@@ -21,8 +21,8 @@
 #
 # Provenance stamping (writer-owned, omit-when-empty for caller-supplied ids):
 #   event_id  generated as "<timestamp>-<random>" when the caller omits it;
-#             callers that need idempotency pass a deterministic id and guard on
-#             it (this writer NEVER dedupes — it appends every valid row).
+#             callers that need idempotency pass a deterministic id; exact
+#             replay succeeds without appending and conflicting reuse fails.
 #   ts        stamped with timestamp_iso when the caller omits it.
 #   links     defaulted to {} so the Go reader always decodes a nested object.
 #             links.work_item is derived from a worker session's derived slug
@@ -32,6 +32,7 @@
 # Required fields:
 #   event        enum: requested | claimed | spawned | needs_input | quiescent |
 #                resumed | recovered | closed | orphaned | step_completed |
+#                terminus_reached |
 #                harness_turn_ended | spawn_failed | request_reclaimed |
 #                request_abandoned | request_cancelled | close_requested |
 #                close_failed | send_requested | sent | send_refused |
@@ -45,6 +46,8 @@
 #   request_id.
 #   modal_blocked requires a non-empty slug and exactly reason=modal; it is a
 #   running-session transition, not a queue-lifecycle event.
+#   terminus_reached requires actor_instance, slug, session_type, and
+#   reason=spec-finalize|impl-close, and forbids a top-level request_id.
 #   Work-item review events (review_flagged, review_held, review_notified,
 #   review_released) REQUIRE a non-empty slug — a third event class keyed to a
 #   work item rather than a queue request. gate_id (optional, omit-when-empty)
@@ -124,14 +127,14 @@ fi
 EVENT=$(printf '%s' "$ROW" | jq -r '.event // ""')
 case "$EVENT" in
   requested|claimed|spawned|needs_input|quiescent|resumed|recovered|closed|orphaned|\
-step_completed|harness_turn_ended|spawn_failed|request_reclaimed|\
+step_completed|terminus_reached|harness_turn_ended|spawn_failed|request_reclaimed|\
 request_abandoned|request_cancelled|close_requested|close_failed|send_requested|sent|send_refused|modal_blocked|\
 review_flagged|review_held|review_notified|review_released) ;;
   "")
     fail "missing required field: event"
     ;;
   *)
-    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, recovered, closed, orphaned, step_completed, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, close_failed, send_requested, sent, send_refused, modal_blocked, review_flagged, review_held, review_notified, review_released)"
+    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, recovered, closed, orphaned, step_completed, terminus_reached, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, close_failed, send_requested, sent, send_refused, modal_blocked, review_flagged, review_held, review_notified, review_released)"
     ;;
 esac
 
@@ -145,6 +148,21 @@ if [[ "$EVENT" == "modal_blocked" ]]; then
       fail "missing required field: reason (modal_blocked requires reason=modal)"
     fi
     fail "invalid field: reason (modal_blocked requires reason=modal)"
+  fi
+fi
+
+# --- Hosted protocol completion requires session identity, never queue identity ---
+if [[ "$EVENT" == "terminus_reached" ]]; then
+  for field in actor_instance slug session_type; do
+    if ! printf '%s' "$ROW" | jq -e --arg field "$field" '(.[$field] // "") != ""' >/dev/null 2>&1; then
+      fail "missing required field: $field (required for event 'terminus_reached')"
+    fi
+  done
+  if ! printf '%s' "$ROW" | jq -e '.reason == "spec-finalize" or .reason == "impl-close"' >/dev/null 2>&1; then
+    fail "invalid field: reason (terminus_reached requires spec-finalize or impl-close)"
+  fi
+  if printf '%s' "$ROW" | jq -e 'has("request_id")' >/dev/null 2>&1; then
+    fail "invalid field: request_id (terminus_reached is not a queue-lifecycle event)"
   fi
 fi
 

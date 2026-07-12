@@ -309,6 +309,10 @@ type model struct {
 	// a seam: a zero value falls back to closeModalHoldDefault; tests inject a small
 	// value so the modal-hold split is exercised without a 30s wait.
 	closeModalHold time.Duration
+	// closeModalRetryCheckpoints are the three delays after modalHold at which a
+	// protocol-terminus close records bounded retry progress. Zero uses the
+	// production 30s/60s/120s schedule; tests inject shorter checkpoints.
+	closeModalRetryCheckpoints [3]time.Duration
 	// observeCloseFn injects one already-classified close observation in tests. A
 	// nil value reads at most one live ScreenSnapshot and routes it through
 	// classifyScreen before the close state machine advances.

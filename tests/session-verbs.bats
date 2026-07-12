@@ -26,6 +26,7 @@ SEND="$REPO_DIR/scripts/session-send.sh"
 PEEK="$REPO_DIR/scripts/session-peek.sh"
 WAIT="$REPO_DIR/scripts/session-wait.sh"
 APPEND="$REPO_DIR/scripts/session-event-append.sh"
+TERMINUS="$REPO_DIR/scripts/session-terminus.sh"
 COORDINATE="$REPO_DIR/scripts/coordinate-status.sh"
 
 setup() {
@@ -835,6 +836,37 @@ PYEOF
   [ "$status" -eq 0 ]
 }
 
+@test "append accepts terminus_reached only with hosted identity and no queue request_id" {
+  run bash "$APPEND" --row '{"event":"terminus_reached","actor_instance":"inst-a","slug":"feature-x","session_type":"implement","reason":"impl-close"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run jq -e 'select(.event=="terminus_reached") | .actor_instance=="inst-a" and .slug=="feature-x" and .session_type=="implement" and (has("request_id")|not)' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+
+  run bash "$APPEND" --row '{"event":"terminus_reached","actor_instance":"inst-a","slug":"feature-x","session_type":"implement","reason":"impl-close","request_id":"queue-id"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not a queue-lifecycle event"* ]]
+}
+
+@test "terminus helper derives deterministic replay identity from the persisted spawn request" {
+  mkdir -p "$TEST_KDIR/_sessions/instances"
+  printf '%s\n' '{"name":"inst-a","sessions":[{"slug":"feature-x","type":"implement","request_id":"spawn-1"}]}' > "$TEST_KDIR/_sessions/instances/inst-a.json"
+  export LORE_SESSION_INSTANCE=inst-a LORE_SESSION_SLUG=feature-x LORE_SESSION_TYPE=implement
+
+  run bash "$TERMINUS" --reason impl-close --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run bash "$TERMINUS" --reason impl-close --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '"event":"terminus_reached"' "$TEST_KDIR/_sessions/events.jsonl")" -eq 1 ]
+  local expected
+  expected="terminus-$(python3 - <<'PY'
+import hashlib
+print(hashlib.sha256("\0".join(["terminus_reached", "inst-a", "feature-x", "implement", "spawn-1", "impl-close"]).encode()).hexdigest())
+PY
+)"
+  run jq -er --arg id "$expected" 'select(.event=="terminus_reached") | .event_id==$id and (has("request_id")|not)' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
 @test "append rejects modal_blocked without a slug" {
   run bash "$APPEND" --row '{"event":"modal_blocked","reason":"modal"}' --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
@@ -1093,6 +1125,19 @@ coordinate_event_vocab() {
   wait
   [ "$status" -eq 0 ]
   [[ "$output" == *'"event":"modal_blocked"'* ]]
+}
+
+@test "wait: --until terminus_reached wakes without changing the teardown default" {
+  write_instance inst-a feature-x
+  echo '{"event":"terminus_reached","actor_instance":"inst-a","slug":"feature-x","session_type":"implement","reason":"impl-close"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  run bash "$WAIT" feature-x --until terminus_reached --since 0 --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"terminus_reached"'* ]]
+
+  local out code
+  out="$(bash "$WAIT" feature-x --since 0 --timeout 1 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 2 ]
+  echo "$out" | jq -e '.until==["closed","close_failed","orphaned"]'
 }
 
 @test "wait: modal_blocked does not change the default close wake set" {

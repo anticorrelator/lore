@@ -888,6 +888,9 @@ fi
 # guard keeps a non-zero child from tripping set -e; stdout is discarded so it
 # cannot corrupt the --json object emitted below. Any failure only warns.
 if [[ -n "${LORE_SESSION_INSTANCE:-}" ]]; then
+  if ! bash "$SCRIPT_DIR/session-terminus.sh" --reason impl-close >/dev/null; then
+    echo "[impl] Warning: terminus event append failed; close already complete (completion journal is best-effort)." >&2
+  fi
   if ! bash "$SCRIPT_DIR/session-close.sh" --self --reason protocol_terminus >/dev/null; then
     echo "[impl] Warning: session close-request failed; close already complete (session teardown is best-effort)." >&2
   fi

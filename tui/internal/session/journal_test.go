@@ -154,6 +154,7 @@ func TestScriptReviewVocabulary(t *testing.T) {
 		{"requested still accepted", Event{Event: EventRequested, RequestID: "20260705T000000Z-abcd1234"}, false},
 		{"recovered accepted without request_id", Event{Event: EventRecovered, Slug: "demo-slug", Reason: "adopted from amber-otter"}, false},
 		{"orphaned accepted with recovery evidence", Event{EventID: "orphaned-fixed", Event: EventOrphaned, Slug: "demo-slug", Reason: "instance-death"}, false},
+		{"terminus accepted with hosted identity", Event{Event: EventTerminusReached, ActorInstance: StrPtr("amber-otter"), Slug: "demo-slug", SessionType: "spec", Reason: "spec-finalize"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

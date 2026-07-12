@@ -45,6 +45,9 @@ const (
 	// close proceeds down the exit ladder, a protocol-terminus close refuses
 	// (close_failed) and leaves the session alive.
 	closeModalHoldDefault = 30 * time.Second
+	closeModalRetryFirst  = 30 * time.Second
+	closeModalRetrySecond = 60 * time.Second
+	closeModalRetryFinal  = 120 * time.Second
 )
 
 // close_failed reason tokens — the terminal a consumed close-request emits when a
@@ -71,15 +74,17 @@ var errCloseLadderExhausted = errors.New("exit ladder exhausted: harness process
 // awaiting teardown. requestID and reason come from the consumed row: requestID
 // is threaded onto the terminal journal row so a close requester has one match
 // key, and reason splits modal-blocked handling by authority (an explicit close
-// acts; a protocol-terminus close refuses). consumedAt bounds the modal-hold
-// grace; interruptedAt is set only after an explicit close's courtesy wait when
+// acts; a protocol-terminus close retries). consumedAt bounds the modal-hold
+// grace; modalRetryCheckpoint records bounded in-memory progress without
+// journaling intermediate outcomes. interruptedAt is set only after an explicit close's courtesy wait when
 // a still-generating session had ESC injected. A protocol-terminus close never
 // sets it.
 type pendingCloseState struct {
-	requestID     string
-	reason        string
-	consumedAt    time.Time
-	interruptedAt time.Time
+	requestID            string
+	reason               string
+	consumedAt           time.Time
+	modalRetryCheckpoint int
+	interruptedAt        time.Time
 }
 
 // appendCloseRequest records one consumed close-request exactly once while
@@ -478,6 +483,15 @@ func (m model) modalHold() time.Duration {
 	return closeModalHoldDefault
 }
 
+func (m model) modalRetryCheckpoints() [3]time.Duration {
+	if m.closeModalRetryCheckpoints[0] > 0 &&
+		m.closeModalRetryCheckpoints[1] > m.closeModalRetryCheckpoints[0] &&
+		m.closeModalRetryCheckpoints[2] > m.closeModalRetryCheckpoints[1] {
+		return m.closeModalRetryCheckpoints
+	}
+	return [3]time.Duration{closeModalRetryFirst, closeModalRetrySecond, closeModalRetryFinal}
+}
+
 // observeClosePanel reads at most one ScreenSnapshot and routes it through the
 // shared classifier. Lifecycle and timer-derived quiescence remain observable
 // even when the framework or screen cannot be classified.
@@ -543,16 +557,32 @@ func (m model) advanceCloseLadders() (model, []tea.Cmd) {
 				if time.Since(pc.consumedAt) < m.modalHold() {
 					continue
 				}
-				// Bound elapsed: act by authority. A protocol-terminus close refuses
-				// loudly — journal close_failed and leave the session alive (no
-				// teardown). An explicit close always acts: it falls through to the
-				// exit ladder. No bytes are injected either way — the send-readiness
-				// gate is untouched.
+				// After the initial hold, a protocol terminus remains nonterminal
+				// through three retry checkpoints on this same heartbeat. A classified
+				// clear falls through to teardown immediately; persistent interactive
+				// state emits only the final close_failed after the third checkpoint.
 				if pc.reason == closeReasonProtocolTerminus {
+					elapsedAfterHold := time.Since(pc.consumedAt) - m.modalHold()
+					checkpoints := m.modalRetryCheckpoints()
+					if elapsedAfterHold < checkpoints[2] {
+						next := 0
+						for i, checkpoint := range checkpoints[:2] {
+							if elapsedAfterHold >= checkpoint {
+								next = i + 1
+							}
+						}
+						if next > pc.modalRetryCheckpoint {
+							pc.modalRetryCheckpoint = next
+							m.pendingClose[slug] = pc
+						}
+						continue
+					}
 					delete(m.pendingClose, slug)
 					cmds = append(cmds, m.closeFailedCmd(slug, pc.requestID, closeFailedInteractivePrompt, m.localSessions[slug]))
 					continue
 				}
+				// An explicit close always acts after modalHold. No bytes are injected
+				// here; it falls through to the existing exit ladder.
 			} else if obs.generating() {
 				if pc.reason == closeReasonProtocolTerminus {
 					if time.Since(pc.consumedAt) < m.terminusGrace() {

@@ -464,15 +464,22 @@ close_request_count() {
   fi
 }
 
+write_hosted_registry() {
+  mkdir -p "$TEST_KDIR/_sessions/instances"
+  printf '%s\n' '{"name":"tui-a1b2c3","sessions":[{"slug":"finalize-item","type":"spec","request_id":"spawn-spec-1"}]}' > "$TEST_KDIR/_sessions/instances/tui-a1b2c3.json"
+}
+
 @test "finalize inside a TUI session emits one self-addressed close-request" {
   command -v jq >/dev/null 2>&1 || skip "jq required for session-close.sh"
   export LORE_SESSION_INSTANCE="tui-a1b2c3"
   export LORE_SESSION_SLUG="finalize-item"
   export LORE_SESSION_TYPE="spec"
+  write_hosted_registry
   run bash "$LORE_CLI" spec finalize finalize-item
   [ "$status" -eq 0 ]
   [ "$(row_count)" -eq 1 ]
   [ "$(close_request_count)" -eq 1 ]
+  [ "$(jq -r '.event' "$TEST_KDIR/_sessions/events.jsonl" | paste -sd, -)" = "terminus_reached,close_requested" ]
 }
 
 @test "finalize outside a session emits no close-request and still finalizes" {
@@ -493,6 +500,7 @@ close_request_count() {
   export LORE_SESSION_INSTANCE="tui-a1b2c3"
   export LORE_SESSION_SLUG="finalize-item"
   export LORE_SESSION_TYPE="spec"
+  write_hosted_registry
   run bash "$LORE_CLI" spec finalize finalize-item
   [ "$status" -eq 0 ]
   [ "$(row_count)" -eq 1 ]

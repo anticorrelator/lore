@@ -103,6 +103,9 @@ func TestCloseReasonGraceDefaults(t *testing.T) {
 	if got := (model{}).explicitGrace(); got != 2*time.Second {
 		t.Fatalf("explicit grace = %s, want 2s", got)
 	}
+	if got := (model{}).modalRetryCheckpoints(); got != [3]time.Duration{30 * time.Second, 60 * time.Second, 120 * time.Second} {
+		t.Fatalf("modal retry checkpoints = %v, want [30s 60s 2m]", got)
+	}
 }
 
 // TestRunCloseLadder_DegradesToSIGTERM: with no capability sequence the ladder
@@ -928,6 +931,66 @@ func TestAdvanceCloseLadders_TerminusModalRefuses(t *testing.T) {
 	}
 	if rows[0].Reason != closeFailedInteractivePrompt || rows[0].RequestID != "cr-t" {
 		t.Fatalf("close_failed row = %+v, want reason=interactive-prompt request_id=cr-t", rows[0])
+	}
+}
+
+func TestAdvanceCloseLadders_TerminusModalRetryCheckpoints(t *testing.T) {
+	m, _ := baseSessionModel(t)
+	m.observeCloseFn = func(work.SessionPanelModel) closeObservation {
+		return closeObservation{quiescent: true, screenKnown: true, screen: screenClass{interactive: true}}
+	}
+	m.closeModalHold = time.Second
+	m.closeModalRetryCheckpoints = [3]time.Duration{time.Second, 2 * time.Second, 3 * time.Second}
+	m.localSessions = map[string]liveSession{"demo": {typ: "spec", initiator: "agent", started: time.Now()}}
+	m.sessionPanels = map[string]work.SessionPanelModel{"demo": work.NewSessionPanelModel("demo")}
+
+	for _, tc := range []struct {
+		elapsed    time.Duration
+		checkpoint int
+	}{
+		{1500 * time.Millisecond, 0},
+		{2100 * time.Millisecond, 1},
+		{3100 * time.Millisecond, 2},
+	} {
+		m.pendingClose = map[string]pendingCloseState{"demo": {
+			requestID: "cr-retry", reason: closeReasonProtocolTerminus,
+			consumedAt: time.Now().Add(-tc.elapsed),
+		}}
+		var cmds []tea.Cmd
+		m, cmds = m.advanceCloseLadders()
+		if len(cmds) != 0 {
+			t.Fatalf("elapsed %s emitted %d commands before final checkpoint", tc.elapsed, len(cmds))
+		}
+		if got := m.pendingClose["demo"].modalRetryCheckpoint; got != tc.checkpoint {
+			t.Fatalf("elapsed %s checkpoint = %d, want %d", tc.elapsed, got, tc.checkpoint)
+		}
+	}
+}
+
+func TestAdvanceCloseLadders_TerminusModalClearClosesDuringRetry(t *testing.T) {
+	m, _ := baseSessionModel(t)
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	kdir := m.config.KnowledgeDir
+	m.observeCloseFn = func(work.SessionPanelModel) closeObservation {
+		return closeObservation{quiescent: true, screenKnown: true, screen: screenClass{composer: true}}
+	}
+	m.localSessions = map[string]liveSession{"demo": {typ: "spec", initiator: "agent", started: time.Now(), closeRequests: []string{"cr-clear"}}}
+	m.sessionPanels = map[string]work.SessionPanelModel{"demo": work.NewSessionPanelModel("demo")}
+	m.pendingClose = map[string]pendingCloseState{"demo": {
+		requestID: "cr-clear", reason: closeReasonProtocolTerminus,
+		consumedAt: time.Now().Add(-time.Minute), modalRetryCheckpoint: 1,
+	}}
+
+	m, cmds := m.advanceCloseLadders()
+	if len(cmds) != 1 {
+		t.Fatalf("classified clear dispatched %d ladders, want 1", len(cmds))
+	}
+	msg := cmds[0]().(closeLadderDoneMsg)
+	m, cmd := m.handleCloseLadderDone(msg)
+	runJournalCmds(t, cmd)
+	rows := readEventRows(t, kdir)
+	if len(rows) != 1 || rows[0].Event != session.EventClosed || rows[0].RequestID != "cr-clear" {
+		t.Fatalf("events = %+v, want one closed for cr-clear", rows)
 	}
 }
 

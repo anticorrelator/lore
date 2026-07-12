@@ -50,6 +50,12 @@ setup() {
   echo "notes" > "$WORK_DIR/legacy-done/notes.md"
 }
 
+write_hosted_registry() {
+  local slug="$1"
+  mkdir -p "$TEST_KDIR/_sessions/instances"
+  printf '{"name":"tui-a1b2c3","sessions":[{"slug":"%s","type":"implement","request_id":"spawn-impl-1"}]}\n' "$slug" > "$TEST_KDIR/_sessions/instances/tui-a1b2c3.json"
+}
+
 teardown() {
   if [ -n "${TEST_KDIR:-}" ] && [ -d "$TEST_KDIR" ]; then
     rm -rf "$TEST_KDIR"
@@ -479,9 +485,11 @@ close_request_count() {
   export LORE_SESSION_INSTANCE="tui-a1b2c3"
   export LORE_SESSION_SLUG="anchored-done"
   export LORE_SESSION_TYPE="implement"
+  write_hosted_registry anchored-done
   run bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done"
   [ "$status" -eq 0 ]
   [ "$(close_request_count)" -eq 1 ]
+  [ "$(jq -r '.event' "$TEST_KDIR/_sessions/events.jsonl" | paste -sd, -)" = "terminus_reached,close_requested" ]
 }
 
 @test "a divergence close (exit 3) is a completed close and emits a close-request" {
@@ -490,6 +498,7 @@ close_request_count() {
   export LORE_SESSION_INSTANCE="tui-a1b2c3"
   export LORE_SESSION_SLUG="anchored-done"
   export LORE_SESSION_TYPE="implement"
+  write_hosted_registry anchored-done
   run bash "$LORE_CLI" impl close anchored-done --verdict none --summary "attempted" \
     --divergence "nothing load-bearing shipped"
   [ "$status" -eq 3 ]
@@ -513,6 +522,7 @@ close_request_count() {
   export LORE_SESSION_INSTANCE="tui-a1b2c3"
   export LORE_SESSION_SLUG="anchored-done"
   export LORE_SESSION_TYPE="implement"
+  write_hosted_registry anchored-done
   run bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done"
   [ "$status" -eq 0 ]
   [ -f "$(rows_file)" ]

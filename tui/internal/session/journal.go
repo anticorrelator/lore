@@ -44,6 +44,7 @@ const (
 	EventClosed           = "closed"
 	EventOrphaned         = "orphaned"
 	EventStepCompleted    = "step_completed"
+	EventTerminusReached  = "terminus_reached"
 	EventHarnessTurnEnded = "harness_turn_ended"
 	EventSpawnFailed      = "spawn_failed"
 	EventReclaimed        = "request_reclaimed"

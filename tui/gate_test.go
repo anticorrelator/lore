@@ -77,6 +77,10 @@ var (
 		"  3. No (esc)",
 		"Press enter to confirm or esc to cancel",
 	}
+	cxApproveSuggestionRows = []string{
+		"› Implement the approved change",
+		"gpt-5-codex  medium · ~/work/lore",
+	}
 
 	ocComposerRows = []string{
 		"┃ Ask anything...",
@@ -122,6 +126,15 @@ func TestComposerMatchersDiscriminate(t *testing.T) {
 	}
 	if screenMatchers["claude-code"].composer(ccOptionSelectRows) {
 		t.Error("claude-code: composer matcher must NOT fire on an option-select modal")
+	}
+}
+
+func TestCodexApproveSuggestionPinsPersistentFalsePositive(t *testing.T) {
+	if !cxPermissionModal(cxApproveSuggestionRows) {
+		t.Fatal("broad approve signature no longer reproduces the persistent false positive")
+	}
+	if cxComposerReady(cxApproveSuggestionRows) {
+		t.Fatal("composer readiness must remain suppressed while the broad approval signature matches")
 	}
 }
 

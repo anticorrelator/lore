@@ -12,7 +12,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 # Read-only vocabulary mirrors. Tests compare the session and retro tokens to
 # their sole appenders so producer drift fails loudly at review time.
-SESSION_EVENT_VOCAB="requested claimed spawned needs_input quiescent resumed recovered closed orphaned step_completed harness_turn_ended spawn_failed request_reclaimed request_abandoned request_cancelled close_requested close_failed send_requested sent send_refused modal_blocked review_flagged review_held review_notified review_released"
+SESSION_EVENT_VOCAB="requested claimed spawned needs_input quiescent resumed recovered closed orphaned step_completed terminus_reached harness_turn_ended spawn_failed request_reclaimed request_abandoned request_cancelled close_requested close_failed send_requested sent send_refused modal_blocked review_flagged review_held review_notified review_released"
 RETRO_ACTION_VOCAB="dispatched deferred skipped"
 CEREMONY_OUTCOME_VOCAB="needs-decision"
 CEREMONY_DISPOSITION_VOCAB="unhandled"
