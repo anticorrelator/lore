@@ -21,6 +21,14 @@ const ReclaimAfter = 60 * time.Second
 // is abandoned rather than claimed again; the journal row is its dead-letter.
 const MaxAttempts = 3
 
+// PreferMatchGrace is how long a pending row carrying prefer_project_dir stays
+// claimable only by an instance whose normalized project dir matches it, keyed
+// on requested_at. After the window every instance may claim it. Three 5s poll
+// ticks: one tick guarantees every live matching instance saw the row, two more
+// absorb a lost race and tick jitter. Well under ReclaimAfter, so a row that no
+// matching instance ever claims still dispatches with bounded added latency.
+const PreferMatchGrace = 15 * time.Second
+
 // Reclaim reason strings carried on request_reclaimed journal rows.
 const (
 	ReasonStaleInstance   = "stale_instance"
@@ -85,6 +93,16 @@ type Request struct {
 	// so absent stays distinct from an explicit value.
 	Framework *string `json:"framework,omitempty"`
 
+	// PreferProjectDir is a soft routing preference: a physically-resolved project
+	// directory an instance is preferred to claim from. Unlike TargetInstance and
+	// MinVintage (hard read-side filters), this only delays other instances — the
+	// prefer_ name carries the softness. An instance whose normalized project dir
+	// equals it claims immediately; any other instance may claim only after
+	// PreferMatchGrace measured from requested_at (see claimableBy). Absent
+	// (omit-when-empty) leaves claim timing unchanged. Pointer so absent stays
+	// distinct from an explicit value.
+	PreferProjectDir *string `json:"prefer_project_dir,omitempty"`
+
 	// SkipConfirm overrides the queue-spawn autonomy default: nil defers to that
 	// default (skip confirmation gates — autonomous), a set value forces the
 	// outcome (true autonomous, false gated so every confirmation gate becomes a
@@ -143,6 +161,14 @@ func (r Request) FrameworkValue() string {
 		return ""
 	}
 	return *r.Framework
+}
+
+// PreferProjectDirValue returns the soft project-dir preference or "" when absent.
+func (r Request) PreferProjectDirValue() string {
+	if r.PreferProjectDir == nil {
+		return ""
+	}
+	return *r.PreferProjectDir
 }
 
 // ExtraContextText extracts a free-text launch context from the request's
@@ -381,8 +407,11 @@ type QueueTickResult struct {
 // slugLive imposes no such gate. myVintage is this instance's build vintage
 // (BuildTime, ISO 8601 UTC), used to filter out requests whose min_vintage this
 // instance does not meet; "" means vintage-unknown, which passes every requirement.
+// myProjectDir is this instance's normalized (physically-resolved) project dir,
+// used to honor a row's prefer_project_dir grace window; "" behaves as an
+// unknown dir that matches nothing (a preferring row defers past its grace).
 func QueueTick(
-	sessionsDir, myName, myVintage string,
+	sessionsDir, myName, myVintage, myProjectDir string,
 	liveInstances map[string]bool,
 	hasPlanDoc func(slug string) bool,
 	slugLive func(slug string) bool,
@@ -412,7 +441,7 @@ func QueueTick(
 	pendingRows, pendingDiagnostics := ScanPendingWithDiagnostics(sessionsDir)
 	res.Diagnostics = append(res.Diagnostics, pendingDiagnostics...)
 	for _, req := range pendingRows {
-		if !claimableBy(req, myName, myVintage) {
+		if !claimableBy(req, myName, myVintage, myProjectDir, now) {
 			continue
 		}
 		if req.Attempts >= MaxAttempts {
@@ -459,14 +488,40 @@ func QueueTick(
 
 // claimableBy reports whether an instance may attempt this pending row: a row is
 // claimable when its target is this instance or unset (any) AND this instance's
-// vintage satisfies any min_vintage requirement. Both filters run read-side; the
-// targeting filter is string equality, the vintage filter a temporal comparison.
-func claimableBy(req Request, myName, myVintage string) bool {
+// vintage satisfies any min_vintage requirement AND the row's prefer_project_dir
+// grace does not currently defer this instance. Targeting is string equality,
+// vintage a temporal comparison, and the preference a timing window — all
+// read-side, no writer, no per-instance attempt state.
+func claimableBy(req Request, myName, myVintage, myProjectDir string, now time.Time) bool {
 	target := req.TargetValue()
 	if target != "" && target != myName {
 		return false
 	}
-	return vintageOK(req.MinVintageValue(), myVintage)
+	if !vintageOK(req.MinVintageValue(), myVintage) {
+		return false
+	}
+	return preferMatchOK(req, myProjectDir, now)
+}
+
+// preferMatchOK reports whether an instance whose normalized project dir is
+// myProjectDir may claim a pending row at time now. A row with no
+// prefer_project_dir, or one whose preference equals this instance's dir, is
+// claimable immediately. Otherwise the instance must wait out PreferMatchGrace
+// measured from requested_at, giving a matching instance first refusal. An
+// unparseable requested_at also passes immediately — the additive-degradation
+// posture: the preference only ever delays a claim, never blocks one outright,
+// so an old binary that never sets myProjectDir still dispatches every row
+// (matching rows after the grace, everything else at once).
+func preferMatchOK(req Request, myProjectDir string, now time.Time) bool {
+	prefer := req.PreferProjectDirValue()
+	if prefer == "" || prefer == myProjectDir {
+		return true
+	}
+	requestedAt, ok := parseVintage(req.RequestedAt)
+	if !ok {
+		return true
+	}
+	return now.Sub(requestedAt) > PreferMatchGrace
 }
 
 // vintageOK reports whether an instance whose build vintage is myVintage may

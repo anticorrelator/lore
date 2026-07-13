@@ -192,6 +192,12 @@ type SettingsModel struct {
 
 	closed bool // set by Esc at top-level when no draft is active
 
+	// frameworkCommitted latches when a tui_launch_framework write succeeds, so
+	// the host can refresh its registry row (which mirrors the launch framework)
+	// on the same commit rather than at the next session-set change. The host
+	// drains it with TakeFrameworkCommitted after each Update.
+	frameworkCommitted bool
+
 	// statusMsg is surfaced by the host status bar via StatusFlash(),
 	// rendered ahead of the mode-aware hints. Written on
 	// IntentReject, write errors, and external-command stderr surfacing.
@@ -1049,6 +1055,18 @@ func (m *SettingsModel) Init() tea.Cmd { return nil }
 // modal when true.
 func (m *SettingsModel) Closed() bool { return m.closed }
 
+// TakeFrameworkCommitted reports whether a tui_launch_framework write landed
+// since the last call, clearing the latch. The host checks it after each Update
+// to refresh its registry row's framework field on the same commit. One-shot:
+// a second call without an intervening commit returns false.
+func (m *SettingsModel) TakeFrameworkCommitted() bool {
+	if !m.frameworkCommitted {
+		return false
+	}
+	m.frameworkCommitted = false
+	return true
+}
+
 // FocusConsumesRunes reports whether the currently-focused widget interprets
 // literal letter keystrokes ('q', 'j', 'k', etc.) as widget-internal input.
 // Hosts use this to decide whether global shortcuts like 'q' (quit) should
@@ -1379,6 +1397,7 @@ func (m *SettingsModel) routeCommit(intent *FieldIntent) tea.Cmd {
 		}
 		m.armUndoIfChanged(intent.DotPath, prevValue, prevPresent, chosen)
 		m.setEffective(intent.DotPath, chosen)
+		m.frameworkCommitted = true
 		m.statusMsg = fmt.Sprintf("saved %s", intent.DotPath)
 		m.statusIsError = false
 		return nil

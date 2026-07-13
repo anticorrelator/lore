@@ -66,6 +66,14 @@ One file per live TUI instance at `instances/<name>.json`.
 | &nbsp;&nbsp;`sessions[].auto_close` | boolean \| absent | The close-ladder auto-close override carried onto the live session (see [Close-request queue](#close-request-queue)), persisted so it survives adoption. Omit-when-empty: absent defers to `initiator`. |
 | `build_sha` | string \| absent | Build vintage — the short git SHA embedded at build time (`-ldflags`). Absent for `go run`/dev builds and for any binary predating this field. Omit-when-empty. |
 | `build_time` | string \| absent | Build vintage — the **orderable** quantity: the commit's committer-date (release build) or the binary's mtime (dev build), ISO 8601 UTC. Absent for a binary predating this field. Omit-when-empty. This, not `build_sha`, is what `min_vintage` filtering compares against (a SHA has no read-side ordering). |
+| `project_dir` | string \| absent | The instance's project directory, physically resolved (`filepath.Abs` + `EvalSymlinks`) once at startup. Immutable for the process. Omit-when-empty for a binary predating this field. It is the match key a request's `prefer_project_dir` compares against byte-for-byte (both sides resolve physically, so `/tmp`→`/private/tmp` and worktree symlinks match). Not a claim filter — a visibility field only. |
+| `framework` | string \| absent | The launch framework the TUI resolves for untargeted spawns (`tui_launch_framework` → `ResolveTUILaunchFramework`), refreshed on every full-row write plus an explicit rewrite when the setting is committed. Omit-when-empty for a binary predating this field or when resolution errors. Not a claim filter — framework selection stays the request's `framework` field; this only surfaces the value a coordinator's routing read needs. |
+
+**Routing-visibility fields** (`project_dir`, `framework`) surface a coordinator's
+one-list-read routing tuple (target, framework, model-compat, worktree). Both are
+fully **additive**: a row written by a binary predating them carries neither, and
+`lore session list` renders each absent field as `unknown` (the vintage-fallback
+idiom). Neither is consulted by claim eligibility.
 
 **Build vintage** stamps a live TUI's build identity onto its row at startup so a
 live-but-outdated instance — registered, claiming, but executing stale semantics —
@@ -150,6 +158,7 @@ and, once an instance claims it, moves to `requests/claimed/<request_id>.json`.
 | `model` | string \| absent | Per-dispatch lead-model override — the session lead is the top-level agent, so a model chosen here is lead selection. Omit-when-empty. Composed into the spawn as the harness's universal `--model` flag (the same flag `model_routing.tiers` aliases feed). **Opaque**: validated only for non-emptiness at enqueue, never against a model list — the candidate set is coordinator policy, not schema, so a bad id surfaces as an honest harness launch error. Distinct from `routing_overrides`, which routes *sub-agent* roles via `LORE_MODEL_<ROLE>` env. |
 | `framework` | string \| absent | Per-request launch framework override. Accepted values are `claude-code`, `opencode`, and `codex`. Omit-when-empty: absent defers to the claiming TUI's `tui_launch_framework` setting. Validated at enqueue against the framework registry and carried to spawn so the harness binary, `LORE_FRAMEWORK`, `SessionProcessStartedMsg.Harness`, and live registry `sessions[].harness` agree. |
 | `skip_confirm` | boolean \| absent | Session autonomy override. Omit-when-empty: absent defers to the queue-spawn default (**autonomous** — a claimed request historically runs without confirmation gates), `true` (`--yes`/`--no-confirm`) forces autonomous, `false` (`--confirm`) forces **gated** so every confirmation gate becomes a coordinator send window. Maps to `SessionDescriptor.SkipConfirm` at spawn. |
+| `prefer_project_dir` | string \| absent | **Soft** routing preference: a physically-resolved project directory (`session request --prefer-dir <path>` / `--prefer-cwd`, resolved and refused at enqueue when it does not exist). Omit-when-empty. Unlike the hard `target_instance`/`min_vintage` filters, this only *delays* other claimants — the `prefer_` name carries the softness. An instance whose `project_dir` equals it claims immediately; any other instance may claim only after `PreferMatchGrace` (15s, three poll ticks) measured from `requested_at`. **Additive**: absence, an unparseable `requested_at`, or a pre-feature instance (which advertises no `project_dir`) never blocks a claim — the preference only ever adds bounded latency, so a matching instance need not exist. A row reclaimed past its grace is claimable by any instance (the preference had its shot on first dispatch). |
 
 Because `framework` is additive, old TUI decoders ignore it. When a
 `--framework` request must not be claimed by a TUI build that predates this
@@ -180,7 +189,12 @@ way, in the same pass: an instance skips a row whose `min_vintage` its own
 `build_time` demonstrably fails (both present, parseable, and older). An instance
 of unknown vintage never skips on this basis — the filter is additive, so it can
 only ever *narrow* the claim set of a vintage-advertising instance, never enlarge
-or block a legacy one.
+or block a legacy one. **Preference** is honored in the same read-side pass as a
+timing window, not a filter: a row carrying `prefer_project_dir` is claimable by a
+matching instance at once and by any other instance only once it has aged past
+`PreferMatchGrace` from `requested_at`. It never removes a row from the claim set
+permanently — an unmatched preference just defers the row 15s — so the atomic
+rename stays the sole claim arbiter in both the in-window and past-window regimes.
 
 ### Request lifecycle (terminal states)
 

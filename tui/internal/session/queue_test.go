@@ -66,7 +66,7 @@ func TestQueueTickTargeting(t *testing.T) {
 
 	// An open request is claimable by this instance.
 	plantPending(t, dir, openReq)
-	res, err := QueueTick(dir, "me", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
+	res, err := QueueTick(dir, "me", "", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestQueueTickTargeting(t *testing.T) {
 
 	// A targeted request is claimable only by its named instance.
 	plantPending(t, dir, targetedMine)
-	res, _ = QueueTick(dir, "me", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
+	res, _ = QueueTick(dir, "me", "", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
 	if res.Claimed == nil || res.Claimed.RequestID != "mine1" {
 		t.Fatalf("targeted-to-me request not claimed: %+v", res.Claimed)
 	}
@@ -85,7 +85,7 @@ func TestQueueTickTargeting(t *testing.T) {
 
 	// A request targeted at another instance stays pending here.
 	plantPending(t, dir, targetedOther)
-	res, _ = QueueTick(dir, "me", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
+	res, _ = QueueTick(dir, "me", "", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
 	if res.Claimed != nil {
 		t.Fatalf("claimed a request targeted at another instance: %+v", res.Claimed)
 	}
@@ -106,7 +106,7 @@ func TestQueueTickMinVintage(t *testing.T) {
 	// A new-enough instance claims a min_vintage request.
 	dir := t.TempDir()
 	plantPending(t, dir, Request{RequestID: "v1", Type: "spec", Slug: strp("a"), Initiator: "agent", MinVintage: strp(cutoff)})
-	res, err := QueueTick(dir, "me", newer, map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
+	res, err := QueueTick(dir, "me", newer, "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestQueueTickMinVintage(t *testing.T) {
 	// An older instance leaves the same request pending.
 	dir = t.TempDir()
 	plantPending(t, dir, Request{RequestID: "v2", Type: "spec", Slug: strp("b"), Initiator: "agent", MinVintage: strp(cutoff)})
-	res, _ = QueueTick(dir, "me", older, map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
+	res, _ = QueueTick(dir, "me", older, "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
 	if res.Claimed != nil {
 		t.Fatalf("older instance claimed a request it is too old for: %+v", res.Claimed)
 	}
@@ -129,7 +129,7 @@ func TestQueueTickMinVintage(t *testing.T) {
 	// degradation: an old binary predating the field still claims.
 	dir = t.TempDir()
 	plantPending(t, dir, Request{RequestID: "v3", Type: "spec", Slug: strp("c"), Initiator: "agent", MinVintage: strp(cutoff)})
-	res, _ = QueueTick(dir, "me", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
+	res, _ = QueueTick(dir, "me", "", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
 	if res.Claimed == nil || res.Claimed.RequestID != "v3" {
 		t.Fatalf("vintage-unknown instance was wrongly rejected by min_vintage: %+v", res.Claimed)
 	}
@@ -161,12 +161,12 @@ func TestQueueTickImplementGate(t *testing.T) {
 	plantPending(t, dir, Request{RequestID: "impl1", Type: "implement", Slug: strp("needs-plan"), Initiator: "agent"})
 
 	// Without a plan doc, an implement request is not claimed.
-	res, _ := QueueTick(dir, "me", "", nil, func(string) bool { return false }, nil, time.Now(), ReclaimAfter)
+	res, _ := QueueTick(dir, "me", "", "", nil, func(string) bool { return false }, nil, time.Now(), ReclaimAfter)
 	if res.Claimed != nil {
 		t.Fatalf("implement claimed despite no plan doc: %+v", res.Claimed)
 	}
 	// With a plan doc, it becomes claimable.
-	res, _ = QueueTick(dir, "me", "", nil, func(string) bool { return true }, nil, time.Now(), ReclaimAfter)
+	res, _ = QueueTick(dir, "me", "", "", nil, func(string) bool { return true }, nil, time.Now(), ReclaimAfter)
 	if res.Claimed == nil || res.Claimed.RequestID != "impl1" {
 		t.Fatalf("implement not claimed once plan doc present: %+v", res.Claimed)
 	}
@@ -182,7 +182,7 @@ func TestQueueTickEvictionGuard(t *testing.T) {
 
 	// The slug is live here: the claim is refused and the row stays pending.
 	live := func(slug string) bool { return slug == "busy-slug" }
-	res, _ := QueueTick(dir, "me", "", nil, noPlan, live, time.Now(), ReclaimAfter)
+	res, _ := QueueTick(dir, "me", "", "", nil, noPlan, live, time.Now(), ReclaimAfter)
 	if res.Claimed != nil {
 		t.Fatalf("claimed a request whose slug is live — would evict the session: %+v", res.Claimed)
 	}
@@ -190,7 +190,7 @@ func TestQueueTickEvictionGuard(t *testing.T) {
 		t.Fatal("eviction-guarded row should remain pending, not be consumed")
 	}
 	// Once the slug frees, the same row is claimable.
-	res, _ = QueueTick(dir, "me", "", nil, noPlan, func(string) bool { return false }, time.Now(), ReclaimAfter)
+	res, _ = QueueTick(dir, "me", "", "", nil, noPlan, func(string) bool { return false }, time.Now(), ReclaimAfter)
 	if res.Claimed == nil || res.Claimed.RequestID != "impl-evict" {
 		t.Fatalf("row not claimed once the slug freed: %+v", res.Claimed)
 	}
@@ -210,7 +210,7 @@ func TestQueueTickWorkerGates(t *testing.T) {
 	// worker is still claimed: it is not implement (so not plan-gated) and its
 	// derived slug is distinct from the live base slug (so not eviction-guarded).
 	baseLive := func(slug string) bool { return slug == "impl-foo" }
-	res, err := QueueTick(dir, "me", "", nil, noPlan, baseLive, time.Now(), ReclaimAfter)
+	res, err := QueueTick(dir, "me", "", "", nil, noPlan, baseLive, time.Now(), ReclaimAfter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestQueueTickWorkerGates(t *testing.T) {
 	dir2 := t.TempDir()
 	plantPending(t, dir2, Request{RequestID: "w1b", Type: "worker", Slug: strp("impl-foo--w1"), Initiator: "agent"})
 	workerLive := func(slug string) bool { return slug == "impl-foo--w1" }
-	res, _ = QueueTick(dir2, "me", "", nil, noPlan, workerLive, time.Now(), ReclaimAfter)
+	res, _ = QueueTick(dir2, "me", "", "", nil, noPlan, workerLive, time.Now(), ReclaimAfter)
 	if res.Claimed != nil {
 		t.Fatalf("claimed a worker whose own derived slug is live — would evict it: %+v", res.Claimed)
 	}
@@ -232,7 +232,7 @@ func TestQueueTickWorkerGates(t *testing.T) {
 func TestQueueTickAbandonsAtAttemptCeiling(t *testing.T) {
 	dir := t.TempDir()
 	plantPending(t, dir, Request{RequestID: "dead1", Type: "spec", Slug: strp("x"), Initiator: "agent", Attempts: MaxAttempts})
-	res, err := QueueTick(dir, "me", "", nil, noPlan, nil, time.Now(), ReclaimAfter)
+	res, err := QueueTick(dir, "me", "", "", nil, noPlan, nil, time.Now(), ReclaimAfter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func TestQueueTickReclaimsIncompleteClaim(t *testing.T) {
 	if err := os.Chtimes(claimedPath(dir, id), old, old); err != nil {
 		t.Fatal(err)
 	}
-	res, err := QueueTick(dir, "me", "", nil, noPlan, nil, time.Now(), ReclaimAfter)
+	res, err := QueueTick(dir, "me", "", "", nil, noPlan, nil, time.Now(), ReclaimAfter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestQueueTickReclaimsStaleClaimer(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Claimer "dead-instance" is absent from the live set → reclaim.
-	res, err := QueueTick(dir, "me", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
+	res, err := QueueTick(dir, "me", "", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func TestQueueTickLeavesLiveClaimerAlone(t *testing.T) {
 	old := time.Now().Add(-2 * ReclaimAfter).UTC().Format("2006-01-02T15:04:05Z")
 	req.ClaimedAt = &old
 	_ = writeRow(claimedPath(dir, id), req)
-	res, _ := QueueTick(dir, "me", "", map[string]bool{"me": true, "busy-instance": true}, noPlan, nil, time.Now(), ReclaimAfter)
+	res, _ := QueueTick(dir, "me", "", "", map[string]bool{"me": true, "busy-instance": true}, noPlan, nil, time.Now(), ReclaimAfter)
 	if len(res.Reclaimed) != 0 {
 		t.Fatalf("reclaimed a live claimer's row: %+v", res.Reclaimed)
 	}
@@ -456,6 +456,93 @@ func TestSkipConfirmDistinguishesAbsentFromFalse(t *testing.T) {
 	}
 	if explicit.SkipConfirm == nil {
 		t.Fatal("explicit skip_confirm:false should decode to a set pointer, got nil")
+	}
+}
+
+// TestQueueTickPreferProjectDir exercises the soft prefer_project_dir grace: a
+// matching instance claims a preferring row immediately, a non-matching instance
+// defers until the row ages past PreferMatchGrace (then claims), an unparseable
+// requested_at degrades to claim-now (the preference only delays, never blocks),
+// and a row with no preference is claimed immediately regardless of dir.
+func TestQueueTickPreferProjectDir(t *testing.T) {
+	const mine = "/work/mine"
+	const other = "/work/other"
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	iso := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05Z") }
+	recent := iso(now.Add(-2 * time.Second)) // inside the 15s grace
+	aged := iso(now.Add(-20 * time.Second))  // past the grace
+
+	// A matching instance claims a preferring row immediately, inside the window.
+	dir := t.TempDir()
+	plantPending(t, dir, Request{RequestID: "p1", Type: "spec", Slug: strp("a"), Initiator: "agent",
+		RequestedAt: recent, PreferProjectDir: strp(mine)})
+	res, err := QueueTick(dir, "me", "", mine, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Claimed == nil || res.Claimed.RequestID != "p1" {
+		t.Fatalf("matching instance did not claim preferring row immediately: %+v", res.Claimed)
+	}
+
+	// A non-matching instance leaves the same fresh row pending inside the window.
+	dir = t.TempDir()
+	plantPending(t, dir, Request{RequestID: "p2", Type: "spec", Slug: strp("b"), Initiator: "agent",
+		RequestedAt: recent, PreferProjectDir: strp(mine)})
+	res, _ = QueueTick(dir, "me", "", other, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
+	if res.Claimed != nil {
+		t.Fatalf("non-matching instance claimed inside the grace window: %+v", res.Claimed)
+	}
+	if len(ScanPending(dir)) != 1 {
+		t.Fatal("preferring row should remain pending for a non-matching instance inside the window")
+	}
+
+	// The same non-matching instance claims once the row has aged past the grace.
+	dir = t.TempDir()
+	plantPending(t, dir, Request{RequestID: "p3", Type: "spec", Slug: strp("c"), Initiator: "agent",
+		RequestedAt: aged, PreferProjectDir: strp(mine)})
+	res, _ = QueueTick(dir, "me", "", other, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
+	if res.Claimed == nil || res.Claimed.RequestID != "p3" {
+		t.Fatalf("non-matching instance did not claim past the grace window: %+v", res.Claimed)
+	}
+
+	// An unparseable requested_at degrades to claim-now even for a non-matching
+	// instance — the additive posture: a malformed timestamp never strands a row.
+	dir = t.TempDir()
+	plantPending(t, dir, Request{RequestID: "p4", Type: "spec", Slug: strp("d"), Initiator: "agent",
+		RequestedAt: "not-a-timestamp", PreferProjectDir: strp(mine)})
+	res, _ = QueueTick(dir, "me", "", other, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
+	if res.Claimed == nil || res.Claimed.RequestID != "p4" {
+		t.Fatalf("unparseable requested_at did not degrade to claim-now: %+v", res.Claimed)
+	}
+
+	// A row with no preference is claimed immediately regardless of dir — today's
+	// behavior is unchanged.
+	dir = t.TempDir()
+	plantPending(t, dir, Request{RequestID: "p5", Type: "spec", Slug: strp("e"), Initiator: "agent",
+		RequestedAt: recent})
+	res, _ = QueueTick(dir, "me", "", other, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
+	if res.Claimed == nil || res.Claimed.RequestID != "p5" {
+		t.Fatalf("no-preference row was not claimed immediately: %+v", res.Claimed)
+	}
+}
+
+// TestPreferProjectDirRoundTrips guards the request-row amendment: prefer_project_dir
+// decodes into the pointer accessor, and an absent field is omitted on marshal.
+func TestPreferProjectDirRoundTrips(t *testing.T) {
+	var req Request
+	if err := json.Unmarshal([]byte(`{"request_id":"x","type":"spec","prefer_project_dir":"/work/mine"}`), &req); err != nil {
+		t.Fatalf("decode prefer_project_dir: %v", err)
+	}
+	if got := req.PreferProjectDirValue(); got != "/work/mine" {
+		t.Fatalf("PreferProjectDirValue = %q, want the decoded path", got)
+	}
+
+	data, err := json.Marshal(Request{RequestID: "x", Type: "spec"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "prefer_project_dir") {
+		t.Errorf("absent prefer_project_dir should be omitted, got %s", data)
 	}
 }
 

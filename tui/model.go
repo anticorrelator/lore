@@ -242,6 +242,11 @@ type model struct {
 	// buildTime is the orderable quantity min_vintage filtering compares against.
 	buildSHA  string
 	buildTime string
+	// normalizedProjectDir is config.ProjectDir resolved to a physical absolute
+	// path once at startup (config.NormalizeProjectDir). It is stamped onto the
+	// registry row and snapshotted into queueTickCmd as the match key a request's
+	// prefer_project_dir compares against; config.ProjectDir stays the spawn cwd.
+	normalizedProjectDir string
 	// tmuxEnabled is the D3 host-capability gate resolved once at startup: when
 	// true, sessions are hosted in tmux (survive crash/restart, adoptable); when
 	// false (tmux absent or LORE_TUI_TMUX=off), spawning/close/quit behave exactly

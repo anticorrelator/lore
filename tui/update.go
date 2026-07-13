@@ -241,6 +241,14 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 			panel, cmd := m.settingsPanel.Update(msg)
 			m.settingsPanel = panel
+			// A tui_launch_framework commit changes the launch framework this
+			// instance's registry row advertises; rewrite the row now so the row
+			// tells the truth within one commit rather than at the next session-set
+			// change. Drained before the Closed() nil-out below so the latch is
+			// never stranded on the panel being torn down.
+			if m.settingsPanel.TakeFrameworkCommitted() && m.instanceName != "" {
+				cmd = tea.Batch(cmd, m.writeInstanceCmd())
+			}
 			if m.settingsPanel.Closed() {
 				m.settingsActive = false
 				m.focusedPanel = m.settingsPriorFocus

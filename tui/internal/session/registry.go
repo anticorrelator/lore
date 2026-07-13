@@ -66,6 +66,17 @@ type Instance struct {
 	// SHA has no read-side ordering.
 	BuildSHA  string `json:"build_sha,omitempty"`
 	BuildTime string `json:"build_time,omitempty"`
+
+	// Routing-visibility fields — additive, omit-when-empty. ProjectDir is this
+	// instance's normalized (physically-resolved) project directory, immutable for
+	// the process; it is the match key a request's prefer_project_dir compares
+	// against. Framework is the launch framework the TUI resolves for untargeted
+	// spawns (ResolveTUILaunchFramework), refreshed on every full-row write plus a
+	// settings-commit trigger. Neither is a claim filter — both surface to a
+	// coordinator's routing read (lore session list). A row written by a
+	// pre-feature binary carries neither and renders as unknown downstream.
+	ProjectDir string `json:"project_dir,omitempty"`
+	Framework  string `json:"framework,omitempty"`
 }
 
 // InstancesDir is the registry directory under a _sessions/ root.

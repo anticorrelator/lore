@@ -118,6 +118,26 @@ func Load() (Config, error) {
 	}, nil
 }
 
+// NormalizeProjectDir resolves dir to a physical absolute path so it can be
+// byte-compared against a request's prefer_project_dir (which the enqueue writer
+// resolves the same way). It applies filepath.Abs then filepath.EvalSymlinks,
+// falling back to the Abs form when symlink resolution errors — a path that does
+// not resolve still yields a stable comparable string. Config.ProjectDir itself
+// is left untouched; the TUI still spawns sessions with the original cwd. macOS
+// /tmp→/private/tmp and worktree symlinks match correctly from both Go and bash
+// once both sides resolve physically.
+func NormalizeProjectDir(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		abs = dir
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return abs
+	}
+	return resolved
+}
+
 // repoIdentifier derives a normalized repo identifier from the knowledge dir.
 // It strips the "<data-root>/repos/" prefix, falling back to filepath.Base.
 func repoIdentifier(kdir string) string {

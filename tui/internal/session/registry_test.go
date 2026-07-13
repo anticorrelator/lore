@@ -1,8 +1,10 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,6 +62,47 @@ func TestBuildIdentityRoundTripAndDegradation(t *testing.T) {
 	for _, inst := range ListInstances(dir) {
 		if inst.Name == "legacy-instance" && (inst.BuildSHA != "" || inst.BuildTime != "") {
 			t.Fatalf("legacy row should read as vintage-unknown, got %+v", inst)
+		}
+	}
+}
+
+// TestRoutingFieldsRoundTripAndDegradation guards the instance-row enrichment:
+// project_dir/framework round-trip through a write, and a row written by a
+// pre-feature binary (neither field present) decodes as empty rather than erroring
+// so downstream readers can render the unknown fallback.
+func TestRoutingFieldsRoundTripAndDegradation(t *testing.T) {
+	dir := t.TempDir()
+	enriched := Instance{
+		Name: "amber-otter", PID: 7, Started: "2026-07-06T00:00:00Z",
+		ProjectDir: "/work/mine", Framework: "claude-code",
+	}
+	if err := WriteInstance(dir, enriched); err != nil {
+		t.Fatal(err)
+	}
+	got := ListInstances(dir)
+	if len(got) != 1 || got[0].ProjectDir != "/work/mine" || got[0].Framework != "claude-code" {
+		t.Fatalf("routing fields did not round-trip: %+v", got)
+	}
+
+	// Absent fields are omitted on marshal (omit-when-empty).
+	data, err := json.Marshal(Instance{Name: "bare", PID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"project_dir", "framework"} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("absent %s should be omitted, got %s", key, data)
+		}
+	}
+
+	// A legacy row lacking both fields decodes cleanly as empty.
+	legacy := filepath.Join(InstancesDir(dir), "legacy-instance.json")
+	if err := os.WriteFile(legacy, []byte(`{"name":"legacy-instance","pid":9,"started":"2026-07-06T00:00:00Z","sessions":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, inst := range ListInstances(dir) {
+		if inst.Name == "legacy-instance" && (inst.ProjectDir != "" || inst.Framework != "") {
+			t.Fatalf("legacy row should read with empty routing fields, got %+v", inst)
 		}
 	}
 }

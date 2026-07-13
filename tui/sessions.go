@@ -120,6 +120,7 @@ func (m model) queueTickCmd() tea.Cmd {
 	dir := m.sessionsDir
 	name := m.instanceName
 	vintage := m.buildTime
+	projectDir := m.normalizedProjectDir
 	planDocs := make(map[string]bool)
 	for _, it := range m.list.Items() {
 		planDocs[it.Slug] = it.HasPlanDoc
@@ -141,7 +142,7 @@ func (m model) queueTickCmd() tea.Cmd {
 		for _, inst := range instances {
 			live[inst.Name] = true
 		}
-		res, err := session.QueueTick(dir, name, vintage, live,
+		res, err := session.QueueTick(dir, name, vintage, projectDir, live,
 			func(slug string) bool { return planDocs[slug] },
 			func(slug string) bool { return liveSlugs[slug] },
 			time.Now(), session.ReclaimAfter)
@@ -633,6 +634,13 @@ func (m model) instanceRow() session.Instance {
 			CloseRequests: append([]string(nil), ls.closeRequests...),
 		})
 	}
+	// Framework is resolved live at row-build so a settings change is reflected
+	// on the next full write; a resolution error omits the field rather than
+	// surfacing a wrong value.
+	framework, err := config.ResolveTUILaunchFramework()
+	if err != nil {
+		framework = ""
+	}
 	return session.Instance{
 		Name:             m.instanceName,
 		PID:              os.Getpid(),
@@ -642,6 +650,8 @@ func (m model) instanceRow() session.Instance {
 		Sessions:         sessions,
 		BuildSHA:         m.buildSHA,
 		BuildTime:        m.buildTime,
+		ProjectDir:       m.normalizedProjectDir,
+		Framework:        framework,
 	}
 }
 

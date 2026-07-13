@@ -103,6 +103,7 @@ func main() {
 		m.spendScript = filepath.Join(os.Getenv("HOME"), ".lore/scripts/session-spend.sh")
 		m.instanceStartedISO = time.Now().UTC().Format("2006-01-02T15:04:05Z")
 		m.buildSHA, m.buildTime = resolveBuildIdentity()
+		m.normalizedProjectDir = config.NormalizeProjectDir(cfg.ProjectDir)
 
 		// D3 host-capability gate: probe tmux once at startup. When absent or
 		// opted out, sessions degrade to the direct-PTY path (TUI-lifetime-bound,
