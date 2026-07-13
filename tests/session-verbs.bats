@@ -231,6 +231,66 @@ journal_boundaries() {
   [ "$status" -eq 0 ]
 }
 
+@test "request omits prefer_project_dir when neither prefer flag is passed" {
+  bash "$REQUEST" --type spec --slug wi --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e 'has("prefer_project_dir") | not' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request --prefer-dir stores the physically-resolved directory" {
+  local target; target="$(mkdir -p "$TEST_KDIR/checkout" && cd "$TEST_KDIR/checkout" && pwd -P)"
+  bash "$REQUEST" --type implement --slug wi --prefer-dir "$TEST_KDIR/checkout" --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e --arg d "$target" '.prefer_project_dir == $d' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request --prefer-dir collapses a symlink to its physical target" {
+  mkdir -p "$TEST_KDIR/realdir"
+  ln -s "$TEST_KDIR/realdir" "$TEST_KDIR/linkdir"
+  local physical; physical="$(cd "$TEST_KDIR/realdir" && pwd -P)"
+  bash "$REQUEST" --type implement --slug wi --prefer-dir "$TEST_KDIR/linkdir" --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e --arg d "$physical" '.prefer_project_dir == $d' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request --prefer-cwd captures the physically-resolved working directory" {
+  mkdir -p "$TEST_KDIR/here"
+  local physical; physical="$(cd "$TEST_KDIR/here" && pwd -P)"
+  ( cd "$TEST_KDIR/here" && bash "$REQUEST" --type chat --prefer-cwd --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR" )
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e --arg d "$physical" '.prefer_project_dir == $d' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request --prefer-dir naming a nonexistent path refuses before enqueue" {
+  run bash "$REQUEST" --type spec --slug wi --prefer-dir /nonexistent/path/xyzzy --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"prefer_project_dir"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+@test "request refuses --prefer-dir and --prefer-cwd together" {
+  run bash "$REQUEST" --type spec --slug wi --prefer-dir "$TEST_KDIR" --prefer-cwd --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"mutually exclusive"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+@test "request --prefer-cwd without --min-vintage emits an advisory but enqueues" {
+  local err="$TEST_KDIR/prefer.err"
+  local out
+  out="$(bash "$REQUEST" --type implement --slug wi --prefer-cwd --kdir "$TEST_KDIR" 2>"$err")"
+  [[ "$out" == *"Enqueued implement request"* ]]
+  grep -q -- "--min-vintage" "$err"
+
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e 'has("prefer_project_dir")' "$pending"
+  [ "$status" -eq 0 ]
+}
+
 @test "request --auto-close true writes a JSON boolean" {
   bash "$REQUEST" --type spec --slug wi --auto-close true --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
@@ -378,6 +438,34 @@ journal_boundaries() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"sessions: feature-x"* ]]
   [[ "$output" != *"chat:"* ]]
+}
+
+@test "list renders framework @ project_dir on the instance line" {
+  mkdir -p "$TEST_KDIR/_sessions/instances"
+  cat > "$TEST_KDIR/_sessions/instances/inst-a.json" <<EOF
+{"name":"inst-a","pid":4242,"repo":"lore","framework":"codex","project_dir":"/work/checkout-a","started":"2026-07-05T00:00:00Z","initiator_default":"human","sessions":[]}
+EOF
+  run bash "$LIST" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"codex @ /work/checkout-a"* ]]
+}
+
+@test "list renders unknown for an instance row lacking framework and project_dir" {
+  # write_instance emits a pre-feature row (no framework/project_dir fields).
+  write_instance inst-a feature-x
+  run bash "$LIST" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"unknown @ unknown"* ]]
+}
+
+@test "list --json passes instance framework and project_dir through untouched" {
+  mkdir -p "$TEST_KDIR/_sessions/instances"
+  cat > "$TEST_KDIR/_sessions/instances/inst-a.json" <<EOF
+{"name":"inst-a","pid":4242,"repo":"lore","framework":"claude-code","project_dir":"/work/checkout-a","started":"2026-07-05T00:00:00Z","initiator_default":"human","sessions":[]}
+EOF
+  run bash "$LIST" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.instances[0].framework == "claude-code" and .instances[0].project_dir == "/work/checkout-a"'
 }
 
 @test "list excludes a malformed row with a stderr warning, never rewriting it" {

@@ -136,6 +136,11 @@ if [[ "$INSTANCE_COUNT" -gt 0 ]]; then
   # the build_time timestamp (dev/go-run binary mtime), else "unknown" for a row
   # written by a binary predating the field. build_time appended in parens when a
   # SHA is present so a coordinator sees both identity and age.
+  # Framework/project-dir column: `<framework> @ <project_dir>`, each rendered as
+  # "unknown" when absent (a row written by a pre-feature binary) — the same
+  # explicit-fallback idiom as vintage. The distinction matters to the coordinator's
+  # one-list-read routing: an omitted segment would read as claude-code, whereas
+  # "unknown" says "can't tell — peek or pin the instance".
   # A slugless session (chat/work session with no work-item slug) has an empty
   # slug, so listing raw slugs renders it invisibly as a blank in the joined
   # column. Render it instead as chat:<8-hex-of-session_id> — the same short id
@@ -148,12 +153,14 @@ if [[ "$INSTANCE_COUNT" -gt 0 ]]; then
     | (if .build_sha then .build_sha + (if .build_time then " (" + .build_time + ")" else "" end)
        elif .build_time then .build_time
        else "unknown" end) as $vintage
+    | ((.framework // "unknown")) as $framework
+    | ((.project_dir // "unknown")) as $project_dir
     | ([.sessions[]?
         | if (.slug // "") != "" then .slug
           else "chat:" + ((.session_id // "") | if . == "" then "?" else .[0:8] end)
           end]
        | join(", ")) as $sessions
-    | "  instance \(.name) (pid \(.pid)) — vintage \($vintage) — sessions: \(if $sessions == "" then "none" else $sessions end)"'
+    | "  instance \(.name) (pid \(.pid)) — \($framework) @ \($project_dir) — vintage \($vintage) — sessions: \(if $sessions == "" then "none" else $sessions end)"'
 fi
 if [[ "$PENDING_COUNT" -gt 0 ]]; then
   printf '%s' "$RESULT" | jq -r '.pending[] | "  pending \(.request_id) \(.type) \(.slug // "(no slug)") → \(.target_instance // "any")\(if .min_vintage then " (min-vintage \(.min_vintage))" else "" end)"'

@@ -42,6 +42,15 @@
 #                      codex | opencode. Validated against adapters/capabilities.json
 #                      and stored only when present. Pair with --min-vintage when an
 #                      old claiming TUI must not ignore this additive field.
+#   --prefer-dir <p>   Soft project-dir preference stored as prefer_project_dir: an
+#                      instance whose project dir matches claims immediately; any
+#                      other defers ~15s before it may claim. Resolved physically at
+#                      write time (refused when it names no existing directory).
+#                      Mutually exclusive with --prefer-cwd. Pair with --min-vintage
+#                      when an old claiming TUI must not ignore this additive field.
+#   --prefer-cwd       Like --prefer-dir but captures the caller's $PWD — the common
+#                      "route to my own checkout" case. Mutually exclusive with
+#                      --prefer-dir.
 #   --yes              Run autonomously: skip the session's confirmation gates
 #                      (alias --no-confirm). This is the default for queue-spawned
 #                      sessions, so omitting all three leaves it on.
@@ -80,6 +89,9 @@ MODEL=""
 MODEL_PROVIDED=0
 FRAMEWORK=""
 FRAMEWORK_PROVIDED=0
+PREFER_DIR=""
+PREFER_DIR_PROVIDED=0
+PREFER_CWD_PROVIDED=0
 SKIP_CONFIRM=""
 
 while [[ $# -gt 0 ]]; do
@@ -96,14 +108,16 @@ while [[ $# -gt 0 ]]; do
     --track) TRACK="$2"; shift 2 ;;
     --model) MODEL="$2"; MODEL_PROVIDED=1; shift 2 ;;
     --framework) FRAMEWORK="$2"; FRAMEWORK_PROVIDED=1; shift 2 ;;
+    --prefer-dir) PREFER_DIR="$2"; PREFER_DIR_PROVIDED=1; shift 2 ;;
+    --prefer-cwd) PREFER_CWD_PROVIDED=1; shift ;;
     --yes|--no-confirm) SKIP_CONFIRM="true"; shift ;;
     --confirm) SKIP_CONFIRM="false"; shift ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,56p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,66p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-request.sh --type <spec|implement|chat|worker> [--slug <s>] [--target <name>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--framework <claude-code|codex|opencode>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-request.sh --type <spec|implement|chat|worker> [--slug <s>] [--target <name>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--framework <claude-code|codex|opencode>] [--prefer-dir <path>|--prefer-cwd] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -186,6 +200,29 @@ if [[ $FRAMEWORK_PROVIDED -eq 1 ]]; then
   FRAMEWORK_JSON="$(jq -n --arg fw "$FRAMEWORK" '$fw')"
 fi
 
+# prefer_project_dir is a soft routing preference: a matching instance claims
+# immediately, a non-matching one defers a grace window before it may claim (the
+# read-side timing lives in the claiming TUI; nothing here is a hard filter). The
+# value is resolved physically at write time — cd + pwd -P collapses symlinks
+# (macOS /tmp → /private/tmp, worktree links) so the byte-equality match the
+# reader performs holds from both bash and Go. An unresolvable path is refused
+# naming the field; the reader never re-validates. --prefer-dir and --prefer-cwd
+# name the same field and are mutually exclusive.
+PREFER_PROJECT_DIR_JSON=""
+if [[ $PREFER_DIR_PROVIDED -eq 1 && $PREFER_CWD_PROVIDED -eq 1 ]]; then
+  fail "--prefer-dir and --prefer-cwd are mutually exclusive (both set prefer_project_dir)"
+fi
+if [[ $PREFER_CWD_PROVIDED -eq 1 ]]; then
+  PREFER_DIR="$PWD"
+  PREFER_DIR_PROVIDED=1
+fi
+if [[ $PREFER_DIR_PROVIDED -eq 1 ]]; then
+  [[ -n "$PREFER_DIR" ]] || fail "empty --prefer-dir (a directory path is required when --prefer-dir is given)"
+  PREFER_RESOLVED="$(cd "$PREFER_DIR" 2>/dev/null && pwd -P || true)"
+  [[ -n "$PREFER_RESOLVED" ]] || fail "invalid --prefer-dir: '$PREFER_DIR' (prefer_project_dir must resolve to an existing directory)"
+  PREFER_PROJECT_DIR_JSON="$(jq -n --arg d "$PREFER_RESOLVED" '$d')"
+fi
+
 # skip_confirm is a nullable bool: absent (omit-when-empty) defers to the
 # queue-spawn default (autonomous — the historical always-skip behavior); true
 # (--yes/--no-confirm) forces autonomous, false (--confirm) forces gated. Emitted
@@ -236,6 +273,10 @@ fi
 
 if [[ $FRAMEWORK_PROVIDED -eq 1 && -z "$MIN_VINTAGE" ]]; then
   echo "[session] advisory: --framework was provided without --min-vintage; old claiming TUIs may ignore the framework field" >&2
+fi
+
+if [[ -n "$PREFER_PROJECT_DIR_JSON" && -z "$MIN_VINTAGE" ]]; then
+  echo "[session] advisory: --prefer-dir/--prefer-cwd was provided without --min-vintage; old claiming TUIs may ignore the prefer_project_dir field and claim immediately" >&2
 fi
 
 if [[ -z "$REQUESTED_BY" ]]; then
@@ -326,6 +367,13 @@ fi
 # so an absent override keeps the claiming TUI's launch-framework fallback.
 if [[ -n "$FRAMEWORK_JSON" ]]; then
   ROW="$(printf '%s' "$ROW" | jq -c --argjson fw "$FRAMEWORK_JSON" '. + {framework: $fw}')"
+fi
+
+# prefer_project_dir follows omit-when-empty: added only when --prefer-dir or
+# --prefer-cwd carried a resolved value, so an absent preference stays absent (the
+# Go decoder reads a nil *string → every instance is immediately eligible).
+if [[ -n "$PREFER_PROJECT_DIR_JSON" ]]; then
+  ROW="$(printf '%s' "$ROW" | jq -c --argjson pd "$PREFER_PROJECT_DIR_JSON" '. + {prefer_project_dir: $pd}')"
 fi
 
 # skip_confirm follows omit-when-empty: added only when --yes/--no-confirm or
