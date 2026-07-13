@@ -73,6 +73,8 @@ Three modes: **protocol session** (rung 2–3, or whenever the human should be a
 
 An untargeted queue request is framework roulette: any live instance may claim it, including one running a different harness whose binary rejects your model id outright (haiku probes claimed by a codex-framework instance died at launch, 2026-07-08). When a dispatch assumes a framework, binary, or vintage, pin the claim — `--target <instance>` or `--min-vintage` — so it can't land somewhere the brief never contemplated.
 
+The same applies to *where* the work runs: a claimed session spawns in the claiming TUI's own startup cwd, so the checkout your brief assumes is not guaranteed. When a step assumes a worktree or branch, say so in the brief — name the intended root and branch, and tell the agent what to do on mismatch (switch to it, or stop and report). Project-dir preference on the request ([[work:route-coordinator-session-requests-to-tui-instance]]) softens this by routing toward matching instances, but it is a preference, never a gate — the brief's explicit worktree/branch direction remains the correctness backstop (user directive 2026-07-13).
+
 **Dispatch is the only control point for autonomous (`--yes`) sessions.** No turn boundaries means `send` cannot land and graceful close waits indefinitely — get the dispatch right, or kill it. Gated sessions invert this: every confirmation gate is a correction window. `--initiator` records provenance, truthfully; teardown policy rides `--auto-close`. Close authority is full-discretion and everything journals — the check on a wrong close is the audit trail, not a gate. Closing a *human*-initiated session is within authority but exceptional: prefer a hands-request.
 
 ### Monitoring
