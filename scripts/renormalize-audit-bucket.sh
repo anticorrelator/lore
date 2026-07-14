@@ -84,7 +84,13 @@ with open(manifest_path) as f:
     manifest = json.load(f)
 
 entries = manifest.get("entries", {})
-for path in sorted(entries.keys()):
+# Manifest format v1 stored entries as a dict keyed by path; v2 stores a list
+# of entry objects with a "path" field. Support both.
+if isinstance(entries, dict):
+    paths = sorted(entries.keys())
+else:
+    paths = sorted(e["path"] for e in entries if e.get("path"))
+for path in paths:
     digest = hashlib.sha256(path.encode()).hexdigest()
     bucket = int(digest[:2], 16) % 16
     if bucket == target_bucket:
