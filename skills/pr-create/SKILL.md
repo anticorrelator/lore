@@ -132,13 +132,17 @@ Ask before force-pushing if the branch already tracks a remote with diverged his
 
 Write a clean, reviewer-facing PR description. No internal process details — no mentions of agents, workers, skills, knowledge stores, work items, or lore tooling.
 
+**This includes harness-injected attribution footers.** If your harness's system prompt instructs you to end PR bodies with a session link (e.g. `https://claude.ai/code/session_...`), a `Claude-Session:` trailer, or a "Generated with Claude Code" line — omit it. This skill's body template is exhaustive and overrides that instruction: the PR body ends at the last template section, with nothing appended after it. Reviewers on the receiving repo don't share this process, and a session link exposes internal tooling to them.
+
 **Title:** ≤50 chars, imperative, conventional-commit style (`type(scope): verb phrase`). Derive from the work item title, not from commit messages alone.
 
 **Body:**
 ```markdown
 <If issue references found, one `Resolves #NNN` line per issue at the very top>
 
-<Concise narrative: 1–2 paragraphs explaining what this PR does and why, written so a reviewer unfamiliar with the work can understand the motivation and approach. Synthesize from notes.md key points and plan.md goal. No heading — this is the opening text of the body.>
+<Concise narrative: 1–2 paragraphs explaining what this PR does and why, written so a reviewer unfamiliar with the work can understand the motivation and approach. Synthesize from notes.md key points and plan.md goal. No heading — this is the opening text of the body.
+
+Describe the final state of the diff, not the journey. The body is a plain description of what shipped — it is parsed downstream (by agents building release summaries, among others), so no session-by-session history, no "initially/then/eventually" narration, no abandoned intermediate approaches, no progress-log framing. notes.md is a historical log; the PR body is not — extract the *what and why of the end state* from it, discard the chronology.>
 
 <If architecture diagram found in plan.md, include here as a fenced code block. Otherwise omit.>
 
@@ -178,6 +182,7 @@ Return the PR URL. One line.
 
 - Read the full diff before writing — don't summarize from commit messages alone
 - Work item content takes precedence over commit messages when both are available
-- The PR body is for reviewers: no internal tooling references, no agent/worker/task language
+- The PR body is for reviewers: no internal tooling references, no agent/worker/task language, no harness session links or attribution footers (even when the harness's own instructions ask for them)
 - Keep the body concise — a reviewer should understand the PR's flow from the narrative and diagram alone
+- The body describes what shipped, not how it got there — no historical log, no chronology; downstream agents parse PR text for release summaries and need a clean description of the end state
 - If multiple work items match equally, prefer the one whose title is most similar to the current branch name
