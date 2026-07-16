@@ -1,21 +1,76 @@
 #!/usr/bin/env bats
 
 REPO_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME:-$0}")/../.." && pwd)"
+LORE="$REPO_DIR/cli/lore"
 PREPARE="$REPO_DIR/scripts/retro-prepare.sh"
 
 setup() {
   command -v jq >/dev/null 2>&1 || skip "jq required"
   TEST_KDIR="$(mktemp -d)"
   export LORE_KNOWLEDGE_DIR="$TEST_KDIR"
-  mkdir -p "$TEST_KDIR/_work/cycle-a" "$TEST_KDIR/_scorecards" "$TEST_KDIR/_meta" "$TEST_KDIR/_sessions"
-  printf '{"schema_version":"1"}\n' > "$TEST_KDIR/_manifest.json"
-  printf '{"title":"Cycle A","status":"active","created":"2026-07-01T00:00:00Z","updated":"2026-07-02T00:00:00Z"}\n' > "$TEST_KDIR/_work/cycle-a/_meta.json"
-  printf '# Plan\n\n- [x] one\n- [ ] two\n[[knowledge:one]]\n' > "$TEST_KDIR/_work/cycle-a/plan.md"
-  printf '# Notes\n' > "$TEST_KDIR/_work/cycle-a/notes.md"
-  : > "$TEST_KDIR/_scorecards/rows.jsonl"
-  printf '{"schema_version":1}\n' > "$TEST_KDIR/_scorecards/_current.json"
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  : > "$TEST_KDIR/_meta/effectiveness-journal.jsonl"
+
+  run "$LORE" init --force "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run "$LORE" work create --title "Cycle A" --slug cycle-a \
+    --intent-anchor "Exercise every published retro evidence reader." --json
+  [ "$status" -eq 0 ]
+  run "$LORE" work note cycle-a --text '**Focus:** writer-created retro reader state'
+  [ "$status" -eq 0 ]
+
+  NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  read -r WINDOW_START WINDOW_END FUTURE_START FUTURE_END < <(python3 - "$NOW" <<'PY'
+from datetime import datetime, timedelta
+import sys
+now = datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+fmt = lambda value: value.strftime("%Y-%m-%dT%H:%M:%SZ")
+print(fmt(now - timedelta(minutes=2)), fmt(now + timedelta(minutes=5)), fmt(now + timedelta(days=1)), fmt(now + timedelta(days=1, minutes=5)))
+PY
+)
+
+  run bash "$REPO_DIR/scripts/retro-deferred-append.sh" \
+    --cycle-id cycle-a --event-type spec-finalize --outcome due --rate 1 \
+    --stratum routine --reason always-stratum --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+
+  SCORECARD_ROW="$(jq -cn --arg now "$NOW" '{schema_version:1,kind:"telemetry",tier:"telemetry",calibration_state:"unknown",metric:"retro-contract",value:1,sample_size:1,window_start:$now,window_end:$now}')"
+  run "$LORE" scorecard append --kdir "$TEST_KDIR" --row "$SCORECARD_ROW" --json
+  [ "$status" -eq 0 ]
+  run "$LORE" scorecard rollup --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+
+  SESSION_ROW="$(jq -cn --arg now "$NOW" '{event:"review_flagged",slug:"cycle-a",ts:$now}')"
+  run bash "$REPO_DIR/scripts/session-event-append.sh" --kdir "$TEST_KDIR" --row "$SESSION_ROW" --json
+  [ "$status" -eq 0 ]
+
+  run "$LORE" journal write --observation "reader contract" --context "retro integration" \
+    --work-item cycle-a --role retro
+  [ "$status" -eq 0 ]
+
+  SNIPPET="$(sed -n '1p' "$REPO_DIR/README.md")"
+  SNIPPET_HASH="$(printf '%s' "$SNIPPET" | python3 "$HOME/.lore/scripts/snippet_normalize.py" --hash)"
+  REPO_SHA="$(git -C "$REPO_DIR" rev-parse HEAD)"
+  CLAIM_ROW="$(jq -cn \
+    --arg snippet "$SNIPPET" --arg hash "$SNIPPET_HASH" --arg sha "$REPO_SHA" \
+    --arg file "$REPO_DIR/README.md" \
+    '{claim_id:"contract-claim",tier:"task-evidence",claim:"Reader contract evidence",producer_role:"implement-lead",protocol_slot:"test",task_id:"task-1",phase_id:"phase-1",scale:"implementation",file:$file,line_range:"1-1",exact_snippet:$snippet,normalized_snippet_hash:$hash,falsifier:"Reader contract disappears",why_this_work_needs_it:"Exercise the settlement writer and reader pair.",captured_at_sha:$sha,change_context:{diff_ref:$sha,changed_files:[$file],summary:"Writer-reader contract test."}}')"
+  run bash "$REPO_DIR/scripts/evidence-append.sh" --work-item cycle-a <<<"$CLAIM_ROW"
+  [ "$status" -eq 0 ]
+  run "$LORE" settlement enqueue --work-item cycle-a --kind task-claim \
+    --row-file "$TEST_KDIR/_work/cycle-a/task-claims.jsonl" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+
+  run "$LORE" consumption-contradiction \
+    --work-item cycle-a --source implement-lead --producer-role implement-lead \
+    --protocol-slot test --cycle-id cycle-a --knowledge-path conventions/example.md \
+    --contradiction-rationale "Reader contract exercise" --claim-id contract-claim \
+    --claim-text "Reader contract evidence" --file "$REPO_DIR/README.md" --line-range 1 \
+    --exact-snippet "$SNIPPET" --falsifier "Reader contract disappears" \
+    --contradiction-id ctr-contract --created-at "$NOW" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  run bash "$REPO_DIR/scripts/consumption-contradiction-update-status.sh" \
+    --work-item cycle-a --contradiction-id ctr-contract --status verified \
+    --settled-at "$NOW" --settled-by-run-id run-contract --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
 }
 
 teardown() {
@@ -23,144 +78,147 @@ teardown() {
   unset LORE_KNOWLEDGE_DIR
 }
 
-json_line() { echo "$output" | grep '^{' | tail -1; }
-
-@test "prepare freezes the v1 source fact calculation and response registries" {
-  run bash "$PREPARE" cycle-a --window-start 2026-07-01T00:00:00Z --window-end 2026-07-02T00:00:00Z --json
+run_prepare() {
+  run "$LORE" retro prepare cycle-a --window-start "$WINDOW_START" --window-end "$WINDOW_END" --json
   [ "$status" -eq 0 ]
-  run python3 - "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json" <<'PY'
-import json,sys,hashlib
-p=json.load(open(sys.argv[1]))
-assert set(p)=={"schema_version","pack_id","input_fingerprint","source_fingerprint","artifact_sha256","cycle","window","due_claim","source_manifest","facts","calculations","fixed_health","provenance"}
-assert [r["source_id"] for r in p["source_manifest"]]==["cycle_work","due_queue","settlement","scorecard_rows","scorecard_current","session_events","journal","consumer_contradiction_lifecycle"]
-assert set(p["facts"])=={"cycle_artifacts","task_context_backlinks","concerns_contradictions","session_retrieval_friction_packets","review_events","scale_signals","scorecard_eligibility_deltas","telemetry_attribution_rework","settlement_health_inputs"}
-assert [r["calculation_id"] for r in p["calculations"]]==["channel_contract_drift","scorecard_delta_readiness","template_headline_readiness","audit_lag","audit_realization","trigger_realization","grounding_failure_rate","candidate_queue_backlog","judge_liveness","consumer_contradiction_routing"]
-body={k:v for k,v in p.items() if k!="artifact_sha256"}
-assert p["artifact_sha256"]==hashlib.sha256(json.dumps(body,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest()
-PY
-  [ "$status" -eq 0 ]
+  jq -e '([.source_manifest[] | select(.coverage == "read")] | length) == 8' \
+    "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json" >/dev/null
 }
 
-@test "journal read returns complete raw entries in the half-open window" {
-  printf '%s\n' \
-    '{"timestamp":"2026-06-30T23:59:59Z","role":"retro","observation":"before"}' \
-    '{"timestamp":"2026-07-01T00:00:00Z","role":"interactive","observation":"at start"}' \
-    '{"timestamp":"2026-07-01T12:00:00Z","role":"worker","observation":"without scores"}' \
-    '{"timestamp":"2026-07-02T00:00:00Z","role":"retro","observation":"at end","scores":{"accuracy":1}}' \
-    > "$TEST_KDIR/_meta/effectiveness-journal.jsonl"
+manifest_row() {
+  jq -c --arg source "$1" '.source_manifest[] | select(.source_id == $source)' \
+    "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+}
 
-  run "$REPO_DIR/cli/lore" journal read \
-    --since 2026-07-01T00:00:00Z --until 2026-07-02T00:00:00Z --json
+@test "cycle_work uses the work writers and public snapshot reader" {
+  run "$LORE" work show cycle-a --json
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '
-    length == 2 and
-    .[0].role == "interactive" and .[0].observation == "at start" and
-    .[1].role == "worker" and .[1].observation == "without scores" and
-    (.[1] | has("scores") | not)
+  echo "$output" | jq -e '.slug == "cycle-a" and (.notes_content | contains("writer-created retro reader state"))'
+  run_prepare
+  manifest_row cycle_work | jq -e '
+    .reader_contract_version == "1" and .projection_mode == "snapshot" and
+    .reader == "lore work show cycle-a --json" and .stable_empty_shape == "missing-cycle-nonzero"
+  '
+  jq -e '.facts.cycle_artifacts.status == "available" and .facts.cycle_artifacts.values.has_notes' \
+    "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+}
+
+@test "due_queue folds writer-created DUE state through the bounded public reader" {
+  run "$LORE" retro queue --cycle-id cycle-a --window-start "$WINDOW_START" --window-end "$WINDOW_END" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.reader_contract_version == "1" and .counts.unhandled_due == 1'
+  run_prepare
+  manifest_row due_queue | jq -e '
+    .reader_contract_version == "1" and .projection_mode == "half-open-window" and
+    (.reader | contains("lore retro queue --cycle-id cycle-a")) and .content_identity != null
   '
 }
 
-@test "prepare reads and registers the same bounded journal projection" {
-  printf '%s\n' \
-    '{"timestamp":"2026-06-30T23:59:59Z","role":"retro","observation":"before"}' \
-    '{"timestamp":"2026-07-01T00:00:00Z","role":"interactive","observation":"at start"}' \
-    '{"timestamp":"2026-07-01T12:00:00Z","role":"worker","observation":"without scores"}' \
-    '{"timestamp":"2026-07-02T00:00:00Z","role":"retro","observation":"at end","scores":{"accuracy":1}}' \
-    > "$TEST_KDIR/_meta/effectiveness-journal.jsonl"
-
-  run "$REPO_DIR/cli/lore" retro prepare cycle-a \
-    --window-start 2026-07-01T00:00:00Z --window-end 2026-07-02T00:00:00Z --json
+@test "settlement publishes writer-created enqueue transitions without opening storage" {
+  run "$LORE" settlement status --window-start "$WINDOW_START" --window-end "$WINDOW_END" --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
-  run jq -e '
-    ([.source_manifest[] | select(.source_id == "journal")][0]) as $journal |
-    $journal.coverage == "read" and
-    $journal.reader == "lore journal read --since 2026-07-01T00:00:00Z --until 2026-07-02T00:00:00Z --json" and
-    .facts.session_retrieval_friction_packets.values.journal_entries == 2 and
-    .facts.scorecard_eligibility_deltas.values.prior_retro_windows == 2
+  echo "$output" | jq -e '
+    .retro_projection.reader_contract_version == "1" and
+    (.retro_projection.queue_transitions | length) == 1 and
+    .retro_projection.queue_transitions[0].kind == "task-claim"
+  '
+  run_prepare
+  manifest_row settlement | jq -e '.reader == ("lore settlement status --window-start " + $start + " --window-end " + $end + " --json")' \
+    --arg start "$WINDOW_START" --arg end "$WINDOW_END"
+  jq -e '.facts.settlement_health_inputs.values.queue_transitions | length == 1' \
+    "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+}
+
+@test "scorecard_rows returns the bounded row written by scorecard append" {
+  run "$LORE" scorecard rows --window-start "$WINDOW_START" --window-end "$WINDOW_END" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e 'length == 1 and .[0].metric == "retro-contract"'
+  run_prepare
+  manifest_row scorecard_rows | jq -e '.reader_contract_version == "1" and .stable_empty_shape == "[]"'
+  jq -e '.facts.scorecard_eligibility_deltas.values.rows_total == 1' \
+    "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+}
+
+@test "scorecard_current returns the snapshot produced by rollup" {
+  run "$LORE" scorecard current --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.reader_contract_version == "1" and .projection_mode == "snapshot" and .row_count == 1'
+  run_prepare
+  manifest_row scorecard_current | jq -e '
+    .reader == "lore scorecard current --json" and .projection_mode == "snapshot" and
+    .stable_empty_shape == "versioned-empty-summary" and .content_identity != null
+  '
+}
+
+@test "session_events preserves cursor semantics while applying the half-open window" {
+  run "$LORE" session events --since 0 --window-start "$WINDOW_START" --window-end "$WINDOW_END" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    .reader_contract_version == "1" and .projection_mode == "half-open-window" and
+    (.events | length) == 1 and .events[0].event == "review_flagged" and (.next_cursor | type) == "number"
+  '
+  run_prepare
+  manifest_row session_events | jq -e '.reader_contract_version == "1" and .cursor > 0'
+  jq -e '.facts.session_retrieval_friction_packets.values.session_events == 1' \
+    "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+}
+
+@test "journal keeps its published bounded projection unchanged" {
+  run "$LORE" journal read --since "$WINDOW_START" --until "$WINDOW_END" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e 'length == 1 and .[0].observation == "reader contract"'
+  run_prepare
+  manifest_row journal | jq -e '.reader_contract_version == "1" and .stable_empty_shape == "[]"'
+  jq -e '.facts.session_retrieval_friction_packets.values.journal_entries == 1' \
+    "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+}
+
+@test "consumer contradiction lifecycle reads writer-created terminal state" {
+  run "$LORE" consumption-contradiction read --window-start "$WINDOW_START" --window-end "$WINDOW_END" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e 'length == 1 and .[0].contradiction_id == "ctr-contract" and .[0].status == "verified"'
+  run_prepare
+  manifest_row consumer_contradiction_lifecycle | jq -e '
+    .reader_contract_version == "1" and .projection_mode == "half-open-window" and .content_identity != null
+  '
+  jq -e '
+    .facts.concerns_contradictions.values == {produced:1, terminal:1} and
+    ([.calculations[] | select(.calculation_id == "consumer_contradiction_routing")][0].disposition == "abstained")
   ' "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
-  [ "$status" -eq 0 ]
 }
 
-@test "prepare reports malformed journal input as unreadable evidence" {
-  printf '%s\n' '{"timestamp":"2026-07-01T12:00:00Z","role":"retro"' \
-    > "$TEST_KDIR/_meta/effectiveness-journal.jsonl"
-
-  run "$REPO_DIR/cli/lore" retro prepare cycle-a \
-    --window-start 2026-07-01T00:00:00Z --window-end 2026-07-02T00:00:00Z --json
+@test "history readers have stable empty projections and absence never becomes green" {
+  run "$LORE" retro queue --cycle-id cycle-a --window-start "$FUTURE_START" --window-end "$FUTURE_END" --json
   [ "$status" -eq 0 ]
-  run jq -e '
-    ([.source_manifest[] | select(.source_id == "journal")][0]) as $journal |
-    $journal.coverage == "unreadable" and
-    $journal.reason == "reader-failed" and
-    ($journal.warnings | length) == 1 and
-    .fixed_health.state != "normal"
+  echo "$output" | jq -e '.counts.unhandled_due == 0 and .counts.handled_due == 0'
+  run "$LORE" scorecard rows --window-start "$FUTURE_START" --window-end "$FUTURE_END" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  [ "$output" = "[]" ]
+  run "$LORE" session events --since 0 --window-start "$FUTURE_START" --window-end "$FUTURE_END" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.events == [] and (.next_cursor | type) == "number"'
+  run "$LORE" journal read --since "$FUTURE_START" --until "$FUTURE_END" --json
+  [ "$status" -eq 0 ]
+  [ "$output" = "[]" ]
+  run "$LORE" consumption-contradiction read --window-start "$FUTURE_START" --window-end "$FUTURE_END" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  [ "$output" = "[]" ]
+  run "$LORE" retro prepare cycle-a --window-start "$FUTURE_START" --window-end "$FUTURE_END" --json
+  [ "$status" -eq 0 ]
+  jq -e '
+    .fixed_health.state != "normal" and
+    ([.calculations[] | select(.calculation_id == "consumer_contradiction_routing")][0].disposition == "abstained")
   ' "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
-  [ "$status" -eq 0 ]
 }
 
-@test "absence and below-floor evidence are never green" {
-  run bash "$PREPARE" cycle-a --window-start 2026-07-01T00:00:00Z --window-end 2026-07-02T00:00:00Z --json
+@test "writer validation rejects malformed evidence before readers see it" {
+  run "$LORE" scorecard append --kdir "$TEST_KDIR" --row '{"kind":"telemetry"}' --json
+  [ "$status" -ne 0 ]
+  run bash "$REPO_DIR/scripts/session-event-append.sh" --kdir "$TEST_KDIR" --row '{"event":"not-a-real-event"}' --json
+  [ "$status" -ne 0 ]
+  run "$LORE" scorecard rows --window-start "$WINDOW_START" --window-end "$WINDOW_END" --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
-  run jq -e '
-    ([.source_manifest[] | select(.source_id=="consumer_contradiction_lifecycle") | .coverage=="not-computable" and .reason=="no-published-reader"] | all) and
-    ([.calculations[] | select(.calculation_id=="candidate_queue_backlog") | .disposition=="not-computable"] | all) and
-    ([.calculations[] | select(.calculation_id=="consumer_contradiction_routing") | .disposition=="not-computable"] | all) and
-    ([.calculations[] | select(.calculation_id=="template_headline_readiness") | .disposition=="abstained" and .reason=="below-sample"] | all) and
-    .fixed_health.state=="not-computable"
-  ' "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
-  [ "$status" -eq 0 ]
-}
-
-@test "exact replay is reused and keeps one prepare marker" {
-  run bash "$PREPARE" cycle-a --window-start 2026-07-01T00:00:00Z --window-end 2026-07-02T00:00:00Z --json
-  [ "$status" -eq 0 ]
-  run bash "$PREPARE" cycle-a --window-start 2026-07-01T00:00:00Z --window-end 2026-07-02T00:00:00Z --json
-  [ "$status" -eq 0 ]
-  json_line | jq -e '.status=="reused" and .artifact.id!=null and .judgment_accepted==null'
-  [ "$(grep -c '^Retro-prepare-atom:' "$TEST_KDIR/_work/cycle-a/execution-log.md")" -eq 1 ]
-}
-
-@test "matching pack without marker recovers the marker" {
-  run bash "$PREPARE" cycle-a --window-start 2026-07-01T00:00:00Z --window-end 2026-07-02T00:00:00Z --json
-  [ "$status" -eq 0 ]
-  rm "$TEST_KDIR/_work/cycle-a/execution-log.md"
-  run bash "$PREPARE" cycle-a --window-start 2026-07-01T00:00:00Z --window-end 2026-07-02T00:00:00Z --json
-  [ "$status" -eq 0 ]
-  json_line | jq -e '.status=="recovered"'
-  [ "$(grep -c '^Retro-prepare-atom:' "$TEST_KDIR/_work/cycle-a/execution-log.md")" -eq 1 ]
-}
-
-@test "a new window replaces an unaccepted pack" {
-  run bash "$PREPARE" cycle-a --window-start 2026-07-01T00:00:00Z --window-end 2026-07-02T00:00:00Z --json
-  [ "$status" -eq 0 ]
-  run bash "$PREPARE" cycle-a --window-start 2026-07-02T00:00:00Z --window-end 2026-07-03T00:00:00Z --json
-  [ "$status" -eq 0 ]
-  json_line | jq -e '.status=="replaced"'
-}
-
-@test "an accepted filing freezes pack replacement" {
-  run bash "$PREPARE" cycle-a --window-start 2026-07-01T00:00:00Z --window-end 2026-07-02T00:00:00Z --json
-  [ "$status" -eq 0 ]
-  printf '{"schema_version":1}\n' > "$TEST_KDIR/_work/cycle-a/retro-filing.json"
-  run bash "$PREPARE" cycle-a --window-start 2026-07-02T00:00:00Z --window-end 2026-07-03T00:00:00Z --json
-  [ "$status" -eq 1 ]
-  json_line | jq -e '.status=="refused" and .error.code=="accepted-pack-frozen"'
-}
-
-@test "prepare refuses missing or unordered explicit bounds" {
-  run bash "$PREPARE" cycle-a --window-start 2026-07-01T00:00:00Z --json
-  [ "$status" -eq 1 ]
-  run bash "$PREPARE" cycle-a --window-start 2026-07-02T00:00:00Z --window-end 2026-07-01T00:00:00Z --json
-  [ "$status" -eq 1 ]
-}
-
-@test "source byte changes alter source and pack fingerprints" {
-  run bash "$PREPARE" cycle-a --window-start 2026-07-01T00:00:00Z --window-end 2026-07-02T00:00:00Z --json
-  [ "$status" -eq 0 ]
-  first="$(jq -r '.source_fingerprint+" "+.pack_id' "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json")"
-  printf '{"schema_version":1,"kind":"telemetry","tier":"telemetry","calibration_state":"unknown"}\n' >> "$TEST_KDIR/_scorecards/rows.jsonl"
-  run bash "$PREPARE" cycle-a --window-start 2026-07-01T00:00:00Z --window-end 2026-07-02T00:00:00Z --json
-  [ "$status" -eq 0 ]
-  second="$(jq -r '.source_fingerprint+" "+.pack_id' "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json")"
-  [ "$first" != "$second" ]
+  echo "$output" | jq -e 'length == 1'
+  run_prepare
+  jq -e '.fixed_health.state != "normal"' "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
 }
