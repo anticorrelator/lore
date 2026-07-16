@@ -187,12 +187,36 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
 8. Look for and run relevant tests:
    - Check for package.json scripts, Makefile targets, pytest, etc.
    - Run tests if found; skip silently if no test command exists
-9. Send completion report to "{{team_lead}}" via SendMessage:
+9. Send completion report to "{{team_lead}}" via SendMessage. The message is
+   transport: the lead lands your report body verbatim at
+   `$KDIR/_work/<slug>/worker-reports/<report-id>.md` — the durable evidence of
+   record — before checking it, so the body must be the complete,
+   self-contained report (see §The Durable Report below):
    ```
    summary: "Done: <task subject>"
    content: |
-     **Task:** <subject>
+     Report-schema: 1
+     Report-id: <copied verbatim from the `Report-id:` line in your task
+       prompt/description — the lead assigns one per dispatch attempt>
+     Work-item: <slug>
+     Task: <subject>
+     Producer-role: worker
+     Dispatch-path: harness-subagent
+     Harness: <the active harness, e.g. claude-code>
+     Status: <completed | blocked | degraded — blocked when **Blockers:** is
+       non-none; degraded when the task shipped with a named capability gap>
      Template-version: {{template_version}}
+     **Artifacts:**
+       REQUIRED — the acceptance index. One YAML-style entry per durable
+       artifact this task produced or extended, each with all four fields:
+       - path: <absolute path, or work-item-relative for _work/ artifacts>
+         kind: <source | test-output | tier2-claims | execution-log | knowledge-entry | ...>
+         writer: <the sanctioned writer that produced it — you (worker) for
+           source edits, evidence-append.sh for task-claims.jsonl rows, etc.>
+         identity: <durable identity the lead can check — a Tier-2 claim_id,
+           an execution-log Report-key, or a source revision/path>
+       The manifest is an index over canonical artifacts, never a substitute
+       for them — the lead's audit reads the artifacts, not this message.
      **Changes:**
      - <file>: <what changed>
      **Tests:** <ran X tests, all passed / no tests found / N failures>
@@ -357,6 +381,30 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
    report — it checks the task description, not the SendMessage body.
 11. Mark task completed: TaskUpdate with status=completed
 
+## The Durable Report
+
+Your report has one evidence-of-record form: the file the lead lands at
+`$KDIR/_work/<slug>/worker-reports/<report-id>.md`, verbatim from your step 9
+body, before any checking. Everything else that carries the report — the
+SendMessage body, the task description, an adapter result envelope, screen
+output, a session transcript — is delivery or debugging, never the record.
+Three consequences:
+
+- **The report id is lead-assigned, per attempt.** Copy the task's
+  `Report-id:` line verbatim into your header. A rejected-and-retried task
+  reports under a fresh id; report files are immutable once accepted, so a
+  retry never overwrites prior evidence.
+- **The report is an index over canonical artifacts.** Tier-2 rows live in
+  `task-claims.jsonl` (via `evidence-append.sh`), the execution log has its
+  own writer, source changes live in the tree. The **Artifacts:** manifest
+  points at them; the lead audits the artifacts, then accepts. A claim that
+  exists only in report prose, with no durable artifact behind it, does not
+  survive that audit.
+- **Sidecars keep their sole writers.** Never write the report file,
+  `task-claims.jsonl`, or `execution-log.md` yourself on this dispatch path —
+  your appends go through the sanctioned writers, and the lead owns the
+  report landing.
+
 ## Tier 2 Evidence Emission
 
 Tier 2 rows are the *work-local evidence trail* for this task — file/line-
@@ -482,6 +530,7 @@ For tasks with subjects starting with "Update stale knowledge entry":
 
 ## Reporting Guidelines
 
+- **Artifacts** is a REQUIRED section — the acceptance index the lead audits from. One entry per durable artifact with all four fields (`path`, `kind`, `writer`, `identity`). Include the source files you changed (identity: revision or path), the Tier-2 claims you appended (identity: `claim_id`), and any test outputs worth auditing. Every `identity` must be checkable against the artifact it names — an unverifiable entry is treated as absent. Never inline artifact contents into the manifest; it indexes, the artifacts carry the evidence.
 - **Observations** are the most valuable part of your report beyond the code changes themselves. Emit 1-3 structured observations, each as a YAML-style list entry with all required fields (plus optional ones):
   - `claim` — short declarative statement of what you learned about the system.
   - `file` — absolute path of the primary file the claim is anchored to.

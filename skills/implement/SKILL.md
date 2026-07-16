@@ -158,7 +158,7 @@ Selection is the caller's declaration — exactly one mode is required, no defau
 Contract (`scripts/impl-open.sh`) — a prepare-and-return emitter; it never invokes harness tools, never spawns anything, never decides routes. Its only write is one execution-log attribution row. It returns:
 
 - **Checksum validation** — delegates to `load-tasks`; a `tasks.json`/`plan.md` checksum mismatch is a hard exit-1 directing to `lore work regen-tasks <slug>`. Tell the user: "plan.md was edited after tasks.json was generated. Run `/work regen-tasks <slug>` to regenerate, or edit plan.md back." Wait for the user's decision — this prompt stays interactive. If `tasks.json` does not exist, generate it with `lore work tasks "$SLUG"`, then re-run `open`. The checksum gate is owned by `open` alone — `next-batch` deliberately does not re-enforce it mid-run.
-- **`capabilities.team_messaging`** — `full | partial | fallback | none`; anything below `full` takes Step 3.0's capability-collapse route: no TeamCreate, no worker spawns, and one durable report per task before the collapse commits.
+- **`capabilities.team_messaging`** — `full | partial | fallback | none`. One input to Step 3.0's operation-level probe, never a proxy for the whole subagent surface: it gates mid-flight messaging (consultations, steering, TeamCreate coordination), while the spawn surface, direct result collection, completion enforcement, and report materialization are probed separately. A sub-`full` level changes how messaging-dependent coordination runs (Step 3.0 decides the route); it does not by itself collapse the run to lead-inline.
 - **`manifest`** — TeamCreate first, then one TaskCreate per eligible task in `tasks.json` order, then TaskUpdate wiring ops whose `add_blocked_by` edges are complete (tasks.json edges within the selection plus collision-serialization edges). Edges pointing outside the selection surface per-task as `external_blocked_by` for the lead to wire against already-created tasks. An empty manifest is success with an explanatory `status`, not an error.
 - **`collisions`** — same-file intersections among concurrent selected tasks, already folded into the manifest as serialization edges so the wiring is collision-safe. **Cross-selection collisions are NOT detected:** when dispatching a `--phase`/`--task` subset, the lead accounts for files held by unselected or still-in-flight tasks before spawning.
 - **`phase_map`** and **`prior_knowledge`** — per-phase knowledge resolved through the 3-branch gate: a `retrieval_directive` resolves via `resolve-manifest.sh` (authoritative; v2 directives return `### Focal:`/`### Adjacent:` sectioned blocks, legacy flat directives a single section — the dispatcher does not branch on shape); task descriptions embedding `## Prior Knowledge` skip prefetch (the phase already carries resolved knowledge; appending would duplicate or conflict); otherwise the fallback `lore prefetch` runs ONLY when the caller declared `--fallback-scale-set <buckets>` (comma-separated from `abstract|architecture|subsystem|implementation`). Without a declaration the phase returns `status: needs-prefetch` with the suggested query — **scale is the caller's declaration, never a default.** On `needs-prefetch`, declare the bucket per the scale rubric (see `skills/memory/SKILL.md` § Scale-Aware Navigation) and re-run `open` with `--fallback-scale-set` — re-declare with intent, not habit. When the fallback branch ran, log one `Knowledge-delivery-path: lead-fallback-prefetch` line via `write-execution-log.sh` so the delivery gap is visible to /retro.
@@ -181,12 +181,21 @@ Exit codes: `0` manifest emitted (possibly empty with explanatory status); `1` v
 
 ### Step 3.0: Lead-inline gate (pre-dispatch short-circuit)
 
-**Read `open`'s `capabilities.team_messaging` and the four `lead_inline_conditions` fields, then decide the route yourself.** There are two routes:
+**Probe the operations the selection actually needs, then decide the route yourself.** The probe is operation-level and lives in the adapter capability layer — `framework_capability` cells plus the active agent adapter's own queries (`ADAPTER="$LORE_REPO_DIR/adapters/agents/$(resolve_active_framework).sh"`) — never a branch on the framework's name; capability overrides participate automatically. Worker dispatch needs four things, each probed on its own:
 
-- **Capability collapse:** when `team_messaging` is below `full`, lead-inline is mandatory regardless of `single_task`; the harness cannot execute TeamCreate/worker dispatch. Execute every selected task serially in manifest dependency order. This route changes bookkeeping and coordination only — the lead still performs every discretion-bearing task judgment and declared consultation/skill obligation.
-- **Efficiency collapse:** on a full-team harness, read the four conditions as separate fields — never an aggregate boolean — because the route is a judgment, not an arithmetic AND: the `detail` block tells you *why* a condition is false, and the carve-out below turns on that distinction. Worker dispatch's value is parallelism across independent tasks plus discretion-bearing context for intent+constraints work; both vanish when the plan reduces to a single fully-determined edit. The ~22KB context tax per spawn plus TeamCreate + TaskCreate + completion round-trip is then pure overhead.
+1. **Spawn surface** — `subagents` supports the adapter's `spawn`/`wait`/`shutdown` operations.
+2. **Direct result collection** — `collect_result` returns the full report body to the lead.
+3. **Completion enforcement** — the adapter's `completion_enforcement` query returns `native_blocking` or `lead_validator`. `self_attestation` or `unavailable` disqualifies dispatch: a worker's own word is never acceptance evidence.
+4. **Report materialization** — the lead can land each collected report at its canonical `worker-reports/` path (Step 4 §1) before checking it.
 
-On either route, selecting lead-inline is provisional. The collapse fires only after the durable report read-back below proves one report key per selected task; task shape is never a substitute for report presence.
+Probe `team_messaging` only when the selection actually requires mid-flight messaging — declared `**Consultations required:**` domains, `mode: persistent` advisors, or steering the lead intends. `team_messaging=none` removes consultations and shared team state, not the spawn surface: a selection of self-contained tasks stays eligible for worker dispatch on such a harness, with TeamCreate/SendMessage coordination replaced by the adapter's spawn → wait → collect_result → shutdown loop and report checking by the lead-validator path when no native hook fires. The probe routes mechanism only — model selection stays the separate role-resolution path (`resolve_model_for_role`, `adapters/roles.json`) under the standing routing directives.
+
+Two lead-inline routes exist:
+
+- **Capability collapse:** when the probe disqualifies worker dispatch — no spawn surface, no direct result collection, enforcement at `self_attestation`/`unavailable`, no way to land the report file, or a messaging-requiring selection on a harness whose messaging probe fails (with no session route selected for those tasks) — execute every selected task serially in manifest dependency order. This route changes bookkeeping and coordination only — the lead still performs every discretion-bearing task judgment and declared consultation/skill obligation. When no route at all — worker dispatch, session-routed worker, or lead-inline — can land and validate the canonical report artifact, refuse the run explicitly rather than auditing a transcript or accepting a self-attested result.
+- **Efficiency collapse:** on a harness where worker dispatch is available, read the four conditions as separate fields — never an aggregate boolean — because the route is a judgment, not an arithmetic AND: the `detail` block tells you *why* a condition is false, and the carve-out below turns on that distinction. Worker dispatch's value is parallelism across independent tasks plus discretion-bearing context for intent+constraints work; both vanish when the plan reduces to a single fully-determined edit. The ~22KB context tax per spawn plus TeamCreate + TaskCreate + completion round-trip is then pure overhead.
+
+On either route, selecting lead-inline is provisional. The collapse fires only after the durable read-back below proves one landed report file and one report key per selected task; task shape is never a substitute for report presence.
 
 The efficiency route is eligible when **all four** conditions hold:
 
@@ -199,7 +208,7 @@ The efficiency route is eligible when **all four** conditions hold:
 
 **No file-count cap.** An earlier version of this gate required ≤3 files. Evidence from the scale-registry-rename cycle (single prescriptive task, 10 verbatim file edits, no discretion) showed the cap was a proxy for "discretion required" that the other conditions already cover better. A 50-file prescriptive rename is still 50 file edits with no discretion; splitting across workers pays N × ~22KB context tax for no shaping gain. `detail.file_count_diagnostic` remains telemetry and does not gate.
 
-**On a full-team harness, if any condition fails (outside the carve-out):** skip Step 3.0 entirely and proceed to Step 3 (worker dispatch). Do not log a skip — the worker pipeline is the default.
+**On a worker-dispatch-capable harness, if any condition fails (outside the carve-out):** skip Step 3.0 entirely and proceed to Step 3 (worker dispatch). Do not log a skip — the worker pipeline is the default.
 
 **If either route is selected:** execute and persist each task inline.
 
@@ -216,7 +225,7 @@ The efficiency route is eligible when **all four** conditions hold:
    echo '<tier2-row-json>' | bash ~/.lore/scripts/evidence-append.sh --work-item "$SLUG"
    ```
    Every row MUST carry `exact_snippet` and `normalized_snippet_hash`. Compute via the canonical helper — do NOT inline the recipe (`python3 ~/.lore/scripts/snippet_normalize.py --hash <<<"$SNIPPET"`); the v1 normalization recipe lives only in `scripts/snippet_normalize.py`, and `evidence-append.sh` delegates to `validate-tier2.sh`, which rejects rows that omit either field or carry a hash that does not match.
-5. **Persist that task's report immediately after verification.** Give every report a run-and-task key, and use the same narrative fields as Step 4 §3 so /retro receives per-task material on every route:
+5. **Persist that task's full report, then its execution-log reduction.** Assign the task's report id at route selection — filesystem-safe and attempt-specific (`<task-id>-r<attempt>`; a retried task gets a fresh id, never an overwrite) — and write the complete schema-v1 report to `$ITEM_DIR/worker-reports/<report-id>.md` (create the directory on first write): the identity header (`Report-schema: 1`, `Report-id:`, `Work-item:`, `Task:`, `Producer-role: implement-lead`, `Dispatch-path: lead-inline`, `Harness:`, `Status:`, `Template-version:`) followed by the same labeled sections a worker report carries (`agents/worker.md` step 9), **Artifacts:** manifest included. That file is the durable evidence of record; the execution-log entry below is its per-task reduction, never its substitute. Give every reduction a run-and-task key, and use the same narrative fields as Step 4 §3 so /retro receives per-task material on every route:
    ```bash
    REPORT_KEY="$RUN_STARTED_AT/<task-id>"
    printf 'Report-key: %s\nTask: %s\nChanges: %s\nSkills: %s\nTier2-claims: %s\nObservations: %s\nConvention: %s\nInvestigation: %s\nBlockers: %s\nConsultations: %s\nTest result: %s\n' \
@@ -227,8 +236,9 @@ The efficiency route is eligible when **all four** conditions hold:
      | bash ~/.lore/scripts/write-execution-log.sh --slug "$SLUG" --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
    ```
    If a field has no content, write `None`. Never batch several tasks into one entry.
-6. **Read back the durable key before accepting the task:**
+6. **Read back the durable report and key before accepting the task:**
    ```bash
+   test -s "$ITEM_DIR/worker-reports/<report-id>.md"
    test "$(rg -Fxc "Report-key: $REPORT_KEY" "$ITEM_DIR/execution-log.md")" -eq 1
    ```
    A failed write or read-back halts the route before the task is checked off. Do not count a screen-rendered report or an in-memory draft.
@@ -289,6 +299,7 @@ The efficiency route is eligible when **all four** conditions hold:
    - `{{prior_knowledge}}` → `$PRIOR_KNOWLEDGE`, followed by that worker's Tier 2 extract block (blank-line separator)
    - `{{template_version}}` → `$WORKER_TEMPLATE_VERSION`
    - Include each assigned task's `packet_id` (carried on its TaskCreate manifest entry and in `open`'s `packets` field) as a literal `Packet-id: <packet_id>` line in that worker's Task prompt — the post-session packet assessor matches this line to confirm handoff. Omit the line for tasks without a `packet_id`.
+   - Assign each task's report id before dispatch — filesystem-safe and attempt-specific (`<task-id>-r<attempt>`; a re-dispatch gets a fresh id, never a reuse) — and include it as a literal `Report-id: <report-id>` line alongside the task assignment in that worker's Task prompt. The worker echoes the id in its report header; the id fixes where Step 4 §1 lands the collected report.
 
    Assign only tasks from `open`'s `initial_unblocked` set. Same-file serialization is already wired into the manifest's blockedBy edges for this selection — never parallel-dispatch same-file tasks across workers; for subset selections, also account for files held by unselected tasks (the cross-selection caveat in Step 2). After claiming (`TaskUpdate(owner=…)`), a worker-side `TaskGet` ownership re-check is the backstop for claim races.
 
@@ -302,7 +313,7 @@ The efficiency route is eligible when **all four** conditions hold:
 
 ### Step 4: Collect progress
 
-As worker messages arrive (delivered automatically), branch by message kind:
+As worker results arrive — delivered automatically on messaging harnesses, collected via the adapter's `wait` + `collect_result` loop where messaging is unavailable — branch by kind:
 
 - **Consultation requests** — bodies whose first line is `## Consultation` and that carry `consultation-id:` route to Step 4.0 below. Mid-task questions; reply immediately so the worker resumes on the next turn boundary.
 - **Completion reports** — bodies matching the `## Reporting Guidelines` shape from `agents/worker.md` route through §1–§6.
@@ -362,7 +373,7 @@ A worker SendMessage whose body begins with `## Consultation` and carries `consu
 
 #### Step 4 §1–§6: Completion reports
 
-1. **Run the mechanical report check before accepting the task — every report, no exceptions.** Save the worker's completion report body verbatim to a file (e.g. via `mktemp`), then gather the harness facts the verb cannot read itself and invoke:
+1. **Persist the report, then run the mechanical check — every report, no exceptions.** Land the worker's completion report body verbatim at its preassigned canonical path, `$ITEM_DIR/worker-reports/<report-id>.md` (the id assigned at dispatch; create `worker-reports/` on first landing), before any checking. The message body, task description, and adapter result envelope are transport; the landed file is the evidence of record, immutable once the task is accepted — a re-dispatched attempt lands under its fresh id, never over prior evidence. A session-routed worker lands its own report at `$ITEM_DIR/worker-reports/<derived-slug>.md` before `terminus_reached`; validate that file rather than re-copying the chaperone's relay. Then gather the harness facts the verb cannot read itself and invoke the check against the landed file:
 
    ```bash
    lore impl check-report "$SLUG" --task <task-id> --report <file> --phase <n> \
@@ -396,7 +407,7 @@ A worker SendMessage whose body begins with `## Consultation` and carries `consu
 
    The spawned-advisor list comes from the lead's own spawn map (Step 3.4); when `provider_status()` is `full`, the transcript's spawn events (TaskCreate with `name: <advisor-name>`, extracted via the documented two-pass `parse_transcript()` + `read_raw_lines()` pattern) corroborate it — the lead-side map is canonical only on `full`; `partial`/`unavailable` statuses flow to branch (c) regardless.
 
-   **On exit 3, the task is rejected — reject it.** SendMessage the report back to the worker naming the verb's `fail_reasons` (missing claim_ids, unsatisfied required domains); do NOT accept; do NOT proceed to §2. **On exit 0, acceptance remains the lead's decision** — mechanical checks alone never accept; weigh the report's substance (tests, blockers, scope) and accept or send back with guidance.
+   **On exit 3, the task is rejected — reject it.** SendMessage the report back to the worker naming the verb's `fail_reasons` (missing claim_ids, unsatisfied required domains); do NOT accept; do NOT proceed to §2. The rejected attempt's landed file stays as evidence; the retry reports under a fresh report id. **On exit 0, acceptance remains the lead's decision** — mechanical checks alone never accept. Audit the durable artifacts the report indexes — its **Artifacts:** manifest entries, the cross-checked Tier 2 rows, the changed files and test outputs — and weigh the report's substance (tests, blockers, scope), then accept or send back with guidance. Acceptance reads the landed report and the canonical artifacts behind it; a transcript, screen rendering, message body, or task description is never the evidence of record.
 
 2. **Assess divergence rationales — the lead's judgment, never the verb's.** For each `diverged: <label> — <why>` finding the check surfaced, assess whether the rationale is convincing. A worker may legitimately diverge — silencing principled divergence is worse than the violation. "Woven but inapplicable to the actual change" is a valid divergence rationale (and a signal the upstream relevance-gate wove too loosely). You are assessing the *rationale*, not re-deriving compliance from the diff. This assessment is observability, not a gate: it NEVER blocks task acceptance and NEVER edits the worker's output.
 

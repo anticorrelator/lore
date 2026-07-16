@@ -265,9 +265,23 @@ cost is per-task attribution.
 **Report landing.** A worker session writes its completion report to
 `_work/<work-item-slug>/worker-reports/<derived-slug>.md` as its final step before
 terminus (the journal has no report-bearing event, and a report must be durable
-*before* `closed` so the chaperone can read it after terminus). Being a full
-harness session with knowledge-store access, it appends its own Tier-2 rows via
-`evidence-append.sh` — no relay block.
+*before* `closed` so the chaperone can read it after terminus). The derived slug
+doubles as the report's identity: the file is a schema-v1 worker report whose
+header carries `Report-schema: 1`, `Report-id: <derived-slug>`, `Work-item:`,
+`Task:`, `Producer-role:`, `Dispatch-path: lore-session`, `Harness:`, `Status:`,
+and `Template-version:` over the standard worker report sections, `**Artifacts:**`
+manifest included (each entry: path, kind, sanctioned writer, durable identity).
+The session is the report file's single writer and lands it atomically
+(tmp + rename, the substrate's write archetype) exactly once per derived slug —
+a re-dispatched attempt is a new `--w<n>` ordinal with its own file, never an
+overwrite of prior evidence. Being a full harness session with knowledge-store
+access, it appends its own Tier-2 rows via `evidence-append.sh` — no relay
+block; every sidecar file keeps its sanctioned sole writer. The journal, screen
+renderings, and harness transcripts are lifecycle and debugging channels: they
+prove the session ran, not what it delivered. Acceptance reads the landed report
+and the canonical artifacts its manifest indexes — persist before checking,
+audit before accepting — never a transcript, screen capture, task description,
+or message body.
 
 ## Close-request queue
 
