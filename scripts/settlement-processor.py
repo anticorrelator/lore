@@ -162,6 +162,13 @@ def iso_z(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def parse_rfc3339(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timezone is required")
+    return parsed.astimezone(timezone.utc)
+
+
 def now_epoch() -> int:
     return int(time.time())
 
@@ -1621,6 +1628,7 @@ class Settlement:
             "framework": "",
             "framework_capability": {},
             "status": "completed",
+            "enqueued_at": item.get("enqueued_at"),
             "reason": f"invalid_{item_kind.replace('-', '_')}",
             "started_at": utc_now(),
             "completed_at": utc_now(),
@@ -1967,6 +1975,7 @@ class Settlement:
                     "framework": item.get("framework", ""),
                     "framework_capability": {},
                     "status": status,
+                    "enqueued_at": item.get("enqueued_at"),
                     "reason": (item.get("result") or {}).get("reason") or "legacy_terminal_queue_item",
                     "started_at": item.get("selected_at") or item.get("updated_at") or utc_now(),
                     "completed_at": item.get("updated_at") or utc_now(),
@@ -2211,6 +2220,10 @@ class Settlement:
             "infra_failure": bool(self.retryable_infrastructure_failure_reason(run)),
             "invalidated": self.run_invalidated(run),
             "completed_at": run.get("completed_at"),
+            "enqueued_at": run.get("enqueued_at"),
+            "judge": run.get("judge"),
+            "reason": run.get("reason"),
+            "verdict": run.get("verdict"),
         }
 
     def _archive_immutable_runs(self, cap: int = ARCHIVE_RUNS_PER_PASS) -> int:
@@ -2410,7 +2423,101 @@ class Settlement:
             "remediation": ELIGIBLE_FRAMEWORKS_REMEDIATION,
         }
 
-    def status(self, settings: dict[str, Any]) -> dict[str, Any]:
+    def retro_status_projection(
+        self,
+        queue: dict[str, Any],
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, Any]:
+        def in_window(value: Any) -> bool:
+            if not isinstance(value, str) or not value:
+                return False
+            try:
+                return start <= parse_rfc3339(value) < end
+            except ValueError:
+                return False
+
+        queue_transitions = []
+        enqueue_by_item: dict[str, str] = {}
+        per_kind: dict[str, dict[str, int]] = {}
+        for item in queue.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or KIND_TASK_CLAIM)
+            bucket = per_kind.setdefault(kind, {"enqueued": 0, "completed": 0, "pending": 0})
+            if item.get("status") == "pending":
+                bucket["pending"] += 1
+            enqueued_at = str(item.get("enqueued_at") or "")
+            if enqueued_at:
+                enqueue_by_item[str(item.get("id") or "")] = enqueued_at
+            if in_window(enqueued_at):
+                bucket["enqueued"] += 1
+                queue_transitions.append({
+                    "item_id": item.get("id"),
+                    "kind": kind,
+                    "status": item.get("status"),
+                    "enqueued_at": enqueued_at,
+                    "selected_at": item.get("selected_at"),
+                })
+
+        completed_envelopes = []
+        grounding_outcomes = []
+        by_gate: dict[str, int] = {}
+        for run in self.census_runs():
+            completed_at = run.get("completed_at")
+            if not in_window(completed_at):
+                continue
+            kind = str(run.get("kind") or KIND_TASK_CLAIM)
+            per_kind.setdefault(kind, {"enqueued": 0, "completed": 0, "pending": 0})["completed"] += 1
+            verdict = run.get("verdict") if isinstance(run.get("verdict"), dict) else {}
+            verdict_label = str(verdict.get("verdict") or run.get("status") or "")
+            gate = str(run.get("judge") or KIND_TO_GATE.get(kind) or kind)
+            by_gate[gate] = by_gate.get(gate, 0) + 1
+            enqueued_at = str(run.get("enqueued_at") or enqueue_by_item.get(str(run.get("item_id") or ""), ""))
+            completed_envelopes.append({
+                "run_id": run.get("run_id"),
+                "item_id": run.get("item_id"),
+                "kind": kind,
+                "gate": gate,
+                "status": run.get("status"),
+                "enqueued_at": enqueued_at or None,
+                "completed_at": completed_at,
+                "verdict": verdict_label,
+                "reason": verdict.get("reason") or run.get("reason"),
+            })
+            grounding_outcomes.append({
+                "run_id": run.get("run_id"),
+                "kind": kind,
+                "verdict": verdict_label,
+                "reason": verdict.get("reason") or run.get("reason"),
+                "grounded": verdict_label not in {"", "unverified", "error", "failed", "blocked"},
+                "completed_at": completed_at,
+            })
+
+        queue_transitions.sort(key=lambda row: (str(row.get("enqueued_at") or ""), str(row.get("item_id") or "")))
+        completed_envelopes.sort(key=lambda row: (str(row.get("completed_at") or ""), str(row.get("run_id") or "")))
+        grounding_outcomes.sort(key=lambda row: (str(row.get("completed_at") or ""), str(row.get("run_id") or "")))
+        return {
+            "reader_contract_version": "1",
+            "projection_mode": "half-open-window",
+            "window": {"start": iso_z(start), "end": iso_z(end)},
+            "queue_transitions": queue_transitions,
+            "completed_envelopes": completed_envelopes,
+            "grounding_outcomes": grounding_outcomes,
+            "per_kind": dict(sorted(per_kind.items())),
+            "liveness": {
+                "routed_items": len(queue_transitions),
+                "completed_runs": len(completed_envelopes),
+                "completed_by_gate": dict(sorted(by_gate.items())),
+            },
+        }
+
+    def status(
+        self,
+        settings: dict[str, Any],
+        window_start: datetime | None = None,
+        window_end: datetime | None = None,
+    ) -> dict[str, Any]:
         queue = self.load_queue()
         leases = self.load_leases()
         usage = self.load_usage()
@@ -2465,7 +2572,7 @@ class Settlement:
             next_action = "processor active"
         elif not census:
             next_action = "idle (event-driven: triggers enqueue disputes/samples)"
-        return {
+        result = {
             "ok": True,
             "enabled": bool(settings["enabled"]),
             "dispatch": {
@@ -2541,6 +2648,9 @@ class Settlement:
             "last_settled": last_settled,
             "infra_exhausted": self.infra_exhausted_status(int(settings["max_auto_retry_attempts"])),
         }
+        if window_start is not None and window_end is not None:
+            result["retro_projection"] = self.retro_status_projection(queue, window_start, window_end)
+        return result
 
     def budget_status(self, usage: dict[str, Any]) -> dict[str, Any]:
         runtime_seconds_per_day = None
@@ -3107,6 +3217,7 @@ class Settlement:
             "framework": chosen["framework"],
             "framework_capability": {k: chosen[k] for k in ("support", "evidence", "install_path_agents")},
             "status": status,
+            "enqueued_at": item.get("enqueued_at"),
             "reason": reason,
             "started_at": started,
             "completed_at": utc_now(),
@@ -3286,6 +3397,7 @@ class Settlement:
             "framework": chosen["framework"],
             "framework_capability": {k: chosen[k] for k in ("support", "evidence", "install_path_agents")},
             "status": status,
+            "enqueued_at": item.get("enqueued_at"),
             "reason": reason,
             "started_at": started,
             "completed_at": utc_now(),
@@ -3945,6 +4057,8 @@ def main() -> int:
     ap.add_argument("--force", action="store_true", help="triggers: bypass the pump throttle")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--window-start", help="status: inclusive RFC3339 lower bound for the retro projection")
+    ap.add_argument("--window-end", help="status: exclusive RFC3339 upper bound for the retro projection")
     ap.add_argument("--max-iterations", type=int, default=200)
     ap.add_argument("--weeks", type=int, default=ROLLUP_BACKFILL_DEFAULT_WEEKS, help="enqueue-rollup-backfill: number of trailing completed weekly windows (1-104)")
     ap.add_argument("--judge", choices=list(ROLLUP_JUDGES), default=None, help="enqueue-rollup-backfill: limit to one judge (default: all 5)")
@@ -3961,7 +4075,18 @@ def main() -> int:
     elif args.command == "scan":
         out = settlement.scan()
     elif args.command == "status":
-        out = settlement.status(settings)
+        if bool(args.window_start) != bool(args.window_end):
+            raise SystemExit("[settlement] Error: --window-start and --window-end must be supplied together")
+        start = end = None
+        if args.window_start and args.window_end:
+            try:
+                start = parse_rfc3339(args.window_start)
+                end = parse_rfc3339(args.window_end)
+            except ValueError as exc:
+                raise SystemExit(f"[settlement] Error: invalid status window: {exc}")
+            if start >= end:
+                raise SystemExit("[settlement] Error: status window start must precede window end")
+        out = settlement.status(settings, start, end)
     elif args.command == "enable":
         out = settlement.set_enabled(True)
     elif args.command == "disable":

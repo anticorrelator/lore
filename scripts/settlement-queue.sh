@@ -11,7 +11,9 @@ usage() {
 Usage: settlement-queue.sh <status|triggers|scan|enqueue|process|enable|disable|schedule|model|queue|retry-errors|drain|enqueue-rollup-backfill> [args...]
 
 Commands:
-  status --json                 Show queue, lease, run, and budget status.
+  status [--window-start RFC3339 --window-end RFC3339] --json
+                                Show operational state plus an optional bounded
+                                retro projection of transitions and run envelopes.
   triggers --json               Run the event-driven enqueue triggers: dispute
                                 detector, spot-sample budget, rollup steady-
                                 state. Idempotent; self-throttled (--force
