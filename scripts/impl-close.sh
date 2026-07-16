@@ -738,7 +738,7 @@ print(json.dumps(attribution, ensure_ascii=False))
 PYEOF
 )
 
-# --- Closure-validity gate: archive, hold open, or refuse --------------------
+# --- Closure-validity gate: validate the archive route or refuse -------------
 CLOSURE_VALID=$(python3 -c '
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
@@ -781,16 +781,6 @@ print("ok")
 WAS_ARCHIVED=false
 case "$CLOSURE_VALID" in
   legacy|ok)
-    if ! bash "$SCRIPT_DIR/archive-work.sh" "$SLUG" >/dev/null; then
-      fail "archive-work.sh failed for '$SLUG' — diagnose and re-run close"
-    fi
-    if [[ ! -d "$KNOWLEDGE_DIR/_work/_archive/$SLUG" ]]; then
-      fail "FATAL: archive did not move work item to _archive/"
-    fi
-    if [[ -d "$ITEM_DIR" ]]; then
-      fail "FATAL: archive left work item in active _work/ path"
-    fi
-    WAS_ARCHIVED=true
     ;;
   capability_incomplete)
     if [[ ! -d "$ITEM_DIR" ]]; then
@@ -839,6 +829,32 @@ print(json.dumps(row, ensure_ascii=False))
 if ! printf '%s' "$TELEMETRY_ROW" | bash "$SCRIPT_DIR/scorecard-append.sh" >/dev/null; then
   echo "[impl] Warning: telemetry row append failed; close continues (observability-only)." >&2
 fi
+
+# --- Conformance aggregate: best-effort before the archive move --------------
+# The renderer owns closure-conformance.md. It runs after the closure write and
+# telemetry while the active item directory still exists. Assembly failure is
+# observable but never changes archive behavior or the close exit code.
+if ! bash "$SCRIPT_DIR/conformance-render.sh" "$SLUG" >/dev/null; then
+  echo "[impl] Warning: conformance aggregate render failed; close continues (observability-only)." >&2
+fi
+
+# --- Archive only after durable close evidence has been assembled ------------
+case "$CLOSURE_VALID" in
+  legacy|ok)
+    if ! bash "$SCRIPT_DIR/archive-work.sh" "$SLUG" >/dev/null; then
+      fail "archive-work.sh failed for '$SLUG' — diagnose and re-run close"
+    fi
+    if [[ ! -d "$KNOWLEDGE_DIR/_work/_archive/$SLUG" ]]; then
+      fail "FATAL: archive did not move work item to _archive/"
+    fi
+    if [[ -d "$ITEM_DIR" ]]; then
+      fail "FATAL: archive left work item in active _work/ path"
+    fi
+    WAS_ARCHIVED=true
+    ;;
+  capability_incomplete)
+    ;;
+esac
 
 # --- Pre-report guard: a completed-but-active parent must carry a valid -------
 # capability_incomplete closure row (the expected divergence state); anything

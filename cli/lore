@@ -156,6 +156,7 @@ Subcommands:
   tasks        Generate tasks from a plan
   load-tasks   Validate tasks.json and output tasks as structured text (for /implement)
   regen-tasks  Regenerate tasks.json from plan.md
+  conformance  Assemble closure-time conformance evidence for a work item
   check        Check off a plan task
   relate       Add or remove related work item links
   flag         Open a lightweight (async) review gate on a work item
@@ -1766,6 +1767,9 @@ cmd_work() {
       ;;
     regen-tasks)
       exec "$SCRIPTS_DIR/regen-tasks.sh" "$@"
+      ;;
+    conformance)
+      exec "$SCRIPTS_DIR/conformance-render.sh" "$@"
       ;;
     phase-context)
       exec "$SCRIPTS_DIR/phase-context.sh" "$@"

@@ -62,6 +62,7 @@ teardown() {
   fi
   unset LORE_KNOWLEDGE_DIR
   unset LORE_SESSION_INSTANCE LORE_SESSION_SLUG LORE_SESSION_TYPE
+  unset LORE_MODEL_WORKER LORE_MODEL_WORKER_MECHANICAL LORE_MODEL_WORKER_JUDGMENT_DENSE
 }
 
 make_meta() {
@@ -205,6 +206,34 @@ PYEOF
   [ "$status_field" = "archived" ]
 }
 
+@test "full close renders conformance before moving the item to the archive" {
+  run bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done"
+  [ "$status" -eq 0 ]
+  artifact="$WORK_DIR/_archive/anchored-done/closure-conformance.md"
+  [ -f "$artifact" ]
+  grep -Fq "# Closure Conformance Aggregate" "$artifact"
+}
+
+@test "conformance failure warns but does not block close" {
+  run bash -c 'cd "$1" && exec "$2" impl close anchored-done --verdict full --summary done' \
+    _ "$TEST_KDIR" "$LORE_CLI"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "conformance aggregate render failed; close continues"
+  [ -d "$WORK_DIR/_archive/anchored-done" ]
+}
+
+@test "close ordering is telemetry then conformance then archive then terminus" {
+  python3 - "$CLOSE_SH" <<'PYEOF'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+telemetry = text.index('if ! printf \'%s\' "$TELEMETRY_ROW"')
+render = text.index('if ! bash "$SCRIPT_DIR/conformance-render.sh"')
+archive = text.index('if ! bash "$SCRIPT_DIR/archive-work.sh"', render)
+terminus = text.index('session-terminus.sh', archive)
+assert telemetry < render < archive < terminus
+PYEOF
+}
+
 @test "full close emits the Done report with run-context counts" {
   run bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done"
   [ "$status" -eq 0 ]
@@ -278,6 +307,8 @@ PYEOF
   # Env override is resolution order #1, so the standard class resolves without
   # touching operator settings; the class-qualified roles fall back to it.
   export LORE_MODEL_WORKER="test-worker-model"
+  export LORE_MODEL_WORKER_MECHANICAL="test-worker-model"
+  export LORE_MODEL_WORKER_JUDGMENT_DENSE="test-worker-model"
   cat > "$WORK_DIR/anchored-done/tasks.json" <<'EOF'
 {"plan_checksum": "x", "phases": [
   {"phase_number": 1, "tasks": [
