@@ -204,6 +204,16 @@ As researcher messages arrive (or after direct file reading in short branch):
      | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source spec-lead --template-version "$RESEARCHER_TEMPLATE_VERSION"
    ```
 
+7. **Journal the investigation milestone.** The findings, Tier-2 rows, and investigation summary are all durable at this point, so a hosted session emits one `step_completed` row for the parent spec session — individual researcher reports and Tier-2 appends never emit steps:
+   ```bash
+   if [[ -n "${LORE_SESSION_INSTANCE:-}" && -n "${LORE_SESSION_SLUG:-}" && -n "${LORE_SESSION_TYPE:-}" ]]; then
+     bash ~/.lore/scripts/session-step.sh \
+       --step-id spec:investigation --step-label "Investigation complete" \
+       || echo "[spec] Warning: investigation step not journaled; the persisted artifacts remain authoritative." >&2
+   fi
+   ```
+   The env gate is the hosted-session test — an unhosted run skips silently. Replay is idempotent, and a failed append warns and moves on; it never rolls back the milestone it was reporting.
+
 ---
 
 ### Step 4: Strategy gate
@@ -353,6 +363,18 @@ If non-empty JSON array, for each skill name in the array:
 This evaluates the abstract plan. If WEAK or MISSING areas are identified, revise the abstract plan before proceeding to Step 5b. No evaluators are registered by default — opt-in via `lore ceremony add spec-design <skill>`.
 
 After each evaluator reaches a terminal attempt, make the outcome judgment and file it under `--ceremony spec-design` using the ceremony outcome filing contract. A revision round receives a new attempt id; never overwrite the evidence identity of an earlier round.
+
+When every evaluator holds a terminal disposition and any accepted revisions are persisted — including the no-evaluator case — a hosted session journals the design milestone:
+
+```bash
+if [[ -n "${LORE_SESSION_INSTANCE:-}" && -n "${LORE_SESSION_SLUG:-}" && -n "${LORE_SESSION_TYPE:-}" ]]; then
+  bash ~/.lore/scripts/session-step.sh \
+    --step-id spec:design --step-label "Design accepted" \
+    || echo "[spec] Warning: design step not journaled; the persisted plan remains authoritative." >&2
+fi
+```
+
+One row marks the accepted design state; evaluator attempts and individual revision rounds do not emit.
 
 ### Step 5b: Synthesize — concrete plan
 
@@ -622,6 +644,18 @@ Invoke every registered evaluator. Present its output to the user. If the lead a
 Do not finalize while a post-plan result still requires a plan edit or human decision. `needs-decision` is durable evidence of that open judgment, not permission to route around it.
 
 Run Step 5.6's two lead-owned preflight asserts now, without finalizing: check every instructed invocation against the **live script**, and check that **Tier-2 emission instructions** point to the canonical validator contract. If either assert — or the finalize verb itself — refuses, fix `plan.md` and re-run the affected ceremony before Step 5.6 invokes `lore spec finalize`.
+
+With the post-plan ceremony terminal and both preflight asserts passing, a hosted session journals the plan-ready milestone before entering Step 5.6:
+
+```bash
+if [[ -n "${LORE_SESSION_INSTANCE:-}" && -n "${LORE_SESSION_SLUG:-}" && -n "${LORE_SESSION_TYPE:-}" ]]; then
+  bash ~/.lore/scripts/session-step.sh \
+    --step-id spec:plan-ready --step-label "Plan ready" \
+    || echo "[spec] Warning: plan-ready step not journaled; the persisted plan and preflight result remain authoritative." >&2
+fi
+```
+
+Finalization emits no step of its own — `lore spec finalize` keeps the later, distinct `terminus_reached` row, and a refused preflight or finalize synthesizes no step history.
 
 ---
 

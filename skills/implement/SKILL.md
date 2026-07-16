@@ -232,7 +232,15 @@ The efficiency route is eligible when **all four** conditions hold:
    test "$(rg -Fxc "Report-key: $REPORT_KEY" "$ITEM_DIR/execution-log.md")" -eq 1
    ```
    A failed write or read-back halts the route before the task is checked off. Do not count a screen-rendered report or an in-memory draft.
-7. **Stash any Tier 3 candidates** for Step 5 (promotion still goes through `promote-batch` with `producer_role: implement-lead`), then mark that task complete: `lore work check "$SLUG" "<task-subject>"`.
+7. **Stash any Tier 3 candidates** for Step 5 (promotion still goes through `promote-batch` with `producer_role: implement-lead`), then mark that task complete: `lore work check "$SLUG" "<task-subject>"`. Once that checkbox write succeeds, a hosted session journals the task milestone:
+   ```bash
+   if [[ -n "${LORE_SESSION_INSTANCE:-}" && -n "${LORE_SESSION_SLUG:-}" && -n "${LORE_SESSION_TYPE:-}" ]]; then
+     bash ~/.lore/scripts/session-step.sh \
+       --step-id "implement:task:<task-id>" --step-label "Accepted task <task-id>" \
+       || echo "[implement] Warning: step for task <task-id> not journaled; the logged report and checked task remain authoritative." >&2
+   fi
+   ```
+   The env gate is the hosted-session test — an unhosted run skips silently. Replay is idempotent, and a failed append warns without unwinding the acceptance.
 8. **Commit the collapse only after all selected tasks pass read-back.** Let N be the number of selected TaskCreate manifest entries, then verify and log the durable count:
    ```bash
    REPORT_COUNT=$(rg -Fc "Report-key: $RUN_STARTED_AT/" "$ITEM_DIR/execution-log.md")
@@ -433,7 +441,17 @@ A worker SendMessage whose body begins with `## Consultation` and carries `consu
    ```bash
    lore work check "$SLUG" "<task-subject>"
    ```
+   Once that checkbox write succeeds, a hosted session journals the task milestone (the same env-gated invocation as the lead-inline route):
+   ```bash
+   if [[ -n "${LORE_SESSION_INSTANCE:-}" && -n "${LORE_SESSION_SLUG:-}" && -n "${LORE_SESSION_TYPE:-}" ]]; then
+     bash ~/.lore/scripts/session-step.sh \
+       --step-id "implement:task:<task-id>" --step-label "Accepted task <task-id>" \
+       || echo "[implement] Warning: step for task <task-id> not journaled; the logged report and checked task remain authoritative." >&2
+   fi
+   ```
    `next-batch` reads completion from these checkboxes; Step 7's close reconciles any misses via `--check-task`.
+
+A task's `step_completed` row belongs to the parent implement session and asserts the full acceptance sequence — report accepted, logged, checkbox persisted. Nothing upstream of that emits: worker completion messages, Tier-2 claim appends, consultation replies, batch transitions, and phase-close echoes all stay journal-silent. Whole-protocol completion remains `impl-close`'s separate `terminus_reached` row.
 
 Do NOT gate on reviewing diffs — workers proceed autonomously. The user reviews at the end.
 
