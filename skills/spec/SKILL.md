@@ -99,6 +99,8 @@ If the user's description is already specific enough (clear scope, stated constr
 
    The version-1 result contains `coverage`, `candidates`, and `provenance`. Coverage names every scanned, missing, or unreadable source stratum; candidates retain each source's own rank and score. The verb excludes canonical Lore skill/agent identities structurally, but it never combines rankings or emits `matched`, `binding`, or `applicability` fields.
 
+   The BM25 strata key on a single query seed — the work-item title, unless repeatable `--seed <token>` flags replace it (tokens join into one query; the wholesale tree scans are seed-insensitive and enumerate everything regardless). The seed is the only query-driven input, which is what lets `/implement`'s close re-run this same enumerator with seeds derived from the shipped diff: the two passes miss independently, and a norm the title-seeded pass ranks below the cutoff gets a second chance at close. A descriptive work-item title is what makes the spec-time half of that pair earn its keep.
+
 7. Apply the two discovery judgments yourself:
 
    - **External skills and agents — strict.** Read plausible external candidates and include only those whose stated domain materially contributes to this implementation. Lore protocol skills remain toolchain, not advisors. Emit `**External skill discovery:**` with the considered set and the matched set; `Matched: none` is valid.
@@ -314,6 +316,8 @@ Produce the conceptual frame first before committing to phase breakdown.
   **This block is the audit manifest, not the worker delivery channel.** It exists so a reviewer (and the post-plan ceremony) can see every preference/convention discovery surfaced. Workers do not read top-level plan.md sections — `/implement` consumes per-phase `**Knowledge context:**` backlinks (Step 3.1 directive branch resolves them via `resolve-manifest.sh` into worker `{{prior_knowledge}}`). Distribution into per-phase Knowledge context happens in Step 5b #2 (concordance-assisted annotation) — see that step for the per-phase placement rule. Entries that don't bind to any specific phase still appear here; the manifest also catches them during review even when they have no per-phase home.
 
   Keep this block at the **full permissive surfaced set** regardless of what binds to a task. The manifest is permissive; the *weave* into task lines is strict (Step 5b "Deliverable contract gate" — only scope-overlapping judgment-class norms become constraint clauses). A backlink staying here while its norm is also woven into a task is correct: the manifest is provenance, the task line is delivery.
+
+  The block is also a parse target: at close, the conformance renderer reads it as the spec-time discovery panel of `closure-conformance.md` and cross-tabulates each label against woven norms, recorded dispositions, and the shipped diff. Keep every bullet in the `[[knowledge:...]] — annotation` shape with a substantive annotation — a thinned or malformed manifest doesn't just weaken review, it blinds the closure read to norms nobody dispositioned.
 - **Advisor declarations:** For each matched skill whose domain overlaps with a phase's scope, consider adding an `**Advisors:**` entry. Set mode based on phase complexity — `must-consult` if the skill defines invariants workers must respect, `on-demand` otherwise.
 
 ### Ceremony outcome filing contract
@@ -426,11 +430,17 @@ Draft concrete implementation sections on top of the approved abstract plan:
 
    <!-- INVARIANT — canonical /spec weave vocabulary. Keep these terms stable; the
         /implement worker report's `Convention handling:` field and the lead's
-        completeness comparison key on them. Drift silently breaks the handoff.
+        completeness comparison key on them, and the task generator and closure
+        conformance renderer parse them literally. Drift silently breaks the handoff.
           - "constraint clause" — the imperative norm woven into a task line
           - "woven norm" / "binding norm" — a surfaced norm that became a constraint clause
           - "stable label" — the entry slug/title the backlink resolves to; the
-            identifier shared with the worker report and the lead comparison -->
+            identifier shared with the worker report and the lead comparison
+          - `honor <stable-label>` — the task-line token that, paired with a same-line
+            knowledge backlink, is extracted into `tasks.json` as `woven_norms`
+          - `**Related preferences/conventions:**` — the audit-manifest block label the
+            closure conformance renderer parses as the spec-time panel of
+            `closure-conformance.md` -->
    **Weave binding judgment-class norms into the constraint clause.** When a preference/convention from Step 2 discovery *binds* to a task, render it as an imperative **constraint clause** in the task line itself — the instruction the worker executes — not only as a `**Knowledge context:**` backlink the worker must choose to fetch. The clause **names the norm by its stable label** (the entry slug/title the backlink resolves to) so the worker's `Convention handling:` report and the lead's completeness comparison reference the same identifier. Keep the backlink for provenance even when the norm is woven.
 
    A norm *binds* only when **both** hold (strict weave):
