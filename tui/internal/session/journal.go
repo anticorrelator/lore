@@ -25,6 +25,8 @@ type Event struct {
 	Initiator      string            `json:"initiator,omitempty"`
 	RequestID      string            `json:"request_id,omitempty"`
 	Reason         string            `json:"reason,omitempty"`
+	StepID         string            `json:"step_id,omitempty"`
+	StepLabel      string            `json:"step_label,omitempty"`
 	Links          map[string]string `json:"links,omitempty"`
 	Spend          json.RawMessage   `json:"spend,omitempty"`
 }

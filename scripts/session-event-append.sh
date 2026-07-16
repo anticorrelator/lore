@@ -46,6 +46,8 @@
 #   request_id.
 #   modal_blocked requires a non-empty slug and exactly reason=modal; it is a
 #   running-session transition, not a queue-lifecycle event.
+#   step_completed requires actor_instance, slug, session_type, step_id, and
+#   step_label, and forbids a top-level request_id.
 #   terminus_reached requires actor_instance, slug, session_type, and
 #   reason=spec-finalize|impl-close, and forbids a top-level request_id.
 #   Work-item review events (review_flagged, review_held, review_notified,
@@ -148,6 +150,18 @@ if [[ "$EVENT" == "modal_blocked" ]]; then
       fail "missing required field: reason (modal_blocked requires reason=modal)"
     fi
     fail "invalid field: reason (modal_blocked requires reason=modal)"
+  fi
+fi
+
+# --- Hosted protocol steps require exact-read identity, never queue identity ---
+if [[ "$EVENT" == "step_completed" ]]; then
+  for field in actor_instance slug session_type step_id step_label; do
+    if ! printf '%s' "$ROW" | jq -e --arg field "$field" '(.[$field] // "") != ""' >/dev/null 2>&1; then
+      fail "missing required field: $field (required for event 'step_completed')"
+    fi
+  done
+  if printf '%s' "$ROW" | jq -e 'has("request_id")' >/dev/null 2>&1; then
+    fail "invalid field: request_id (step_completed is not a queue-lifecycle event)"
   fi
 fi
 

@@ -514,6 +514,8 @@ protocol terminal verbs, stop hooks) appends through the one sanctioned writer,
 | `initiator` | string | `agent\|human`. |
 | `request_id` | string | The request this event concerns; required for queue-lifecycle events. |
 | `reason` | string | Failure/reclaim reason; also the review-gate rationale carried by `review_flagged`/`review_held`/`review_released`. Also carried by `spawn_failed`, `request_reclaimed`, `request_abandoned`; `modal_blocked` requires exactly `modal`; `terminus_reached` requires `spec-finalize` or `impl-close`. |
+| `step_id` | string | Stable machine-readable milestone identity. Required on `step_completed`; `/spec` uses `spec:investigation`, `spec:design`, and `spec:plan-ready`, while `/implement` uses `implement:task:<task-id>`. |
+| `step_label` | string | Concise human-readable milestone label. Required on `step_completed`. |
 | `gate_id` | string | Review-gate audit join key. Omit-when-empty. A gate-open verb (`review_flagged`/`review_held`) sets it as the row's `event_id`; the `review_released` row echoes it here so a reader pairs release→open without replaying state. See [docs/review-gates.md](review-gates.md). |
 | `links` | object | `{work_item?, artifact?, close_requests?}` — string-valued pointers and correlations. Review events point `artifact` at the review packet. On `closed` only, `close_requests` is a string containing a compact JSON array of distinct, non-empty consumed close-request IDs in first-consumed order (for example `"[\"term-1\",\"explicit-2\"]"`); the string representation preserves existing `map[string]string` Go readers while safely carrying opaque IDs. Writer defaults to `{}`. For a worker session (derived slug `<work-item-slug>--w<n>`) the writer derives `links.work_item` = the base work-item slug when the caller did not set it, so every worker lifecycle row points back at its work item (see [Worker sessions](#worker-sessions)). |
 | `spend` | object \| null | Session token spend, on `closed` and `orphaned`. `duration_seconds` is always present; a `basis` enum (`transcript\|rollout\|store\|duration-only`) marks how the tokens were sourced. When the harness exposes a deterministic transcript binding (claude-code, via a spawn-time `--session-id`), the TUI merges the D1 token vocabulary — `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `reasoning_output_tokens`, `total_tokens`, `cost_usd`, `model`, `harness` (fields the harness does not expose are omitted, never zero-filled). Every gap — codex/opencode-hosted sessions, an absent transcript, a probe timeout, an abrupt quit — degrades to `{duration_seconds, basis:"duration-only"}`. Extraction runs at teardown or recovery via `scripts/session-spend.sh`; the row still flows only through the sole writer. |
@@ -538,7 +540,7 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `recovered` | TUI | a restarted/replacement instance adopted a still-running tmux-hosted session from a dead instance's registry row; `reason` names the predecessor (`adopted from <dead-instance>`). Session-transition class — no `request_id` |
 | `closed` | TUI | a session ended (carries `spend`: token counts where the harness exposes them, else duration-only) |
 | `orphaned` | TUI | a dead instance's atomic recovery owner found no surviving tmux session; carries `reason=instance-death`, the dead `target_instance`, persisted spawn `request_id` when available, and evidence-bounded `spend` |
-| `step_completed` | protocol terminal verbs | a protocol step finished (e.g. `/implement` phase close) |
+| `step_completed` | hosted `/spec` and `/implement` leads | a durable intra-protocol milestone completed: `/spec` investigation, reviewed design, or plan-ready state; or an `/implement` task accepted, logged, and checked off |
 | `terminus_reached` | `spec-finalize` / `impl-close` | the hosted protocol completed its durable terminal writes; carries actor, slug, session type, and terminal verb in `reason`, but no queue `request_id` |
 | `harness_turn_ended` | stop hooks | a harness turn boundary was reached |
 | `spawn_failed` | TUI | spawn failed; request returned to pending (carries `reason`) |
@@ -563,13 +565,29 @@ and `send_refused` carry it so `session send --wait` can match its outcome by id
 `close_failed` carries it so a close-outcome watcher can match the failure back to
 its `close_requested`.)
 
-**Protocol-transition events** — `terminus_reached` is emitted after the
-terminal verb's final refusal/fatal gate and before its best-effort close enqueue.
-It requires non-empty `actor_instance`, `slug`, and `session_type`, carries
-`reason=spec-finalize|impl-close`, and MUST NOT carry a top-level `request_id`.
-Its deterministic event id incorporates the live registry's persisted spawn
-request identity, so exact replay is idempotent without conflating completion
-with a queue lifecycle.
+**Protocol-transition events** — `step_completed` marks durable progress within a
+hosted protocol. `/spec` emits `spec:investigation` after investigation findings,
+evidence, and logs persist; `spec:design` after design-ceremony dispositions and
+accepted revisions persist; and `spec:plan-ready` after the post-plan ceremony and
+preflight succeed. `/implement` emits `implement:task:<task-id>` only after the
+lead accepts and logs the task report and its completed checkbox persists. These
+are the only step producers: researcher or worker completions, individual evidence
+claims, consultations, phase-close echoes, and bare-terminal sessions do not emit.
+
+Every `step_completed` row requires non-empty `actor_instance`, `slug`,
+`session_type`, `step_id`, and `step_label`, and MUST NOT carry a top-level
+`request_id`. `scripts/session-step.sh` derives its deterministic event id from
+the event name, hosted identity, persisted spawn request identity, and stable
+`step_id`. Exact replay is idempotent; changing the label for the same hosted step
+is conflicting evidence and is refused.
+
+`terminus_reached` remains the separate whole-protocol completion event. It is
+emitted after the terminal verb's final refusal/fatal gate and before its
+best-effort close enqueue. It requires non-empty `actor_instance`, `slug`, and
+`session_type`, carries `reason=spec-finalize|impl-close`, and MUST NOT carry a
+top-level `request_id`. Its deterministic event id incorporates the live
+registry's persisted spawn request identity, so exact replay is idempotent without
+conflating completion with a queue lifecycle.
 
 **Work-item review events** — `review_flagged`, `review_held`, `review_notified`,
 `review_released` — form a third event class keyed to a work item rather than a
@@ -585,8 +603,8 @@ and TUI-driven queue lifecycle; the enqueue writer owns `requested`; the
 `request_cancelled` (its cancel form), while the TUI owns the `closed` /
 `close_failed` close outcomes it decides at consume; the `session send` verb owns
 `send_requested` (its enqueue), while the TUI owns the `sent` / `send_refused`
-outcomes it decides at consume; protocol terminal verbs own `step_completed`
-and `terminus_reached`;
+outcomes it decides at consume; hosted `/spec` and `/implement` leads own
+`step_completed`, while their terminal verbs own `terminus_reached`;
 stop hooks own `harness_turn_ended`. Peek has no events — it is a read.
 
 ### Prospective emission (emitter obligation)
@@ -745,9 +763,11 @@ rather than growing this contract.**
   row matches `<slug>` exactly (never by substring, so a worker's `<slug>--w<n>`
   close never wakes a positional parent wait) and an event in its `--until` set
   (default `closed,close_failed,orphaned`, the close/recovery terminal set). The
-  default deliberately remains teardown-oriented; completion-aware consumers
-  opt in with `--until terminus_reached` and treat later close outcomes as
-  separate cleanup/spend evidence. The
+  default deliberately remains teardown-oriented. Progress-aware consumers opt
+  in with `--until step_completed` and exact-read `step_id`/`step_label` from the
+  matched row; completion-aware consumers opt in with `--until terminus_reached`.
+  A step wake is not protocol completion, and later close outcomes remain separate
+  cleanup/spend evidence. The
   alternate `--work-item <base-slug>` target matches both the exact base and only
   canonical derived `<base-slug>--w<n>` worker slugs, in journal rows and the live
   registry; supplying it together with a positional slug is a usage error. Callers

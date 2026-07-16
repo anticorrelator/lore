@@ -50,6 +50,12 @@ func (genEvent) Generate(r *rand.Rand, _ int) reflect.Value {
 		ev.Reason = tok()
 	}
 	if r.Intn(2) == 0 {
+		ev.StepID = tok()
+	}
+	if r.Intn(2) == 0 {
+		ev.StepLabel = tok()
+	}
+	if r.Intn(2) == 0 {
 		ev.Links = map[string]string{"work_item": tok()}
 	}
 	if ev.Event == EventModalBlocked {
@@ -84,6 +90,28 @@ func TestEventRowRoundtrip(t *testing.T) {
 	}
 	if err := quick.Check(f, &quick.Config{MaxCount: 500}); err != nil {
 		t.Error(err)
+	}
+}
+
+func TestStepCompletedFieldsRoundtrip(t *testing.T) {
+	want := Event{
+		Event:         EventStepCompleted,
+		ActorInstance: StrPtr("amber-otter"),
+		Slug:          "demo-slug",
+		SessionType:   "spec",
+		StepID:        "spec:plan-ready",
+		StepLabel:     "Plan ready",
+	}
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Event
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("step event roundtrip mismatch: got %+v, want %+v", got, want)
 	}
 }
 
@@ -154,6 +182,7 @@ func TestScriptReviewVocabulary(t *testing.T) {
 		{"requested still accepted", Event{Event: EventRequested, RequestID: "20260705T000000Z-abcd1234"}, false},
 		{"recovered accepted without request_id", Event{Event: EventRecovered, Slug: "demo-slug", Reason: "adopted from amber-otter"}, false},
 		{"orphaned accepted with recovery evidence", Event{EventID: "orphaned-fixed", Event: EventOrphaned, Slug: "demo-slug", Reason: "instance-death"}, false},
+		{"step accepted with hosted identity", Event{Event: EventStepCompleted, ActorInstance: StrPtr("amber-otter"), Slug: "demo-slug", SessionType: "spec", StepID: "spec:plan-ready", StepLabel: "Plan ready"}, false},
 		{"terminus accepted with hosted identity", Event{Event: EventTerminusReached, ActorInstance: StrPtr("amber-otter"), Slug: "demo-slug", SessionType: "spec", Reason: "spec-finalize"}, false},
 	}
 	for _, tc := range cases {

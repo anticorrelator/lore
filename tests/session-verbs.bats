@@ -26,6 +26,7 @@ SEND="$REPO_DIR/scripts/session-send.sh"
 PEEK="$REPO_DIR/scripts/session-peek.sh"
 WAIT="$REPO_DIR/scripts/session-wait.sh"
 APPEND="$REPO_DIR/scripts/session-event-append.sh"
+STEP="$REPO_DIR/scripts/session-step.sh"
 TERMINUS="$REPO_DIR/scripts/session-terminus.sh"
 COORDINATE="$REPO_DIR/scripts/coordinate-status.sh"
 
@@ -935,6 +936,53 @@ PYEOF
   [[ "$output" == *"not a queue-lifecycle event"* ]]
 }
 
+@test "append accepts step_completed only with hosted step identity and no queue request_id" {
+  local row='{"event":"step_completed","actor_instance":"inst-a","slug":"feature-x","session_type":"implement","step_id":"implement:task:task-1","step_label":"Task 1 accepted"}'
+  run bash "$APPEND" --row "$row" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run jq -e 'select(.event=="step_completed") | .actor_instance=="inst-a" and .slug=="feature-x" and .session_type=="implement" and .step_id=="implement:task:task-1" and .step_label=="Task 1 accepted" and (has("request_id")|not)' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+
+  local field incomplete
+  for field in actor_instance slug session_type step_id step_label; do
+    incomplete="$(printf '%s' "$row" | jq -c "del(.$field)")"
+    run bash "$APPEND" --row "$incomplete" --kdir "$TEST_KDIR"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"missing required field: $field"* ]]
+  done
+
+  run bash "$APPEND" --row "$(printf '%s' "$row" | jq -c '. + {request_id:"queue-id"}')" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"request_id (step_completed is not a queue-lifecycle event)"* ]]
+  [ "$(grep -c '"event":"step_completed"' "$TEST_KDIR/_sessions/events.jsonl")" -eq 1 ]
+}
+
+@test "step helper derives deterministic replay identity and refuses changed labels" {
+  mkdir -p "$TEST_KDIR/_sessions/instances"
+  printf '%s\n' '{"name":"inst-a","sessions":[{"slug":"feature-x","type":"implement","request_id":"spawn-1"}]}' > "$TEST_KDIR/_sessions/instances/inst-a.json"
+  export LORE_SESSION_INSTANCE=inst-a LORE_SESSION_SLUG=feature-x LORE_SESSION_TYPE=implement
+
+  run bash "$STEP" --step-id implement:task:task-1 --step-label "Task 1 accepted" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run bash "$STEP" --step-id implement:task:task-1 --step-label "Task 1 accepted" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '"event":"step_completed"' "$TEST_KDIR/_sessions/events.jsonl")" -eq 1 ]
+
+  local expected
+  expected="step-$(python3 - <<'PY'
+import hashlib
+print(hashlib.sha256("\0".join(["step_completed", "inst-a", "feature-x", "implement", "spawn-1", "implement:task:task-1"]).encode()).hexdigest())
+PY
+)"
+  run jq -er --arg id "$expected" 'select(.event=="step_completed") | .event_id==$id and .step_id=="implement:task:task-1" and .step_label=="Task 1 accepted" and (has("request_id")|not)' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+
+  run bash "$STEP" --step-id implement:task:task-1 --step-label "Different evidence" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"event_id collision"* ]]
+  [ "$(grep -c '"event":"step_completed"' "$TEST_KDIR/_sessions/events.jsonl")" -eq 1 ]
+}
+
 @test "terminus helper derives deterministic replay identity from the persisted spawn request" {
   mkdir -p "$TEST_KDIR/_sessions/instances"
   printf '%s\n' '{"name":"inst-a","sessions":[{"slug":"feature-x","type":"implement","request_id":"spawn-1"}]}' > "$TEST_KDIR/_sessions/instances/inst-a.json"
@@ -1221,6 +1269,20 @@ coordinate_event_vocab() {
   run bash "$WAIT" feature-x --until terminus_reached --since 0 --timeout 1 --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
   [[ "$output" == *'"event":"terminus_reached"'* ]]
+
+  local out code
+  out="$(bash "$WAIT" feature-x --since 0 --timeout 1 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 2 ]
+  echo "$out" | jq -e '.until==["closed","close_failed","orphaned"]'
+}
+
+@test "wait: --until step_completed wakes with exact step fields without changing the teardown default" {
+  write_instance inst-a feature-x
+  echo '{"event":"step_completed","actor_instance":"inst-a","slug":"feature-x","session_type":"implement","step_id":"implement:task:task-1","step_label":"Task 1 accepted"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  run bash "$WAIT" feature-x --until step_completed --since 0 --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"step_id":"implement:task:task-1"'* ]]
+  [[ "$output" == *'"step_label":"Task 1 accepted"'* ]]
 
   local out code
   out="$(bash "$WAIT" feature-x --since 0 --timeout 1 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?

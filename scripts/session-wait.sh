@@ -17,6 +17,10 @@
 #                     teardown can end in either). Each name is checked against the
 #                     journal's event vocabulary up front; a name that is not in it
 #                     is a usage error, not a wait that never ends.
+#                     `step_completed` is an explicit progress wake: inspect the
+#                     matched row's step_id and step_label before acting. It is not
+#                     part of the default teardown set and does not mean the whole
+#                     protocol reached terminus.
 #   --since <cursor>  Byte-offset cursor to start reading from. Omit to start at
 #                     the journal's current end ("wake on what happens next").
 #                     Treat the value as opaque — pass back a cursor this verb or
