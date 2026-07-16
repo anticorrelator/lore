@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -68,14 +69,19 @@ var (
 		"gpt-5-codex  medium · ~/work/lore",
 	}
 	cxModalRows = []string{
-		"› ",
-		"gpt-5-codex  medium · ~/work/lore",
 		"Would you like to run the following command?",
 		"$ rm -rf build",
 		"› 1. Yes, proceed (y)",
 		"  2. Yes, and don't ask again",
 		"  3. No (esc)",
 		"Press enter to confirm or esc to cancel",
+	}
+	cxOptionSelectRows = []string{
+		"Choose the next step",
+		"  1. Run the verification",
+		"› 2. Leave it for later",
+		"  4. Cancel",
+		"Use ↑ and ↓, then Enter to select",
 	}
 	cxApproveSuggestionRows = []string{
 		"› Implement the approved change",
@@ -127,14 +133,39 @@ func TestComposerMatchersDiscriminate(t *testing.T) {
 	if screenMatchers["claude-code"].composer(ccOptionSelectRows) {
 		t.Error("claude-code: composer matcher must NOT fire on an option-select modal")
 	}
+
+	for _, tc := range []struct {
+		name      string
+		framework string
+		rows      []string
+		selected  int
+		available []int
+	}{
+		{"claude-code permission", "claude-code", ccModalRows, 1, []int{1, 2, 3}},
+		{"claude-code option select", "claude-code", ccOptionSelectRows, 1, []int{1, 2}},
+		{"codex approval", "codex", cxModalRows, 1, []int{1, 2, 3}},
+		{"codex generic option select", "codex", cxOptionSelectRows, 2, []int{1, 2, 4}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, ok := classifyScreen(tc.framework, work.ScreenSnapshot{Rows: tc.rows})
+			if !ok || !state.interactive {
+				t.Fatalf("classification = %+v known=%v, want interactive", state, ok)
+			}
+			if state.selectedOption != tc.selected || !slices.Equal(state.availableOptions, tc.available) {
+				t.Fatalf("choice geometry = selected %d available %v, want selected %d available %v",
+					state.selectedOption, state.availableOptions, tc.selected, tc.available)
+			}
+		})
+	}
 }
 
-func TestCodexApproveSuggestionPinsPersistentFalsePositive(t *testing.T) {
-	if !cxPermissionModal(cxApproveSuggestionRows) {
-		t.Fatal("broad approve signature no longer reproduces the persistent false positive")
+func TestCodexApproveSuggestionIsHealthyComposer(t *testing.T) {
+	state, ok := classifyScreen("codex", work.ScreenSnapshot{Rows: cxApproveSuggestionRows})
+	if !ok {
+		t.Fatal("codex classifier unavailable")
 	}
-	if cxComposerReady(cxApproveSuggestionRows) {
-		t.Fatal("composer readiness must remain suppressed while the broad approval signature matches")
+	if state.interactive || !state.composer {
+		t.Fatalf("approved suggestion classified as %+v, want noninteractive composer", state)
 	}
 }
 

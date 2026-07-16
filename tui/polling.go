@@ -264,6 +264,7 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 		cmds = append(cmds, m.syncInstanceCmd(), readInstancesCmd(m.sessionsDir), m.queueTickCmd(),
 			scanCloseRequestsCmd(m.sessionsDir, m.instanceName, hosted, closeIDToSlug),
 			scanSendRequestsCmd(m.sessionsDir, m.instanceName, hosted),
+			scanAnswerRequestsCmd(m.sessionsDir, m.instanceName, hosted),
 			scanPeekRequestsCmd(m.sessionsDir, m.instanceName, hosted),
 			m.sessionsRefreshCmd())
 		// Re-evaluate any close-request already waiting on quiescence.
@@ -275,6 +276,11 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 		var sendCmds []tea.Cmd
 		m, sendCmds = m.advanceSendVerifications()
 		cmds = append(cmds, sendCmds...)
+		// Confirm modal answers only after a later screen no longer contains the
+		// request's expectation. Answer keys are never replayed.
+		var answerCmds []tea.Cmd
+		m, answerCmds = m.advanceAnswerVerifications()
+		cmds = append(cmds, answerCmds...)
 		// Observe modal-entry edges on the same heartbeat and Bubble Tea goroutine
 		// as the other screen consumers. The returned append commands do the disk
 		// write asynchronously through the sole journal writer.

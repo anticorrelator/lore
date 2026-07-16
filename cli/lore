@@ -564,6 +564,8 @@ Verbs:
             pending spawn request (--request <id>)
   send      Inject a message into a live session's composer (<slug> <message>),
             gated on the session being idle at its prompt; --wait for the outcome
+  answer    Select a numbered harness-modal option (<slug> --option <N>) when
+            required --expect text still matches; --wait for verified outcome
   peek      Snapshot a live session's rendered screen (<slug>) plus its
             readiness classification; --raw for the ANSI variant
   wait      Block until a journal event lands for a session (<slug>), waking on
@@ -931,6 +933,9 @@ cmd_session() {
       ;;
     send)
       exec "$SCRIPTS_DIR/session-send.sh" "$@"
+      ;;
+    answer)
+      exec "$SCRIPTS_DIR/session-answer.sh" "$@"
       ;;
     peek)
       exec "$SCRIPTS_DIR/session-peek.sh" "$@"

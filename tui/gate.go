@@ -36,6 +36,7 @@ const (
 type screenMatcher struct {
 	composer          func(rows []string) bool
 	interactive       func(rows []string) bool
+	choices           func(rows []string) optionGeometry
 	pending           func(rows []string) bool
 	placeholder       func(rows []string, ansiRows []string) bool
 	heldInput         func(rows []string, ansiRows []string) bool
@@ -54,21 +55,24 @@ var screenMatchers = map[string]screenMatcher{
 	"claude-code": {
 		composer:          ccComposerReady,
 		interactive:       ccInteractivePrompt,
+		choices:           ccModalOptions,
 		pending:           ccComposerPending,
 		placeholder:       ccComposerPlaceholder,
 		heldInput:         ccComposerHeldInput,
 		redactPlaceholder: ccRedactComposerPlaceholder,
 	},
-	"codex":    {composer: cxComposerReady, interactive: cxPermissionModal},
+	"codex":    {composer: cxComposerReady, interactive: cxPermissionModal, choices: cxModalOptions},
 	"opencode": {composer: ocComposerReady, interactive: ocPermissionModal},
 }
 
 type screenClass struct {
-	composer    bool
-	interactive bool
-	pending     bool
-	placeholder bool
-	heldInput   bool
+	composer         bool
+	interactive      bool
+	selectedOption   int
+	availableOptions []int
+	pending          bool
+	placeholder      bool
+	heldInput        bool
 }
 
 // closeObservation is one close tick's view of a panel: process lifecycle and
@@ -101,13 +105,58 @@ func classifyScreen(framework string, snap work.ScreenSnapshot) (screenClass, bo
 	}
 	rows := gateRows(snap.Rows)
 	ansiRows := splitANSIRows(snap.ANSI)
-	return screenClass{
+	state := screenClass{
 		composer:    mm.composer != nil && mm.composer(rows),
 		interactive: mm.interactive != nil && mm.interactive(rows),
 		pending:     mm.pending != nil && mm.pending(rows),
 		placeholder: mm.placeholder != nil && mm.placeholder(rows, ansiRows),
 		heldInput:   mm.heldInput != nil && mm.heldInput(rows, ansiRows),
-	}, true
+	}
+	if mm.choices != nil {
+		geometry := mm.choices(rows)
+		state.selectedOption = geometry.selected
+		state.availableOptions = append([]int(nil), geometry.available...)
+	}
+	return state, true
+}
+
+// optionGeometry is the numbered choice state parsed from one interactive
+// screen. available preserves rendered row order; selected is the displayed
+// option number carrying the selection glyph. A modal may be interactive while
+// this structure is empty, in which case it is observable but not answerable.
+type optionGeometry struct {
+	selected  int
+	available []int
+}
+
+var numberedOptionRow = regexp.MustCompile(`^\s*([❯›>])?\s*(\d+)[.)]\s+\S`)
+
+func parseNumberedOptions(rows []string) optionGeometry {
+	geometry := optionGeometry{}
+	seen := make(map[int]bool)
+	selectedCount := 0
+	for _, row := range rows {
+		match := numberedOptionRow.FindStringSubmatch(row)
+		if len(match) != 3 {
+			continue
+		}
+		option, err := strconv.Atoi(match[2])
+		if err != nil || option < 1 {
+			continue
+		}
+		if !seen[option] {
+			seen[option] = true
+			geometry.available = append(geometry.available, option)
+		}
+		if match[1] != "" {
+			selectedCount++
+			geometry.selected = option
+		}
+	}
+	if selectedCount != 1 {
+		geometry.selected = 0
+	}
+	return geometry
 }
 
 // classifyCloseObservation pairs the panel's lifecycle/idle state with the
@@ -236,7 +285,7 @@ func splitANSIRows(ansi string) []string {
 func noContractNotice(framework string) runtimeNotice {
 	return degradationNotice(
 		"interaction-contract-unavailable",
-		"no interaction contract for "+framework+"; session send/peek refused",
+		"no interaction contract for "+framework+"; session send/peek/answer refused",
 	)
 }
 
@@ -281,6 +330,13 @@ func ccComposerReady(rows []string) bool {
 
 func ccInteractivePrompt(rows []string) bool {
 	return ccPermissionModal(rows) || ccOptionSelectModal(rows)
+}
+
+func ccModalOptions(rows []string) optionGeometry {
+	if !ccInteractivePrompt(rows) {
+		return optionGeometry{}
+	}
+	return parseNumberedOptions(lastRows(rows, 16))
 }
 
 func ccPermissionModal(rows []string) bool {
@@ -496,8 +552,8 @@ func promptPrefix(row string) string {
 
 // --- codex: footer status line "<model> <effort> · <cwd>" + a '›' input row. ---
 var (
-	cxFooter   = regexp.MustCompile(`(minimal|low|medium|high|xhigh)\s+·\s`)
-	cxApproval = regexp.MustCompile(`(?i)would you like to run|press enter to confirm or esc|yes, proceed|and tell codex what to do|allow.*command|approve`)
+	cxFooter      = regexp.MustCompile(`(minimal|low|medium|high|xhigh)\s+·\s`)
+	cxModalAnchor = regexp.MustCompile(`(?i)would you like to run|press enter to confirm or esc|enter\s+to\s+(confirm|select)|select.*enter|use.*(?:↑|↓).*enter|up/down|arrow keys`)
 )
 
 const cxGlyph = "›"
@@ -528,12 +584,23 @@ func cxComposerReady(rows []string) bool {
 }
 
 func cxPermissionModal(rows []string) bool {
-	for _, r := range rows {
-		if cxApproval.MatchString(r) {
-			return true
-		}
+	geometry := cxModalOptions(rows)
+	return geometry.selected > 0 && len(geometry.available) >= 2
+}
+
+func cxModalOptions(rows []string) optionGeometry {
+	tail := lastRows(rows, 18)
+	text := strings.Join(tail, "\n")
+	// A current composer footer means any modal-looking rows above it are
+	// scrollback, not the active input surface.
+	if cxFooter.MatchString(text) || !cxModalAnchor.MatchString(text) {
+		return optionGeometry{}
 	}
-	return false
+	geometry := parseNumberedOptions(tail)
+	if geometry.selected == 0 || len(geometry.available) < 2 {
+		return optionGeometry{}
+	}
+	return geometry
 }
 
 // --- opencode: '╹▀+' bottom border + a 'commands' key-hint + the '┃' left border. ---

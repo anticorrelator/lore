@@ -491,6 +491,37 @@ ticks (~5–10s) before the outcome row, pass a longer `--timeout` (e.g. `--time
 30`) for headroom over the default 15s when a swallow-and-retry is possible.
 Without `--wait` it enqueues and exits 0 with the request id.
 
+## Answer-request queue
+
+One file per answer request at `answer-requests/<request_id>.json`. The public
+surface is `lore session answer <slug> --option <N> --expect <literal>`: `N` is
+the displayed positive option number, and the expectation is mandatory text from
+the modal the coordinator intends to answer. The request row carries
+`{request_id, slug, target_instance, option, expect, requested_by, requested_at}`;
+`option` is a JSON number. Enqueue is tmp-write + rename and emits
+`answer_requested` through the event writer.
+
+The owning TUI takes one screen snapshot and routes it through the same shared
+classifier used by send, peek, close, and modal observation. It refuses before
+writing when the screen is not interactive (`not-modal`), the expectation is no
+longer visible (`expect-mismatch`), the selected or requested numbered row is not
+proven (`option-unavailable`), the harness has no interaction contract
+(`no-contract`), or screen/PTY access fails (`error`). Numbered options are kept
+in rendered row order, so navigation is the target row index minus the selected
+row index, not arithmetic on displayed numbers. The only PTY payload is one
+canonical sequence containing the required `Up` (`ESC[A`) or `Down` (`ESC[B`)
+keys followed by Enter (`CR`). There is no raw-key surface or automatic choice
+policy.
+
+A gate-passing request is deleted immediately and retained only as an in-memory
+verification record. A later snapshot that no longer contains the expectation
+emits `answered`; a vanished panel or bounded confirmation timeout emits
+`answer_refused` with `reason=unconfirmed`. The keys are never replayed. Thus a
+successful write syscall alone is not an `answered` outcome, and every request
+that reaches a terminal has exactly one of `answered` or `answer_refused`.
+`lore session answer --wait` matches that terminal by request id (exit 0 for
+answered, 3 for refused, and 1 for usage/error/timeout).
+
 ## Peek request / response
 
 `lore session peek <slug>` is the substrate's first **addressed-response**
@@ -527,7 +558,8 @@ protocol terminal verbs, stop hooks) appends through the one sanctioned writer,
 | `session_type` | string | `spec\|implement\|chat\|worker` — the session's type (the request's `type` maps to this). |
 | `initiator` | string | `agent\|human`. |
 | `request_id` | string | The request this event concerns; required for queue-lifecycle events. |
-| `reason` | string | Failure/reclaim reason; also the review-gate rationale carried by `review_flagged`/`review_held`/`review_released`. Also carried by `spawn_failed`, `request_reclaimed`, `request_abandoned`; `modal_blocked` requires exactly `modal`; `terminus_reached` requires `spec-finalize` or `impl-close`. |
+| `option` | integer | Positive displayed modal option number; required on `answer_requested`, `answered`, and `answer_refused`. |
+| `reason` | string | Failure/reclaim reason; also the review-gate rationale carried by `review_flagged`/`review_held`/`review_released`. Also carried by `spawn_failed`, `request_reclaimed`, `request_abandoned`; `modal_blocked` requires exactly `modal`; `answer_refused` uses its closed refusal set; `terminus_reached` requires `spec-finalize` or `impl-close`. |
 | `step_id` | string | Stable machine-readable milestone identity. Required on `step_completed`; `/spec` uses `spec:investigation`, `spec:design`, and `spec:plan-ready`, while `/implement` uses `implement:task:<task-id>`. |
 | `step_label` | string | Concise human-readable milestone label. Required on `step_completed`. |
 | `gate_id` | string | Review-gate audit join key. Omit-when-empty. A gate-open verb (`review_flagged`/`review_held`) sets it as the row's `event_id`; the `review_released` row echoes it here so a reader pairs release→open without replaying state. See [docs/review-gates.md](review-gates.md). |
@@ -566,6 +598,9 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `send_requested` | `session send` enqueue verb | a send request was enqueued for the instance running a slug |
 | `sent` | TUI | the message was injected AND a later observation confirmed the composer submitted it (verified-outcome; see [Send-request queue](#send-request-queue)) |
 | `send_refused` | TUI | injection was refused, or an injected message never submitted; `reason` names why — gate refusals (`generating`/`modal`/`no-signature`/`no-contract`/`unsafe-payload`/`error`) or the post-inject `unsubmitted` |
+| `answer_requested` | `session answer` enqueue verb | an expectation-guarded numbered modal choice was enqueued; carries numeric `option` |
+| `answered` | TUI | one restricted navigation+Enter write was followed by a later screen where the expectation disappeared |
+| `answer_refused` | TUI | the choice failed closed; `reason` is `not-modal`, `expect-mismatch`, `option-unavailable`, `no-contract`, `error`, or `unconfirmed` |
 | `review_flagged` | `lore work flag` verb | a lightweight (async) review gate was opened on a work item; `event_id` is the gate_id |
 | `review_held` | `lore work hold` verb | a blocking review gate was opened on a work item; `event_id` is the gate_id |
 | `review_notified` | coordinator (direct append) | a stateless review notification for a work item; no gate, no verb |
@@ -573,9 +608,12 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 
 **Queue-lifecycle events** — `requested`, `claimed`, `spawned`, `spawn_failed`,
 `request_reclaimed`, `request_abandoned`, `request_cancelled`, `close_requested`,
-`close_failed`, `send_requested`, `sent`, `send_refused` — each concern a specific
+`close_failed`, `send_requested`, `sent`, `send_refused`, `answer_requested`,
+`answered`, `answer_refused` — each concern a specific
 request and MUST carry a non-empty `request_id`. The writer enforces this. (`sent`
 and `send_refused` carry it so `session send --wait` can match its outcome by id;
+the three answer events also require a non-empty slug and positive integer
+`option`, and let `session answer --wait` match its verified outcome by id;
 `close_failed` carries it so a close-outcome watcher can match the failure back to
 its `close_requested`.)
 
@@ -617,7 +655,8 @@ and TUI-driven queue lifecycle; the enqueue writer owns `requested`; the
 `request_cancelled` (its cancel form), while the TUI owns the `closed` /
 `close_failed` close outcomes it decides at consume; the `session send` verb owns
 `send_requested` (its enqueue), while the TUI owns the `sent` / `send_refused`
-outcomes it decides at consume; hosted `/spec` and `/implement` leads own
+outcomes it decides at consume; the `session answer` verb owns `answer_requested`,
+while the TUI owns `answered` / `answer_refused`; hosted `/spec` and `/implement` leads own
 `step_completed`, while their terminal verbs own `terminus_reached`;
 stop hooks own `harness_turn_ended`. Peek has no events — it is a read.
 
@@ -726,6 +765,7 @@ reads full snapshots.
 | `requests/pending/<id>.json` | the enqueuer | item 2 `request` verb; TUI human path | item 2 / Phase 2 |
 | `requests/claimed/<id>.json` | the claiming TUI instance | `os.Rename` claim + tmp+rename metadata | Phase 2 (TUI) |
 | `close-requests/<id>.json` | the enqueuer (`session close` verb); deleted-on-consume by the owning TUI instance | tmp + rename enqueue; owning instance deletes | item 2 (enqueue) / Phase 2 (consume) |
+| `answer-requests/<id>.json` | the enqueuer (`session answer` verb); deleted-on-consume by the owning TUI instance | tmp + rename enqueue; owning instance deletes after the shared classifier gate | answer verb |
 | `events.jsonl` | `scripts/session-event-append.sh` | every emitter, via subprocess | Phase 1 |
 | `[session-request]` cold-start marker | `scripts/load-work.sh` (reader of `requests/pending/`) | SessionStart hook | Phase 1 |
 
@@ -818,6 +858,9 @@ rather than growing this contract.**
   into a running session (the Send-request queue) and gating on harness readiness
   are specified in the body above (`## Send-request queue`, `## Peek request /
   response`) and consumed by the TUI per that contract.
+- **Modal choice delivery — landed.** `session answer` uses the same classifier
+  as the readiness gate, adds no arbitrary-key authority, and verifies the
+  expectation disappeared before reporting success.
 - **Skill routing — landed (item 4).** `/coordinate` (`skills/coordinate/SKILL.md`)
   is the coordinator role's protocol home: it consumes these surfaces read-only
   through the session verbs and adds no verbs, no event vocabulary, and no TUI

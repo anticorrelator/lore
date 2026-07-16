@@ -422,6 +422,39 @@ func TestSpecPanelSingleEscForwardsAndDoesNotDetach(t *testing.T) {
 	}
 }
 
+func TestSelectModalOptionWritesCanonicalSequence(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		delta int
+		want  string
+	}{
+		{"selected row", 0, "\r"},
+		{"two rows down", 2, "\x1b[B\x1b[B\r"},
+		{"one row up", -1, "\x1b[A\r"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			defer w.Close()
+			panel := NewSessionPanelModel("test").SetPtmx(w, nil, nil)
+			if err := panel.SelectModalOption(tc.delta); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			buf := make([]byte, 32)
+			n, err := r.Read(buf)
+			if err != nil || string(buf[:n]) != tc.want {
+				t.Fatalf("PTY bytes = %q (err=%v), want %q", buf[:n], err, tc.want)
+			}
+		})
+	}
+}
+
 func TestSpecPanelDoubleEscDetaches(t *testing.T) {
 	m := NewSessionPanelModel("test")
 	// Leave m.ptmx nil — handleEscKey skips the write but still arms/fires.

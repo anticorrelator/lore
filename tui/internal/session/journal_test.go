@@ -22,6 +22,7 @@ func (genEvent) Generate(r *rand.Rand, _ int) reflect.Value {
 		EventOrphaned,
 		EventSpawnFailed, EventReclaimed, EventAbandoned, EventCancelled,
 		EventSendRequested, EventSent, EventSendRefused, EventCloseFailed,
+		EventAnswerRequested, EventAnswered, EventAnswerRefused,
 		EventReviewFlagged, EventReviewHeld, EventReviewNotified, EventReviewReleased,
 	}
 	tok := func() string { return string(rune('a'+r.Intn(26))) + string(rune('a'+r.Intn(26))) + "-x" }
@@ -45,6 +46,9 @@ func (genEvent) Generate(r *rand.Rand, _ int) reflect.Value {
 	ev.Initiator = []string{"", "agent", "human"}[r.Intn(3)]
 	if r.Intn(2) == 0 {
 		ev.RequestID = tok()
+	}
+	if r.Intn(2) == 0 {
+		ev.Option = 1 + r.Intn(9)
 	}
 	if r.Intn(2) == 0 {
 		ev.Reason = tok()
@@ -180,6 +184,11 @@ func TestScriptReviewVocabulary(t *testing.T) {
 		{"review_released with slug accepted", Event{Event: EventReviewReleased, Slug: "demo-slug"}, false},
 		{"close_requested with request_id accepted", Event{Event: "close_requested", RequestID: "20260705T000000Z-abcd1234"}, false},
 		{"requested still accepted", Event{Event: EventRequested, RequestID: "20260705T000000Z-abcd1234"}, false},
+		{"answer requested with numeric option accepted", Event{Event: EventAnswerRequested, RequestID: "answer-1", Slug: "demo-slug", Option: 2}, false},
+		{"answered with numeric option accepted", Event{Event: EventAnswered, RequestID: "answer-1", Slug: "demo-slug", Option: 2}, false},
+		{"answer refusal with closed reason accepted", Event{Event: EventAnswerRefused, RequestID: "answer-1", Slug: "demo-slug", Option: 2, Reason: "not-modal"}, false},
+		{"answer lifecycle without option rejected", Event{Event: EventAnswered, RequestID: "answer-1", Slug: "demo-slug"}, true},
+		{"answer refusal with unknown reason rejected", Event{Event: EventAnswerRefused, RequestID: "answer-1", Slug: "demo-slug", Option: 2, Reason: "maybe"}, true},
 		{"recovered accepted without request_id", Event{Event: EventRecovered, Slug: "demo-slug", Reason: "adopted from amber-otter"}, false},
 		{"orphaned accepted with recovery evidence", Event{EventID: "orphaned-fixed", Event: EventOrphaned, Slug: "demo-slug", Reason: "instance-death"}, false},
 		{"step accepted with hosted identity", Event{Event: EventStepCompleted, ActorInstance: StrPtr("amber-otter"), Slug: "demo-slug", SessionType: "spec", StepID: "spec:plan-ready", StepLabel: "Plan ready"}, false},

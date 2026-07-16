@@ -61,6 +61,21 @@ def test_permission_matcher_rejects_composer_state(harness):
     assert d.MATCHERS[harness]["permission"](rows) is False
 
 
+def test_codex_approved_suggestion_regression_is_ready_not_interactive():
+    obs = d.load_observation("codex")
+    rows = obs["regression_screens"]["healthy_approved_suggestion"]["raw_rows"]
+    assert d.codex_permission_modal(rows) is False
+    assert d.codex_composer_ready(rows) is True
+
+
+def test_codex_recorded_approval_menu_exposes_choice_geometry():
+    obs = d.load_observation("codex")
+    rows = _permission_rows("codex", obs)
+    selected, available = d.codex_modal_options(rows)
+    assert selected == 1
+    assert available == [1, 2, 3]
+
+
 # --------------------------------------------------------------------------- #
 # Contract-shape checks against adapters/capabilities.json (read dynamically).
 # --------------------------------------------------------------------------- #

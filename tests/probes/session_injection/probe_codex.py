@@ -273,6 +273,10 @@ def test_p2_approval_prompt_signature():
         rows = sess.oracle.rows()
         assert modal_seen and d.codex_permission_modal(rows), "approval modal not detected"
         assert not d.codex_composer_ready(rows), "composer matcher fired during a modal"
+        selected, available = d.codex_modal_options(rows)
+        assert selected == 1 and available == [1, 2, 3], (
+            f"approval choice geometry changed: selected={selected}, available={available}"
+        )
         row = d.interaction_row(FRAMEWORK, "permission_prompt_signature")
         assert row["support"] != "none" and row["matcher"].strip()
         sess.marker("decline modal (Esc)")

@@ -158,11 +158,13 @@ def claude_code_permission_modal(rows):
 # codex: footer status line "<model> <effort> · <cwd>" + a '›' input row.
 _CX_FOOTER = re.compile(r"(minimal|low|medium|high|xhigh)\s+·\s")
 _CX_GLYPH = "›"
-_CX_APPROVAL = re.compile(
-    r"would you like to run|press enter to confirm or esc|yes, proceed|"
-    r"and tell codex what to do|allow.*command|approve",
+_CX_MODAL_ANCHOR = re.compile(
+    r"would you like to run|press enter to confirm or esc|"
+    r"enter\s+to\s+(?:confirm|select)|select.*enter|use.*(?:↑|↓).*enter|"
+    r"up/down|arrow keys",
     re.I,
 )
+_NUMBERED_OPTION = re.compile(r"^\s*([❯›>])?\s*(\d+)[.)]\s+\S")
 
 
 def codex_composer_ready(rows):
@@ -180,7 +182,32 @@ def codex_composer_ready(rows):
 
 
 def codex_permission_modal(rows):
-    return any(_CX_APPROVAL.search(r) for r in rows)
+    selected, available = codex_modal_options(rows)
+    return selected is not None and len(available) >= 2
+
+
+def codex_modal_options(rows):
+    """Return (selected displayed number, available numbers in row order)."""
+    tail = rows[-18:]
+    text = "\n".join(tail)
+    if _CX_FOOTER.search(text) or not _CX_MODAL_ANCHOR.search(text):
+        return (None, [])
+    selected = None
+    selected_count = 0
+    available = []
+    for row in tail:
+        match = _NUMBERED_OPTION.match(row)
+        if not match:
+            continue
+        option = int(match.group(2))
+        if option not in available:
+            available.append(option)
+        if match.group(1):
+            selected_count += 1
+            selected = option
+    if selected_count != 1 or len(available) < 2:
+        return (None, [])
+    return (selected, available)
 
 
 # opencode: '╹▀+' bottom border + a 'commands' key-hint + the '┃' left border.

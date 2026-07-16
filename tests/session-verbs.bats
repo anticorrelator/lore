@@ -23,6 +23,7 @@ LIST="$REPO_DIR/scripts/session-list.sh"
 EVENTS="$REPO_DIR/scripts/session-events.sh"
 CLOSE="$REPO_DIR/scripts/session-close.sh"
 SEND="$REPO_DIR/scripts/session-send.sh"
+ANSWER="$REPO_DIR/scripts/session-answer.sh"
 PEEK="$REPO_DIR/scripts/session-peek.sh"
 WAIT="$REPO_DIR/scripts/session-wait.sh"
 APPEND="$REPO_DIR/scripts/session-event-append.sh"
@@ -925,6 +926,26 @@ PYEOF
   [ "$status" -eq 0 ]
 }
 
+@test "append accepts answer lifecycle rows with numeric option and closed refusal reason" {
+  run bash "$APPEND" --row '{"event":"answer_requested","request_id":"a1","slug":"feature-x","option":2}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run bash "$APPEND" --row '{"event":"answered","request_id":"a1","slug":"feature-x","option":2}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run bash "$APPEND" --row '{"event":"answer_refused","request_id":"a2","slug":"feature-x","option":3,"reason":"expect-mismatch"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run jq -s -e 'map(select(.event=="answer_requested" or .event=="answered" or .event=="answer_refused")) | map(.option) == [2,2,3] and all(.[]; (.option|type)=="number")' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "append rejects malformed answer lifecycle rows" {
+  run bash "$APPEND" --row '{"event":"answered","request_id":"a1","slug":"feature-x"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"option"* ]]
+  run bash "$APPEND" --row '{"event":"answer_refused","request_id":"a2","slug":"feature-x","option":2,"reason":"maybe"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"answer_refused requires"* ]]
+}
+
 @test "append accepts terminus_reached only with hosted identity and no queue request_id" {
   run bash "$APPEND" --row '{"event":"terminus_reached","actor_instance":"inst-a","slug":"feature-x","session_type":"implement","reason":"impl-close"}' --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
@@ -1120,6 +1141,73 @@ PY
   run bash "$SEND" feature-x "hi" --wait --timeout 1 --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
   [[ "$output" == *"timed out"* ]]
+}
+
+# =====================================================================
+# session answer
+# =====================================================================
+
+@test "answer enqueues numeric option and expectation and emits answer_requested" {
+  write_instance inst-a feature-x
+  run bash "$ANSWER" feature-x --option 2 --expect "Would you like to run" --requested-by coordinator --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.enqueued==true and .slug=="feature-x" and .target_instance=="inst-a" and .option==2'
+
+  local ar; ar="$(ls "$TEST_KDIR"/_sessions/answer-requests/*.json)"
+  run jq -e '.option==2 and (.option|type)=="number" and .expect=="Would you like to run" and .requested_by=="coordinator"' "$ar"
+  [ "$status" -eq 0 ]
+  run jq -e 'select(.event=="answer_requested") | .request_id and .slug=="feature-x" and .option==2 and (.option|type)=="number"' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "answer validates required expectation and positive option before enqueue" {
+  write_instance inst-a feature-x
+  run bash "$ANSWER" feature-x --expect modal --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--option"* ]]
+  run bash "$ANSWER" feature-x --option 2 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--expect"* ]]
+  run bash "$ANSWER" feature-x --option 0 --expect modal --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"positive integer"* ]]
+  [ ! -d "$TEST_KDIR/_sessions/answer-requests" ]
+}
+
+@test "answer --wait maps answered to exit 0" {
+  write_instance inst-a feature-x
+  ( rid="$(wait_request_id answer-requests)"
+    echo '{"event":"answered","request_id":"'"$rid"'","slug":"feature-x","option":2}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  run bash "$ANSWER" feature-x --option 2 --expect modal --wait --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Answered 'feature-x' with option 2"* ]]
+}
+
+@test "answer --wait maps answer_refused to exit 3" {
+  write_instance inst-a feature-x
+  ( rid="$(wait_request_id answer-requests)"
+    echo '{"event":"answer_refused","request_id":"'"$rid"'","slug":"feature-x","option":2,"reason":"option-unavailable"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  run bash "$ANSWER" feature-x --option 2 --expect modal --wait --timeout 10 --json --kdir "$TEST_KDIR"
+  wait
+  [ "$status" -eq 3 ]
+  [[ "$output" == *'"refused": true'* ]]
+  [[ "$output" == *'"option": 2'* ]]
+  [[ "$output" == *'"reason": "option-unavailable"'* ]]
+}
+
+@test "answer --wait times out to exit 1" {
+  write_instance inst-a feature-x
+  run bash "$ANSWER" feature-x --option 1 --expect modal --wait --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"timed out"* ]]
+}
+
+@test "session answer routes through the dispatcher" {
+  write_instance inst-a feature-x
+  run bash "$LORE" session answer feature-x --option 1 --expect modal --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.enqueued==true and .option==1'
 }
 
 # =====================================================================

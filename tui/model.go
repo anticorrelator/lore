@@ -271,13 +271,14 @@ type model struct {
 	// dispatched (or its close resolves to a close_failed terminal), so each
 	// consumed close-request produces exactly one terminal journal row.
 	pendingClose map[string]pendingCloseState
-	// pendingSend and pendingPeek hold send/peek request ids whose consume is in
+	// pendingSend, pendingAnswer, and pendingPeek hold request ids whose consume is in
 	// flight, so a re-scan before the async delete lands does not double-process
 	// the same request. Keyed by request id (unlike pendingClose, which is keyed
 	// by slug): multiple send/peek requests can target one slug. An entry is
 	// cleared when its consume Cmd reports back.
-	pendingSend map[string]bool
-	pendingPeek map[string]bool
+	pendingSend   map[string]bool
+	pendingAnswer map[string]bool
+	pendingPeek   map[string]bool
 	// pendingSendVerify holds gate-passing sends whose paste reached the composer
 	// but whose outcome is not yet journaled: the `sent` row defers until a
 	// post-inject observation confirms the composer submitted. Keyed by request id.
@@ -296,6 +297,13 @@ type model struct {
 	// live screen via observeSend; tests inject a scripted result to drive the
 	// retry-once and deadline transitions without a real emulator.
 	observeSendFn func(work.SessionPanelModel) sendObs
+	// pendingAnswerVerify holds modal choices whose keys were written and whose
+	// outcome waits for the request's expected text to disappear from a later
+	// screen. The request file is already consumed; keys are never replayed.
+	pendingAnswerVerify map[string]pendingAnswerState
+	// answerVerifyGrace bounds confirmation of a written modal choice. A zero
+	// value uses answerVerifyGraceDefault; tests set a short bound.
+	answerVerifyGrace time.Duration
 	// closeGrace is the per-rung wait the close ladder allows a harness process
 	// to exit before escalating (graceful→SIGTERM→Kill); closePoll is how often
 	// it re-checks liveness within that window. Both are seams: zero values fall

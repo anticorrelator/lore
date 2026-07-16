@@ -507,7 +507,7 @@
         "permission_prompt_signature": {
           "support": "full",
           "evidence": "codex-interaction",
-          "matcher": "an approval modal shows a 'Would you like to run the following command?' header, a '$ <cmd>' line, and a numbered option list with the '›' glyph on the selected row ('› 1. Yes, proceed (y)' / 2. Yes+don't-ask / 3. No (esc)), plus a 'Press enter to confirm or esc to cancel' footer. The composer footer status line is NOT present while the modal owns the screen — its absence + this option list is the readiness-gate 'blocked' signal",
+          "matcher": "in the bottom 18 rows, an approval or selection action/header anchor plus at least two numbered options and exactly one selected row marked by '›'; the parser exposes the displayed option numbers in row order. The composer footer status line is NOT present while the modal owns the screen, so a current model/effort/cwd footer makes modal-looking rows scrollback rather than an active prompt",
           "notes": "Only escalates under -a untrusted (default auto-approves trusted commands with no modal). Probed in raw/codex/p2_approval_untrusted.log."
         },
         "submit_sequence": {

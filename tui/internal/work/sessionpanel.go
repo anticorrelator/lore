@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -408,6 +409,31 @@ func (m SessionPanelModel) SubmitSequence(submitSeq string) error {
 		return nil
 	}
 	_, err := m.ptmx.Write([]byte(submitSeq))
+	return err
+}
+
+// SelectModalOption writes one relative arrow-key sequence followed by Enter.
+// delta is the requested row index minus the selected row index from the same
+// classified screen snapshot; negative moves up and positive moves down.
+func (m SessionPanelModel) SelectModalOption(delta int) error {
+	if m.ptmx == nil {
+		return errors.New("no PTY attached")
+	}
+	code := tea.KeyDown
+	steps := delta
+	if steps < 0 {
+		code = tea.KeyUp
+		steps = -steps
+	}
+	sequence := make([]byte, 0, steps*3+1)
+	for i := 0; i < steps; i++ {
+		sequence = append(sequence, KeyToBytes(tea.KeyPressMsg{Code: code})...)
+	}
+	sequence = append(sequence, KeyToBytes(tea.KeyPressMsg{Code: tea.KeyEnter})...)
+	n, err := m.ptmx.Write(sequence)
+	if err == nil && n != len(sequence) {
+		err = io.ErrShortWrite
+	}
 	return err
 }
 

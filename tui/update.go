@@ -632,6 +632,12 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case sendConsumedMsg:
 		return m.handleSendConsumed(msg)
 
+	case answerRequestScanMsg:
+		return m.handleAnswerRequestScan(msg)
+
+	case answerConsumedMsg:
+		return m.handleAnswerConsumed(msg)
+
 	case peekRequestScanMsg:
 		return m.handlePeekRequestScan(msg)
 

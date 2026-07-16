@@ -24,6 +24,17 @@
     "launch_2_footer": "gpt-5.4-mini low \u00b7 /private/tmp/claude-501/-Users-dustinqngo-work-lore/618e24b6-58ad-4aa7-a3e7-60c6b2023092/scratchpa\u2026",
     "graceful_exit_used": "Ctrl-C"
   },
+  "regression_screens": {
+    "healthy_approved_suggestion": {
+      "classification_before": "interactive=true, composer=false",
+      "classification_after": "interactive=false, composer=true",
+      "raw_rows": [
+        "› Implement the approved change",
+        "  gpt-5.4-mini low · /private/tmp/probe-env-codex"
+      ],
+      "note": "The word approved is composer ghost/example text; the active footer proves this is the healthy composer, not a modal."
+    }
+  },
   "permission_prompt_signature": {
     "phase_a_default_mode": {
       "induced_by": "prompt 'Run this exact shell command: echo probe-ok'",

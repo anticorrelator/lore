@@ -36,6 +36,7 @@
 #                harness_turn_ended | spawn_failed | request_reclaimed |
 #                request_abandoned | request_cancelled | close_requested |
 #                close_failed | send_requested | sent | send_refused |
+#                answer_requested | answered | answer_refused |
 #                modal_blocked |
 #                review_flagged | review_held | review_notified | review_released
 #
@@ -44,6 +45,9 @@
 #   request_reclaimed, request_abandoned, request_cancelled, close_requested,
 #   close_failed, send_requested, sent, send_refused) REQUIRE a non-empty
 #   request_id.
+#   Answer lifecycle events also require a non-empty slug and a positive integer
+#   option. answer_refused requires reason=not-modal|expect-mismatch|
+#   option-unavailable|no-contract|error|unconfirmed.
 #   modal_blocked requires a non-empty slug and exactly reason=modal; it is a
 #   running-session transition, not a queue-lifecycle event.
 #   step_completed requires actor_instance, slug, session_type, step_id, and
@@ -130,13 +134,13 @@ EVENT=$(printf '%s' "$ROW" | jq -r '.event // ""')
 case "$EVENT" in
   requested|claimed|spawned|needs_input|quiescent|resumed|recovered|closed|orphaned|\
 step_completed|terminus_reached|harness_turn_ended|spawn_failed|request_reclaimed|\
-request_abandoned|request_cancelled|close_requested|close_failed|send_requested|sent|send_refused|modal_blocked|\
+request_abandoned|request_cancelled|close_requested|close_failed|send_requested|sent|send_refused|answer_requested|answered|answer_refused|modal_blocked|\
 review_flagged|review_held|review_notified|review_released) ;;
   "")
     fail "missing required field: event"
     ;;
   *)
-    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, recovered, closed, orphaned, step_completed, terminus_reached, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, close_failed, send_requested, sent, send_refused, modal_blocked, review_flagged, review_held, review_notified, review_released)"
+    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, recovered, closed, orphaned, step_completed, terminus_reached, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, close_failed, send_requested, sent, send_refused, answer_requested, answered, answer_refused, modal_blocked, review_flagged, review_held, review_notified, review_released)"
     ;;
 esac
 
@@ -182,12 +186,31 @@ fi
 
 # --- Queue-lifecycle events require a non-empty request_id ---
 case "$EVENT" in
-  requested|claimed|spawned|spawn_failed|request_reclaimed|request_abandoned|request_cancelled|close_requested|close_failed|send_requested|sent|send_refused)
+  requested|claimed|spawned|spawn_failed|request_reclaimed|request_abandoned|request_cancelled|close_requested|close_failed|send_requested|sent|send_refused|answer_requested|answered|answer_refused)
     if ! printf '%s' "$ROW" | jq -e '(.request_id // "") != ""' >/dev/null 2>&1; then
       fail "missing required field: request_id (required for queue-lifecycle event '$EVENT')"
     fi
     ;;
 esac
+
+# --- Answer lifecycle rows carry the selected displayed option ---
+case "$EVENT" in
+  answer_requested|answered|answer_refused)
+    if ! printf '%s' "$ROW" | jq -e '(.slug // "") != ""' >/dev/null 2>&1; then
+      fail "missing required field: slug (required for answer lifecycle event '$EVENT')"
+    fi
+    if ! printf '%s' "$ROW" | jq -e '.option | type == "number" and . > 0 and . == floor' >/dev/null 2>&1; then
+      fail "invalid field: option (answer lifecycle events require a positive integer)"
+    fi
+    ;;
+esac
+
+if [[ "$EVENT" == "answer_refused" ]]; then
+  case "$(printf '%s' "$ROW" | jq -r '.reason // ""')" in
+    not-modal|expect-mismatch|option-unavailable|no-contract|error|unconfirmed) ;;
+    *) fail "invalid field: reason (answer_refused requires not-modal, expect-mismatch, option-unavailable, no-contract, error, or unconfirmed)" ;;
+  esac
+fi
 
 # --- Work-item review events require a non-empty slug ---
 # Third event class: keyed to a work item, not a queue request. This branch is

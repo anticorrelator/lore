@@ -12,8 +12,8 @@ import (
 // Event is one row appended to _sessions/events.jsonl. event_id, ts, and links
 // are stamped by the sole-writer script when absent, so emitters leave them
 // empty; the closed event vocabulary is validated there too. Queue-lifecycle
-// events (requested, claimed, spawned, spawn_failed, request_reclaimed,
-// request_abandoned, request_cancelled) MUST carry a non-empty RequestID.
+// events carry a non-empty RequestID; answer lifecycle events additionally carry
+// Slug and a positive numeric Option.
 type Event struct {
 	EventID        string            `json:"event_id,omitempty"`
 	TS             string            `json:"ts,omitempty"`
@@ -24,6 +24,7 @@ type Event struct {
 	SessionType    string            `json:"session_type,omitempty"`
 	Initiator      string            `json:"initiator,omitempty"`
 	RequestID      string            `json:"request_id,omitempty"`
+	Option         int               `json:"option,omitempty"`
 	Reason         string            `json:"reason,omitempty"`
 	StepID         string            `json:"step_id,omitempty"`
 	StepLabel      string            `json:"step_label,omitempty"`
@@ -55,6 +56,9 @@ const (
 	EventSendRequested    = "send_requested"
 	EventSent             = "sent"
 	EventSendRefused      = "send_refused"
+	EventAnswerRequested  = "answer_requested"
+	EventAnswered         = "answered"
+	EventAnswerRefused    = "answer_refused"
 	EventCloseRequested   = "close_requested"
 	EventCloseFailed      = "close_failed"
 
