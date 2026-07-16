@@ -91,6 +91,11 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
    load-bearing claims, structural invariants) into the source — the codebase
    speaks maintainer English.
 
+   **User-facing strings and commit messages leave the project** — write them
+   in plain professional language, and give any newly coined identifier a
+   referent the reader can reach (its definition, nearby code, or an adjacent
+   comment), never one that lives only in this project's internal context.
+
    **Drift test:** if the surrounding code changes, will this comment quietly
    become a lie? A wrong comment is worse than none — when in doubt, drop.
 

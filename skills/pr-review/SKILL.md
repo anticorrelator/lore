@@ -576,6 +576,8 @@ The test is decision-theoretic, not descriptive: not "can a scenario be describe
 
   If a finding genuinely can't compress this far without losing the path, it stays **cockpit-only** — keep it in Section 3 and omit it from `proposed-comments.json`. A material finding can be reviewer-facing without being posted; that is cleaner than shipping a paragraph inline.
 
+  **Register — everything posted to GitHub is written for a colleague outside this project's process.** This covers inline comments and the top-level structural-notes block alike. Use shared professional vocabulary; a term whose precise meaning was established inside this project (in its docs, plans, or working sessions) either gets replaced with a common-vocabulary equivalent or is defined in the comment itself. The reader has no access to this project's internal writing and no obligation to acquire its vocabulary — a comment they can only parse with that context is a comment that will be confidently misread.
+
   *Translate, don't copy* — the failure mode is shipping the cockpit prose verbatim:
 
   > **Bad (copied from cockpit — mechanism-led, do not post):** `applyModelNameDefaults` prefixes the name via `applyBedrockModelPrefix` when `provider === "AWS"`; no test sets `awsBedrockModelPrefix`, so if the `startsWith` idempotency guard regresses the agent sets an invalid model ID and `run_playground` fails.
