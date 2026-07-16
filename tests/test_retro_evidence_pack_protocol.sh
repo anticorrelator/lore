@@ -48,6 +48,28 @@ assert "D1 is the named graduation candidate" in text
 assert "This implementation does not graduate it" in text
 assert "Check 7 is irreducible ground truth and must never be replaced by a number" in text
 
+pack_contract = text.split("#### Pack v1 contract", 1)[1].split("#### Absence is never green", 1)[0]
+for token in [
+    "reader_contract_version",
+    "projection_mode",
+    "stable_empty_shape",
+    "half-open `[start,end)`",
+    "retire the old surface in the same change",
+    "travel with the semantic change",
+]:
+    assert token in pack_contract, f"reader seam doctrine missing: {token}"
+
+vocabulary = text.split("#### Consumer-contradiction vocabulary", 1)[1].split("### Step 3", 1)[0]
+for token in [
+    "pending | verified | contradicted",
+    "lore consumption-contradiction read",
+    "settled_at",
+]:
+    assert token in vocabulary, f"contradiction lifecycle doctrine missing: {token}"
+
+assert "no-published-reader" not in text, "stale pre-reader doctrine resurfaced"
+assert "not-computable:dormant-census" not in text, "dormant census is an abstention, not not-computable"
+
 for token in [
     '"reader_contract_version":"1"',
     '"projection_mode":projection_mode',

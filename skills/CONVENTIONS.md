@@ -175,6 +175,14 @@ Skills that share behavioral rules (checklists, enrichment procedures, labeling 
 
 Reference protocol files by their paths under `claude-md/review-protocol/` (e.g., `claude-md/review-protocol/checklist.md`). Each skill reads only the section files it needs via selective `cat` commands, reducing token footprint.
 
+## Protocol Mutation Chains
+
+Skill prose, the executable behavior it describes, and the contract tests that pin that behavior form one mutation chain: they change together. Style, compression, and reorganization ride with the semantic change they explain; a standalone prose pass restates a contract nobody re-verified, and that is where drift starts.
+
+When a skill consumes a published reader, evolve that reader inside its existing command namespace and update its contract test in the same change. Add a sibling reader only when the substrate has no canonical read surface; replacing a reader requires retiring the old surface in the same change, so consumers never face two plausible authorities.
+
+Enforce the chain mechanically only where the repository owns a narrow, mechanically classifiable seam — `scripts/check-retro-seam-drift.sh` does this for the retro readers and `skills/retro/SKILL.md`, rejecting unpaired reader changes and standalone prose passes. Skills outside such a seam keep their sanctioned prose-only channels (owner directives, seat calibrations); a local coupling rule is not a global ban on those channels.
+
 ## Intentional Differences
 
 These are deliberate design choices, not inconsistencies:

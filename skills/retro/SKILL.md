@@ -93,7 +93,13 @@ Identity layers answer different questions:
 
 Never substitute one identity for another.
 
-The required v1 sources are `cycle_work`, `due_queue`, `settlement`, `scorecard_rows`, `scorecard_current`, `session_events`, `journal`, and `consumer_contradiction_lifecycle`. Every source row carries `reader`, `resolved_source`, `coverage`, `content_identity`, `cursor`, `window_field`, `warnings`, and `reason`. Coverage is exactly `read | absent | unreadable | stale | not-computable`.
+The required v1 sources are `cycle_work`, `due_queue`, `settlement`, `scorecard_rows`, `scorecard_current`, `session_events`, `journal`, and `consumer_contradiction_lifecycle`. Every source row carries `reader`, `resolved_source`, `reader_contract_version`, `projection_mode`, `stable_empty_shape`, `coverage`, `content_identity`, `cursor`, `window_field`, `warnings`, and `reason`. Coverage is exactly `read | absent | unreadable | stale | not-computable`.
+
+The registered reader is the reader prepare executes — never a paraphrase or a sibling implementation path. History readers take the caller's half-open `[start,end)` window and return their declared stable empty shape; `cycle_work` and `scorecard_current` stay snapshots because filtering them by event time would misstate their meaning. Content identity hashes only the stable projection fields capable of changing pack facts.
+
+Each reader seam is one versioned contract: command, window or snapshot semantics, success shape, stable empty shape, malformed-source behavior, and the fact-relevant projection. A semantic change to any of these increments that seam's `reader_contract_version` and updates its writer-driven contract test in the same change. Never add a sibling reader beside a canonical one — extend the existing namespace, or retire the old surface in the same change that replaces it.
+
+Style, compression, and reorganization of this skill travel with the semantic change they describe. A standalone prose pass after behavior or contract tests have moved leaves three descriptions of one seam; keep prose, reader, and test moving as one mutation chain.
 
 The required fact groups are `cycle_artifacts`, `task_context_backlinks`, `concerns_contradictions`, `session_retrieval_friction_packets`, `review_events`, `scale_signals`, `scorecard_eligibility_deltas`, `telemetry_attribution_rework`, and `settlement_health_inputs`. A fact group is `available | absent | not-computable`; non-available facts carry `values: null` and a reason.
 
@@ -108,15 +114,9 @@ Treat each state literally:
 - `absent`, `unreadable`, and `stale` are evidence states, never favorable verdicts.
 - `fixed_health.state=not-computable` withholds `normal`; it does not imply `pipeline-degraded` and does not invite the lead to guess.
 
-Pack v1 intentionally keeps these gaps explicit:
+The six load-bearing calculations consume only the versioned published projections. Missing, unreadable, stale, malformed, or below-floor evidence keeps the calculation's emitted `not-computable` or `abstained` disposition and its reason — never green. A disabled settlement census stays an explicit `abstained: dormant-census`; judge liveness abstains below its registered sample floor; an empty bounded contradiction lifecycle is below sample, not proof of healthy routing.
 
-- consumer-contradiction routing is `not-computable:no-published-reader`;
-- candidate backlog is `not-computable:dormant-census` while census is disabled or stale;
-- grounding failure is `not-computable:source-drift` until the public reader reconciles the sources;
-- judge liveness abstains below its registered sample floor;
-- audit lag is not computable when enqueue time cannot be reconstructed after drain.
-
-Do not consume or mutate `_evolve/accepted-clusters.jsonl` to resolve any of them.
+Do not consume or mutate `_evolve/accepted-clusters.jsonl` to fill any of these gaps.
 
 #### Tier-aware evidence
 
@@ -134,9 +134,9 @@ Never mix tiers in one cell — the same metric measures different things at dif
 
 #### Consumer-contradiction vocabulary
 
-The row schema names `status` — `pending | verified | contradicted`; the terminal pair is `verified | contradicted`. A future public reader must expose the sidecar truth written by `consumption-contradiction-update-status.sh`, including `created_at` and terminal `settled_at`. Until then, prepare manifests the source as `not-computable` instead of inspecting the private lifecycle.
+The row schema names `status` — `pending | verified | contradicted`; the terminal pair is `verified | contradicted`. The published `lore consumption-contradiction read` projection exposes each row's `created_at`, terminal `settled_at`, status, work-item identity, and settling run identity, across active and archived cycles within the caller's half-open window. Consume that lifecycle array directly; do not inspect sidecar files or substitute scorecard verdicts.
 
-Compatibility guard: reject the retired lifecycle words `routed`, `rejected`, `accepted`, `declined`, `remediated` as status values. The allowed set is `{pending, verified, contradicted}`. When a sanctioned reader eventually exists, the narrative report shape remains `Consumption contradictions: N total (P pending verdict, V verified, C contradicted)`, and a verification denominator uses `status ∈ {verified, contradicted}`.
+Compatibility guard: reject the retired lifecycle words `routed`, `rejected`, `accepted`, `declined`, `remediated` as status values. The narrative report shape is `Consumption contradictions: N total (P pending verdict, V verified, C contradicted)`; the routing denominator is every produced lifecycle row and the numerator is `status ∈ {verified, contradicted}`.
 
 ### Step 3: Adjudicate the Cycle
 
@@ -215,17 +215,17 @@ Read `fixed_health` and its referenced calculation rows before reading headline 
 
 Healthy checks remain silent in the report — green narration turns to ritual and buries the one check that trips. This is load-bearing healthy silence, not permission to omit pack rows.
 
-##### Check: Judge liveness (disposition: redirected per-gate to settlement run envelopes)
+##### Check: Judge liveness
 
-The normative calculation reads completed envelopes from `_settlement/runs/*.json`; it does not treat fixture-calibration logs as liveness — those record calibration ceremonies, not per-verdict activity, and sit legitimately empty over healthy windows. The zero-output signature remains `completed_runs_in_window == 0 AND settlement_queue_items_routed > 0`. Pack v1 applies the registered floor before classifying rates; below-floor is `abstained`, never green or tripped.
+The calculation reads completed run envelopes from the published settlement projection; fixture-calibration logs are not liveness evidence — they record calibration ceremonies, not per-verdict activity, and sit legitimately empty over healthy windows. The zero-output signature is `completed_runs_in_window == 0 AND settlement_queue_items_routed > 0`, and it trips regardless of sample size. Otherwise the registered floor applies before rate classification; below-floor completions are `abstained`, never green or tripped.
 
 ##### Check: Consumer-contradiction routing
 
-The source is deliberately `not-computable:no-published-reader` in pack v1. Do not reintroduce the scorecard-verdict source named by the retired design — it never existed. The reader-source proposal remains live until a sanctioned public reader exposes the lifecycle.
+Read the bounded `consumer_contradiction_lifecycle` projection. Below the registered floor the calculation abstains — preserve that. At or above it, the fixed arithmetic compares terminal `verified | contradicted` rows against all produced lifecycle rows. Missing or unreadable lifecycle evidence is `not-computable`, never a zero-rate shortcut and never green.
 
 ##### Check: Candidate backlog
 
-Treat dormant or stale census as `not-computable:dormant-census`. Do not classify the active batch or dormant backlog count as healthy.
+A disabled census is `abstained: dormant-census` — never read the dormant backlog count as healthy or as tripped. With census enabled, the fixed calculation classifies pending counts from the settlement projection; a missing projection stays `not-computable`.
 
 ##### Check: Grounding, audit lag, and realization
 
