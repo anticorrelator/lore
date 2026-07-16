@@ -8,10 +8,11 @@ source "$SCRIPT_DIR/lib.sh"
 
 REF=""
 JSON_MODE=0
+SEEDS=()
 
 usage() {
   cat >&2 <<'EOF'
-Usage: lore spec discover <ref> [--json]
+Usage: lore spec discover <ref> [--seed <token>]... [--json]
 
 Enumerate source-manifested external skill/agent and preference/convention
 candidates. Results retain source-native ordering and are not matched, bound,
@@ -35,6 +36,11 @@ PY
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --json) JSON_MODE=1; shift ;;
+    --seed)
+      [[ $# -ge 2 && -n "$2" ]] || fail "--seed requires a non-empty token"
+      SEEDS+=("$2")
+      shift 2
+      ;;
     --help|-h) usage; exit 0 ;;
     --*) fail "unknown flag: $1" ;;
     *) [[ -z "$REF" ]] || fail "unexpected extra argument: $1"; REF="$1"; shift ;;
@@ -70,10 +76,15 @@ except Exception:
 PY
 )
 
-PAYLOAD=$(python3 - "$SLUG" "$TITLE" "$KDIR" "$SKILLS_ROOT" "$AGENTS_ROOT" "$LORE_REPO_DIR" "$SCRIPT_DIR/pk_cli.py" "$HOME/.codex/plugins/cache" "$FRAMEWORK" <<'PY'
+SEED_QUERY=""
+if [[ ${#SEEDS[@]} -gt 0 ]]; then
+  SEED_QUERY=$(IFS=' '; printf '%s' "${SEEDS[*]}")
+fi
+
+PAYLOAD=$(python3 - "$SLUG" "$TITLE" "$KDIR" "$SKILLS_ROOT" "$AGENTS_ROOT" "$LORE_REPO_DIR" "$SCRIPT_DIR/pk_cli.py" "$HOME/.codex/plugins/cache" "$FRAMEWORK" "$SEED_QUERY" <<'PY'
 import glob, json, os, pathlib, subprocess, sys
 
-slug, title, kdir, skills_root, agents_root, repo, pk_cli, plugin_cache, framework = sys.argv[1:]
+slug, title, kdir, skills_root, agents_root, repo, pk_cli, plugin_cache, framework, seed_query = sys.argv[1:]
 
 canonical_skills = {p.name for p in pathlib.Path(repo, "skills").iterdir() if p.is_dir()} if os.path.isdir(os.path.join(repo, "skills")) else set()
 canonical_agents = {p.stem for p in pathlib.Path(repo, "agents").glob("*.md")}
@@ -147,7 +158,7 @@ for source_id, scales, limit in (
     ("bm25-subsystem-implementation", "subsystem,implementation", "10"),
     ("bm25-abstract-architecture", "abstract,architecture", "5"),
 ):
-    query = title
+    query = seed_query or title
     try:
         proc = subprocess.run([sys.executable, pk_cli, "search", kdir, query,
                                "--scale-set", scales, "--caller", "spec-discover", "--json", "--limit", limit],
@@ -163,7 +174,7 @@ for source_id, scales, limit in (
         coverage.append({"source_id": source_id, "kind": "knowledge-search", "root": kdir,
                          "status": "unreadable", "candidate_count": 0, "gap_reason": str(exc)})
 
-print(json.dumps({
+payload = {
     "schema_version": 1,
     "coverage": coverage,
     "candidates": candidates,
@@ -173,7 +184,10 @@ print(json.dumps({
         "ordering": "source-native",
         "applicability_decided": False,
     },
-}, ensure_ascii=False))
+}
+if seed_query:
+    payload["provenance"]["query_seed"] = seed_query
+print(json.dumps(payload, ensure_ascii=False))
 PY
 )
 

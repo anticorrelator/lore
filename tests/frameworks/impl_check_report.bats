@@ -445,6 +445,8 @@ EOF
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "diverged: norm-a"
   echo "$output" | grep -q "the norm assumes a queue"
+  grep -Fq 'diverged=[{"label": "norm-a", "rationale": "the norm assumes a queue this change does not have"}]' \
+    "$ITEM_DIR/execution-log.md"
 }
 
 # --- Fabrication guard + advisor rollup ---------------------------------------

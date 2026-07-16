@@ -301,6 +301,32 @@ def extract_task_backlinks(item_text: str) -> list[str]:
     return backlinks
 
 
+_WOVEN_NORM_RE = re.compile(
+    r"\bhonor\s+`?([A-Za-z0-9][A-Za-z0-9._-]*)`?"
+)
+
+
+def extract_woven_norms(item_text: str) -> list[str]:
+    """Return honor-clause labels backed by same-line knowledge backlinks."""
+    backlink_slugs: set[str] = set()
+    for target in extract_task_backlinks(item_text):
+        if not target.startswith("knowledge:"):
+            continue
+        path = target.removeprefix("knowledge:").split("#", 1)[0].rstrip("/")
+        slug = path.rsplit("/", 1)[-1]
+        if slug.endswith(".md"):
+            slug = slug[:-3]
+        if slug:
+            backlink_slugs.add(slug)
+
+    woven: list[str] = []
+    for match in _WOVEN_NORM_RE.finditer(item_text):
+        label = match.group(1)
+        if label in backlink_slugs and label not in woven:
+            woven.append(label)
+    return woven
+
+
 # Closed judgment-class vocabulary. A spec author writes a trailing
 # [class: <value>] marker on each task line; /implement routes each value to a
 # worker-tier binding. The three values are a closed set — anything else is not
@@ -1395,6 +1421,7 @@ def generate_tasks_from_plan(
             active_form = to_active_form(subject)
             file_targets = extract_file_targets(item_text, files)
             task_backlinks = extract_task_backlinks(item_text)
+            woven_norms = extract_woven_norms(item_text)
             judgment_class = extract_judgment_class(item_text)
             route = extract_route(item_text)
             parsed_items.append({
@@ -1403,6 +1430,7 @@ def generate_tasks_from_plan(
                 "active_form": active_form,
                 "file_targets": file_targets,
                 "task_backlinks": task_backlinks,
+                "woven_norms": woven_norms,
                 "judgment_class": judgment_class,
                 "route": route,
             })
@@ -1455,6 +1483,7 @@ def generate_tasks_from_plan(
             active_form = item["active_form"]
             file_targets = item["file_targets"]
             task_backlinks = item["task_backlinks"]
+            woven_norms = item["woven_norms"]
             judgment_class = item["judgment_class"]
             route = item["route"]
 
@@ -1516,6 +1545,8 @@ def generate_tasks_from_plan(
             # line carried a [route: …] marker — no default synthesis.
             if route is not None:
                 task_payload["route"] = route
+            if woven_norms:
+                task_payload["woven_norms"] = woven_norms
             phase_tasks.append(task_payload)
 
         # Chain tasks that share a file target (within and across phases)

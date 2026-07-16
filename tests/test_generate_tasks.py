@@ -18,6 +18,7 @@ generate_tasks_from_plan = _mod.generate_tasks_from_plan
 extract_route = _mod.extract_route
 strip_route_marker = _mod.strip_route_marker
 extract_task_backlinks = _mod.extract_task_backlinks
+extract_woven_norms = _mod.extract_woven_norms
 build_context_section = _mod.build_context_section
 extract_file_targets = _mod.extract_file_targets
 estimate_context_cost = _mod.estimate_context_cost
@@ -728,6 +729,42 @@ class TestExtractTaskBacklinks:
         text = "Use [[knowledge:x#A]] and also [[knowledge:x#A]] again"
         result = extract_task_backlinks(text)
         assert result == ["knowledge:x#A"]
+
+
+class TestExtractWovenNorms:
+    def test_matching_honor_clause_and_backlink_slug_is_extracted(self):
+        text = (
+            "Apply honor `safe-shell-boundaries` while editing "
+            "[[knowledge:conventions/scripting/safe-shell-boundaries]]"
+        )
+        assert extract_woven_norms(text) == ["safe-shell-boundaries"]
+
+    def test_backlink_without_honor_clause_is_not_woven(self):
+        text = "Read [[knowledge:conventions/scripting/safe-shell-boundaries]]"
+        assert extract_woven_norms(text) == []
+
+    def test_honor_clause_without_matching_backlink_is_not_woven(self):
+        text = (
+            "honor `safe-shell-boundaries` "
+            "[[knowledge:conventions/scripting/different-rule]]"
+        )
+        assert extract_woven_norms(text) == []
+
+    def test_generated_task_omits_empty_and_emits_matching_woven_norms(self):
+        plan = """\
+# Woven norms
+
+## Design Decisions
+
+### Phase 1: Build
+**Objective:** Build safely
+**Files:** `scripts/build.sh`
+- [ ] Update script; honor `safe-shell-boundaries` [[knowledge:conventions/scripting/safe-shell-boundaries]]
+- [ ] Add tests [[knowledge:conventions/testing/test-shape]]
+"""
+        tasks = generate_tasks_from_plan(plan)["phases"][0]["tasks"]
+        assert tasks[0]["woven_norms"] == ["safe-shell-boundaries"]
+        assert "woven_norms" not in tasks[1]
 
 
 class TestTaskLevelBacklinkIntegration:

@@ -48,6 +48,27 @@ assert row["status"]=="missing" and row["candidate_count"]==0 and row["gap_reaso
 '
 }
 
+@test "repeatable seed flags replace the title query and leave tree scans intact" {
+  run bash "$LORE" spec discover discover-item \
+    --seed scripts/close.sh --seed conformance --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep '"schema_version"' | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+queries={r["query"] for r in d["candidates"] if r["kind"]=="knowledge-search"}
+assert queries in (set(), {"scripts/close.sh conformance"}), queries
+assert d["provenance"]["query_seed"] == "scripts/close.sh conformance"
+tree_paths={r["path"] for r in d["candidates"] if r["source_id"] in {"preferences-tree","conventions-tree"}}
+assert {"preferences/one.md","conventions/nested/two.md"} <= tree_paths
+'
+}
+
+@test "seed requires a non-empty token" {
+  run bash "$LORE" spec discover discover-item --seed
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q -- "--seed requires a non-empty token"
+}
+
 @test "discover requires a work reference and rejects unknown flags" {
   run bash "$LORE" spec discover --json
   [ "$status" -eq 1 ]

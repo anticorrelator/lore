@@ -631,7 +631,7 @@ lines = [
     f"Convention handling: {ch['status']}; missing={json.dumps(ch['missing'])}; "
     f"duplicated={json.dumps(ch['duplicated'])}; "
     f"unrecognized={json.dumps(ch['unrecognized'])}; "
-    f"diverged={json.dumps([d['label'] for d in ch['diverged']])}",
+    f"diverged={json.dumps(ch['diverged'], ensure_ascii=False)}",
     f"Fabrication guard: {fg['status']}; verified={json.dumps(fg['verified'])}",
 ]
 for ident in fg["stripped"]:
