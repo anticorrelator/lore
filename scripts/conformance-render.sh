@@ -249,11 +249,14 @@ def add_disposition(label, status, rationale, source):
 
 def parse_disposition_lines(lines, source):
     for line in lines:
-        match = re.match(r"^\s*-?\s*(honored|diverged):\s*(.*)$", line)
-        if not match:
-            continue
-        parts = re.split(r"\s+[—–-]+\s+", match.group(2).strip(), maxsplit=1)
-        add_disposition(parts[0], match.group(1), parts[1] if len(parts) > 1 else "", source)
+        segments = re.split(r";\s*(?=(?:honored|diverged):)", line)
+        for segment in segments:
+            match = re.match(r"^\s*-?\s*(honored|diverged):\s*(.*)$", segment)
+            if not match:
+                continue
+            parts = re.split(r"\s+[—–-]+\s+", match.group(2).strip(), maxsplit=1)
+            add_disposition(parts[0], match.group(1),
+                            parts[1] if len(parts) > 1 else "", source)
 
 
 log_path = os.path.join(item_dir, "execution-log.md")

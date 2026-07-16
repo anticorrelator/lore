@@ -51,6 +51,7 @@ EOF
 EOF
   cat > "$ITEM_DIR/execution-log.md" <<'EOF'
 Convention handling: clean; missing=[]; duplicated=[]; unrecognized=[]; diverged=[{"label": "safe-widget-edits", "rationale": "the fixture has no deployment step"}]
+Convention: honored: safe-widget-edits; honored: review-widget-output; diverged: deploy-widget — deployment is out of scope
 EOF
   printf '%s\n' '# Safe Widget Edits' > \
     "$LORE_KNOWLEDGE_DIR/conventions/scripting/safe-widget-edits.md"
@@ -91,6 +92,10 @@ assert {row["path"] for row in payload["diff"]["files"]} == {
 assert payload["spec_discovery"][0]["label"] == "safe-widget-edits"
 assert payload["woven_norms"] == [{"label": "safe-widget-edits", "task_ids": ["task-1"]}]
 assert payload["recorded_dispositions"][0]["rationale"] == "the fixture has no deployment step"
+lead_rows = [row for row in payload["recorded_dispositions"] if row["source"] == "execution-log.md"]
+assert {row["label"] for row in lead_rows} == {
+    "safe-widget-edits", "review-widget-output", "deploy-widget"}
+assert next(row for row in lead_rows if row["label"] == "deploy-widget")["rationale"] == "deployment is out of scope"
 assert set(payload["panel_coverage"]) == {
     "spec_discovery", "woven_norms", "recorded_dispositions",
     "shipped_diff", "closure_discovery"}
