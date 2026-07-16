@@ -5,11 +5,13 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-python3 - "$REPO_ROOT/skills/retro/SKILL.md" <<'PY'
+python3 - "$REPO_ROOT/skills/retro/SKILL.md" "$REPO_ROOT/scripts/retro-prepare.sh" "$REPO_ROOT/scripts/check-retro-seam-drift.sh" <<'PY'
 from pathlib import Path
 import sys
 
 text = Path(sys.argv[1]).read_text()
+prepare = Path(sys.argv[2]).read_text()
+drift_check = Path(sys.argv[3]).read_text()
 
 for token in [
     "lore retro prepare",
@@ -30,9 +32,8 @@ for token in ["causal interpretation", "D1–D5", "Check 7", "suggestion selecti
 
 absence = text.split("#### Absence is never green", 1)[1].split("#### Tier-aware evidence", 1)[0]
 for token in [
-    "not-computable:no-published-reader",
-    "not-computable:dormant-census",
-    "not-computable:source-drift",
+    "not-computable",
+    "dormant-census",
     "abstains below its registered sample floor",
 ]:
     assert token in absence, f"absence doctrine missing: {token}"
@@ -46,6 +47,24 @@ assert "Self-evolving protocol — every invocation produces at least one" not i
 assert "D1 is the named graduation candidate" in text
 assert "This implementation does not graduate it" in text
 assert "Check 7 is irreducible ground truth and must never be replaced by a number" in text
+
+for token in [
+    '"reader_contract_version":"1"',
+    '"projection_mode":projection_mode',
+    '"stable_empty_shape":empty_shape',
+    "consumer_contradiction_lifecycle",
+    "queue_transitions",
+    "completed_envelopes",
+    "grounding_outcomes",
+]:
+    assert token in prepare, f"published reader contract missing: {token}"
+
+for token in [
+    "tests/frameworks/retro_prepare.bats",
+    "skills/retro/SKILL.md",
+    "without retro behavior, contract-test, or protocol-check changes",
+]:
+    assert token in drift_check, f"seam-fix mutation doctrine missing: {token}"
 
 print("retro evidence-pack protocol: PASS")
 PY
