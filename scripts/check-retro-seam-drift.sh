@@ -58,6 +58,11 @@ skill_has_companion() {
 failures=0
 while IFS= read -r commit; do
   [[ -n "$commit" ]] || continue
+  # The checker establishes the enforcement boundary. Commits made before it
+  # existed cannot have complied with a rule the repository had not published.
+  if ! git cat-file -e "$commit^:scripts/check-retro-seam-drift.sh" 2>/dev/null; then
+    continue
+  fi
   paths=()
   while IFS= read -r path; do
     paths+=("$path")

@@ -81,4 +81,20 @@ printf 'owner calibration\n' >> "$repo/skills/other/SKILL.md"
 commit_all "$repo" "other skill prose"
 expect_pass "$repo" "$base"
 
+repo="$TMP/rollout-boundary"
+mkdir -p "$repo/scripts" "$repo/tests/frameworks"
+printf 'registry baseline\n' > "$repo/scripts/retro-prepare.sh"
+printf 'reader test baseline\n' > "$repo/tests/frameworks/retro_prepare.bats"
+git -C "$repo" init -q
+git -C "$repo" config user.name "Retro Contract Test"
+git -C "$repo" config user.email "retro-contract@example.invalid"
+git -C "$repo" add .
+git -C "$repo" commit -q -m baseline
+base="$(git -C "$repo" rev-parse HEAD)"
+printf 'pre-checker reader change\n' >> "$repo/scripts/retro-prepare.sh"
+commit_all "$repo" "reader change before enforcement"
+cp "$CHECKER" "$repo/scripts/check-retro-seam-drift.sh"
+commit_all "$repo" "introduce drift checker"
+expect_pass "$repo" "$base"
+
 echo "retro seam drift check: PASS"
