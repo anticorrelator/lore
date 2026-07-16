@@ -444,8 +444,8 @@ Subcommands:
   rollup    Aggregate rows.jsonl into _scorecards/_current.json
   calibrate Run a calibration fixture-set against a judge; flip marker on pass,
             append to history on every run (passing or failing).
-  current   Print _scorecards/_current.json
-  rows      Print _scorecards/rows.jsonl
+  current   Read the versioned current-rollup snapshot
+  rows      Read scorecard rows, optionally in a half-open time window
 
 Options:
   --help, -h    Show this help
@@ -718,25 +718,8 @@ cmd_scorecard() {
     calibrate)
       exec "$SCRIPTS_DIR/scorecards-calibrate.sh" "$@"
       ;;
-    current)
-      local kdir current_file
-      kdir="$(resolve_kdir)"
-      current_file="$kdir/_scorecards/_current.json"
-      if [[ ! -f "$current_file" ]]; then
-        echo "Error: $current_file does not exist. Run 'lore scorecard rollup' first." >&2
-        return 1
-      fi
-      cat "$current_file"
-      ;;
-    rows)
-      local kdir rows_file
-      kdir="$(resolve_kdir)"
-      rows_file="$kdir/_scorecards/rows.jsonl"
-      if [[ ! -f "$rows_file" ]]; then
-        echo "Error: $rows_file does not exist. Run 'lore scorecard append' to create it." >&2
-        return 1
-      fi
-      cat "$rows_file"
+    current|rows)
+      exec "$SCRIPTS_DIR/scorecard-read.sh" "$subcmd" "$@"
       ;;
     *)
       echo "Error: unknown scorecard subcommand '$subcmd'" >&2
@@ -2234,7 +2217,15 @@ case "$1" in
     ;;
   consumption-contradiction)
     shift
-    exec "$SCRIPTS_DIR/consumption-contradiction-append.sh" "$@"
+    if [[ "${1:-}" == "read" ]]; then
+      shift
+      exec "$SCRIPTS_DIR/consumption-contradiction-read.sh" "$@"
+    elif [[ "${1:-}" == "append" ]]; then
+      shift
+      exec "$SCRIPTS_DIR/consumption-contradiction-append.sh" "$@"
+    else
+      exec "$SCRIPTS_DIR/consumption-contradiction-append.sh" "$@"
+    fi
     ;;
   synopsis)
     shift

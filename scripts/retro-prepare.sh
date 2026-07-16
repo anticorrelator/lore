@@ -184,18 +184,23 @@ run_reader() {
   printf '%s\n' "$rc" >"$TMP_DIR/$source_id.rc"
 }
 
-run_reader cycle_work bash "$SCRIPT_DIR/load-work-item.sh" --json "$SLUG"
-run_reader due_queue bash "$SCRIPT_DIR/retro-queue.sh" queue --cycle-id "$SLUG" --json
-run_reader settlement bash "$SCRIPT_DIR/settlement-queue.sh" status --kdir "$KDIR" --json
-run_reader scorecard_rows "$LORE_REPO_DIR/cli/lore" scorecard rows
-run_reader scorecard_current "$LORE_REPO_DIR/cli/lore" scorecard current
-run_reader session_events bash "$SCRIPT_DIR/session-events.sh" --since 0 --kdir "$KDIR" --json
+WINDOW_START_NORM=$(printf '%s' "$WINDOW_JSON" | jq -r .start)
+WINDOW_END_NORM=$(printf '%s' "$WINDOW_JSON" | jq -r .end)
+run_reader cycle_work "$LORE_REPO_DIR/cli/lore" work show "$SLUG" --json
+run_reader due_queue "$LORE_REPO_DIR/cli/lore" retro queue --cycle-id "$SLUG" \
+  --window-start "$WINDOW_START_NORM" --window-end "$WINDOW_END_NORM" --json
+run_reader settlement "$LORE_REPO_DIR/cli/lore" settlement status \
+  --window-start "$WINDOW_START_NORM" --window-end "$WINDOW_END_NORM" --json
+run_reader scorecard_rows "$LORE_REPO_DIR/cli/lore" scorecard rows \
+  --window-start "$WINDOW_START_NORM" --window-end "$WINDOW_END_NORM" --json
+run_reader scorecard_current "$LORE_REPO_DIR/cli/lore" scorecard current --json
+run_reader session_events "$LORE_REPO_DIR/cli/lore" session events --since 0 \
+  --window-start "$WINDOW_START_NORM" --window-end "$WINDOW_END_NORM" --json
 run_reader journal "$LORE_REPO_DIR/cli/lore" journal read \
-  --since "$(printf '%s' "$WINDOW_JSON" | jq -r .start)" \
-  --until "$(printf '%s' "$WINDOW_JSON" | jq -r .end)" --json
+  --since "$WINDOW_START_NORM" --until "$WINDOW_END_NORM" --json
+run_reader consumer_contradiction_lifecycle "$LORE_REPO_DIR/cli/lore" consumption-contradiction read \
+  --window-start "$WINDOW_START_NORM" --window-end "$WINDOW_END_NORM" --json
 
-# The consumer lifecycle has no sanctioned public reader in v1. Its row is
-# generated inside the pack builder and no private file is touched here.
 PREPARED="$TMP_DIR/prepared.json"
 set +e
 python3 - "$TMP_DIR" "$PREPARED" "$SLUG" "$ARCHIVED" "$WINDOW_JSON" "$DUE_DISPOSITION" "$DUE_WARNING" <<'PY'
@@ -206,14 +211,14 @@ tmp,out_path,slug,archived_raw,window_raw,due_disposition,due_warning=sys.argv[1
 window=json.loads(window_raw); archived=archived_raw=="true"
 
 SOURCE_REGISTRY=[
- ("cycle_work","lore work show --json",f"_work/{'_archive/' if archived else ''}{slug}"),
- ("due_queue","lore retro queue --json","_scorecards/retro-deferred-queue.jsonl"),
- ("settlement","lore settlement status --json","_settlement"),
- ("scorecard_rows","lore scorecard rows","_scorecards/rows.jsonl"),
- ("scorecard_current","lore scorecard current","_scorecards/_current.json"),
- ("session_events","lore session events --json","_sessions/events.jsonl"),
- ("journal",f"lore journal read --since {window['start']} --until {window['end']} --json","_meta/effectiveness-journal.jsonl"),
- ("consumer_contradiction_lifecycle",None,None),
+ ("cycle_work",f"lore work show {slug} --json",f"_work/{'_archive/' if archived else ''}{slug}","snapshot","missing-cycle-nonzero"),
+ ("due_queue",f"lore retro queue --cycle-id {slug} --window-start {window['start']} --window-end {window['end']} --json","_scorecards/retro-deferred-queue.jsonl","half-open-window","versioned-empty-fold"),
+ ("settlement",f"lore settlement status --window-start {window['start']} --window-end {window['end']} --json","_settlement","half-open-window","empty-arrays-and-counts"),
+ ("scorecard_rows",f"lore scorecard rows --window-start {window['start']} --window-end {window['end']} --json","_scorecards/rows.jsonl","half-open-window","[]"),
+ ("scorecard_current","lore scorecard current --json","_scorecards/_current.json","snapshot","versioned-empty-summary"),
+ ("session_events",f"lore session events --since 0 --window-start {window['start']} --window-end {window['end']} --json","_sessions/events.jsonl","half-open-window","events-empty-with-cursor"),
+ ("journal",f"lore journal read --since {window['start']} --until {window['end']} --json","_meta/effectiveness-journal.jsonl","half-open-window","[]"),
+ ("consumer_contradiction_lifecycle",f"lore consumption-contradiction read --window-start {window['start']} --window-end {window['end']} --json","_work/{active,_archive}/**/consumption-contradictions.jsonl","half-open-window","[]"),
 ]
 FACT_REGISTRY={
  "cycle_artifacts":["cycle_work"],
@@ -235,8 +240,6 @@ CALC_REGISTRY=[
 def canonical(value):
  return json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()
 def load_reader(source_id):
- if source_id=="consumer_contradiction_lifecycle":
-  return None,{"coverage":"not-computable","warnings":[],"reason":"no-published-reader","cursor":None}
  rc_path=os.path.join(tmp,source_id+".rc")
  rc=int(open(rc_path).read().strip()) if os.path.exists(rc_path) else 1
  data=open(os.path.join(tmp,source_id+".out"),"rb").read() if os.path.exists(os.path.join(tmp,source_id+".out")) else b""
@@ -244,15 +247,9 @@ def load_reader(source_id):
  if rc!=0:
   reason="source-absent" if any(x in err.lower() for x in ("does not exist","not found","no journal")) else "reader-failed"
   return None,{"coverage":"absent" if reason=="source-absent" else "unreadable","warnings":[err] if err else [],"reason":reason,"cursor":None}
- if source_id=="scorecard_rows" and not data.strip():
-  obj=[]
- else:
-  try: obj=json.loads(data) if data.strip() else None
-  except Exception:
-   # rows.jsonl is a published NDJSON stream.
-   try: obj=[json.loads(line) for line in data.decode().splitlines() if line.strip()]
-   except Exception as exc:
-    return None,{"coverage":"unreadable","warnings":[str(exc)],"reason":"invalid-reader-output","cursor":None}
+ try: obj=json.loads(data) if data.strip() else None
+ except Exception as exc:
+  return None,{"coverage":"unreadable","warnings":[str(exc)],"reason":"invalid-reader-output","cursor":None}
  identity_obj=obj
  if source_id=="cycle_work" and isinstance(obj,dict):
   # The sanctioned work reader includes execution-log.md. Prepare appends its
@@ -264,20 +261,19 @@ def load_reader(source_id):
   # Exclude clock-derived display telemetry such as seconds_since_last. The
   # pack reads only these published state fields.
   dispatch=obj.get("dispatch") or {}
-  identity_obj={"queue":obj.get("queue"),"counts":obj.get("counts"),"health":obj.get("health"),
-                "batch":obj.get("batch"),"items":obj.get("items"),"terminal_items":obj.get("terminal_items"),
-                "dispatch":{"census_enabled":dispatch.get("census_enabled"),"mode":dispatch.get("mode"),
-                            "verify_volume":dispatch.get("verify_volume")}}
+  identity_obj={"retro_projection":obj.get("retro_projection"),
+                "dispatch":{"census_enabled":dispatch.get("census_enabled"),"mode":dispatch.get("mode")}}
  return (obj,{"coverage":"read","warnings":[err] if err else [],"reason":None,
               "cursor":obj.get("next_cursor") if isinstance(obj,dict) else None,
               "identity":hashlib.sha256(canonical(identity_obj)).hexdigest()})
 
 objects={}; manifest=[]
-for sid,reader,resolved in SOURCE_REGISTRY:
+for sid,reader,resolved,projection_mode,empty_shape in SOURCE_REGISTRY:
  obj,meta=load_reader(sid); objects[sid]=obj
  manifest.append({"source_id":sid,"reader":reader,"resolved_source":resolved,
+  "reader_contract_version":"1","projection_mode":projection_mode,"stable_empty_shape":empty_shape,
   "coverage":meta["coverage"],"content_identity":meta.get("identity"),"cursor":meta.get("cursor"),
-  "window_field":"timestamp-or-source-native-window" if sid not in {"cycle_work","scorecard_current"} else None,
+  "window_field":"[start,end)" if projection_mode=="half-open-window" else None,
   "warnings":meta["warnings"],"reason":meta["reason"]})
 
 def fact(status,source_ids,values=None,reason=None):
@@ -297,16 +293,17 @@ event_rows=events.get("events",[]) if isinstance(events,dict) else []
 journal=objects.get("journal") if isinstance(objects.get("journal"),list) else []
 rows=objects.get("scorecard_rows") if isinstance(objects.get("scorecard_rows"),list) else []
 settlement=objects.get("settlement")
+contradictions=objects.get("consumer_contradiction_lifecycle") if isinstance(objects.get("consumer_contradiction_lifecycle"),list) else []
 facts={
  "cycle_artifacts":fact("available",FACT_REGISTRY["cycle_artifacts"],cycle_values) if cycle_values is not None else fact("not-computable",FACT_REGISTRY["cycle_artifacts"],reason="cycle-reader-unavailable"),
  "task_context_backlinks":fact("available",FACT_REGISTRY["task_context_backlinks"],task_values) if task_values is not None else fact("not-computable",FACT_REGISTRY["task_context_backlinks"],reason="cycle-reader-unavailable"),
- "concerns_contradictions":fact("not-computable",FACT_REGISTRY["concerns_contradictions"],reason="no-published-reader"),
+ "concerns_contradictions":fact("available",FACT_REGISTRY["concerns_contradictions"],{"produced":len(contradictions),"terminal":sum(1 for row in contradictions if row.get("status") in {"verified","contradicted"})}) if isinstance(objects.get("consumer_contradiction_lifecycle"),list) else fact("not-computable",FACT_REGISTRY["concerns_contradictions"],reason="contradiction-reader-unavailable"),
  "session_retrieval_friction_packets":fact("available",FACT_REGISTRY["session_retrieval_friction_packets"],{"session_events":len(event_rows),"journal_entries":len(journal)}) if isinstance(events,dict) else fact("not-computable",FACT_REGISTRY["session_retrieval_friction_packets"],reason="session-reader-unavailable"),
  "review_events":fact("available",FACT_REGISTRY["review_events"],{"review_like_events":sum(1 for e in event_rows if "review" in str(e.get("event","")).lower())}),
  "scale_signals":fact("available",FACT_REGISTRY["scale_signals"],{"declared_scale_events":sum(1 for e in event_rows if e.get("scale_declared") is True or isinstance(e.get("scale_declared"),str) and e.get("scale_declared"))}),
  "scorecard_eligibility_deltas":fact("available",FACT_REGISTRY["scorecard_eligibility_deltas"],{"rows_total":len(rows),"calibrated_template_rows":sum(1 for r in rows if r.get("kind")=="scored" and r.get("tier")=="template" and r.get("calibration_state")=="calibrated"),"prior_retro_windows":len(journal)}) if isinstance(objects.get("scorecard_rows"),list) else fact("absent",FACT_REGISTRY["scorecard_eligibility_deltas"],reason="scorecard-rows-absent"),
  "telemetry_attribution_rework":fact("available",FACT_REGISTRY["telemetry_attribution_rework"],{"telemetry_rows":sum(1 for r in rows if r.get("kind")=="telemetry" or r.get("tier")=="telemetry"),"correction_rows":sum(1 for r in rows if r.get("tier")=="correction")}) if isinstance(objects.get("scorecard_rows"),list) else fact("absent",FACT_REGISTRY["telemetry_attribution_rework"],reason="scorecard-rows-absent"),
- "settlement_health_inputs":fact("available",FACT_REGISTRY["settlement_health_inputs"],{"queue":settlement.get("queue"),"counts":settlement.get("counts"),"health":settlement.get("health"),"dispatch":settlement.get("dispatch"),"batch":settlement.get("batch")}) if isinstance(settlement,dict) else fact("not-computable",FACT_REGISTRY["settlement_health_inputs"],reason="settlement-reader-unavailable"),
+ "settlement_health_inputs":fact("available",FACT_REGISTRY["settlement_health_inputs"],settlement.get("retro_projection")) if isinstance(settlement,dict) and isinstance(settlement.get("retro_projection"),dict) else fact("not-computable",FACT_REGISTRY["settlement_health_inputs"],reason="settlement-reader-unavailable"),
 }
 
 def calc(cid,sources,n=None,d=None,value=None,unit="ratio",floor=None,threshold=None,disposition="not-computable",reason=None):
@@ -321,17 +318,70 @@ else: calcs.append(calc("scorecard_delta_readiness",["scorecard_rows","journal"]
 if eligible_n is None: calcs.append(calc("template_headline_readiness",["scorecard_rows"],floor=10,threshold="metric-n>=10",reason="scorecard rows unavailable"))
 elif eligible_n<10: calcs.append(calc("template_headline_readiness",["scorecard_rows"],n=eligible_n,d=10,value=eligible_n,unit="rows",floor=10,threshold="metric-n>=10",disposition="abstained",reason="below-sample"))
 else: calcs.append(calc("template_headline_readiness",["scorecard_rows"],n=eligible_n,d=eligible_n,value=eligible_n,unit="rows",floor=10,threshold="metric-n>=10",disposition="green",reason=None))
-calcs.append(calc("audit_lag",["settlement"],unit="days",threshold="<=7",reason="enqueue time is not reconstructible from the published status reader"))
-calcs.append(calc("audit_realization",["settlement"],floor=10,threshold=">=0.50 or >=3 completions below floor",reason="published status omits completed run envelopes"))
+projection=(settlement or {}).get("retro_projection",{}) if isinstance(settlement,dict) else {}
+queue_transitions=projection.get("queue_transitions",[]) if isinstance(projection,dict) else []
+completed=projection.get("completed_envelopes",[]) if isinstance(projection,dict) else []
+grounding=projection.get("grounding_outcomes",[]) if isinstance(projection,dict) else []
+per_kind=projection.get("per_kind",{}) if isinstance(projection,dict) else {}
+
+def stamp(value):
+ if not isinstance(value,str) or not value: return None
+ try: return datetime.fromisoformat(value[:-1]+"+00:00" if value.endswith("Z") else value).astimezone(timezone.utc)
+ except Exception: return None
+
+lags=[]
+for row in completed:
+ a,b=stamp(row.get("enqueued_at")),stamp(row.get("completed_at"))
+ if a is not None and b is not None and b>=a: lags.append((b-a).total_seconds()/86400)
+if not isinstance(projection,dict) or not projection:
+ calcs.append(calc("audit_lag",["settlement"],unit="days",threshold="<=7",reason="settlement projection unavailable"))
+elif not lags:
+ calcs.append(calc("audit_lag",["settlement"],n=0,d=max(1,len(completed)),value=None,unit="days",threshold="<=7",disposition="abstained",reason="no completed enqueue-to-verdict pairs"))
+else:
+ lag=max(lags); calcs.append(calc("audit_lag",["settlement"],n=len(lags),d=len(completed),value=lag,unit="days",threshold="<=7",disposition="tripped" if lag>7 else "green",reason=None))
+
+routed=len(queue_transitions); realized=len(completed)
+if not isinstance(projection,dict) or not projection:
+ calcs.append(calc("audit_realization",["settlement"],floor=10,threshold=">=0.50 or >=3 completions below floor",reason="settlement projection unavailable"))
+elif routed<10:
+ calcs.append(calc("audit_realization",["settlement"],n=realized,d=routed,value=(realized/routed if routed else None),floor=10,threshold=">=0.50 or >=3 completions below floor",disposition="green" if realized>=3 else "abstained",reason=None if realized>=3 else "below-sample"))
+else:
+ ratio=realized/routed; calcs.append(calc("audit_realization",["settlement"],n=realized,d=routed,value=ratio,floor=10,threshold=">=0.50 or >=3 completions below floor",disposition="green" if ratio>=0.5 else "tripped",reason=None))
 calcs.append(calc("trigger_realization",["session_events","settlement"],floor=10,threshold="relative-divergence<=0.50",reason="published readers do not expose configured probability per roll"))
-calcs.append(calc("grounding_failure_rate",["settlement","scorecard_rows"],floor=10,threshold=">0.30 or reason-concentration>0.50@failed>=5",reason="source-drift"))
+grounding_failures=sum(1 for row in grounding if row.get("grounded") is False or row.get("verdict") in {"unverified","error","failed"})
+if not isinstance(projection,dict) or not projection:
+ calcs.append(calc("grounding_failure_rate",["settlement"],floor=10,threshold=">0.30",reason="settlement projection unavailable"))
+elif len(grounding)<10:
+ calcs.append(calc("grounding_failure_rate",["settlement"],n=grounding_failures,d=len(grounding),value=(grounding_failures/len(grounding) if grounding else None),floor=10,threshold=">0.30",disposition="abstained",reason="below-sample"))
+else:
+ rate=grounding_failures/len(grounding); calcs.append(calc("grounding_failure_rate",["settlement"],n=grounding_failures,d=len(grounding),value=rate,floor=10,threshold=">0.30",disposition="tripped" if rate>0.30 else "green",reason=None))
 dispatch=(settlement or {}).get("dispatch",{}) if isinstance(settlement,dict) else {}
 if dispatch.get("census_enabled") is False:
- calcs.append(calc("candidate_queue_backlog",["settlement"],unit="items",floor=10,threshold="growth>2 or pending-kind>25 or total>50",reason="dormant-census"))
+ calcs.append(calc("candidate_queue_backlog",["settlement"],unit="items",floor=10,threshold="pending-kind>25 or total>50",disposition="abstained",reason="dormant-census"))
+elif not isinstance(projection,dict) or not projection:
+ calcs.append(calc("candidate_queue_backlog",["settlement"],unit="items",floor=10,threshold="pending-kind>25 or total>50",reason="settlement projection unavailable"))
 else:
- calcs.append(calc("candidate_queue_backlog",["settlement"],unit="items",floor=10,threshold="growth>2 or pending-kind>25 or total>50",reason="published status lacks trustworthy per-kind window transitions"))
-calcs.append(calc("judge_liveness",["settlement"],floor=5,threshold="unverified>0.80 or silence>0.90 or zero-runs-with-routing",reason="published status omits per-gate completed run envelopes"))
-calcs.append(calc("consumer_contradiction_routing",["consumer_contradiction_lifecycle"],floor=10,threshold="verdicts/produced<0.10",reason="no-published-reader"))
+ pending=sum(int(v.get("pending",0)) for v in per_kind.values() if isinstance(v,dict)); peak=max([int(v.get("pending",0)) for v in per_kind.values() if isinstance(v,dict)] or [0])
+ disposition="tripped" if pending>50 or peak>25 else ("green" if pending>=10 else "abstained")
+ calcs.append(calc("candidate_queue_backlog",["settlement"],n=pending,d=len(per_kind),value=pending,unit="items",floor=10,threshold="pending-kind>25 or total>50",disposition=disposition,reason="below-sample" if disposition=="abstained" else None))
+
+unverified=sum(1 for row in completed if row.get("verdict") in {"unverified","error","failed"})
+if not isinstance(projection,dict) or not projection:
+ calcs.append(calc("judge_liveness",["settlement"],floor=5,threshold="unverified>0.80 or zero-runs-with-routing",reason="settlement projection unavailable"))
+elif routed>0 and realized==0:
+ calcs.append(calc("judge_liveness",["settlement"],n=0,d=routed,value=0,floor=5,threshold="unverified>0.80 or zero-runs-with-routing",disposition="tripped",reason="zero-runs-with-routing"))
+elif realized<5:
+ calcs.append(calc("judge_liveness",["settlement"],n=realized,d=max(1,routed),value=None,floor=5,threshold="unverified>0.80 or zero-runs-with-routing",disposition="abstained",reason="below-sample"))
+else:
+ rate=unverified/realized; calcs.append(calc("judge_liveness",["settlement"],n=unverified,d=realized,value=rate,floor=5,threshold="unverified>0.80 or zero-runs-with-routing",disposition="tripped" if rate>0.80 else "green",reason=None))
+
+terminal_contradictions=sum(1 for row in contradictions if row.get("status") in {"verified","contradicted"})
+if not isinstance(objects.get("consumer_contradiction_lifecycle"),list):
+ calcs.append(calc("consumer_contradiction_routing",["consumer_contradiction_lifecycle"],floor=10,threshold="verdicts/produced<0.10",reason="contradiction projection unavailable"))
+elif len(contradictions)<10:
+ calcs.append(calc("consumer_contradiction_routing",["consumer_contradiction_lifecycle"],n=terminal_contradictions,d=len(contradictions),value=(terminal_contradictions/len(contradictions) if contradictions else None),floor=10,threshold="verdicts/produced<0.10",disposition="abstained",reason="below-sample"))
+else:
+ ratio=terminal_contradictions/len(contradictions); calcs.append(calc("consumer_contradiction_routing",["consumer_contradiction_lifecycle"],n=terminal_contradictions,d=len(contradictions),value=ratio,floor=10,threshold="verdicts/produced<0.10",disposition="tripped" if ratio<0.10 else "green",reason=None))
 
 load_bearing={"audit_lag","audit_realization","grounding_failure_rate","candidate_queue_backlog","judge_liveness","consumer_contradiction_routing"}
 selected=[c for c in calcs if c["calculation_id"] in load_bearing]
@@ -342,7 +392,7 @@ else: state="normal"
 fixed_health={"state":state,"calculation_ids":[c["calculation_id"] for c in selected],"tripped_calculation_ids":[c["calculation_id"] for c in selected if c["disposition"]=="tripped"]}
 
 input_fp=hashlib.sha256(canonical({"schema_version":1,"slug":slug,"window":window})).hexdigest()
-source_shape=[{k:r[k] for k in ("source_id","reader","resolved_source","coverage","content_identity","cursor","window_field","warnings")} for r in manifest]
+source_shape=[{k:r[k] for k in ("source_id","reader_contract_version","reader","projection_mode","resolved_source","coverage","content_identity","cursor","window_field","warnings")} for r in manifest]
 source_fp=hashlib.sha256(canonical({"sources":source_shape,"calculations":[{"calculation_id":c,"calculation_version":"1"} for c in CALC_REGISTRY]})).hexdigest()
 pack_id=hashlib.sha256(canonical({"input_fingerprint":input_fp,"source_fingerprint":source_fp})).hexdigest()
 work_title=work.get("title","") if isinstance(work,dict) else ""

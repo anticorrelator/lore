@@ -13,7 +13,7 @@ source "$SCRIPT_DIR/lib.sh"
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  retro-queue.sh queue [--cycle-id <slug>] [--kdir <path>] [--json]
+  retro-queue.sh queue [--cycle-id <slug>] [--window-start <RFC3339> --window-end <RFC3339>] [--kdir <path>] [--json]
   retro-queue.sh handle (--outcome-id <id> | --cycle-id <slug>)
       --action <dispatched|deferred|skipped> --handled-by <actor>
       [--kdir <path>] [--json]
@@ -38,15 +38,23 @@ fi
 CYCLE_ID=""
 KDIR_OVERRIDE=""
 JSON_MODE=0
+WINDOW_START=""
+WINDOW_END=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cycle-id) CYCLE_ID="$2"; shift 2 ;;
+    --window-start) WINDOW_START="$2"; shift 2 ;;
+    --window-end) WINDOW_END="$2"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Error: unknown flag '$1'" >&2; usage; exit 1 ;;
   esac
 done
+
+if [[ -n "$WINDOW_START" || -n "$WINDOW_END" ]]; then
+  [[ -n "$WINDOW_START" && -n "$WINDOW_END" ]] || { echo "Error: --window-start and --window-end must be supplied together" >&2; exit 1; }
+fi
 
 if [[ -n "$KDIR_OVERRIDE" ]]; then
   KNOWLEDGE_DIR="$KDIR_OVERRIDE"
@@ -59,10 +67,27 @@ if [[ ! -d "$KNOWLEDGE_DIR" ]]; then
 fi
 
 QUEUE="$KNOWLEDGE_DIR/_scorecards/retro-deferred-queue.jsonl"
-RESULT=$(python3 - "$QUEUE" "$CYCLE_ID" <<'PYEOF'
+RESULT=$(python3 - "$QUEUE" "$CYCLE_ID" "$WINDOW_START" "$WINDOW_END" <<'PYEOF'
 import json, os, sys
+from datetime import datetime, timezone
 
-queue, cycle_filter = sys.argv[1:3]
+queue, cycle_filter, start_raw, end_raw = sys.argv[1:5]
+
+def parse(value):
+    value = value[:-1] + "+00:00" if value.endswith("Z") else value
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        raise ValueError("timezone required")
+    return dt.astimezone(timezone.utc)
+
+start = end = None
+if start_raw or end_raw:
+    try:
+        start, end = parse(start_raw), parse(end_raw)
+    except ValueError as exc:
+        raise SystemExit(f"[retro queue] invalid window: {exc}")
+    if start >= end:
+        raise SystemExit("[retro queue] window start must precede window end")
 outcomes = {}
 dispositions = {}
 legacy = []
@@ -78,6 +103,16 @@ if os.path.isfile(queue):
                 continue
             if cycle_filter and row.get("cycle_id") != cycle_filter:
                 continue
+            if start is not None:
+                stamp = row.get("ts") or row.get("created_at") or row.get("timestamp")
+                if not isinstance(stamp, str):
+                    continue
+                try:
+                    if not (start <= parse(stamp) < end):
+                        continue
+                except ValueError:
+                    malformed += 1
+                    continue
             if row.get("outcome") == "due" and row.get("outcome_id"):
                 oid = row["outcome_id"]
                 if row.get("record_type") == "disposition":
@@ -104,6 +139,9 @@ unhandled.sort(key=key)
 handled.sort(key=key)
 legacy.sort(key=key)
 print(json.dumps({
+    "reader_contract_version": "1",
+    "projection_mode": "half-open-window" if start is not None else "fold",
+    "window": {"start": start_raw, "end": end_raw} if start is not None else None,
     "fold_version": "1",
     "vocabulary_version": "1",
     "counts": {

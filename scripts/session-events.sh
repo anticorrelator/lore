@@ -2,7 +2,7 @@
 # session-events.sh — Read _sessions/events.jsonl from an opaque byte-offset cursor
 #
 # Usage:
-#   lore session events [--since <cursor>] [--tail <N>] [--cursor-only] [--kdir <path>] [--json]
+#   lore session events [--since <cursor>] [--tail <N>] [--window-start <RFC3339> --window-end <RFC3339>] [--cursor-only] [--kdir <path>] [--json]
 #
 # Options:
 #   --since <cursor>  Byte offset to resume from (default: 0). Treated as an
@@ -45,11 +45,15 @@ KDIR_OVERRIDE=""
 JSON_MODE=0
 CURSOR_ONLY=0
 TAIL_N=""
+WINDOW_START=""
+WINDOW_END=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --since) SINCE="$2"; shift 2 ;;
     --tail) TAIL_N="$2"; shift 2 ;;
+    --window-start) WINDOW_START="$2"; shift 2 ;;
+    --window-end) WINDOW_END="$2"; shift 2 ;;
     --cursor-only) CURSOR_ONLY=1; shift ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
@@ -69,6 +73,11 @@ fail() {
   fi
   die "$msg"
 }
+
+if [[ -n "$WINDOW_START" || -n "$WINDOW_END" ]]; then
+  [[ -n "$WINDOW_START" && -n "$WINDOW_END" ]] || fail "--window-start and --window-end must be supplied together"
+  [[ $CURSOR_ONLY -eq 0 ]] || fail "window bounds cannot be combined with --cursor-only"
+fi
 
 command -v jq &>/dev/null || fail "jq is required but not found on PATH"
 command -v python3 &>/dev/null || fail "python3 is required but not found on PATH"
@@ -105,11 +114,28 @@ fi
 
 # The cursor reader is pure: it emits {events, next_cursor} on stdout and any
 # exclusion/reset warnings on stderr. Byte-offset arithmetic lives entirely here.
-RESULT="$(python3 - "$EVENTS_FILE" "$SINCE" <<'PYEOF'
+RESULT="$(python3 - "$EVENTS_FILE" "$SINCE" "$WINDOW_START" "$WINDOW_END" <<'PYEOF'
 import json, os, sys
+from datetime import datetime, timezone
 
-events_file = sys.argv[1]
-since = int(sys.argv[2])
+events_file, since_raw, start_raw, end_raw = sys.argv[1:]
+since = int(since_raw)
+
+def parse(value):
+    value = value[:-1] + "+00:00" if value.endswith("Z") else value
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        raise ValueError("timezone required")
+    return dt.astimezone(timezone.utc)
+
+start = end = None
+if start_raw or end_raw:
+    try:
+        start, end = parse(start_raw), parse(end_raw)
+    except ValueError as exc:
+        raise SystemExit(f"[session] invalid window: {exc}")
+    if start >= end:
+        raise SystemExit("[session] window start must precede window end")
 
 size = os.path.getsize(events_file) if os.path.exists(events_file) else 0
 
@@ -161,12 +187,24 @@ if size > 0 and since < size:
                         f"invalid JSON; excluded\n"
                     )
                 pending_malformed = []
-                events.append(obj)
+                if start is None:
+                    events.append(obj)
+                else:
+                    stamp = next((obj.get(k) for k in ("timestamp", "ts", "created_at", "started_at", "completed_at") if obj.get(k)), None)
+                    if isinstance(stamp, str):
+                        try:
+                            if start <= parse(stamp) < end:
+                                events.append(obj)
+                        except ValueError:
+                            sys.stderr.write(f"[session] warning: events.jsonl:{lineno} invalid timestamp; excluded\n")
                 next_cursor = line_end
         idx = nl + 1
         pos = line_end
 
 print(json.dumps({
+    "reader_contract_version": "1",
+    "projection_mode": "half-open-window" if start is not None else "cursor",
+    "window": {"start": start_raw, "end": end_raw} if start is not None else None,
     "fold_version": "1",
     "vocabulary_version": "1",
     "events": events,
