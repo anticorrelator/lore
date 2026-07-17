@@ -2041,6 +2041,10 @@ case "$1" in
     shift
     exec "$SCRIPTS_DIR/lore-test.sh" "$@"
     ;;
+  defaults)
+    shift
+    exec "$SCRIPTS_DIR/render-standing-defaults.sh" "$@"
+    ;;
   annotate)
     shift
     exec "$SCRIPTS_DIR/annotate.sh" "$@"

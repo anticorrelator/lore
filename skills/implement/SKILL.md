@@ -59,8 +59,9 @@ Eight decisions stay in lead prose. The verbs validate the vocabulary these kern
 
 ```bash
 lore resolve
+lore defaults
 ```
-Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
+Set `KNOWLEDGE_DIR` to the first result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`. The second renders the standing defaults in force (settings-derived role/model maps, ceremony registrations, sampling rates, preference directives cited by title); treat its output as binding for this run.
 
 Agent templates live in the lore repo under `agents/<name>.md` and surface via `resolve_agent_template <name>` (Claude Code: `~/.claude/agents/<name>.md`). Do NOT use `git rev-parse --show-toplevel` for agent paths — the current repo is the target project, not the lore repo.
 

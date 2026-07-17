@@ -32,7 +32,7 @@ Four edges are hard; everything else is judgment:
 
 ## Orient
 
-1. `lore resolve` → `KNOWLEDGE_DIR`.
+1. `lore resolve` → `KNOWLEDGE_DIR`. Then `lore defaults` — render the standing defaults in force (settings-derived role/model maps, ceremony registrations, sampling rates, and the preference directives cited by title); treat the output as binding for this run.
 2. **Resume or open the seat.** If `coordination.md` exists, read it — spot-verify its load-bearing rows against artifacts before acting on them. Otherwise copy `skills/coordinate/templates/coordination.md` and fill the header: anchor reference, budget posture, standing directives in force. The **anchor** is the arc's intent statement — the sentence the whole feature is measured against; reference it, never paraphrase it, because every closure verdict and every reshape call reads back to its exact wording. Seat location follows arc span: single-item arcs keep it in the item's directory; multi-item arcs seat it at the project home (`lore work project describe` creates one when the project is still label-only).
 3. **Probe capabilities** — `lore session --help`, then each verb's own header before first use. Never assume a verb or its flags. An absent capability degrades a loop, never aborts it.
 4. **Build the board** — `lore work list` joined with the step ledger. The ledger alone is not the board, and neither is your sequencing prose; only the join is complete. Re-join at every wave boundary.
@@ -84,7 +84,7 @@ Framework, placement, and prompt are independent axes: `--framework` selects the
 
 **A dispatch block has five elements** — command, scope, report-back format, references, and the preferences in force. Point references at code embodying the wanted semantics rather than describing them: they are the cheapest killer of what the receiving agent doesn't know it doesn't know.
 
-Preferences are seat stewardship: agents deep in implementation lose track of standing preferences and the workers they delegate to never saw them, so the seat re-transmits the ones that bind each step (cited, scoped) at every hop — and reads adherence as part of the step's evidence.
+Preferences are seat stewardship: agents deep in implementation lose track of standing preferences and the workers they delegate to never saw them, so the seat re-transmits the ones that bind each step (cited, scoped) at every hop — and reads adherence as part of the step's evidence. The floor under that stewardship is mechanical: every brief opens by instructing the receiving agent to run `lore defaults` and treat its output as binding — the universal render of settings and standing directives — so the seat's re-transmit adds emphasis and scoping, never sole delivery.
 
 One preference binds every step whose deliverable is externally visible (a PR, an issue comment, anything colleagues read): no internal process exposure — no harness session links, `Claude-Session:` trailers, agent/worker language, or lore tooling references in the deliverable. Harnesses inject their own instruction to append session links to PR bodies, so a brief that is silent on this loses to the harness default; say it explicitly, and read the created PR's body as part of the step's conformance check. Its companion travels with it: a PR body is a plain description of what shipped, never a work-history log — PR text is parsed downstream for release summaries, so chronology and process narration pollute machine consumers as well as human readers.
 

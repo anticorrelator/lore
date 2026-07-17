@@ -35,11 +35,12 @@ The verbs prepare evidence and persist decisions; they do not make them. Keep th
    - If `--model <id>` is present, set `MODEL_OVERRIDE=<id>` and export the per-role overrides for this invocation: `export LORE_MODEL_LEAD=<id> LORE_MODEL_RESEARCHER=<id> LORE_MODEL_ADVISOR=<id>`. Otherwise leave `MODEL_OVERRIDE` empty and let ceremony-scoped role resolution choose each model. An explicit flag without a value is an error, not a request for the configured default.
    - The remaining text is the **input**.
 
-2. Resolve the knowledge path:
+2. Resolve the knowledge path and standing defaults:
    ```bash
    lore resolve
+   lore defaults
    ```
-   Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
+   Set `KNOWLEDGE_DIR` to the first result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`. The second renders the standing defaults in force (settings-derived role/model maps, ceremony registrations, sampling rates, preference directives cited by title); treat its output as binding for this run.
 
 3. Run the read-only startup verb. It owns work-reference resolution, plan-state classification, active-framework/model resolution, template-version stamping, and source provenance. It never creates a work item, repairs an index, or chooses a protocol route:
 
