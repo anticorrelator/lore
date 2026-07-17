@@ -207,15 +207,31 @@ PYEOF
 }
 
 @test "full close renders conformance before moving the item to the archive" {
-  run bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done"
+  run env LORE_CONFORMANCE_RENDER_RATE=1 bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done"
   [ "$status" -eq 0 ]
   artifact="$WORK_DIR/_archive/anchored-done/closure-conformance.md"
   [ -f "$artifact" ]
   grep -Fq "# Closure Conformance Aggregate" "$artifact"
 }
 
+@test "routine close sampled out skips the render and announces the on-demand path" {
+  run env LORE_CONFORMANCE_RENDER_RATE=0 bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done"
+  [ "$status" -eq 0 ]
+  [ ! -f "$WORK_DIR/_archive/anchored-done/closure-conformance.md" ]
+  echo "$output" | grep -q "conformance render sampled out"
+  echo "$output" | grep -q "lore work conformance anchored-done"
+}
+
+@test "degraded verdict always renders conformance regardless of rate" {
+  LORE_CONFORMANCE_RENDER_RATE=0 run partial_close
+  [ "$status" -eq 3 ]
+  artifact="$WORK_DIR/anchored-done/closure-conformance.md"
+  [ -f "$artifact" ]
+  echo "$output" | grep -q "degraded_closure"
+}
+
 @test "conformance failure warns but does not block close" {
-  run bash -c 'cd "$1" && exec "$2" impl close anchored-done --verdict full --summary done' \
+  run bash -c 'cd "$1" && exec env LORE_CONFORMANCE_RENDER_RATE=1 "$2" impl close anchored-done --verdict full --summary done' \
     _ "$TEST_KDIR" "$LORE_CLI"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "conformance aggregate render failed; close continues"

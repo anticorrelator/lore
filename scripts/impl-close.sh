@@ -830,12 +830,48 @@ if ! printf '%s' "$TELEMETRY_ROW" | bash "$SCRIPT_DIR/scorecard-append.sh" >/dev
   echo "[impl] Warning: telemetry row append failed; close continues (observability-only)." >&2
 fi
 
-# --- Conformance aggregate: best-effort before the archive move --------------
+# --- Conformance aggregate: SAMPLED assembly before the archive move ---------
 # The renderer owns closure-conformance.md. It runs after the closure write and
 # telemetry while the active item directory still exists. Assembly failure is
 # observable but never changes archive behavior or the close exit code.
-if ! bash "$SCRIPT_DIR/conformance-render.sh" "$SLUG" >/dev/null; then
-  echo "[impl] Warning: conformance aggregate render failed; close continues (observability-only)." >&2
+#
+# Sampling (owner constraint, 2026-07-16): the eager render is sampled, not
+# universal. A skip loses nothing — `lore work conformance <slug>` reproduces
+# the same aggregate on demand — so sampling the auto-render is not a silent
+# skip: the decision is announced, and the artifact stays derivable.
+#   Always-stratum: a degraded closure verdict (partial/none) always renders.
+#   Routine coin:   sha256("conformance:<slug>:<date>") vs
+#                   conformance_sampling.render_rate (settings.json;
+#                   default 0.25; env LORE_CONFORMANCE_RENDER_RATE overrides
+#                   for tests). Same slug + date → same decision, RNG-free.
+CONF_RATE="${LORE_CONFORMANCE_RENDER_RATE:-}"
+if [[ -z "$CONF_RATE" ]]; then
+  CONF_RATE=$(bash "$SCRIPT_DIR/settings.sh" get conformance_sampling.render_rate 2>/dev/null || true)
+fi
+[[ -n "$CONF_RATE" ]] || CONF_RATE="0.25"
+CONF_DECISION=$(python3 - "$SLUG" "$VERDICT" "$CONF_RATE" <<'PYEOF'
+import hashlib, sys, datetime
+slug, verdict, rate_str = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    rate = max(0.0, min(1.0, float(rate_str)))
+except ValueError:
+    rate = 0.25
+if verdict in ("partial", "none"):
+    print("render degraded_closure")
+    sys.exit(0)
+date = datetime.date.today().isoformat()
+digest = hashlib.sha256(f"conformance:{slug}:{date}".encode()).hexdigest()
+coin = int(digest[:8], 16) / 0x100000000
+print(f"render coin={coin:.4f}" if coin < rate else f"skip coin={coin:.4f}")
+PYEOF
+)
+if [[ "$CONF_DECISION" == render* ]]; then
+  echo "[impl] conformance render: ${CONF_DECISION#render } (rate=$CONF_RATE)" >&2
+  if ! bash "$SCRIPT_DIR/conformance-render.sh" "$SLUG" >/dev/null; then
+    echo "[impl] Warning: conformance aggregate render failed; close continues (observability-only)." >&2
+  fi
+else
+  echo "[impl] conformance render sampled out (${CONF_DECISION#skip } rate=$CONF_RATE); 'lore work conformance $SLUG' renders the same aggregate on demand." >&2
 fi
 
 # --- Archive only after durable close evidence has been assembled ------------
