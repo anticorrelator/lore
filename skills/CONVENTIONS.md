@@ -181,7 +181,7 @@ Skill prose, the executable behavior it describes, and the contract tests that p
 
 When a skill consumes a published reader, evolve that reader inside its existing command namespace and update its contract test in the same change. Add a sibling reader only when the substrate has no canonical read surface; replacing a reader requires retiring the old surface in the same change, so consumers never face two plausible authorities.
 
-Enforce the chain mechanically only where the repository owns a narrow, mechanically classifiable seam — `scripts/check-retro-seam-drift.sh` does this for the retro readers and `skills/retro/SKILL.md`, rejecting unpaired reader changes and standalone prose passes. Skills outside such a seam keep their sanctioned prose-only channels (owner directives, seat calibrations); a local coupling rule is not a global ban on those channels.
+Enforce the chain mechanically only where the repository owns a narrow, mechanically classifiable seam — `scripts/check-retro-seam-drift.sh` does this for the retro readers and `skills/retro/SKILL.md`, rejecting unpaired reader changes and standalone prose passes. The checker and the reader contract suite run two ways: on demand as `lore test seams` (checker over `origin/main..HEAD` plus `tests/frameworks/retro_prepare.bats` and the checker's own tests), and mechanically on every push via the versioned `githooks/pre-push` hook — activate once per clone with `git config core.hooksPath githooks`. Skills outside such a seam keep their sanctioned prose-only channels (owner directives, seat calibrations); a local coupling rule is not a global ban on those channels.
 
 ## Intentional Differences
 
