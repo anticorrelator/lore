@@ -141,8 +141,10 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
 
    See preference `never-leave-lore-internal-scaffolding-markers-in-c.md`
    for the full rationale.
-6. **During the task, emit Tier 2 evidence as you go.** Each time you form a
-   claim anchored to a specific `file:line_range` that grounds the work in
+6. **During the task, emit Tier 2 evidence as you go** — Tier 2 rows are
+   file-anchored claim records, the auditable middle of lore's evidence ladder
+   (Tier 1: session captures; Tier 3: claims promoted to the shared knowledge
+   commons). Each time you form a claim anchored to a specific `file:line_range` that grounds the work in
    this task, emit it immediately via `evidence-append.sh` — one call per
    claim. See the "Tier 2 Evidence Emission" section below for the 13-field
    JSON shape and the `echo '<json>' | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>`
@@ -211,7 +213,8 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
        artifact this task produced or extended, each with all four fields:
        - path: <absolute path, or work-item-relative for _work/ artifacts>
          kind: <source | test-output | tier2-claims | execution-log | knowledge-entry | ...>
-         writer: <the sanctioned writer that produced it — you (worker) for
+         writer: <the sanctioned writer that produced it (each durable file has
+           exactly one script or role allowed to write it) — you (worker) for
            source edits, evidence-append.sh for task-claims.jsonl rows, etc.>
          identity: <durable identity the lead can check — a Tier-2 claim_id,
            an execution-log Report-key, or a source revision/path>
