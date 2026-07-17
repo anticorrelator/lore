@@ -80,6 +80,14 @@ For each file with interface changes, apply this methodology:
 - Do parameter names reveal intent without needing inline comments to interpret them?
 - Are there names that suggest the wrong type (e.g., `list` for something unordered, `id` for something non-unique)?
 
+**Run the term-resolvability part of this check cold.** For every new or renamed identifier, user-facing string, and comment term, read it as a competent engineer who has never seen this project or its internal vocabulary — deliberately set aside the Prior Knowledge preamble (the project-context block injected at the top of your review prompt) and anything you know about what the term means internally. Familiarity is what breaks this check: a reader who already knows the term glides over it with a confident reading, so the enculturated reviewer cannot detect which terms fail for everyone else. The failure you are hunting is confident *mis*reading, not visible confusion — ask what a cold reader would take the term to mean, and whether that matches what it actually means here.
+
+**Flagged terms take the rename-or-define fork.** A term is flagged when the cold reader cannot resolve it from what they can reach — the signature, the surrounding code, or an adjacent comment. Every flagged term resolves exactly one of two ways:
+- **(a) Rename** to shared professional vocabulary (standard terms of art, plain language), or
+- **(b) Keep the term**, with a definition at the site where a reader first encounters it, plus one line on why existing vocabulary doesn't serve.
+
+New coinages are allowed — the fork prices them rather than banning them. Renaming is the cheap path, so only terms carrying real conceptual weight are worth the cost of (b). Report each flagged term as a finding with the fork as the suggested resolution; do not silently rewrite.
+
 **3e. Extension surface** — Assess whether the interface design makes correct extension easy and incorrect extension hard:
 - Are there extension points that are easy to misuse (e.g., optional parameters with dangerous defaults, variadic args where order matters)?
 - Does the interface make the common case simple and the uncommon case possible without exposing footguns in the primary path?
