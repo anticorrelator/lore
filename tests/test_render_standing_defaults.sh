@@ -25,6 +25,27 @@ cat > "$TMP/config/settings.json" <<'JSON'
       "ceremonies": { "spec-design": ["codex-design-review"] }
     }
   },
+  "standing_decisions": {
+    "modal_answers": {
+      "codex-additional-safety-checks-keep-waiting-v1": {
+        "enabled": true,
+        "framework": "codex",
+        "signature": {
+          "kind": "numbered-modal-v1",
+          "title": "Additional safety checks",
+          "options": [
+            {"number": 1, "label": "Retry with a faster model"},
+            {"number": 2, "label": "Keep waiting"},
+            {"number": 3, "label": "Learn more"}
+          ]
+        },
+        "answer": {"option": 2, "expect": "Additional safety checks"},
+        "registered_by": "user",
+        "registered_at": "2026-07-21T00:00:00Z",
+        "rationale": "Keep the current protocol session on its selected model."
+      }
+    }
+  },
   "retro_sampling": { "routine_rate": 0.5 }
 }
 JSON
@@ -36,6 +57,10 @@ grep -q "harnesses.claude-code.roles.worker: sonnet" <<<"$out" || fail "second r
 grep -q "retro_sampling.routine_rate: 0.5" <<<"$out" || fail "sampling rate missing"
 grep -q "harnesses.claude-code.ceremonies.spec-design.0: codex-design-review" <<<"$out" \
   || fail "ceremony registration not flattened"
+grep -q "standing_decisions.modal_answers.codex-additional-safety-checks-keep-waiting-v1.signature.options.1.label: Keep waiting" <<<"$out" \
+  || fail "standing modal option not flattened"
+grep -q "standing_decisions.modal_answers.codex-additional-safety-checks-keep-waiting-v1.registered_by: user" <<<"$out" \
+  || fail "standing modal decision metadata not flattened"
 grep -q "Preference directives in force" <<<"$out" || fail "directives section missing"
 grep -q "End standing defaults" <<<"$out" || fail "missing footer"
 

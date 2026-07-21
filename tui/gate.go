@@ -7,6 +7,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
@@ -73,6 +74,7 @@ type screenClass struct {
 	pending          bool
 	placeholder      bool
 	heldInput        bool
+	numberedModal    *config.NumberedModalSignature
 }
 
 // closeObservation is one close tick's view of a panel: process lifecycle and
@@ -116,6 +118,10 @@ func classifyScreen(framework string, snap work.ScreenSnapshot) (screenClass, bo
 		geometry := mm.choices(rows)
 		state.selectedOption = geometry.selected
 		state.availableOptions = append([]int(nil), geometry.available...)
+		if state.interactive && geometry.signature.Title != "" && len(geometry.signature.Options) >= 2 {
+			signature := geometry.signature
+			state.numberedModal = &signature
+		}
 	}
 	return state, true
 }
@@ -125,19 +131,33 @@ func classifyScreen(framework string, snap work.ScreenSnapshot) (screenClass, bo
 // option number carrying the selection glyph. A modal may be interactive while
 // this structure is empty, in which case it is observable but not answerable.
 type optionGeometry struct {
-	selected  int
-	available []int
+	selected   int
+	available  []int
+	signature  config.NumberedModalSignature
+	lastOption int
 }
 
-var numberedOptionRow = regexp.MustCompile(`^\s*([❯›>])?\s*(\d+)[.)]\s+\S`)
+var numberedOptionRow = regexp.MustCompile(`^\s*([❯›>])?\s*(\d+)[.)]\s+(.+)$`)
+
+func modalTitleBefore(rows []string, firstOption int) string {
+	for i := firstOption - 1; i >= 0; i-- {
+		title := strings.TrimSpace(rows[i])
+		if title == "" || strings.Trim(title, "─━═┄┅┈┉- ") == "" {
+			continue
+		}
+		return title
+	}
+	return ""
+}
 
 func parseNumberedOptions(rows []string) optionGeometry {
-	geometry := optionGeometry{}
+	geometry := optionGeometry{lastOption: -1}
 	seen := make(map[int]bool)
 	selectedCount := 0
-	for _, row := range rows {
+	firstOption := -1
+	for i, row := range rows {
 		match := numberedOptionRow.FindStringSubmatch(row)
-		if len(match) != 3 {
+		if len(match) != 4 {
 			continue
 		}
 		option, err := strconv.Atoi(match[2])
@@ -147,7 +167,15 @@ func parseNumberedOptions(rows []string) optionGeometry {
 		if !seen[option] {
 			seen[option] = true
 			geometry.available = append(geometry.available, option)
+			geometry.signature.Options = append(geometry.signature.Options, config.ModalAnswerOption{
+				Number: option,
+				Label:  strings.TrimSpace(match[3]),
+			})
 		}
+		if firstOption < 0 {
+			firstOption = i
+		}
+		geometry.lastOption = i
 		if match[1] != "" {
 			selectedCount++
 			geometry.selected = option
@@ -156,6 +184,8 @@ func parseNumberedOptions(rows []string) optionGeometry {
 	if selectedCount != 1 {
 		geometry.selected = 0
 	}
+	geometry.signature.Kind = config.NumberedModalSignatureV1
+	geometry.signature.Title = modalTitleBefore(rows, firstOption)
 	return geometry
 }
 
@@ -608,32 +638,7 @@ func cxModalOptions(rows []string) optionGeometry {
 	if !cxModalAnchor.MatchString(text) {
 		return optionGeometry{}
 	}
-	geometry := optionGeometry{}
-	seen := make(map[int]bool)
-	selectedCount := 0
-	lastOption := -1
-	for i, row := range tail {
-		match := numberedOptionRow.FindStringSubmatch(row)
-		if len(match) != 3 {
-			continue
-		}
-		option, err := strconv.Atoi(match[2])
-		if err != nil || option < 1 {
-			continue
-		}
-		lastOption = i
-		if !seen[option] {
-			seen[option] = true
-			geometry.available = append(geometry.available, option)
-		}
-		if match[1] != "" {
-			selectedCount++
-			geometry.selected = option
-		}
-	}
-	if selectedCount != 1 {
-		geometry.selected = 0
-	}
+	geometry := parseNumberedOptions(tail)
 	if geometry.selected == 0 || len(geometry.available) < 2 {
 		return optionGeometry{}
 	}
@@ -642,7 +647,7 @@ func cxModalOptions(rows []string) optionGeometry {
 	// the modal-looking rows scrollback. A footer alone may be a partial repaint,
 	// so it cannot clear an otherwise active modal.
 	if footerIdx := cxFooterIndex(tail); footerIdx >= 0 {
-		for i := lastOption + 1; i < footerIdx; i++ {
+		for i := geometry.lastOption + 1; i < footerIdx; i++ {
 			if strings.HasPrefix(strings.TrimLeft(tail[i], " \t"), cxGlyph) {
 				return optionGeometry{}
 			}

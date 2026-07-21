@@ -27,7 +27,7 @@ func TestScanAnswerRequestsDecodesNumericOption(t *testing.T) {
 	want := AnswerRequest{
 		RequestID: "answer-1", Slug: "demo", TargetInstance: "amber-otter",
 		Option: 2, Expect: "Would you like to run", RequestedBy: "lead",
-		RequestedAt: "2026-07-16T00:00:00Z",
+		RequestedAt: "2026-07-16T00:00:00Z", RegistrationID: "standing-answer-v1",
 	}
 	writeAnswerRequest(t, dir, want)
 	got := ScanAnswerRequests(dir)

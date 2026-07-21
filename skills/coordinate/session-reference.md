@@ -110,6 +110,15 @@ outcome, and exposes no raw-key surface. A modal whose choice geometry the class
 can't prove is observable but not answerable; that refusal is the honest terminal,
 not a bug.
 
+An enabled `standing_decisions.modal_answers.<registration-id>` entry may authorize
+one exact `numbered-modal-v1` signature: framework, trimmed title, and the complete
+ordered `{number,label}` option list must match byte-for-byte. The modal edge journals
+first, then the normal answer verb enqueues with `--registration-id`; requested and
+terminal answer rows retain that id. Missing, disabled, malformed, unsupported, or
+mismatched entries take the ordinary `modal_blocked` path with no answer request.
+This registry does not authorize composer input: recurring composer consent remains
+`needs_input` until a separate send-based standing policy exists.
+
 ## Close addresses
 
 - `close <slug>` tears down the live session.

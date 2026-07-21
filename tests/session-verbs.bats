@@ -1069,13 +1069,13 @@ PYEOF
 }
 
 @test "append accepts answer lifecycle rows with numeric option and closed refusal reason" {
-  run bash "$APPEND" --row '{"event":"answer_requested","request_id":"a1","slug":"feature-x","option":2}' --kdir "$TEST_KDIR"
+  run bash "$APPEND" --row '{"event":"answer_requested","request_id":"a1","slug":"feature-x","option":2,"registration_id":"standing-answer-v1"}' --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
   run bash "$APPEND" --row '{"event":"answered","request_id":"a1","slug":"feature-x","option":2}' --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
   run bash "$APPEND" --row '{"event":"answer_refused","request_id":"a2","slug":"feature-x","option":3,"reason":"expect-mismatch"}' --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
-  run jq -s -e 'map(select(.event=="answer_requested" or .event=="answered" or .event=="answer_refused")) | map(.option) == [2,2,3] and all(.[]; (.option|type)=="number")' "$TEST_KDIR/_sessions/events.jsonl"
+  run jq -s -e 'map(select(.event=="answer_requested" or .event=="answered" or .event=="answer_refused")) | map(.option) == [2,2,3] and all(.[]; (.option|type)=="number") and .[0].registration_id=="standing-answer-v1"' "$TEST_KDIR/_sessions/events.jsonl"
   [ "$status" -eq 0 ]
 }
 
@@ -1086,6 +1086,12 @@ PYEOF
   run bash "$APPEND" --row '{"event":"answer_refused","request_id":"a2","slug":"feature-x","option":2,"reason":"maybe"}' --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
   [[ "$output" == *"answer_refused requires"* ]]
+  run bash "$APPEND" --row '{"event":"modal_blocked","slug":"feature-x","reason":"modal","registration_id":"standing-answer-v1"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"allowed only on answer lifecycle"* ]]
+  run bash "$APPEND" --row '{"event":"answered","request_id":"a3","slug":"feature-x","option":2,"registration_id":"Not Stable"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"stable kebab-case"* ]]
 }
 
 @test "append accepts terminus_reached only with hosted identity and no queue request_id" {
@@ -1298,7 +1304,24 @@ PY
   local ar; ar="$(ls "$TEST_KDIR"/_sessions/answer-requests/*.json)"
   run jq -e '.option==2 and (.option|type)=="number" and .expect=="Would you like to run" and .requested_by=="coordinator"' "$ar"
   [ "$status" -eq 0 ]
+  run jq -e 'has("registration_id") | not' "$ar"
+  [ "$status" -eq 0 ]
   run jq -e 'select(.event=="answer_requested") | .request_id and .slug=="feature-x" and .option==2 and (.option|type)=="number"' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+  run jq -e 'select(.event=="answer_requested") | has("registration_id") | not' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "answer carries a standing registration id through request and requested event" {
+  write_instance inst-a feature-x
+  run bash "$ANSWER" feature-x --option 2 --expect "Additional safety checks" \
+    --registration-id codex-additional-safety-checks-keep-waiting-v1 --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+
+  local ar; ar="$(ls "$TEST_KDIR"/_sessions/answer-requests/*.json)"
+  run jq -e '.registration_id=="codex-additional-safety-checks-keep-waiting-v1"' "$ar"
+  [ "$status" -eq 0 ]
+  run jq -e 'select(.event=="answer_requested") | .registration_id=="codex-additional-safety-checks-keep-waiting-v1"' "$TEST_KDIR/_sessions/events.jsonl"
   [ "$status" -eq 0 ]
 }
 

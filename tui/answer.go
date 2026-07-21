@@ -31,11 +31,12 @@ type answerConsumedMsg struct {
 }
 
 type pendingAnswerState struct {
-	slug      string
-	requestID string
-	option    int
-	expect    string
-	writtenAt time.Time
+	slug           string
+	requestID      string
+	option         int
+	expect         string
+	registrationID string
+	writtenAt      time.Time
 }
 
 func scanAnswerRequestsCmd(sessionsDir, myName string, hosted map[string]bool) tea.Cmd {
@@ -151,7 +152,7 @@ func (m model) handleAnswerRequestScanResolved(msg answerRequestScanMsg, framewo
 			}
 			m.pendingAnswerVerify[request.RequestID] = pendingAnswerState{
 				slug: request.Slug, requestID: request.RequestID, option: request.Option,
-				expect: request.Expect, writtenAt: time.Now(),
+				expect: request.Expect, registrationID: request.RegistrationID, writtenAt: time.Now(),
 			}
 			busySlugs[request.Slug] = true
 		}
@@ -221,6 +222,7 @@ func (m model) advanceAnswerVerifications() (model, []tea.Cmd) {
 func (m model) answerVerifyTerminalCmd(pending pendingAnswerState, confirmed bool) tea.Cmd {
 	request := session.AnswerRequest{
 		RequestID: pending.requestID, Slug: pending.slug, Option: pending.option,
+		RegistrationID: pending.registrationID,
 	}
 	reason := ""
 	if !confirmed {
@@ -232,7 +234,7 @@ func (m model) answerVerifyTerminalCmd(pending pendingAnswerState, confirmed boo
 func (m model) answerOutcomeEvent(request session.AnswerRequest, answered bool, reason string) session.Event {
 	event := session.Event{
 		ActorInstance: session.StrPtr(m.instanceName), Slug: request.Slug,
-		RequestID: request.RequestID, Option: request.Option,
+		RequestID: request.RequestID, Option: request.Option, RegistrationID: request.RegistrationID,
 	}
 	if live, ok := m.localSessions[request.Slug]; ok {
 		event.SessionType = live.typ

@@ -146,6 +146,17 @@ review_flagged|review_held|review_notified|review_released) ;;
     ;;
 esac
 
+# registration_id is optional provenance carried only by answer lifecycle rows.
+if printf '%s' "$ROW" | jq -e 'has("registration_id")' >/dev/null 2>&1; then
+  case "$EVENT" in
+    answer_requested|answered|answer_refused) ;;
+    *) fail "invalid field: registration_id (allowed only on answer lifecycle events)" ;;
+  esac
+  if ! printf '%s' "$ROW" | jq -e '.registration_id | type == "string" and test("^[a-z][a-z0-9-]*$")' >/dev/null 2>&1; then
+    fail "invalid field: registration_id (must be a stable kebab-case id)"
+  fi
+fi
+
 # --- Worktree outcomes are linked lifecycle rows, not teardown terminals ---
 case "$EVENT" in
   restore_refused|worktree_quarantined)

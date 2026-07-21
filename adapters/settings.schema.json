@@ -42,6 +42,10 @@
         }
       }
     },
+    "standing_decisions": {
+      "$ref": "#/$defs/standing_decisions_config",
+      "description": "User-registered standing decisions. Registrations authorize only the transport named by their typed subtree; no registrations are installed by default."
+    },
     "obsidian": {
       "type": "object",
       "additionalProperties": false,
@@ -198,6 +202,64 @@
       "type": "string",
       "enum": ["full", "partial", "fallback", "none"],
       "description": "Closed support-level vocabulary. Mirrors adapters/capabilities.json `support_levels`."
+    },
+
+    "standing_decisions_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "modal_answers": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/modal_answer_registration"},
+          "description": "Stable registration id to exact numbered-modal answer. Missing entries and entries with enabled=false are inactive."
+        }
+      }
+    },
+
+    "modal_answer_registration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "framework", "signature", "answer", "registered_by", "registered_at", "rationale"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "framework": {"$ref": "#/$defs/framework_id"},
+        "signature": {"$ref": "#/$defs/numbered_modal_signature"},
+        "answer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["option", "expect"],
+          "properties": {
+            "option": {"type": "integer", "minimum": 1},
+            "expect": {"type": "string", "minLength": 1}
+          }
+        },
+        "registered_by": {"type": "string", "enum": ["user"]},
+        "registered_at": {"type": "string", "format": "date-time"},
+        "rationale": {"type": "string", "minLength": 1}
+      }
+    },
+
+    "numbered_modal_signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "title", "options"],
+      "properties": {
+        "kind": {"type": "string", "enum": ["numbered-modal-v1"]},
+        "title": {"type": "string", "minLength": 1},
+        "options": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["number", "label"],
+            "properties": {
+              "number": {"type": "integer", "minimum": 1},
+              "label": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
     },
 
     "capability_overrides_map": {

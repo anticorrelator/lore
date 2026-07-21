@@ -18,6 +18,7 @@ type AnswerRequest struct {
 	Expect         string `json:"expect"`
 	RequestedBy    string `json:"requested_by"`
 	RequestedAt    string `json:"requested_at"`
+	RegistrationID string `json:"registration_id,omitempty"`
 }
 
 // AnswerRequestsDir is the answer-request surface under a _sessions/ directory.

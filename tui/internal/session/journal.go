@@ -25,6 +25,7 @@ type Event struct {
 	Initiator      string            `json:"initiator,omitempty"`
 	RequestID      string            `json:"request_id,omitempty"`
 	Option         int               `json:"option,omitempty"`
+	RegistrationID string            `json:"registration_id,omitempty"`
 	Reason         string            `json:"reason,omitempty"`
 	StepID         string            `json:"step_id,omitempty"`
 	StepLabel      string            `json:"step_label,omitempty"`
