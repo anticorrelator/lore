@@ -1494,6 +1494,31 @@ coordinate_event_vocab() {
   [[ "$output" == *'"event":"closed"'* ]]
 }
 
+@test "wait follow: a backgrounded non-terminal row keeps polling to a later terminal (set -e continue-path regression)" {
+  # Backgrounded (non-tty stdout) follow whose first poll batch holds only a
+  # non-terminal row must keep polling. The read-loop's last body command is the
+  # `[[ terminal == true ]]` guard, which returns 1 for a non-terminal row; under
+  # `set -e` that once aborted the whole verb with exit 1 (no stderr) right after
+  # emitting the row, instead of continuing until the stop-set row landed.
+  write_instance inst-a feature-x
+  local f="$TEST_KDIR/_sessions/events.jsonl"
+  printf '%s\n' '{"event":"step_completed","slug":"feature-x","step_id":"one"}' > "$f"
+
+  local out="$TEST_KDIR/follow.out" err="$TEST_KDIR/follow.err" code
+  # stdout to a file (not a tty), stdin detached — model the background invocation.
+  bash "$WAIT" feature-x --follow --until terminus_reached --since 0 --timeout 10 --kdir "$TEST_KDIR" </dev/null >"$out" 2>"$err" &
+  local pid=$!
+  # Append the terminal row after the first poll batch has been consumed.
+  sleep 2
+  printf '%s\n' '{"event":"terminus_reached","slug":"feature-x"}' >> "$f"
+  wait "$pid" && code=0 || code=$?
+
+  [ "$code" -eq 0 ]
+  [ "$(jq -rs '[.[] | select(has("event")) | .event] | join(",")' "$out")" = \
+    "step_completed,terminus_reached" ]
+  [ "$(jq -rs '[.[] | select(has("next_cursor"))] | length' "$out")" -eq 2 ]
+}
+
 @test "wait follow: checkpoints survive stderr suppression (stderr cursor-loss regression)" {
   write_instance inst-a feature-x
   printf '%s\n' \

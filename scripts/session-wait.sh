@@ -390,6 +390,11 @@ process_follow_result() {
     emit_follow_record "$row" "$row_cursor" "$terminal"
     [[ "$terminal" == true ]] && exit 0
   done < <(follow_records "$result")
+  # A non-terminal last row leaves the read-loop's status at 1 (the failed
+  # `[[ terminal == true ]]` guard), which under `set -e` would kill this
+  # standalone call and abort the poll after emitting rows. Return 0 so the
+  # caller keeps polling until a stop-set row, timeout, or session-gone.
+  return 0
 }
 
 # Echo one live owner for the active target mode. Work-item mode deliberately
