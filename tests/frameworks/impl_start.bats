@@ -26,11 +26,20 @@ setup() {
   TEST_KDIR="$(mktemp -d)"
   export LORE_KNOWLEDGE_DIR="$TEST_KDIR"
 
+  # cli/lore intentionally dispatches through ~/.lore/scripts. Point that
+  # install-shaped path at this checkout so the test exercises the worktree
+  # implementation instead of whichever Lore revision the operator installed.
+  ORIGINAL_HOME="$HOME"
+  export HOME="$TEST_KDIR/home"
+  mkdir -p "$HOME/.lore"
+  ln -s "$REPO_DIR/scripts" "$HOME/.lore/scripts"
+
   # Role->model env overrides are resolution order #1, so tests never read
   # the operator's settings.json.
   export LORE_MODEL_LEAD="test-lead-model"
   export LORE_MODEL_WORKER="test-worker-model"
   export LORE_MODEL_ADVISOR="test-advisor-model"
+  export LORE_FRAMEWORK="claude-code"
 
   # Throwaway git repo: cache-branch.sh derives the branch from cwd.
   FAKE_REPO="$TEST_KDIR/fake-repo"
@@ -80,7 +89,8 @@ teardown() {
   if [ -n "${TEST_KDIR:-}" ] && [ -d "$TEST_KDIR" ]; then
     rm -rf "$TEST_KDIR"
   fi
-  unset LORE_KNOWLEDGE_DIR LORE_MODEL_LEAD LORE_MODEL_WORKER LORE_MODEL_ADVISOR
+  export HOME="$ORIGINAL_HOME"
+  unset LORE_KNOWLEDGE_DIR LORE_MODEL_LEAD LORE_MODEL_WORKER LORE_MODEL_ADVISOR LORE_FRAMEWORK
 }
 
 # --- Happy path: text mode ---------------------------------------------
@@ -146,10 +156,35 @@ assert d["models"] == {"lead": "test-lead-model", "worker": "test-worker-model",
 '
 }
 
+@test "--json exposes structured worker-class routes without replacing scalar bindings" {
+  run bash "$LORE_CLI" impl start widget-pipeline --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep '"slug"' | python3 -c '
+import json, sys
+d = json.loads(sys.stdin.read())
+routes = d["worker_class_routes"]
+assert set(routes) == {"mechanical", "standard", "judgment-dense"}
+for route in routes.values():
+    assert route["source_framework"] == "claude-code"
+    assert route["target_framework"] == "claude-code"
+    assert route["native_binding"] == route["binding"]
+    assert route["qualified"] is False
+assert d["worker_class_models"]["standard"] == "test-worker-model"
+'
+}
+
 @test "text mode renders the worker class bindings line" {
   run bash "$LORE_CLI" impl start widget-pipeline
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Worker class bindings (implement ceremony): mechanical=.* standard=test-worker-model  judgment-dense="
+}
+
+@test "start refuses an unsupported registered foreign worker route" {
+  export LORE_MODEL_WORKER_MECHANICAL="opencode/openai/gpt-5.5"
+  run bash "$LORE_CLI" impl start widget-pipeline --json
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unsupported framework bridge 'claude-code->opencode'"* ]]
+  [[ "$output" == *"refusing to prepare dispatch"* ]]
 }
 
 @test "--json prior-claims maps are keyed by task and by file; malformed lines skipped" {

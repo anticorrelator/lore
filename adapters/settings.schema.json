@@ -88,7 +88,7 @@
     "role_value": {
       "type": "string",
       "minLength": 1,
-      "description": "Model id bound to a role (e.g. \"opus\", \"sonnet\", \"haiku\", or a fully-qualified provider/model like \"anthropic/sonnet\"). Codex also accepts a reasoning-effort suffix such as \"gpt-5.5-high\", split by the Codex adapter into model \"gpt-5.5\" plus reasoning_effort \"high\". Empty string is REJECTED — its semantics are ambiguous (suppress vs. use-default) and it would route through resolve_model_for_role as a non-empty truthy value in jq. The schema forbids it; doctor surfaces violations."
+      "description": "Model id bound to a role (e.g. \"opus\", \"sonnet\", \"haiku\", or a provider/model value like \"anthropic/sonnet\"). A first slash segment that exactly matches a framework id in adapters/capabilities.json qualifies the route (for example \"codex/gpt-5.5-medium\"); other slash values retain their target-native provider/model meaning. Codex reasoning-effort suffixes remain adapter-owned: after route qualification is removed, the Codex adapter splits \"gpt-5.5-high\" into model \"gpt-5.5\" plus reasoning_effort \"high\". Empty string is REJECTED — its semantics are ambiguous (suppress vs. use-default) and it would route through resolve_model_for_role as a non-empty truthy value in jq. The schema forbids it; doctor surfaces violations."
     },
 
     "skill_id": {

@@ -950,3 +950,72 @@ func TestResolveModelForRole_ClassRoleErrorsNamingWorkerWhenUnbound(t *testing.T
 		t.Errorf("error = %v, want it to name the fallback role \"worker\"", err)
 	}
 }
+
+func TestResolveRouteForRole_UnqualifiedOpenCodeProviderBinding(t *testing.T) {
+	setupFakeLoreData(t, "opencode", map[string]string{"worker": "openai/gpt-5.5"})
+	t.Setenv("LORE_FRAMEWORK", "opencode")
+	route, err := ResolveRouteForRoleInCeremony("worker", "implement")
+	if err != nil {
+		t.Fatalf("ResolveRouteForRoleInCeremony: %v", err)
+	}
+	want := ModelRoute{"openai/gpt-5.5", "opencode", "opencode", "openai/gpt-5.5", false}
+	if route != want {
+		t.Errorf("route = %#v, want %#v", route, want)
+	}
+}
+
+func TestResolveRouteForRole_QualifiedCodexTarget(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"worker-mechanical": "codex/gpt-5.5-medium"})
+	t.Setenv("LORE_FRAMEWORK", "claude-code")
+	route, err := ResolveRouteForRoleInCeremony("worker-mechanical", "implement")
+	if err != nil {
+		t.Fatalf("ResolveRouteForRoleInCeremony: %v", err)
+	}
+	want := ModelRoute{"codex/gpt-5.5-medium", "claude-code", "codex", "gpt-5.5-medium", true}
+	if route != want {
+		t.Errorf("route = %#v, want %#v", route, want)
+	}
+}
+
+func TestResolveRouteForRole_ClassFallbackMatchesWorkerRoute(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"worker": "codex/gpt-5.5-high"})
+	t.Setenv("LORE_FRAMEWORK", "claude-code")
+	classRoute, err := ResolveRouteForRoleInCeremony("worker-judgment-dense", "implement")
+	if err != nil {
+		t.Fatalf("class route: %v", err)
+	}
+	workerRoute, err := ResolveRouteForRoleInCeremony("worker", "implement")
+	if err != nil {
+		t.Fatalf("worker route: %v", err)
+	}
+	if classRoute != workerRoute {
+		t.Errorf("class route = %#v, worker route = %#v", classRoute, workerRoute)
+	}
+}
+
+func TestResolveRouteForRole_RejectsMalformedQualifier(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"worker": "codex/"})
+	t.Setenv("LORE_FRAMEWORK", "claude-code")
+	_, err := ResolveRouteForRole("worker")
+	if err == nil || !strings.Contains(err.Error(), "empty native binding") {
+		t.Fatalf("error = %v, want malformed qualifier rejection", err)
+	}
+}
+
+func TestResolveRouteForRole_ValidatesSelectedTargetShape(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"worker": "codex/openai/gpt-5.5"})
+	t.Setenv("LORE_FRAMEWORK", "claude-code")
+	_, err := ResolveRouteForRole("worker")
+	if err == nil || !strings.Contains(err.Error(), "target framework \"codex\"") {
+		t.Fatalf("error = %v, want target-native shape rejection", err)
+	}
+}
+
+func TestResolveRouteForRole_RejectsUnsupportedForeignBridge(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"worker": "opencode/openai/gpt-5.5"})
+	t.Setenv("LORE_FRAMEWORK", "claude-code")
+	_, err := ResolveRouteForRole("worker")
+	if err == nil || !strings.Contains(err.Error(), "claude-code->opencode") {
+		t.Fatalf("error = %v, want named unsupported bridge", err)
+	}
+}

@@ -163,7 +163,30 @@ type interactionRow struct {
 // auditor-model alias list the TUI's tier-cycle key walks; each alias must be
 // valid harness `--model` input for that framework.
 type modelRouting struct {
+	Shape string   `json:"shape"`
 	Tiers []string `json:"tiers"`
+}
+
+// FrameworkModelRoutingShape returns the target-native binding shape declared
+// by adapters/capabilities.json. An empty framework resolves through the active
+// framework, and absent shape data degrades to single like scripts/lib.sh.
+func FrameworkModelRoutingShape(framework string) (string, error) {
+	if framework == "" {
+		var err error
+		framework, err = ResolveActiveFramework()
+		if err != nil {
+			return "", err
+		}
+	}
+	caps, err := loadCapabilitiesFile()
+	if err != nil {
+		return "single", nil
+	}
+	shape := caps.Frameworks[framework].ModelRouting.Shape
+	if shape == "" {
+		shape = "single"
+	}
+	return shape, nil
 }
 
 // spendTelemetry is the per-framework spend_telemetry block from
@@ -1137,6 +1160,88 @@ func ResolveModelForRoleInCeremony(role, ceremony string) (string, error) {
 	}
 
 	return "", fmt.Errorf("no model binding for role %q (no env var, no per-repo .lore.config, no harnesses.<active>.roles.%s or harnesses.<active>.roles.default in settings.json)", role, role)
+}
+
+// ModelRoute is the structured sibling of the scalar role binding. Binding is
+// the exact ResolveModelForRoleInCeremony result; NativeBinding removes only a
+// registered framework qualifier.
+type ModelRoute struct {
+	Binding         string `json:"binding"`
+	SourceFramework string `json:"source_framework"`
+	TargetFramework string `json:"target_framework"`
+	NativeBinding   string `json:"native_binding"`
+	Qualified       bool   `json:"qualified"`
+}
+
+// ResolveRouteForRole resolves a role-only route without consulting ceremony
+// overlays. It mirrors scripts/lib.sh resolve_route_for_role.
+func ResolveRouteForRole(role string) (ModelRoute, error) {
+	return ResolveRouteForRoleInCeremony(role, "")
+}
+
+// ResolveRouteForRoleInCeremony preserves scalar binding precedence, then
+// recognizes a framework qualifier only when the first slash segment is a key
+// in adapters/capabilities.json. Native payload validation belongs to the
+// selected target framework, not the source framework.
+func ResolveRouteForRoleInCeremony(role, ceremony string) (ModelRoute, error) {
+	binding, err := ResolveModelForRoleInCeremony(role, ceremony)
+	if err != nil {
+		return ModelRoute{}, err
+	}
+	return resolveModelRoute(role, binding)
+}
+
+func resolveModelRoute(role, binding string) (ModelRoute, error) {
+	if role == "" {
+		return ModelRoute{}, fmt.Errorf("resolve_route_for_role requires a role name")
+	}
+	if binding == "" {
+		return ModelRoute{}, fmt.Errorf("role %q has empty model binding", role)
+	}
+
+	source, err := ResolveActiveFramework()
+	if err != nil {
+		return ModelRoute{}, err
+	}
+	caps, err := loadCapabilitiesFile()
+	if err != nil {
+		return ModelRoute{}, err
+	}
+
+	route := ModelRoute{
+		Binding:         binding,
+		SourceFramework: source,
+		TargetFramework: source,
+		NativeBinding:   binding,
+	}
+	if slash := strings.IndexByte(binding, '/'); slash >= 0 {
+		prefix := binding[:slash]
+		if _, registered := caps.Frameworks[prefix]; registered {
+			route.TargetFramework = prefix
+			route.NativeBinding = binding[slash+1:]
+			route.Qualified = true
+			if route.NativeBinding == "" {
+				return ModelRoute{}, fmt.Errorf("role %q binding %q has an empty native binding after framework qualifier %q", role, binding, prefix+"/")
+			}
+		}
+	}
+
+	target := caps.Frameworks[route.TargetFramework]
+	shape := target.ModelRouting.Shape
+	if shape == "" {
+		shape = "single"
+	}
+	if strings.Contains(route.NativeBinding, "/") && shape != "multi" {
+		if route.Qualified {
+			return ModelRoute{}, fmt.Errorf("role %q binding %q has native binding %q but target framework %q has model_routing.shape=%s (single-provider harnesses require a bare model binding)", role, binding, route.NativeBinding, route.TargetFramework, shape)
+		}
+		return ModelRoute{}, fmt.Errorf("role %q binding %q names a provider but the active harness %q has model_routing.shape=%s (single-provider harnesses cannot serve cross-provider bindings)", role, binding, source, shape)
+	}
+
+	if source != route.TargetFramework && route.TargetFramework != "codex" {
+		return ModelRoute{}, fmt.Errorf("unsupported framework bridge %q for role %q binding %q", source+"->"+route.TargetFramework, role, binding)
+	}
+	return route, nil
 }
 
 // firstUnknownKey returns the lexicographically-first top-level key of block

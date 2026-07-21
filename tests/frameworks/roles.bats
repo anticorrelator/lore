@@ -480,6 +480,124 @@ JSON
 }
 
 # ============================================================
+# Framework-qualified structured routes
+# ============================================================
+
+@test "resolve_route_for_role preserves an unqualified OpenCode provider/model binding" {
+  write_settings <<'JSON'
+{ "version": 1, "tui_launch_framework": "opencode",
+  "harnesses": {
+    "claude-code": {"args": []},
+    "opencode": {"args": [], "roles": {"worker": "openai/gpt-5.5"}},
+    "codex": {"args": []} } }
+JSON
+  LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=opencode run bash -c "source '$LIB'; resolve_route_for_role worker implement"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.binding')" = "openai/gpt-5.5" ]
+  [ "$(printf '%s' "$output" | jq -r '.source_framework')" = "opencode" ]
+  [ "$(printf '%s' "$output" | jq -r '.target_framework')" = "opencode" ]
+  [ "$(printf '%s' "$output" | jq -r '.native_binding')" = "openai/gpt-5.5" ]
+  [ "$(printf '%s' "$output" | jq -r '.qualified')" = "false" ]
+}
+
+@test "resolve_route_for_role selects a registered Codex target and strips only its qualifier" {
+  write_settings <<'JSON'
+{ "version": 1, "tui_launch_framework": "claude-code",
+  "harnesses": {
+    "claude-code": {"args": [], "roles": {"worker-mechanical": "codex/gpt-5.5-medium"}},
+    "opencode": {"args": []}, "codex": {"args": []} } }
+JSON
+  LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; resolve_route_for_role worker-mechanical implement"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.binding')" = "codex/gpt-5.5-medium" ]
+  [ "$(printf '%s' "$output" | jq -r '.source_framework')" = "claude-code" ]
+  [ "$(printf '%s' "$output" | jq -r '.target_framework')" = "codex" ]
+  [ "$(printf '%s' "$output" | jq -r '.native_binding')" = "gpt-5.5-medium" ]
+  [ "$(printf '%s' "$output" | jq -r '.qualified')" = "true" ]
+}
+
+@test "resolve_route_for_role strips same-framework qualifiers for every registered framework" {
+  cases=(
+    "claude-code|claude-code/sonnet|sonnet"
+    "opencode|opencode/openai/gpt-5.5|openai/gpt-5.5"
+    "codex|codex/gpt-5.5-high|gpt-5.5-high"
+  )
+  for case_value in "${cases[@]}"; do
+    IFS='|' read -r framework binding native <<<"$case_value"
+    route=$(LORE_FRAMEWORK="$framework" LORE_MODEL_WORKER="$binding" bash -c "source '$LIB'; resolve_route_for_role worker")
+    [ "$(printf '%s' "$route" | jq -r '.source_framework')" = "$framework" ]
+    [ "$(printf '%s' "$route" | jq -r '.target_framework')" = "$framework" ]
+    [ "$(printf '%s' "$route" | jq -r '.native_binding')" = "$native" ]
+    [ "$(printf '%s' "$route" | jq -r '.qualified')" = "true" ]
+  done
+}
+
+@test "resolve_route_for_role class miss remains exactly the plain worker route" {
+  write_settings <<'JSON'
+{ "version": 1, "tui_launch_framework": "claude-code",
+  "harnesses": {
+    "claude-code": {"args": [], "roles": {"worker": "codex/gpt-5.5-high"}},
+    "opencode": {"args": []}, "codex": {"args": []} } }
+JSON
+  class_route=$(LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code bash -c "source '$LIB'; resolve_route_for_role worker-judgment-dense implement")
+  worker_route=$(LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code bash -c "source '$LIB'; resolve_route_for_role worker implement")
+  [ "$class_route" = "$worker_route" ]
+}
+
+@test "resolve_route_for_role rejects a registered qualifier with empty native payload" {
+  write_settings <<'JSON'
+{ "version": 1, "tui_launch_framework": "claude-code",
+  "harnesses": {
+    "claude-code": {"args": [], "roles": {"worker": "codex/"}},
+    "opencode": {"args": []}, "codex": {"args": []} } }
+JSON
+  LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; resolve_route_for_role worker"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"empty native binding"* ]]
+}
+
+@test "resolve_route_for_role validates the native payload against the selected target shape" {
+  write_settings <<'JSON'
+{ "version": 1, "tui_launch_framework": "claude-code",
+  "harnesses": {
+    "claude-code": {"args": [], "roles": {"worker": "codex/openai/gpt-5.5"}},
+    "opencode": {"args": []}, "codex": {"args": []} } }
+JSON
+  LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; resolve_route_for_role worker"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"target framework 'codex'"* ]]
+  [[ "$output" == *"single-provider"* ]]
+}
+
+@test "resolve_route_for_role names an unsupported registered foreign bridge" {
+  write_settings <<'JSON'
+{ "version": 1, "tui_launch_framework": "claude-code",
+  "harnesses": {
+    "claude-code": {"args": [], "roles": {"worker": "opencode/openai/gpt-5.5"}},
+    "opencode": {"args": []}, "codex": {"args": []} } }
+JSON
+  LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; resolve_route_for_role worker"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unsupported framework bridge 'claude-code->opencode'"* ]]
+}
+
+@test "validate_role_model_binding accepts a supported qualified Codex route" {
+  LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; validate_role_model_binding worker codex/gpt-5.5-medium"
+  [ "$status" -eq 0 ]
+}
+
+@test "Codex effort splitting receives only the route's native payload" {
+  route=$(LORE_FRAMEWORK=claude-code LORE_MODEL_WORKER=codex/gpt-5.5-medium \
+    bash -c "source '$LIB'; resolve_route_for_role worker")
+  native=$(printf '%s' "$route" | jq -r '.native_binding')
+  run bash "$REPO_DIR/adapters/agents/codex.sh" split_model_variant "$native"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"model=gpt-5.5"* ]]
+  [[ "$output" == *"reasoning_effort=medium"* ]]
+  [[ "$output" != *"codex/"* ]]
+}
+
+# ============================================================
 # codex split_model_variant subcommand
 # ============================================================
 

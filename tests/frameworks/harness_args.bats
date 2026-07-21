@@ -484,6 +484,41 @@ EOF
   [ "$bash_status" -ne 0 ]
 }
 
+@test "parity: resolve_route_for_role — registered Codex target" {
+  export LORE_FRAMEWORK=claude-code
+  write_settings <<EOF
+{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"worker-mechanical":"codex/gpt-5.5-medium","worker":"sonnet"}},"opencode":{"args":[]},"codex":{"args":[]}}}
+EOF
+  go_out=$(go_helper resolve_route_for_role worker-mechanical implement)
+  bash_out=$(bash_helper "resolve_route_for_role worker-mechanical implement")
+  [ "$go_out" = "$bash_out" ]
+  [ "$(printf '%s' "$go_out" | jq -r '.native_binding')" = "gpt-5.5-medium" ]
+}
+
+@test "parity: resolve_route_for_role — unqualified provider/model remains source-native" {
+  export LORE_FRAMEWORK=opencode
+  write_settings <<EOF
+{"version":1,"tui_launch_framework":"opencode","capability_overrides":{},"harnesses":{"claude-code":{"args":[]},"opencode":{"args":[],"roles":{"worker":"openai/gpt-5.5"}},"codex":{"args":[]}}}
+EOF
+  go_out=$(go_helper resolve_route_for_role worker)
+  bash_out=$(bash_helper "resolve_route_for_role worker")
+  [ "$go_out" = "$bash_out" ]
+  [ "$(printf '%s' "$go_out" | jq -r '.qualified')" = "false" ]
+}
+
+@test "parity: resolve_route_for_role — malformed qualifier rejected on both sides" {
+  export LORE_FRAMEWORK=claude-code
+  write_settings <<EOF
+{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"worker":"codex/"}},"opencode":{"args":[]},"codex":{"args":[]}}}
+EOF
+  go_status=0
+  go_out=$(go_helper resolve_route_for_role worker) || go_status=$?
+  bash_status=0
+  bash_out=$(bash_helper "resolve_route_for_role worker") || bash_status=$?
+  [ "$go_status" -ne 0 ]
+  [ "$bash_status" -ne 0 ]
+}
+
 # ============================================================
 # Bash-only smoke tests (don't depend on Go)
 # Cover the bash side's load_harness_args resolution ladder so the
