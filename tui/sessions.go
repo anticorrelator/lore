@@ -51,7 +51,10 @@ type liveSession struct {
 	closeRequests []string
 	// worktree is the durable execution workspace identity. A nil value marks a
 	// legacy session that cannot be safely recovered into a host checkout.
-	worktree *worktree.Identity
+	worktree     *worktree.Identity
+	worktreeID   string
+	executionDir string
+	pid          int
 	// worktreeDispositionPending suppresses duplicate publish attempts when the
 	// PTY completion and close ladder observe the same process death concurrently.
 	// Durable recovery still relies on the persisted lifecycle state, not this bit.
@@ -100,6 +103,12 @@ type worktreeDispositionMsg struct {
 	err            error
 }
 
+type managedWorktreeQuiescedMsg struct {
+	slug           string
+	closeRequestID string
+	err            error
+}
+
 // --- Cmds ---
 
 // readInstancesCmd reads the instance registry (a full snapshot).
@@ -115,8 +124,24 @@ func readInstancesCmd(sessionsDir string) tea.Cmd {
 func (m model) syncInstanceCmd() tea.Cmd {
 	dir := m.sessionsDir
 	inst := m.instanceRow()
+	kdir := m.config.KnowledgeDir
 	return func() tea.Msg {
-		return instanceSyncedMsg{err: session.Heartbeat(dir, inst)}
+		if err := session.Heartbeat(dir, inst); err != nil {
+			return instanceSyncedMsg{err: err}
+		}
+		for _, hosted := range inst.Sessions {
+			if hosted.WorktreeID == "" {
+				continue
+			}
+			placement, err := worktree.ValidateManagedPlacement(context.Background(), kdir, hosted.WorktreeID, hosted.ExecutionDir, hosted.Worktree)
+			if err != nil {
+				return instanceSyncedMsg{err: fmt.Errorf("renew managed worktree %s: %w", hosted.WorktreeID, err)}
+			}
+			if err := worktree.RenewManagedPlacement(context.Background(), kdir, hosted.WorktreeID, placement.Owner.ID); err != nil {
+				return instanceSyncedMsg{err: err}
+			}
+		}
+		return instanceSyncedMsg{err: worktree.SweepManagedPlacements(context.Background(), kdir)}
 	}
 }
 
@@ -143,6 +168,42 @@ func (m model) disposeWorktreeCmd(slug string, ls liveSession, closeRequestID st
 		outcome, err := publishWorktree(context.Background(), *ls.worktree, destination)
 		return worktreeDispositionMsg{slug: slug, closeRequestID: closeRequestID, ls: ls, outcome: outcome, err: err}
 	}
+}
+
+func (m model) quiesceManagedWorktreeCmd(slug string, ls liveSession, closeRequestID string) tea.Cmd {
+	kdir := m.config.KnowledgeDir
+	return func() tea.Msg {
+		if ls.worktree == nil || ls.worktreeID == "" || ls.executionDir == "" {
+			return managedWorktreeQuiescedMsg{slug: slug, closeRequestID: closeRequestID,
+				err: fmt.Errorf("incomplete managed worktree placement")}
+		}
+		placement, err := worktree.ValidateManagedPlacement(context.Background(), kdir, ls.worktreeID, ls.executionDir, ls.worktree)
+		if err != nil {
+			return managedWorktreeQuiescedMsg{slug: slug, closeRequestID: closeRequestID, err: err}
+		}
+		if placement.State != "active" && placement.State != "recovered" {
+			return managedWorktreeQuiescedMsg{slug: slug, closeRequestID: closeRequestID,
+				err: fmt.Errorf("managed worktree state %q cannot quiesce", placement.State)}
+		}
+		err = worktree.TransitionManagedPlacement(context.Background(), kdir, ls.worktreeID, "quiescent")
+		return managedWorktreeQuiescedMsg{slug: slug, closeRequestID: closeRequestID, err: err}
+	}
+}
+
+func (m model) handleManagedWorktreeQuiesced(msg managedWorktreeQuiescedMsg) (model, tea.Cmd) {
+	ls, tracked := m.localSessions[msg.slug]
+	if !tracked {
+		return m, nil
+	}
+	ls.worktreeDispositionPending = false
+	m.localSessions[msg.slug] = ls
+	if msg.err != nil {
+		m.flashErr = compactErr("managed worktree quiesce", msg.err)
+		return m, m.writeInstanceCmd()
+	}
+	var cmds []tea.Cmd
+	m, cmds = m.finalizeLocalSessionClosed(msg.slug, msg.closeRequestID)
+	return m, tea.Sequence(cmds...)
 }
 
 func publishWorktree(ctx context.Context, identity worktree.Identity, destination string) (worktree.PublishOutcome, error) {
@@ -369,6 +430,9 @@ type adoptedSession struct {
 	autoClose     *bool
 	closeRequests []string
 	worktree      *worktree.Identity
+	worktreeID    string
+	executionDir  string
+	pid           int
 	refusalReason string
 }
 
@@ -390,15 +454,44 @@ func adoptedFromRegistry(deadInstance string, s session.Session) adoptedSession 
 		harness: s.Harness, autoClose: s.AutoClose,
 		closeRequests: append([]string(nil), s.CloseRequests...),
 		worktree:      cloneWorktreeIdentity(s.Worktree),
+		worktreeID:    s.WorktreeID,
+		executionDir:  s.ExecutionDir,
+		pid:           s.PID,
 	}
 }
 
-func validateAdoptionIdentity(s session.Session) error {
+func validateAdoptionIdentity(kdir string, s session.Session) error {
 	if err := validatePersistedWorktree(s.Worktree); err != nil {
 		return err
 	}
 	if s.Worktree.State != worktree.StateActive && s.Worktree.State != worktree.StateTeardownPending {
 		return fmt.Errorf("worktree lifecycle %q cannot host a surviving process", s.Worktree.State)
+	}
+	managed := s.WorktreeID != "" || s.ExecutionDir != ""
+	if managed {
+		if s.WorktreeID == "" || s.ExecutionDir == "" {
+			return fmt.Errorf("incomplete managed worktree placement")
+		}
+		placement, err := worktree.ValidateManagedPlacement(context.Background(), kdir, s.WorktreeID, s.ExecutionDir, s.Worktree)
+		if err != nil {
+			return err
+		}
+		if placement.State != "active" && placement.State != "recovered" {
+			return fmt.Errorf("managed worktree lifecycle %q cannot host a surviving process", placement.State)
+		}
+		if placement.Owner.Kind != "session" || placement.Owner.PID != s.PID ||
+			placement.Owner.TmuxName != s.Tmux || placement.Owner.TmuxServer != "lore-tui" {
+			return fmt.Errorf("managed worktree owner does not match persisted session pid/tmux identity")
+		}
+	}
+	if managed {
+		panePID, err := work.TmuxPanePID(s.Tmux)
+		if err != nil {
+			return fmt.Errorf("read tmux pane pid: %w", err)
+		}
+		if s.PID <= 0 || panePID != s.PID {
+			return fmt.Errorf("tmux pane pid mismatch: observed %d, expected %d", panePID, s.PID)
+		}
 	}
 	paneCWD, err := work.TmuxPaneCWD(s.Tmux)
 	if err != nil {
@@ -412,8 +505,12 @@ func validateAdoptionIdentity(s session.Session) error {
 	if err != nil {
 		return fmt.Errorf("canonicalize tmux pane cwd: %w", err)
 	}
-	if canonicalPaneCWD != s.Worktree.CanonicalPath {
-		return fmt.Errorf("tmux pane cwd mismatch: observed %q, expected %q", canonicalPaneCWD, s.Worktree.CanonicalPath)
+	expectedDir := s.Worktree.CanonicalPath
+	if managed {
+		expectedDir = s.ExecutionDir
+	}
+	if canonicalPaneCWD != expectedDir {
+		return fmt.Errorf("tmux pane cwd mismatch: observed %q, expected %q", canonicalPaneCWD, expectedDir)
 	}
 	return nil
 }
@@ -526,7 +623,7 @@ func (m model) adoptionScanCmd() tea.Cmd {
 			for _, s := range claim.Sessions {
 				if s.Tmux != "" && work.TmuxHasSession(s.Tmux) {
 					a := adoptedFromRegistry(claim.Name, s)
-					if err := validateAdoptionIdentity(s); err != nil {
+					if err := validateAdoptionIdentity(kdir, s); err != nil {
 						a.refusalReason = err.Error()
 						claimRetained = append(claimRetained, a)
 						claimEvents = append(claimEvents, adoptionRefusedEvent(self, a))
@@ -539,7 +636,20 @@ func (m model) adoptionScanCmd() tea.Cmd {
 				// ordinary closed is reserved for an observed teardown.
 				a := adoptedFromRegistry(claim.Name, s)
 				ls := a.liveSession()
-				if err := validatePersistedWorktree(s.Worktree); err != nil {
+				if s.WorktreeID != "" || s.ExecutionDir != "" {
+					// A coordinated tree is never published or restored by session
+					// recovery. The orphan event lands below; the manager's sweep then
+					// captures its recovery bundle before any removal.
+					if s.WorktreeID == "" || s.ExecutionDir == "" {
+						a.refusalReason = "incomplete managed worktree placement"
+						claimEvents = append(claimEvents, adoptionRefusedEvent(self, a))
+						claimRetained = append(claimRetained, a)
+					} else if _, placementErr := worktree.ValidateManagedPlacement(context.Background(), kdir, s.WorktreeID, s.ExecutionDir, s.Worktree); placementErr != nil {
+						a.refusalReason = placementErr.Error()
+						claimEvents = append(claimEvents, adoptionRefusedEvent(self, a))
+						claimRetained = append(claimRetained, a)
+					}
+				} else if err := validatePersistedWorktree(s.Worktree); err != nil {
 					a.refusalReason = err.Error()
 					claimEvents = append(claimEvents, adoptionRefusedEvent(self, a))
 					claimRetained = append(claimRetained, a)
@@ -599,6 +709,11 @@ func (m model) adoptionScanCmd() tea.Cmd {
 				notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "adoption-claim-delete", Message: compactErr("adoption claim delete", err)})
 			}
 		}
+		// Crash evidence and adoption ownership transfers above must be durable
+		// before the manager may sweep an abandoned coordinated checkout.
+		if err := worktree.SweepManagedPlacements(context.Background(), kdir); err != nil {
+			notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "worktree-sweep", Message: compactErr("managed worktree sweep", err)})
+		}
 		return adoptionScanMsg{alive: alive, retained: retained, notices: notices, diagnostics: diagnostics}
 	}
 }
@@ -646,8 +761,12 @@ func (m model) handleAdoptionScan(msg adoptionScanMsg) (model, tea.Cmd) {
 			adoptedFrom:   a.deadInstance,
 			closeRequests: append([]string(nil), a.closeRequests...),
 			worktree:      cloneWorktreeIdentity(a.worktree),
+			worktreeID:    a.worktreeID,
+			executionDir:  a.executionDir,
+			pid:           a.pid,
 		}
-		cmds = append(cmds, work.AttachTerminalCmd(a.slug, a.tmuxName, a.sessionID, a.harness, *a.worktree, specW, specH))
+		cmds = append(cmds, work.AttachTerminalCmd(a.slug, a.tmuxName, a.sessionID, a.harness,
+			m.config.KnowledgeDir, a.worktreeID, a.executionDir, *a.worktree, specW, specH))
 	}
 	if diagnosticCmd != nil {
 		cmds = append(cmds, diagnosticCmd)
@@ -662,6 +781,9 @@ func (a adoptedSession) liveSession() liveSession {
 		tmuxName: a.tmuxName, adopted: true, adoptedFrom: a.deadInstance,
 		closeRequests: append([]string(nil), a.closeRequests...),
 		worktree:      cloneWorktreeIdentity(a.worktree),
+		worktreeID:    a.worktreeID,
+		executionDir:  a.executionDir,
+		pid:           a.pid,
 	}
 }
 
@@ -671,7 +793,8 @@ func (a adoptedSession) registrySession() session.Session {
 		Started: a.started.UTC().Format("2006-01-02T15:04:05Z"), Tmux: a.tmuxName,
 		RequestID: a.requestID, SessionID: a.sessionID, Harness: a.harness,
 		AutoClose: a.autoClose, CloseRequests: append([]string(nil), a.closeRequests...),
-		Worktree: cloneWorktreeIdentity(a.worktree),
+		Worktree:   cloneWorktreeIdentity(a.worktree),
+		WorktreeID: a.worktreeID, ExecutionDir: a.executionDir, PID: a.pid,
 	}
 }
 
@@ -828,6 +951,8 @@ func descriptorFromRequest(req session.Request) work.SessionDescriptor {
 		Model:            req.ModelValue(),
 		Framework:        req.FrameworkValue(),
 		Worktree:         req.WorktreeIdentity,
+		WorktreeID:       req.WorktreeIDValue(),
+		ExecutionDir:     req.ExecutionDirValue(),
 		ShortMode:        req.TrackValue() == work.SpecTrackShort,
 		SkipConfirm:      skipConfirm,
 		FindingIndex:     -1,
@@ -864,16 +989,19 @@ func (m model) spawnSession(d work.SessionDescriptor, requestID string) (model, 
 		m.pendingSpawns = make(map[string]liveSession)
 	}
 	m.pendingSpawns[slug] = liveSession{
-		typ:       sessionType(d.Type),
-		initiator: d.Initiator,
-		requestID: requestID,
-		started:   time.Now(),
-		autoClose: d.AutoClose,
+		typ:          sessionType(d.Type),
+		initiator:    d.Initiator,
+		requestID:    requestID,
+		started:      time.Now(),
+		autoClose:    d.AutoClose,
+		worktreeID:   d.WorktreeID,
+		executionDir: d.ExecutionDir,
 	}
 	if d.Initiator != "agent" {
 		m.sessionLaunchedFromModal = m.state == stateWork
 	}
-	env := work.SessionEnv{Instance: m.instanceName, Slug: slug, Type: sessionType(d.Type), RoutingOverrides: d.RoutingOverrides}
+	env := work.SessionEnv{Instance: m.instanceName, Slug: slug, Type: sessionType(d.Type),
+		WorktreeID: d.WorktreeID, ExecutionDir: d.ExecutionDir, RoutingOverrides: d.RoutingOverrides}
 	if d.Worktree == nil {
 		sourceDir := m.normalizedProjectDir
 		if sourceDir == "" {
@@ -898,12 +1026,15 @@ func (m model) instanceRow() session.Instance {
 			Initiator:     ls.initiator,
 			Started:       ls.started.UTC().Format("2006-01-02T15:04:05Z"),
 			Tmux:          ls.tmuxName,
+			PID:           ls.pid,
 			RequestID:     ls.requestID,
 			SessionID:     ls.sessionID,
 			Harness:       ls.harness,
 			AutoClose:     ls.autoClose,
 			CloseRequests: append([]string(nil), ls.closeRequests...),
 			Worktree:      cloneWorktreeIdentity(ls.worktree),
+			WorktreeID:    ls.worktreeID,
+			ExecutionDir:  ls.executionDir,
 		})
 	}
 	// Framework is resolved live at row-build so a settings change is reflected

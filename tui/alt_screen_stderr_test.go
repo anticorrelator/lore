@@ -90,7 +90,9 @@ func TestRuntimeTUIProductionFilesDoNotWriteParentStderr(t *testing.T) {
 			return nil
 		}
 		clean := filepath.ToSlash(path)
-		if clean == "main.go" || clean == "internal/config/cmd/parity-harness/main.go" {
+		// Standalone cmd packages are ordinary CLI processes: stderr is part of
+		// their command contract, not output from the alternate-screen TUI runtime.
+		if clean == "main.go" || strings.HasPrefix(clean, "cmd/") || clean == "internal/config/cmd/parity-harness/main.go" {
 			return nil
 		}
 		file, err := parser.ParseFile(fset, path, nil, 0)

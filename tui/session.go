@@ -29,6 +29,14 @@ func (m model) endLocalSessionClosed(slug, closeRequestID string) (model, []tea.
 	if !ok {
 		return m, nil
 	}
+	if ls.worktreeID != "" {
+		if ls.worktreeDispositionPending {
+			return m, nil
+		}
+		ls.worktreeDispositionPending = true
+		m.localSessions[slug] = ls
+		return m, []tea.Cmd{tea.Sequence(m.writeInstanceCmd(), m.quiesceManagedWorktreeCmd(slug, ls, closeRequestID))}
+	}
 	if ls.worktree != nil && ls.worktree.OwnsWorktree() {
 		if ls.worktreeDispositionPending {
 			return m, nil
@@ -83,7 +91,7 @@ func (m model) endLocalSessionFailed(slug, closeRequestID, reason string) (model
 		requestID = ls.requestID
 	}
 	var refusalCmd tea.Cmd
-	if ls.worktree != nil {
+	if ls.worktree != nil && ls.worktreeID == "" {
 		pending := *ls.worktree
 		if pending.State != worktree.StateTeardownPending {
 			var err error
@@ -274,6 +282,9 @@ func (m model) handleSessionProcessStarted(msg work.SessionProcessStartedMsg) (m
 	meta.sessionID = msg.SessionID
 	meta.harness = msg.Harness
 	meta.tmuxName = msg.Tmux
+	meta.pid = msg.PID
+	meta.worktreeID = msg.WorktreeID
+	meta.executionDir = msg.ExecutionDir
 	if !meta.adopted {
 		meta.worktree = cloneWorktreeIdentity(&msg.Worktree)
 	}

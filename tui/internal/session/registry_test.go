@@ -60,6 +60,7 @@ func TestSessionWorktreeIdentityRoundTripAndLegacyOmission(t *testing.T) {
 	}
 	inst := Instance{Name: "owner", Repo: "repo", PID: 1, Sessions: []Session{{
 		Slug: "demo", Type: "implement", Started: "2026-07-21T00:00:00Z", Worktree: identity,
+		WorktreeID: "tree-1", ExecutionDir: identity.CanonicalPath, PID: 4242, Tmux: "lore-owner-demo",
 	}}}
 	if err := WriteInstance(dir, inst); err != nil {
 		t.Fatal(err)
@@ -71,6 +72,10 @@ func TestSessionWorktreeIdentityRoundTripAndLegacyOmission(t *testing.T) {
 	round := got[0].Sessions[0].Worktree
 	if *round != *identity {
 		t.Fatalf("worktree identity changed across registry roundtrip:\n got %+v\nwant %+v", *round, *identity)
+	}
+	managed := got[0].Sessions[0]
+	if managed.WorktreeID != "tree-1" || managed.ExecutionDir != identity.CanonicalPath || managed.PID != 4242 || managed.Tmux != "lore-owner-demo" {
+		t.Fatalf("independent manager/process ownership changed across registry roundtrip: %+v", managed)
 	}
 
 	legacy := Instance{Name: "legacy", Repo: "repo", PID: 2, Sessions: []Session{{Slug: "old", Type: "spec"}}}

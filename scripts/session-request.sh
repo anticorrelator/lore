@@ -52,6 +52,11 @@
 #                      otherwise the value is parsed as JSON. When omitted for a
 #                      fresh request, the claiming TUI allocates and captures a
 #                      session-owned worktree before reaching the launch boundary.
+#   --worktree-id <id>  Manager-owned coordination worktree identifier. Requires
+#                      --execution-dir and --worktree-identity; the three values
+#                      are checked against the live manager registry row.
+#   --execution-dir <p> Absolute manager-resolved child working directory. This is
+#                      hard placement, unlike the claim-timing-only --prefer-dir.
 #   --prefer-dir <p>   Soft project-dir preference stored as prefer_project_dir: an
 #                      instance whose project dir matches claims immediately; any
 #                      other defers ~15s before it may claim. Resolved physically at
@@ -104,6 +109,10 @@ FRAMEWORK=""
 FRAMEWORK_PROVIDED=0
 WORKTREE_IDENTITY=""
 WORKTREE_IDENTITY_PROVIDED=0
+WORKTREE_ID=""
+WORKTREE_ID_PROVIDED=0
+EXECUTION_DIR=""
+EXECUTION_DIR_PROVIDED=0
 PREFER_DIR=""
 PREFER_DIR_PROVIDED=0
 PREFER_CWD_PROVIDED=0
@@ -125,6 +134,8 @@ while [[ $# -gt 0 ]]; do
     --model) MODEL="$2"; MODEL_PROVIDED=1; shift 2 ;;
     --framework) FRAMEWORK="$2"; FRAMEWORK_PROVIDED=1; shift 2 ;;
     --worktree-identity) WORKTREE_IDENTITY="$2"; WORKTREE_IDENTITY_PROVIDED=1; shift 2 ;;
+    --worktree-id) WORKTREE_ID="$2"; WORKTREE_ID_PROVIDED=1; shift 2 ;;
+    --execution-dir) EXECUTION_DIR="$2"; EXECUTION_DIR_PROVIDED=1; shift 2 ;;
     --prefer-dir) PREFER_DIR="$2"; PREFER_DIR_PROVIDED=1; shift 2 ;;
     --prefer-cwd) PREFER_CWD_PROVIDED=1; shift ;;
     --anywhere) ANYWHERE_PROVIDED=1; shift ;;
@@ -135,7 +146,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) sed -n '2,79p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--target <name> | --prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--framework <claude-code|codex|opencode>] [--worktree-identity <json|file>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--target <name> | --prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--framework <claude-code|codex|opencode>] [--worktree-identity <json|file>] [--worktree-id <id> --execution-dir <path>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -242,6 +253,26 @@ if [[ $WORKTREE_IDENTITY_PROVIDED -eq 1 ]]; then
   ' >/dev/null 2>&1; then
     fail "invalid --worktree-identity (expected complete v1 identity in captured state)"
   fi
+fi
+
+# Manager-owned placement is an all-or-nothing tuple. The guard identity is the
+# repository identity proof; worktree_id is the manager record key; execution_dir
+# is the hard child cwd. Never infer one from another when a projection dropped a
+# field, because that would turn schema loss into an incorrectly placed writer.
+MANAGED_PLACEMENT_FIELDS=$((WORKTREE_ID_PROVIDED + EXECUTION_DIR_PROVIDED))
+if [[ $MANAGED_PLACEMENT_FIELDS -ne 0 ]]; then
+  [[ $MANAGED_PLACEMENT_FIELDS -eq 2 && $WORKTREE_IDENTITY_PROVIDED -eq 1 ]] || \
+    fail "managed worktree placement requires --worktree-id, --execution-dir, and --worktree-identity together"
+  [[ "$WORKTREE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || \
+    fail "invalid --worktree-id: '$WORKTREE_ID'"
+  [[ "$EXECUTION_DIR" = /* ]] || \
+    fail "invalid --execution-dir: '$EXECUTION_DIR' (must be absolute)"
+  EXECUTION_DIR_RESOLVED="$(cd "$EXECUTION_DIR" 2>/dev/null && pwd -P || true)"
+  [[ -n "$EXECUTION_DIR_RESOLVED" ]] || \
+    fail "invalid --execution-dir: '$EXECUTION_DIR' (must name an existing directory)"
+  IDENTITY_DIR="$(printf '%s' "$WORKTREE_IDENTITY_JSON" | jq -r '.canonical_path')"
+  [[ "$EXECUTION_DIR_RESOLVED" == "$IDENTITY_DIR" ]] || \
+    fail "execution_dir does not match worktree_identity.canonical_path"
 fi
 
 # prefer_project_dir is a soft routing preference: a matching instance claims
@@ -370,6 +401,27 @@ else
 fi
 [[ -d "$KNOWLEDGE_DIR" ]] || fail "knowledge store not found at: $KNOWLEDGE_DIR"
 
+# The manager registry is the authority for coordinated placement. Validate the
+# exact live row after resolving --kdir so a caller cannot pair a real checkout
+# with a different stream's id or a stale/truncated identity.
+if [[ $WORKTREE_ID_PROVIDED -eq 1 ]]; then
+  MANAGER_ROW="$KNOWLEDGE_DIR/_coordination/worktrees/registry/$WORKTREE_ID.json"
+  [[ -f "$MANAGER_ROW" ]] || fail "managed worktree registry row not found for --worktree-id '$WORKTREE_ID'"
+  if ! jq -e \
+    --arg id "$WORKTREE_ID" \
+    --arg dir "$EXECUTION_DIR_RESOLVED" \
+    --argjson identity "$WORKTREE_IDENTITY_JSON" '
+      .schema_version == 1 and
+      .worktree_id == $id and
+      .execution_dir == $dir and
+      (.state == "reserved" or .state == "bound") and
+      (.owner.kind == "session" and (.owner.id | type == "string" and length > 0)) and
+      .guard_identity == $identity
+    ' "$MANAGER_ROW" >/dev/null 2>&1; then
+    fail "managed worktree placement does not match registry row for '$WORKTREE_ID'"
+  fi
+fi
+
 PENDING_DIR="$KNOWLEDGE_DIR/_sessions/requests/pending"
 mkdir -p "$PENDING_DIR"
 
@@ -435,6 +487,12 @@ if [[ -n "$WORKTREE_IDENTITY_JSON" ]]; then
   ROW="$(printf '%s' "$ROW" | jq -c --argjson wi "$WORKTREE_IDENTITY_JSON" '. + {worktree_identity: $wi}')"
 fi
 
+# worktree_id/execution_dir are hard placement and therefore travel together.
+# prefer_project_dir remains a separate, soft claim-timing hint.
+if [[ $WORKTREE_ID_PROVIDED -eq 1 ]]; then
+  ROW="$(printf '%s' "$ROW" | jq -c --arg id "$WORKTREE_ID" --arg dir "$EXECUTION_DIR_RESOLVED" '. + {worktree_id: $id, execution_dir: $dir}')"
+fi
+
 # prefer_project_dir follows omit-when-empty: added only when --prefer-dir or
 # --prefer-cwd carried a resolved value, so an absent preference stays absent (the
 # Go decoder reads a nil *string → every instance is immediately eligible).
@@ -466,9 +524,12 @@ EVENT_ROW="$(jq -n \
   --arg initiator "$INITIATOR" \
   --argjson slug "$SLUG_JSON" \
   --argjson target "$TARGET_JSON" \
+  --arg worktree_id "$WORKTREE_ID" \
+  --arg execution_dir "${EXECUTION_DIR_RESOLVED:-}" \
   '{event: "requested", request_id: $request_id, session_type: $session_type, initiator: $initiator}
    + (if $slug != null then {slug: $slug} else {} end)
-   + (if $target != null then {target_instance: $target} else {} end)')"
+   + (if $target != null then {target_instance: $target} else {} end)
+   + (if $worktree_id != "" then {worktree_id: $worktree_id, execution_dir: $execution_dir} else {} end)')"
 
 if ! printf '%s' "$EVENT_ROW" | bash "$SCRIPT_DIR/session-event-append.sh" --kdir "$KNOWLEDGE_DIR" >/dev/null; then
   # The pending row is durable (the source of truth for liveness); a lost
@@ -484,8 +545,11 @@ if [[ $JSON_MODE -eq 1 ]]; then
     --arg type "$TYPE" \
     --argjson slug "$SLUG_JSON" \
     --argjson target "$TARGET_JSON" \
+    --arg worktree_id "$WORKTREE_ID" \
+    --arg execution_dir "${EXECUTION_DIR_RESOLVED:-}" \
     --arg path "$RELPATH" \
-    '{request_id: $request_id, type: $type, slug: $slug, target_instance: $target, path: $path, enqueued: true}')"
+    '{request_id: $request_id, type: $type, slug: $slug, target_instance: $target, path: $path, enqueued: true}
+     + (if $worktree_id != "" then {worktree_id: $worktree_id, execution_dir: $execution_dir} else {} end)')"
   json_output "$RESULT"
 fi
 

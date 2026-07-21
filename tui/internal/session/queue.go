@@ -101,6 +101,14 @@ type Request struct {
 	// invalid identity is refused before process spawn.
 	WorktreeIdentity *worktree.Identity `json:"worktree_identity,omitempty"`
 
+	// WorktreeID and ExecutionDir are the manager-owned placement tuple for a
+	// coordinated writer. They are optional only for rolling compatibility and
+	// must be consumed all-or-nothing: WorktreeID names the manager registry row,
+	// while ExecutionDir is the exact child cwd validated against that row and
+	// WorktreeIdentity. PreferProjectDir remains claim timing only.
+	WorktreeID   *string `json:"worktree_id,omitempty"`
+	ExecutionDir *string `json:"execution_dir,omitempty"`
+
 	// PreferProjectDir is a soft routing preference: a physically-resolved project
 	// directory an instance is preferred to claim from. Unlike TargetInstance and
 	// MinVintage (hard read-side filters), this only delays other instances — the
@@ -169,6 +177,22 @@ func (r Request) FrameworkValue() string {
 		return ""
 	}
 	return *r.Framework
+}
+
+// WorktreeIDValue returns the manager-owned worktree id or "" when absent.
+func (r Request) WorktreeIDValue() string {
+	if r.WorktreeID == nil {
+		return ""
+	}
+	return *r.WorktreeID
+}
+
+// ExecutionDirValue returns the hard child cwd or "" when absent.
+func (r Request) ExecutionDirValue() string {
+	if r.ExecutionDir == nil {
+		return ""
+	}
+	return *r.ExecutionDir
 }
 
 // PreferProjectDirValue returns the soft project-dir preference or "" when absent.

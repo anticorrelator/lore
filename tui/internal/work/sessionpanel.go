@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -118,10 +119,13 @@ type SessionProcessStartedMsg struct {
 	// signalling it would only detach a viewer. Both empty/zero for direct-PTY.
 	Tmux    string
 	PanePID int
+	PID     int
 
 	// Worktree is the validated session workspace identity used for the
 	// harness cwd. The host persists it with the live session after spawn.
-	Worktree worktree.Identity
+	Worktree     worktree.Identity
+	WorktreeID   string
+	ExecutionDir string
 
 	// Notices describe non-fatal launch degradations for the host model to render.
 	Notices []OperatorNotice
@@ -1196,11 +1200,35 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 		if err := worktree.ValidateIdentity(context.Background(), identity); err != nil {
 			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: %w", err)}
 		}
+		managed := d.WorktreeID != "" || d.ExecutionDir != ""
+		var placement worktree.ManagedPlacement
+		if managed {
+			if d.WorktreeID == "" || d.ExecutionDir == "" {
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: incomplete managed worktree placement")}
+			}
+			var err error
+			placement, err = worktree.ValidateManagedPlacement(context.Background(), knowledgeDir, d.WorktreeID, d.ExecutionDir, d.Worktree)
+			if err != nil {
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: %w", err)}
+			}
+			if placement.State != "reserved" && placement.State != "bound" {
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: managed worktree state %q is not launchable", placement.State)}
+			}
+			if placement.Owner.Kind != "session" {
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: managed worktree owner kind %q cannot host a session", placement.Owner.Kind)}
+			}
+			if err := runManagedWorktreeCommand(context.Background(), knowledgeDir, "bind", d.WorktreeID, placement.Owner.ID, 0, ""); err != nil {
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: %w", err)}
+			}
+		}
 		identity, err := worktree.Transition(identity, worktree.StateActive)
 		if err != nil {
 			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: %w", err)}
 		}
 		worktreeDir := identity.CanonicalPath
+		if managed {
+			worktreeDir = d.ExecutionDir
+		}
 		// Build the initial prompt to auto-submit. Passing it as a positional
 		// argument to the harness binary starts an interactive session and
 		// submits it immediately — no PTY-write timing hack needed.
@@ -1363,20 +1391,73 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 			}
 			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("pty start: %w", err), Notices: notices}
 		}
+		processPID := 0
+		if panePID != 0 {
+			processPID = panePID
+		} else if cmd.Process != nil {
+			processPID = cmd.Process.Pid
+		}
+		if managed {
+			ownerTmux := ""
+			ownerPID := processPID
+			if tmuxName != "" {
+				ownerTmux = tmuxName
+			}
+			if err := runManagedWorktreeCommand(context.Background(), knowledgeDir, "bind", d.WorktreeID, placement.Owner.ID, ownerPID, ownerTmux); err == nil {
+				err = runManagedWorktreeCommand(context.Background(), knowledgeDir, "transition-active", d.WorktreeID, placement.Owner.ID, 0, "")
+			}
+			if err != nil {
+				_ = ptmx.Close()
+				if tmuxName != "" {
+					killTmuxSession(tmuxName)
+				} else if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("managed worktree activation failed: %w", err), Notices: notices}
+			}
+		}
 
 		return SessionProcessStartedMsg{
-			Slug:      slug,
-			Ptmx:      ptmx,
-			Cmd:       cmd,
-			Output:    ptyReaderChan(ptmx),
-			SessionID: sessionID,
-			Harness:   activeFramework,
-			Tmux:      tmuxName,
-			PanePID:   panePID,
-			Worktree:  identity,
-			Notices:   notices,
+			Slug:         slug,
+			Ptmx:         ptmx,
+			Cmd:          cmd,
+			Output:       ptyReaderChan(ptmx),
+			SessionID:    sessionID,
+			Harness:      activeFramework,
+			Tmux:         tmuxName,
+			PanePID:      panePID,
+			PID:          processPID,
+			Worktree:     identity,
+			WorktreeID:   d.WorktreeID,
+			ExecutionDir: worktreeDir,
+			Notices:      notices,
 		}
 	}
+}
+
+func runManagedWorktreeCommand(ctx context.Context, knowledgeDir, action, worktreeID, ownerID string, ownerPID int, ownerTmux string) error {
+	args := []string{"coordinate", "worktree"}
+	switch action {
+	case "bind":
+		args = append(args, "bind", "--worktree-id", worktreeID, "--owner-id", ownerID)
+		if ownerPID != 0 {
+			args = append(args, "--owner-pid", strconv.Itoa(ownerPID))
+		}
+		if ownerTmux != "" {
+			args = append(args, "--owner-tmux", ownerTmux, "--tmux-server", tmuxServerLabel)
+		}
+	case "transition-active":
+		args = append(args, "transition", "--worktree-id", worktreeID, "--to", "active")
+	case "transition-recovered":
+		args = append(args, "transition", "--worktree-id", worktreeID, "--to", "recovered")
+	default:
+		return fmt.Errorf("unknown managed worktree action %q", action)
+	}
+	args = append(args, "--kdir", knowledgeDir)
+	if out, err := exec.CommandContext(ctx, "lore", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("lore %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // AttachTerminalCmd re-attaches a panel to an already-running tmux-hosted session
@@ -1386,7 +1467,7 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 // registry-recovered sessionID/harness so teardown can still bind the spend probe.
 // A pane-PID query failure means the session died between the adoption scan and the
 // attach; that surfaces as a spawn error (the caller journals it closed).
-func AttachTerminalCmd(slug, tmuxName, sessionID, harness string, identity worktree.Identity, width, height int) tea.Cmd {
+func AttachTerminalCmd(slug, tmuxName, sessionID, harness, knowledgeDir, worktreeID, executionDir string, identity worktree.Identity, width, height int) tea.Cmd {
 	return func() (result tea.Msg) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -1397,27 +1478,58 @@ func AttachTerminalCmd(slug, tmuxName, sessionID, harness string, identity workt
 		if err := worktree.ValidateIdentity(context.Background(), identity); err != nil {
 			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse tmux adoption: %w", err)}
 		}
+		managed := worktreeID != "" || executionDir != ""
+		var placement worktree.ManagedPlacement
+		if managed {
+			if worktreeID == "" || executionDir == "" {
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse tmux adoption: incomplete managed worktree placement")}
+			}
+			var err error
+			placement, err = worktree.ValidateManagedPlacement(context.Background(), knowledgeDir, worktreeID, executionDir, &identity)
+			if err != nil {
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse tmux adoption: %w", err)}
+			}
+			if placement.State != "active" && placement.State != "recovered" {
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse tmux adoption: managed worktree state %q is not recoverable", placement.State)}
+			}
+		}
 		panePID, perr := tmuxPanePID(tmuxName)
 		if perr != nil {
 			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("tmux pane pid: %w", perr)}
 		}
 		cmd := tmuxAttachCommand(tmuxName)
 		cmd.Dir = identity.CanonicalPath
+		if managed {
+			cmd.Dir = executionDir
+		}
 		ws := &pty.Winsize{Rows: uint16(height), Cols: uint16(width)}
 		ptmx, err := pty.StartWithSize(cmd, ws)
 		if err != nil {
 			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("pty start: %w", err)}
 		}
+		if managed {
+			managerErr := runManagedWorktreeCommand(context.Background(), knowledgeDir, "bind", worktreeID, placement.Owner.ID, panePID, tmuxName)
+			if managerErr == nil && placement.State == "active" {
+				managerErr = runManagedWorktreeCommand(context.Background(), knowledgeDir, "transition-recovered", worktreeID, placement.Owner.ID, 0, "")
+			}
+			if managerErr != nil {
+				_ = ptmx.Close()
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("managed worktree recovery failed: %w", managerErr)}
+			}
+		}
 		return SessionProcessStartedMsg{
-			Slug:      slug,
-			Ptmx:      ptmx,
-			Cmd:       cmd,
-			Output:    ptyReaderChan(ptmx),
-			SessionID: sessionID,
-			Harness:   harness,
-			Tmux:      tmuxName,
-			PanePID:   panePID,
-			Worktree:  identity,
+			Slug:         slug,
+			Ptmx:         ptmx,
+			Cmd:          cmd,
+			Output:       ptyReaderChan(ptmx),
+			SessionID:    sessionID,
+			Harness:      harness,
+			Tmux:         tmuxName,
+			PanePID:      panePID,
+			PID:          panePID,
+			Worktree:     identity,
+			WorktreeID:   worktreeID,
+			ExecutionDir: cmd.Dir,
 		}
 	}
 }

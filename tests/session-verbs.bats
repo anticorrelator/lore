@@ -228,6 +228,55 @@ journal_boundaries() {
   [ ! -e "$TEST_KDIR/_sessions/requests" ]
 }
 
+@test "request carries manager-validated worktree_id and execution_dir as hard placement" {
+  mkdir -p "$TEST_KDIR/managed-tree" "$TEST_KDIR/_coordination/worktrees/registry"
+  local execution_dir; execution_dir="$(cd "$TEST_KDIR/managed-tree" && pwd -P)"
+  local identity
+  identity="$(jq -cn --arg dir "$execution_dir" '{version:1,canonical_path:$dir,git_common_dir:"/tmp/repo/.git",git_dir:"/tmp/repo/.git/worktrees/session-tree",epoch:"epoch-1",captured:{canonical_path:"/tmp/repo",git_common_dir:"/tmp/repo/.git",git_dir:"/tmp/repo/.git",head_oid:"abc",index_digest:"index",worktree_digest:"tree"},target_ref:"refs/heads/main",target_oid:"abc",state:"captured"}')"
+  jq -n --arg dir "$execution_dir" --argjson identity "$identity" \
+    '{schema_version:1,worktree_id:"tree-1",execution_dir:$dir,state:"reserved",owner:{kind:"session",id:"worker-1"},guard_identity:$identity}' \
+    > "$TEST_KDIR/_coordination/worktrees/registry/tree-1.json"
+
+  run bash "$REQUEST" --type worker --slug impl-demo--w1 --worktree-id tree-1 \
+    --execution-dir "$execution_dir" --worktree-identity "$identity" --anywhere --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg dir "$execution_dir" \
+    '.worktree_id == "tree-1" and .execution_dir == $dir and .enqueued == true'
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e --arg dir "$execution_dir" \
+    '.worktree_id == "tree-1" and .execution_dir == $dir and .worktree_identity.canonical_path == $dir' "$pending"
+  [ "$status" -eq 0 ]
+  run jq -e --arg dir "$execution_dir" \
+    '.event == "requested" and .worktree_id == "tree-1" and .execution_dir == $dir' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "request refuses a partial managed placement tuple" {
+  mkdir -p "$TEST_KDIR/managed-tree"
+  local execution_dir; execution_dir="$(cd "$TEST_KDIR/managed-tree" && pwd -P)"
+  run bash "$REQUEST" --type worker --slug impl-demo--w1 --worktree-id tree-1 \
+    --execution-dir "$execution_dir" --anywhere --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"requires --worktree-id, --execution-dir, and --worktree-identity together"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+@test "request refuses managed placement that disagrees with the registry" {
+  mkdir -p "$TEST_KDIR/managed-tree" "$TEST_KDIR/_coordination/worktrees/registry"
+  local execution_dir; execution_dir="$(cd "$TEST_KDIR/managed-tree" && pwd -P)"
+  local identity
+  identity="$(jq -cn --arg dir "$execution_dir" '{version:1,canonical_path:$dir,git_common_dir:"/tmp/repo/.git",git_dir:"/tmp/repo/.git/worktrees/session-tree",epoch:"epoch-1",captured:{canonical_path:"/tmp/repo",git_common_dir:"/tmp/repo/.git",git_dir:"/tmp/repo/.git",head_oid:"abc",index_digest:"index",worktree_digest:"tree"},target_ref:"refs/heads/main",target_oid:"abc",state:"captured"}')"
+  jq -n --arg dir "$execution_dir" --argjson identity "$identity" \
+    '{schema_version:1,worktree_id:"different",execution_dir:$dir,state:"reserved",owner:{kind:"session",id:"worker-1"},guard_identity:$identity}' \
+    > "$TEST_KDIR/_coordination/worktrees/registry/tree-1.json"
+
+  run bash "$REQUEST" --type worker --slug impl-demo--w1 --worktree-id tree-1 \
+    --execution-dir "$execution_dir" --worktree-identity "$identity" --anywhere --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"does not match registry row"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
 @test "request with invalid --framework refuses before enqueue" {
   run bash "$REQUEST" --type spec --slug wi --framework bogus --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]

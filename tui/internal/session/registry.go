@@ -41,12 +41,15 @@ type Session struct {
 	Started   string `json:"started"`   // ISO 8601 UTC
 
 	Tmux          string             `json:"tmux,omitempty"`
+	PID           int                `json:"pid,omitempty"`
 	RequestID     string             `json:"request_id,omitempty"`
 	SessionID     string             `json:"session_id,omitempty"`
 	Harness       string             `json:"harness,omitempty"`
 	AutoClose     *bool              `json:"auto_close,omitempty"`
 	CloseRequests []string           `json:"close_requests,omitempty"`
 	Worktree      *worktree.Identity `json:"worktree,omitempty"`
+	WorktreeID    string             `json:"worktree_id,omitempty"`
+	ExecutionDir  string             `json:"execution_dir,omitempty"`
 }
 
 // Instance is one live TUI instance's registry row, stored at

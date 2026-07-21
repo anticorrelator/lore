@@ -704,10 +704,11 @@ func (m *model) applyTerminalColorPair() {
 // PTY and kills the panel's subprocess, which for a tmux session is the attach
 // client — killing it detaches and leaves the harness pane running. So tmux-hosted
 // sessions are NOT journaled `closed` and their registry row is left on disk as the
-// recovery manifest for the next start to adopt. Direct-PTY sessions keep the old
-// kill + `closed` + row-removal behavior. When any tmux session survives, the row
-// is rewritten to list only the survivors so the direct-PTY sessions just closed
-// are not re-adopted (and double-closed) on the next start.
+// recovery manifest for the next start to adopt. Legacy direct-PTY sessions keep
+// the old kill + `closed` + row-removal behavior. A manager-owned direct-PTY
+// session is also retained because synchronous quit cannot prove its process dead
+// and manager state quiescent. When any ownership is retained, the row is rewritten
+// to list it so legacy direct-PTY sessions just closed are not re-adopted.
 func (m *model) cleanupAllSubprocesses() {
 	if m.aiCancel != nil {
 		m.aiCancel()
@@ -716,10 +717,14 @@ func (m *model) cleanupAllSubprocesses() {
 	for slug, panel := range m.sessionPanels {
 		m.sessionPanels[slug] = panel.Cleanup()
 	}
-	anyTmuxSurvives := false
+	anySessionRetained := false
 	for slug, ls := range m.localSessions {
-		if ls.tmuxName != "" {
-			anyTmuxSurvives = true
+		if ls.tmuxName != "" || ls.worktreeID != "" {
+			// A managed direct-PTY quit has no asynchronous close ladder left to
+			// prove process death and quiescence. Preserve its registry ownership
+			// exactly like a tmux survivor; startup recovery records the orphan
+			// before the manager's crash sweep may remove the tree.
+			anySessionRetained = true
 			continue // detach-and-preserve: no closed row, keep it on the manifest
 		}
 		_ = session.AppendEvent(m.eventScript, m.config.KnowledgeDir, m.closedEventFor(slug, ls))
@@ -728,7 +733,7 @@ func (m *model) cleanupAllSubprocesses() {
 	if m.instanceName == "" || m.sessionsDir == "" {
 		return
 	}
-	if anyTmuxSurvives {
+	if anySessionRetained {
 		_ = session.WriteInstance(m.sessionsDir, m.instanceRow())
 	} else {
 		_ = session.RemoveInstance(m.sessionsDir, m.instanceName)

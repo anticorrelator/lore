@@ -547,13 +547,16 @@ func TestPreferProjectDirRoundTrips(t *testing.T) {
 }
 
 func TestWorktreeIdentityRoundTripsWithoutProjectionLoss(t *testing.T) {
-	row := `{"request_id":"x","type":"spec","worktree_identity":{"version":1,"canonical_path":"/work/session","git_common_dir":"/repo/.git","git_dir":"/repo/.git/worktrees/session","epoch":"epoch-1","captured":{"canonical_path":"/repo","git_common_dir":"/repo/.git","git_dir":"/repo/.git","head_oid":"abc","index_digest":"index","worktree_digest":"tree"},"target_ref":"refs/heads/main","target_oid":"abc","state":"captured"}}`
+	row := `{"request_id":"x","type":"spec","worktree_id":"tree-1","execution_dir":"/work/session","worktree_identity":{"version":1,"canonical_path":"/work/session","git_common_dir":"/repo/.git","git_dir":"/repo/.git/worktrees/session","epoch":"epoch-1","captured":{"canonical_path":"/repo","git_common_dir":"/repo/.git","git_dir":"/repo/.git","head_oid":"abc","index_digest":"index","worktree_digest":"tree"},"target_ref":"refs/heads/main","target_oid":"abc","state":"captured"}}`
 	var req Request
 	if err := json.Unmarshal([]byte(row), &req); err != nil {
 		t.Fatalf("decode worktree_identity: %v", err)
 	}
 	if req.WorktreeIdentity == nil || req.WorktreeIdentity.CanonicalPath != "/work/session" || req.WorktreeIdentity.Epoch != "epoch-1" {
 		t.Fatalf("worktree identity projection lost fields: %+v", req.WorktreeIdentity)
+	}
+	if req.WorktreeIDValue() != "tree-1" || req.ExecutionDirValue() != "/work/session" {
+		t.Fatalf("managed placement projection lost fields: id=%q dir=%q", req.WorktreeIDValue(), req.ExecutionDirValue())
 	}
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -565,6 +568,9 @@ func TestWorktreeIdentityRoundTripsWithoutProjectionLoss(t *testing.T) {
 	}
 	if got := string(roundTripped["worktree_identity"]); !strings.Contains(got, `"epoch":"epoch-1"`) || !strings.Contains(got, `"worktree_digest":"tree"`) {
 		t.Fatalf("worktree identity did not survive round trip: %s", got)
+	}
+	if string(roundTripped["worktree_id"]) != `"tree-1"` || string(roundTripped["execution_dir"]) != `"/work/session"` {
+		t.Fatalf("managed placement did not survive round trip: %s", data)
 	}
 }
 

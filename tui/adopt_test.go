@@ -355,6 +355,30 @@ func TestCleanupAllSubprocesses_RemovesRowWhenNoTmux(t *testing.T) {
 	}
 }
 
+func TestCleanupAllSubprocesses_RetainsManagedDirectPTYForCrashSweep(t *testing.T) {
+	m, sessionsDir := baseSessionModel(t)
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	identity := &worktree.Identity{Version: worktree.IdentityVersion, State: worktree.StateActive}
+	m.localSessions = map[string]liveSession{
+		"managed": {typ: "worker", initiator: "agent", started: time.Now(), worktree: identity,
+			worktreeID: "tree-1", executionDir: "/managed/tree-1", pid: 4242},
+	}
+	m.sessionPanels = map[string]work.SessionPanelModel{"managed": work.NewSessionPanelModel("managed")}
+	if err := session.WriteInstance(sessionsDir, m.instanceRow()); err != nil {
+		t.Fatal(err)
+	}
+
+	m.cleanupAllSubprocesses()
+
+	if got := readEventTypes(t, m.config.KnowledgeDir); len(got) != 0 {
+		t.Fatalf("managed direct quit emitted unproven terminal events: %v", got)
+	}
+	rows := session.ListInstances(sessionsDir)
+	if len(rows) != 1 || len(rows[0].Sessions) != 1 || rows[0].Sessions[0].WorktreeID != "tree-1" || rows[0].Sessions[0].PID != 4242 {
+		t.Fatalf("managed direct ownership was not retained for crash recovery: %+v", rows)
+	}
+}
+
 // TestAdoptionScan_LiveTmuxReattaches is the end-to-end recovery path against a
 // real tmux server: a corpse row referencing a live tmux session is detected as
 // adoptable (not closed), and the attach Cmd re-queries the surviving pane PID and
@@ -444,7 +468,7 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 
 	// The attach Cmd re-hosts the survivor: it re-queries the pane PID (the crashed
 	// instance's captured one is gone) and reports the same tmux session.
-	started, ok := work.AttachTerminalCmd("demo", name, "uuid-1", "claude-code", identity, 80, 24)().(work.SessionProcessStartedMsg)
+	started, ok := work.AttachTerminalCmd("demo", name, "uuid-1", "claude-code", "", "", "", identity, 80, 24)().(work.SessionProcessStartedMsg)
 	if !ok {
 		t.Fatalf("attach did not start; session likely died mid-test")
 	}

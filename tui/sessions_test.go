@@ -154,6 +154,7 @@ func TestDescriptorFromRequestMapsDispatchFields(t *testing.T) {
 	d := descriptorFromRequest(session.Request{
 		RequestID: "r", Type: "spec", Slug: strPtr("demo"), Initiator: "agent",
 		Track: strPtr("short"), Model: strPtr("opus"), Framework: strPtr("codex"), SkipConfirm: &gated, WorktreeIdentity: identity,
+		WorktreeID: strPtr("tree-1"), ExecutionDir: strPtr("/work/session"),
 	})
 	if !d.ShortMode {
 		t.Error("track=short did not set ShortMode")
@@ -169,6 +170,9 @@ func TestDescriptorFromRequestMapsDispatchFields(t *testing.T) {
 	}
 	if d.Worktree != identity || d.Worktree.Epoch != "epoch-1" {
 		t.Fatalf("worktree identity was not projected intact: %+v", d.Worktree)
+	}
+	if d.WorktreeID != "tree-1" || d.ExecutionDir != "/work/session" {
+		t.Fatalf("managed placement was not projected intact: id=%q dir=%q", d.WorktreeID, d.ExecutionDir)
 	}
 }
 

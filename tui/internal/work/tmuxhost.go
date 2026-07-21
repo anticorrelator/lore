@@ -227,6 +227,10 @@ func tmuxPanePID(name string) (int, error) {
 	return pid, nil
 }
 
+// TmuxPanePID returns the current harness pane PID for persisted ownership
+// validation during startup adoption.
+func TmuxPanePID(name string) (int, error) { return tmuxPanePID(name) }
+
 // TmuxPaneCWD returns the current directory of the session's harness pane.
 // Recovery uses it to prove the surviving process still occupies its persisted
 // worktree before transferring ownership to a new TUI instance.

@@ -98,6 +98,23 @@ func TestCloseDispositionStaleDestinationPreservesHostAndStreamMarkers(t *testin
 	}
 }
 
+func TestManagedSessionCloseRoutesToQuiescenceWithoutLegacyPublish(t *testing.T) {
+	identity := worktree.Identity{Version: worktree.IdentityVersion, State: worktree.StateActive}
+	m, _ := baseSessionModel(t)
+	m.localSessions = map[string]liveSession{"worker-1": {
+		typ: "worker", initiator: "agent", started: time.Now(), worktree: &identity,
+		worktreeID: "tree-1", executionDir: "/managed/tree-1", pid: 4242,
+	}}
+	m, cmds := m.endLocalSessionClosed("worker-1", "close-1")
+	if len(cmds) != 1 {
+		t.Fatalf("managed close scheduled %d commands, want registry write then quiesce sequence", len(cmds))
+	}
+	got := m.localSessions["worker-1"]
+	if !got.worktreeDispositionPending || got.worktree.State != worktree.StateActive {
+		t.Fatalf("managed close entered legacy guard publish lifecycle: %+v", got)
+	}
+}
+
 // TestTmuxProc_SignalsRealProcess: tmuxProc's Terminate delivers a real SIGTERM to
 // its pane PID (not the attach client), the process actually dies, and Alive
 // reports dead once the pid is freed. This is the D7 guarantee that under tmux the

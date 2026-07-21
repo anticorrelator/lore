@@ -74,6 +74,12 @@ type SessionDescriptor struct {
 	// StartTerminalCmd validates it and uses only CanonicalPath as the harness cwd.
 	Worktree *worktree.Identity
 
+	// WorktreeID and ExecutionDir identify manager-owned coordinated placement.
+	// Both empty selects the legacy session-owned lifecycle. A partial pair is
+	// invalid and must be refused before launch.
+	WorktreeID   string
+	ExecutionDir string
+
 	ShortMode    bool
 	SkipConfirm  bool
 	FollowupMode bool
@@ -86,9 +92,11 @@ type SessionDescriptor struct {
 // inferring it from the slug. The zero value exports nothing (a launch with no
 // session identity to advertise).
 type SessionEnv struct {
-	Instance string // LORE_SESSION_INSTANCE
-	Slug     string // LORE_SESSION_SLUG
-	Type     string // LORE_SESSION_TYPE: spec|implement|chat
+	Instance     string // LORE_SESSION_INSTANCE
+	Slug         string // LORE_SESSION_SLUG
+	Type         string // LORE_SESSION_TYPE: spec|implement|chat
+	WorktreeID   string // LORE_WORKTREE_ID for coordinated writers
+	ExecutionDir string // LORE_EXECUTION_DIR, identical to the validated child cwd
 
 	// RoutingOverrides is a per-dispatch role→model map exported as
 	// LORE_MODEL_<ROLE> — the resolver's top-precedence env layer (tranche-1 D2:
@@ -110,6 +118,12 @@ func (s SessionEnv) vars() []string {
 	}
 	if s.Type != "" {
 		out = append(out, "LORE_SESSION_TYPE="+s.Type)
+	}
+	if s.WorktreeID != "" {
+		out = append(out, "LORE_WORKTREE_ID="+s.WorktreeID)
+	}
+	if s.ExecutionDir != "" {
+		out = append(out, "LORE_EXECUTION_DIR="+s.ExecutionDir)
 	}
 	// Sort roles for a deterministic env order. Each role→model becomes
 	// LORE_MODEL_<ROLE> with the role uppercased and hyphens mapped to

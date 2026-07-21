@@ -249,6 +249,57 @@ func TestStartTerminalCmdPinsDirectPTYToValidatedWorktree(t *testing.T) {
 	}
 }
 
+func TestStartTerminalCmdPinsManagedDirectPTYToExecutionDir(t *testing.T) {
+	stageFakeBinaries(t)
+	knowledgeDir := stageFakeLoreData(t, "claude-code", nil)
+	identity := mustSessionWorktree(t)
+	registry := filepath.Join(knowledgeDir, "_coordination", "worktrees", "registry")
+	if err := os.MkdirAll(registry, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	row := worktree.ManagedPlacement{
+		SchemaVersion: 1, WorktreeID: "tree-1", ExecutionDir: identity.CanonicalPath, State: "reserved",
+		Owner: worktree.ManagedOwner{Kind: "session", ID: "worker-1"}, GuardIdentity: identity,
+	}
+	data, err := json.Marshal(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(registry, "tree-1.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := SessionDescriptor{Type: SessionWorker, Slug: "worker-1", SkipConfirm: true, FindingIndex: -1,
+		Worktree: &identity, WorktreeID: "tree-1", ExecutionDir: identity.CanonicalPath}
+	env := SessionEnv{Instance: "owner", Slug: d.Slug, Type: d.Type, WorktreeID: d.WorktreeID, ExecutionDir: d.ExecutionDir}
+	msg := StartTerminalCmd(d, 80, 24, knowledgeDir, env, false)()
+	started, ok := msg.(SessionProcessStartedMsg)
+	if !ok {
+		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
+	}
+	defer started.Ptmx.Close()
+	if started.Cmd.Dir != identity.CanonicalPath || started.ExecutionDir != identity.CanonicalPath || started.WorktreeID != "tree-1" {
+		t.Fatalf("managed spawn placement = cmd:%q id:%q dir:%q", started.Cmd.Dir, started.WorktreeID, started.ExecutionDir)
+	}
+	if started.PID <= 0 {
+		t.Fatalf("managed direct PTY did not preserve process ownership: %+v", started)
+	}
+	for _, want := range []string{"LORE_WORKTREE_ID=tree-1", "LORE_EXECUTION_DIR=" + identity.CanonicalPath} {
+		if !envContains(started.Cmd.Env, want) {
+			t.Fatalf("managed child env missing %q: %v", want, started.Cmd.Env)
+		}
+	}
+}
+
+func TestStartTerminalCmdRefusesPartialManagedPlacementBeforeSpawn(t *testing.T) {
+	identity := mustSessionWorktree(t)
+	d := SessionDescriptor{Type: SessionWorker, Slug: "partial", Worktree: &identity, WorktreeID: "tree-1"}
+	msg := StartTerminalCmd(d, 80, 24, t.TempDir(), SessionEnv{}, false)()
+	failed, ok := msg.(StreamErrorMsg)
+	if !ok || !strings.Contains(failed.Err.Error(), "incomplete managed worktree placement") {
+		t.Fatalf("partial managed placement was not refused: %T %+v", msg, msg)
+	}
+}
+
 func TestStartTerminalCmdRefusesMissingWorktreeBeforeSpawn(t *testing.T) {
 	d := SessionDescriptor{Type: SessionSpec, Slug: "missing-worktree", Title: "missing", SkipConfirm: true, FindingIndex: -1}
 	msg := StartTerminalCmd(d, 80, 24, t.TempDir(), SessionEnv{}, false)()
@@ -321,6 +372,23 @@ func TestSessionEnvVarsOmitsEmptyFields(t *testing.T) {
 	}
 	if len(SessionEnv{}.vars()) != 0 {
 		t.Errorf("zero SessionEnv should export nothing, got %v", SessionEnv{}.vars())
+	}
+}
+
+func TestSessionEnvVarsCarriesManagedPlacement(t *testing.T) {
+	got := SessionEnv{Instance: "owner", Slug: "worker-1", Type: "worker",
+		WorktreeID: "tree-1", ExecutionDir: "/work/tree-1"}.vars()
+	want := []string{
+		"LORE_SESSION_INSTANCE=owner", "LORE_SESSION_SLUG=worker-1", "LORE_SESSION_TYPE=worker",
+		"LORE_WORKTREE_ID=tree-1", "LORE_EXECUTION_DIR=/work/tree-1",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("vars() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("vars()[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 
