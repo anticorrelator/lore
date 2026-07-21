@@ -50,10 +50,11 @@ def _iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-# Composer geometry: the reliable "ready" anchor is the footer status line
-# "<model> <effort> · <cwd>". find_composer returns the geometry; the readiness
-# *matcher* is the shared d.codex_composer_ready.
-FOOTER_RE = re.compile(r"(minimal|low|medium|high|xhigh)\s+·\s")
+# Composer geometry: the reliable "ready" anchor is the bottom-region footer
+# suffix "· <cwd>". Status badges before the separator are intentionally opaque.
+# find_composer returns geometry; readiness remains d.codex_composer_ready.
+FOOTER_RE = re.compile(r"·\s+(?:~(?:/|$)|/)\S*")
+BOTTOM_REGION_ROWS = 18
 INPUT_GLYPH = "›"
 TRUST_RE = re.compile(r"do you trust the contents of this directory", re.I)
 WELCOME_RE = re.compile(r"OpenAI Codex \(v")
@@ -62,11 +63,17 @@ WELCOME_RE = re.compile(r"OpenAI Codex \(v")
 def find_composer(oracle):
     """Return (ready, input_row_idx, footer_row_idx) for input-region slicing."""
     rows = oracle.rows()
-    footer_idx = next((i for i, r in enumerate(rows) if FOOTER_RE.search(r)), None)
+    if d.codex_permission_modal(rows):
+        return (False, None, None)
+    start = max(0, len(rows) - BOTTOM_REGION_ROWS)
+    footer_idx = next(
+        (i for i in range(len(rows) - 1, start - 1, -1) if FOOTER_RE.search(rows[i])),
+        None,
+    )
     if footer_idx is None:
         return (False, None, None)
     input_idx = None
-    for i in range(footer_idx, -1, -1):
+    for i in range(footer_idx, start - 1, -1):
         if rows[i].lstrip().startswith(INPUT_GLYPH):
             input_idx = i
             break

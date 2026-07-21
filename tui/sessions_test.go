@@ -412,25 +412,35 @@ func TestAdvanceModalObservationsJournalsEntries(t *testing.T) {
 	}
 }
 
-func TestHealthyCodexApprovedSuggestionEmitsNoModalEvent(t *testing.T) {
-	m := sessionModelWithRealScript(t)
-	m.sessionPanels = map[string]work.SessionPanelModel{"demo": {}}
-	state, known := classifyScreen("codex", work.ScreenSnapshot{Rows: cxApproveSuggestionRows})
-	if !known || state.interactive || !state.composer {
-		t.Fatalf("healthy composer classification = %+v known=%v", state, known)
-	}
-	m.observeModalFn = func(work.SessionPanelModel) modalObservation {
-		return modalObservation{known: known, blocked: state.interactive}
-	}
-	m, cmds := m.advanceModalObservations()
-	for _, cmd := range cmds {
-		runJournalCmds(t, cmd)
-	}
-	if got := readEventTypes(t, m.config.KnowledgeDir); len(got) != 0 {
-		t.Fatalf("healthy composer emitted modal journal rows: %v", got)
-	}
-	if m.sessionModalBlocked["demo"] {
-		t.Fatal("healthy composer armed the modal latch")
+func TestHealthyCodexComposersEmitNoModalEvent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rows []string
+	}{
+		{"approved suggestion", cxApproveSuggestionRows},
+		{"current fast footer", cxComposerRows},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := sessionModelWithRealScript(t)
+			m.sessionPanels = map[string]work.SessionPanelModel{"demo": {}}
+			state, known := classifyScreen("codex", work.ScreenSnapshot{Rows: tc.rows})
+			if !known || state.interactive || !state.composer {
+				t.Fatalf("healthy composer classification = %+v known=%v", state, known)
+			}
+			m.observeModalFn = func(work.SessionPanelModel) modalObservation {
+				return modalObservation{known: known, blocked: state.interactive}
+			}
+			m, cmds := m.advanceModalObservations()
+			for _, cmd := range cmds {
+				runJournalCmds(t, cmd)
+			}
+			if got := readEventTypes(t, m.config.KnowledgeDir); len(got) != 0 {
+				t.Fatalf("healthy composer emitted modal journal rows: %v", got)
+			}
+			if m.sessionModalBlocked["demo"] {
+				t.Fatal("healthy composer armed the modal latch")
+			}
+		})
 	}
 }
 

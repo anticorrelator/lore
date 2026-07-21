@@ -550,13 +550,29 @@ func promptPrefix(row string) string {
 	return string(runes[:start])
 }
 
-// --- codex: footer status line "<model> <effort> · <cwd>" + a '›' input row. ---
+// --- codex: bottom-region "· <cwd>" footer suffix + a '›' input row. ---
 var (
-	cxFooter      = regexp.MustCompile(`(minimal|low|medium|high|xhigh)\s+·\s`)
+	cxFooter      = regexp.MustCompile(`·\s+(~(/|$)|/)\S*`)
 	cxModalAnchor = regexp.MustCompile(`(?i)would you like to run|press enter to confirm or esc|enter\s+to\s+(confirm|select)|select.*enter|use.*(?:↑|↓).*enter|up/down|arrow keys`)
 )
 
-const cxGlyph = "›"
+const (
+	cxGlyph            = "›"
+	cxBottomRegionRows = 18
+)
+
+func cxFooterIndex(rows []string) int {
+	start := len(rows) - cxBottomRegionRows
+	if start < 0 {
+		start = 0
+	}
+	for i := len(rows) - 1; i >= start; i-- {
+		if cxFooter.MatchString(rows[i]) {
+			return i
+		}
+	}
+	return -1
+}
 
 func cxComposerReady(rows []string) bool {
 	// The approval modal usually drops the footer status row, but negate it
@@ -565,17 +581,15 @@ func cxComposerReady(rows []string) bool {
 	if cxPermissionModal(rows) {
 		return false
 	}
-	footerIdx := -1
-	for i, r := range rows {
-		if cxFooter.MatchString(r) {
-			footerIdx = i
-			break
-		}
-	}
+	footerIdx := cxFooterIndex(rows)
 	if footerIdx < 0 {
 		return false
 	}
-	for i := footerIdx; i >= 0; i-- {
+	start := len(rows) - cxBottomRegionRows
+	if start < 0 {
+		start = 0
+	}
+	for i := footerIdx; i >= start; i-- {
 		if strings.HasPrefix(strings.TrimLeft(rows[i], " \t"), cxGlyph) {
 			return true
 		}
@@ -591,14 +605,48 @@ func cxPermissionModal(rows []string) bool {
 func cxModalOptions(rows []string) optionGeometry {
 	tail := lastRows(rows, 18)
 	text := strings.Join(tail, "\n")
-	// A current composer footer means any modal-looking rows above it are
-	// scrollback, not the active input surface.
-	if cxFooter.MatchString(text) || !cxModalAnchor.MatchString(text) {
+	if !cxModalAnchor.MatchString(text) {
 		return optionGeometry{}
 	}
-	geometry := parseNumberedOptions(tail)
+	geometry := optionGeometry{}
+	seen := make(map[int]bool)
+	selectedCount := 0
+	lastOption := -1
+	for i, row := range tail {
+		match := numberedOptionRow.FindStringSubmatch(row)
+		if len(match) != 3 {
+			continue
+		}
+		option, err := strconv.Atoi(match[2])
+		if err != nil || option < 1 {
+			continue
+		}
+		lastOption = i
+		if !seen[option] {
+			seen[option] = true
+			geometry.available = append(geometry.available, option)
+		}
+		if match[1] != "" {
+			selectedCount++
+			geometry.selected = option
+		}
+	}
+	if selectedCount != 1 {
+		geometry.selected = 0
+	}
 	if geometry.selected == 0 || len(geometry.available) < 2 {
 		return optionGeometry{}
+	}
+
+	// A fresh input row after the option list and before a current footer makes
+	// the modal-looking rows scrollback. A footer alone may be a partial repaint,
+	// so it cannot clear an otherwise active modal.
+	if footerIdx := cxFooterIndex(tail); footerIdx >= 0 {
+		for i := lastOption + 1; i < footerIdx; i++ {
+			if strings.HasPrefix(strings.TrimLeft(tail[i], " \t"), cxGlyph) {
+				return optionGeometry{}
+			}
+		}
 	}
 	return geometry
 }

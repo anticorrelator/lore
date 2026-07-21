@@ -501,13 +501,13 @@
         "composer_signature": {
           "support": "full",
           "evidence": "codex-interaction",
-          "matcher": "footer status row matches (?:minimal|low|medium|high|xhigh)\\s+·\\s AND an input row (at/above it) begins with '›' — the '›' glyph alone is shared with codex selection menus (incl. trust modal), so the footer middot+cwd is the disambiguator; AND permission_prompt_signature does NOT match (the approval modal usually drops the footer row; the negation guards partial repaints)",
-          "notes": "Footer status line '<model> <effort> · <cwd>' is the durable anchor; the welcome banner scrolls off after the first turn. Probed in raw/codex/p1_composer_launch{1,2}.log."
+          "matcher": "within the bottom 18 rows, a footer suffix matches ·\\s+(?:~(?:/|$)|/)\\S* and a row at/above it begins with '›' — status badges before the separator are intentionally opaque, and the '›' glyph alone is shared with codex selection menus; AND permission_prompt_signature does NOT match (the negation guards partial repaints)",
+          "notes": "The bottom-region middot+working-directory suffix is the durable anchor; optional badges such as 'fast' may appear between effort and the separator, and the welcome banner scrolls off after the first turn. Historical probe logs are raw/codex/p1_composer_launch{1,2}.log; the current fast-badge shape is recorded in observations/codex.json."
         },
         "permission_prompt_signature": {
           "support": "full",
           "evidence": "codex-interaction",
-          "matcher": "in the bottom 18 rows, an approval or selection action/header anchor plus at least two numbered options and exactly one selected row marked by '›'; the parser exposes the displayed option numbers in row order. The composer footer status line is NOT present while the modal owns the screen, so a current model/effort/cwd footer makes modal-looking rows scrollback rather than an active prompt",
+          "matcher": "in the bottom 18 rows, an approval or selection action/header anchor plus at least two numbered options and exactly one selected row marked by '›'; the parser exposes the displayed option numbers in row order. A footer clears modal-looking rows as scrollback only when a fresh '›' input row follows the option list before that footer; a footer retained by a partial repaint does not clear the modal",
           "notes": "Only escalates under -a untrusted (default auto-approves trusted commands with no modal). Probed in raw/codex/p2_approval_untrusted.log."
         },
         "submit_sequence": {

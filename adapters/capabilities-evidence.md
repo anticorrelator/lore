@@ -633,10 +633,13 @@ the exact binary version probed; refresh when the harness is upgraded.
 - **URL / path:** `tests/probes/session_injection/observations/codex.json`
   and the raw byte logs under
   `tests/probes/session_injection/observations/raw/codex/`.
-- **Retrieved:** 2026-07-05
-- **Product / version:** codex-cli 0.142.5.
-- **Claim:** Per-row raw-log backing — `composer_signature` (footer status
-  line anchor) ← `raw/codex/p1_composer_launch{1,2}.log`;
+- **Retrieved:** 2026-07-05; composer footer compatibility rechecked 2026-07-21.
+- **Product / version:** codex-cli 0.142.5 probe suite; codex-cli 0.144.3
+  fast-badge composer recheck.
+- **Claim:** Per-row raw-log backing — `composer_signature` (bottom-region
+  middot+working-directory suffix plus input-row anchor) ←
+  `raw/codex/p1_composer_launch{1,2}.log`; the current
+  `high fast · ~/work/lore` regression shape is recorded in `codex.json`;
   `permission_prompt_signature` (only under `-a untrusted`) ←
   `p2_approval_untrusted.log`; `submit_sequence` (CR submits) ←
   `p3_submit.log`; `newline_sequence` (Ctrl-J LF inserts) ←

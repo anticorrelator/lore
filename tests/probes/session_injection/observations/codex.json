@@ -5,18 +5,18 @@
   "model_used": "gpt-5.4-mini low",
   "tty_size": "120x40",
   "composer_signature": {
-    "matcher": "footer status row matches (?:minimal|low|medium|high|xhigh)\\s+\u00b7\\s AND an input row (at/above it) begins with '\u203a' \u2014 the '\u203a' glyph alone is shared with codex selection menus (incl. trust modal), so the footer middot+cwd is the disambiguator",
-    "footer_regex": "(minimal|low|medium|high|xhigh)\\s+\u00b7\\s",
+    "matcher": "within the bottom 18 rows, footer suffix \u00b7\\s+(?:~(?:/|$)|/)\\S* plus an input row at/above it beginning with '\u203a'; status badges before the separator are opaque, the glyph alone is shared with selection menus, and an active permission modal is explicitly negated",
+    "footer_regex": "\u00b7\\s+(?:~(?:/|$)|/)\\S*",
+    "bottom_region_rows": 18,
     "input_glyph": "\u203a",
     "raw_rows": [
-      "\u203a Run /review on my current changes",
+      "\u203a Use /skills to list available skills",
       "",
-      "  gpt-5.4-mini low \u00b7 /private/tmp/claude-501/-Users-dustinqngo-work-lore/618e24b6-58ad-4aa7-a3e7-60c6b2023092/scratchpa\u2026"
+      "  gpt-5.6-sol high fast \u00b7 ~/work/lore \u00b7 Main [default]"
     ],
-    "cursor_on_input_row": [
-      2,
-      12
-    ],
+    "raw_rows_source": "lore session peek ready=true against isolated real codex-cli 0.144.3 session matcher-live-proof-rebuilt-20260721 on 2026-07-21",
+    "cursor_on_input_row": null,
+    "cursor_note": "The 2026-07-21 lore session peek fixture does not expose cursor coordinates; the original 0.142.5 probe did observe the cursor on its input row.",
     "welcome_banner_present_at_start": true,
     "welcome_banner_note": "'OpenAI Codex (vX)' box is present at fresh launch but scrolls off after the first submitted message (no alt-screen), so it is NOT a durable composer anchor \u2014 the footer status line is.",
     "stability": "footer identical across 2 launches: True",
@@ -33,6 +33,16 @@
         "  gpt-5.4-mini low · /private/tmp/probe-env-codex"
       ],
       "note": "The word approved is composer ghost/example text; the active footer proves this is the healthy composer, not a modal."
+    },
+    "current_fast_badge_footer": {
+      "binary_version": "codex-cli 0.144.3",
+      "captured_at": "2026-07-21T04:52:32Z",
+      "raw_rows": [
+        "\u203a Use /skills to list available skills",
+        "  gpt-5.6-sol high fast \u00b7 ~/work/lore \u00b7 Main [default]"
+      ],
+      "classification": "composer=true; send readiness still requires quiescent=true",
+      "note": "The optional fast badge appears between reasoning effort and the footer separator, so effort-token adjacency is not a stable composer contract."
     }
   },
   "permission_prompt_signature": {

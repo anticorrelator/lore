@@ -115,14 +115,18 @@ through the stream that shipped the terminus contract, 2026-07-12).
    run `lore work regen-tasks <slug>` in the same act as the amendment, or the next
    /implement session stalls at its mandatory gate asking permission the seat may
    not be able to grant (codex `send` refused `no-signature`).
-2. **A refused steer is not health evidence — peek is the direct read.** Codex `send`
-   can still refuse `no-signature` at a healthy idle composer (the composer-signature
-   matcher is untouched by the modal-classifier fix). Where steering bounces and no
-   `modal_blocked` watcher is armed, peek ~10–15 min after dispatch as the early
-   liveness check instead of trusting a long watcher timeout as the first signal.
-   The stall this calibration originally feared — a session parked on a harness modal
-   you can neither see nor answer — is now the handled case: the modal pages an armed
-   watcher and takes a `session answer`.
+2. **A refused steer is not health evidence — peek is the direct read.** Current Codex
+   may insert optional badges before its footer separator (`high fast · <cwd>`), so
+   readiness keys on the bottom-region separator+cwd suffix and nearby composer row,
+   not a closed status-token list. A `generating` refusal remains truthful even while
+   that composer chrome is visible: wait for `peek` to report `ready=true`, then
+   correlate the nonce with one `send_requested` → `sent` journal pair before treating
+   it as delivered. A `no-signature` refusal on an apparently idle future Codex build
+   is a matcher-contract drift signal; preserve the screen and refresh the capability
+   fixture instead of retrying the body. Rechecked on codex-cli 0.144.3 (2026-07-21):
+   the fast-badge footer classified ready at idle, refused `generating` during a
+   running tool call without placing the nonce in the transcript, and accepted a
+   different nonce after returning idle.
 
 ## Shipped verb history
 

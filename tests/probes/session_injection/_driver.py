@@ -155,9 +155,10 @@ def claude_code_permission_modal(rows):
     return (proceed or footer) and options >= 2
 
 
-# codex: footer status line "<model> <effort> · <cwd>" + a '›' input row.
-_CX_FOOTER = re.compile(r"(minimal|low|medium|high|xhigh)\s+·\s")
+# codex: bottom-region "· <cwd>" footer suffix + a '›' input row.
+_CX_FOOTER = re.compile(r"·\s+(?:~(?:/|$)|/)\S*")
 _CX_GLYPH = "›"
+_CX_BOTTOM_REGION_ROWS = 18
 _CX_MODAL_ANCHOR = re.compile(
     r"would you like to run|press enter to confirm or esc|"
     r"enter\s+to\s+(?:confirm|select)|select.*enter|use.*(?:↑|↓).*enter|"
@@ -167,15 +168,24 @@ _CX_MODAL_ANCHOR = re.compile(
 _NUMBERED_OPTION = re.compile(r"^\s*([❯›>])?\s*(\d+)[.)]\s+\S")
 
 
+def _codex_footer_index(rows):
+    start = max(0, len(rows) - _CX_BOTTOM_REGION_ROWS)
+    return next(
+        (i for i in range(len(rows) - 1, start - 1, -1) if _CX_FOOTER.search(rows[i])),
+        None,
+    )
+
+
 def codex_composer_ready(rows):
     # "Ready" means visible AND unobstructed; the approval modal usually drops
     # the footer status row, but negate it explicitly for partial repaints.
     if codex_permission_modal(rows):
         return False
-    footer_idx = next((i for i, r in enumerate(rows) if _CX_FOOTER.search(r)), None)
+    footer_idx = _codex_footer_index(rows)
     if footer_idx is None:
         return False
-    for i in range(footer_idx, -1, -1):
+    start = max(0, len(rows) - _CX_BOTTOM_REGION_ROWS)
+    for i in range(footer_idx, start - 1, -1):
         if rows[i].lstrip().startswith(_CX_GLYPH):
             return True
     return False
@@ -190,15 +200,17 @@ def codex_modal_options(rows):
     """Return (selected displayed number, available numbers in row order)."""
     tail = rows[-18:]
     text = "\n".join(tail)
-    if _CX_FOOTER.search(text) or not _CX_MODAL_ANCHOR.search(text):
+    if not _CX_MODAL_ANCHOR.search(text):
         return (None, [])
     selected = None
     selected_count = 0
     available = []
-    for row in tail:
+    last_option = None
+    for i, row in enumerate(tail):
         match = _NUMBERED_OPTION.match(row)
         if not match:
             continue
+        last_option = i
         option = int(match.group(2))
         if option not in available:
             available.append(option)
@@ -207,6 +219,14 @@ def codex_modal_options(rows):
             selected = option
     if selected_count != 1 or len(available) < 2:
         return (None, [])
+
+    # A fresh input row after the option list and before a current footer makes
+    # the modal-looking rows scrollback. A footer alone may be a partial repaint.
+    footer_idx = _codex_footer_index(tail)
+    if footer_idx is not None:
+        for row in tail[last_option + 1:footer_idx]:
+            if row.lstrip().startswith(_CX_GLYPH):
+                return (None, [])
     return (selected, available)
 
 

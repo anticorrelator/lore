@@ -66,7 +66,7 @@ var (
 
 	cxComposerRows = []string{
 		"› ",
-		"gpt-5-codex  medium · ~/work/lore",
+		"gpt-5.6-sol high fast · ~/work/lore · Main [default]",
 	}
 	cxModalRows = []string{
 		"Would you like to run the following command?",
@@ -85,8 +85,14 @@ var (
 	}
 	cxApproveSuggestionRows = []string{
 		"› Implement the approved change",
-		"gpt-5-codex  medium · ~/work/lore",
+		"gpt-5.6-sol high fast · ~/work/lore · Main [default]",
 	}
+	cxPartialRepaintRows = append(append([]string{}, cxModalRows...),
+		"gpt-5.6-sol high fast · ~/work/lore · Main [default]")
+	cxModalScrollbackRows = append(append([]string{}, cxModalRows...),
+		"• Command declined",
+		"› ",
+		"gpt-5.6-sol high fast · ~/work/lore · Main [default]")
 
 	ocComposerRows = []string{
 		"┃ Ask anything...",
@@ -169,6 +175,18 @@ func TestCodexApproveSuggestionIsHealthyComposer(t *testing.T) {
 	}
 }
 
+func TestCodexPartialRepaintAndModalScrollback(t *testing.T) {
+	partial, ok := classifyScreen("codex", work.ScreenSnapshot{Rows: cxPartialRepaintRows})
+	if !ok || !partial.interactive || partial.composer {
+		t.Fatalf("partial modal repaint classified as %+v known=%v, want modal only", partial, ok)
+	}
+
+	scrollback, ok := classifyScreen("codex", work.ScreenSnapshot{Rows: cxModalScrollbackRows})
+	if !ok || scrollback.interactive || !scrollback.composer {
+		t.Fatalf("settled composer with modal scrollback classified as %+v known=%v, want composer only", scrollback, ok)
+	}
+}
+
 func TestSendReadiness(t *testing.T) {
 	snapComposer := work.ScreenSnapshot{Rows: ccComposerRows}
 	snapModal := work.ScreenSnapshot{Rows: ccModalRows}
@@ -176,6 +194,13 @@ func TestSendReadiness(t *testing.T) {
 	snapOther := work.ScreenSnapshot{Rows: []string{"thinking...", "some output"}}
 	snapGhost := work.ScreenSnapshot{Rows: ccGhostRows, ANSI: ccGhostANSI}
 	snapHeld := work.ScreenSnapshot{Rows: ccHeldRows, ANSI: ccHeldANSI}
+	snapCodexComposer := work.ScreenSnapshot{Rows: cxComposerRows}
+	snapCodexModal := work.ScreenSnapshot{Rows: cxModalRows}
+	snapCodexPartial := work.ScreenSnapshot{Rows: cxPartialRepaintRows}
+	snapCodexOldFooter := work.ScreenSnapshot{Rows: append([]string{
+		"› stale transcript prompt",
+		"gpt-5.6-sol high fast · ~/work/lore",
+	}, make([]string, cxBottomRegionRows)...)}
 
 	// Live regression (real claude-code idle session): the prompt row renders as
 	// "❯ commit this" — a NBSP after the glyph plus a ghost-text suggestion.
@@ -207,6 +232,12 @@ func TestSendReadiness(t *testing.T) {
 		{"no-composer-signature", "claude-code", true, true, snapOther, false, sendReasonNoSignature},
 		{"no-contract", "claude-code", true, false, snapComposer, false, sendReasonNoContract},
 		{"unknown-framework", "ghostwriter", true, true, snapComposer, false, sendReasonNoContract},
+		{"codex-current-fast-footer", "codex", true, true, snapCodexComposer, true, ""},
+		{"codex-current-fast-footer-generating", "codex", false, true, snapCodexComposer, false, sendReasonGenerating},
+		{"codex-permission-modal", "codex", true, true, snapCodexModal, false, sendReasonModal},
+		{"codex-partial-modal-repaint", "codex", true, true, snapCodexPartial, false, sendReasonModal},
+		{"codex-footer-outside-bottom-region", "codex", true, true, snapCodexOldFooter, false, sendReasonNoSignature},
+		{"codex-no-contract", "codex", true, false, snapCodexComposer, false, sendReasonNoContract},
 	}
 	for _, c := range cases {
 		ready, reason := sendReadiness(c.framework, c.quiescent, c.hasCon, c.snap)
