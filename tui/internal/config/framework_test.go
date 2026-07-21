@@ -540,6 +540,101 @@ func TestLoadHarnessArgs_NonClaudeCodeDefaultsEmpty(t *testing.T) {
 	}
 }
 
+// writeHarnessAutonomousArgs writes the autonomous-session arg profile into
+// settings.json under harnesses.<fw>.autonomous_args, alongside whatever `args`
+// writeHarnessArgs already staged. Used by the initiator-aware selection tests.
+func writeHarnessAutonomousArgs(t *testing.T, perFramework map[string][]string) {
+	t.Helper()
+	dataDir := os.Getenv("LORE_DATA_DIR")
+	if dataDir == "" {
+		t.Fatal("LORE_DATA_DIR not set; call setupFakeLoreData first")
+	}
+	path := filepath.Join(dataDir, "config", "settings.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	harnesses, _ := out["harnesses"].(map[string]any)
+	if harnesses == nil {
+		harnesses = map[string]any{}
+		out["harnesses"] = harnesses
+	}
+	for fw, args := range perFramework {
+		block, _ := harnesses[fw].(map[string]any)
+		if block == nil {
+			block = map[string]any{}
+			harnesses[fw] = block
+		}
+		block["autonomous_args"] = args
+	}
+	data, _ := json.MarshalIndent(out, "", "  ")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Agent-initiated spawn with an autonomous profile present uses it.
+func TestLoadHarnessArgsForInitiator_AgentUsesAutonomous(t *testing.T) {
+	setupFakeLoreData(t, "codex", nil)
+	writeHarnessArgs(t, map[string][]string{
+		"codex": {"--ask-for-approval", "on-request"},
+	})
+	writeHarnessAutonomousArgs(t, map[string][]string{
+		"codex": {"--ask-for-approval", "never"},
+	})
+	got := LoadHarnessArgsForInitiator("codex", "agent")
+	want := []string{"--ask-for-approval", "never"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("agent+autonomous_args: got %v, want %v", got, want)
+	}
+}
+
+// Agent-initiated spawn with no autonomous profile falls through to args.
+func TestLoadHarnessArgsForInitiator_AgentNoKeyUsesArgs(t *testing.T) {
+	setupFakeLoreData(t, "codex", nil)
+	writeHarnessArgs(t, map[string][]string{
+		"codex": {"--ask-for-approval", "on-request"},
+	})
+	got := LoadHarnessArgsForInitiator("codex", "agent")
+	want := []string{"--ask-for-approval", "on-request"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("agent+no-key: got %v, want %v (must equal args)", got, want)
+	}
+}
+
+// Human-initiated spawn ignores the autonomous profile even when present.
+func TestLoadHarnessArgsForInitiator_HumanUsesArgs(t *testing.T) {
+	setupFakeLoreData(t, "codex", nil)
+	writeHarnessArgs(t, map[string][]string{
+		"codex": {"--ask-for-approval", "on-request"},
+	})
+	writeHarnessAutonomousArgs(t, map[string][]string{
+		"codex": {"--ask-for-approval", "never"},
+	})
+	got := LoadHarnessArgsForInitiator("codex", "human")
+	want := []string{"--ask-for-approval", "on-request"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("human+autonomous_args present: got %v, want %v (must equal args)", got, want)
+	}
+}
+
+// The LORE_HARNESS_ARGS env override outranks the autonomous profile.
+func TestLoadHarnessArgsForInitiator_EnvOverridesAutonomous(t *testing.T) {
+	setupFakeLoreData(t, "codex", nil)
+	writeHarnessAutonomousArgs(t, map[string][]string{
+		"codex": {"--ask-for-approval", "never"},
+	})
+	t.Setenv("LORE_HARNESS_ARGS", `["--from-env"]`)
+	got := LoadHarnessArgsForInitiator("codex", "agent")
+	if len(got) != 1 || got[0] != "--from-env" {
+		t.Errorf("env override: got %v, want [--from-env]", got)
+	}
+}
+
 func TestLoadClaudeConfig_DeprecatedAlias(t *testing.T) {
 	setupFakeLoreData(t, "opencode", nil)
 	writeHarnessArgs(t, map[string][]string{
