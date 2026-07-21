@@ -22,7 +22,9 @@
 #   --context <t|file> Dispatch guidance handed to prompt composition. Value is read
 #                      from a file when it names one, else treated as literal text. A
 #                      JSON object is stored verbatim as extra_context; any other text
-#                      is wrapped as {"dispatch_guidance": <text>}.
+#                      is wrapped as {"dispatch_guidance": <text>}. Worker requests
+#                      require dispatch_guidance to contain the current canonical
+#                      block rendered by `lore dispatch guidance`.
 #   --route role=model Per-dispatch routing override (repeatable). The claiming TUI
 #                      exports it as LORE_MODEL_<ROLE> into the spawned session, riding
 #                      the resolver's top-precedence env layer. role MUST be in the
@@ -385,6 +387,20 @@ if [[ -n "$CONTEXT" ]]; then
   else
     EXTRA_JSON="$(jq -n --arg g "$CONTENT" '{dispatch_guidance: $g}')"
   fi
+fi
+
+# Worker-session enqueue is an actual launch boundary, not a prompt-authoring
+# surface. Require the exact composed brief here so a caller cannot queue a
+# floorless worker and hope the claiming TUI repairs it later.
+if [[ "$TYPE" == "worker" ]]; then
+  [[ "$EXTRA_JSON" != "null" ]] || \
+    fail "--context is required for --type worker and must contain the current canonical dispatch-guidance block"
+  WORKER_PROMPT="$(printf '%s' "$EXTRA_JSON" | jq -r '.dispatch_guidance // empty')"
+  [[ -n "$WORKER_PROMPT" ]] || \
+    fail "worker --context must provide a non-empty dispatch_guidance string"
+  # shellcheck disable=SC2119
+  VALIDATION_ERROR="$(printf '%s' "$WORKER_PROMPT" | validate_dispatch_guidance 2>&1 >/dev/null || true)"
+  [[ -z "$VALIDATION_ERROR" ]] || fail "$VALIDATION_ERROR"
 fi
 
 # Nullable string fields become explicit JSON null when unset.

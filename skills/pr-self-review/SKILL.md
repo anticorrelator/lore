@@ -117,9 +117,13 @@ Structure as a context block:
 
 ### 2b. Spawn lens agents
 
+**Dispatch guidance gate:** For every built-in lens, ceremony, or materiality-gate launch or retry, run `lore dispatch guidance` immediately before assembling that launch's prompt. Prepend that launch attempt's complete output verbatim as the first block; never copy, summarize, cache, or reuse it for another launch. If any render fails while preparing a parallel batch, issue none of that batch; a retry renders a fresh block independently for every member. This changes neither selected models nor concurrency behavior.
+
 For each selected lens, read its Step 3 methodology. Lens methodology source table: see `skills/pr-review/SKILL.md` Step 3b (the seven-row table mapping each lens to its source file and Step 3 heading is the canonical reference; Blast Radius row applies here unchanged).
 
 For each lens, create a task using the lens-agent prompt template — read `skills/pr-self-review/templates/lens-agent-prompt.md` for the verbatim prompt scaffold (the self-review variant adds "Self-Review Pre-Scan" framing distinct from pr-review's lens-agent prompt). The template embeds the role-assignment opener "You are a lens review agent analyzing PR #<number>" and the grounding contract "Findings without a `**Grounding:**` line will be downgraded or dropped." verbatim.
+
+Immediately before each lens launch or retry, render a new complete dispatch-guidance block and prepend that launch's output verbatim before the template scaffold. The scaffold remains otherwise unchanged.
 
 **Correctness lens modification:** Append: "Skip step 3d (intent alignment). The author already knows the intent."
 
@@ -141,6 +145,8 @@ When a PR number is available, invoke each ceremony lens via the Skill tool with
 ```
 
 Ceremony lenses fetch their own PR data — do **not** pass diff content, review context, or metadata. Run all ceremony lens invocations in parallel.
+
+Immediately before each ceremony Skill launch or retry, render a new complete dispatch-guidance block and prepend that launch's output verbatim before the task-specific `/<skill-name> <PR_NUMBER>` invocation. If rendering fails, do not launch that ceremony lens. The PR number remains the ceremony skill's sole task-specific argument.
 
 Ceremony lens results are collected alongside built-in lens results in Step 2c. If a ceremony lens does not produce findings in the standard Findings Output Format, its output is handled as non-conforming during synthesis.
 
@@ -174,6 +180,8 @@ cat ~/.lore/claude-md/review-protocol/severity.md
 ```
 
 ### 3a. Run all findings through the materiality gate
+
+For every materiality-gate launch or retry, run `lore dispatch guidance` immediately before assembling that launch's prompt. If rendering fails, stop before that launch. Prepend that launch attempt's complete output verbatim before the grounding-evaluation template; never reuse a lens or ceremony render.
 
 Spawn one agent with:
 - The PR's stated intent (title, body, and commit messages from Step 1b)

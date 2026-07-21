@@ -128,6 +128,8 @@ For each feedback item with a substantive label (suggestion, issue, question, th
 
 **Investigation escalation:** When all three gate conditions are met (substantive label + insufficient knowledge results + multi-file analysis needed), spawn an Explore agent to investigate cross-boundary concerns before finalizing the categorization. Follow the Investigation Escalation procedure in `~/.lore/claude-md/review-protocol/escalation.md`. Maximum 2 escalations per review.
 
+For every Explore launch or retry, run `lore dispatch guidance` immediately before assembling that launch's prompt. If rendering fails, stop before that launch. Prepend that launch attempt's complete output verbatim as the first block; never transcribe, summarize, cache, or reuse it. The escalation procedure's task, scope, question, evidence, and report contracts follow unchanged after that block.
+
 Skip enrichment for nitpick and praise labels.
 
 ## Step 5: Create Work Item with Notes

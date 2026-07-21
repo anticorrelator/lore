@@ -229,6 +229,28 @@ PYEOF
   [[ "$output" =~ claude-code ]]
 }
 
+@test "claude-code install preserves user hooks and adds the exact Agent guidance gate" {
+  [ -f "$CC_ADAPTER" ] || skip "adapters/hooks/claude-code.sh missing"
+  set_framework claude-code
+  export HOME="$TEST_LORE_DATA_DIR/home"
+  mkdir -p "$HOME/.claude"
+  cat > "$HOME/.claude/settings.json" <<'JSON'
+{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"user-owned-hook"}]}]}}
+JSON
+  run bash "$CC_ADAPTER" install --framework claude-code
+  [ "$status" -eq 0 ]
+  run python3 - "$HOME/.claude/settings.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+rows = d["hooks"]["PreToolUse"]
+assert any(r.get("matcher") == "Bash" and r["hooks"][0]["command"] == "user-owned-hook" for r in rows)
+agent = [r for r in rows if r.get("matcher") == "Agent"]
+assert len(agent) == 1
+assert agent[0]["hooks"][0]["command"] == "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/validate-dispatch-guidance.sh --hook claude-code"
+PY
+  [ "$status" -eq 0 ]
+}
+
 # ============================================================
 # opencode adapter (T26)
 # ============================================================
@@ -295,6 +317,44 @@ PYEOF
 @test "opencode adapter pins spawned handler scripts to LORE_FRAMEWORK=opencode" {
   [ -f "$OC_ADAPTER" ] || skip "adapters/opencode/lore-hooks.ts missing"
   run grep -q 'LORE_FRAMEWORK: "opencode"' "$OC_ADAPTER"
+  [ "$status" -eq 0 ]
+}
+
+@test "opencode refuses only the definite native task route when prompt enforcement is unverified" {
+  [ -f "$OC_ADAPTER" ] || skip "adapters/opencode/lore-hooks.ts missing"
+  OC_ADAPTER="$OC_ADAPTER" run python3 - <<'PYEOF'
+import os, re, sys
+text = open(os.environ["OC_ADAPTER"]).read()
+required = [
+    'payload.tool === "task"',
+    "Run 'lore dispatch guidance'",
+    'return { allow: false, reason: NATIVE_TASK_GUIDANCE_REASON }',
+]
+missing = [needle for needle in required if needle not in text]
+if missing:
+    print("missing exact OpenCode task refusal fragments:", missing)
+    sys.exit(1)
+body = re.search(
+    r"export function refuseUnverifiedNativeTask\(.*?\n\}", text, re.S
+)
+if not body:
+    print("could not locate refusal helper")
+    sys.exit(2)
+for heuristic in ('toLowerCase(', 'includes(', 'prompt', 'message'):
+    if heuristic in body.group(0):
+        print("unverified heuristic/prompt normalization in refusal helper:", heuristic)
+        sys.exit(1)
+PYEOF
+  [ "$status" -eq 0 ]
+}
+
+@test "doctor checks capability-backed Claude and Codex guidance hook commands" {
+  doctor="$REPO_DIR/scripts/doctor.sh"
+  run grep -qF 'framework_capability native_dispatch_guidance_hook' "$doctor"
+  [ "$status" -eq 0 ]
+  run grep -qF 'LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/validate-dispatch-guidance.sh --hook claude-code' "$doctor"
+  [ "$status" -eq 0 ]
+  run grep -qF 'LORE_FRAMEWORK=codex bash ~/.lore/scripts/validate-dispatch-guidance.sh --hook codex' "$doctor"
   [ "$status" -eq 0 ]
 }
 
@@ -377,4 +437,20 @@ PYEOF
   run grep -cE '(~/\.lore/scripts/|LORE_DATA_DIR.*scripts)' "$CODEX_ADAPTER"
   [ "$status" -eq 0 ]
   [ "$output" -gt 0 ]
+}
+
+@test "codex install preserves user TOML and adds the exact Agent guidance gate" {
+  [ -f "$CODEX_ADAPTER" ] || skip "adapters/codex/hooks.sh missing"
+  set_framework codex
+  export HOME="$TEST_LORE_DATA_DIR/home"
+  mkdir -p "$HOME/.codex"
+  cat > "$HOME/.codex/config.toml" <<'TOML'
+model = "user-owned-model"
+TOML
+  run bash "$CODEX_ADAPTER" install --framework codex
+  [ "$status" -eq 0 ]
+  run grep -qF 'model = "user-owned-model"' "$HOME/.codex/config.toml"
+  [ "$status" -eq 0 ]
+  [ "$(grep -cF 'matcher = "Agent"' "$HOME/.codex/config.toml")" -eq 1 ]
+  [ "$(grep -cF 'LORE_FRAMEWORK=codex bash ~/.lore/scripts/validate-dispatch-guidance.sh --hook codex' "$HOME/.codex/config.toml")" -eq 1 ]
 }

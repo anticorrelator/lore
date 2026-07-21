@@ -75,14 +75,24 @@ ADAPTER="$LORE_REPO_DIR/adapters/agents/$FRAMEWORK.sh"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 PREPARED="$TMP_DIR/prepared.json"
+GUIDANCE_FILE="$TMP_DIR/dispatch-guidance.txt"
+
+# The published directive carries the same prompt floor enforced at the launch
+# boundary. Render and validate it before any investigation prefetch or artifact
+# write, so a broken floor cannot produce a reusable dispatch manifest.
+# shellcheck disable=SC2119
+render_dispatch_guidance > "$GUIDANCE_FILE"
+validate_dispatch_guidance --prompt-file "$GUIDANCE_FILE" || \
+  emit_error "canonical dispatch guidance failed validation" "run 'lore dispatch guidance' and repair the renderer/validator contract"
 
 set +e
 python3 - "$INVESTIGATIONS_FILE" "$PREPARED" "$SLUG" "$FRAMEWORK" "$SUBAGENTS" "$TEAM_MESSAGING" \
-  "$RESEARCHER_MODEL" "$RESEARCHER_TEMPLATE_VERSION" "$SCRIPT_DIR/prefetch-knowledge.sh" "$ADAPTER" <<'PY'
+  "$RESEARCHER_MODEL" "$RESEARCHER_TEMPLATE_VERSION" "$SCRIPT_DIR/prefetch-knowledge.sh" "$ADAPTER" "$GUIDANCE_FILE" <<'PY'
 import hashlib, json, os, subprocess, sys
 
 (input_path, output_path, slug, framework, subagents, team_messaging,
- researcher_model, researcher_template_version, prefetch_script, adapter) = sys.argv[1:]
+ researcher_model, researcher_template_version, prefetch_script, adapter,
+ guidance_path) = sys.argv[1:]
 
 def reject(message):
     print(message, file=sys.stderr)
@@ -152,6 +162,17 @@ if fixed_preferences != 1: reject("exactly one fixed preference/convention inves
 def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
+try:
+    dispatch_guidance = open(guidance_path, encoding="utf-8").read()
+except Exception as exc:
+    reject(f"canonical dispatch guidance is unreadable: {exc}")
+marker = "Defaults-Digest: sha256:"
+matches = [line.removeprefix(marker) for line in dispatch_guidance.splitlines()
+           if line.startswith(marker)]
+if len(matches) != 1 or len(matches[0]) != 64:
+    reject("canonical dispatch guidance lacks one defaults digest identity")
+guidance_identity = {"schema_version": 1, "defaults_digest": f"sha256:{matches[0]}"}
+
 input_shape = {"schema_version": 1, "slug": slug, "ordered_investigations": normalized}
 input_fp = hashlib.sha256(canonical(input_shape)).hexdigest()
 prefetch_manifest = []
@@ -175,6 +196,7 @@ capabilities = {"subagents": subagents, "team_messaging": team_messaging}
 source_shape = {"active_framework": framework, "adapter_capabilities": capabilities,
                 "researcher_model": researcher_model,
                 "researcher_template_version": researcher_template_version,
+                "dispatch_guidance_identity": guidance_identity,
                 "ordered_prefetch": prefetch_manifest}
 source_fp = hashlib.sha256(canonical(source_shape)).hexdigest()
 
@@ -184,7 +206,8 @@ for ordinal, inv in enumerate(normalized, 1):
     op_id = hashlib.sha256((input_fp + "\0" + inv["id"]).encode("utf-8")).hexdigest()[:20]
     payload = {"role": "researcher", "model": researcher_model,
                "investigation_id": inv["id"], "question": inv["question"],
-               "complexity": inv["complexity"], "prior_knowledge": knowledge_by_id[inv["id"]]}
+               "complexity": inv["complexity"], "prior_knowledge": knowledge_by_id[inv["id"]],
+               "dispatch_guidance": dispatch_guidance}
     directives.append({"ordinal": ordinal, "operation_id": op_id, "adapter": adapter,
                        "action": "spawn", "payload": payload,
                        "teardown_payload": {"action": "shutdown", "handle_slot": op_id, "approve": True}})
@@ -289,8 +312,13 @@ if [[ $NEED_ATOM -eq 1 ]]; then
   fi
 fi
 
-RESULT=$(jq -c --arg status "$STATUS" --arg path "$ARTIFACT" \
-  '.artifact + {status:$status, artifact_path:$path, artifact_sha256:.artifact_sha256}' "$PREPARED")
+if [[ $NEED_PUBLISH -eq 1 ]]; then
+  RESULT=$(jq -c --arg status "$STATUS" --arg path "$ARTIFACT" \
+    '.artifact + {status:$status, artifact_path:$path, artifact_sha256:.artifact_sha256}' "$PREPARED")
+else
+  RESULT=$(jq -c --arg status "$STATUS" --arg path "$ARTIFACT" --arg sha "$CURRENT_SHA" \
+    '. + {status:$status, artifact_path:$path, artifact_sha256:$sha}' "$ARTIFACT")
+fi
 if [[ $JSON_MODE -eq 1 ]]; then
   printf '%s\n' "$RESULT"
 else

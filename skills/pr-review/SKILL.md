@@ -227,6 +227,8 @@ in the diff or source. The brief alone is never sufficient basis for a finding.
 
 ### 3b. Read lens methodologies and spawn agents
 
+**Dispatch guidance gate:** For every built-in, Structural Read, ceremony, or perspective-agent launch or retry, run `lore dispatch guidance` immediately before assembling that launch's prompt. Prepend that launch attempt's complete output verbatim as the first block; never copy, summarize, cache, or reuse it for another launch. If any render fails while preparing the single parallel lens batch, issue none of that batch; a retry renders a fresh block independently for every member before launch. This changes neither model routing nor concurrency.
+
 For each selected lens, read its Step 3 methodology:
 
 | Lens | Source | Step 3 heading |
@@ -243,6 +245,8 @@ For each selected lens, read its Step 3 methodology:
 For each selected lens, create a task with this structure:
 
 ```
+<complete `lore dispatch guidance` output rendered for this launch attempt, verbatim>
+
 # <Lens Name> Lens — PR #<number>
 
 You are a lens review agent analyzing PR #<number> in <owner>/<repo>.
@@ -322,6 +326,8 @@ The Structural Read lens is the one whole-PR lens. Construct it as an `Agent` ta
 Its substrate is **diagram (when present) + narrative + diff** — the promoted Narrative + Diagram from Step 3a-narrative, plus the diff. It never receives other lenses' raw findings; the cross-finding benefit is recovered later in synthesis (Step 4-structural). On a single-module PR no diagram was drawn — embed narrative + diff alone and say so, so the diagram-dependent checks are skipped rather than hallucinated. It also receives the **architecture-scale Prior Knowledge** held aside in Step 3a-knowledge — not the diff-local block — so its idiom-fit judgment is grounded in documented architecture and conventions rather than re-inferred from the diff.
 
 ```
+<complete `lore dispatch guidance` output rendered for this launch attempt, verbatim>
+
 # Structural Read Lens — PR #<number>
 
 You are the Structural Read lens agent for PR #<number> in <owner>/<repo>.
@@ -389,6 +395,8 @@ Report back with your structural assessment when complete.
 
 **This step is mandatory and must not be skipped.** Ceremony lenses are identified by the `[ceremony]` tag assigned during Step 2b. For each ceremony lens in the selected set, construct an `Agent` task — *not* a `Skill` invocation — using the `general-purpose` subagent type with this prompt structure: read `skills/pr-review/templates/ceremony-lens-prompt.md`.
 
+Immediately before each ceremony launch or retry, render a new complete dispatch-guidance block and prepend that launch's output verbatim before the ceremony template content. The template remains otherwise unchanged.
+
 The `Agent`-wrapped invocation — rather than a direct `Skill` call from the main conversation — is what makes parallel execution with built-in lens agents possible. `Skill` invocations run synchronously in the main thread; `Agent` invocations issued in a single message run concurrently.
 
 <!-- section-boundary -->
@@ -408,6 +416,8 @@ Ceremony lens results are collected in Step 3d alongside built-in results; outpu
 ### 3c. Self-review perspective lenses (--self mode only)
 
 If mode is `--self`, after standard lens agents complete, spawn perspective-lens agents:
+
+Immediately before each perspective-lens launch or retry, render a new complete dispatch-guidance block and prepend that launch's output verbatim to its prompt below. Fail before that launch if rendering fails rather than dispatching a floorless prompt.
 
 **External reviewer perspective:** "Review these findings as if seeing this code for the first time. Flag any finding where the explanation relies on context not available in the diff."
 

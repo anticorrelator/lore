@@ -1149,6 +1149,18 @@ resolve_permission_adapter() {
   esac
 }
 
+# --- dispatch guidance -----------------------------------------------------
+# These are the shared prompt-assembly seams for repository-owned dispatch
+# producers. Keep callers out of the renderer/validator filenames so the
+# schema can evolve behind one stable shell contract.
+render_dispatch_guidance() {
+  bash "$LORE_LIB_DIR/render-dispatch-guidance.sh" "$@"
+}
+
+validate_dispatch_guidance() {
+  bash "$LORE_LIB_DIR/validate-dispatch-guidance.sh" "$@"
+}
+
 # --- framework_model_routing_shape ---
 # Print the model_routing shape for the active framework: "single" or "multi".
 # Reads adapters/capabilities.json `.frameworks.<active>.model_routing.shape`.

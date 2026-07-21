@@ -84,6 +84,9 @@ cmd_spawn() {
     echo "Error: spawn requires <role> <task_prompt>" >&2
     return 1
   fi
+  if ! printf '%s' "$task_prompt" | bash "$LORE_REPO_DIR/scripts/validate-dispatch-guidance.sh"; then
+    return 1
+  fi
 
   local subagents
   subagents=$(cap subagents)
@@ -241,11 +244,14 @@ cmd_settings_override_flag() {
 # rows are the closed seven plus a header summary.
 cmd_smoke() {
   require_claude_code
-  local subagents team_messaging transcript task_completed
+  local subagents team_messaging transcript task_completed guidance_hook native_ad_hoc
   subagents=$(cap subagents)
   team_messaging=$(cap team_messaging)
   transcript=$(cap transcript_provider)
   task_completed=$(cap task_completed_hook)
+  guidance_hook=$(cap native_dispatch_guidance_hook)
+  native_ad_hoc="unavailable"
+  [[ "$guidance_hook" == "full" ]] && native_ad_hoc="eligible"
 
   local mode
   mode=$(resolve_completion_enforcement_mode)
@@ -257,6 +263,7 @@ cmd_smoke() {
   echo "[claude-code orchestration adapter smoke]"
   echo "  active framework:        claude-code"
   echo "  completion enforcement:  $mode"
+  echo "  native ad-hoc dispatch:   $native_ad_hoc (guidance hook=$guidance_hook)"
   echo "  role bindings:           lead=$model_lead worker=$model_worker"
   echo
   echo "  Operation                Support       Native API"

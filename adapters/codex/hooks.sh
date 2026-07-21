@@ -165,6 +165,13 @@ command = "bash ~/.lore/scripts/pre-compact.sh"
 # form below is the schema codex actually expects.
 matcher = "Write"
 command = "bash ~/.lore/scripts/guard-work-writes.sh"
+
+[[hooks.PreToolUse]]
+# Current Codex maps the spawn_agent local function onto the Agent matcher.
+# The hook payload retains tool_name=spawn_agent and tool_input.message;
+# validate-dispatch-guidance.sh accepts only that probe-backed exact shape.
+matcher = "Agent"
+command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/validate-dispatch-guidance.sh --hook codex"
 # <<< lore hooks (managed)
 TOML
 }
@@ -308,7 +315,7 @@ cmd_smoke() {
   echo "  -------------------- --------- ----------------------------------------"
   printf '  %-20s %-9s %s\n' session_start      full      "SessionStart hook (~/.lore/scripts/{doctor,auto-reindex,load-knowledge,load-work,load-threads,extract-session-digest})"
   printf '  %-20s %-9s %s\n' user_prompt        full      "(no native UserPromptSubmit; PreToolUse matcher=Write covers lore writes)"
-  printf '  %-20s %-9s %s\n' pre_tool           full      "PreToolUse hook (matcher=Write -> guard-work-writes.sh)"
+  printf '  %-20s %-9s %s\n' pre_tool           full      "PreToolUse hooks (Write guard; Agent/spawn_agent -> validate-dispatch-guidance.sh)"
   printf '  %-20s %-9s %s\n' post_tool          full      "(currently unused by lore; PostToolUse hook surface available)"
   printf '  %-20s %-9s %s\n' permission_request full      "PermissionRequest hook (behavior=allow|deny|abstain JSON-stdout)"
   printf '  %-20s %-9s %s\n' pre_compact        fallback  "(no native PreCompact; SessionStart bookend -> pre-compact.sh)"

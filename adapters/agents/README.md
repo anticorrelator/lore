@@ -73,6 +73,12 @@ operation:
 | `completion_enforcement`  | `task_completed_hook` + `subagents`                          | See "Completion Enforcement Degradation Modes" below.             |
 | `resolve_model_for_role`  | `model_routing`                                              | `shape=single` → role map collapses to one binding.               |
 
+Every `spawn` validates the exact `task_prompt` against the current canonical
+block before it resolves or emits model routing. This admission check does not
+select or rewrite the model. Native ad-hoc launches bypass the adapter, so they
+are eligible only when `native_dispatch_guidance_hook=full`; otherwise callers
+use the validating adapter or an item-backed worker session.
+
 `completion_enforcement` is the only operation that always returns a
 value (not an error) — even on unsupported harnesses, it returns
 `unavailable` so callers can branch to a soft warning instead of
@@ -418,6 +424,7 @@ or with `subagents=none` outright.
 | `shutdown`                 | shutdown_request via SendMessage             | plugin runtime kill                         | subagent stop                            |
 | `completion_enforcement`   | `native_blocking`                            | `lead_validator`                            | `lead_validator`                         |
 | `resolve_model_for_role`   | `--model <id>` (single)                      | provider/model selector (multi)             | model selector (single)                  |
+| native ad-hoc dispatch     | eligible (`Agent` prompt hook)               | _unavailable_                               | eligible (`spawn_agent` message hook)    |
 
 Cells in italics mark `unsupported`/`fallback` operations per
 [`adapters/capabilities.json`](../capabilities.json). Unsupported

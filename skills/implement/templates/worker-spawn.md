@@ -2,6 +2,10 @@
 
 Three spawn routes. Dispatch precedence is: an explicit per-run model or route pin, then the class's qualified standing route, then the native default. Same-framework targets spawn natively. A foreign target uses the chaperone only when `target_framework` is `codex`; every other foreign pair refuses before spawn. An unqualified binding can still use the legacy Codex route when the user or plan explicitly selects it. The **session-routed** route remains explicit — a `[route: session]` task-line marker (surfaced as the task's `route` field) or a user directive at dispatch. Confirm the effective implementation model against the stated intent before dispatch.
 
+## Guidance floor
+
+Immediately before each Task launch, render a single-use block with `lore dispatch guidance`. If rendering fails, stop before the Task call. Prepend the complete output verbatim to the exact prompt, before the resolved template and task context; render again for every worker, chaperone, and retry. Nested launches receive separate renderings at their own assembly seams.
+
 ## Per-task judgment class → worker role
 
 Each batch entry from `lore impl open` / `lore impl next-batch` carries a `judgment_class` (`mechanical | standard | judgment-dense`, or `null` on unannotated/legacy tasks). It selects the class-qualified worker role to resolve the model from:
@@ -33,6 +37,8 @@ Task:
   name: "worker-N"
   mode: "bypassPermissions"
   prompt: |
+    $DISPATCH_GUIDANCE
+
     <contents of the worker agent template with {{template}} variables resolved>
     <if advisors: contents of advisory-consultation.md with {{advisors}} resolved>
 ```
@@ -65,9 +71,14 @@ Task:
   name: "worker-N"
   mode: "bypassPermissions"
   prompt: |
+    $DISPATCH_GUIDANCE
+
     <contents of agents/codex-worker.md with {{template}} variables resolved,
      including {{worker_role}} set to the class-qualified role for this task
      and {{native_binding}} set to $CODEX_NATIVE_BINDING>
+    <launch-seam instruction: before §4 assembles the Codex prompt, render a
+     new lore dispatch guidance block, fail before codex exec if rendering
+     fails, and write the complete block first in that prompt>
 ```
 
 The chaperone sends only the native Codex payload to `adapters/agents/codex.sh split_model_variant`. For a standing route that payload is `{{native_binding}}`; for the legacy explicit route it comes from `LORE_FRAMEWORK=codex resolve_model_for_role {{worker_role}} implement`. The chaperone marks its result `degraded` when Codex returns no parseable report; on a degraded return, re-dispatch the task through the native same-harness route. Routing through Codex remains an optimization, never a dependency.
@@ -82,7 +93,7 @@ The Task tool spawns Claude-native subagents that report at turn boundaries, so 
 
 **Derive the session slug.** A worker session runs under a derived slug `<work-item-slug>--w<n>` (`n` = a per-dispatch ordinal you increment across session-routed dispatches in this run). The derived slug is the session's identity end to end — the TUI keys its panel and journal rows on it, and it is distinct from the work-item slug on purpose (a shared slug would collide with the lead's own implement session and would double-count worker cost into retro's session-spend line). The base work item still travels with the session: in the request's `--context` brief and, once running, in each journal row's `links.work_item`.
 
-**Compose the session-adapted brief and write it to a file.** The brief is the same worker protocol content the default route resolves from `agents/worker.md` (task assignment + phase brief + prior knowledge + evidence contract), adapted for session execution. Write the composed brief to a durable file the chaperone will point `--context` at — `$KDIR/_work/<work-item-slug>/worker-reports/<derived-slug>.brief.md` sits right beside where the report lands and doubles as the observability record of exactly what the session was asked to do. Pass that path to the chaperone as `{{brief_file}}`; the chaperone never reads the brief, it only references the file, which keeps its own context minimal. The session is a standalone harness session, not a team subagent, so the brief's adaptations are:
+**Compose the session-adapted brief and write it to a file.** Render a new guidance block for the brief itself and write that complete output first; if rendering fails, do not write or enqueue the brief. This rendering is separate from the one prepended to the chaperone's own Task prompt. The rest of the brief is the same worker protocol content the default route resolves from `agents/worker.md` (task assignment + phase brief + prior knowledge + evidence contract), adapted for session execution. Write the composed brief to a durable file the chaperone will point `--context` at — `$KDIR/_work/<work-item-slug>/worker-reports/<derived-slug>.brief.md` sits right beside where the report lands and doubles as the observability record of exactly what the session was asked to do. Pass that path to the chaperone as `{{brief_file}}`; the chaperone never reads the brief, it only references the file, which keeps its own context minimal. The session is a standalone harness session, not a team subagent, so the brief's adaptations are:
 
 - **Report lands as a file, not a SendMessage.** The session writes its completion report to `$KDIR/_work/<work-item-slug>/worker-reports/<derived-slug>.md` (`mkdir -p` the directory first) as its final step before terminus — there is no lead to message and no journal event carries a report body. The chaperone reads that file after terminus.
 - **Tier 2 rows are self-appended.** The session runs `evidence-append.sh --work-item <work-item-slug>` itself (it has knowledge-store access), landing its rows in the base work item's `task-claims.jsonl` and listing the `claim_id`s in its report — exactly as an in-harness worker does. No relay block, no chaperone-side append.
@@ -108,6 +119,8 @@ Task:
   name: "worker-N"
   mode: "bypassPermissions"
   prompt: |
+    $DISPATCH_GUIDANCE
+
     <contents of agents/session-worker.md with {{template}} variables resolved:
      {{work_item_slug}}, {{derived_slug}}, {{worker_model}} set to
      $WORKER_SESSION_MODEL, and {{brief_file}} set to the path of the brief

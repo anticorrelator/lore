@@ -119,6 +119,17 @@ non-`none` cell points at an id that exists here.
   `PermissionRequest` and `PermissionDenied` events are also documented.
 - **Consumed by:** `claude-code.capabilities.permission_hooks`.
 
+### claude-code-native-dispatch-guidance-hook
+
+- **Source:** Anthropic — Claude Code Hooks reference
+- **URL / path:** https://code.claude.com/docs/en/hooks
+- **Retrieved:** 2026-07-21
+- **Product / version:** Claude Code, unversioned (docs site, current)
+- **Claim:** `PreToolUse` can match the `Agent` launch tool, exposes its
+  prompt as `tool_input.prompt`, and can deny the call before execution
+  through `hookSpecificOutput.permissionDecision: "deny"`.
+- **Consumed by:** `claude-code.capabilities.native_dispatch_guidance_hook`.
+
 ### claude-code-task-completed-hook
 
 - **Source:** Anthropic — Claude Code Hooks reference
@@ -501,6 +512,17 @@ non-`none` cell points at an id that exists here.
   the hook adapter must use the right field per event.
 - **Consumed by:** `codex.capabilities.permission_hooks`.
 
+### codex-native-dispatch-guidance-hook
+
+- **Source:** OpenAI — Codex Hooks reference and current local-function schema
+- **URL / path:** https://learn.chatgpt.com/docs/hooks.md
+- **Retrieved:** 2026-07-21
+- **Product / version:** Codex, current manual
+- **Claim:** `PreToolUse` supports a blocking command hook on the `Agent`
+  matcher used for `spawn_agent`; the launch payload retains
+  `tool_name=spawn_agent` and its exact prompt in `tool_input.message`.
+- **Consumed by:** `codex.capabilities.native_dispatch_guidance_hook`.
+
 ### codex-task-completed-hook
 
 - **Source:** OpenAI Developers — Codex Hooks reference (event list,
@@ -773,6 +795,7 @@ matches the union of all `evidence:` fields in capabilities.json.
 - claude-code-tool-hooks
 - claude-code-permission-hooks
 - claude-code-task-completed-hook
+- claude-code-native-dispatch-guidance-hook
 - claude-code-subagents
 - claude-code-team-messaging
 - claude-code-transcript-provider
@@ -805,6 +828,7 @@ matches the union of all `evidence:` fields in capabilities.json.
 - codex-tool-hooks
 - codex-permission-hooks
 - codex-task-completed-hook
+- codex-native-dispatch-guidance-hook
 - codex-subagents
 - codex-transcript-provider
 - codex-headless-runner

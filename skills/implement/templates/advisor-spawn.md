@@ -14,6 +14,8 @@ For each persistent advisor:
 
    Per-spawn model selection for advisors routes through `bash "$ADAPTER" resolve_model_for_role advisor`. The Claude Code path produces a `delegate:TaskCreate` directive with the resolved model id; opencode honors `provider/model` syntax for advisor bindings independently of worker bindings.
 
+   Immediately before assembling this advisor's prompt, run `lore dispatch guidance`. If rendering fails, stop before the Task call. Prepend the complete single-use output verbatim before the resolved advisor template; render again for every advisor and retry.
+
    ```
    ADVISOR_MODEL=$(bash "$ADAPTER" resolve_model_for_role advisor)
 
@@ -24,6 +26,8 @@ For each persistent advisor:
      name: "<advisor-name>"
      mode: "bypassPermissions"
      prompt: |
+       $DISPATCH_GUIDANCE
+
        <contents of the advisor agent template with {{template}} variables resolved>
    ```
 

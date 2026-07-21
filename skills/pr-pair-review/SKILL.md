@@ -113,6 +113,9 @@ For comments with substantive labels (suggestion, issue, question, thought):
 3. Stale-knowledge flagging: see `skills/pr-review/SKILL.md` Step 4d — if an entry is STALE and the PR contradicts it, flag as "convention may need updating" — not "PR is wrong."
 
 **Conditional investigation escalation:** If knowledge results are insufficient AND the concern involves cross-boundary invariants or architectural patterns spanning multiple files, spawn an Explore agent:
+
+For every escalation launch or retry, run `lore dispatch guidance` immediately before assembling that launch's prompt. If rendering fails, stop before that launch. Prepend that launch attempt's complete output verbatim as the first block; never transcribe, summarize, cache, or reuse the block. Then append the task-specific prompt:
+
 ```
 Task: Investigate whether [specific concern] holds.
 Scope: [files/directories to examine]
