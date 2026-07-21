@@ -118,7 +118,7 @@ Commands:
   impl         /implement bookkeeping verbs (see: lore impl --help)
   spec         /spec bookkeeping verbs (see: lore spec --help)
   evolve       /evolve review-queue and filing verbs (see: lore evolve --help)
-  coordinate   Read-only cross-substrate coordination status (see: lore coordinate --help)
+  coordinate   Coordination status, reconciliation, and stream worktrees (see: lore coordinate --help)
   session      Multi-session coordination substrate verbs (see: lore session --help)
   retro        Federated retro pooling (see: lore retro --help)
   correction   Verdict-driven correction management (see: lore correction --help)
@@ -537,13 +537,16 @@ EOF
 
 coordinate_usage() {
   cat >&2 <<EOF
-lore coordinate — read-only cross-substrate coordination view
+lore coordinate — cross-substrate coordination and stream lifecycle
 
 Usage: lore coordinate <verb> [args...]
 
 Verbs:
   status    Project work, session, ceremony, retro, and evolve evidence into
             Act now, Needs judgment, Waiting, and Reconcile
+  reconcile Freeze and validate immutable per-stream reconciliation evidence
+  worktree  Allocate, bind, renew, transition, clean, sweep, or inspect a
+            manager-owned stream worktree
 
 Options:
   --help, -h    Show this help
@@ -894,6 +897,12 @@ cmd_coordinate() {
       ;;
     status)
       exec "$SCRIPTS_DIR/coordinate-status.sh" "$@"
+      ;;
+    reconcile)
+      exec "$SCRIPTS_DIR/coordinate-reconcile.sh" "$@"
+      ;;
+    worktree)
+      exec "$SCRIPTS_DIR/coordinate-worktree.sh" "$@"
       ;;
     *)
       echo "Error: unknown coordinate verb '$subcmd'" >&2
