@@ -130,8 +130,10 @@ reconciliation, and verified manager cleanup remain separate decisions.
 ## Event stream mechanics
 
 - The cursor rides stdout as a final `{"next_cursor": N}` row alongside the event
-  rows — read the whole stream, no stderr to fold back in. It is opaque: persist it
-  verbatim in the ledger. A mid-row `--since` is refused with
+  rows — read the whole stream, no stderr to fold back in. JSON reads also expose
+  ordered `records` entries that pair each event with the cursor immediately after
+  that row; follow mode uses those exact boundaries rather than the batch cursor.
+  Cursors are opaque: persist them verbatim in the ledger. A mid-row `--since` is refused with
   `cursor-not-row-aligned` — cursors are copied verbatim, never computed.
 - `--cursor-only` gets a baseline without replaying the journal; `--tail <N>` reads
   the last N rows plus the cursor row — an orientation snapshot, not a resume
@@ -145,21 +147,40 @@ reconciliation, and verified manager cleanup remain separate decisions.
 
 `lore session wait <slug>` keys on exact slug so a worker's close never wakes a
 parent (`--work-item <slug>` opts in to the base slug plus derived `--w<n>` workers).
-Exits: 0 matched, 2 timed out (re-arm from the returned cursor), 3 session-gone,
-4 internal error after bounded retries — never read 4 as timeout. `--request-id`
-narrows `closed` rows only; a slug-matched `close_failed` still wakes — sloppy wake,
-exact read (c2c34e2). The wait default is `closed,close_failed,orphaned`
-(teardown-oriented); progress (`step_completed`), completion (`terminus_reached`),
-worktree refusal/quarantine (`restore_refused`, `worktree_quarantined`), and stall
-(`modal_blocked`, one journal row per genuine modal entry) wakes are explicit
-opt-ins via `--until`. `wait` has no session-type filter — scope every
-watcher and raw poll by exact slug or `--request-id`, and on wake check the matched
-row's event type and fields before acting.
+Exits: 0 matched or follow stop reached, 2 timed out (resume from the returned
+cursor), 3 session-gone, 4 internal error after bounded retries — never read 4 as
+timeout. The omitted timeout is 3600 seconds; explicit `--timeout 0` remains an
+immediate check. Without `--follow`, `--until` keeps its one-shot filtering
+behavior. With `--follow`, every exact-target row is emitted in journal order and
+`--until` is the stop set. Plain output emits each event followed by its exact
+`{"next_cursor": N}` checkpoint; `--json` emits one NDJSON matched object per
+event with `matched`, `next_cursor`, and `terminal`, then an existing
+terminal-shaped object on a non-match exit. Inspect every row's event and fields
+before acting. `--request-id` narrows
+`closed` rows only; a slug-matched `close_failed` still wakes — sloppy wake, exact
+read (c2c34e2). The default stop set remains
+`closed,close_failed,orphaned`; progress (`step_completed`), completion
+(`terminus_reached`), worktree refusal/quarantine (`restore_refused`,
+`worktree_quarantined`), and stall (`modal_blocked`, one journal row per genuine
+modal entry) are explicit `--until` choices. `wait` has no session-type filter —
+scope every watcher by exact slug or `--request-id`.
+
+`--next-session` requires `--follow`, a positional exact slug, and no caller-supplied
+`--request-id`. It starts at a supplied cursor or an invocation-time journal-end
+baseline, ignores predecessor rows, and binds the first future request identity
+from `requested`, `claimed`, `spawned`, or `spawn_failed`. Claim and spawn are
+unordered acquisition edges for that identity: failed or reclaimed attempts keep
+waiting, liveness begins only after correlated spawn (or recovery after claim),
+and correlated abandonment or cancellation emits and exits 3.
 
 Run watchers and coordinator control from the stable checkout, never from a mutating
 stream tree. This keeps a worker from rewriting the watcher or its dependency closure
 mid-poll; declared overlap remains a semantic ownership edge even when Git paths are
-physically isolated.
+physically isolated. For a stream that must perform the rewrite, publish the handoff
+first, retain the last cursor, and raw-poll `lore session events --since <cursor>`
+with exact slug, event, and field inspection only until the replacement contracts
+are green. That raw-poll posture is scoped to the migration window, not standing
+guidance.
 
 ## Calibrations (session-queues arc, 2026-07-16; n=1 each, ~1h wall clock lost)
 
@@ -211,6 +232,12 @@ kept for provenance. Live wants stay in SKILL.md.
   modal stalls journal as `modal_blocked` (ebc500b →
   [[work:journal-modal-blocked-session-detection]]) — live-proven same day
   (3 entries, latch-clean, zero heartbeat spam).
+- persistent follow, next-session acquisition, and the one-hour default — SHIPPED
+  2026-07-21: follow emits every target row with a per-row resume checkpoint;
+  next-session binds the future request across the no-owner gap and tolerates
+  claim/spawn reordering. Rewriting the wait closure remains a calibrated n=4
+  watcher hazard, so raw journal polling is a stream-scoped migration handoff only
+  → [[work:session-watch-persistent-follow-sane-timeout-next]].
 - close retry-on-unblock + `terminus_reached` — SHIPPED 2026-07-12 (park-open arc →
   [[work:completed-sessions-park-open-close-retry-on-unbloc]]), both legs. Origin: a
   spec session completed its protocol but both terminus auto-closes died against a

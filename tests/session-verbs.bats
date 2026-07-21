@@ -618,6 +618,22 @@ EOF
   echo "$output" | jq -e '.fold_version=="1" and .vocabulary_version=="1"'
 }
 
+@test "events: JSON records pair every event with its exact following row boundary" {
+  write_journal >/dev/null
+  local -a bounds=(); local _b
+  while IFS= read -r _b; do bounds+=("$_b"); done < <(journal_boundaries)
+  local out; out="$(bash "$EVENTS" --kdir "$TEST_KDIR" --json)"
+
+  [ "$(echo "$out" | jq -r '.records | length')" -eq "${#JOURNAL_ROWS[@]}" ]
+  [ "$(echo "$out" | jq -r '[.records[].event.event] | join(",")')" = \
+    "requested,claimed,spawned,closed" ]
+  local actual expected
+  actual="$(echo "$out" | jq -r '[.records[].next_cursor] | join(",")')"
+  expected="$(printf '%s\n' "${bounds[@]:1}" | paste -sd, -)"
+  [ "$actual" = "$expected" ]
+  echo "$out" | jq -e '.events == [.records[].event] and .next_cursor == .records[-1].next_cursor'
+}
+
 @test "events: a torn trailing row never disturbs the complete-row read; cursor stops before it" {
   local f; f="$(write_journal)"
   local -a bounds=(); local _b
@@ -1453,6 +1469,147 @@ coordinate_event_vocab() {
   # Re-arming from the emitted cursor does not re-match the consumed row.
   run bash "$WAIT" feature-x --since "$nc" --timeout 1 --kdir "$TEST_KDIR"
   [ "$status" -eq 2 ]
+}
+
+@test "wait follow: one process emits every row through terminal (sleep-blocked delegation regression)" {
+  write_instance inst-a feature-x
+  local f="$TEST_KDIR/_sessions/events.jsonl"
+  printf '%s\n' \
+    '{"event":"step_completed","slug":"feature-x","step_id":"one"}' \
+    '{"event":"step_completed","slug":"feature-x","step_id":"two"}' \
+    '{"event":"terminus_reached","slug":"feature-x"}' \
+    '{"event":"closed","request_id":"spawn-rid","slug":"feature-x"}' > "$f"
+
+  local out code
+  out="$(bash "$WAIT" feature-x --follow --until terminus_reached --since 0 --timeout 10 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 0 ]
+  [ "$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("event")) | .event] | join(",")')" = \
+    "step_completed,step_completed,terminus_reached" ]
+  [ "$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("next_cursor"))] | length')" -eq 3 ]
+
+  local terminal_cursor
+  terminal_cursor="$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("next_cursor")) | .next_cursor][-1]')"
+  run bash "$WAIT" feature-x --until closed --since "$terminal_cursor" --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"closed"'* ]]
+}
+
+@test "wait follow: checkpoints survive stderr suppression (stderr cursor-loss regression)" {
+  write_instance inst-a feature-x
+  printf '%s\n' \
+    '{"event":"step_completed","slug":"feature-x","step_id":"one"}' \
+    '{"event":"closed","request_id":"spawn-rid","slug":"feature-x"}' \
+    > "$TEST_KDIR/_sessions/events.jsonl"
+
+  local out
+  out="$(bash "$WAIT" feature-x --follow --since 0 --timeout 10 --kdir "$TEST_KDIR" 2>/dev/null)"
+  [ "$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("event"))] | length')" -eq 2 ]
+  [ "$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("next_cursor"))] | length')" -eq 2 ]
+  local nc size
+  nc="$(printf '%s\n' "$out" | tail -n1 | jq -r '.next_cursor')"
+  size="$(wc -c < "$TEST_KDIR/_sessions/events.jsonl" | tr -d ' ')"
+  [ "$nc" -eq "$size" ]
+}
+
+@test "wait follow: an empty batch times out without a false match (BSD grep -qv regression)" {
+  write_instance inst-a feature-x
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  local stub_bin="$TEST_KDIR/stub-bin" date_count="$TEST_KDIR/date-count"
+  mkdir -p "$stub_bin"
+  cat > "$stub_bin/date" <<'EOF'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$DATE_COUNT" ] || count="$(cat "$DATE_COUNT")"
+count=$((count + 1))
+printf '%s\n' "$count" > "$DATE_COUNT"
+if [ "$count" -eq 1 ]; then printf '%s\n' 100; else printf '%s\n' 3700; fi
+EOF
+  cat > "$stub_bin/sleep" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$stub_bin/date" "$stub_bin/sleep"
+
+  local out err="$TEST_KDIR/wait.err" code
+  out="$(PATH="$stub_bin:$PATH" DATE_COUNT="$date_count" bash "$WAIT" feature-x --follow --since 0 --json --kdir "$TEST_KDIR" 2>"$err")" && code=0 || code=$?
+  [ "$code" -eq 2 ]
+  [ "$(printf '%s\n' "$out" | jq -s 'length')" -eq 1 ]
+  echo "$out" | jq -e '.outcome=="timeout" and .matched==null and .next_cursor==0'
+  grep -q "timed out after 3600s" "$err"
+}
+
+@test "wait follow: JSON emits ordered matched objects and marks only the stop row terminal" {
+  write_instance inst-a feature-x
+  printf '%s\n' \
+    '{"event":"step_completed","slug":"feature-x","step_id":"one"}' \
+    '{"event":"terminus_reached","slug":"feature-x"}' \
+    > "$TEST_KDIR/_sessions/events.jsonl"
+  local out
+  out="$(bash "$WAIT" feature-x --follow --until terminus_reached --since 0 --json --timeout 10 --kdir "$TEST_KDIR")"
+  echo "$out" | jq -s -e '
+    length == 2
+    and [.[].matched.event] == ["step_completed", "terminus_reached"]
+    and [.[].terminal] == [false, true]
+    and (.[0].next_cursor < .[1].next_cursor)
+  '
+}
+
+@test "wait next-session: binds claimed or spawned first, survives retry rows, and ignores predecessor terminal" {
+  local order
+  for order in claimed-first spawned-first; do
+    : > "$TEST_KDIR/_sessions/events.jsonl"
+    printf '%s\n' '{"event":"closed","request_id":"old-rid","slug":"feature-x"}' >> "$TEST_KDIR/_sessions/events.jsonl"
+    if [[ "$order" == claimed-first ]]; then
+      printf '%s\n' \
+        '{"event":"claimed","request_id":"next-rid","slug":"feature-x"}' \
+        '{"event":"spawn_failed","request_id":"next-rid","slug":"feature-x"}' \
+        '{"event":"request_reclaimed","request_id":"next-rid","slug":"feature-x"}' \
+        '{"event":"spawned","request_id":"next-rid","slug":"feature-x"}' \
+        >> "$TEST_KDIR/_sessions/events.jsonl"
+    else
+      printf '%s\n' \
+        '{"event":"spawned","request_id":"next-rid","slug":"feature-x"}' \
+        '{"event":"claimed","request_id":"next-rid","slug":"feature-x"}' \
+        >> "$TEST_KDIR/_sessions/events.jsonl"
+    fi
+    printf '%s\n' \
+      '{"event":"step_completed","slug":"feature-x","step_id":"one"}' \
+      '{"event":"terminus_reached","slug":"feature-x"}' \
+      >> "$TEST_KDIR/_sessions/events.jsonl"
+
+    local out code
+    out="$(bash "$WAIT" feature-x --follow --next-session --until terminus_reached --since 0 --timeout 10 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+    [ "$code" -eq 0 ]
+    [[ "$out" != *'"request_id":"old-rid"'* ]]
+    [[ "$out" == *'"request_id":"next-rid"'* ]]
+    [ "$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("event")) | .event][-1]')" = "terminus_reached" ]
+  done
+}
+
+@test "wait next-session: abandoned successor emits the row and exits session-gone 3" {
+  printf '%s\n' \
+    '{"event":"requested","request_id":"next-rid","slug":"feature-x"}' \
+    '{"event":"request_abandoned","request_id":"next-rid","slug":"feature-x"}' \
+    > "$TEST_KDIR/_sessions/events.jsonl"
+  local out code
+  out="$(bash "$WAIT" feature-x --follow --next-session --until closed --since 0 --timeout 10 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 3 ]
+  [ "$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("event")) | .event] | join(",")')" = \
+    "requested,request_abandoned" ]
+}
+
+@test "wait next-session: rejects incompatible target and request modes" {
+  run bash "$WAIT" feature-x --next-session --since 0 --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--next-session requires --follow"* ]]
+
+  run bash "$WAIT" --work-item feature-x --follow --next-session --since 0 --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"requires an exact positional slug"* ]]
+
+  run bash "$WAIT" feature-x --follow --next-session --request-id rid --since 0 --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"binds the successor request ID"* ]]
 }
 
 @test "wait: the default until-set also wakes on close_failed" {

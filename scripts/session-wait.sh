@@ -8,7 +8,8 @@
 # Usage:
 #   lore session wait (<slug> | --work-item <base-slug>)
 #                            [--until <events>] [--since <cursor>]
-#                            [--request-id <id>] [--timeout <sec>] [--ttl <sec>]
+#                            [--request-id <id>] [--follow] [--next-session]
+#                            [--timeout <sec>] [--ttl <sec>]
 #                            [--kdir <path>] [--json]
 #
 # Options:
@@ -32,7 +33,11 @@
 #                     remains a deliberately sloppy wake for an exact re-read.
 #   --work-item <slug> Match the base slug and canonical derived worker slugs
 #                     `<slug>--w<n>`. This is an alternative to positional slug.
-#   --timeout <sec>   How long to wait before giving up (default: 60).
+#   --follow          Emit every target row and stop after emitting the first
+#                     event in --until. Without it, wait remains one-shot.
+#   --next-session    Follow-only exact-slug mode: ignore the predecessor and
+#                     bind the first future request identity before emitting.
+#   --timeout <sec>   How long to wait before giving up (default: 3600).
 #   --ttl <sec>       Liveness window for the owning-instance check (default: 30).
 #   --kdir <path>     Knowledge-store override (test isolation).
 #   --json            Emit one result object instead of plain rows (see below).
@@ -48,9 +53,10 @@
 #   back the cursor so the caller can re-arm with --since <that cursor> — no journal
 #   replay, and it never re-matches the row it just consumed.
 #
-# Output (--json): one object {outcome, matched, next_cursor, slug, until} on every
-#   terminal — outcome is "matched" | "timeout" | "session_gone" |
-#   "internal_error", matched is the event row or null.
+# Output (--json): one-shot emits one object
+#   {outcome, matched, next_cursor, slug, until}. Follow emits one NDJSON matched
+#   object per target row, with terminal=true on the --until stop row; timeout,
+#   session-gone, and internal-error append the existing terminal-shaped object.
 #
 # Exit codes (meanings are local to this verb — do not read them as a cross-verb
 # contract):
@@ -90,13 +96,15 @@ WORK_ITEM_SET=0
 UNTIL="closed,close_failed,orphaned"
 SINCE=""
 SINCE_SET=0
-TIMEOUT=60
+TIMEOUT=3600
 TTL=30
 SESSION_GONE_GRACE_SECONDS=2
 KDIR_OVERRIDE=""
 JSON_MODE=0
 REQUEST_ID=""
 REQUEST_ID_SET=0
+FOLLOW=0
+NEXT_SESSION=0
 EVENTS_RETRY_DELAYS=(1 2)
 
 # Mirror of the sole writer's event vocabulary (session-event-append.sh's
@@ -116,6 +124,8 @@ while [[ $# -gt 0 ]]; do
     --since) SINCE="$2"; SINCE_SET=1; shift 2 ;;
     --request-id) REQUEST_ID="$2"; REQUEST_ID_SET=1; shift 2 ;;
     --work-item) WORK_ITEM="$2"; WORK_ITEM_SET=1; shift 2 ;;
+    --follow) FOLLOW=1; shift ;;
+    --next-session) NEXT_SESSION=1; shift ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
     --ttl) TTL="$2"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
@@ -123,7 +133,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) sed -n '2,72p' "$0"; exit 0 ;;
     --*)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-wait.sh (<slug> | --work-item <base-slug>) [--until <events>] [--since <cursor>] [--request-id <id>] [--timeout <sec>] [--ttl <sec>] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-wait.sh (<slug> | --work-item <base-slug>) [--until <events>] [--since <cursor>] [--request-id <id>] [--follow] [--next-session] [--timeout <sec>] [--ttl <sec>] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
     *)
@@ -174,6 +184,11 @@ fi
 if [[ $REQUEST_ID_SET -eq 1 && -z "$REQUEST_ID" ]]; then
   fail "invalid --request-id: value must be non-empty"
 fi
+if [[ $NEXT_SESSION -eq 1 ]]; then
+  [[ $FOLLOW -eq 1 ]] || fail "--next-session requires --follow"
+  [[ $WORK_ITEM_SET -eq 0 ]] || fail "--next-session requires an exact positional slug, not --work-item"
+  [[ $REQUEST_ID_SET -eq 0 ]] || fail "--next-session binds the successor request ID; do not pass --request-id"
+fi
 
 # --- Validate --until against the writer's vocabulary; build the until-set ---
 [[ -n "${UNTIL// }" ]] || fail "empty --until: pass at least one event name"
@@ -198,6 +213,9 @@ for tok in "${UNTIL_TOKENS[@]}"; do
     if [[ "$tok" == "$p" ]]; then LIVENESS_ENABLED=0; break 2; fi
   done
 done
+if [[ $NEXT_SESSION -eq 1 ]]; then
+  LIVENESS_ENABLED=0
+fi
 
 # --- Resolve store ---
 if [[ -n "$KDIR_OVERRIDE" ]]; then
@@ -242,7 +260,7 @@ UNTIL_JSON="$(printf '%s\n' "${UNTIL_TOKENS[@]}" | jq -R . | jq -s -c .)"
 
 # One incremental read from the given cursor. Composing the reference reader means
 # torn-row, interior-malformed, and past-EOF-reset tolerance are inherited, not
-# re-derived here. Echoes the reader's {events, next_cursor} object.
+# re-derived here. Echoes the reader's {events, records, next_cursor} object.
 # Run the reference reader at most three times. The fixed 1s/2s backoff is
 # intentionally bounded: this remains a caller-owned wait, not a supervisor.
 run_events() {
@@ -281,6 +299,97 @@ first_match() {
       and (.event as $e | $until | index($e))
       and ($request_id_set == 0 or .event != "closed" or .request_id? == $request_id)
     ))' 2>/dev/null || true
+}
+
+# Ordered target-scoped reader records for follow mode. The reader owns each
+# row's byte boundary; this verb only applies target and request filters.
+follow_records() {
+  printf '%s' "$1" | jq -c --arg slug "$SLUG" \
+    --arg request_id "$REQUEST_ID" --argjson request_id_set "$REQUEST_ID_SET" \
+    --argjson work_item_set "$WORK_ITEM_SET" \
+    'def target_matches:
+      . == $slug or (
+        $work_item_set == 1
+        and startswith($slug + "--w")
+        and (.[($slug | length) + 3:] | test("^[0-9]+$"))
+      );
+    .records[] | select(
+      (.event.slug | target_matches)
+      and ($request_id_set == 0 or .event.event != "closed" or .event.request_id? == $request_id)
+    )'
+}
+
+event_in_until() {
+  local event="$1" tok
+  for tok in "${UNTIL_TOKENS[@]}"; do
+    [[ "$event" == "$tok" ]] && return 0
+  done
+  return 1
+}
+
+emit_follow_record() {
+  local row="$1" cursor="$2" terminal="$3"
+  if [[ $JSON_MODE -eq 1 ]]; then
+    jq -cn --argjson matched "$row" --argjson nc "$cursor" \
+      --arg slug "$SLUG" --argjson until "$UNTIL_JSON" --argjson terminal "$terminal" \
+      '{outcome: "matched", matched: $matched, next_cursor: $nc, slug: $slug, until: $until, terminal: $terminal}'
+  else
+    printf '%s\n' "$row"
+    jq -cn --argjson nc "$cursor" '{next_cursor: $nc}'
+  fi
+}
+
+process_follow_result() {
+  local result="$1" record row row_cursor event row_request_id terminal
+  while IFS= read -r record; do
+    [[ -n "$record" ]] || continue
+    row="$(printf '%s' "$record" | jq -c '.event')"
+    row_cursor="$(printf '%s' "$record" | jq -r '.next_cursor')"
+    event="$(printf '%s' "$row" | jq -r '.event')"
+
+    if [[ $NEXT_SESSION -eq 1 ]]; then
+      row_request_id="$(printf '%s' "$row" | jq -r '.request_id? // empty')"
+      if [[ $NEXT_BOUND -eq 0 ]]; then
+        case "$event" in
+          requested|claimed|spawned|spawn_failed)
+            [[ -n "$row_request_id" ]] || continue
+            NEXT_BOUND=1
+            BOUND_REQUEST_ID="$row_request_id"
+            ;;
+          *) continue ;;
+        esac
+      fi
+
+      case "$event" in
+        requested|claimed|spawned|spawn_failed|request_reclaimed|request_abandoned|request_cancelled|closed)
+          [[ "$row_request_id" == "$BOUND_REQUEST_ID" ]] || continue
+          ;;
+      esac
+
+      [[ "$event" == "claimed" ]] && BOUND_CLAIM_SEEN=1
+      if [[ "$event" == "spawned" ]]; then
+        LIVENESS_ENABLED=1
+      elif [[ "$event" == "recovered" && $BOUND_CLAIM_SEEN -eq 1 ]]; then
+        LIVENESS_ENABLED=1
+      fi
+
+      if [[ "$event" == "request_abandoned" || "$event" == "request_cancelled" ]]; then
+        emit_follow_record "$row" "$row_cursor" false
+        emit_terminal "session_gone" "$row_cursor" 3 \
+          "[session] successor request '$BOUND_REQUEST_ID' ended with $event; session gone (re-armable from cursor $row_cursor)"
+      fi
+    fi
+
+    terminal=false
+    if event_in_until "$event"; then
+      terminal=true
+    fi
+    if [[ $NEXT_SESSION -eq 1 && ( "$event" == "spawn_failed" || "$event" == "request_reclaimed" ) ]]; then
+      terminal=false
+    fi
+    emit_follow_record "$row" "$row_cursor" "$terminal"
+    [[ "$terminal" == true ]] && exit 0
+  done < <(follow_records "$result")
 }
 
 # Echo one live owner for the active target mode. Work-item mode deliberately
@@ -362,13 +471,21 @@ else
   CURSOR="$(run_events --cursor-only --kdir "$KNOWLEDGE_DIR")" || emit_internal_error null
 fi
 
+NEXT_BOUND=0
+BOUND_REQUEST_ID=""
+BOUND_CLAIM_SEEN=0
+
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
 while :; do
   RESULT="$(read_from "$CURSOR")" || emit_internal_error "$CURSOR"
-  MATCH="$(first_match "$RESULT")"
-  if [[ -n "$MATCH" && "$MATCH" != "null" ]]; then
-    NC="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
-    emit_matched "$MATCH" "$NC"
+  if [[ $FOLLOW -eq 0 ]]; then
+    MATCH="$(first_match "$RESULT")"
+    if [[ -n "$MATCH" && "$MATCH" != "null" ]]; then
+      NC="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
+      emit_matched "$MATCH" "$NC"
+    fi
+  else
+    process_follow_result "$RESULT"
   fi
   CURSOR="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
 
@@ -380,10 +497,15 @@ while :; do
       # short grace, then read exactly once more before declaring session-gone.
       sleep "$SESSION_GONE_GRACE_SECONDS"
       RESULT="$(read_from "$CURSOR")" || emit_internal_error "$CURSOR"
-      MATCH="$(first_match "$RESULT")"
-      NC="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
-      if [[ -n "$MATCH" && "$MATCH" != "null" ]]; then
-        emit_matched "$MATCH" "$NC"
+      if [[ $FOLLOW -eq 0 ]]; then
+        MATCH="$(first_match "$RESULT")"
+        NC="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
+        if [[ -n "$MATCH" && "$MATCH" != "null" ]]; then
+          emit_matched "$MATCH" "$NC"
+        fi
+      else
+        process_follow_result "$RESULT"
+        NC="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
       fi
       emit_terminal "session_gone" "$NC" 3 \
         "[session] no live instance hosts '$SLUG' and no matching event arrived; session gone (re-armable from cursor $NC)"

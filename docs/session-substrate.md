@@ -822,14 +822,16 @@ cursor that exceeds the file size (impossible without external tampering) resets
 a full re-read with a warning.
 
 `session events` reports that cursor as `next_cursor`. Under `--json` it wraps
-`{events: [...], next_cursor: N}`. Plain output is one JSON value per line on
-stdout: the event rows, then a final `{"next_cursor": N}` row. The cursor is data,
-so it rides stdout with the rows it belongs to — a consumer reads the whole stream
-and never has to fold stderr back in to stay caught up; it tells the rows apart by
-shape (`has("event")` vs `has("next_cursor")`). Two shortcuts serve the same
-stream: `--cursor-only` prints just the current end-of-journal offset (an O(1)
-stat, no rows replayed) for capturing a baseline before acting, and `--tail <N>`
-emits only the last N rows plus the cursor row.
+`{events: [...], records: [{event: <row>, next_cursor: N}, ...], next_cursor: N}`:
+`events` and the aggregate cursor remain compatible, while each ordered `records`
+entry marks the byte after its own valid row. Plain output is one JSON value per
+line on stdout: the event rows, then a final `{"next_cursor": N}` row. The cursor
+is data, so it rides stdout with the rows it belongs to — a consumer reads the
+whole stream and never has to fold stderr back in to stay caught up; it tells the
+rows apart by shape (`has("event")` vs `has("next_cursor")`). Two shortcuts serve
+the same stream: `--cursor-only` prints just the current end-of-journal offset (an
+O(1) stat, no rows replayed) for capturing a baseline before acting, and `--tail
+<N>` emits only the last N rows plus the cursor row.
 
 ### Dedupe posture
 
@@ -905,15 +907,21 @@ rather than growing this contract.**
   and write these surfaces per this contract; they do not spawn, wait, or touch
   the TUI. Registry and claimed-queue *writes* remain Phase 2 (TUI).
 - **Blocking read verb — landed.** `lore session wait <slug>` is the blocking
-  front on the journal: it polls `session events` from a cursor and returns when a
-  row matches `<slug>` exactly (never by substring, so a worker's `<slug>--w<n>`
-  close never wakes a positional parent wait) and an event in its `--until` set
-  (default `closed,close_failed,orphaned`, the close/recovery terminal set). The
-  default deliberately remains teardown-oriented. Progress-aware consumers opt
-  in with `--until step_completed` and exact-read `step_id`/`step_label` from the
-  matched row; completion-aware consumers opt in with `--until terminus_reached`.
-  A step wake is not protocol completion, and later close outcomes remain separate
-  cleanup/spend evidence. The
+  front on the journal: it polls `session events` from a cursor and keys on
+  `<slug>` exactly (never by substring, so a worker's `<slug>--w<n>` close never
+  wakes a positional parent wait). Without `--follow`, it retains the one-shot
+  contract: return the first target row whose event is in `--until` (default
+  `closed,close_failed,orphaned`, the close/recovery terminal set). With
+  `--follow`, it emits every target row in journal order and treats `--until` as
+  the stop set, exiting 0 immediately after the first emitted row in that set.
+  Plain follow output pairs each event row with its own `{"next_cursor": N}` row;
+  `--json` emits one NDJSON
+  `{outcome:"matched", matched:<row>, next_cursor:N, slug, until, terminal}`
+  object per event and appends the existing terminal-shaped object on a non-match
+  exit. Consumers inspect each event type and fields before acting. Progress-aware
+  consumers stop with `--until step_completed`; completion-aware consumers use
+  `--until terminus_reached`. A step row is not protocol completion, and later
+  close outcomes remain separate cleanup/spend evidence. The
   alternate `--work-item <base-slug>` target matches both the exact base and only
   canonical derived `<base-slug>--w<n>` worker slugs, in journal rows and the live
   registry; supplying it together with a positional slug is a usage error. Callers
@@ -922,8 +930,10 @@ rather than growing this contract.**
   `close_failed` carrying a distinct close-request ID — remain a deliberately
   sloppy wake: waking ends sleep only, and the coordinator re-reads the journal
   from the returned cursor to make its exact decision. Exit codes carry the
-  outcome: 0 matched, 1 usage/error, 2 timed out, 3 session-gone, and 4 exhausted
-  internal reader failure. Both baseline and incremental `session events` calls
+  outcome: 0 matched or follow stop reached, 1 usage/error, 2 timed out, 3
+  session-gone, and 4 exhausted internal reader failure. The omitted timeout is
+  3600 seconds; explicit `--timeout 0` remains an immediate bounded check. Both
+  baseline and incremental `session events` calls
   receive three attempts with 1s then 2s backoff; exhaustion is never translated
   into timeout 2. Every non-error exit hands back a resume cursor so a woken
   consumer re-arms with `--since` instead of replaying. A supplied `--since`
@@ -935,8 +945,17 @@ rather than growing this contract.**
   `wait` gives the journal a two-second grace and reads once more before returning
   3. The journal row wins if it lands in that window. Session-gone is suppressed
   when the `--until` set names a queue/pre-spawn event, where an unhosted slug is
-  the normal starting state. Read-side only — it adds no writer, no event, and no
-  TUI surface. See its header for the race-free close-then-wait idiom.
+  the normal starting state. `--next-session` is a follow-only exact-slug mode
+  that starts at a supplied cursor or an invocation-time end-of-journal baseline,
+  binds the first future successor request ID from `requested`, `claimed`,
+  `spawned`, or `spawn_failed`, and emits only that successor's rows. Claim and
+  spawn may arrive in either order; failed or reclaimed attempts keep waiting,
+  and ordinary liveness checks begin only after a correlated spawn (or recovery
+  after claim). A correlated abandoned or cancelled request emits and exits 3.
+  Callers cannot combine this mode with
+  `--work-item` or a caller-supplied `--request-id`. Read-side only — it adds no
+  writer, no event, and no TUI surface. See its header for the race-free
+  close-then-wait idiom.
   Modal detection is an explicit opt-in wake edge: `--until modal_blocked` wakes
   on the next shared-classifier entry row (`reason=modal`). The default remains
   the close/recovery terminal set, and consumers re-arm from the returned cursor.

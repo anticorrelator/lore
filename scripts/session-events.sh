@@ -15,7 +15,9 @@
 #                     an O(1) stat, no rows replayed. Use it to capture a baseline
 #                     cursor before acting (e.g. close-then-wait teardown).
 #   --kdir <path>     Knowledge-store override (test isolation).
-#   --json            Emit {events: [...], next_cursor: N} on stdout. Default plain
+#   --json            Emit {events: [...], records: [...], next_cursor: N} on
+#                     stdout. Each records entry pairs an event with the cursor
+#                     immediately after that row. Default plain
 #                     output is one JSON value per line: the NDJSON event rows,
 #                     then a final {"next_cursor": N} row — all on stdout. Consumers
 #                     tell them apart by shape (has("event") vs has("next_cursor")).
@@ -149,6 +151,7 @@ if since > size:
     since = 0
 
 events = []
+records = []
 next_cursor = since
 
 if size > 0 and since < size:
@@ -187,16 +190,18 @@ if size > 0 and since < size:
                         f"invalid JSON; excluded\n"
                     )
                 pending_malformed = []
-                if start is None:
-                    events.append(obj)
-                else:
+                include = start is None
+                if start is not None:
                     stamp = next((obj.get(k) for k in ("timestamp", "ts", "created_at", "started_at", "completed_at") if obj.get(k)), None)
                     if isinstance(stamp, str):
                         try:
                             if start <= parse(stamp) < end:
-                                events.append(obj)
+                                include = True
                         except ValueError:
                             sys.stderr.write(f"[session] warning: events.jsonl:{lineno} invalid timestamp; excluded\n")
+                if include:
+                    events.append(obj)
+                    records.append({"event": obj, "next_cursor": line_end})
                 next_cursor = line_end
         idx = nl + 1
         pos = line_end
@@ -208,6 +213,7 @@ print(json.dumps({
     "fold_version": "1",
     "vocabulary_version": "1",
     "events": events,
+    "records": records,
     "next_cursor": next_cursor,
 }))
 PYEOF
