@@ -321,6 +321,53 @@ if [[ ! -f "$META" ]]; then
   fail "missing _meta.json for work item '$SLUG'"
 fi
 
+# A coordinated close consumes the reconciliation reader rather than branch
+# state. No close verdict is recorded until every opened writer attempt has
+# proven path removal, Git-registry removal, and branch disposition. A full
+# close additionally requires each stream's latest attempt to be integrated
+# with a full verdict. Missing/unknown lifecycle state fails before any close
+# side effect.
+RECONCILIATION_STATE="$KNOWLEDGE_DIR/_coordination/reconciliation/$SLUG/streams.json"
+if [[ -f "$RECONCILIATION_STATE" ]]; then
+  set +e
+  RECONCILIATION_STATUS=$(python3 "$SCRIPT_DIR/coordinate-reconcile.py" status \
+    --kdir "$KNOWLEDGE_DIR" --slug "$SLUG" --json 2>&1)
+  RECONCILIATION_RC=$?
+  set -e
+  [[ $RECONCILIATION_RC -eq 0 ]] \
+    || fail "coordinated close cannot validate reconciliation evidence: $RECONCILIATION_STATUS"
+  set +e
+  RECONCILIATION_ERROR=$(_LORE_RECONCILIATION_STATUS="$RECONCILIATION_STATUS" python3 - "$VERDICT" <<'PYEOF'
+import json, os, sys
+verdict = sys.argv[1]
+doc = json.loads(os.environ["_LORE_RECONCILIATION_STATUS"])
+errors = []
+if doc.get("schema_version") != 2 or doc.get("valid") is not True:
+    errors.append("aggregate schema/hash validation failed")
+for stream in doc.get("streams", []):
+    attempts = stream.get("attempts") or []
+    if not attempts and stream.get("tree") == "writer":
+        errors.append(f"{stream.get('stream_id')}: writer stream has no attempt evidence")
+        continue
+    for attempt in attempts:
+        cleanup = attempt.get("cleanup") or {}
+        if cleanup.get("verified") is not True:
+            errors.append(
+                f"{stream.get('stream_id')}/{attempt.get('attempt_id')}: cleanup is unproven "
+                f"(state={cleanup.get('state')}, source={cleanup.get('record_source')})"
+            )
+    if verdict == "full" and attempts and attempts[-1].get("terminal_full_cleaned") is not True:
+        errors.append(f"{stream.get('stream_id')}: latest attempt is not integrated/full/cleaned")
+print("; ".join(errors))
+PYEOF
+  )
+  RECONCILIATION_CHECK_RC=$?
+  set -e
+  [[ $RECONCILIATION_CHECK_RC -eq 0 ]] || fail "coordinated close validation crashed"
+  [[ -z "$RECONCILIATION_ERROR" ]] \
+    || fail "coordinated close refused: $RECONCILIATION_ERROR"
+fi
+
 TITLE=$(json_field "title" "$META")
 
 INTENT_ANCHOR=$(python3 -c 'import json,sys

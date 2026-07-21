@@ -101,8 +101,38 @@ BASE_TIP=$(git -C "$REPO_ROOT" rev-parse --verify "$BASE_REF^{commit}" 2>/dev/nu
 BASE_SHA=$(git -C "$REPO_ROOT" merge-base "$HEAD_SHA" "$BASE_TIP" 2>/dev/null) \
   || fail "could not compute merge-base for '$BASE_REF' and HEAD"
 
-CHANGED_PATHS=$(git -C "$REPO_ROOT" diff --name-only "$BASE_SHA" "$HEAD_SHA")
-DIFF_NUMSTAT=$(git -C "$REPO_ROOT" diff --numstat "$BASE_SHA" "$HEAD_SHA")
+RECONCILIATION_JSON=""
+RECONCILIATION_STATE="$KDIR/_coordination/reconciliation/$SLUG/streams.json"
+if [[ -f "$RECONCILIATION_STATE" ]]; then
+  set +e
+  RECONCILIATION_JSON=$(python3 "$SCRIPT_DIR/coordinate-reconcile.py" status \
+    --kdir "$KDIR" --slug "$SLUG" --json 2>&1)
+  RECONCILIATION_RC=$?
+  set -e
+  [[ $RECONCILIATION_RC -eq 0 ]] || fail "coordinated stream evidence is invalid: $RECONCILIATION_JSON"
+  printf '%s' "$RECONCILIATION_JSON" | jq -e '.valid == true' >/dev/null \
+    || fail "coordinated stream evidence did not pass hash and identity validation"
+  CHANGED_PATHS=$(_LORE_RECON_JSON="$RECONCILIATION_JSON" python3 - "$KDIR" <<'PY'
+import json, pathlib, sys
+kdir = pathlib.Path(sys.argv[1])
+status = json.loads(__import__("os").environ["_LORE_RECON_JSON"])
+paths = set()
+for stream in status.get("streams", []):
+    for attempt in stream.get("attempts", []):
+        for key in ("source_manifest", "integrated_manifest"):
+            ref = attempt.get(key)
+            if not isinstance(ref, dict):
+                continue
+            manifest = json.loads((kdir / ref["path"]).read_text(encoding="utf-8"))
+            paths.update(p for p in manifest.get("changed_paths", []) if isinstance(p, str) and p)
+print("\n".join(sorted(paths)))
+PY
+  )
+  DIFF_NUMSTAT=""
+else
+  CHANGED_PATHS=$(git -C "$REPO_ROOT" diff --name-only "$BASE_SHA" "$HEAD_SHA")
+  DIFF_NUMSTAT=$(git -C "$REPO_ROOT" diff --numstat "$BASE_SHA" "$HEAD_SHA")
+fi
 
 SEEDS_JSON=$(printf '%s\n' "$CHANGED_PATHS" | python3 -c '
 import json, pathlib, sys
@@ -142,8 +172,10 @@ SUMMARY_FILE=$(mktemp)
 trap 'rm -f "$SUMMARY_FILE"' EXIT
 _LORE_CHANGED_PATHS="$CHANGED_PATHS" \
   _LORE_DIFF_NUMSTAT="$DIFF_NUMSTAT" \
-  _LORE_DISCOVERY_JSON="$DISCOVERY_JSON" \
-  _LORE_DISCOVERY_ERROR="$DISCOVERY_ERROR" \
+_LORE_DISCOVERY_JSON="$DISCOVERY_JSON" \
+_LORE_DISCOVERY_ERROR="$DISCOVERY_ERROR" \
+_LORE_RECONCILIATION_JSON="$RECONCILIATION_JSON" \
+_LORE_KDIR="$KDIR" \
   python3 - "$ITEM_DIR" "$SLUG" "$BASE_REF" "$BASE_SHA" "$HEAD_SHA" >"$SUMMARY_FILE" <<'PY'
 import datetime
 import glob
@@ -315,6 +347,41 @@ diff_rows = [{"path": path, **numstat.get(path, {"added": 0, "deleted": 0})}
              for path in changed_paths]
 diff_cov = coverage("present" if diff_rows else "present-empty")
 
+reconciliation_raw = os.environ.get("_LORE_RECONCILIATION_JSON", "")
+stream_diffs = []
+if reconciliation_raw:
+    reconciliation = json.loads(reconciliation_raw)
+    kdir = pathlib.Path(os.environ["_LORE_KDIR"])
+    for stream in reconciliation.get("streams", []):
+        for attempt in stream.get("attempts", []):
+            source_ref = attempt.get("source_manifest")
+            integrated_ref = attempt.get("integrated_manifest")
+            source_manifest = (
+                json.loads((kdir / source_ref["path"]).read_text(encoding="utf-8"))
+                if isinstance(source_ref, dict) else None
+            )
+            integrated_manifest = (
+                json.loads((kdir / integrated_ref["path"]).read_text(encoding="utf-8"))
+                if isinstance(integrated_ref, dict) else None
+            )
+            source_paths = set(source_manifest.get("changed_paths", [])) if source_manifest else set()
+            integrated_paths = set(integrated_manifest.get("changed_paths", [])) if integrated_manifest else set()
+            stream_diffs.append({
+                "stream_id": stream.get("stream_id"),
+                "attempt_id": attempt.get("attempt_id"),
+                "tree": stream.get("tree"),
+                "depends_on": stream.get("depends_on", []),
+                "status": attempt.get("status"),
+                "verdict": attempt.get("verdict"),
+                "cleanup": attempt.get("cleanup"),
+                "terminal_full_cleaned": attempt.get("terminal_full_cleaned", False),
+                "source_manifest": source_ref,
+                "integrated_manifest": integrated_ref,
+                "source_paths": sorted(source_paths),
+                "integrated_paths": sorted(integrated_paths),
+                "source_only_paths": sorted(source_paths - integrated_paths),
+            })
+
 
 closure_rows = []
 discovery_raw = os.environ.get("_LORE_DISCOVERY_JSON", "")
@@ -371,7 +438,7 @@ panel_coverage = {
 }
 rendered_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 aggregate = {
-    "schema_version": 1,
+    "schema_version": 2 if reconciliation_raw else 1,
     "work_item": slug,
     "rendered_at": rendered_at,
     "diff": {"base_ref": base_ref, "base_sha": base_sha,
@@ -384,6 +451,8 @@ aggregate = {
     "closure_discovery": closure_rows,
     "cross_tab": cross_tab,
 }
+if reconciliation_raw:
+    aggregate["stream_diffs"] = stream_diffs
 
 
 def escape(value):
@@ -438,7 +507,21 @@ else:
     lines.append(f"Absent: {disp_cov.get('reason') or 'no honored or diverged dispositions were recorded.'}")
 
 lines.extend(["", "## Panel D — Shipped Diff", ""])
-if diff_rows:
+if stream_diffs:
+    lines.extend([
+        "| Stream / attempt | Verdict | Cleanup verified | Source manifest | Integrated manifest | Source-only paths |",
+        "|---|---|---|---|---|---|",
+    ])
+    for row in stream_diffs:
+        cleanup = "yes" if (row.get("cleanup") or {}).get("verified") else "no"
+        source = (row.get("source_manifest") or {}).get("sha256", "—")
+        integrated = (row.get("integrated_manifest") or {}).get("sha256", "—")
+        source_only = ", ".join(row.get("source_only_paths") or []) or "—"
+        lines.append(
+            f"| `{escape(row['stream_id'])}/{escape(row['attempt_id'])}` | "
+            f"{escape(row.get('verdict') or '—')} | {cleanup} | `{source}` | `{integrated}` | {escape(source_only)} |"
+        )
+elif diff_rows:
     lines.extend(["| File | Added | Deleted |", "|---|---:|---:|"])
     for row in diff_rows:
         added = "binary" if row["added"] is None else row["added"]
@@ -499,6 +582,7 @@ summary = {
         "changed_files": len(diff_rows),
         "closure_discovery": len(closure_rows),
         "cross_tab_labels": len(cross_tab),
+        "stream_diffs": len(stream_diffs),
     },
 }
 print(json.dumps(summary, ensure_ascii=False))

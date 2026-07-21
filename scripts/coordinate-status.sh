@@ -49,6 +49,14 @@ fi
 export SESSION_EVENT_VOCAB RETRO_ACTION_VOCAB CEREMONY_OUTCOME_VOCAB \
   CEREMONY_DISPOSITION_VOCAB
 
+# Coordination shares the repository-global lease ceiling already rendered by
+# `lore defaults`. Missing or malformed settings fail closed to one seat.
+COORDINATION_MAX_CONCURRENCY=$(bash "$SCRIPT_DIR/settings.sh" get settlement.max_concurrency 2>/dev/null || true)
+if [[ ! "$COORDINATION_MAX_CONCURRENCY" =~ ^[1-9][0-9]*$ ]]; then
+  COORDINATION_MAX_CONCURRENCY=1
+fi
+export COORDINATION_MAX_CONCURRENCY
+
 exec python3 - "$KNOWLEDGE_DIR" "$SCRIPT_DIR" "$JSON_MODE" <<'PYEOF'
 import datetime as dt
 import hashlib
@@ -95,6 +103,12 @@ RULES = {
     "reconcile.work.merged-active": "An item still in the active index explicitly reports merged state or a merge commit.",
     "reconcile.work.action-evidence-gap": "An active planned item lacks versioned task/DAG evidence; absence is not treated as unblocked.",
     "reconcile.work.action-wait-conflict": "A pending task is locally unblocked while its work item carries explicit waiting evidence.",
+    "act.coordinate.ready": "A pending stream has no active attempt, every explicit predecessor is done/full/cleaned, and a settings-derived seat is available.",
+    "waiting.coordinate.dependency": "A stream remains waiting until every explicit predecessor is done/full with verified cleanup.",
+    "waiting.coordinate.capacity": "A ready stream waits because the settings-derived concurrency ceiling has no remaining seat.",
+    "waiting.coordinate.active": "An active attempt is suppressed from the actionable projection.",
+    "needs.coordinate.predecessor": "A terminal predecessor without full verdict and verified cleanup requires coordinator judgment.",
+    "needs.coordinate.conflict": "A frozen source attempt records merge conflicts that the coordinator judges and a worker edits.",
 }
 
 
@@ -121,6 +135,9 @@ def make_row(bucket, source_id, kind, title, facts, locator, identity, rule_id):
 
 buckets = {"act_now": [], "needs_judgment": [], "waiting": [], "reconcile": []}
 manifest = {}
+coordination_candidates = []
+coordination_active = []
+coordination_ceiling = int(os.environ.get("COORDINATION_MAX_CONCURRENCY", "1"))
 
 
 def source_row(source_id, status, schema_version, vocabulary_version, locator, error=None):
@@ -188,6 +205,95 @@ def line_error_summary(errors):
     if len(errors) <= 4:
         return "; ".join(errors)
     return "; ".join(errors[:4]) + f"; and {len(errors) - 4} more"
+
+
+def parse_ledger(path):
+    """Parse the first markdown table carrying the coordination edge columns."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return [], "coordination ledger is unreadable"
+    for index, line in enumerate(lines[:-1]):
+        if not line.lstrip().startswith("|"):
+            continue
+        headers = [cell.strip().lower() for cell in line.strip().strip("|").split("|")]
+        required = {"depends on", "tree", "status", "verdict"}
+        if not required.issubset(headers):
+            continue
+        separator = lines[index + 1]
+        if not separator.lstrip().startswith("|") or "---" not in separator:
+            continue
+        rows = []
+        seen_streams = set()
+        for lineno, raw in enumerate(lines[index + 2:], index + 3):
+            if not raw.lstrip().startswith("|"):
+                break
+            cells = [cell.strip() for cell in raw.strip().strip("|").split("|")]
+            if len(cells) != len(headers):
+                return [], f"coordination ledger row {lineno} has {len(cells)} cells; expected {len(headers)}"
+            row = dict(zip(headers, cells))
+            stream_id = row.get("stream") or row.get("#") or row.get("step")
+            if not stream_id or stream_id in {"—", "-"}:
+                return [], f"coordination ledger row {lineno} has no stream identity"
+            stream_id = stream_id.strip("`")
+            if stream_id in seen_streams:
+                return [], f"coordination ledger repeats stream identity {stream_id!r}"
+            seen_streams.add(stream_id)
+            depends = [] if row["depends on"] in {"", "—", "-"} else [
+                token.strip().strip("`") for token in row["depends on"].split(",") if token.strip()
+            ]
+            rows.append({**row, "stream_id": stream_id, "depends_on": depends,
+                         "line": lineno})
+        return rows, None
+    return [], None
+
+
+def reconciliation_projection(slug):
+    state_path = kdir / "_coordination" / "reconciliation" / slug / "streams.json"
+    if not state_path.is_file():
+        return {}, None
+    proc = subprocess.run(
+        [sys.executable, str(scripts / "coordinate-reconcile.py"), "status",
+         "--kdir", str(kdir), "--slug", slug, "--json"],
+        text=True, capture_output=True, check=False,
+    )
+    if proc.returncode != 0:
+        return {}, proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return {}, f"reconciliation status returned invalid JSON: {exc}"
+    return {row.get("stream_id"): row for row in payload.get("streams", []) if isinstance(row, dict)}, None
+
+
+def latest_attempt(stream):
+    attempts = stream.get("attempts") if isinstance(stream, dict) else None
+    return attempts[-1] if isinstance(attempts, list) and attempts else None
+
+
+def dependency_cycles(rows):
+    graph = {row["stream_id"]: [dep for dep in row["depends_on"]
+                                if dep in {item["stream_id"] for item in rows}]
+             for row in rows}
+    visiting, visited, cyclic = set(), set(), set()
+
+    def walk(node, stack):
+        if node in visiting:
+            cyclic.update(stack[stack.index(node):])
+            return
+        if node in visited:
+            return
+        visiting.add(node)
+        stack.append(node)
+        for dependency in graph[node]:
+            walk(dependency, stack)
+        stack.pop()
+        visiting.remove(node)
+        visited.add(node)
+
+    for node in graph:
+        walk(node, [])
+    return cyclic
 
 
 # --- work-index -----------------------------------------------------------
@@ -301,9 +407,120 @@ else:
                             [slug, not_before], "waiting.work.not-before",
                         ))
 
+                ledger_path = item_dir / "coordination.md"
+                ledger_rows, ledger_error = parse_ledger(ledger_path) if ledger_path.is_file() else ([], None)
+                has_coordination_ledger = bool(ledger_rows)
+                if ledger_error:
+                    buckets["reconcile"].append(make_row(
+                        "reconcile", "work-index", "coordination-ledger-invalid",
+                        f"{slug}: coordination ledger is malformed",
+                        {"slug": slug, "error": ledger_error}, f"_work/{slug}/coordination.md",
+                        [slug, ledger_error], "reconcile.work.action-evidence-gap",
+                    ))
+                elif has_coordination_ledger:
+                    reconciled, reconciliation_error = reconciliation_projection(slug)
+                    if reconciliation_error:
+                        buckets["reconcile"].append(make_row(
+                            "reconcile", "work-index", "coordination-reconciliation-invalid",
+                            f"{slug}: reconciliation evidence failed validation",
+                            {"slug": slug, "error": reconciliation_error},
+                            f"_coordination/reconciliation/{slug}/streams.json",
+                            [slug, reconciliation_error], "reconcile.source.gap",
+                        ))
+                    ledger_by_id = {row["stream_id"]: row for row in ledger_rows}
+                    cyclic_streams = dependency_cycles(ledger_rows)
+                    for row in ledger_rows:
+                        stream_id = row["stream_id"]
+                        locator = f"_work/{slug}/coordination.md#L{row['line']}"
+                        tree = row["tree"]
+                        status = row["status"]
+                        verdict = row["verdict"]
+                        stream_state = reconciled.get(stream_id, {})
+                        attempt = latest_attempt(stream_state)
+                        facts = {
+                            "slug": slug, "stream_id": stream_id, "depends_on": row["depends_on"],
+                            "tree": tree, "status": status, "verdict": verdict,
+                            "attempt": attempt,
+                        }
+                        if stream_id in cyclic_streams:
+                            buckets["reconcile"].append(make_row(
+                                "reconcile", "work-index", "coordination-dependency-cycle",
+                                f"{slug}/{stream_id}: dependency edge participates in a cycle",
+                                facts, locator, [slug, stream_id, sorted(cyclic_streams)],
+                                "reconcile.work.action-evidence-gap",
+                            ))
+                            continue
+                        if tree not in {"writer", "read-only"}:
+                            buckets["reconcile"].append(make_row(
+                                "reconcile", "work-index", "coordination-tree-invalid",
+                                f"{slug}/{stream_id}: unknown Tree value {tree!r}", facts, locator,
+                                [slug, stream_id, tree], "reconcile.work.action-evidence-gap",
+                            ))
+                            continue
+                        if attempt and attempt.get("status") == "needs_judgment":
+                            buckets["needs_judgment"].append(make_row(
+                                "needs_judgment", "work-index", "stream-merge-conflict",
+                                f"{slug}/{stream_id}: merge conflict needs composition judgment",
+                                facts, locator, [slug, stream_id, attempt.get("attempt_id")],
+                                "needs.coordinate.conflict",
+                            ))
+                            continue
+                        if status == "in-flight" or (attempt and attempt.get("status") == "source_frozen"):
+                            coordination_active.append((slug, stream_id, tree))
+                            buckets["waiting"].append(make_row(
+                                "waiting", "work-index", "active-stream-attempt",
+                                f"{slug}/{stream_id}: active attempt is not redispatched", facts,
+                                locator, [slug, stream_id], "waiting.coordinate.active",
+                            ))
+                            continue
+                        if status != "pending":
+                            continue
+                        unresolved = []
+                        judgment = []
+                        for dependency in row["depends_on"]:
+                            predecessor = ledger_by_id.get(dependency)
+                            if predecessor is None:
+                                judgment.append({"stream_id": dependency, "reason": "missing ledger row"})
+                                continue
+                            predecessor_state = reconciled.get(dependency, {})
+                            predecessor_attempt = latest_attempt(predecessor_state)
+                            cleanup_ok = predecessor.get("tree") == "read-only" or bool(
+                                predecessor_attempt and predecessor_attempt.get("terminal_full_cleaned")
+                            )
+                            if predecessor.get("status") == "done" and predecessor.get("verdict") == "full" and cleanup_ok:
+                                continue
+                            detail = {
+                                "stream_id": dependency,
+                                "status": predecessor.get("status"),
+                                "verdict": predecessor.get("verdict"),
+                                "cleanup_verified": cleanup_ok,
+                            }
+                            if predecessor.get("status") == "done" or predecessor.get("verdict") in {"partial", "none"}:
+                                judgment.append(detail)
+                            else:
+                                unresolved.append(detail)
+                        facts["unresolved_predecessors"] = unresolved
+                        facts["judgment_predecessors"] = judgment
+                        if judgment:
+                            buckets["needs_judgment"].append(make_row(
+                                "needs_judgment", "work-index", "predecessor-not-full-cleaned",
+                                f"{slug}/{stream_id}: terminal predecessor is not full and cleaned",
+                                facts, locator, [slug, stream_id, judgment],
+                                "needs.coordinate.predecessor",
+                            ))
+                        elif unresolved:
+                            buckets["waiting"].append(make_row(
+                                "waiting", "work-index", "stream-dependency-wait",
+                                f"{slug}/{stream_id}: waiting on explicit predecessors", facts,
+                                locator, [slug, stream_id, unresolved],
+                                "waiting.coordinate.dependency",
+                            ))
+                        else:
+                            coordination_candidates.append((slug, stream_id, tree, facts, locator))
+
                 plan_path = item_dir / "plan.md"
                 tasks_path = item_dir / "tasks.json"
-                if index_row.get("has_plan_doc") is True:
+                if index_row.get("has_plan_doc") is True and not has_coordination_ledger:
                     task_rows = None
                     plan_text = ""
                     try:
@@ -380,6 +597,29 @@ else:
                                 f"_work/{slug}/tasks.json", slug,
                                 "reconcile.work.action-evidence-gap",
                             ))
+
+
+# Eager dispatch is a derived join, never persisted ledger state. Recompute the
+# capacity after every projection; lexical ordering is deterministic and carries
+# no priority claim.
+coordination_candidates.sort(key=lambda row: (row[0], row[1]))
+coordination_capacity = max(0, coordination_ceiling - len(coordination_active))
+for index, (slug, stream_id, tree, facts, locator) in enumerate(coordination_candidates):
+    facts = {**facts, "concurrency_ceiling": coordination_ceiling,
+             "active_attempts": len(coordination_active),
+             "dispatch_slot": index + 1 if index < coordination_capacity else None}
+    if index < coordination_capacity:
+        buckets["act_now"].append(make_row(
+            "act_now", "work-index", "ready-stream",
+            f"{slug}/{stream_id}: ready for eager dispatch", facts, locator,
+            [slug, stream_id], "act.coordinate.ready",
+        ))
+    else:
+        buckets["waiting"].append(make_row(
+            "waiting", "work-index", "ready-stream-at-capacity",
+            f"{slug}/{stream_id}: ready, waiting for a coordination seat", facts,
+            locator, [slug, stream_id], "waiting.coordinate.capacity",
+        ))
 
 
 # --- session-journal (published readers only) -----------------------------
@@ -711,6 +951,13 @@ projection = {
     "ordering": "neutral lexical source/identity order; not priority",
     "source_manifest": [manifest[source_id] for source_id in SOURCE_ORDER],
     "bucket_counts": {name: len(rows) for name, rows in buckets.items()},
+    "coordination_dispatch": {
+        "concurrency_ceiling": coordination_ceiling,
+        "active_attempts": len(coordination_active),
+        "capacity": coordination_capacity,
+        "ready_total": len(coordination_candidates),
+        "eager_dispatch_count": min(coordination_capacity, len(coordination_candidates)),
+    },
     "buckets": buckets,
 }
 

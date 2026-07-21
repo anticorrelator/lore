@@ -360,6 +360,13 @@ _ROUTE_RE = re.compile(r"\[route:\s*(session)\s*\]")
 # leaves no orphaned space.
 _ROUTE_STRIP_RE = re.compile(r"\s*" + _ROUTE_RE.pattern)
 
+# Coordination annotations are additive task projections. The subject remains
+# byte-identical to the plan checklist line so checkbox reconciliation keeps its
+# existing identity; consumers read the structured fields instead of reparsing
+# prose. Explicit dependencies compose with collision-derived blockedBy edges.
+_DEPENDS_ON_RE = re.compile(r"\[depends-on:\s*([^\]]*)\]", re.IGNORECASE)
+_TREE_RE = re.compile(r"\[tree:\s*(writer|read-only)\s*\]", re.IGNORECASE)
+
 
 def extract_route(item_text: str) -> "str | None":
     """Extract the trailing [route: <value>] marker from a task line.
@@ -381,6 +388,29 @@ def strip_route_marker(text: str) -> str:
     field instead.
     """
     return _ROUTE_STRIP_RE.sub("", text).strip()
+
+
+def extract_explicit_dependencies(item_text: str) -> list[str]:
+    """Extract ordered task ids from an optional [depends-on: ...] marker."""
+    match = _DEPENDS_ON_RE.search(item_text)
+    if not match:
+        return []
+    values: list[str] = []
+    for raw in match.group(1).split(","):
+        value = raw.strip()
+        if not value:
+            continue
+        if not re.fullmatch(r"task-[1-9][0-9]*", value):
+            raise ValueError(f"invalid dependency id {value!r}; expected task-N")
+        if value not in values:
+            values.append(value)
+    return values
+
+
+def extract_tree(item_text: str) -> str:
+    """Return the declared coordination tree class, defaulting conservatively."""
+    match = _TREE_RE.search(item_text)
+    return match.group(1).lower() if match else "writer"
 
 
 def _is_file_path(candidate: str) -> bool:
@@ -1424,6 +1454,8 @@ def generate_tasks_from_plan(
             woven_norms = extract_woven_norms(item_text)
             judgment_class = extract_judgment_class(item_text)
             route = extract_route(item_text)
+            explicit_dependencies = extract_explicit_dependencies(item_text)
+            tree = extract_tree(item_text)
             parsed_items.append({
                 "task_id": task_id,
                 "subject": subject,
@@ -1433,6 +1465,8 @@ def generate_tasks_from_plan(
                 "woven_norms": woven_norms,
                 "judgment_class": judgment_class,
                 "route": route,
+                "explicit_dependencies": explicit_dependencies,
+                "tree": tree,
             })
 
         # Filter design decisions relevant to this phase
@@ -1486,6 +1520,8 @@ def generate_tasks_from_plan(
             woven_norms = item["woven_norms"]
             judgment_class = item["judgment_class"]
             route = item["route"]
+            explicit_dependencies = item["explicit_dependencies"]
+            tree = item["tree"]
 
             # Build stripped description: Phase line (D6), objective hint, target files,
             # task line, task-specific Scope, task-specific backlinks (annotation-only), plan reference.
@@ -1536,7 +1572,8 @@ def generate_tasks_from_plan(
                 "subject": subject,
                 "description": description,
                 "activeForm": active_form,
-                "blockedBy": [],
+                "blockedBy": list(explicit_dependencies),
+                "tree": tree,
                 "file_targets": file_targets,
                 "judgment_class": judgment_class,
                 "context_cost_estimate": context_cost_estimate,
@@ -1597,6 +1634,15 @@ def generate_tasks_from_plan(
 
     # Compute recommended worker count from the assembled DAG
     all_tasks = [task for phase in phases for task in phase["tasks"]]
+    task_ids = {task["id"] for task in all_tasks}
+    for task in all_tasks:
+        unknown = [dependency for dependency in task["blockedBy"] if dependency not in task_ids]
+        if unknown:
+            raise ValueError(
+                f"{task['id']} declares unknown dependencies: {', '.join(unknown)}"
+            )
+        if task["id"] in task["blockedBy"]:
+            raise ValueError(f"{task['id']} cannot depend on itself")
     recommended_workers = compute_recommended_workers(all_tasks)
 
     return {

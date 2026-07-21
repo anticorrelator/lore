@@ -17,6 +17,8 @@ _spec.loader.exec_module(_mod)
 generate_tasks_from_plan = _mod.generate_tasks_from_plan
 extract_route = _mod.extract_route
 strip_route_marker = _mod.strip_route_marker
+extract_explicit_dependencies = _mod.extract_explicit_dependencies
+extract_tree = _mod.extract_tree
 extract_task_backlinks = _mod.extract_task_backlinks
 extract_woven_norms = _mod.extract_woven_norms
 build_context_section = _mod.build_context_section
@@ -2738,3 +2740,40 @@ class TestRouteMarkerInTasks:
         for phase in result["phases"]:
             for task in phase["tasks"]:
                 assert "route" not in task
+
+
+COORDINATION_EDGE_PLAN = """\
+# Coordinated streams
+
+## Phases
+
+### Phase 1: Streams
+**Files:** `a.txt`, `b.txt`, `c.txt`
+- [ ] Build source A [tree: writer]
+- [ ] Inspect source B [tree: read-only]
+- [ ] Integrate source C [depends-on: task-1, task-2] [tree: writer]
+"""
+
+
+class TestCoordinationTaskProjection:
+    def test_explicit_edges_and_tree_are_structured(self, tmp_path):
+        result = generate_tasks_from_plan(COORDINATION_EDGE_PLAN, str(tmp_path))
+        tasks = result["phases"][0]["tasks"]
+        assert tasks[0]["tree"] == "writer"
+        assert tasks[1]["tree"] == "read-only"
+        assert tasks[2]["blockedBy"] == ["task-1", "task-2"]
+        assert tasks[2]["tree"] == "writer"
+
+    def test_missing_tree_defaults_to_writer(self):
+        assert extract_tree("Build source") == "writer"
+
+    def test_unknown_dependency_fails_generation(self, tmp_path):
+        plan = COORDINATION_EDGE_PLAN.replace(
+            "task-1, task-2", "task-1, task-99"
+        )
+        with pytest.raises(ValueError, match="unknown dependencies"):
+            generate_tasks_from_plan(plan, str(tmp_path))
+
+    def test_dependency_marker_rejects_non_task_identity(self):
+        with pytest.raises(ValueError, match="expected task-N"):
+            extract_explicit_dependencies("Build [depends-on: upstream]")
