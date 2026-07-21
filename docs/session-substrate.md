@@ -58,12 +58,13 @@ One file per live TUI instance at `instances/<name>.json`.
 | `repo` | string | Repo the instance is bound to. |
 | `started` | string | ISO 8601 UTC timestamp of instance start. |
 | `initiator_default` | string | `"human"` in v1 — the default initiator stamped on sessions this instance starts. |
-| `sessions` | array of objects | Live sessions nested under the instance: `[{slug, type, initiator, started}]`, each optionally carrying the recovery manifest fields `tmux`, `session_id`, `harness`, `auto_close` (below). |
+| `sessions` | array of objects | Live sessions nested under the instance: `[{slug, type, initiator, started}]`, each carrying the recovery fields below and its versioned `worktree` identity. |
 | &nbsp;&nbsp;`sessions[].tmux` | string \| absent | tmux session name (`lore-<instance>-<slug>`) hosting the harness, when the session is tmux-hosted. Omit-when-empty; absent for direct-PTY sessions (tmux unavailable / `LORE_TUI_TMUX=off`). Its presence on a dead instance's row is what a restarting TUI's adoption scan keys on to reattach rather than orphan. |
 | &nbsp;&nbsp;`sessions[].request_id` | string \| absent | Spawn-request identity, persisted prospectively so recovery can correlate a terminal row to the exact spawn. Omit-when-empty for human or legacy sessions; never reconstructed from slug, time, type, or journal ordering. |
 | &nbsp;&nbsp;`sessions[].session_id` | string \| absent | Harness transcript-binding id (claude-code `--session-id`), persisted so an adopting instance can still extract token spend at teardown after the original TUI is gone. Omit-when-empty. |
 | &nbsp;&nbsp;`sessions[].harness` | string \| absent | Launch framework the session was spawned under (the spend probe's `--harness`). Omit-when-empty. |
 | &nbsp;&nbsp;`sessions[].auto_close` | boolean \| absent | The close-ladder auto-close override carried onto the live session (see [Close-request queue](#close-request-queue)), persisted so it survives adoption. Omit-when-empty: absent defers to `initiator`. |
+| &nbsp;&nbsp;`sessions[].worktree` | object \| absent | Complete [session worktree identity](#session-worktree-identity-and-lifecycle), persisted without projection loss across launch, registry rewrites, teardown, and adoption. Absence marks a legacy row and is unsafe to spawn or adopt. |
 | `build_sha` | string \| absent | Build vintage — the short git SHA embedded at build time (`-ldflags`). Absent for `go run`/dev builds and for any binary predating this field. Omit-when-empty. |
 | `build_time` | string \| absent | Build vintage — the **orderable** quantity: the commit's committer-date (release build) or the binary's mtime (dev build), ISO 8601 UTC. Absent for a binary predating this field. Omit-when-empty. This, not `build_sha`, is what `min_vintage` filtering compares against (a SHA has no read-side ordering). |
 | `project_dir` | string \| absent | The instance's project directory, physically resolved (`filepath.Abs` + `EvalSymlinks`) once at startup. Immutable for the process. Omit-when-empty for a binary predating this field. It is the match key a request's `prefer_project_dir` compares against byte-for-byte (both sides resolve physically, so `/tmp`→`/private/tmp` and worktree symlinks match). Not a claim filter — a visibility field only. |
@@ -86,11 +87,11 @@ rejected** by `min_vintage` filtering (see [Request queue](#request-queue)).
 Per nested session object: `slug` (string), `type` (string enum
 `spec|implement|chat|worker`), `initiator` (string enum `agent|human`), `started`
 (string, ISO 8601 UTC), plus the omit-when-empty recovery-manifest fields `tmux`,
-`session_id`, `harness`, `auto_close` (above), and `close_requests` (an ordered
-array of distinct, non-empty close-request IDs already consumed during this
-session lifecycle). The close-request set survives a `close_failed` outcome and
-tmux adoption so a later successful close can declare the exact attempts it
-recovers.
+`session_id`, `harness`, `auto_close`, `worktree` (above), and `close_requests`
+(an ordered array of distinct, non-empty close-request IDs already consumed
+during this session lifecycle). The close-request set and worktree identity
+survive a `close_failed` outcome and tmux adoption so a later successful close
+can declare the exact attempts it recovers without losing workspace ownership.
 
 **Write archetype.** The instance rewrites its own file via tmp + `os.Rename`
 (torn-read-proof) whenever a session starts or ends. **Heartbeat** is an
@@ -124,12 +125,54 @@ re-attaches through the normal spawn path and journals `recovered`; a session wh
 tmux is gone (or that had no `tmux` name) is journaled `orphaned` with
 `reason=instance-death`, the dead predecessor in `target_instance`, its persisted
 spawn request ID when available, and spend bounded by the existing transcript or
-duration-only evidence. The durable registry write of the adopting
-row lands before its `recovered` journal row (the substrate's durable-before-journal
-ordering). Adoption doubles as crash-corpse cleanup: the claimed file is removed
-once its sessions are handled. Recovery is tmux-gated — with tmux absent or
-`LORE_TUI_TMUX=off`, sessions are TUI-lifetime-bound exactly as before and no
-adoption runs.
+duration-only evidence. Before attaching, the adopter validates the complete
+versioned worktree identity and proves that the pane cwd equals its canonical
+path. Missing identity, a different Git common-dir or per-worktree git-dir, an
+epoch mismatch, or a reused path is refused; recovery never substitutes the
+replacement TUI's project directory. The durable registry write transferring
+ownership lands before its `recovered` journal row (the substrate's
+durable-before-journal ordering). The claimed corpse row is removed only after
+surviving ownership has transferred or the session has reached a durable terminal
+disposition. Recovery is tmux-gated — with tmux absent or `LORE_TUI_TMUX=off`,
+sessions are TUI-lifetime-bound exactly as before and no adoption runs.
+
+## Session worktree identity and lifecycle
+
+Every hosted harness writes in a session-owned Git worktree, never in the source
+checkout. The durable `Identity` is versioned and carries exactly:
+
+- the worktree's canonical path, Git common-dir, per-worktree git-dir, and epoch;
+- the captured generation: source canonical path, Git common-dir, git-dir, HEAD
+  OID, index digest, and worktree digest;
+- target ref and target OID; and
+- lifecycle state.
+
+The ordinary lifecycle is `captured → active → publishable → published |
+quarantined`. `teardown-pending` is the ownership-retaining state used when close
+cannot yet prove process death; it may proceed to `publishable` or `quarantined`
+but is not cleanup-eligible itself. Identity is checked before spawn, adoption,
+publish, and cleanup. Unknown or incomplete legacy identity and any path,
+common-dir, git-dir, epoch, or generation mismatch fail closed.
+
+Publishing compares the destination's full live generation with the captured
+generation before applying the session result through Git. The typed outcomes
+are exactly `published`, `restore_refused`, and `worktree_quarantined`. A refusal
+or quarantine leaves every destination file byte-for-byte unchanged and keeps
+the session result recoverable through its durable result ref and patch. A
+quarantined identity is cleanup-eligible because the content is durable
+elsewhere; quarantine does not promise indefinite retention of the physical
+worktree directory.
+
+`published` is the successful internal disposition and projects to the normal
+exactly-once `closed` session terminal; there is no separate `published` journal
+event. `restore_refused` and `worktree_quarantined` add their named worktree rows
+because the operator needs the refusal reason and recovery artifact. Those rows
+remain linked lifecycle outcomes, not additional close terminals.
+
+This contract stops at safe worktree ownership and disposition. Scheduling
+parallel writers, dependency edges, coordinator reconciliation order,
+conformance aggregation, and bounded physical cleanup belong to
+`parallel-tree-writers-temporary-worktrees`.
 
 ## Request queue
 
@@ -159,6 +202,7 @@ and, once an instance claims it, moves to `requests/claimed/<request_id>.json`.
 | `framework` | string \| absent | Per-request launch framework override. Accepted values are `claude-code`, `opencode`, and `codex`. Omit-when-empty: absent defers to the claiming TUI's `tui_launch_framework` setting. Validated at enqueue against the framework registry and carried to spawn so the harness binary, `LORE_FRAMEWORK`, `SessionProcessStartedMsg.Harness`, and live registry `sessions[].harness` agree. |
 | `skip_confirm` | boolean \| absent | Session autonomy override. Omit-when-empty: absent defers to the queue-spawn default (**autonomous** — a claimed request historically runs without confirmation gates), `true` (`--yes`/`--no-confirm`) forces autonomous, `false` (`--confirm`) forces **gated** so every confirmation gate becomes a coordinator send window. Maps to `SessionDescriptor.SkipConfirm` at spawn. |
 | `prefer_project_dir` | string \| absent | **Soft** routing preference: a physically-resolved project directory (`session request --prefer-dir <path>` / `--prefer-cwd`, resolved and refused at enqueue when it does not exist). Omit-when-empty. Unlike the hard `target_instance`/`min_vintage` filters, this only *delays* other claimants — the `prefer_` name carries the softness. An instance whose `project_dir` equals it claims immediately; any other instance may claim only after `PreferMatchGrace` (15s, three poll ticks) measured from `requested_at`. **Additive**: absence, an unparseable `requested_at`, or a pre-feature instance (which advertises no `project_dir`) never blocks a claim — the preference only ever adds bounded latency, so a matching instance need not exist. A row reclaimed past its grace is claimable by any instance (the preference had its shot on first dispatch). |
+| `worktree_identity` | object \| absent | Complete versioned [session worktree identity](#session-worktree-identity-and-lifecycle), carried unchanged from request to launch. Omit-when-empty only for legacy or TUI-created requests whose claimant allocates the identity before spawn; a hosted process never starts without a complete identity in `captured` state. |
 
 Because `framework` is additive, old TUI decoders ignore it. When a
 `--framework` request must not be claimed by a TUI build that predates this
@@ -382,6 +426,15 @@ wait on `closed` **or** `close_failed`. Like `closed`, the `close_requested →
 close_failed` pair is matched by per-slug ordering, never adjacency — running-session
 transitions may fall between the request and its terminal.
 
+Process teardown and worktree disposition are linked but distinct lifecycles. A
+`close_failed` row leaves the identity in `teardown-pending` and retains ownership
+while the harness may still write. Once process death is proven, the owner records
+the worktree's `published`, `restore_refused`, or `worktree_quarantined` outcome
+before releasing the registry row. `restore_refused` also retains ownership;
+`published` and `worktree_quarantined` are cleanup-eligible dispositions. The
+successful `published` disposition projects through `closed`; only refusal and
+quarantine add a distinct worktree journal row.
+
 When startup recovery confirms an instance dead, the same atomic corpse owner
 retires every pending close request whose exact `target_instance` names that
 predecessor. It first appends (or proves an idempotent replay of) a deterministic
@@ -595,6 +648,8 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `request_cancelled` | `session close --request` cancel verb | a pending spawn request was cancelled |
 | `close_requested` | `session close` enqueue verb (`<slug>` / `--self`) | a close request was enqueued for the instance running a slug |
 | `close_failed` | TUI | a consumed close request did not complete teardown; `reason` names why (`interactive-prompt`/`still-generating`/`rung-exhausted`/`error`), or `target-instance-dead` records exact dead-target retirement |
+| `restore_refused` | TUI | a worktree identity, ownership, or publish precondition could not be proven; carries a reason and links to the expected identity/generation, plus observed values when available. It is a worktree outcome, not a close terminal |
+| `worktree_quarantined` | TUI | a session result was preserved under a durable ref/patch after safe publication was refused; carries the result artifact and expected/observed generation links. It is a worktree outcome, not a close terminal |
 | `send_requested` | `session send` enqueue verb | a send request was enqueued for the instance running a slug |
 | `sent` | TUI | the message was injected AND a later observation confirmed the composer submitted it (verified-outcome; see [Send-request queue](#send-request-queue)) |
 | `send_refused` | TUI | injection was refused, or an injected message never submitted; `reason` names why — gate refusals (`generating`/`modal`/`no-signature`/`no-contract`/`unsafe-payload`/`error`) or the post-inject `unsubmitted` |

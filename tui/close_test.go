@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,7 +17,86 @@ import (
 
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
+	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
+
+func TestCloseDispositionStaleDestinationPreservesHostAndStreamMarkers(t *testing.T) {
+	sourceDir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-b", "main"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Lore Test"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", sourceDir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	hostMarker := filepath.Join(sourceDir, "host-marker.bin")
+	if err := os.WriteFile(hostMarker, []byte{0x00, 0x41, 0xff, 0x0a}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", sourceDir, "add", "host-marker.bin").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v (%s)", err, out)
+	}
+	if out, err := exec.Command("git", "-C", sourceDir, "commit", "-m", "seed").CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v (%s)", err, out)
+	}
+	identity, err := worktree.Create(context.Background(), sourceDir, filepath.Join(t.TempDir(), "session-worktree"), "close-epoch")
+	if err != nil {
+		t.Fatalf("create session worktree: %v", err)
+	}
+	identity, err = worktree.Transition(identity, worktree.StateActive)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hostBytes := []byte{0x42, 0x00, 0xfe, 0x0a}
+	streamBytes := []byte{0x53, 0x00, 0xfd, 0x0a}
+	if err := os.WriteFile(hostMarker, hostBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	streamMarker := filepath.Join(identity.CanonicalPath, "stream-marker.bin")
+	if err := os.WriteFile(streamMarker, streamBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m, _ := baseSessionModel(t)
+	m.config.ProjectDir = sourceDir
+	m.normalizedProjectDir = sourceDir
+	ls := liveSession{typ: "implement", initiator: "agent", started: time.Now(), worktree: &identity}
+	m.localSessions = map[string]liveSession{"demo": ls}
+	m, closeCmds := m.endLocalSessionClosed("demo", "close-1")
+	if len(closeCmds) != 1 || m.localSessions["demo"].worktree.State != worktree.StateTeardownPending {
+		t.Fatalf("session close did not retain teardown-pending ownership: %+v", m.localSessions["demo"])
+	}
+	if _, duplicateCmds := m.endLocalSessionClosed("demo", ""); len(duplicateCmds) != 0 {
+		t.Fatalf("concurrent stream completion scheduled a duplicate disposition: %d commands", len(duplicateCmds))
+	}
+	ls = m.localSessions["demo"]
+	msg, ok := m.disposeWorktreeCmd("demo", ls, "close-1")().(worktreeDispositionMsg)
+	if !ok {
+		t.Fatalf("close disposition returned unexpected message")
+	}
+	if msg.err != nil || msg.outcome.Kind != worktree.OutcomeWorktreeQuarantined {
+		t.Fatalf("stale close disposition = %+v err=%v, want worktree_quarantined", msg.outcome, msg.err)
+	}
+	if msg.outcome.Identity.State != worktree.StateQuarantined || msg.outcome.Artifact.Ref == "" || msg.outcome.Artifact.PatchPath == "" {
+		t.Fatalf("quarantine artifact incomplete: %+v", msg.outcome)
+	}
+	m, outcomeCmd := m.handleWorktreeDisposition(msg)
+	if outcomeCmd == nil {
+		t.Fatal("quarantined close did not schedule outcome-before-release persistence")
+	}
+	if _, owned := m.localSessions["demo"]; owned {
+		t.Fatal("terminal quarantine did not release registry ownership")
+	}
+	if got, err := os.ReadFile(hostMarker); err != nil || !bytes.Equal(got, hostBytes) {
+		t.Fatalf("close disposition changed host marker: got %v err=%v want %v", got, err, hostBytes)
+	}
+	if got, err := os.ReadFile(streamMarker); err != nil || !bytes.Equal(got, streamBytes) {
+		t.Fatalf("close disposition changed stream marker: got %v err=%v want %v", got, err, streamBytes)
+	}
+}
 
 // TestTmuxProc_SignalsRealProcess: tmuxProc's Terminate delivers a real SIGTERM to
 // its pane PID (not the attach client), the process actually dies, and Alive
@@ -1037,21 +1117,37 @@ func TestAdvanceCloseLadders_TerminusOptionSelectRefuses(t *testing.T) {
 
 // TestHandleCloseLadderDone_ErrorJournalsCloseFailed: a ladder that could not
 // confirm the process gone (errCloseLadderExhausted) emits close_failed
-// reason=rung-exhausted, NOT `closed` (the double-terminal trap), drops the
-// session, and a later StreamCompleteMsg adds no second terminal.
+// reason=rung-exhausted, NOT `closed` (the double-terminal trap), retains the
+// session's workspace ownership, and rewrites its mutable lifecycle state.
 func TestHandleCloseLadderDone_ErrorJournalsCloseFailed(t *testing.T) {
 	m, _ := baseSessionModel(t)
 	m.eventScript = repoScriptPath(t, "session-event-append.sh")
 	kdir := m.config.KnowledgeDir
-	m.localSessions = map[string]liveSession{"demo": {typ: "spec", initiator: "human", started: time.Now()}}
+	identity := &worktree.Identity{
+		Version: worktree.IdentityVersion, CanonicalPath: "/tmp/session-tree",
+		GitCommonDir: "/tmp/repo/.git", GitDir: "/tmp/repo/.git/worktrees/session-tree",
+		Epoch: "close-test", TargetOID: "1111111111111111111111111111111111111111", State: worktree.StateActive,
+		Captured: worktree.Generation{
+			CanonicalPath: "/tmp/repo", GitCommonDir: "/tmp/repo/.git", GitDir: "/tmp/repo/.git",
+			HeadOID: "1111111111111111111111111111111111111111", IndexDigest: "index", WorktreeDigest: "tree",
+		},
+	}
+	m.localSessions = map[string]liveSession{"demo": {
+		typ: "spec", initiator: "human", started: time.Now(), worktree: identity,
+		closeRequests: []string{"cr-e"},
+	}}
 	panel, _ := work.NewSessionPanelModel("demo").Update(work.StreamCompleteMsg{Slug: "demo"})
 	m.sessionPanels = map[string]work.SessionPanelModel{"demo": panel}
 
 	m, cmd := m.handleCloseLadderDone(closeLadderDoneMsg{
 		slug: "demo", rung: rungKill, err: errCloseLadderExhausted, requestID: "cr-e",
 	})
-	if _, ok := m.localSessions["demo"]; ok {
-		t.Fatal("failed teardown did not drop the session from localSessions")
+	retained, ok := m.localSessions["demo"]
+	if !ok || retained.worktree == nil {
+		t.Fatal("failed teardown released durable worktree ownership")
+	}
+	if retained.worktree.State != worktree.StateTeardownPending {
+		t.Fatalf("failed teardown lifecycle = %q, want teardown-pending", retained.worktree.State)
 	}
 	runJournalCmds(t, cmd)
 	rows := readEventRows(t, kdir)
@@ -1062,10 +1158,18 @@ func TestHandleCloseLadderDone_ErrorJournalsCloseFailed(t *testing.T) {
 		t.Fatalf("close_failed row = %+v, want reason=rung-exhausted request_id=cr-e", rows[0])
 	}
 
-	// StreamComplete re-entry: the dropped session yields no second terminal.
+	instances := session.ListInstances(m.sessionsDir)
+	if len(instances) != 1 || len(instances[0].Sessions) != 1 || instances[0].Sessions[0].Worktree == nil ||
+		instances[0].Sessions[0].Worktree.State != worktree.StateTeardownPending {
+		t.Fatalf("teardown-pending ownership was not fully rewritten: %+v", instances)
+	}
+
+	// A later process-death observation starts disposition but cannot emit a
+	// second teardown terminal before that disposition reaches a terminal state.
 	_, cmd = m.handleStreamComplete(work.StreamCompleteMsg{Slug: "demo"})
 	runJournalCmds(t, cmd)
-	if rows := readEventRows(t, kdir); len(rows) != 1 {
-		t.Fatalf("terminal journaled %d times, want exactly once: %+v", len(rows), rows)
+	rows = readEventRows(t, kdir)
+	if len(rows) != 1 || rows[0].Event != session.EventCloseFailed || rows[0].RequestID != "cr-e" {
+		t.Fatalf("later death emitted a second request terminal before disposition: %+v", rows)
 	}
 }

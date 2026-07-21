@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +16,7 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
+	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
 
 // baseSessionModel builds a minimal model wired for the session substrate at a
@@ -147,9 +150,10 @@ func TestRequestFrameworkValue(t *testing.T) {
 // (gated).
 func TestDescriptorFromRequestMapsDispatchFields(t *testing.T) {
 	gated := false
+	identity := &worktree.Identity{Version: worktree.IdentityVersion, CanonicalPath: "/work/session", Epoch: "epoch-1", State: worktree.StateCaptured}
 	d := descriptorFromRequest(session.Request{
 		RequestID: "r", Type: "spec", Slug: strPtr("demo"), Initiator: "agent",
-		Track: strPtr("short"), Model: strPtr("opus"), Framework: strPtr("codex"), SkipConfirm: &gated,
+		Track: strPtr("short"), Model: strPtr("opus"), Framework: strPtr("codex"), SkipConfirm: &gated, WorktreeIdentity: identity,
 	})
 	if !d.ShortMode {
 		t.Error("track=short did not set ShortMode")
@@ -162,6 +166,9 @@ func TestDescriptorFromRequestMapsDispatchFields(t *testing.T) {
 	}
 	if d.SkipConfirm {
 		t.Error("skip_confirm=false did not set SkipConfirm gated (false)")
+	}
+	if d.Worktree != identity || d.Worktree.Epoch != "epoch-1" {
+		t.Fatalf("worktree identity was not projected intact: %+v", d.Worktree)
 	}
 }
 
@@ -184,6 +191,56 @@ func TestDescriptorFromRequestDefaults(t *testing.T) {
 	}
 	if !d.SkipConfirm {
 		t.Error("absent skip_confirm must default to SkipConfirm true (queue-spawn autonomy)")
+	}
+}
+
+func TestHumanModalSpawnDerivesCapturedWorktreeIdentity(t *testing.T) {
+	source := t.TempDir()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "modal-test@example.invalid"},
+		{"config", "user.name", "Modal Test"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = source
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(source, "marker"), []byte("host\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", "marker")
+	cmd.Dir = source
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v: %s", err, out)
+	}
+	cmd = exec.Command("git", "commit", "-m", "fixture")
+	cmd.Dir = source
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v: %s", err, out)
+	}
+
+	var allocated work.SessionDescriptor
+	marker := struct{}{}
+	path := filepath.Join(t.TempDir(), "session-worktree")
+	msg := allocateSessionWorktreeCmd(
+		work.SessionDescriptor{Type: work.SessionChat, Slug: "modal", Initiator: "human"},
+		source, path, "modal-epoch",
+		func(d work.SessionDescriptor) tea.Msg { allocated = d; return marker },
+	)()
+	if _, ok := msg.(struct{}); !ok {
+		t.Fatalf("allocation returned %T (%+v)", msg, msg)
+	}
+	expectedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("resolve derived path: %v", err)
+	}
+	if allocated.Worktree == nil || allocated.Worktree.State != worktree.StateCaptured || allocated.Worktree.CanonicalPath != expectedPath {
+		t.Fatalf("derived worktree = %+v, want captured identity at %q", allocated.Worktree, expectedPath)
+	}
+	if err := worktree.ValidateIdentity(context.Background(), *allocated.Worktree); err != nil {
+		t.Fatalf("derived identity is invalid: %v", err)
 	}
 }
 

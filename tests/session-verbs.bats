@@ -213,6 +213,21 @@ journal_boundaries() {
   [ "$status" -eq 0 ]
 }
 
+@test "request --worktree-identity carries the complete versioned identity" {
+  local identity='{"version":1,"canonical_path":"/tmp/session-tree","git_common_dir":"/tmp/repo/.git","git_dir":"/tmp/repo/.git/worktrees/session-tree","epoch":"epoch-1","captured":{"canonical_path":"/tmp/repo","git_common_dir":"/tmp/repo/.git","git_dir":"/tmp/repo/.git","head_oid":"abc","index_digest":"index","worktree_digest":"tree"},"target_ref":"refs/heads/main","target_oid":"abc","state":"captured"}'
+  bash "$REQUEST" --type implement --slug wi --worktree-identity "$identity" --anywhere --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e '.worktree_identity.version == 1 and .worktree_identity.epoch == "epoch-1" and .worktree_identity.captured.worktree_digest == "tree" and .worktree_identity.state == "captured"' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request refuses a truncated worktree identity before enqueue" {
+  run bash "$REQUEST" --type implement --slug wi --worktree-identity '{"version":1,"canonical_path":"/tmp/session-tree"}' --anywhere --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid --worktree-identity"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
 @test "request with invalid --framework refuses before enqueue" {
   run bash "$REQUEST" --type spec --slug wi --framework bogus --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
@@ -938,6 +953,31 @@ PYEOF
   [ "$status" -eq 0 ]
   run grep -c '"event":"close_failed"' "$TEST_KDIR/_sessions/events.jsonl"
   [ "$output" = "1" ]
+}
+
+@test "append accepts worktree outcomes without making them close terminals" {
+  run bash "$APPEND" --row '{"event":"restore_refused","slug":"feature-x","reason":"destination-drift"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run bash "$APPEND" --row '{"event":"worktree_quarantined","slug":"feature-x","reason":"destination-drift","links":{"result_ref":"refs/lore/quarantine/epoch-1"}}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run jq -s -e 'map(.event) == ["restore_refused","worktree_quarantined"] and all(.[]; has("request_id") | not)' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "append rejects worktree outcomes without linked session identity" {
+  run bash "$APPEND" --row '{"event":"restore_refused","reason":"legacy-identity"}' --kdir "$TEST_KDIR"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"missing required field: slug"* ]]
+  run bash "$APPEND" --row '{"event":"worktree_quarantined","slug":"feature-x"}' --kdir "$TEST_KDIR"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"missing required field: reason"* ]]
+}
+
+@test "wait accepts explicit worktree outcome events without treating them as close terminals" {
+  echo '{"event":"restore_refused","slug":"feature-x","reason":"legacy-identity"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  run bash "$WAIT" feature-x --until restore_refused --since 0 --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"restore_refused"'* ]]
 }
 
 @test "append accepts orphaned and deterministic replay is idempotent" {

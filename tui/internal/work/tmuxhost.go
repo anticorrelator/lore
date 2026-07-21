@@ -153,8 +153,8 @@ func tmuxPaneEnv(extras []string) []string {
 // new-session's -P -F so the close ladder can later signal it directly rather than
 // the attach client). env is the per-session extra environment; harnessBin/args is
 // the exact command the direct-PTY path would have run.
-func createTmuxSession(name string, cols, rows int, env []string, harnessBin string, harnessArgs []string) (int, error) {
-	args := tmuxSessionArgs(name, cols, rows, env, harnessBin, harnessArgs)
+func createTmuxSession(name, worktreeDir string, cols, rows int, env []string, harnessBin string, harnessArgs []string) (int, error) {
+	args := tmuxSessionArgs(name, worktreeDir, cols, rows, env, harnessBin, harnessArgs)
 
 	cmd := exec.Command(tmuxBinary, args...)
 	out, err := cmd.Output()
@@ -168,11 +168,11 @@ func createTmuxSession(name string, cols, rows int, env []string, harnessBin str
 	return pid, nil
 }
 
-func tmuxSessionArgs(name string, cols, rows int, env []string, harnessBin string, harnessArgs []string) []string {
+func tmuxSessionArgs(name, worktreeDir string, cols, rows int, env []string, harnessBin string, harnessArgs []string) []string {
 	args := []string{"-L", tmuxServerLabel, "-f", "/dev/null"}
 	args = append(args, tmuxOptionPins()...)
 	args = append(args, tmuxRGBFeaturePin()...)
-	args = append(args, "new-session", "-d", "-s", name, "-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows))
+	args = append(args, "new-session", "-d", "-s", name, "-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows), "-c", worktreeDir)
 	args = append(args, tmuxPaneEnv(env)...)
 	args = append(args, "-P", "-F", "#{pane_pid}", "--", harnessBin)
 	args = append(args, harnessArgs...)
@@ -225,6 +225,22 @@ func tmuxPanePID(name string) (int, error) {
 		return 0, fmt.Errorf("parse pane pid %q: %w", line, perr)
 	}
 	return pid, nil
+}
+
+// TmuxPaneCWD returns the current directory of the session's harness pane.
+// Recovery uses it to prove the surviving process still occupies its persisted
+// worktree before transferring ownership to a new TUI instance.
+func TmuxPaneCWD(name string) (string, error) {
+	out, err := exec.Command(tmuxBinary, "-L", tmuxServerLabel,
+		"list-panes", "-t", name, "-F", "#{pane_current_path}").Output()
+	if err != nil {
+		return "", fmt.Errorf("tmux list-panes cwd: %w", err)
+	}
+	cwd := strings.TrimSpace(string(out))
+	if cwd == "" {
+		return "", fmt.Errorf("tmux list-panes cwd: empty pane path")
+	}
+	return cwd, nil
 }
 
 // captureTmuxPaneHistory returns the pane's retained history plus its visible

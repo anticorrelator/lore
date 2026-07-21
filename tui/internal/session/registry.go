@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
 
 // LivenessTTL is the window within which an instance file's mtime must fall
@@ -38,12 +40,13 @@ type Session struct {
 	Initiator string `json:"initiator"` // agent|human
 	Started   string `json:"started"`   // ISO 8601 UTC
 
-	Tmux          string   `json:"tmux,omitempty"`
-	RequestID     string   `json:"request_id,omitempty"`
-	SessionID     string   `json:"session_id,omitempty"`
-	Harness       string   `json:"harness,omitempty"`
-	AutoClose     *bool    `json:"auto_close,omitempty"`
-	CloseRequests []string `json:"close_requests,omitempty"`
+	Tmux          string             `json:"tmux,omitempty"`
+	RequestID     string             `json:"request_id,omitempty"`
+	SessionID     string             `json:"session_id,omitempty"`
+	Harness       string             `json:"harness,omitempty"`
+	AutoClose     *bool              `json:"auto_close,omitempty"`
+	CloseRequests []string           `json:"close_requests,omitempty"`
+	Worktree      *worktree.Identity `json:"worktree,omitempty"`
 }
 
 // Instance is one live TUI instance's registry row, stored at

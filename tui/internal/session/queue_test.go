@@ -546,6 +546,28 @@ func TestPreferProjectDirRoundTrips(t *testing.T) {
 	}
 }
 
+func TestWorktreeIdentityRoundTripsWithoutProjectionLoss(t *testing.T) {
+	row := `{"request_id":"x","type":"spec","worktree_identity":{"version":1,"canonical_path":"/work/session","git_common_dir":"/repo/.git","git_dir":"/repo/.git/worktrees/session","epoch":"epoch-1","captured":{"canonical_path":"/repo","git_common_dir":"/repo/.git","git_dir":"/repo/.git","head_oid":"abc","index_digest":"index","worktree_digest":"tree"},"target_ref":"refs/heads/main","target_oid":"abc","state":"captured"}}`
+	var req Request
+	if err := json.Unmarshal([]byte(row), &req); err != nil {
+		t.Fatalf("decode worktree_identity: %v", err)
+	}
+	if req.WorktreeIdentity == nil || req.WorktreeIdentity.CanonicalPath != "/work/session" || req.WorktreeIdentity.Epoch != "epoch-1" {
+		t.Fatalf("worktree identity projection lost fields: %+v", req.WorktreeIdentity)
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var roundTripped map[string]json.RawMessage
+	if err := json.Unmarshal(data, &roundTripped); err != nil {
+		t.Fatalf("decode round trip: %v", err)
+	}
+	if got := string(roundTripped["worktree_identity"]); !strings.Contains(got, `"epoch":"epoch-1"`) || !strings.Contains(got, `"worktree_digest":"tree"`) {
+		t.Fatalf("worktree identity did not survive round trip: %s", got)
+	}
+}
+
 func noPlan(string) bool { return false }
 
 // ClaimRequestFixture plants a pending row and renames it into claimed/ without

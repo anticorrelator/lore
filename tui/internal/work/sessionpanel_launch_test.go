@@ -2,15 +2,53 @@ package work
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
+
+func mustSessionWorktree(t *testing.T) worktree.Identity {
+	t.Helper()
+	source := t.TempDir()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "launch-test@example.invalid"},
+		{"config", "user.name", "Launch Test"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = source
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(source, "marker"), []byte("source\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", "marker")
+	cmd.Dir = source
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v: %s", err, out)
+	}
+	cmd = exec.Command("git", "commit", "-m", "fixture")
+	cmd.Dir = source
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v: %s", err, out)
+	}
+	identity, err := worktree.Create(context.Background(), source, filepath.Join(t.TempDir(), "session-worktree"), "launch-test-epoch")
+	if err != nil {
+		t.Fatalf("create session worktree: %v", err)
+	}
+	return identity
+}
 
 func captureParentStderr(t *testing.T, fn func()) string {
 	t.Helper()
@@ -147,8 +185,9 @@ func runStartTerminal(t *testing.T, slug, projectDir string, followupMode bool) 
 	t.Helper()
 	// width=80, height=24 are typical PTY defaults; the values aren't
 	// load-bearing for the args we assert.
-	d := SessionDescriptor{Type: SessionSpec, Slug: slug, Title: "smoke title", SkipConfirm: true, FollowupMode: followupMode, FindingIndex: -1}
-	cmd := StartTerminalCmd(d, projectDir, 80, 24, projectDir, SessionEnv{}, false)
+	identity := mustSessionWorktree(t)
+	d := SessionDescriptor{Type: SessionSpec, Slug: slug, Title: "smoke title", SkipConfirm: true, FollowupMode: followupMode, FindingIndex: -1, Worktree: &identity}
+	cmd := StartTerminalCmd(d, 80, 24, projectDir, SessionEnv{}, false)
 	msg := cmd()
 	if started, ok := msg.(SessionProcessStartedMsg); ok {
 		// Close the PTY so the stub subprocess receives EOF and exits without
@@ -190,6 +229,52 @@ func TestStartTerminalCmd_SpawnsClaudeBinaryWithDefaultFlags(t *testing.T) {
 	}
 }
 
+func TestStartTerminalCmdPinsDirectPTYToValidatedWorktree(t *testing.T) {
+	stageFakeBinaries(t)
+	knowledgeDir := stageFakeLoreData(t, "claude-code", nil)
+	identity := mustSessionWorktree(t)
+	d := SessionDescriptor{Type: SessionSpec, Slug: "cwd-smoke", Title: "cwd smoke", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+
+	msg := StartTerminalCmd(d, 80, 24, knowledgeDir, SessionEnv{}, false)()
+	started, ok := msg.(SessionProcessStartedMsg)
+	if !ok {
+		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
+	}
+	defer started.Ptmx.Close()
+	if started.Cmd.Dir != identity.CanonicalPath {
+		t.Fatalf("direct PTY cwd = %q, want %q", started.Cmd.Dir, identity.CanonicalPath)
+	}
+	if started.Worktree.State != worktree.StateActive || started.Worktree.CanonicalPath != identity.CanonicalPath {
+		t.Fatalf("started worktree = %+v, want active identity at %q", started.Worktree, identity.CanonicalPath)
+	}
+}
+
+func TestStartTerminalCmdRefusesMissingWorktreeBeforeSpawn(t *testing.T) {
+	d := SessionDescriptor{Type: SessionSpec, Slug: "missing-worktree", Title: "missing", SkipConfirm: true, FindingIndex: -1}
+	msg := StartTerminalCmd(d, 80, 24, t.TempDir(), SessionEnv{}, false)()
+	failed, ok := msg.(StreamErrorMsg)
+	if !ok {
+		t.Fatalf("expected StreamErrorMsg, got %T (%+v)", msg, msg)
+	}
+	if !strings.Contains(failed.Err.Error(), "missing worktree identity") {
+		t.Fatalf("error = %q, want missing identity refusal", failed.Err)
+	}
+}
+
+func TestStartTerminalCmdRefusesInvalidWorktreeBeforeSpawn(t *testing.T) {
+	identity := mustSessionWorktree(t)
+	identity.Epoch = "different-epoch"
+	d := SessionDescriptor{Type: SessionSpec, Slug: "invalid-worktree", Title: "invalid", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+	msg := StartTerminalCmd(d, 80, 24, t.TempDir(), SessionEnv{}, false)()
+	failed, ok := msg.(StreamErrorMsg)
+	if !ok {
+		t.Fatalf("expected StreamErrorMsg, got %T (%+v)", msg, msg)
+	}
+	if !strings.Contains(failed.Err.Error(), "worktree epoch mismatch") {
+		t.Fatalf("error = %q, want epoch refusal", failed.Err)
+	}
+}
+
 // TestStartTerminalCmd_ExportsSessionIdentity asserts the D3 session identity
 // joins LORE_FRAMEWORK in the harness child's environment, and that an empty
 // SessionEnv field is omitted rather than exported blank.
@@ -197,8 +282,9 @@ func TestStartTerminalCmd_ExportsSessionIdentity(t *testing.T) {
 	stageFakeBinaries(t)
 	dir := stageFakeLoreData(t, "claude-code", nil)
 
-	d := SessionDescriptor{Type: SessionSpec, Slug: "smoke-slug", Title: "smoke title", SkipConfirm: true, FindingIndex: -1}
-	cmd := StartTerminalCmd(d, dir, 80, 24, dir,
+	identity := mustSessionWorktree(t)
+	d := SessionDescriptor{Type: SessionSpec, Slug: "smoke-slug", Title: "smoke title", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+	cmd := StartTerminalCmd(d, 80, 24, dir,
 		SessionEnv{Instance: "amber-otter", Slug: "smoke-slug", Type: "spec"}, false)
 	msg := cmd()
 	started, ok := msg.(SessionProcessStartedMsg)
@@ -401,7 +487,9 @@ func TestStartTerminalCmd_FrameworkOverrideSelectsSpawnIdentity(t *testing.T) {
 		SkipConfirm:  true,
 		FindingIndex: -1,
 	}
-	cmd := StartTerminalCmd(d, dir, 80, 24, dir, SessionEnv{}, false)
+	identity := mustSessionWorktree(t)
+	d.Worktree = &identity
+	cmd := StartTerminalCmd(d, 80, 24, dir, SessionEnv{}, false)
 	msg := cmd()
 	started, ok := msg.(SessionProcessStartedMsg)
 	if !ok {
@@ -487,8 +575,9 @@ func TestStartTerminalCmd_ComposesModelFlag(t *testing.T) {
 	stageFakeBinaries(t)
 	dir := stageFakeLoreData(t, "claude-code", nil)
 
-	withModel := SessionDescriptor{Type: SessionSpec, Slug: "smoke-slug", Title: "smoke", Model: "opus", SkipConfirm: true, FindingIndex: -1}
-	cmd := StartTerminalCmd(withModel, dir, 80, 24, dir, SessionEnv{}, false)
+	identity := mustSessionWorktree(t)
+	withModel := SessionDescriptor{Type: SessionSpec, Slug: "smoke-slug", Title: "smoke", Model: "opus", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+	cmd := StartTerminalCmd(withModel, 80, 24, dir, SessionEnv{}, false)
 	msg := cmd()
 	started, ok := msg.(SessionProcessStartedMsg)
 	if !ok {

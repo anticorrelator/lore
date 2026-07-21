@@ -2,6 +2,7 @@ package work
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/style"
+	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
 
 // resolveFollowupDir mirrors followup.ResolveDir / scripts/lib.sh::resolve_followup_dir,
@@ -116,6 +118,10 @@ type SessionProcessStartedMsg struct {
 	// signalling it would only detach a viewer. Both empty/zero for direct-PTY.
 	Tmux    string
 	PanePID int
+
+	// Worktree is the validated session workspace identity used for the
+	// harness cwd. The host persists it with the live session after spawn.
+	Worktree worktree.Identity
 
 	// Notices describe non-fatal launch degradations for the host model to render.
 	Notices []OperatorNotice
@@ -1173,9 +1179,7 @@ func buildInitialPrompt(d SessionDescriptor) string {
 // inside a PTY and returns SessionProcessStartedMsg with the PTY master, exec.Cmd,
 // and a channel of raw byte chunks read from the PTY. The PTY master is the
 // read/write interface — write user keystrokes, read subprocess output.
-// projectDir must be the project root (not the knowledge _work/ dir) so the
-// launched skill explores the correct codebase.
-func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int, knowledgeDir string, sessionEnv SessionEnv, tmux bool) tea.Cmd {
+func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir string, sessionEnv SessionEnv, tmux bool) tea.Cmd {
 	return func() (result tea.Msg) {
 		slug := d.Slug
 		var notices []OperatorNotice
@@ -1185,6 +1189,18 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 				result = StreamErrorMsg{Slug: slug, Err: fmt.Errorf("start panic: %v", r), Notices: notices}
 			}
 		}()
+		if d.Worktree == nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: missing worktree identity")}
+		}
+		identity := *d.Worktree
+		if err := worktree.ValidateIdentity(context.Background(), identity); err != nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: %w", err)}
+		}
+		identity, err := worktree.Transition(identity, worktree.StateActive)
+		if err != nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: %w", err)}
+		}
+		worktreeDir := identity.CanonicalPath
 		// Build the initial prompt to auto-submit. Passing it as a positional
 		// argument to the harness binary starts an interactive session and
 		// submits it immediately — no PTY-write timing hack needed.
@@ -1301,7 +1317,7 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 					label = "slugless session (" + name + ")"
 				}
 				extras := append([]string{"LORE_FRAMEWORK=" + activeFramework}, sessionEnv.vars()...)
-				pid, terr := createTmuxSession(name, width, height, extras, harnessBinary, args)
+				pid, terr := createTmuxSession(name, worktreeDir, width, height, extras, harnessBinary, args)
 				if terr != nil {
 					notices = append(notices, OperatorNotice{
 						Code:    "tmux-hosting-failed",
@@ -1310,7 +1326,7 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 				} else {
 					tmuxName, panePID = name, pid
 					cmd = tmuxAttachCommand(name)
-					cmd.Dir = projectDir
+					cmd.Dir = worktreeDir
 				}
 			} else {
 				// tmux is active but this process advertises no instance name to build
@@ -1324,7 +1340,7 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 		}
 		if cmd == nil {
 			cmd = exec.Command(harnessBinary, args...)
-			cmd.Dir = projectDir
+			cmd.Dir = worktreeDir
 			cmd.Env = append(os.Environ(), "LORE_FRAMEWORK="+activeFramework)
 			cmd.Env = append(cmd.Env, sessionEnv.vars()...)
 			// Do NOT set cmd.Stderr = io.Discard here: with a PTY the subprocess's
@@ -1357,6 +1373,7 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 			Harness:   activeFramework,
 			Tmux:      tmuxName,
 			PanePID:   panePID,
+			Worktree:  identity,
 			Notices:   notices,
 		}
 	}
@@ -1369,7 +1386,7 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 // registry-recovered sessionID/harness so teardown can still bind the spend probe.
 // A pane-PID query failure means the session died between the adoption scan and the
 // attach; that surfaces as a spawn error (the caller journals it closed).
-func AttachTerminalCmd(slug, tmuxName, sessionID, harness, projectDir string, width, height int) tea.Cmd {
+func AttachTerminalCmd(slug, tmuxName, sessionID, harness string, identity worktree.Identity, width, height int) tea.Cmd {
 	return func() (result tea.Msg) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -1377,12 +1394,15 @@ func AttachTerminalCmd(slug, tmuxName, sessionID, harness, projectDir string, wi
 				result = StreamErrorMsg{Slug: slug, Err: fmt.Errorf("attach panic: %v", r)}
 			}
 		}()
+		if err := worktree.ValidateIdentity(context.Background(), identity); err != nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse tmux adoption: %w", err)}
+		}
 		panePID, perr := tmuxPanePID(tmuxName)
 		if perr != nil {
 			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("tmux pane pid: %w", perr)}
 		}
 		cmd := tmuxAttachCommand(tmuxName)
-		cmd.Dir = projectDir
+		cmd.Dir = identity.CanonicalPath
 		ws := &pty.Winsize{Rows: uint16(height), Cols: uint16(width)}
 		ptmx, err := pty.StartWithSize(cmd, ws)
 		if err != nil {
@@ -1397,6 +1417,7 @@ func AttachTerminalCmd(slug, tmuxName, sessionID, harness, projectDir string, wi
 			Harness:   harness,
 			Tmux:      tmuxName,
 			PanePID:   panePID,
+			Worktree:  identity,
 		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
+	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
 
 // endLocalSession drops a torn-down session from this instance's registry row
@@ -28,6 +29,37 @@ func (m model) endLocalSessionClosed(slug, closeRequestID string) (model, []tea.
 	if !ok {
 		return m, nil
 	}
+	if ls.worktree != nil && ls.worktree.OwnsWorktree() {
+		if ls.worktreeDispositionPending {
+			return m, nil
+		}
+		pending := *ls.worktree
+		if pending.State != worktree.StateTeardownPending {
+			var err error
+			pending, err = worktree.Transition(pending, worktree.StateTeardownPending)
+			if err != nil {
+				m.flashErr = compactErr("worktree teardown transition", err)
+				return m, []tea.Cmd{journalCmd(m.eventScript, m.config.KnowledgeDir, worktreeOutcomeEvent(
+					m.instanceName, slug, ls, worktree.PublishOutcome{
+						Kind: worktree.OutcomeRestoreRefused, Identity: *ls.worktree,
+						Expected: ls.worktree.Captured, Reason: err.Error(),
+					},
+				))}
+			}
+		}
+		ls.worktree = cloneWorktreeIdentity(&pending)
+		ls.worktreeDispositionPending = true
+		m.localSessions[slug] = ls
+		return m, []tea.Cmd{tea.Sequence(m.writeInstanceCmd(), m.disposeWorktreeCmd(slug, ls, closeRequestID))}
+	}
+	return m.finalizeLocalSessionClosed(slug, closeRequestID)
+}
+
+func (m model) finalizeLocalSessionClosed(slug, closeRequestID string) (model, []tea.Cmd) {
+	ls, ok := m.localSessions[slug]
+	if !ok {
+		return m, nil
+	}
 	delete(m.localSessions, slug)
 	delete(m.sessionIdle, slug)
 	delete(m.sessionModalBlocked, slug)
@@ -37,12 +69,10 @@ func (m model) endLocalSessionClosed(slug, closeRequestID string) (model, []tea.
 	}
 }
 
-// endLocalSessionFailed drops a torn-down session from the registry and journals
-// `close_failed` (not `closed`) — the terminal for a ladder that could not confirm
-// the process gone. Like endLocalSessionClosed it removes the slug so a later
-// StreamCompleteMsg cannot add a second terminal for the same request. The
-// close_failed row requires a request_id; the consumed close request_id supplies
-// it, falling back to the spawn id only if that were somehow empty.
+// endLocalSessionFailed journals `close_failed` without releasing the session's
+// durable workspace ownership. The harness may still be running, so its registry
+// row is rewritten as teardown-pending and remains recoverable by this or a later
+// TUI instance.
 func (m model) endLocalSessionFailed(slug, closeRequestID, reason string) (model, []tea.Cmd) {
 	ls, ok := m.localSessions[slug]
 	if !ok {
@@ -52,13 +82,32 @@ func (m model) endLocalSessionFailed(slug, closeRequestID, reason string) (model
 	if requestID == "" {
 		requestID = ls.requestID
 	}
-	delete(m.localSessions, slug)
-	delete(m.sessionIdle, slug)
-	delete(m.sessionModalBlocked, slug)
-	return m, []tea.Cmd{
-		m.writeInstanceCmd(),
-		m.closeFailedCmd(slug, requestID, reason, ls),
+	var refusalCmd tea.Cmd
+	if ls.worktree != nil {
+		pending := *ls.worktree
+		if pending.State != worktree.StateTeardownPending {
+			var err error
+			pending, err = worktree.Transition(pending, worktree.StateTeardownPending)
+			if err != nil {
+				m.flashErr = compactErr("worktree teardown transition", err)
+				refusalCmd = journalCmd(m.eventScript, m.config.KnowledgeDir, worktreeOutcomeEvent(
+					m.instanceName, slug, ls, worktree.PublishOutcome{
+						Kind: worktree.OutcomeRestoreRefused, Identity: *ls.worktree,
+						Expected: ls.worktree.Captured, Reason: err.Error(),
+					},
+				))
+			} else {
+				ls.worktree = cloneWorktreeIdentity(&pending)
+			}
+		}
 	}
+	m.localSessions[slug] = ls
+	cmds := []tea.Cmd{m.writeInstanceCmd()}
+	if refusalCmd != nil {
+		cmds = append(cmds, refusalCmd)
+	}
+	cmds = append(cmds, m.closeFailedCmd(slug, requestID, reason, ls))
+	return m, cmds
 }
 
 func (m model) handleSpecRequest(msg work.SpecRequestMsg) (model, tea.Cmd) {
@@ -225,6 +274,9 @@ func (m model) handleSessionProcessStarted(msg work.SessionProcessStartedMsg) (m
 	meta.sessionID = msg.SessionID
 	meta.harness = msg.Harness
 	meta.tmuxName = msg.Tmux
+	if !meta.adopted {
+		meta.worktree = cloneWorktreeIdentity(&msg.Worktree)
+	}
 	if m.localSessions == nil {
 		m.localSessions = make(map[string]liveSession)
 	}

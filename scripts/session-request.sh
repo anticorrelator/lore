@@ -46,6 +46,12 @@
 #                      codex | opencode. Validated against adapters/capabilities.json
 #                      and stored only when present. Pair with --min-vintage when an
 #                      old claiming TUI must not ignore this additive field.
+#   --worktree-identity <json|file>
+#                      Versioned session-worktree identity to carry unchanged to
+#                      the claiming TUI. A file is read when the value names one;
+#                      otherwise the value is parsed as JSON. When omitted for a
+#                      fresh request, the claiming TUI allocates and captures a
+#                      session-owned worktree before reaching the launch boundary.
 #   --prefer-dir <p>   Soft project-dir preference stored as prefer_project_dir: an
 #                      instance whose project dir matches claims immediately; any
 #                      other defers ~15s before it may claim. Resolved physically at
@@ -96,6 +102,8 @@ MODEL=""
 MODEL_PROVIDED=0
 FRAMEWORK=""
 FRAMEWORK_PROVIDED=0
+WORKTREE_IDENTITY=""
+WORKTREE_IDENTITY_PROVIDED=0
 PREFER_DIR=""
 PREFER_DIR_PROVIDED=0
 PREFER_CWD_PROVIDED=0
@@ -116,6 +124,7 @@ while [[ $# -gt 0 ]]; do
     --track) TRACK="$2"; shift 2 ;;
     --model) MODEL="$2"; MODEL_PROVIDED=1; shift 2 ;;
     --framework) FRAMEWORK="$2"; FRAMEWORK_PROVIDED=1; shift 2 ;;
+    --worktree-identity) WORKTREE_IDENTITY="$2"; WORKTREE_IDENTITY_PROVIDED=1; shift 2 ;;
     --prefer-dir) PREFER_DIR="$2"; PREFER_DIR_PROVIDED=1; shift 2 ;;
     --prefer-cwd) PREFER_CWD_PROVIDED=1; shift ;;
     --anywhere) ANYWHERE_PROVIDED=1; shift ;;
@@ -123,10 +132,10 @@ while [[ $# -gt 0 ]]; do
     --confirm) SKIP_CONFIRM="false"; shift ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,73p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,79p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--target <name> | --prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--framework <claude-code|codex|opencode>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--target <name> | --prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--framework <claude-code|codex|opencode>] [--worktree-identity <json|file>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -207,6 +216,32 @@ if [[ $FRAMEWORK_PROVIDED -eq 1 ]]; then
     fail "invalid --framework: '$FRAMEWORK' (must be one of $VALID_FRAMEWORKS)"
   fi
   FRAMEWORK_JSON="$(jq -n --arg fw "$FRAMEWORK" '$fw')"
+fi
+
+# worktree_identity is the versioned request-to-launch seam. Validate the
+# complete v1 JSON shape at enqueue so a present-but-truncated identity never
+# enters the queue; Git/path ownership is validated again by the claiming TUI
+# immediately before spawn. The field remains omit-when-empty for additive
+# schema compatibility; a fresh omitted identity is allocated before launch.
+WORKTREE_IDENTITY_JSON=""
+if [[ $WORKTREE_IDENTITY_PROVIDED -eq 1 ]]; then
+  [[ -n "$WORKTREE_IDENTITY" ]] || fail "empty --worktree-identity (a v1 identity JSON object or file is required)"
+  if [[ -f "$WORKTREE_IDENTITY" ]]; then
+    WORKTREE_IDENTITY_JSON="$(jq -c '.' "$WORKTREE_IDENTITY" 2>/dev/null)" || fail "invalid --worktree-identity file: '$WORKTREE_IDENTITY' (expected JSON)"
+  else
+    WORKTREE_IDENTITY_JSON="$(printf '%s' "$WORKTREE_IDENTITY" | jq -c '.' 2>/dev/null)" || fail "invalid --worktree-identity (expected a JSON object or readable file)"
+  fi
+  if ! printf '%s' "$WORKTREE_IDENTITY_JSON" | jq -e '
+    type == "object" and
+    .version == 1 and
+    ([.canonical_path, .git_common_dir, .git_dir, .epoch, .target_oid] | all(type == "string" and length > 0)) and
+    (.target_ref | type == "string") and
+    (.captured | type == "object" and
+      ([.canonical_path, .git_common_dir, .git_dir, .head_oid, .index_digest, .worktree_digest] | all(type == "string" and length > 0))) and
+    .state == "captured"
+  ' >/dev/null 2>&1; then
+    fail "invalid --worktree-identity (expected complete v1 identity in captured state)"
+  fi
 fi
 
 # prefer_project_dir is a soft routing preference: a matching instance claims
@@ -391,6 +426,13 @@ fi
 # so an absent override keeps the claiming TUI's launch-framework fallback.
 if [[ -n "$FRAMEWORK_JSON" ]]; then
   ROW="$(printf '%s' "$ROW" | jq -c --argjson fw "$FRAMEWORK_JSON" '. + {framework: $fw}')"
+fi
+
+# worktree_identity follows omit-when-empty for rolling schema compatibility.
+# When present, preserve the whole versioned identity object byte-for-byte in
+# meaning; intermediate request projections must not reconstruct a partial row.
+if [[ -n "$WORKTREE_IDENTITY_JSON" ]]; then
+  ROW="$(printf '%s' "$ROW" | jq -c --argjson wi "$WORKTREE_IDENTITY_JSON" '. + {worktree_identity: $wi}')"
 fi
 
 # prefer_project_dir follows omit-when-empty: added only when --prefer-dir or

@@ -62,6 +62,7 @@ const (
 	closeFailedRungExhausted      = "rung-exhausted"
 	closeFailedError              = "error"
 	closeFailedTargetInstanceDead = "target-instance-dead"
+	closeFailedRecoveryRefused    = "recovery-refused"
 )
 
 // errCloseLadderExhausted marks a teardown that ran every exit-ladder rung and
@@ -417,6 +418,12 @@ func (m model) handleCloseRequestScan(msg closeRequestScanMsg) (model, tea.Cmd) 
 			m.localSessions[slug] = ls
 		}
 		cmds = append(cmds, consumeCloseRequestCmd(m.sessionsDir, cr.RequestID, m.instanceRow()))
+		if _, hosted := m.sessionPanels[slug]; !hosted {
+			if ls, tracked := m.localSessions[slug]; tracked {
+				cmds = append(cmds, m.closeFailedCmd(slug, cr.RequestID, closeFailedRecoveryRefused, ls))
+			}
+			continue
+		}
 
 		// Protocol-terminus is the only reason still gated by initiator/auto_close.
 		// Every explicit close acts with full discretion (falls through to teardown).
@@ -632,25 +639,13 @@ func (m model) closeFailedCmd(slug, requestID, reason string, ls liveSession) te
 	})
 }
 
-// handleCloseLadderDone finishes teardown after the exit ladder ran: it cleans up
-// the panel and marks it done, then emits the consumed close-request's single
-// terminal. A ladder that confirmed the process gone journals `closed` (carrying
-// the close request_id); a ladder that could not confirm it gone journals
-// `close_failed` instead — never both. Both drop the slug from this instance's
-// registry, so the StreamCompleteMsg the killed process later produces re-enters
-// teardown as a no-op (endLocalSession* is guarded on localSessions membership),
-// keeping the terminal exactly-once.
+// handleCloseLadderDone emits the consumed close-request's single teardown
+// terminal. A confirmed process death cleans up the panel and journals `closed`.
+// An unconfirmed death journals `close_failed`, leaves the panel attached, and
+// retains the registry ownership needed for a later death observation.
 func (m model) handleCloseLadderDone(msg closeLadderDoneMsg) (model, tea.Cmd) {
 	m = m.routeRuntimeNotices(msg.notices)
 	slug := msg.slug
-	if m.sessionPanels != nil {
-		if panel, ok := m.sessionPanels[slug]; ok {
-			sm := panel.Cleanup()
-			sm, _ = sm.Update(work.StreamCompleteMsg{Slug: slug}) // sets done
-			m.sessionPanels[slug] = sm
-		}
-	}
-	m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: slug, Done: true})
 
 	var termCmds []tea.Cmd
 	if msg.err != nil {
@@ -661,6 +656,14 @@ func (m model) handleCloseLadderDone(msg closeLadderDoneMsg) (model, tea.Cmd) {
 		}
 		m, termCmds = m.endLocalSessionFailed(slug, msg.requestID, reason)
 	} else {
+		if m.sessionPanels != nil {
+			if panel, ok := m.sessionPanels[slug]; ok {
+				sm := panel.Cleanup()
+				sm, _ = sm.Update(work.StreamCompleteMsg{Slug: slug}) // sets done
+				m.sessionPanels[slug] = sm
+			}
+		}
+		m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: slug, Done: true})
 		m, termCmds = m.endLocalSessionClosed(slug, msg.requestID)
 	}
 	cmds := append([]tea.Cmd(nil), termCmds...)

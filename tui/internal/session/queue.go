@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
 
 // ReclaimAfter is the age past which a claimed row is returned to pending when
@@ -92,6 +94,12 @@ type Request struct {
 	// the supplied value and lets the spawn path decide how to consume it. Pointer
 	// so absent stays distinct from an explicit value.
 	Framework *string `json:"framework,omitempty"`
+
+	// WorktreeIdentity is the complete versioned identity of the isolated tree
+	// the harness must run in. Optional on disk for rolling schema compatibility;
+	// fresh requests without one are allocated before launch, while a supplied
+	// invalid identity is refused before process spawn.
+	WorktreeIdentity *worktree.Identity `json:"worktree_identity,omitempty"`
 
 	// PreferProjectDir is a soft routing preference: a physically-resolved project
 	// directory an instance is preferred to claim from. Unlike TargetInstance and

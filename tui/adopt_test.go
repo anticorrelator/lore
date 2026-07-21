@@ -2,17 +2,96 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
+	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
+
+func TestAdoptionScanRefusesWrongPaneCWDAndPreservesMarkers(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed; skipping live adoption refusal integration")
+	}
+	m, sessionsDir := baseSessionModel(t)
+	m.config.RepoIdentifier = "my-repo"
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	sourceDir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-b", "main"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Lore Test"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", sourceDir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	hostMarker := filepath.Join(sourceDir, "host-marker.bin")
+	if err := os.WriteFile(hostMarker, []byte{0x00, 0x41, 0xff, 0x0a}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", sourceDir, "add", "host-marker.bin").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v (%s)", err, out)
+	}
+	if out, err := exec.Command("git", "-C", sourceDir, "commit", "-m", "seed").CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v (%s)", err, out)
+	}
+	identity, err := worktree.Create(context.Background(), sourceDir, filepath.Join(t.TempDir(), "session-worktree"), "refuse-epoch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err = worktree.Transition(identity, worktree.StateActive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostBytes := []byte{0x42, 0x00, 0xfe, 0x0a}
+	streamBytes := []byte{0x53, 0x00, 0xfd, 0x0a}
+	if err := os.WriteFile(hostMarker, hostBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	streamMarker := filepath.Join(identity.CanonicalPath, "stream-marker.bin")
+	if err := os.WriteFile(streamMarker, streamBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	name := "lore-test-refuse-" + strconv.Itoa(os.Getpid())
+	if out, err := exec.Command("tmux", "-L", "lore-tui", "-f", "/dev/null",
+		"new-session", "-d", "-s", name, "-c", sourceDir, "--", "sleep", "300").CombinedOutput(); err != nil {
+		t.Fatalf("create wrong-cwd survivor: %v (%s)", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-L", "lore-tui", "kill-session", "-t", name).Run() })
+	plantCorpse(t, sessionsDir, "dead-inst", "my-repo", deadPID(t), []session.Session{{
+		Slug: "demo", Type: "implement", Initiator: "agent", Started: "2026-07-21T00:00:00Z",
+		Tmux: name, RequestID: "spawn-1", Worktree: &identity,
+	}})
+
+	msg := m.adoptionScanCmd()().(adoptionScanMsg)
+	if len(msg.alive) != 0 || len(msg.retained) != 1 || !strings.Contains(msg.retained[0].refusalReason, "tmux pane cwd mismatch") {
+		t.Fatalf("wrong-cwd adoption was not refused and retained: %+v", msg)
+	}
+	if got := readEventTypes(t, m.config.KnowledgeDir); len(got) != 1 || got[0] != session.EventRestoreRefused {
+		t.Fatalf("wrong-cwd adoption events = %v, want [restore_refused]", got)
+	}
+	if got, err := os.ReadFile(hostMarker); err != nil || !bytes.Equal(got, hostBytes) {
+		t.Fatalf("refused adoption changed host marker: got %v err=%v want %v", got, err, hostBytes)
+	}
+	if got, err := os.ReadFile(streamMarker); err != nil || !bytes.Equal(got, streamBytes) {
+		t.Fatalf("refused adoption changed stream marker: got %v err=%v want %v", got, err, streamBytes)
+	}
+	instances := session.ListInstances(sessionsDir)
+	if len(instances) != 1 || instances[0].Name != "me" || len(instances[0].Sessions) != 1 || instances[0].Sessions[0].Worktree == nil {
+		t.Fatalf("refused adoption did not transfer durable ownership: %+v", instances)
+	}
+}
 
 func readJSONLines(t *testing.T, path string) []map[string]any {
 	t.Helper()
@@ -107,25 +186,37 @@ func TestAdoptionScan_DeadSessionJournalsOrphaned(t *testing.T) {
 	if len(msg.alive) != 0 {
 		t.Fatalf("dead (no-tmux) session returned as alive: %+v", msg.alive)
 	}
-	if got := readEventTypes(t, kdir); len(got) != 1 || got[0] != session.EventOrphaned {
-		t.Fatalf("events = %v, want exactly [orphaned]", got)
+	if got := readEventTypes(t, kdir); len(got) != 2 || got[0] != session.EventRestoreRefused || got[1] != session.EventOrphaned {
+		t.Fatalf("events = %v, want [restore_refused orphaned]", got)
 	}
 	rows := readEventRows(t, kdir)
-	if rows[0].RequestID != "spawn-1" || rows[0].Reason != "instance-death" || rows[0].TargetInstance == nil || *rows[0].TargetInstance != "dead-inst" {
-		t.Fatalf("orphaned identity = %+v", rows[0])
+	if rows[0].Reason != "missing versioned worktree identity" || rows[0].TargetInstance == nil || *rows[0].TargetInstance != "dead-inst" {
+		t.Fatalf("legacy refusal identity = %+v", rows[0])
+	}
+	if rows[1].RequestID != "spawn-1" || rows[1].Reason != "instance-death" || rows[1].TargetInstance == nil || *rows[1].TargetInstance != "dead-inst" {
+		t.Fatalf("orphaned identity = %+v", rows[1])
 	}
 	var spend map[string]any
-	if err := json.Unmarshal(rows[0].Spend, &spend); err != nil || spend["basis"] != "duration-only" {
-		t.Fatalf("orphaned spend = %s err=%v", rows[0].Spend, err)
+	if err := json.Unmarshal(rows[1].Spend, &spend); err != nil || spend["basis"] != "duration-only" {
+		t.Fatalf("orphaned spend = %s err=%v", rows[1].Spend, err)
 	}
 	dueRows := readJSONLines(t, filepath.Join(kdir, "_scorecards", "retro-deferred-queue.jsonl"))
 	if len(dueRows) != 1 || dueRows[0]["event_type"] != "session-orphaned" || dueRows[0]["stratum"] != "instance_death" || dueRows[0]["disposition"] != "unhandled" {
 		t.Fatalf("orphan DUE rows = %+v", dueRows)
 	}
-	// The corpse and any claim file are gone (adoption doubles as corpse cleanup).
+	// The corpse claim is deleted only after the adopting instance owns the
+	// refused legacy row; a later heartbeat must not erase that ownership.
 	leftover, _ := filepath.Glob(filepath.Join(session.InstancesDir(sessionsDir), "*"))
-	if len(leftover) != 0 {
-		t.Fatalf("corpse/claim files left behind: %v", leftover)
+	if len(leftover) != 1 || filepath.Base(leftover[0]) != "me.json" {
+		t.Fatalf("ownership transfer rows = %v, want only me.json", leftover)
+	}
+	m, _ = m.handleAdoptionScan(msg)
+	if cmd := m.writeInstanceCmd(); cmd != nil {
+		_ = cmd()
+	}
+	instances := session.ListInstances(sessionsDir)
+	if len(instances) != 1 || instances[0].Name != "me" || len(instances[0].Sessions) != 1 || instances[0].Sessions[0].Slug != "demo" {
+		t.Fatalf("adopter heartbeat lost refused ownership: %+v", instances)
 	}
 }
 
@@ -275,12 +366,49 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 	m, sessionsDir := baseSessionModel(t)
 	m.config.RepoIdentifier = "my-repo"
 	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	sourceDir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-b", "main"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Lore Test"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", sourceDir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	hostMarker := filepath.Join(sourceDir, "host-marker.bin")
+	if err := os.WriteFile(hostMarker, []byte{0x00, 0x41, 0xff, 0x0a}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", sourceDir, "add", "host-marker.bin").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v (%s)", err, out)
+	}
+	if out, err := exec.Command("git", "-C", sourceDir, "commit", "-m", "seed").CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v (%s)", err, out)
+	}
+	identity, err := worktree.Create(context.Background(), sourceDir, filepath.Join(t.TempDir(), "session-worktree"), "adopt-epoch")
+	if err != nil {
+		t.Fatalf("create session worktree: %v", err)
+	}
+	identity, err = worktree.Transition(identity, worktree.StateActive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostBytes := []byte{0x42, 0x00, 0xfe, 0x0a}
+	streamBytes := []byte{0x53, 0x00, 0xfd, 0x0a}
+	if err := os.WriteFile(hostMarker, hostBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	streamMarker := filepath.Join(identity.CanonicalPath, "stream-marker.bin")
+	if err := os.WriteFile(streamMarker, streamBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	// Stand up a real survivor session on the dedicated server (unique name so the
 	// test never disturbs a live TUI's sessions).
 	name := "lore-test-adopt-" + strconv.Itoa(os.Getpid())
 	if out, err := exec.Command("tmux", "-L", "lore-tui", "-f", "/dev/null",
-		"new-session", "-d", "-s", name, "--", "sleep", "300").CombinedOutput(); err != nil {
+		"new-session", "-d", "-s", name, "-c", identity.CanonicalPath, "--", "sleep", "300").CombinedOutput(); err != nil {
 		t.Fatalf("create survivor session: %v (%s)", err, out)
 	}
 	t.Cleanup(func() { _ = exec.Command("tmux", "-L", "lore-tui", "kill-session", "-t", name).Run() })
@@ -288,7 +416,7 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 	plantCorpse(t, sessionsDir, "dead-inst", "my-repo", deadPID(t), []session.Session{
 		{Slug: "demo", Type: "spec", Initiator: "human", Started: "2026-07-06T00:00:00Z",
 			Tmux: name, RequestID: "spawn-1", SessionID: "uuid-1", Harness: "claude-code",
-			CloseRequests: []string{"term-1"}},
+			CloseRequests: []string{"term-1"}, Worktree: &identity},
 	})
 	retiredPath := writeCloseRequestFixture(t, sessionsDir, session.CloseRequest{
 		RequestID: "close-dead", Slug: "demo", TargetInstance: "dead-inst", Reason: "coordinator",
@@ -307,8 +435,8 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 	if len(msg.alive[0].closeRequests) != 1 || msg.alive[0].closeRequests[0] != "term-1" {
 		t.Fatalf("recovered close-request manifest lost: %+v", msg.alive[0])
 	}
-	if leftover, _ := filepath.Glob(filepath.Join(session.InstancesDir(sessionsDir), "*")); len(leftover) != 0 {
-		t.Fatalf("corpse not cleaned up: %v", leftover)
+	if leftover, _ := filepath.Glob(filepath.Join(session.InstancesDir(sessionsDir), "*")); len(leftover) != 1 || filepath.Base(leftover[0]) != "me.json" {
+		t.Fatalf("corpse ownership was not transferred before cleanup: %v", leftover)
 	}
 	if _, err := os.Stat(retiredPath); !os.IsNotExist(err) {
 		t.Fatalf("dead-target request survived adoption: %v", err)
@@ -316,7 +444,7 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 
 	// The attach Cmd re-hosts the survivor: it re-queries the pane PID (the crashed
 	// instance's captured one is gone) and reports the same tmux session.
-	started, ok := work.AttachTerminalCmd("demo", name, "uuid-1", "claude-code", m.config.ProjectDir, 80, 24)().(work.SessionProcessStartedMsg)
+	started, ok := work.AttachTerminalCmd("demo", name, "uuid-1", "claude-code", identity, 80, 24)().(work.SessionProcessStartedMsg)
 	if !ok {
 		t.Fatalf("attach did not start; session likely died mid-test")
 	}
@@ -328,5 +456,11 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 	}
 	if started.SessionID != "uuid-1" || started.Harness != "claude-code" {
 		t.Fatalf("attach dropped the recovered spend binding: %+v", started)
+	}
+	if got, err := os.ReadFile(hostMarker); err != nil || !bytes.Equal(got, hostBytes) {
+		t.Fatalf("adoption changed host marker: got %v err=%v want %v", got, err, hostBytes)
+	}
+	if got, err := os.ReadFile(streamMarker); err != nil || !bytes.Equal(got, streamBytes) {
+		t.Fatalf("adoption changed stream marker: got %v err=%v want %v", got, err, streamBytes)
 	}
 }

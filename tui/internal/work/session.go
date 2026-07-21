@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
 
 // Session type vocabulary — the on-disk spec|implement|chat strings shared
@@ -66,6 +68,11 @@ type SessionDescriptor struct {
 	// Framework is the per-request launch framework override. Empty leaves the
 	// spawn path on the TUI launch-framework fallback.
 	Framework string
+
+	// Worktree is carried intact from the request row to the launch
+	// boundary. Fresh descriptors without one are allocated before this boundary;
+	// StartTerminalCmd validates it and uses only CanonicalPath as the harness cwd.
+	Worktree *worktree.Identity
 
 	ShortMode    bool
 	SkipConfirm  bool

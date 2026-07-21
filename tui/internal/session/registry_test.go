@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
 
 func TestWriteAndListInstance(t *testing.T) {
@@ -33,6 +35,54 @@ func TestWriteAndListInstance(t *testing.T) {
 	if closeRequests := got[0].Sessions[0].CloseRequests; len(closeRequests) != 2 ||
 		closeRequests[0] != "term-1" || closeRequests[1] != "explicit-2" {
 		t.Fatalf("session close_requests roundtrip = %v", closeRequests)
+	}
+}
+
+func TestSessionWorktreeIdentityRoundTripAndLegacyOmission(t *testing.T) {
+	dir := t.TempDir()
+	identity := &worktree.Identity{
+		Version:       worktree.IdentityVersion,
+		CanonicalPath: "/repo/.git/lore-worktrees/session-1",
+		GitCommonDir:  "/repo/.git",
+		GitDir:        "/repo/.git/worktrees/session-1",
+		Epoch:         "epoch-1",
+		Captured: worktree.Generation{
+			CanonicalPath:  "/repo",
+			GitCommonDir:   "/repo/.git",
+			GitDir:         "/repo/.git",
+			HeadOID:        "1111111111111111111111111111111111111111",
+			IndexDigest:    "index-a",
+			WorktreeDigest: "tree-a",
+		},
+		TargetRef: "refs/heads/main",
+		TargetOID: "1111111111111111111111111111111111111111",
+		State:     worktree.StateActive,
+	}
+	inst := Instance{Name: "owner", Repo: "repo", PID: 1, Sessions: []Session{{
+		Slug: "demo", Type: "implement", Started: "2026-07-21T00:00:00Z", Worktree: identity,
+	}}}
+	if err := WriteInstance(dir, inst); err != nil {
+		t.Fatal(err)
+	}
+	got := ListInstances(dir)
+	if len(got) != 1 || len(got[0].Sessions) != 1 || got[0].Sessions[0].Worktree == nil {
+		t.Fatalf("worktree identity missing after registry roundtrip: %+v", got)
+	}
+	round := got[0].Sessions[0].Worktree
+	if *round != *identity {
+		t.Fatalf("worktree identity changed across registry roundtrip:\n got %+v\nwant %+v", *round, *identity)
+	}
+
+	legacy := Instance{Name: "legacy", Repo: "repo", PID: 2, Sessions: []Session{{Slug: "old", Type: "spec"}}}
+	if err := WriteInstance(dir, legacy); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(instancePath(dir, "legacy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"worktree"`) {
+		t.Fatalf("legacy row unexpectedly serialized worktree identity: %s", data)
 	}
 }
 

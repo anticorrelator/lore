@@ -38,6 +38,7 @@
 #                close_failed | send_requested | sent | send_refused |
 #                answer_requested | answered | answer_refused |
 #                modal_blocked |
+#                restore_refused | worktree_quarantined |
 #                review_flagged | review_held | review_notified | review_released
 #
 # Conditional rules:
@@ -135,12 +136,25 @@ case "$EVENT" in
   requested|claimed|spawned|needs_input|quiescent|resumed|recovered|closed|orphaned|\
 step_completed|terminus_reached|harness_turn_ended|spawn_failed|request_reclaimed|\
 request_abandoned|request_cancelled|close_requested|close_failed|send_requested|sent|send_refused|answer_requested|answered|answer_refused|modal_blocked|\
+restore_refused|worktree_quarantined|\
 review_flagged|review_held|review_notified|review_released) ;;
   "")
     fail "missing required field: event"
     ;;
   *)
-    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, recovered, closed, orphaned, step_completed, terminus_reached, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, close_failed, send_requested, sent, send_refused, answer_requested, answered, answer_refused, modal_blocked, review_flagged, review_held, review_notified, review_released)"
+    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, recovered, closed, orphaned, step_completed, terminus_reached, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, close_failed, send_requested, sent, send_refused, answer_requested, answered, answer_refused, modal_blocked, restore_refused, worktree_quarantined, review_flagged, review_held, review_notified, review_released)"
+    ;;
+esac
+
+# --- Worktree outcomes are linked lifecycle rows, not teardown terminals ---
+case "$EVENT" in
+  restore_refused|worktree_quarantined)
+    if ! printf '%s' "$ROW" | jq -e '(.slug // "") != ""' >/dev/null 2>&1; then
+      fail "missing required field: slug (required for worktree outcome '$EVENT')"
+    fi
+    if ! printf '%s' "$ROW" | jq -e '(.reason // "") != ""' >/dev/null 2>&1; then
+      fail "missing required field: reason (required for worktree outcome '$EVENT')"
+    fi
     ;;
 esac
 

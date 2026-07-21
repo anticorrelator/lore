@@ -26,11 +26,32 @@ constrain the claim:
   `<framework> @ <project_dir>`. An `unknown` in either position is a pre-feature row
   and means *can't tell*, never a default — verify some other way or pin the claim.
 
-Placement: a claimed session spawns in the claiming TUI's own startup cwd. `--prefer-dir
+Placement selects the source checkout, not a writable harness cwd. `--prefer-dir
 <path>` (`--prefer-cwd` for your own checkout) is soft — a matching instance claims
 immediately, others defer a 15s grace window, then anyone may take it: claim *timing*,
-never a gate; pre-feature instances ignore it (pair with `--min-vintage`). The brief's
-explicit root/branch direction plus its mismatch instruction stays the correctness backstop.
+never a gate; pre-feature instances ignore it (pair with `--min-vintage`). Before
+spawn, the claimant captures its selected checkout into a session-owned worktree;
+both direct PTY and tmux hosting run with that worktree's canonical path as cwd.
+
+## Worktree lifecycle and refusal
+
+The versioned worktree identity carries canonical path, Git common-dir,
+per-worktree git-dir, epoch, captured generation (source path/common-dir/git-dir,
+HEAD OID, index digest, worktree digest), target ref and OID, and state. Its
+ordinary lifecycle is `captured → active → publishable → published | quarantined`.
+`teardown-pending` retains ownership while process death is unresolved; only
+`published` and `quarantined` are cleanup-eligible.
+
+Spawn, adoption, publish, and cleanup each revalidate identity. Missing legacy
+identity, path reuse, git-dir or epoch mismatch, destination drift, and integration
+conflict fail closed. The disposition vocabulary is exactly `published`,
+`restore_refused`, and `worktree_quarantined`: refusal/quarantine leaves the
+destination byte-for-byte unchanged and preserves the candidate under a durable
+result ref/patch. Successful `published` projects to the normal exactly-once
+`closed` terminal; refusal and quarantine add their named recovery rows, not
+another close terminal. Quarantine preserves content, not the physical directory;
+parallel-stream scheduling, reconciliation order, conformance aggregation, and
+bounded cleanup belong to `parallel-tree-writers-temporary-worktrees`.
 
 ## Send and answer semantics
 
@@ -73,7 +94,9 @@ not a bug.
 Close authority is full-discretion and everything journals — the check on a wrong
 close is the audit trail, not a gate. Closing a *human*-initiated session is within
 authority but exceptional: prefer a hands-request. `--initiator` records provenance;
-teardown policy rides `--auto-close`.
+teardown policy rides `--auto-close`. A failed close moves owned work to
+`teardown-pending`; it does not release the registry row while the process may
+still write.
 
 ## Event stream mechanics
 
@@ -98,8 +121,9 @@ Exits: 0 matched, 2 timed out (re-arm from the returned cursor), 3 session-gone,
 narrows `closed` rows only; a slug-matched `close_failed` still wakes — sloppy wake,
 exact read (c2c34e2). The wait default is `closed,close_failed,orphaned`
 (teardown-oriented); progress (`step_completed`), completion (`terminus_reached`),
-and stall (`modal_blocked`, one journal row per genuine modal entry) wakes are
-explicit opt-ins via `--until`. `wait` has no session-type filter — scope every
+worktree refusal/quarantine (`restore_refused`, `worktree_quarantined`), and stall
+(`modal_blocked`, one journal row per genuine modal entry) wakes are explicit
+opt-ins via `--until`. `wait` has no session-type filter — scope every
 watcher and raw poll by exact slug or `--request-id`, and on wake check the matched
 row's event type and fields before acting.
 

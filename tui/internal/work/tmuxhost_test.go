@@ -23,7 +23,7 @@ func TestTmuxLaunchCapabilityContractHarnessMatrix(t *testing.T) {
 	}
 	for _, fixture := range fixtures {
 		t.Run(fixture.framework, func(t *testing.T) {
-			args := tmuxSessionArgs("lore-test-session", 80, 24,
+			args := tmuxSessionArgs("lore-test-session", "/tmp/session-worktree", 80, 24,
 				[]string{"LORE_FRAMEWORK=" + fixture.framework, "COLORTERM=wrong"},
 				fixture.binary, []string{"--fixture"})
 			joined := strings.Join(args, "\x00")
@@ -37,6 +37,9 @@ func TestTmuxLaunchCapabilityContractHarnessMatrix(t *testing.T) {
 			}
 			if !strings.Contains(joined, "LORE_FRAMEWORK="+fixture.framework) {
 				t.Errorf("tmux args lost framework identity: %v", args)
+			}
+			if !strings.Contains(joined, "new-session\x00-d\x00-s\x00lore-test-session\x00-x\x0080\x00-y\x0024\x00-c\x00/tmp/session-worktree") {
+				t.Errorf("tmux args did not pin the pane cwd: %v", args)
 			}
 			wantTail := []string{"--", fixture.binary, "--fixture"}
 			if !slices.Equal(args[len(args)-len(wantTail):], wantTail) {

@@ -20,6 +20,7 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
 	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/work"
+	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
 
 func queryPanelDefaultColors(t *testing.T, panel work.SessionPanelModel) string {
@@ -85,6 +86,7 @@ func TestAdoptionCapabilityContractHarnessMatrix(t *testing.T) {
 			harness:      framework,
 			tmuxName:     "tmux-" + framework,
 			deadInstance: "old-instance",
+			worktree:     &worktree.Identity{Version: worktree.IdentityVersion, CanonicalPath: "/tmp/adopt-" + framework, State: worktree.StateActive},
 		})
 	}
 
