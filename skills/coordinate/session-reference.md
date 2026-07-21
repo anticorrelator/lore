@@ -5,10 +5,13 @@ holds the flag semantics, exit codes, and incident-derived calibrations that bac
 
 ## Dispatch targeting and placement
 
-An untargeted queue request is framework roulette: any live instance may claim it,
-including one running a different harness whose binary rejects your model id outright
-(haiku probes claimed by a codex-framework instance died at launch, 2026-07-08). When a
-dispatch assumes a framework, binary, or vintage, constrain the claim:
+Every request declares exactly one placement stance — `--target`, `--prefer-dir`,
+`--prefer-cwd`, or `--anywhere` — and the CLI refuses a stanceless one (0 of 110
+pre-contract claims ever stated placement). `--anywhere` is the deliberate roulette
+opt-in, writing no queue field: any live instance may claim, including one whose
+harness rejects your model id at launch (haiku probes claimed by a codex-framework
+instance died, 2026-07-08). When a dispatch assumes a framework, binary, or vintage,
+constrain the claim:
 
 - `--target <instance>` is the only pin (the named instance alone may claim).
 - `--min-vintage` is a compatibility floor, not a pin — it refuses a claim only on
@@ -23,14 +26,11 @@ dispatch assumes a framework, binary, or vintage, constrain the claim:
   `<framework> @ <project_dir>`. An `unknown` in either position is a pre-feature row
   and means *can't tell*, never a default — verify some other way or pin the claim.
 
-Placement: a claimed session spawns in the claiming TUI's own startup cwd, so the
-checkout your brief assumes is not guaranteed. When a step assumes a worktree or
-branch, name the intended root and branch in the brief, and say what to do on
-mismatch. `--prefer-dir <path>` (`--prefer-cwd` for your own checkout) softens the
-roulette: a matching instance claims immediately, others defer for a 15s grace
-window, then anyone may take it — claim *timing*, never a gate. Pre-feature instances
-ignore the preference (pair with `--min-vintage`). The brief's explicit
-worktree/branch direction remains the correctness backstop.
+Placement: a claimed session spawns in the claiming TUI's own startup cwd. `--prefer-dir
+<path>` (`--prefer-cwd` for your own checkout) is soft — a matching instance claims
+immediately, others defer a 15s grace window, then anyone may take it: claim *timing*,
+never a gate; pre-feature instances ignore it (pair with `--min-vintage`). The brief's
+explicit root/branch direction plus its mismatch instruction stays the correctness backstop.
 
 ## Send and answer semantics
 

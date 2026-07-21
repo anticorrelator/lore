@@ -2,14 +2,18 @@
 # session-request.sh — Enqueue a session spawn request into _sessions/requests/pending/
 #
 # Usage:
-#   lore session request --type <spec|implement|chat|worker> [options]
+#   lore session request --type <spec|implement|chat|worker> \
+#     (--target <i> | --prefer-dir <p> | --prefer-cwd | --anywhere) [options]
 #
 # Options:
 #   --type <t>         Required. Session type: spec | implement | chat | worker.
 #   --slug <s>         Work-item slug the request targets (default: null / no work
 #                      item). REQUIRED for --type worker: a worker's slug is the
 #                      derived <work-item-slug>--w<n> that is its session identity.
-#   --target <name>    Instance name to address the request to (default: null / any instance).
+#   --target <name>    Placement stance: address the request to one instance (the
+#                      named instance alone may claim). Every request MUST carry
+#                      exactly one placement stance — --target, --prefer-dir,
+#                      --prefer-cwd, or --anywhere; a stanceless request is refused.
 #   --initiator <i>    Who initiated the request: agent | human (default: human).
 #   --auto-close <b>   Override the TUI exit-ladder auto-close gate: true | false.
 #                      Omitted (default) defers to --initiator (agent auto-closes,
@@ -51,6 +55,9 @@
 #   --prefer-cwd       Like --prefer-dir but captures the caller's $PWD — the common
 #                      "route to my own checkout" case. Mutually exclusive with
 #                      --prefer-dir.
+#   --anywhere         Placement stance: any live instance may claim immediately.
+#                      Writes no queue field — the explicit form of what an
+#                      unstated placement used to mean, made deliberate.
 #   --yes              Run autonomously: skip the session's confirmation gates
 #                      (alias --no-confirm). This is the default for queue-spawned
 #                      sessions, so omitting all three leaves it on.
@@ -92,6 +99,7 @@ FRAMEWORK_PROVIDED=0
 PREFER_DIR=""
 PREFER_DIR_PROVIDED=0
 PREFER_CWD_PROVIDED=0
+ANYWHERE_PROVIDED=0
 SKIP_CONFIRM=""
 
 while [[ $# -gt 0 ]]; do
@@ -110,14 +118,15 @@ while [[ $# -gt 0 ]]; do
     --framework) FRAMEWORK="$2"; FRAMEWORK_PROVIDED=1; shift 2 ;;
     --prefer-dir) PREFER_DIR="$2"; PREFER_DIR_PROVIDED=1; shift 2 ;;
     --prefer-cwd) PREFER_CWD_PROVIDED=1; shift ;;
+    --anywhere) ANYWHERE_PROVIDED=1; shift ;;
     --yes|--no-confirm) SKIP_CONFIRM="true"; shift ;;
     --confirm) SKIP_CONFIRM="false"; shift ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,66p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,73p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-request.sh --type <spec|implement|chat|worker> [--slug <s>] [--target <name>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--framework <claude-code|codex|opencode>] [--prefer-dir <path>|--prefer-cwd] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--target <name> | --prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--framework <claude-code|codex|opencode>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -208,6 +217,21 @@ fi
 # reader performs holds from both bash and Go. An unresolvable path is refused
 # naming the field; the reader never re-validates. --prefer-dir and --prefer-cwd
 # name the same field and are mutually exclusive.
+# Placement stance is a required declaration: every request states where it may
+# run — --target (hard pin), --prefer-dir/--prefer-cwd (soft preference), or
+# --anywhere (the deliberate opt-out). --anywhere satisfies this check and writes
+# NO queue field: the row is byte-identical to the old untargeted form, so old
+# claiming TUIs are unaffected. Why an error and not a default: the soft-preference
+# mechanism shipped 2026-07-13, yet 0 of 110 historical claims carried
+# prefer_project_dir — placement was silently unstated, and a missing declaration
+# must be an error, never a routed-to-anywhere default.
+if [[ $ANYWHERE_PROVIDED -eq 1 ]] && [[ -n "$TARGET" || $PREFER_DIR_PROVIDED -eq 1 || $PREFER_CWD_PROVIDED -eq 1 ]]; then
+  fail "--anywhere contradicts an explicit placement (--target, --prefer-dir, or --prefer-cwd); pass exactly one stance"
+fi
+if [[ $ANYWHERE_PROVIDED -eq 0 && -z "$TARGET" && $PREFER_DIR_PROVIDED -eq 0 && $PREFER_CWD_PROVIDED -eq 0 ]]; then
+  fail "missing placement stance: pass exactly one of --target <instance>, --prefer-dir <path>, --prefer-cwd, or --anywhere"
+fi
+
 PREFER_PROJECT_DIR_JSON=""
 if [[ $PREFER_DIR_PROVIDED -eq 1 && $PREFER_CWD_PROVIDED -eq 1 ]]; then
   fail "--prefer-dir and --prefer-cwd are mutually exclusive (both set prefer_project_dir)"

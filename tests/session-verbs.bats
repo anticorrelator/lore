@@ -167,7 +167,7 @@ journal_boundaries() {
 }
 
 @test "request --type worker with a derived slug writes a pending row" {
-  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --initiator agent --context "brief body" --kdir "$TEST_KDIR"
+  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --initiator agent --context "brief body" --anywhere --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.type=="worker" and .slug=="impl-foo--w1"' "$pending"
@@ -187,27 +187,27 @@ journal_boundaries() {
 }
 
 @test "requested event for a worker derives links.work_item from the derived slug" {
-  bash "$REQUEST" --type worker --slug "impl-foo--w1" --initiator agent --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type worker --slug "impl-foo--w1" --initiator agent --anywhere --kdir "$TEST_KDIR"
   run jq -e 'select(.event=="requested") | .links.work_item == "impl-foo"' "$TEST_KDIR/_sessions/events.jsonl"
   [ "$status" -eq 0 ]
 }
 
 @test "request omits auto_close when the flag is not passed" {
-  bash "$REQUEST" --type spec --slug wi --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type spec --slug wi --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e 'has("auto_close") | not' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request omits framework when the flag is not passed" {
-  bash "$REQUEST" --type spec --slug wi --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type spec --slug wi --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e 'has("framework") | not' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request --framework writes the framework field" {
-  bash "$REQUEST" --type implement --slug wi --framework codex --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type implement --slug wi --framework codex --min-vintage 2026-07-05T12:00:00Z --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.framework == "codex"' "$pending"
   [ "$status" -eq 0 ]
@@ -223,7 +223,7 @@ journal_boundaries() {
 @test "request --framework without --min-vintage emits an advisory but enqueues" {
   local err="$TEST_KDIR/framework.err"
   local out
-  out="$(bash "$REQUEST" --type implement --slug wi --framework codex --kdir "$TEST_KDIR" 2>"$err")"
+  out="$(bash "$REQUEST" --type implement --slug wi --framework codex --anywhere --kdir "$TEST_KDIR" 2>"$err")"
   [[ "$out" == *"Enqueued implement request"* ]]
   [ "$(wc -l < "$err" | tr -d ' ')" -eq 1 ]
   grep -q -- "--min-vintage" "$err"
@@ -234,7 +234,7 @@ journal_boundaries() {
 }
 
 @test "request omits prefer_project_dir when neither prefer flag is passed" {
-  bash "$REQUEST" --type spec --slug wi --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type spec --slug wi --target inst-a --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e 'has("prefer_project_dir") | not' "$pending"
   [ "$status" -eq 0 ]
@@ -293,15 +293,52 @@ journal_boundaries() {
   [ "$status" -eq 0 ]
 }
 
+@test "request without a placement stance refuses naming all four options" {
+  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --context hi --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"placement stance"* ]]
+  [[ "$output" == *"--target"* ]]
+  [[ "$output" == *"--prefer-dir"* ]]
+  [[ "$output" == *"--prefer-cwd"* ]]
+  [[ "$output" == *"--anywhere"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+@test "each placement stance alone satisfies the requirement" {
+  mkdir -p "$TEST_KDIR/dir"
+  bash "$REQUEST" --type chat --target inst-a --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type chat --prefer-dir "$TEST_KDIR/dir" --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR"
+  ( cd "$TEST_KDIR/dir" && bash "$REQUEST" --type chat --prefer-cwd --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR" )
+  bash "$REQUEST" --type chat --anywhere --kdir "$TEST_KDIR"
+  [ "$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json | wc -l | tr -d ' ')" -eq 4 ]
+}
+
+@test "request --anywhere enqueues and writes no placement field" {
+  bash "$REQUEST" --type spec --slug wi --anywhere --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e '(has("prefer_project_dir") | not) and .target_instance == null' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request refuses --anywhere combined with an explicit placement" {
+  run bash "$REQUEST" --type spec --slug wi --anywhere --target inst-a --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--anywhere contradicts"* ]]
+  run bash "$REQUEST" --type spec --slug wi --anywhere --prefer-cwd --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--anywhere contradicts"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
 @test "request --auto-close true writes a JSON boolean" {
-  bash "$REQUEST" --type spec --slug wi --auto-close true --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type spec --slug wi --auto-close true --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.auto_close == true and (.auto_close | type == "boolean")' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request --auto-close false holds an agent session open" {
-  bash "$REQUEST" --type implement --slug wi --initiator agent --auto-close false --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type implement --slug wi --initiator agent --auto-close false --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.auto_close == false and (.auto_close | type == "boolean")' "$pending"
   [ "$status" -eq 0 ]
@@ -314,14 +351,14 @@ journal_boundaries() {
 }
 
 @test "request wraps plain --context text as a dispatch_guidance object" {
-  bash "$REQUEST" --type spec --context "Run /spec and report the plan slug." --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type spec --context "Run /spec and report the plan slug." --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.extra_context.dispatch_guidance == "Run /spec and report the plan slug."' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request stores a JSON-object --context verbatim" {
-  bash "$REQUEST" --type spec --context '{"priority":"high","asks":["A","B"]}' --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type spec --context '{"priority":"high","asks":["A","B"]}' --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.extra_context.priority == "high" and (.extra_context.asks | length) == 2' "$pending"
   [ "$status" -eq 0 ]
@@ -330,54 +367,54 @@ journal_boundaries() {
 @test "request reads --context from a file when the value names one" {
   local cf="$TEST_KDIR/ctx.txt"
   printf 'guidance from a file' > "$cf"
-  bash "$REQUEST" --type chat --context "$cf" --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type chat --context "$cf" --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.extra_context.dispatch_guidance == "guidance from a file"' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request --json emits a structured result" {
-  run bash "$REQUEST" --type spec --slug demo --kdir "$TEST_KDIR" --json
+  run bash "$REQUEST" --type spec --slug demo --anywhere --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.enqueued == true and .type == "spec" and .slug == "demo" and (.request_id | length > 0)'
 }
 
 @test "request --route writes a routing_overrides map" {
-  bash "$REQUEST" --type implement --slug wi --route worker=opus --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type implement --slug wi --route worker=opus --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.routing_overrides.worker == "opus" and (.routing_overrides | type == "object")' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request --route is repeatable across roles" {
-  bash "$REQUEST" --type implement --slug wi --route worker=opus --route reviewer=haiku --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type implement --slug wi --route worker=opus --route reviewer=haiku --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.routing_overrides.worker == "opus" and .routing_overrides.reviewer == "haiku"' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request --route accepts a hyphenated class-qualified role" {
-  bash "$REQUEST" --type implement --slug wi --route worker-mechanical=haiku --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type implement --slug wi --route worker-mechanical=haiku --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.routing_overrides."worker-mechanical" == "haiku"' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request with an unknown --route role refuses naming the registry" {
-  run bash "$REQUEST" --type implement --slug wi --route bogus=opus --kdir "$TEST_KDIR"
+  run bash "$REQUEST" --type implement --slug wi --route bogus=opus --anywhere --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
   [[ "$output" == *"unknown role 'bogus'"* ]]
   [[ "$output" == *"roles.json"* ]]
 }
 
 @test "request with a malformed --route spec refuses" {
-  run bash "$REQUEST" --type implement --slug wi --route worker --kdir "$TEST_KDIR"
+  run bash "$REQUEST" --type implement --slug wi --route worker --anywhere --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
   [[ "$output" == *"invalid --route"* ]]
 }
 
 @test "request omits routing_overrides when no --route is passed" {
-  bash "$REQUEST" --type spec --slug wi --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type spec --slug wi --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e 'has("routing_overrides") | not' "$pending"
   [ "$status" -eq 0 ]
@@ -674,7 +711,7 @@ EOF
 }
 
 @test "close --request cancels a pending spawn row and emits request_cancelled" {
-  local rid; rid="$(bash "$REQUEST" --type chat --slug wi --kdir "$TEST_KDIR" --json | jq -r .request_id)"
+  local rid; rid="$(bash "$REQUEST" --type chat --slug wi --anywhere --kdir "$TEST_KDIR" --json | jq -r .request_id)"
   [ -f "$TEST_KDIR/_sessions/requests/pending/$rid.json" ]
 
   run bash "$CLOSE" --request "$rid" --kdir "$TEST_KDIR" --json
