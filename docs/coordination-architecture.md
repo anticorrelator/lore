@@ -1,7 +1,7 @@
 # Coordination Architecture
 
 This is the **roof** over the coordination system's per-layer contract docs. It
-gives the assembled picture — the four layers, how they connect, and the
+gives the assembled picture — the five layers, how they connect, and the
 constraints that bind across all of them — then hands off to each layer's own
 contract doc for the mechanism. It **duplicates nothing**: every layer detail
 lives in exactly one contract doc, linked here. Read this first for the shape;
@@ -9,44 +9,38 @@ read the linked contract for the layer you are changing.
 
 The system lets multiple protocol sessions (`/spec`, `/implement`, `/retro`) run
 across sessions and days, coordinated by one judgment seat, **without a daemon** —
-the layers integrate only through files in the knowledge store (`_sessions/`) and
-a daemonless CLI (`lore session`). That property is the design, not an
+the layers integrate through files in the knowledge store (`_sessions/` and
+`_coordination/`) and daemonless `lore session` / `lore coordinate` verbs. That property is the design, not an
 implementation detail; the [cross-layer constraints](#cross-layer-constraints)
 state why, once.
 
 ## The system in one diagram
 
 ```
-                 ┌─────────────────────────────────────────────────┐
-                 │  COORDINATOR KERNEL — /coordinate + ledger       │
-                 │  judgment: depth · rung · granularity · routing  │
-                 │  · gates · unknowns   (coordination.md = seat)   │
-                 └───────────────┬──────────────────────▲───────────┘
-    interacts ONLY through       │ requests, closes,    │ journal events,
-    substrate files & CLI verbs  │ ledgers cursor       │ read via opaque cursor
-┌────────────────────────────────▼──────────────────────┴───────────┐
-│  SESSION SUBSTRATE  (_sessions/ in the knowledge store)            │
-│  instance registry · request queue (atomic claim, extra_context,  │
-│  routing_overrides, auto_close, min_vintage) · close/send/peek     │
-│  queues · events journal (sole writer, opaque byte cursor,         │
-│  spend on `closed`)                    ── the file-based bus ──     │
-└──────────┬───────────────────────────────────┬────────────────────┘
-           │ claims & spawns                   │ reads & writes
+┌─────────────────────────────────────────────────────────────────┐
+│ COORDINATOR KERNEL — /coordinate + coordination.md               │
+│ explicit dependencies · semantic ownership · reconciliation call │
+└──────────────┬───────────────────────────────────▲───────────────┘
+               │ allocate / reconcile / clean      │ joined status
+┌──────────────▼───────────────────────────────────┴───────────────┐
+│ COORDINATION SUBSTRATE (_coordination/)                           │
+│ leased worktree manifests · immutable source/integrated objects  │
+│ cleanup proof · derived readiness (no persisted ready flag)       │
+└──────────────┬───────────────────────────────────▲───────────────┘
+               │ hard execution identity           │ stream result
+┌──────────────▼───────────────────────────────────┴───────────────┐
+│ SESSION SUBSTRATE (_sessions/) — request/instance queues + journal│
+└──────────┬───────────────────────────────────┬───────────────────┘
+           │ claims & spawns                   │ daemonless verbs
 ┌──────────▼──────────────────┐   ┌────────────▼───────────────────┐
-│  TUI = the INSTRUMENT        │   │  lore session verbs (any agent)│
-│  PTY host · screen emulation │   │  request · list · events ·     │
-│  readiness gate · send/peek  │   │  close · send · peek           │
-│  exit ladder · badges/gates  │   │  (daemonless; prepare + return)│
+│ TUI INSTRUMENT              │   │ lore session / coordinate     │
+│ PTY/tmux host · guard       │   │ prepare, inspect, reconcile   │
 └──────────┬──────────────────┘   └────────────────────────────────┘
-           │ hosts
+           │ hosts at validated execution_dir
 ┌──────────▼───────────────────────────────────────────────────────┐
-│  PROTOCOL SESSIONS  /spec · /implement · /retro                   │
-│  models: ceremony_roles → class roles → per-dispatch env          │
-│  comprehension gates: flag/hold/release · review packets          │
-│                                                                    │
-│  evidence ─▶ work items ─▶ scorecards ─▶ /retro ─▶ /evolve         │
-│         └──────── the audit loop, artifact-fed, bottom-up ─────────┘
-└───────────────────────────────────────────────────────────────────┘
+│ PROTOCOL SESSIONS — /spec · /implement · /retro                  │
+│ evidence ─▶ work items ─▶ scorecards ─▶ /retro ─▶ /evolve        │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 Two things the diagram encodes that are easy to miss:
@@ -89,9 +83,27 @@ What binds it: **judgment inline, implementation dispatched.** The kernel review
 verifies, synthesizes, and adjudicates — and writes *substrate only* (work items,
 ledger, notes, commits). It **never writes repo source**; crossing that line
 creates an unaudited mega-worker outside every evidence protocol. It interacts with
-the layers below only through substrate files and the `lore session` verbs.
+the layers below only through substrate files and the `lore session` / `lore
+coordinate` verbs.
 
-### 2. Session substrate — [`session-substrate.md`](session-substrate.md)
+### 2. Coordination worktrees and reconciliation — `lore coordinate`
+
+The `_coordination/` surface isolates every mutating stream in a manager-owned
+temporary worktree and preserves its immutable source and integrated manifests.
+The manager consumes the versioned identity and lifecycle implemented by
+`tui/internal/worktree/guard.go`; it does not introduce a competing checkout
+identity. Its outer manifest binds work item, stream, attempt, temporary branch,
+allocation base, and a session-or-seat lease to the canonical guard identity.
+
+The coordinator derives readiness from `Depends on`, `Tree`, active attempts,
+terminal full+cleaned predecessors, and the concurrency ceiling rendered by
+`lore defaults`. It owns integration order and conflict judgment; workers own
+source conflict edits. The source and integrated manifests remain valid after the
+tree and branch disappear. Normal and crash cleanup share one terminal proof:
+path absent, Git worktree registry absent, and branch/guard refs disposed. Recovery
+evidence is persisted before removal; incomplete proof remains `cleanup_blocked`.
+
+### 3. Session substrate — [`session-substrate.md`](session-substrate.md)
 
 The `_sessions/` surface in the knowledge store: the instance **registry** (one
 file per live TUI — a crashed instance's row survives past its liveness TTL as the
@@ -109,7 +121,7 @@ has one sanctioned physical writer; every emitter shells out to it. The contract
 doc is the authority on row schemas, the event vocabulary, the reclamation rules,
 and the opaque byte-offset cursor — none of which is restated here.
 
-### 3. The instrument and the verbs — TUI (`tui/`) + `lore session` verbs; capability profile in [`../adapters/capabilities-evidence.md`](../adapters/capabilities-evidence.md)
+### 4. The instrument and the verbs — TUI (`tui/`) + `lore session` verbs; capability profile in [`../adapters/capabilities-evidence.md`](../adapters/capabilities-evidence.md)
 
 Two clients of the substrate, split by role:
 
@@ -136,7 +148,7 @@ subagents, transcript/spend providers, and the live PTY interaction probes that
 back the readiness gate's composer/permission signatures). Claude Code is `full`;
 OpenCode and Codex are `partial` with named degradations.
 
-### 4. Protocol sessions — `/spec`, `/implement`, `/retro`; comprehension gates in [`review-gates.md`](review-gates.md)
+### 5. Protocol sessions — `/spec`, `/implement`, `/retro`; comprehension gates in [`review-gates.md`](review-gates.md)
 
 The actual work the TUI hosts. Three things cut across all of them:
 
@@ -169,6 +181,8 @@ them locally and point back rather than re-arguing them.
 |---|---|---|---|
 | **No daemon** | Coordination is derivable from filesystem state; no long-running process owns it. Enqueue is tmp-write + rename, claim is a rename between dirs, history is an O_APPEND journal read by opaque byte offset. | Substrate layout; the byte-offset cursor (a sequence number would force the writer to read-modify state, breaking the archetype). | The picture survives any process dying. A crash loses at most one journal row; a restarted seat resumes from the ledger + cursor. It is also the anchor a "TUI-as-viewer over a hosting daemon" idea collides with. |
 | **Sole writer per file** | Exactly one writer owns each surface: a TUI owns its own registry file; the enqueuer owns a pending request; the claimer owns it after the rename; `events.jsonl` has one sanctioned physical writer that every emitter shells out to. | The per-owner-file decomposition (dissolves read-modify-write); `session-event-append.sh` as the journal's sole validator. | Validation and serialization are paid once, at write time. Readers never re-validate and never dedupe — a torn/interior-malformed row is excluded with a warning, not repaired. |
+| **Leased isolation with semantic ownership** | Every mutating stream runs in a manager-owned worktree under a durable session or seat lease. Allocation never delegates; a seat-leased subagent is valid only in that seat's tree. Known overlap consolidates or gains an explicit edge. | `lore coordinate worktree`; hard session placement; ledger `Depends on` / `Tree`; canonical guard identity in `tui/internal/worktree/guard.go`. | Physical isolation prevents checkout collisions, while explicit ownership prevents semantically incompatible edits from becoming surprise merges. |
+| **Verified cleanup gates completion** | A writer is not `done` until reconciliation is full and cleanup proves path, Git worktree registry, and branch/ref disposition. Crash sweeping records recovery evidence before removal; `cleanup_blocked` is retry-only. | Reconciliation aggregate, manager archive proof, coordinated `impl-close` precondition. | A process terminal or successful merge cannot launder leaked worktrees or destroyed abandoned changes into closure. |
 | **Surface is the feature** | The TUI's interactive instrumentation — readiness gate, injection, exit ladder, journal emission — *is* the coordination capability, not a view over a hidden engine. | The instrument layer: the gate/injection/emission live in the hosting process. | You cannot extract a headless engine and keep the TUI as a viewer without re-introducing a daemon — the instrumentation is load-bearing, so pulling it out reopens the no-daemon anchor. |
 | **Capability gating with explicit degradation** | Every capability is probed, not assumed; an absent capability degrades a loop, never aborts it. A needs-input session with no `send` becomes a blocked-on-input ledger row; a harness with no transcript binding degrades spend to `duration-only`. | `lore session --help` (verb availability); `adapters/capabilities.json` + `../adapters/capabilities-evidence.md` (dated per-harness evidence, full/partial/fallback/none). | Harnesses diverge (Claude Code full; OpenCode/Codex partial). The system must run degraded rather than assume-and-break — and consumers must probe live availability rather than trust a contract doc's non-goals list. |
 | **Initiator-gated, cooperative terminus close** | Close authority branches on the close request's `reason` before any interrupt write. An **explicit** close (`reason` `human` or `coordinator`) is **full-discretion**: a generating turn gets two seconds to finish naturally, then ESC and the existing force-teardown ladder. Only a **protocol-terminus** close reads `initiator`/`auto_close`: an auto-closing agent session waits up to two minutes for natural quiescence and never interrupts or force-kills while generating; expiry emits one correlated `close_failed/still-generating` with the session alive for an explicit re-close. A human-initiated session is **held open** with a *done* badge, and a per-request `auto_close` override flips that terminus branch either direction. | The TUI close-request consume path, which branches on `reason` (the [close-authority section](session-substrate.md#close-request-queue)); the shared screen classifier, cooperative waits, and explicit interrupt ladder. Live behavior changes only after the operator rebuilds the TUI. | Human comprehension is a system invariant **at protocol terminus**, and teardown must not destroy the tail whose completion it records. Truthful refusal preserves that work while explicit operator/coordinator authority remains the sanctioned runaway-session escape hatch. |

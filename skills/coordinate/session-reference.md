@@ -26,12 +26,14 @@ constrain the claim:
   `<framework> @ <project_dir>`. An `unknown` in either position is a pre-feature row
   and means *can't tell*, never a default — verify some other way or pin the claim.
 
-Placement selects the source checkout, not a writable harness cwd. `--prefer-dir
+Placement stance selects a claimant, not a writable harness cwd. `--prefer-dir
 <path>` (`--prefer-cwd` for your own checkout) is soft — a matching instance claims
-immediately, others defer a 15s grace window, then anyone may take it: claim *timing*,
-never a gate; pre-feature instances ignore it (pair with `--min-vintage`). Before
-spawn, the claimant captures its selected checkout into a session-owned worktree;
-both direct PTY and tmux hosting run with that worktree's canonical path as cwd.
+immediately, others defer a 15s grace window, then anyone may take it: claim timing,
+never a gate. An ordinary hosted session captures that checkout into a session-owned
+worktree before spawn. A coordinated writer instead carries the all-or-nothing
+`--worktree-id`, `--execution-dir`, and `--worktree-identity` tuple allocated by the
+coordination manager. Both direct PTY and tmux hosting validate the tuple and run at
+the canonical execution directory; neither falls back to the TUI project directory.
 
 ## Worktree lifecycle and refusal
 
@@ -49,9 +51,35 @@ conflict fail closed. The disposition vocabulary is exactly `published`,
 destination byte-for-byte unchanged and preserves the candidate under a durable
 result ref/patch. Successful `published` projects to the normal exactly-once
 `closed` terminal; refusal and quarantine add their named recovery rows, not
-another close terminal. Quarantine preserves content, not the physical directory;
-parallel-stream scheduling, reconciliation order, conformance aggregation, and
-bounded cleanup belong to `parallel-tree-writers-temporary-worktrees`.
+another close terminal. Quarantine preserves content, not the physical directory.
+
+## Coordinated writer ownership and cleanup
+
+`lore coordinate worktree` is the sole manager for coordinated stream trees. Its
+manifest embeds the canonical guard identity from `tui/internal/worktree/guard.go` and
+adds immutable work item, stream, attempt, temporary branch, allocation base, and
+owner/lease identity. The manager alone allocates and advances the outer lifecycle:
+`reserved → bound → active|recovered → quiescent → reconciling → cleanup_due →
+removed`; abnormal cleanup claims advance through `sweep_claimed → swept`, while
+`cleanup_blocked` remains retryable and never means success.
+
+Allocation authority stays with the coordinator or dispatching seat. A session owns
+the 900-second lease through its durable registry identity. A mutating subagent may
+run only inside a worktree allocated to its dispatching seat; it neither allocates
+nor receives independent ownership. If no seat lease is available, use an item-backed
+worker session. Read-only agents require no worktree. Live PID or tmux ownership
+protects the tree regardless of lease age; renewals rewrite the manager row through
+the sole manager rather than relying on registry mtime.
+
+After quiescence, freeze the immutable source manifest, reconcile from the stable
+control checkout, and freeze the integrated manifest before cleanup. The coordinator
+chooses intended composition; merge conflicts are aborted and recorded, then a
+worker edits the leased source tree and returns a new attempt. Cleanup or crash sweep
+first persists tracked, staged, unstaged, and untracked recovery evidence outside the
+tree, then removes it. Terminal proof requires path absence, absence from `git
+worktree list --porcelain`, and recorded temporary-branch and guard-ref disposition.
+Missing proof or failed removal stays `cleanup_blocked`, so the stream cannot satisfy
+a dependency edge.
 
 ## Send and answer semantics
 
@@ -94,9 +122,10 @@ not a bug.
 Close authority is full-discretion and everything journals — the check on a wrong
 close is the audit trail, not a gate. Closing a *human*-initiated session is within
 authority but exceptional: prefer a hands-request. `--initiator` records provenance;
-teardown policy rides `--auto-close`. A failed close moves owned work to
-`teardown-pending`; it does not release the registry row while the process may
-still write.
+teardown policy rides `--auto-close`. A failed close moves guard ownership to
+`teardown-pending`; it does not release the session registry row or manager lease
+while the process may still write. Process teardown, guard disposition,
+reconciliation, and verified manager cleanup remain separate decisions.
 
 ## Event stream mechanics
 
@@ -127,11 +156,10 @@ opt-ins via `--until`. `wait` has no session-type filter — scope every
 watcher and raw poll by exact slug or `--request-id`, and on wake check the matched
 row's event type and fields before acting.
 
-One closure the verb honestly refuses to absorb: a running watcher dies if a live
-tree-writer rewrites `session-wait.sh` or anything in its dependency closure
-mid-poll — check the writer's declared file set before arming, and drop to a raw
-byte-offset journal poll when it overlaps (n=3 across arcs; the fallback ran clean
-through the stream that shipped the terminus contract, 2026-07-12).
+Run watchers and coordinator control from the stable checkout, never from a mutating
+stream tree. This keeps a worker from rewriting the watcher or its dependency closure
+mid-poll; declared overlap remains a semantic ownership edge even when Git paths are
+physically isolated.
 
 ## Calibrations (session-queues arc, 2026-07-16; n=1 each, ~1h wall clock lost)
 

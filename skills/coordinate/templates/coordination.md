@@ -13,6 +13,7 @@
 **Intent anchor:** [[work:<slug>]] — read it there; don't paraphrase it here.
 **Budget posture:** <e.g. cost-sensitive; duration-only until spend telemetry lands>
 **Standing directives in force:** <model floor, routing policy, retro cadence — cite the preference entries>
+**Concurrency ceiling:** <settings key/value rendered by `lore defaults`; runtime capacity may lower it>
 
 **Retro checkpoint:** Read `lore retro queue`; for each `outcome=due`, `disposition=unhandled` identity, record exactly one explicit disposition through `lore retro handle --outcome-id <id> --action <dispatched|deferred|skipped> --handled-by coordinate`, then ledger the matching outcome. The read is the retro substrate's narrow fold only; it never auto-runs `/retro`.
 
@@ -22,9 +23,11 @@
 
 ## Step Ledger
 
-| # | Step | Rung | Executor / route | Call + one-line rationale | Gate | Status | Verdict | Evidence / SHA |
-|---|------|------|------------------|---------------------------|------|--------|---------|----------------|
-| 1 | <e.g. /spec on item X> | 2 | <hands session / subagent (model)> | <depth/routing/granularity call + why> | notify | pending | — | — |
+| # | Step | Depends on | Tree | Rung | Executor / route | Call + one-line rationale | Gate | Status | Verdict | Worktree / attempt | Evidence / SHA |
+|---|------|------------|------|------|------------------|---------------------------|------|--------|---------|--------------------|----------------|
+| 1 | <e.g. /spec on item X> | — | read-only | 2 | <session / subagent (model)> | <depth/routing/granularity call + why> | notify | pending | — | — | — |
+
+`Depends on` names step ids; `Tree` is `writer` or `read-only`. Keep durable status and attempt identity here, but derive ready/waiting/needs-judgment by re-joining the board after each transition. A writer reaches `done` only after full reconciliation and verified cleanup across path, Git registry, and branch/ref disposition.
 
 ## Dynamic-acts log
 

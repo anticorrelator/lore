@@ -50,13 +50,18 @@ for prose in (" ".join(coordinate.split()), " ".join(reference.split())):
 
 assert "does not retain the physical directory forever" in coordinate
 assert "Quarantine preserves content, not the physical directory" in reference
-for sibling_boundary in (
-    "parallel-stream scheduling",
-    "reconciliation order",
-    "conformance aggregation",
-    "bounded cleanup",
+reference_flat = " ".join(reference.split())
+for managed_contract in (
+    "sole manager",
+    "reserved → bound → active|recovered → quiescent → reconciling → cleanup_due → removed",
+    "dispatching seat",
+    "900-second lease",
+    "immutable source manifest",
+    "integrated manifest",
+    "git worktree list --porcelain",
+    "cleanup_blocked",
 ):
-    assert sibling_boundary in reference, f"sibling ownership boundary missing: {sibling_boundary}"
+    assert managed_contract in reference_flat, f"managed worktree contract missing: {managed_contract}"
 
 print("session worktree protocol contract: PASS")
 PYEOF

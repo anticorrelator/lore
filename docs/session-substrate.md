@@ -60,11 +60,14 @@ One file per live TUI instance at `instances/<name>.json`.
 | `initiator_default` | string | `"human"` in v1 — the default initiator stamped on sessions this instance starts. |
 | `sessions` | array of objects | Live sessions nested under the instance: `[{slug, type, initiator, started}]`, each carrying the recovery fields below and its versioned `worktree` identity. |
 | &nbsp;&nbsp;`sessions[].tmux` | string \| absent | tmux session name (`lore-<instance>-<slug>`) hosting the harness, when the session is tmux-hosted. Omit-when-empty; absent for direct-PTY sessions (tmux unavailable / `LORE_TUI_TMUX=off`). Its presence on a dead instance's row is what a restarting TUI's adoption scan keys on to reattach rather than orphan. |
+| &nbsp;&nbsp;`sessions[].pid` | integer \| absent | Direct child process identity, persisted independently of the registry heartbeat so a manager lease can protect a live writer and a crash sweep can prove the owner dead. |
 | &nbsp;&nbsp;`sessions[].request_id` | string \| absent | Spawn-request identity, persisted prospectively so recovery can correlate a terminal row to the exact spawn. Omit-when-empty for human or legacy sessions; never reconstructed from slug, time, type, or journal ordering. |
 | &nbsp;&nbsp;`sessions[].session_id` | string \| absent | Harness transcript-binding id (claude-code `--session-id`), persisted so an adopting instance can still extract token spend at teardown after the original TUI is gone. Omit-when-empty. |
 | &nbsp;&nbsp;`sessions[].harness` | string \| absent | Launch framework the session was spawned under (the spend probe's `--harness`). Omit-when-empty. |
 | &nbsp;&nbsp;`sessions[].auto_close` | boolean \| absent | The close-ladder auto-close override carried onto the live session (see [Close-request queue](#close-request-queue)), persisted so it survives adoption. Omit-when-empty: absent defers to `initiator`. |
 | &nbsp;&nbsp;`sessions[].worktree` | object \| absent | Complete [session worktree identity](#session-worktree-identity-and-lifecycle), persisted without projection loss across launch, registry rewrites, teardown, and adoption. Absence marks a legacy row and is unsafe to spawn or adopt. |
+| &nbsp;&nbsp;`sessions[].worktree_id` | string \| absent | Coordinated manager manifest identity. Omit only for an unmanaged/legacy session; when present it travels with `execution_dir` and `worktree`. |
+| &nbsp;&nbsp;`sessions[].execution_dir` | string \| absent | Exact manager-validated child cwd. It is hard placement and must equal the canonical path in the manager row and guard identity. |
 | `build_sha` | string \| absent | Build vintage — the short git SHA embedded at build time (`-ldflags`). Absent for `go run`/dev builds and for any binary predating this field. Omit-when-empty. |
 | `build_time` | string \| absent | Build vintage — the **orderable** quantity: the commit's committer-date (release build) or the binary's mtime (dev build), ISO 8601 UTC. Absent for a binary predating this field. Omit-when-empty. This, not `build_sha`, is what `min_vintage` filtering compares against (a SHA has no read-side ordering). |
 | `project_dir` | string \| absent | The instance's project directory, physically resolved (`filepath.Abs` + `EvalSymlinks`) once at startup. Immutable for the process. Omit-when-empty for a binary predating this field. It is the match key a request's `prefer_project_dir` compares against byte-for-byte (both sides resolve physically, so `/tmp`→`/private/tmp` and worktree symlinks match). Not a claim filter — a visibility field only. |
@@ -138,8 +141,10 @@ sessions are TUI-lifetime-bound exactly as before and no adoption runs.
 
 ## Session worktree identity and lifecycle
 
-Every hosted harness writes in a session-owned Git worktree, never in the source
-checkout. The durable `Identity` is versioned and carries exactly:
+Every hosted harness writes in an isolated Git worktree, never in the source
+checkout. An ordinary session owns that tree directly; a coordinated writer is
+placed in the manager-owned tree named by its request. Both use the same durable,
+versioned `Identity` from `tui/internal/worktree/guard.go`, which carries exactly:
 
 - the worktree's canonical path, Git common-dir, per-worktree git-dir, and epoch;
 - the captured generation: source canonical path, Git common-dir, git-dir, HEAD
@@ -169,10 +174,35 @@ event. `restore_refused` and `worktree_quarantined` add their named worktree row
 because the operator needs the refusal reason and recovery artifact. Those rows
 remain linked lifecycle outcomes, not additional close terminals.
 
-This contract stops at safe worktree ownership and disposition. Scheduling
-parallel writers, dependency edges, coordinator reconciliation order,
-conformance aggregation, and bounded physical cleanup belong to
-`parallel-tree-writers-temporary-worktrees`.
+### Coordinated placement and outer lifecycle
+
+The session substrate transports coordinated placement; the sole writer remains
+`lore coordinate worktree` under sibling `_coordination/worktrees/`. Its schema-v1
+manifest binds `worktree_id`, absolute `execution_dir`, temporary branch, Git
+common-dir, allocation base SHA, owner item, stream/attempt, a session-or-seat
+900-second lease, and the canonical guard identity above. The guard owns checkout
+identity and safe publication; the manager composes it rather than defining a
+second identity.
+
+The manager's outer lifecycle is `reserved → bound → active|recovered → quiescent
+→ reconciling → cleanup_due → removed`, with `sweep_claimed → swept` for abnormal
+cleanup and retry-only `cleanup_blocked`. Session spawn and adoption validate the
+request tuple against the live manager row before process creation, set the child
+cwd to `execution_dir`, and persist PID/tmux ownership. A live owner protects the
+tree regardless of age. Lease renewal and lifecycle transitions rewrite the manager
+row explicitly; session registry mtime is not ownership state.
+
+Allocation authority never crosses the dispatch boundary. A session carries the
+lease in its durable identity. A mutating harness subagent may run under a seat's
+lease only inside the tree that seat allocated; an unleased mutation degrades to an
+item-backed worker session. Read-only streams have no manager worktree.
+
+After quiescence, reconciliation freezes immutable source and integrated manifests
+before cleanup. Normal close and stale sweep share the same evidence-before-removal
+ordering and terminal proof: recovery evidence is persisted outside the tree, then
+the path, Git worktree registry entry, temporary branch, and guard refs are removed
+and verified. Failure stays `cleanup_blocked`; no coordinated stream is `done` and
+no dependency is satisfied until removal is proven.
 
 ## Request queue
 
@@ -203,6 +233,8 @@ and, once an instance claims it, moves to `requests/claimed/<request_id>.json`.
 | `skip_confirm` | boolean \| absent | Session autonomy override. Omit-when-empty: absent defers to the queue-spawn default (**autonomous** — a claimed request historically runs without confirmation gates), `true` (`--yes`/`--no-confirm`) forces autonomous, `false` (`--confirm`) forces **gated** so every confirmation gate becomes a coordinator send window. Maps to `SessionDescriptor.SkipConfirm` at spawn. |
 | `prefer_project_dir` | string \| absent | **Soft** routing preference: a physically-resolved project directory (`session request --prefer-dir <path>` / `--prefer-cwd`, resolved and refused at enqueue when it does not exist). Omit-when-empty. Unlike the hard `target_instance`/`min_vintage` filters, this only *delays* other claimants — the `prefer_` name carries the softness. An instance whose `project_dir` equals it claims immediately; any other instance may claim only after `PreferMatchGrace` (15s, three poll ticks) measured from `requested_at`. **Additive**: absence, an unparseable `requested_at`, or a pre-feature instance (which advertises no `project_dir`) never blocks a claim — the preference only ever adds bounded latency, so a matching instance need not exist. A row reclaimed past its grace is claimable by any instance (the preference had its shot on first dispatch). |
 | `worktree_identity` | object \| absent | Complete versioned [session worktree identity](#session-worktree-identity-and-lifecycle), carried unchanged from request to launch. Omit-when-empty only for legacy or TUI-created requests whose claimant allocates the identity before spawn; a hosted process never starts without a complete identity in `captured` state. |
+| `worktree_id` | string \| absent | Manager manifest identity for a coordinated writer. Requires `execution_dir` and `worktree_identity`; the enqueue writer verifies the exact reserved/bound live row and session ownership. |
+| `execution_dir` | string \| absent | Absolute, canonical manager-resolved child cwd. Hard placement, unlike `prefer_project_dir`; the claiming TUI refuses any row/guard/path mismatch before spawn. |
 
 Because `framework` is additive, old TUI decoders ignore it. When a
 `--framework` request must not be claimed by a TUI build that predates this
@@ -433,7 +465,12 @@ the worktree's `published`, `restore_refused`, or `worktree_quarantined` outcome
 before releasing the registry row. `restore_refused` also retains ownership;
 `published` and `worktree_quarantined` are cleanup-eligible dispositions. The
 successful `published` disposition projects through `closed`; only refusal and
-quarantine add a distinct worktree journal row.
+quarantine add a distinct worktree journal row. For a coordinated writer, registry
+release also does not imply manager cleanup: its session-or-seat lease persists until
+reconciliation and `lore coordinate worktree cleanup` prove path, Git registry, and
+branch/ref disposition. A `close_failed` owner remains live protection; an expired
+dead owner enters the same recovery-before-removal sweep and cannot produce `done`
+without cleanup proof.
 
 When startup recovery confirms an instance dead, the same atomic corpse owner
 retires every pending close request whose exact `target_instance` names that
@@ -927,6 +964,11 @@ rather than growing this contract.**
   *dispatch protocol* that drives it — the session-worker chaperone, lead-side
   brief composition, and per-task spend attribution — is an `/implement` concern,
   not a substrate surface. Route dispatch needs there, not into this substrate.
+- **Coordinated writer placement — landed.** Requests carry the manager tuple,
+  direct PTY/tmux/adoption validate it before spawn, and registry rows preserve
+  PID/tmux ownership for renewal and sweep protection. Dependency readiness,
+  reconciliation objects, and terminal cleanup proof remain `_coordination/`
+  surfaces consumed through `lore coordinate`, not new `_sessions/` writers.
 - **Review mechanism — landed (separate contract).** The four `review_*` events
   are journal vocabulary here, but the gate mechanism they record (flag/hold/notify
   spectrum, the `_meta.json` review block, the flag/hold/release verbs, the review
