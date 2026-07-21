@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Closed agent role registry for lore. resolve_model_for_role(<role>) consults this list before consulting the per-repo and user role->model bindings. A role may carry an optional fallback_role: when the queried role's own layers all miss short of the overlay default, the resolver re-resolves once with the fallback role (used by the class-qualified worker roles to inherit plain worker's binding). Adding a role requires updating this file, scripts/lib.sh resolve_model_for_role, tui/internal/config/framework.go ResolveModelForRoleInCeremony, adapters/settings.schema.json ($defs/role_id enum + $defs/roles_map_overlay properties), and tests/frameworks/roles.bats.",
+  "description": "Closed agent role registry for lore. resolve_model_for_role(<role>) consults this list before consulting the per-repo and user role->model bindings; resolve_route_for_role(<role>) interprets the resulting scalar against the closed framework registry without changing precedence. A role may carry an optional fallback_role: when the queried role's own layers all miss short of the overlay default, the resolver re-resolves once with the fallback role (used by the class-qualified worker roles to inherit plain worker's binding). Adding a role requires updating this file, scripts/lib.sh resolve_model_for_role, tui/internal/config/framework.go ResolveModelForRoleInCeremony, adapters/settings.schema.json ($defs/role_id enum + $defs/roles_map_overlay properties), and tests/frameworks/roles.bats.",
   "default_role": "default",
   "roles": [
     {

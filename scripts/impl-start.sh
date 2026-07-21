@@ -179,6 +179,21 @@ resolve_model_or_empty() {
   fi
 }
 
+resolve_route_or_empty() {
+  local role="$1" ceremony="${2:-}" raw_model="${3:-}" route
+  if [[ -z "$raw_model" ]]; then
+    echo "[impl] Warning: no model binding resolved for role '$role'; route unavailable" >&2
+    printf ''
+    return 0
+  fi
+  if route=$(resolve_route_for_role "$role" ${ceremony:+"$ceremony"}) && [[ -n "$route" ]]; then
+    printf '%s' "$route"
+  else
+    echo "[impl] Error: configured route for role '$role' is invalid; refusing to prepare dispatch" >&2
+    return 1
+  fi
+}
+
 template_version_or_empty() {
   local label="$1" path="$2" tv
   if [[ -n "$path" ]] && tv=$(bash "$SCRIPT_DIR/template-version.sh" "$path" 2>/dev/null) && [[ -n "$tv" ]]; then
@@ -200,6 +215,9 @@ ADVISOR_MODEL=$(resolve_model_or_empty advisor)
 WORKER_MECHANICAL_MODEL=$(resolve_model_or_empty worker-mechanical implement)
 WORKER_STANDARD_MODEL=$(resolve_model_or_empty worker implement)
 WORKER_JUDGMENT_DENSE_MODEL=$(resolve_model_or_empty worker-judgment-dense implement)
+WORKER_MECHANICAL_ROUTE=$(resolve_route_or_empty worker-mechanical implement "$WORKER_MECHANICAL_MODEL")
+WORKER_STANDARD_ROUTE=$(resolve_route_or_empty worker implement "$WORKER_STANDARD_MODEL")
+WORKER_JUDGMENT_DENSE_ROUTE=$(resolve_route_or_empty worker-judgment-dense implement "$WORKER_JUDGMENT_DENSE_MODEL")
 
 LEAD_TV=$(template_version_or_empty lead "$LORE_REPO_DIR/skills/implement/SKILL.md")
 WORKER_TV=$(template_version_or_empty worker "$(resolve_agent_template worker 2>/dev/null || true)")
@@ -210,14 +228,19 @@ PAYLOAD=$(python3 - "$ITEM_DIR" "$SLUG" "$ARCHIVED" "$PHASES" "$UNCHECKED" \
   "$CACHE_STATUS" "$CURRENT_BRANCH" \
   "$LEAD_MODEL" "$WORKER_MODEL" "$ADVISOR_MODEL" \
   "$LEAD_TV" "$WORKER_TV" "$ADVISOR_TV" \
-  "$WORKER_MECHANICAL_MODEL" "$WORKER_STANDARD_MODEL" "$WORKER_JUDGMENT_DENSE_MODEL" <<'PYEOF'
+  "$WORKER_MECHANICAL_MODEL" "$WORKER_STANDARD_MODEL" "$WORKER_JUDGMENT_DENSE_MODEL" \
+  "$WORKER_MECHANICAL_ROUTE" "$WORKER_STANDARD_ROUTE" "$WORKER_JUDGMENT_DENSE_ROUTE" <<'PYEOF'
 import json
 import os
 import sys
 
 (item_dir, slug, archived, phases, unchecked, cache_status, branch,
  lead_m, worker_m, advisor_m, lead_tv, worker_tv, advisor_tv,
- worker_mech_m, worker_std_m, worker_jd_m) = sys.argv[1:17]
+ worker_mech_m, worker_std_m, worker_jd_m,
+ worker_mech_r, worker_std_r, worker_jd_r) = sys.argv[1:20]
+
+def route_or_none(raw):
+    return json.loads(raw) if raw else None
 
 with open(os.path.join(item_dir, "_meta.json")) as f:
     meta = json.load(f)
@@ -264,6 +287,11 @@ print(json.dumps({
         "standard": worker_std_m or None,
         "judgment-dense": worker_jd_m or None,
     },
+    "worker_class_routes": {
+        "mechanical": route_or_none(worker_mech_r),
+        "standard": route_or_none(worker_std_r),
+        "judgment-dense": route_or_none(worker_jd_r),
+    },
     "template_versions": {"lead": lead_tv, "worker": worker_tv, "advisor": advisor_tv},
 }))
 PYEOF
@@ -282,12 +310,17 @@ m = d["models"]
 tv = d["template_versions"]
 p = d["plan"]
 wc = d["worker_class_models"]
+wr = d["worker_class_routes"]
 print(f"[impl start] {d['title']}")
 print(f"Slug: {d['slug']}  (archived: {str(d['archived']).lower()})")
 print(f"Models: lead={m['lead']}  worker={m['worker']}  advisor={m['advisor']}")
 print(f"Worker class bindings (implement ceremony): "
       f"mechanical={wc['mechanical']}  standard={wc['standard']}  "
       f"judgment-dense={wc['judgment-dense']}")
+print("Worker class routes (source -> target / native): " + "  ".join(
+      f"{name}={route['source_framework']}->{route['target_framework']} / {route['native_binding']}"
+      if route else f"{name}=unresolved"
+      for name, route in wr.items()))
 print(f"Template versions: lead={tv['lead']}  worker={tv['worker']}  advisor={tv['advisor']}")
 print(f"Phases: {p['phases']} with {p['unchecked_tasks']} unchecked tasks")
 total = d["prior_claims"]["total"]

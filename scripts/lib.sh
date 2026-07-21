@@ -1476,6 +1476,91 @@ resolve_model_for_role() {
   return 1
 }
 
+# --- resolve_route_for_role ---
+# Resolve the existing scalar role binding, then interpret an optional leading
+# framework id from adapters/capabilities.json. The scalar resolver above is
+# deliberately unchanged; this sibling returns the non-lossy route as compact
+# JSON for orchestration callers.
+#
+# Output keys: binding, source_framework, target_framework, native_binding,
+# qualified. Go counterpart: config.ResolveRouteForRoleInCeremony.
+_model_route_json() {
+  local role="$1"
+  local binding="$2"
+  [[ -z "$role" ]] && { echo "Error: resolve_route_for_role requires a role name" >&2; return 1; }
+  [[ -z "$binding" ]] && { echo "Error: role '$role' has empty model binding" >&2; return 1; }
+
+  if ! command -v jq &>/dev/null; then
+    echo "Error: resolve_route_for_role requires jq" >&2
+    return 1
+  fi
+
+  local roles_file="$LORE_LIB_DIR/../adapters/roles.json"
+  local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
+  if [[ ! -f "$capabilities_file" ]]; then
+    echo "Error: resolve_route_for_role cannot read $capabilities_file" >&2
+    return 1
+  fi
+  if [[ -f "$roles_file" ]] && ! jq -e --arg r "$role" '.roles[] | select(.id == $r)' "$roles_file" &>/dev/null; then
+    echo "Error: unknown role '$role' (not in $roles_file)" >&2
+    return 1
+  fi
+
+  local source target native prefix qualified shape
+  source=$(resolve_active_framework) || return 1
+  target="$source"
+  native="$binding"
+  qualified="false"
+
+  if [[ "$binding" == */* ]]; then
+    prefix="${binding%%/*}"
+    if jq -e --arg fw "$prefix" '.frameworks[$fw] != null' "$capabilities_file" &>/dev/null; then
+      target="$prefix"
+      native="${binding#*/}"
+      qualified="true"
+      if [[ -z "$native" ]]; then
+        echo "Error: role '$role' binding '$binding' has an empty native binding after framework qualifier '$target/'" >&2
+        return 1
+      fi
+    fi
+  fi
+
+  shape=$(jq -r --arg fw "$target" '.frameworks[$fw].model_routing.shape // "single"' "$capabilities_file" 2>/dev/null)
+  if [[ "$native" == */* && "$shape" != "multi" ]]; then
+    if [[ "$qualified" == "true" ]]; then
+      echo "Error: role '$role' binding '$binding' has native binding '$native' but target framework '$target' has model_routing.shape=$shape (single-provider harnesses require a bare model binding)" >&2
+    else
+      echo "Error: role '$role' binding '$binding' names a provider but the active harness '$source' has model_routing.shape=$shape (single-provider harnesses cannot serve cross-provider bindings)." >&2
+    fi
+    return 1
+  fi
+
+  # The only implemented foreign bridge is the Codex worker chaperone. Same-
+  # framework qualification is always native; every other foreign pair fails
+  # before a source adapter can mistake the framework id for a provider id.
+  if [[ "$source" != "$target" && "$target" != "codex" ]]; then
+    echo "Error: unsupported framework bridge '$source->$target' for role '$role' binding '$binding'" >&2
+    return 1
+  fi
+
+  jq -cn \
+    --arg binding "$binding" \
+    --arg source_framework "$source" \
+    --arg target_framework "$target" \
+    --arg native_binding "$native" \
+    --argjson qualified "$qualified" \
+    '{binding: $binding, source_framework: $source_framework, target_framework: $target_framework, native_binding: $native_binding, qualified: $qualified}'
+}
+
+resolve_route_for_role() {
+  local role="$1"
+  local ceremony="${2:-}"
+  local binding
+  [[ -z "$role" ]] && { echo "Error: resolve_route_for_role requires a role name" >&2; return 1; }
+  binding=$(resolve_model_for_role "$role" ${ceremony:+"$ceremony"}) || return 1
+  _model_route_json "$role" "$binding"
+}
+
 # --- resolve_harness_install_path ---
 # Print the install path for a kind on the active framework (or optional
 # explicit framework), with $HOME and similar shell-style references expanded.
@@ -1630,8 +1715,8 @@ resolve_agent_template() {
 }
 
 # --- validate_role_model_binding ---
-# Validate a role->model binding against the closed role registry and the
-# active harness's model_routing shape. T14 ownership (the verification
+# Validate a role->model binding against the closed role and framework
+# registries and the selected target's model_routing shape. T14 ownership (the verification
 # rule lives in tests/frameworks/roles.bats; this helper is what the test
 # exercises and what install/doctor surfaces will call once T15+T60 wire
 # them up).
@@ -1641,11 +1726,10 @@ resolve_agent_template() {
 #
 # Rules:
 #   1. role MUST appear in adapters/roles.json's closed set.
-#   2. If model contains a slash (provider/model syntax) — e.g.
-#      "anthropic/sonnet" or "openai/gpt-4o" — the active harness's
-#      model_routing.shape MUST be "multi". Single-shape harnesses
-#      (claude-code, codex) cannot serve cross-provider bindings.
-#   3. Empty model strings are rejected.
+#   2. A first slash segment that is a registered framework id qualifies the
+#      route; otherwise slash syntax retains its existing provider/model meaning.
+#   3. The native binding is validated against the target framework's shape.
+#   4. Empty model strings and unsupported foreign bridges are rejected.
 #
 # Bare model names (no slash) are always accepted regardless of shape;
 # single-provider harnesses interpret the bare name against their native
@@ -1664,7 +1748,9 @@ validate_role_model_binding() {
     return 1
   fi
 
-  # Rule 1: role must be in the closed registry.
+  # Preserve the legacy bare-binding path, including its degraded behavior when
+  # jq or roles.json is unavailable. Registry parsing is needed only for slash
+  # values, where the first segment may select a framework.
   local roles_file="$LORE_LIB_DIR/../adapters/roles.json"
   if [[ -f "$roles_file" ]] && command -v jq &>/dev/null; then
     if ! jq -e --arg r "$role" '.roles[] | select(.id == $r)' "$roles_file" &>/dev/null; then
@@ -1672,20 +1758,11 @@ validate_role_model_binding() {
       return 1
     fi
   fi
-
-  # Rule 2: provider/model syntax requires multi-shape harness.
-  if [[ "$model" == */* ]]; then
-    local shape
-    shape=$(framework_model_routing_shape) || return 1
-    if [[ "$shape" != "multi" ]]; then
-      local active
-      active=$(resolve_active_framework 2>/dev/null) || active="<unknown>"
-      echo "Error: role '$role' binding '$model' names a provider but the active harness '$active' has model_routing.shape=$shape (single-provider harnesses cannot serve cross-provider bindings)." >&2
-      return 1
-    fi
+  if [[ "$model" != */* ]]; then
+    return 0
   fi
 
-  return 0
+  _model_route_json "$role" "$model" >/dev/null
 }
 
 # --- resolve_completion_enforcement_mode ---

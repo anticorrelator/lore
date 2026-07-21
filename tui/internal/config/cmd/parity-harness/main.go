@@ -22,6 +22,8 @@
 //	resolve_model_for_role <role> [<ceremony>]
 //	                                — print model id; optional ceremony id
 //	                                  consults the ceremony overlay
+//	resolve_route_for_role <role> [<ceremony>]
+//	                                — print the compact structured route JSON
 //	load_harness_args [framework]   — print args, one per line (T10-pending)
 //	migrate_claude_args_to_harness_args
 //	                                — print "ok" on success (T10-pending)
@@ -132,13 +134,45 @@ func main() {
 		}
 		fmt.Println(out)
 
-	case "framework_capability",
-		"framework_model_routing_shape":
+	case "resolve_route_for_role":
+		if len(args) < 1 || len(args) > 2 {
+			fmt.Fprintln(os.Stderr, "Error: resolve_route_for_role requires <role> [<ceremony>]")
+			os.Exit(1)
+		}
+		ceremony := ""
+		if len(args) == 2 {
+			ceremony = args[1]
+		}
+		route, err := config.ResolveRouteForRoleInCeremony(args[0], ceremony)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		out, err := json.Marshal(route)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(out))
+
+	case "framework_capability":
 		// These bash-only helpers were added in T6 but were not part of T10's
 		// Go-side scope (T10 is harness-args + ResolveModelForRole only). They
 		// remain Go-side TODOs; the harness keeps a stable sentinel so bats
 		// can skip the parity row without failing the suite.
 		fmt.Println("T10-pending")
+
+	case "framework_model_routing_shape":
+		framework := ""
+		if len(args) >= 1 {
+			framework = args[0]
+		}
+		shape, err := config.FrameworkModelRoutingShape(framework)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		fmt.Println(shape)
 
 	case "framework_model_routing_tiers":
 		// Mirrors scripts/lib.sh framework_model_routing_tiers: optional
