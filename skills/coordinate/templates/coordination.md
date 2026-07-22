@@ -17,6 +17,18 @@
 
 **Retro checkpoint:** Read `lore retro queue`; for each `outcome=due`, `disposition=unhandled` identity, record exactly one explicit disposition through `lore retro handle --outcome-id <id> --action <dispatched|deferred|skipped> --handled-by coordinate`, then ledger the matching outcome. The read is the retro substrate's narrow fold only; it never auto-runs `/retro`.
 
+## Brief
+
+<!-- Rewritten in place at every step closure — states where the arc is now, not how it
+     got here. For a reader without coordinator context; 1–2 sentences per facet,
+     one screen total. Facet names are free content, not pinned vocabulary. -->
+
+**Landed:** <what has shipped>
+**In place:** <what exists and works now — substrate, contracts, running streams>
+**Major decisions:** <the calls that shaped the arc, in reader terms>
+**Surprises:** <what turned out differently than planned>
+**Review-flags:** <what deserves a colleague's eyes>
+
 ## Journal cursor
 
 `next_cursor: 0` <!-- opaque; take it from the final {"next_cursor": N} row on `lore session events` stdout (or `--cursor-only`), store verbatim, echo via --since, never compute -->
