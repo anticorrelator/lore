@@ -1356,6 +1356,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case sessionsRefreshedMsg:
 		return m.handleSessionsRefreshed(msg)
 
+	case sessionMirrorCapturedMsg:
+		return m.handleSessionMirrorCaptured(msg)
+
 	case sessionview.SessionSelectedMsg:
 		return m.handleSessionSelected(msg)
 

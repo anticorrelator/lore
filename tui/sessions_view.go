@@ -117,6 +117,7 @@ func (m model) buildSessionRows(instances []session.Instance, pending []session.
 				Local:        local,
 				SessionID:    s.SessionID,
 				BaseItem:     deriveBase(s.Slug),
+				Tmux:         s.Tmux,
 				NeedsInput:   act.NeedsInput,
 				Quiescent:    act.Quiescent,
 				ClosePending: act.ClosePending,
