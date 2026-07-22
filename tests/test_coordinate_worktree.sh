@@ -5,6 +5,7 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANAGER="$REPO_ROOT/scripts/coordinate-worktree.sh"
+RECONCILE="$REPO_ROOT/scripts/coordinate-reconcile.py"
 CLI="$REPO_ROOT/cli/lore"
 TEST_ROOT="$(mktemp -d)"
 KDIR="$TEST_ROOT/store"
@@ -158,6 +159,51 @@ assert_dir "failed removal leaves path retryable" "$BLOCKED_PATH"
 bash "$MANAGER" transition --kdir "$KDIR" --worktree-id "$BLOCKED_ID" --to cleanup_due --json >/dev/null
 bash "$MANAGER" cleanup --kdir "$KDIR" --worktree-id "$BLOCKED_ID" --json >/dev/null
 assert_absent "cleanup retry removes path" "$BLOCKED_PATH"
+
+# Acceptance refs pinned at reconciliation survive the sweep that deletes the
+# temporary branch, keeping the accepted stream tip reachable afterward.
+ACCEPT="$(allocate accept-anchor accept-seat --owner-pid "$$")"
+ACCEPT_ID="$(jq -r '.worktree_id' <<<"$ACCEPT")"
+ACCEPT_PATH="$(jq -r '.execution_dir' <<<"$ACCEPT")"
+ACCEPT_BRANCH="$(jq -r '.temporary_branch' <<<"$ACCEPT")"
+ACCEPT_COMMON="$(jq -r '.git_common_dir' "$KDIR/_coordination/worktrees/registry/$ACCEPT_ID.json")"
+# Commit on the temporary branch so the stream tip is reachable only through it.
+printf 'accepted\n' > "$ACCEPT_PATH/accepted.txt"
+git -C "$ACCEPT_PATH" add accepted.txt
+git -C "$ACCEPT_PATH" commit -qm accepted-tip
+TIP="$(git -C "$ACCEPT_PATH" rev-parse HEAD)"
+bash "$MANAGER" bind --kdir "$KDIR" --worktree-id "$ACCEPT_ID" --owner-id accept-seat --owner-pid "$$" --json >/dev/null
+for state in active quiescent reconciling; do
+  bash "$MANAGER" transition --kdir "$KDIR" --worktree-id "$ACCEPT_ID" --to "$state" --json >/dev/null
+done
+printf 'diff --git a/accepted.txt b/accepted.txt\n' > "$TEST_ROOT/accept-src.patch"
+printf 'diff --git a/accepted.txt b/accepted.txt\n+accepted\n' > "$TEST_ROOT/accept-int.patch"
+python3 "$RECONCILE" freeze-source --kdir "$KDIR" --slug demo \
+  --stream stream-a --attempt accept-anchor --worktree-id "$ACCEPT_ID" --tree writer \
+  --patch "$TEST_ROOT/accept-src.patch" --head-sha "$TIP" --changed-path accepted.txt --json >/dev/null
+python3 "$RECONCILE" freeze-integrated --kdir "$KDIR" --slug demo \
+  --stream stream-a --attempt accept-anchor --patch "$TEST_ROOT/accept-int.patch" \
+  --integrated-sha "$TIP" --changed-path accepted.txt --verdict full --json >/dev/null
+INT_REF="refs/lore/accepted/demo/stream-a/accept-anchor/integrated"
+SRC_REF="refs/lore/accepted/demo/stream-a/accept-anchor/source"
+assert_eq "acceptance integrated ref pinned before sweep" "$TIP" \
+  "$(git --git-dir="$ACCEPT_COMMON" rev-parse "$INT_REF")"
+
+bash "$MANAGER" transition --kdir "$KDIR" --worktree-id "$ACCEPT_ID" --to cleanup_due --json >/dev/null
+SWEEP_ACCEPT="$(bash "$MANAGER" cleanup --kdir "$KDIR" --worktree-id "$ACCEPT_ID" --json)"
+assert_eq "accepted stream cleanup proof verifies" "true" "$(jq -r '.cleanup_proof.verified' <<<"$SWEEP_ACCEPT")"
+assert_eq "accepted stream branch is deleted" "deleted" "$(jq -r '.cleanup_proof.branch_disposition' <<<"$SWEEP_ACCEPT")"
+assert_absent "accepted stream worktree path removed" "$ACCEPT_PATH"
+git --git-dir="$ACCEPT_COMMON" show-ref --verify --quiet "refs/heads/$ACCEPT_BRANCH"
+assert_eq "temporary branch gone after sweep" "1" "$?"
+assert_eq "acceptance integrated ref survives sweep" "$TIP" \
+  "$(git --git-dir="$ACCEPT_COMMON" rev-parse "$INT_REF")"
+assert_eq "acceptance source ref survives sweep" "$TIP" \
+  "$(git --git-dir="$ACCEPT_COMMON" rev-parse "$SRC_REF")"
+git --git-dir="$ACCEPT_COMMON" merge-base --is-ancestor "$TIP" "$SRC_REF"
+assert_eq "stream tip reachable from acceptance ref after sweep" "0" "$?"
+git --git-dir="$ACCEPT_COMMON" merge-base --is-ancestor "$TIP" main
+assert_eq "stream tip is not reachable from main" "1" "$?"
 
 REFUSE="$(allocate refuse-missing-identity refuse-seat)"
 REFUSE_ID="$(jq -r '.worktree_id' <<<"$REFUSE")"

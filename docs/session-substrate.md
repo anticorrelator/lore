@@ -204,6 +204,21 @@ the path, Git worktree registry entry, temporary branch, and guard refs are remo
 and verified. Failure stays `cleanup_blocked`; no coordinated stream is `done` and
 no dependency is satisfied until removal is proven.
 
+When `freeze-integrated` accepts an attempt it pins two durable anchors in the
+Git common-dir before recording the acceptance — `refs/lore/accepted/{item}/{stream}/{attempt}/integrated`
+at the integrated commit and `.../source` at the stream tip — writing them before
+the reconciliation status update so `integrated` never appears without its anchor.
+These refs are reconciliation-keyed rather than worktree-keyed, so they sit outside
+the sweep's deletion set: the sweep still deletes the temporary branch, but the
+accepted commits stay reachable regardless of sweep timing. They are evidence,
+retained for the lifetime of the reconciliation object store — no automatic release
+at publication or supersession. To recover an accepted-but-unpublished stream,
+enumerate the anchors with `git for-each-ref refs/lore/accepted/` and inspect a
+commit with `git log <sha>`; prune only under an explicit ancestry gate
+(`git merge-base --is-ancestor <sha> <published-ref>`) or work-item archival, never
+on temporary-branch presence, since accepted history never interleaves with the
+published branch.
+
 ## Request queue
 
 One file per request. A request begins in `requests/pending/<request_id>.json`
