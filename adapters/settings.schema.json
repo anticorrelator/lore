@@ -193,12 +193,15 @@
         "tool_hooks",
         "permission_hooks",
         "task_completed_hook",
+        "native_dispatch_guidance_hook",
         "subagents",
         "team_messaging",
         "transcript_provider",
         "headless_runner",
         "plugin_runtime",
-        "model_routing"
+        "model_routing",
+        "interaction",
+        "spend_telemetry"
       ],
       "description": "Closed capability registry. MUST stay in lockstep with adapters/capabilities.json `capabilities` map — drift is caught by tests/frameworks/settings_schema_keyset_parity.bats."
     },
@@ -281,12 +284,15 @@
         "tool_hooks":           {"$ref": "#/$defs/support_level"},
         "permission_hooks":     {"$ref": "#/$defs/support_level"},
         "task_completed_hook":  {"$ref": "#/$defs/support_level"},
+        "native_dispatch_guidance_hook": {"$ref": "#/$defs/support_level"},
         "subagents":            {"$ref": "#/$defs/support_level"},
         "team_messaging":       {"$ref": "#/$defs/support_level"},
         "transcript_provider":  {"$ref": "#/$defs/support_level"},
         "headless_runner":      {"$ref": "#/$defs/support_level"},
         "plugin_runtime":       {"$ref": "#/$defs/support_level"},
-        "model_routing":        {"$ref": "#/$defs/support_level"}
+        "model_routing":        {"$ref": "#/$defs/support_level"},
+        "interaction":          {"$ref": "#/$defs/support_level"},
+        "spend_telemetry":      {"$ref": "#/$defs/support_level"}
       }
     },
 
