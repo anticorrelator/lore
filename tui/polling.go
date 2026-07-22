@@ -38,12 +38,14 @@ func captureSessionMirrorCmd(rowID, tmuxName string) tea.Cmd {
 
 // handleSessionMirrorCaptured pushes a fresh remote-screen snapshot into the
 // read-only card. A capture error leaves the prior frame in place rather than
-// blanking the mirror mid-session; SetMirror itself drops a stale-row snapshot.
+// blanking the mirror mid-session; SetMirror itself drops a stale-row snapshot,
+// so pushing to both mirror consumers is safe — at most one displays the row.
 func (m model) handleSessionMirrorCaptured(msg sessionMirrorCapturedMsg) (model, tea.Cmd) {
 	if msg.err != nil {
 		return m, nil
 	}
 	m.sessionsDetail.SetMirror(msg.rowID, msg.lines)
+	m.coordinationDetail.SetMirror(msg.rowID, msg.lines)
 	return m, nil
 }
 
@@ -142,7 +144,7 @@ type projectDetailMtimeCheckedMsg struct {
 // (or a doc added/removed) to the home refreshes the open detail within a tick.
 func checkProjectDetailMtime(workDir, slug string) tea.Cmd {
 	return func() tea.Msg {
-		dir := filepath.Join(workDir, "_projects", slug)
+		dir := work.ProjectHome(workDir, slug)
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			return projectDetailMtimeCheckedMsg{slug: slug, err: err}
@@ -278,6 +280,21 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 	if m.state == stateSessions && m.tmuxEnabled {
 		if rowID, tmuxName, ok := m.sessionsDetail.RemoteMirror(); ok {
 			cmds = append(cmds, captureSessionMirrorCmd(rowID, tmuxName))
+		}
+	}
+	// Coordination arcs ride this same heartbeat: the existence fold is one
+	// stat per project label (cheap from any state) so the tab count stays
+	// current; ledger and pin reads are scoped to the selected arc while the
+	// view is displayed, and the mirror capture to a displayed remote row.
+	cmds = append(cmds, m.scanArcsCmd())
+	if m.state == stateCoordination {
+		if arc := m.coordinationList.CurrentSlug(); arc != "" {
+			cmds = append(cmds, readArcLedgerCmd(m.config.WorkDir, arc), m.readArcPinCmd(arc))
+		}
+		if m.tmuxEnabled {
+			if rowID, tmuxName, ok := m.coordinationDetail.RemoteMirror(); ok {
+				cmds = append(cmds, captureSessionMirrorCmd(rowID, tmuxName))
+			}
 		}
 	}
 	// Always poll the follow-up index so the tab indicator reflects external

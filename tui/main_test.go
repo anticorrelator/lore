@@ -15,6 +15,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
+	"github.com/anticorrelator/lore/tui/internal/coordination"
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
@@ -475,15 +476,17 @@ func TestTypedCharactersInKittyMode(t *testing.T) {
 // minimalModel constructs the smallest model that buildPaneConfig can operate on.
 func minimalModel(state appState, workItems []work.WorkItem, fuItems []followup.FollowUpItem) model {
 	return model{
-		state:          state,
-		list:           work.NewListModel(workItems),
-		detail:         work.NewDetailModel("", ""),
-		followupList:   followup.NewListModel(fuItems),
-		followupDetail: followup.NewDetailModel(""),
-		settlement:     settlement.NewModel(),
-		sessionPanels:  make(map[string]work.SessionPanelModel),
-		sessionsList:   sessionview.NewListModel(),
-		sessionsDetail: sessionview.NewDetailModel(),
+		state:              state,
+		list:               work.NewListModel(workItems),
+		detail:             work.NewDetailModel("", ""),
+		followupList:       followup.NewListModel(fuItems),
+		followupDetail:     followup.NewDetailModel(""),
+		settlement:         settlement.NewModel(),
+		sessionPanels:      make(map[string]work.SessionPanelModel),
+		sessionsList:       sessionview.NewListModel(),
+		sessionsDetail:     sessionview.NewDetailModel(),
+		coordinationList:   coordination.NewListModel(),
+		coordinationDetail: coordination.NewDetailModel(),
 	}
 }
 
@@ -3056,19 +3059,11 @@ func TestWorkListStatusBarKeybindContract(t *testing.T) {
 			t.Fatalf("i produced %T, want work.ImplementRequestMsg", cmd())
 		}
 	})
-	t.Run("c (chat)", func(t *testing.T) {
+	t.Run("c (coordination)", func(t *testing.T) {
 		m := workContractModel()
-		nm, cmd := updateModel(t, m, press('c'))
-		if cmd == nil {
-			t.Fatal("c should emit a chat request")
-		}
-		msg := cmd()
-		if _, ok := msg.(work.ChatRequestMsg); !ok {
-			t.Fatalf("c produced %T, want work.ChatRequestMsg", msg)
-		}
-		nm, _ = updateModel(t, nm, msg)
-		if !nm.sessionConfirmActive || nm.sessionConfirmDescriptor.Type != work.SessionChat {
-			t.Error("chat request should open the confirm modal in chat mode")
+		nm, _ := updateModel(t, m, press('c'))
+		if nm.state != stateCoordination {
+			t.Fatalf("c on the work list should enter the coordination view, got state %d", nm.state)
 		}
 	})
 	t.Run("K (knowledge)", func(t *testing.T) {
@@ -3881,14 +3876,15 @@ func TestTabIndicatorAdvertisesSectionKeys(t *testing.T) {
 		want    []string
 		notWant []string
 	}{
-		{"work", stateWork, []string{"work (1)", "f follow-ups (2)", "v sessions (4)", "t settlement (3)"}, []string{"w work"}},
-		{"followups", stateFollowUps, []string{"w work (1)", "v sessions (4)", "t settlement (3)"}, []string{"f follow-ups"}},
-		{"sessions", stateSessions, []string{"w work (1)", "f follow-ups (2)", "t settlement (3)"}, []string{"v sessions"}},
-		{"settlement", stateSettlement, []string{"w work (1)", "f follow-ups (2)", "v sessions (4)"}, []string{"t settlement"}},
+		{"work", stateWork, []string{"work (1)", "f follow-ups (2)", "v sessions (4)", "t settlement (3)", "c coordination (5)"}, []string{"w work"}},
+		{"followups", stateFollowUps, []string{"w work (1)", "v sessions (4)", "t settlement (3)", "c coordination (5)"}, []string{"f follow-ups"}},
+		{"sessions", stateSessions, []string{"w work (1)", "f follow-ups (2)", "t settlement (3)", "c coordination (5)"}, []string{"v sessions"}},
+		{"settlement", stateSettlement, []string{"w work (1)", "f follow-ups (2)", "v sessions (4)", "c coordination (5)"}, []string{"t settlement"}},
+		{"coordination", stateCoordination, []string{"w work (1)", "f follow-ups (2)", "v sessions (4)", "t settlement (3)"}, []string{"c coordination"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := stripANSI(renderTabIndicator(tc.state, 1, 2, 3, 4, 0, 80, ""))
+			out := stripANSI(renderTabIndicator(tc.state, 1, 2, 3, 4, 0, 5, 100, ""))
 			for _, want := range tc.want {
 				if !strings.Contains(out, want) {
 					t.Errorf("tab indicator missing %q:\n%s", want, out)

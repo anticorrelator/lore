@@ -37,6 +37,10 @@ type SessionRow struct {
 	SessionID string // harness session id (close --session addressing)
 	BaseItem  string // base work item for a derived-slug worker; "" = ungrouped
 	Tmux      string // registry tmux session name; "" = direct-PTY, no remote mirror
+	// Project is the owning work item's project label, resolved in-memory by
+	// the host at row-build time (via Slug, falling back to BaseItem). It never
+	// touches the substrate; "" = the session joins no arc.
+	Project string
 
 	NeedsInput   bool
 	Quiescent    bool

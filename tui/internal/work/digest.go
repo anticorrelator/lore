@@ -105,6 +105,46 @@ func extractDigestSections(plan string) []digestSection {
 	return out
 }
 
+// ExtractSection returns the body of the first ATX section whose heading text
+// equals name (case-insensitive), running from the heading to the next heading
+// of equal or higher level. Fenced code is ignored on both sides of the
+// boundary rule, matching extractDigestSections. found is false when no such
+// heading exists — absence is the caller's degrade signal, never an error.
+func ExtractSection(md, name string) (body string, found bool) {
+	lines := strings.Split(md, "\n")
+	inFence := false
+	for i := 0; i < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		level, text := atxHeading(lines[i])
+		if level == 0 || !strings.EqualFold(text, name) {
+			continue
+		}
+		j := i + 1
+		bodyFence := false
+		for j < len(lines) {
+			if strings.HasPrefix(strings.TrimSpace(lines[j]), "```") {
+				bodyFence = !bodyFence
+				j++
+				continue
+			}
+			if !bodyFence {
+				if lv, _ := atxHeading(lines[j]); lv > 0 && lv <= level {
+					break
+				}
+			}
+			j++
+		}
+		return strings.TrimSpace(strings.Join(lines[i+1:j], "\n")), true
+	}
+	return "", false
+}
+
 // digestSectionRule renders "─ Label ────…" filling width, in the shared
 // section-framing tokens.
 func digestSectionRule(label string, width int) string {

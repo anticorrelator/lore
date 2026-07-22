@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
+	"github.com/anticorrelator/lore/tui/internal/coordination"
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
@@ -45,15 +46,17 @@ func classifyStartupState(cfg config.Config) appState {
 // already populated items by the time the user opens the panel.
 func newModel(cfg config.Config, prefs config.Prefs, startState appState) model {
 	return model{
-		state:          startState,
-		config:         cfg,
-		layoutMode:     prefs.Layout,
-		indexPath:      filepath.Join(cfg.WorkDir, "_index.json"),
-		settlement:     settlement.NewModel(),
-		list:           work.NewListModel(nil),
-		followupList:   followup.NewListModel(nil),
-		sessionsList:   sessionview.NewListModel(),
-		sessionsDetail: sessionview.NewDetailModel(),
+		state:              startState,
+		config:             cfg,
+		layoutMode:         prefs.Layout,
+		indexPath:          filepath.Join(cfg.WorkDir, "_index.json"),
+		settlement:         settlement.NewModel(),
+		list:               work.NewListModel(nil),
+		followupList:       followup.NewListModel(nil),
+		sessionsList:       sessionview.NewListModel(),
+		sessionsDetail:     sessionview.NewDetailModel(),
+		coordinationList:   coordination.NewListModel(),
+		coordinationDetail: coordination.NewDetailModel(),
 	}
 }
 

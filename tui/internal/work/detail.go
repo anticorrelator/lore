@@ -271,6 +271,13 @@ type ProjectDetail struct {
 	Docs []ExtraFile
 }
 
+// ProjectHome is the project home directory _work/_projects/<slug>/ — the
+// single composition point for the path. Detail loads, freshness polls, and
+// the coordination sidecar all resolve through it.
+func ProjectHome(workDir, slug string) string {
+	return filepath.Join(workDir, "_projects", slug)
+}
+
 // LoadProjectDetail reads a project home at _projects/<slug>/ into a
 // ProjectDetail. A missing home dir (labeled project with no record) or an
 // empty slug (the ungrouped bucket) is not an error — both return a detail with
@@ -283,7 +290,7 @@ func LoadProjectDetail(workDir, slug string) (*ProjectDetail, error) {
 		return pd, nil // ungrouped bucket: no project, no home to read
 	}
 
-	homeDir := filepath.Join(workDir, "_projects", slug)
+	homeDir := ProjectHome(workDir, slug)
 	metaBytes, err := os.ReadFile(filepath.Join(homeDir, "_meta.json"))
 	if err != nil {
 		return pd, nil // labeled project with no home dir yet
