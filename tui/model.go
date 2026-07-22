@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
+	"github.com/anticorrelator/lore/tui/internal/coordination"
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
 	"github.com/anticorrelator/lore/tui/internal/search"
@@ -32,6 +33,7 @@ const (
 	stateFollowUps
 	stateSessions
 	stateSettlement
+	stateCoordination
 	stateOnboarding
 	stateNoRepo
 )
@@ -178,6 +180,17 @@ type model struct {
 	sessionsJournalCursor int64
 	sessionsCount         int
 	sessionsNeedsInput    int
+	// sessionRows is the last assembled substrate-union row set, kept for the
+	// coordination view's read-side session→arc join (recomputed per refresh,
+	// never persisted).
+	sessionRows []sessionview.SessionRow
+
+	// coordinationList / coordinationDetail back the coordination workspace
+	// (stateCoordination): an arc list (projects whose home carries a
+	// coordination.md ledger) and a four-tab detail. The arc scan rides the
+	// poll tick from any state so the tab-indicator count stays current.
+	coordinationList   coordination.ListModel
+	coordinationDetail coordination.DetailModel
 
 	aiInputActive bool
 	aiLoading     bool
@@ -596,6 +609,46 @@ func (m *model) sessionsPanelCallbacks() panelCallbacks {
 	}
 }
 
+// coordinationPanelCallbacks builds the split-pane callbacks for the
+// coordination workspace. No session panel ever attaches here — the detail's
+// Sessions tab renders read-only cards/mirrors — so the terminal seams are
+// inert stubs.
+func (m *model) coordinationPanelCallbacks() panelCallbacks {
+	return panelCallbacks{
+		currentSlug:    func() string { return "" },
+		loadDetail:     func(slug string) tea.Cmd { return m.loadCoordinationDetail(slug) },
+		sessionPanelFn: func() (work.SessionPanelModel, bool) { return work.SessionPanelModel{}, false },
+		listUpdate: func(lmsg tea.Msg) (tea.Cmd, string, string) {
+			prev := m.coordinationList.CurrentSlug()
+			cl, cmd := m.coordinationList.Update(lmsg)
+			m.coordinationList = cl
+			return cmd, prev, m.coordinationList.CurrentSlug()
+		},
+		detailUpdate: func(dmsg tea.Msg) tea.Cmd {
+			var cmd tea.Cmd
+			m.coordinationDetail, cmd = m.coordinationDetail.Update(dmsg)
+			return cmd
+		},
+		// Same TopBottom row arithmetic as workPanelCallbacks: detail content
+		// starts at topPanelHeight+3.
+		setContentStart: func() {
+			if m.layoutMode == config.LayoutLeftRight {
+				m.coordinationDetail.SetContentStart(2, leftPanelWidth+5)
+			} else {
+				m.coordinationDetail.SetContentStart(m.topPanelHeight()+3, 3)
+			}
+		},
+		resize: func() tea.Cmd {
+			listW, listH := m.listDims()
+			cl, lcmd := m.coordinationList.Update(tea.WindowSizeMsg{Width: listW, Height: listH})
+			m.coordinationList = cl
+			var dcmd tea.Cmd
+			m.coordinationDetail, dcmd = m.coordinationDetail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+			return batchCmd(lcmd, dcmd)
+		},
+	}
+}
+
 // currentSessionsPanel returns the live panel for the sessions list's current
 // row when that row is locally hosted, mirroring currentSessionPanel for the
 // work list but routing by the row's own session key rather than a work-item
@@ -774,6 +827,9 @@ type paneConfig struct {
 	// count and whether any session awaits input (the needs-input marker).
 	sessionsCount      int
 	sessionsNeedsInput int
+	// coordinationCount is the arc count passed to renderTabIndicator for the
+	// coordination tab.
+	coordinationCount int
 }
 
 // buildPaneConfig constructs a paneConfig from the current model state.
@@ -782,8 +838,27 @@ func (m model) buildPaneConfig() paneConfig {
 	listItemCount := len(m.list.Items())
 	fuItemCount := m.followupList.FollowUpCount()
 	settlementCount := m.settlement.Count()
+	coordinationCount := m.coordinationList.Count()
 
 	switch m.state {
+	case stateCoordination:
+		listTitle := style.TitleName.Render("Arcs")
+		if n := m.coordinationList.Count(); n > 0 {
+			listTitle += " " + style.TitleCount.Render(fmt.Sprintf("(%d)", n))
+		}
+		return paneConfig{
+			listView:           m.coordinationList.View(),
+			detailView:         m.coordinationDetail.View(),
+			listTitle:          listTitle,
+			detailTitle:        m.coordinationDetail.Title(),
+			state:              stateCoordination,
+			listItemCount:      listItemCount,
+			fuItemCount:        fuItemCount,
+			settlementCount:    settlementCount,
+			sessionsCount:      m.sessionsCount,
+			sessionsNeedsInput: m.sessionsNeedsInput,
+			coordinationCount:  coordinationCount,
+		}
 	case stateSessions:
 		listTitle := style.TitleName.Render("Sessions")
 		if n := m.sessionsList.Count(); n > 0 {
@@ -804,6 +879,7 @@ func (m model) buildPaneConfig() paneConfig {
 			settlementCount:    settlementCount,
 			sessionsCount:      m.sessionsCount,
 			sessionsNeedsInput: m.sessionsNeedsInput,
+			coordinationCount:  coordinationCount,
 		}
 	case stateFollowUps:
 		modeLabel := "Open"
@@ -841,6 +917,7 @@ func (m model) buildPaneConfig() paneConfig {
 			settlementCount:    settlementCount,
 			sessionsCount:      m.sessionsCount,
 			sessionsNeedsInput: m.sessionsNeedsInput,
+			coordinationCount:  coordinationCount,
 		}
 	default: // stateWork
 		modeLabel := "Active"
@@ -885,6 +962,7 @@ func (m model) buildPaneConfig() paneConfig {
 			settlementCount:    settlementCount,
 			sessionsCount:      m.sessionsCount,
 			sessionsNeedsInput: m.sessionsNeedsInput,
+			coordinationCount:  coordinationCount,
 		}
 	}
 }

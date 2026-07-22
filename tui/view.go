@@ -225,16 +225,17 @@ func (m model) viewNoRepo() string {
 }
 
 // renderTabIndicator renders a full-width section row showing
-// "work (N) · follow-ups (N) · sessions (N) · settlement (N)". The active
-// section is highlighted; every other section is prefixed with the key that
-// switches to it (w / f / v / t). The keys are routed in update.go and mirrored
-// in the status bar and help modal — do not display a key here without all
-// three. The sessions section carries a needs-input marker (●) when any session
-// awaits input — the persistent announcement channel for agent spawns that never
-// steal focus. identity, when non-empty and it fits, is right-aligned into the
-// same row as the instance's "<repo> · <name>" chrome, followed by a small
-// right gutter; it is dropped rather than wrapped when the row is too narrow.
-func renderTabIndicator(activeTab appState, workCount, followupCount, settlementCount, sessionsCount, sessionsNeedsInput, width int, identity string) string {
+// "work (N) · follow-ups (N) · sessions (N) · settlement (N) · coordination (N)".
+// The active section is highlighted; every other section is prefixed with the
+// key that switches to it (w / f / v / t / c). The keys are routed in update.go
+// and mirrored in the status bar and help modal — do not display a key here
+// without all three. The sessions section carries a needs-input marker (●) when
+// any session awaits input — the persistent announcement channel for agent
+// spawns that never steal focus. identity, when non-empty and it fits, is
+// right-aligned into the same row as the instance's "<repo> · <name>" chrome,
+// followed by a small right gutter; it is dropped rather than wrapped when the
+// row is too narrow.
+func renderTabIndicator(activeTab appState, workCount, followupCount, settlementCount, sessionsCount, sessionsNeedsInput, coordinationCount, width int, identity string) string {
 	section := func(key, label string, count int, active bool) string {
 		text := fmt.Sprintf("%s (%d)", label, count)
 		if active {
@@ -253,7 +254,8 @@ func renderTabIndicator(activeTab appState, workCount, followupCount, settlement
 		section("w", "work", workCount, activeTab == stateWork) + sep +
 		section("f", "follow-ups", followupCount, activeTab == stateFollowUps) + sep +
 		sessionsSection + sep +
-		section("t", "settlement", settlementCount, activeTab == stateSettlement)
+		section("t", "settlement", settlementCount, activeTab == stateSettlement) + sep +
+		section("c", "coordination", coordinationCount, activeTab == stateCoordination)
 	lineW := lipgloss.Width(line)
 	if identity != "" {
 		idW := lipgloss.Width(identity)
@@ -302,7 +304,7 @@ func (m model) viewSettlement() string {
 	lines := m.renderSettlementBodyLines(bodyW, contentH)
 
 	var b strings.Builder
-	b.WriteString(renderTabIndicator(stateSettlement, len(m.list.Items()), m.followupList.FollowUpCount(), m.settlement.Count(), m.sessionsCount, m.sessionsNeedsInput, w, m.tabIdentity()))
+	b.WriteString(renderTabIndicator(stateSettlement, len(m.list.Items()), m.followupList.FollowUpCount(), m.settlement.Count(), m.sessionsCount, m.sessionsNeedsInput, m.coordinationList.Count(), w, m.tabIdentity()))
 	b.WriteString("\n")
 	// Border annotation: advertise what j/k currently walks — the queue at
 	// the root, claims or verdicts inside a drill-in.
@@ -468,7 +470,7 @@ func (m model) viewSideBySide(cfg paneConfig) string {
 	rightBorderChar := rightBS.Render(style.DockBorder.Right)
 
 	var b strings.Builder
-	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.settlementCount, cfg.sessionsCount, cfg.sessionsNeedsInput, m.width, m.tabIdentity()))
+	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.settlementCount, cfg.sessionsCount, cfg.sessionsNeedsInput, cfg.coordinationCount, m.width, m.tabIdentity()))
 	b.WriteString("\n")
 	b.WriteString(topRow)
 	b.WriteString("\n")
@@ -581,7 +583,7 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.settlementCount, cfg.sessionsCount, cfg.sessionsNeedsInput, m.width, m.tabIdentity()))
+	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.settlementCount, cfg.sessionsCount, cfg.sessionsNeedsInput, cfg.coordinationCount, m.width, m.tabIdentity()))
 	b.WriteString("\n")
 
 	// === Top panel (list) ===

@@ -18,6 +18,7 @@ import (
 	"github.com/creack/pty"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
+	"github.com/anticorrelator/lore/tui/internal/coordination"
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/inputmsg"
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
@@ -732,14 +733,14 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			// settlement keeps its own `v` (verdict drill-in), so sessions is
 			// reached from settlement via w→work→v. Focus-conjunct guarded so a
 			// terminal-focused session still forwards `v` to its PTY.
-			if (m.state == stateWork || m.state == stateFollowUps) && !(m.terminalMode && m.focusedPanel == panelRight) {
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.state = stateSessions
 				m.terminalMode = false
 				m.focusedPanel = panelLeft
 				return m, m.sessionsRefreshCmd()
 			}
 		case "t":
-			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions) && !(m.terminalMode && m.focusedPanel == panelRight) {
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.state = stateSettlement
 				m.terminalMode = false
 				m.focusedPanel = panelLeft
@@ -780,7 +781,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m, nil
 			}
 		case "q":
-			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateSettlement || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.cleanupAllSubprocesses()
 				return m, tea.Quit
 			}
@@ -900,6 +901,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.workPanelCallbacks().resize()
 				m.followupPanelCallbacks().resize()
 				m.sessionsPanelCallbacks().resize()
+				m.coordinationPanelCallbacks().resize()
 				m.resizeSessionPanels()
 
 				// Persist preference asynchronously
@@ -945,7 +947,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 			// stateKnowledge / no match: no-op.
 		case "K":
-			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateSettlement || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.prevState = m.state
 				m.state = stateKnowledge
 				m.browser = knowledge.NewBrowserModel(m.config.KnowledgeDir)
@@ -963,7 +965,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			// From the settlement panel the modal opens focused at the
 			// settlement subtree — the durable-config home now that the
 			// panel carries no inline settings.
-			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateKnowledge || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateKnowledge || m.state == stateSettlement || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				focus := ""
 				if m.state == stateSettlement {
 					focus = "settlement"
@@ -971,7 +973,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m.openSettingsModal(focus)
 			}
 		case "f":
-			if (m.state == stateWork || m.state == stateSessions || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
+			if (m.state == stateWork || m.state == stateSessions || m.state == stateSettlement || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.state = stateFollowUps
 				// Preserve items already loaded by the background poll so the
 				// counter and list don't flicker to 0 while the reload is in flight.
@@ -989,7 +991,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				cmd := m.leaveFollowups()
 				return m, cmd
 			}
-			if m.state == stateSessions && !(m.terminalMode && m.focusedPanel == panelRight) {
+			if (m.state == stateSessions || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.state = stateWork
 				m.terminalMode = false
 				m.focusedPanel = panelLeft
@@ -1045,6 +1047,19 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 					}
 					return m, func() tea.Msg { return msg }
 				}
+			}
+			// Enter the coordination view from every context where `c` is not
+			// already chat (the two blocks above: work-detail focus, follow-ups).
+			// Follow-ups keeps its chat `c`, so coordination is reached from
+			// there via w→c. Focus-conjunct guarded so a terminal-focused
+			// session still forwards `c` to its PTY. With zero arcs the view
+			// opens to its explicit empty state.
+			if ((m.state == stateWork && m.focusedPanel == panelLeft) || m.state == stateSessions || m.state == stateSettlement) &&
+				!(m.terminalMode && m.focusedPanel == panelRight) {
+				m.state = stateCoordination
+				m.terminalMode = false
+				m.focusedPanel = panelLeft
+				return m, tea.Batch(m.scanArcsCmd(), m.sessionsRefreshCmd())
 			}
 		case "R":
 			// Release the current item's review gate — detail context only.
@@ -1115,6 +1130,14 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			if m.state == stateSessions && !(m.terminalMode && m.focusedPanel == panelRight) {
 				return m.openSessionCloseConfirm()
 			}
+			// Same close request from the coordination detail's Sessions tab,
+			// which renders the card advertising it.
+			if m.state == stateCoordination && m.focusedPanel == panelRight &&
+				m.coordinationDetail.ActiveTabID() == coordination.TabSessions {
+				if row, ok := m.coordinationDetail.CurrentSession(); ok {
+					return m.openSessionCloseConfirmFor(row)
+				}
+			}
 		case "m":
 			if m.state == stateSettlement {
 				return m.cycleSettlementModelTier()
@@ -1173,6 +1196,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		fcmd := m.followupPanelCallbacks().resize()
 		bcmd := m.knowledgePanelCallbacks().resize()
 		m.sessionsPanelCallbacks().resize()
+		m.coordinationPanelCallbacks().resize()
 		m.resizeSessionPanels()
 
 		m.settlement = m.settlement.SetSize(msg.Width-2, msg.Height-4)
@@ -1244,6 +1268,8 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				}
 			}
 		}
+		// Keep the coordination member view in step with the reloaded index.
+		m.syncCoordinationMembers()
 		return m, tea.Batch(cmds...)
 
 	case prStatusLoadedMsg:
@@ -1355,6 +1381,20 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 	case sessionsRefreshedMsg:
 		return m.handleSessionsRefreshed(msg)
+
+	case coordinationArcsScannedMsg:
+		return m.handleCoordinationArcsScanned(msg)
+
+	case coordinationLedgerReadMsg:
+		return m.handleCoordinationLedgerRead(msg)
+
+	case coordinationPinReadMsg:
+		return m.handleCoordinationPinRead(msg)
+
+	case coordination.ArcSelectedMsg:
+		// Enter on an arc row: load detail and shift focus to the right panel.
+		m.focusedPanel = panelRight
+		return m, m.loadCoordinationDetail(msg.Slug)
 
 	case sessionMirrorCapturedMsg:
 		return m.handleSessionMirrorCaptured(msg)
@@ -1612,6 +1652,23 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		}
 		// esc/h on the list (left focus) leaves the workspace back to work; the
 		// split-pane seam only maps esc/h on the right panel (card → list).
+		if km, ok := msg.(tea.KeyPressMsg); ok && m.focusedPanel == panelLeft {
+			switch km.String() {
+			case "esc", "h":
+				m.state = stateWork
+				m.terminalMode = false
+				m.focusedPanel = panelLeft
+				return m, loadWorkItems(m.config.WorkDir)
+			}
+		}
+		return m, routeFocusedPanel(&m, msg, cb)
+	case stateCoordination:
+		cb := m.coordinationPanelCallbacks()
+		if cmd, consumed := handlePanelRouting(&m, msg, cb); consumed {
+			return m, cmd
+		}
+		// esc/h on the list (left focus) leaves the workspace back to work,
+		// mirroring the sessions workspace.
 		if km, ok := msg.(tea.KeyPressMsg); ok && m.focusedPanel == panelLeft {
 			switch km.String() {
 			case "esc", "h":

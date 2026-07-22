@@ -327,3 +327,47 @@ func TestDetailModelNarrowBarCollapsesExtraFiles(t *testing.T) {
 		t.Fatalf("cycling reached %d of %d tabs", len(seen), total)
 	}
 }
+
+// --- ExtractSection (generalized fence-aware section boundary) ---
+
+func TestExtractSectionBasic(t *testing.T) {
+	md := "# Ledger\n\n## Brief\n\nlanded: the thing\nsurprises: none\n\n## Rows\n\nrow one\n"
+	body, found := ExtractSection(md, "Brief")
+	if !found {
+		t.Fatal("Brief section should be found")
+	}
+	if body != "landed: the thing\nsurprises: none" {
+		t.Errorf("unexpected body: %q", body)
+	}
+}
+
+func TestExtractSectionMissingIsNotAnError(t *testing.T) {
+	if _, found := ExtractSection("# Ledger\n\n## Rows\n", "Brief"); found {
+		t.Error("absent section must report found=false")
+	}
+}
+
+func TestExtractSectionIgnoresHeadingsInsideFences(t *testing.T) {
+	md := "```\n## Brief\nfake\n```\n\n## Brief\n\nreal body\n\n## Next\n"
+	body, found := ExtractSection(md, "Brief")
+	if !found || body != "real body" {
+		t.Fatalf("fence-aware match failed: found=%v body=%q", found, body)
+	}
+	// A fenced heading inside the body must not terminate the section.
+	md2 := "## Brief\n\nbefore\n```\n## Not A Boundary\n```\nafter\n\n## Next\n"
+	body2, found2 := ExtractSection(md2, "Brief")
+	if !found2 || !strings.Contains(body2, "after") {
+		t.Fatalf("fenced heading terminated the section: %q", body2)
+	}
+}
+
+func TestExtractSectionBoundaryIsEqualOrHigherLevel(t *testing.T) {
+	md := "## Brief\n\nintro\n\n### Sub Facet\n\ndetail\n\n## Rows\n\nrow\n"
+	body, found := ExtractSection(md, "Brief")
+	if !found {
+		t.Fatal("Brief section should be found")
+	}
+	if !strings.Contains(body, "Sub Facet") || strings.Contains(body, "Rows") {
+		t.Errorf("lower-level headings belong to the section, equal-level ends it: %q", body)
+	}
+}

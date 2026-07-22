@@ -75,9 +75,11 @@ func (m model) handleSessionsRefreshed(msg sessionsRefreshedMsg) (model, tea.Cmd
 	m.sessionActivity = sessionview.FoldEvents(m.sessionActivity, msg.events)
 	m.sessionsJournalCursor = msg.journalCursor
 
-	m.sessionsList.SetSessions(m.buildSessionRows(msg.instances, msg.pending, msg.claimed))
+	m.sessionRows = m.buildSessionRows(msg.instances, msg.pending, msg.claimed)
+	m.sessionsList.SetSessions(m.sessionRows)
 	m.sessionsCount = m.sessionsList.Count()
 	m.sessionsNeedsInput = m.sessionsList.NeedsInputCount()
+	m.syncCoordinationSessions()
 
 	if m.state == stateSessions {
 		m.loadSessionsDetail(m.sessionsList.CurrentKey())
@@ -95,6 +97,25 @@ func (m model) buildSessionRows(instances []session.Instance, pending []session.
 	var rows []sessionview.SessionRow
 	liveSlugs := map[string]bool{}
 
+	// In-memory session→project join for the coordination view: the session's
+	// own slug wins, a derived worker falls back to its base item. Nothing is
+	// persisted — a session whose slug resolves to no item joins no arc.
+	itemProject := map[string]string{}
+	for _, it := range m.list.Items() {
+		itemProject[it.Slug] = it.Project
+	}
+	projectOf := func(slug, base string) string {
+		if p, ok := itemProject[slug]; ok {
+			return p
+		}
+		if base != "" {
+			if p, ok := itemProject[base]; ok {
+				return p
+			}
+		}
+		return ""
+	}
+
 	for _, inst := range instances {
 		local := inst.Name == m.instanceName
 		for _, s := range inst.Sessions {
@@ -106,6 +127,7 @@ func (m model) buildSessionRows(instances []session.Instance, pending []session.
 			if display == "" {
 				display = sessionview.ChatDisplayID(s.SessionID)
 			}
+			base := deriveBase(s.Slug)
 			rows = append(rows, sessionview.SessionRow{
 				RowID:        inst.Name + "|" + s.Slug + "|" + s.SessionID,
 				PanelKey:     s.Slug,
@@ -116,8 +138,9 @@ func (m model) buildSessionRows(instances []session.Instance, pending []session.
 				Instance:     inst.Name,
 				Local:        local,
 				SessionID:    s.SessionID,
-				BaseItem:     deriveBase(s.Slug),
+				BaseItem:     base,
 				Tmux:         s.Tmux,
+				Project:      projectOf(s.Slug, base),
 				NeedsInput:   act.NeedsInput,
 				Quiescent:    act.Quiescent,
 				ClosePending: act.ClosePending,
@@ -135,6 +158,7 @@ func (m model) buildSessionRows(instances []session.Instance, pending []session.
 		if display == "" {
 			display = "chat:? (spawning)"
 		}
+		base := deriveBase(slug)
 		rows = append(rows, sessionview.SessionRow{
 			RowID:     "inflight|" + req.RequestID,
 			Slug:      slug,
@@ -143,7 +167,8 @@ func (m model) buildSessionRows(instances []session.Instance, pending []session.
 			Initiator: req.Initiator,
 			Instance:  owner,
 			InFlight:  true,
-			BaseItem:  deriveBase(slug),
+			BaseItem:  base,
+			Project:   projectOf(slug, base),
 		})
 	}
 	for _, req := range pending {
@@ -188,6 +213,13 @@ func (m model) openSessionCloseConfirm() (model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	return m.openSessionCloseConfirmFor(row)
+}
+
+// openSessionCloseConfirmFor opens the close confirmation for the given row —
+// the shared entry for the sessions list and the coordination detail's
+// Sessions tab.
+func (m model) openSessionCloseConfirmFor(row sessionview.SessionRow) (model, tea.Cmd) {
 	if row.InFlight {
 		m.flashErr = "cannot close a spawning session — wait for it to start"
 		return m, nil
