@@ -68,6 +68,60 @@ def require_token(name: str, value: str) -> str:
     return value
 
 
+def git_common(common_dir: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    proc = subprocess.run(
+        ["git", "--git-dir", str(common_dir), *args],
+        text=True, capture_output=True, check=False,
+    )
+    if check and proc.returncode != 0:
+        fail(proc.stderr.strip() or proc.stdout.strip() or f"git {args[0] if args else ''} failed")
+    return proc
+
+
+def accepted_ref_names(slug: str, stream: str, attempt: str) -> dict:
+    base = f"refs/lore/accepted/{slug}/{stream}/{attempt}"
+    return {"integrated": f"{base}/integrated", "source": f"{base}/source"}
+
+
+def resolve_commit(common_dir: str, candidate: str | None) -> str | None:
+    """Return the canonical OID if candidate names an existing commit, else None."""
+    if not candidate:
+        return None
+    if git_common(common_dir, "cat-file", "-e", f"{candidate}^{{commit}}", check=False).returncode != 0:
+        return None
+    return git_common(common_dir, "rev-parse", "--verify", f"{candidate}^{{commit}}").stdout.strip()
+
+
+def write_accepted_ref(common_dir: str, ref: str, sha: str) -> None:
+    """Create-only pin of ref -> sha. Same OID is idempotent; a different OID is refused."""
+    if git_common(common_dir, "check-ref-format", ref, check=False).returncode != 0:
+        fail(f"invalid acceptance ref name: {ref}")
+    existing = git_common(common_dir, "rev-parse", "--verify", "--quiet", ref, check=False)
+    current = existing.stdout.strip()
+    if existing.returncode == 0 and current:
+        if current != sha:
+            fail(f"acceptance ref {ref} is immutable; use a new attempt id")
+        return
+    git_common(common_dir, "update-ref", ref, sha, "")
+
+
+def audit_accepted_refs(common_dir: str | None, refs: list) -> None:
+    """Fail closed unless every recorded acceptance ref resolves to its recorded SHA."""
+    if not common_dir:
+        fail("acceptance ref audit requires git_common_dir")
+    for entry in refs:
+        ref = entry.get("ref") if isinstance(entry, dict) else None
+        sha = entry.get("sha") if isinstance(entry, dict) else None
+        if not ref or not sha:
+            fail(f"malformed acceptance ref record: {entry!r}")
+        proc = git_common(common_dir, "rev-parse", "--verify", "--quiet", ref, check=False)
+        resolved = proc.stdout.strip()
+        if proc.returncode != 0 or not resolved:
+            fail(f"acceptance ref is missing: {ref}")
+        if resolved != sha:
+            fail(f"acceptance ref mismatch: {ref} resolves to {resolved} expected {sha}")
+
+
 def load_json(path: Path, label: str) -> dict:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -356,12 +410,36 @@ def command_freeze_integrated(args, store: Store) -> dict:
             fail(f"unknown stream {args.stream}")
         attempt = store.attempt(stream, args.attempt)
         source = store.validate_manifest(attempt.get("source_manifest"), "source", args.stream, args.attempt)
+
+        identity, _ = worktree_record(store.kdir, attempt.get("worktree_id"))
+        common_dir = identity.get("git_common_dir")
+        if not common_dir:
+            fail("worktree identity carries no git_common_dir for acceptance refs")
+        integrated_commit = resolve_commit(common_dir, args.integrated_sha)
+        if integrated_commit is None:
+            fail(f"integrated sha does not resolve to a commit: {args.integrated_sha!r}")
+        source_tip = (resolve_commit(common_dir, source.get("head_sha"))
+                      or resolve_commit(common_dir, source.get("temporary_branch")))
+        if source_tip is None:
+            fail("stream tip does not resolve: neither source head_sha nor temporary_branch is a commit")
+        names = accepted_ref_names(store.slug, args.stream, args.attempt)
+        acceptance_refs = [
+            {"ref": names["integrated"], "sha": integrated_commit},
+            {"ref": names["source"], "sha": source_tip},
+        ]
+        # Anchor the accepted commits before the manifest and streams.json record
+        # the acceptance: a crash after this point leaves at most an orphan ref,
+        # never an acceptance without its durable anchor.
+        for entry in acceptance_refs:
+            write_accepted_ref(common_dir, entry["ref"], entry["sha"])
+
         metadata = {
             "worktree_id": attempt.get("worktree_id"),
             "integrated_sha": args.integrated_sha,
             "source_manifest_sha256": attempt["source_manifest"]["sha256"],
             "changed_paths": args.changed_path,
             "verdict": args.verdict,
+            "acceptance_refs": acceptance_refs,
         }
         manifest_ref = store.freeze_object("integrated", args.stream, args.attempt, Path(args.patch), metadata)
         if attempt.get("integrated_manifest") not in (None, manifest_ref):
@@ -372,7 +450,8 @@ def command_freeze_integrated(args, store: Store) -> dict:
                         "integrated_manifest": manifest_ref, "updated_at": now()})
         store.write(state)
     return {"status": "integrated", "stream_id": args.stream, "attempt_id": args.attempt,
-            "source_manifest": source, "manifest": manifest_ref, "verdict": args.verdict}
+            "source_manifest": source, "manifest": manifest_ref, "verdict": args.verdict,
+            "acceptance_refs": acceptance_refs}
 
 
 def command_status(args, store: Store) -> dict:
@@ -386,10 +465,13 @@ def command_status(args, store: Store) -> dict:
             try:
                 if attempt.get("source_manifest"):
                     store.validate_manifest(attempt["source_manifest"], "source", stream["stream_id"], attempt["attempt_id"])
+                integrated_manifest = None
                 if attempt.get("integrated_manifest"):
-                    store.validate_manifest(attempt["integrated_manifest"], "integrated", stream["stream_id"], attempt["attempt_id"])
+                    integrated_manifest = store.validate_manifest(attempt["integrated_manifest"], "integrated", stream["stream_id"], attempt["attempt_id"])
                 identity, source = worktree_record(store.kdir, attempt["worktree_id"])
                 validate_identity(identity, store.slug, stream["stream_id"], attempt["attempt_id"], attempt["worktree_id"])
+                if integrated_manifest is not None and isinstance(integrated_manifest.get("acceptance_refs"), list):
+                    audit_accepted_refs(identity.get("git_common_dir"), integrated_manifest["acceptance_refs"])
                 row["cleanup"] = cleanup_status(identity, source)
                 row["valid"] = True
             except (SystemExit, OSError, json.JSONDecodeError) as exc:

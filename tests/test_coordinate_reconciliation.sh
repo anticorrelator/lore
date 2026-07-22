@@ -41,10 +41,25 @@ cat >"$KDIR/_work/coordinated/coordination.md" <<'EOF'
 | stream-c | Unrelated writer | — | writer | in-flight | — | live-c |
 EOF
 
+# A real repository backs the reconciler's git_common_dir. Acceptance refs are
+# pinned into it at freeze-integrated, so their targets must be real commits.
+REPO="$TEST_ROOT/repo"
+COMMON="$REPO/.git"
+git init -q "$REPO"
+git -C "$REPO" config user.email test@example.com
+git -C "$REPO" config user.name Test
+git -C "$REPO" commit -q --allow-empty -m base
+mkcommit() { git -C "$REPO" commit -q --allow-empty -m "$1" && git -C "$REPO" rev-parse HEAD; }
+
+SRC_A=$(mkcommit src-a)
+INT_A=$(mkcommit int-a)
+SRC_D=$(mkcommit src-d)
+INT_D=$(mkcommit int-d)
+
 write_identity() {
-  local id="$1" stream="$2" attempt="$3"
+  local id="$1" stream="$2" attempt="$3" item="${4:-coordinated}"
   cat >"$KDIR/_coordination/worktrees/registry/$id.json" <<JSON
-{"schema_version":1,"worktree_id":"$id","execution_dir":"$TEST_ROOT/$id","temporary_branch":"refs/heads/$id","git_common_dir":"$TEST_ROOT/git","allocation_base_sha":"base-$id","owner_item":"coordinated","stream_id":"$stream","attempt_id":"$attempt","owner":{"kind":"seat","id":"seat-1"},"lease":{"duration_seconds":900,"renewed_at":"2026-07-21T00:00:00Z","expires_at":"2099-07-21T00:15:00Z"},"guard_identity":{},"state":"quiescent","lifecycle":[]}
+{"schema_version":1,"worktree_id":"$id","execution_dir":"$TEST_ROOT/$id","temporary_branch":"refs/heads/$id","git_common_dir":"$COMMON","allocation_base_sha":"base-$id","owner_item":"$item","stream_id":"$stream","attempt_id":"$attempt","owner":{"kind":"seat","id":"seat-1"},"lease":{"duration_seconds":900,"renewed_at":"2026-07-21T00:00:00Z","expires_at":"2099-07-21T00:15:00Z"},"guard_identity":{},"state":"quiescent","lifecycle":[]}
 JSON
 }
 
@@ -54,10 +69,16 @@ printf 'diff --git a/a.txt b/a.txt\n+integrated\n' >"$TEST_ROOT/integrated-a.pat
 
 python3 "$RECONCILE" freeze-source --kdir "$KDIR" --slug coordinated \
   --stream stream-a --attempt attempt-1 --worktree-id wt-a --tree writer \
-  --patch "$TEST_ROOT/source-a.patch" --head-sha source-a --changed-path a.txt --json >/dev/null
+  --patch "$TEST_ROOT/source-a.patch" --head-sha "$SRC_A" --changed-path a.txt --json >/dev/null
 python3 "$RECONCILE" freeze-integrated --kdir "$KDIR" --slug coordinated \
   --stream stream-a --attempt attempt-1 --patch "$TEST_ROOT/integrated-a.patch" \
-  --integrated-sha integrated-a --changed-path a.txt --verdict full --json >/dev/null
+  --integrated-sha "$INT_A" --changed-path a.txt --verdict full --json >/dev/null
+
+# Acceptance refs are pinned at freeze-integrated, resolving to the recorded SHAs.
+A_INT_REF="refs/lore/accepted/coordinated/stream-a/attempt-1/integrated"
+A_SRC_REF="refs/lore/accepted/coordinated/stream-a/attempt-1/source"
+[[ "$(git --git-dir="$COMMON" rev-parse "$A_INT_REF")" == "$INT_A" ]]
+[[ "$(git --git-dir="$COMMON" rev-parse "$A_SRC_REF")" == "$SRC_A" ]]
 
 python3 - "$KDIR/_coordination/worktrees/registry/wt-a.json" \
   "$KDIR/_coordination/worktrees/archive/wt-a.json" <<'PY'
@@ -162,10 +183,10 @@ printf 'diff --git a/d.txt b/d.txt\n' >"$TEST_ROOT/source-d.patch"
 printf 'diff --git a/d.txt b/d.txt\n+integrated\n' >"$TEST_ROOT/integrated-d.patch"
 python3 "$RECONCILE" freeze-source --kdir "$KDIR" --slug coordinated \
   --stream stream-d --attempt attempt-1 --worktree-id wt-d --tree writer \
-  --patch "$TEST_ROOT/source-d.patch" --head-sha source-d --changed-path d.txt --json >/dev/null
+  --patch "$TEST_ROOT/source-d.patch" --head-sha "$SRC_D" --changed-path d.txt --json >/dev/null
 python3 "$RECONCILE" freeze-integrated --kdir "$KDIR" --slug coordinated \
   --stream stream-d --attempt attempt-1 --patch "$TEST_ROOT/integrated-d.patch" \
-  --integrated-sha integrated-d --changed-path d.txt --verdict full --json >/dev/null
+  --integrated-sha "$INT_D" --changed-path d.txt --verdict full --json >/dev/null
 set +e
 CLOSE_OUTPUT=$(LORE_DATA_DIR="$DATA_DIR" LORE_KNOWLEDGE_DIR="$KDIR" \
   bash "$CLOSE" coordinated --verdict full --summary "coordinated close" 2>&1)
@@ -180,5 +201,87 @@ OBJECT=$(jq -r '.streams[0].attempts[0].source_manifest.path' "$KDIR/_coordinati
 printf 'tamper\n' >>"$KDIR/$OBJECT"
 TAMPERED=$(python3 "$RECONCILE" status --kdir "$KDIR" --slug coordinated --json)
 jq -e '.valid == false' <<<"$TAMPERED" >/dev/null
+
+# Acceptance-ref behaviors on an isolated slug: verdict coverage, idempotency,
+# immutability, status audit, and pre-feature backward compatibility.
+freeze_accepted() {
+  local stream="$1" verdict="$2" src="$3" integrated="$4"
+  local wt="wt-$stream"
+  write_identity "$wt" "$stream" attempt-1 accepted
+  printf 'diff --git a/%s.txt b/%s.txt\n' "$stream" "$stream" >"$TEST_ROOT/$stream-src.patch"
+  printf 'diff --git a/%s.txt b/%s.txt\n+x\n' "$stream" "$stream" >"$TEST_ROOT/$stream-int.patch"
+  python3 "$RECONCILE" freeze-source --kdir "$KDIR" --slug accepted \
+    --stream "$stream" --attempt attempt-1 --worktree-id "$wt" --tree writer \
+    --patch "$TEST_ROOT/$stream-src.patch" --head-sha "$src" --changed-path "$stream.txt" --json >/dev/null
+  python3 "$RECONCILE" freeze-integrated --kdir "$KDIR" --slug accepted \
+    --stream "$stream" --attempt attempt-1 --patch "$TEST_ROOT/$stream-int.patch" \
+    --integrated-sha "$integrated" --changed-path "$stream.txt" --verdict "$verdict" --json >/dev/null
+}
+
+assert_accepted_refs() {
+  local stream="$1" src="$2" integrated="$3"
+  local base="refs/lore/accepted/accepted/$stream/attempt-1"
+  [[ "$(git --git-dir="$COMMON" rev-parse "$base/integrated")" == "$integrated" ]]
+  [[ "$(git --git-dir="$COMMON" rev-parse "$base/source")" == "$src" ]]
+}
+
+# Refs are pinned for every verdict, mirroring the object store.
+SRC_FULL=$(mkcommit src-full); INT_FULL=$(mkcommit int-full)
+SRC_PART=$(mkcommit src-part); INT_PART=$(mkcommit int-part)
+SRC_NONE=$(mkcommit src-none); INT_NONE=$(mkcommit int-none)
+freeze_accepted stream-full full "$SRC_FULL" "$INT_FULL"
+freeze_accepted stream-partial partial "$SRC_PART" "$INT_PART"
+freeze_accepted stream-none none "$SRC_NONE" "$INT_NONE"
+assert_accepted_refs stream-full "$SRC_FULL" "$INT_FULL"
+assert_accepted_refs stream-partial "$SRC_PART" "$INT_PART"
+assert_accepted_refs stream-none "$SRC_NONE" "$INT_NONE"
+
+# Re-running freeze-integrated with identical arguments is idempotent.
+python3 "$RECONCILE" freeze-integrated --kdir "$KDIR" --slug accepted \
+  --stream stream-full --attempt attempt-1 --patch "$TEST_ROOT/stream-full-int.patch" \
+  --integrated-sha "$INT_FULL" --changed-path stream-full.txt --verdict full --json >/dev/null
+assert_accepted_refs stream-full "$SRC_FULL" "$INT_FULL"
+
+# A different integrated SHA for the same attempt fails on the immutability rule.
+set +e
+IMMUTABLE_OUT=$(python3 "$RECONCILE" freeze-integrated --kdir "$KDIR" --slug accepted \
+  --stream stream-full --attempt attempt-1 --patch "$TEST_ROOT/stream-full-int.patch" \
+  --integrated-sha "$INT_PART" --changed-path stream-full.txt --verdict full --json 2>&1)
+IMMUTABLE_RC=$?
+set -e
+[[ $IMMUTABLE_RC -ne 0 ]]
+[[ "$IMMUTABLE_OUT" == *immutable* ]]
+
+# status marks an attempt invalid when an acceptance ref is deleted out from under it.
+git --git-dir="$COMMON" update-ref -d "refs/lore/accepted/accepted/stream-full/attempt-1/integrated"
+ACCEPTED_STATUS=$(python3 "$RECONCILE" status --kdir "$KDIR" --slug accepted --json)
+jq -e '.valid == false' <<<"$ACCEPTED_STATUS" >/dev/null
+jq -e '[.streams[] | select(.stream_id=="stream-full") | .attempts[0]][0] | .valid == false and (.validation_error | test("acceptance ref"))' <<<"$ACCEPTED_STATUS" >/dev/null
+jq -e '[.streams[] | select(.stream_id=="stream-partial") | .attempts[0]][0] | .valid == true' <<<"$ACCEPTED_STATUS" >/dev/null
+
+# A pre-feature integrated manifest (no acceptance_refs metadata) skips the audit
+# and stays valid even when its refs are absent.
+SRC_LEG=$(mkcommit src-legacy); INT_LEG=$(mkcommit int-legacy)
+freeze_accepted stream-legacy full "$SRC_LEG" "$INT_LEG"
+python3 - "$KDIR" accepted stream-legacy attempt-1 <<'PY'
+import hashlib, json, sys
+kdir, slug, stream, attempt = sys.argv[1:5]
+streams_path = f"{kdir}/_coordination/reconciliation/{slug}/streams.json"
+state = json.load(open(streams_path, encoding="utf-8"))
+ref = next(a["integrated_manifest"] for s in state["streams"] if s["stream_id"] == stream
+           for a in s["attempts"] if a["attempt_id"] == attempt)
+manifest = json.load(open(f"{kdir}/{ref['path']}", encoding="utf-8"))
+manifest.pop("acceptance_refs", None)
+body = (json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+new_hash = hashlib.sha256(body).hexdigest()
+rel = f"_coordination/reconciliation/{slug}/objects/sha256-{new_hash}.json"
+open(f"{kdir}/{rel}", "wb").write(body)
+ref["sha256"], ref["path"] = new_hash, rel
+json.dump(state, open(streams_path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
+git --git-dir="$COMMON" update-ref -d "refs/lore/accepted/accepted/stream-legacy/attempt-1/integrated"
+git --git-dir="$COMMON" update-ref -d "refs/lore/accepted/accepted/stream-legacy/attempt-1/source"
+LEGACY_STATUS=$(python3 "$RECONCILE" status --kdir "$KDIR" --slug accepted --json)
+jq -e '[.streams[] | select(.stream_id=="stream-legacy") | .attempts[0]][0] | .valid == true' <<<"$LEGACY_STATUS" >/dev/null
 
 echo "coordinate reconciliation tests passed"
