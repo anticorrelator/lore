@@ -1048,13 +1048,13 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 					return m, func() tea.Msg { return msg }
 				}
 			}
-			// Enter the coordination view from every context where `c` is not
-			// already chat (the two blocks above: work-detail focus, follow-ups).
-			// Follow-ups keeps its chat `c`, so coordination is reached from
-			// there via w→c. Focus-conjunct guarded so a terminal-focused
-			// session still forwards `c` to its PTY. With zero arcs the view
-			// opens to its explicit empty state.
-			if ((m.state == stateWork && m.focusedPanel == panelLeft) || m.state == stateSessions || m.state == stateSettlement) &&
+		case "o":
+			// Enter the coordination view. `o` collides with nothing, so it binds
+			// from every section with only the standard terminal-focus guard the
+			// other state-switch keys use — a terminal-focused session still
+			// forwards `o` to its PTY. With zero arcs the view opens to its
+			// explicit empty state.
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateSettlement) &&
 				!(m.terminalMode && m.focusedPanel == panelRight) {
 				m.state = stateCoordination
 				m.terminalMode = false

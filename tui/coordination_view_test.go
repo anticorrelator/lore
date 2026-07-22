@@ -30,14 +30,14 @@ func coordinationContractModel(t *testing.T) model {
 	return m
 }
 
-// TestCoordinationEntryKeybindContract pins the `c` entry key advertised in
+// TestCoordinationEntryKeybindContract pins the `o` entry key advertised in
 // the tab indicator and the work/sessions/settlement status bars, and that
 // chat keeps `c` in its two contexts (work-detail focus, follow-ups).
 func TestCoordinationEntryKeybindContract(t *testing.T) {
-	t.Run("c (coordination)", func(t *testing.T) {
-		nm, cmd := updateModel(t, workContractModel(), press('c'))
+	t.Run("o (coordination)", func(t *testing.T) {
+		nm, cmd := updateModel(t, workContractModel(), press('o'))
 		if nm.state != stateCoordination {
-			t.Fatalf("c from the work list should enter coordination, got state %d", nm.state)
+			t.Fatalf("o from the work list should enter coordination, got state %d", nm.state)
 		}
 		if cmd == nil {
 			t.Error("entering coordination should dispatch the arc scan")
@@ -47,16 +47,16 @@ func TestCoordinationEntryKeybindContract(t *testing.T) {
 		}
 
 		sm := sessionsContractModel(t)
-		nsm, _ := updateModel(t, sm, press('c'))
+		nsm, _ := updateModel(t, sm, press('o'))
 		if nsm.state != stateCoordination {
-			t.Error("c from the sessions list should enter coordination")
+			t.Error("o from the sessions list should enter coordination")
 		}
 
 		stm := minimalModel(stateSettlement, nil, nil)
 		stm.width, stm.height = 120, 40
-		nstm, _ := updateModel(t, stm, press('c'))
+		nstm, _ := updateModel(t, stm, press('o'))
 		if nstm.state != stateCoordination {
-			t.Error("c from settlement should enter coordination")
+			t.Error("o from settlement should enter coordination")
 		}
 	})
 	t.Run("c stays chat in the work detail focus", func(t *testing.T) {
@@ -70,11 +70,11 @@ func TestCoordinationEntryKeybindContract(t *testing.T) {
 			t.Fatalf("c produced %T, want work.ChatRequestMsg", cmd())
 		}
 	})
-	t.Run("c with zero arcs opens the explicit empty state", func(t *testing.T) {
+	t.Run("o with zero arcs opens the explicit empty state", func(t *testing.T) {
 		m := workContractModel()
-		nm, _ := updateModel(t, m, press('c'))
+		nm, _ := updateModel(t, m, press('o'))
 		if nm.state != stateCoordination {
-			t.Fatal("c should enter coordination even with zero arcs")
+			t.Fatal("o should enter coordination even with zero arcs")
 		}
 		if out := stripANSI(nm.viewContent()); !strings.Contains(out, "No coordination arcs") {
 			t.Errorf("zero-arc coordination view must render its empty state:\n%s", out)
