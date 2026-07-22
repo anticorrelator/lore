@@ -15,6 +15,38 @@ import (
 // indexPollTickMsg fires every 5 seconds to trigger an mtime check on _index.json.
 type indexPollTickMsg struct{}
 
+// sessionMirrorCapturedMsg carries a client-less capture-pane snapshot of a
+// remote tmux-hosted session's visible screen for the read-only mirror card.
+type sessionMirrorCapturedMsg struct {
+	rowID    string
+	tmuxName string
+	lines    []string
+	err      error
+}
+
+// captureSessionMirrorCmd captures a remote session's visible tmux screen off the
+// UI thread. rowID/tmuxName are snapshotted at Cmd-build time; the handler drops a
+// snapshot whose row no longer matches, so a capture landing after the cursor
+// moved never paints under the wrong session. The capture attaches no client and
+// so cannot perturb the owning instance's screen-state contract.
+func captureSessionMirrorCmd(rowID, tmuxName string) tea.Cmd {
+	return func() tea.Msg {
+		lines, err := work.CapturePaneScreen(tmuxName)
+		return sessionMirrorCapturedMsg{rowID: rowID, tmuxName: tmuxName, lines: lines, err: err}
+	}
+}
+
+// handleSessionMirrorCaptured pushes a fresh remote-screen snapshot into the
+// read-only card. A capture error leaves the prior frame in place rather than
+// blanking the mirror mid-session; SetMirror itself drops a stale-row snapshot.
+func (m model) handleSessionMirrorCaptured(msg sessionMirrorCapturedMsg) (model, tea.Cmd) {
+	if msg.err != nil {
+		return m, nil
+	}
+	m.sessionsDetail.SetMirror(msg.rowID, msg.lines)
+	return m, nil
+}
+
 func indexPollTick() tea.Cmd {
 	return tea.Tick(5*time.Second, func(time.Time) tea.Msg { return indexPollTickMsg{} })
 }
@@ -236,6 +268,16 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 	if m.detail.IsProject() {
 		if ps := m.detail.ProjectSlug(); ps != "" {
 			cmds = append(cmds, checkProjectDetailMtime(m.config.WorkDir, ps))
+		}
+	}
+	// Cross-instance read-only mirror: while a remote tmux-hosted session's card
+	// is displayed, capture its visible screen on this same heartbeat. Visibility-
+	// scoped — RemoteMirror returns false for a hidden card, a local panel, an
+	// in-flight spawn, or a direct-PTY row — so the capture-pane subprocess cost is
+	// proportional to what the user is actually watching. No second tick loop.
+	if m.state == stateSessions && m.tmuxEnabled {
+		if rowID, tmuxName, ok := m.sessionsDetail.RemoteMirror(); ok {
+			cmds = append(cmds, captureSessionMirrorCmd(rowID, tmuxName))
 		}
 	}
 	// Always poll the follow-up index so the tab indicator reflects external

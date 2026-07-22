@@ -36,6 +36,7 @@ type SessionRow struct {
 	InFlight  bool   // a queued spawn not yet live
 	SessionID string // harness session id (close --session addressing)
 	BaseItem  string // base work item for a derived-slug worker; "" = ungrouped
+	Tmux      string // registry tmux session name; "" = direct-PTY, no remote mirror
 
 	NeedsInput   bool
 	Quiescent    bool

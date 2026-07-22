@@ -268,3 +268,32 @@ func captureTmuxPaneHistory(name string) ([]string, error) {
 	}
 	return lines, nil
 }
+
+// CapturePaneScreen returns a named session's visible screen as display rows,
+// preserving ANSI attributes — the read side of the cross-instance read-only
+// mirror. It is captureTmuxPaneHistory's visible-screen sibling: it omits `-S -`,
+// so only the on-screen rows are returned (what the owning instance's client
+// currently displays), not scrollback.
+//
+// capture-pane attaches no client, so this read is size-neutral: it cannot become
+// the shared server's `window-size latest` client and resize the pane, which is
+// what corrupts the owner's screen-state contract that the injection/peek
+// signatures anchor on. This is why the mirror captures rather than attaching a
+// read-only client. Callers gate on TmuxAvailable; the tmux name is the registry
+// row's, opaque here.
+func CapturePaneScreen(name string) ([]string, error) {
+	if name == "" {
+		return nil, fmt.Errorf("capture tmux screen: empty session name")
+	}
+	out, err := exec.Command(tmuxBinary, "-L", tmuxServerLabel,
+		"capture-pane", "-p", "-e", "-t", name).Output()
+	if err != nil {
+		return nil, fmt.Errorf("tmux capture-pane: %w", err)
+	}
+	text := strings.ReplaceAll(string(out), "\r\n", "\n")
+	lines := strings.Split(text, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines, nil
+}
