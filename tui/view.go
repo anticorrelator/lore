@@ -255,7 +255,7 @@ func renderTabIndicator(activeTab appState, workCount, followupCount, settlement
 		section("f", "follow-ups", followupCount, activeTab == stateFollowUps) + sep +
 		sessionsSection + sep +
 		section("t", "settlement", settlementCount, activeTab == stateSettlement) + sep +
-		section("c", "coordination", coordinationCount, activeTab == stateCoordination)
+		section("o", "coordination", coordinationCount, activeTab == stateCoordination)
 	lineW := lipgloss.Width(line)
 	if identity != "" {
 		idW := lipgloss.Width(identity)

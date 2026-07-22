@@ -3059,11 +3059,11 @@ func TestWorkListStatusBarKeybindContract(t *testing.T) {
 			t.Fatalf("i produced %T, want work.ImplementRequestMsg", cmd())
 		}
 	})
-	t.Run("c (coordination)", func(t *testing.T) {
+	t.Run("o (coordination)", func(t *testing.T) {
 		m := workContractModel()
-		nm, _ := updateModel(t, m, press('c'))
+		nm, _ := updateModel(t, m, press('o'))
 		if nm.state != stateCoordination {
-			t.Fatalf("c on the work list should enter the coordination view, got state %d", nm.state)
+			t.Fatalf("o on the work list should enter the coordination view, got state %d", nm.state)
 		}
 	})
 	t.Run("K (knowledge)", func(t *testing.T) {
@@ -3876,11 +3876,11 @@ func TestTabIndicatorAdvertisesSectionKeys(t *testing.T) {
 		want    []string
 		notWant []string
 	}{
-		{"work", stateWork, []string{"work (1)", "f follow-ups (2)", "v sessions (4)", "t settlement (3)", "c coordination (5)"}, []string{"w work"}},
-		{"followups", stateFollowUps, []string{"w work (1)", "v sessions (4)", "t settlement (3)", "c coordination (5)"}, []string{"f follow-ups"}},
-		{"sessions", stateSessions, []string{"w work (1)", "f follow-ups (2)", "t settlement (3)", "c coordination (5)"}, []string{"v sessions"}},
-		{"settlement", stateSettlement, []string{"w work (1)", "f follow-ups (2)", "v sessions (4)", "c coordination (5)"}, []string{"t settlement"}},
-		{"coordination", stateCoordination, []string{"w work (1)", "f follow-ups (2)", "v sessions (4)", "t settlement (3)"}, []string{"c coordination"}},
+		{"work", stateWork, []string{"work (1)", "f follow-ups (2)", "v sessions (4)", "t settlement (3)", "o coordination (5)"}, []string{"w work"}},
+		{"followups", stateFollowUps, []string{"w work (1)", "v sessions (4)", "t settlement (3)", "o coordination (5)"}, []string{"f follow-ups"}},
+		{"sessions", stateSessions, []string{"w work (1)", "f follow-ups (2)", "t settlement (3)", "o coordination (5)"}, []string{"v sessions"}},
+		{"settlement", stateSettlement, []string{"w work (1)", "f follow-ups (2)", "v sessions (4)", "o coordination (5)"}, []string{"t settlement"}},
+		{"coordination", stateCoordination, []string{"w work (1)", "f follow-ups (2)", "v sessions (4)", "t settlement (3)"}, []string{"o coordination"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
