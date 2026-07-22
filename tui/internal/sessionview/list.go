@@ -194,6 +194,11 @@ func (m ListModel) View() string { return m.list.View() }
 // CurrentKey returns the RowID under the cursor, or "" on a header/empty list.
 func (m ListModel) CurrentKey() string { return m.list.CurrentID() }
 
+// SetCursorByID moves the cursor to the row with the given RowID, reporting
+// whether it was found. The move is programmatic, so callers must pair it with
+// an explicit detail load — the list fires no cursor-change hook.
+func (m *ListModel) SetCursorByID(id string) bool { return m.list.SetCursorByID(id) }
+
 // CurrentSession returns the session under the cursor, or false on a header row.
 func (m ListModel) CurrentSession() (SessionRow, bool) {
 	return m.SessionByID(m.list.CurrentID())

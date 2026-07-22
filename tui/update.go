@@ -737,6 +737,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.state = stateSessions
 				m.terminalMode = false
 				m.focusedPanel = panelLeft
+				m.returnToCoordination = false
 				return m, m.sessionsRefreshCmd()
 			}
 		case "t":
@@ -744,6 +745,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.state = stateSettlement
 				m.terminalMode = false
 				m.focusedPanel = panelLeft
+				m.returnToCoordination = false
 				return m, loadSettlementStatus()
 			}
 		case "ctrl+c":
@@ -866,6 +868,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				focusCmd := ta.Focus()
 				m.aiInput = ta
 				m.aiInputActive = true
+				m.returnToCoordination = false
 				return m, focusCmd
 			}
 		case "a":
@@ -984,6 +987,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.followupPanelCallbacks().resize()
 				m.lastFollowupDetailMtime = time.Time{}
 				m.focusedPanel = panelLeft
+				m.returnToCoordination = false
 				return m, followup.LoadIndexCmd(m.config.KnowledgeDir)
 			}
 		case "w":
@@ -995,6 +999,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.state = stateWork
 				m.terminalMode = false
 				m.focusedPanel = panelLeft
+				m.returnToCoordination = false
 				return m, loadWorkItems(m.config.WorkDir)
 			}
 			if m.state == stateSettlement {
@@ -1059,6 +1064,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.state = stateCoordination
 				m.terminalMode = false
 				m.focusedPanel = panelLeft
+				m.returnToCoordination = false
 				return m, tea.Batch(m.scanArcsCmd(), m.sessionsRefreshCmd())
 			}
 		case "R":
@@ -1396,6 +1402,14 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.focusedPanel = panelRight
 		return m, m.loadCoordinationDetail(msg.Slug)
 
+	case coordination.MemberSelectedMsg:
+		// Enter/l on an Items-tab row: drill into the member's work detail.
+		return m.handleCoordinationMemberSelected(msg)
+
+	case coordination.SessionSelectedMsg:
+		// Enter/l on a Sessions-tab row: drill into the session's workspace surface.
+		return m.handleCoordinationSessionSelected(msg)
+
 	case sessionMirrorCapturedMsg:
 		return m.handleSessionMirrorCaptured(msg)
 
@@ -1634,6 +1648,16 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	// routeFocusedPanel forwards everything else to the focused sub-model.
 	switch m.state {
 	case stateWork:
+		// A pending coordination drill-in return fires from the member's detail
+		// on a single h/Esc — before the split-pane seam, which would otherwise
+		// only shift focus to the work list.
+		if km, ok := msg.(tea.KeyPressMsg); ok && m.returnToCoordination &&
+			m.focusedPanel == panelRight && !m.terminalMode {
+			switch km.String() {
+			case "esc", "h":
+				return m.returnToCoordinationView()
+			}
+		}
 		cb := m.workPanelCallbacks()
 		if cmd, consumed := handlePanelRouting(&m, msg, cb); consumed {
 			return m, cmd
@@ -1651,10 +1675,15 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			return m, cmd
 		}
 		// esc/h on the list (left focus) leaves the workspace back to work; the
-		// split-pane seam only maps esc/h on the right panel (card → list).
+		// split-pane seam only maps esc/h on the right panel (card → list). A
+		// pending coordination drill-in return redirects that exit to the
+		// coordination view instead of work.
 		if km, ok := msg.(tea.KeyPressMsg); ok && m.focusedPanel == panelLeft {
 			switch km.String() {
 			case "esc", "h":
+				if m.returnToCoordination {
+					return m.returnToCoordinationView()
+				}
 				m.state = stateWork
 				m.terminalMode = false
 				m.focusedPanel = panelLeft

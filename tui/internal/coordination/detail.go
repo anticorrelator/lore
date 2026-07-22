@@ -30,6 +30,20 @@ var (
 	pinDeadStyle   = lipgloss.NewStyle().Foreground(style.ColorDanger).Bold(true)
 )
 
+// MemberSelectedMsg is emitted when Enter/l lands on an Items-tab member row.
+// The host carries the selection into the work detail and records the
+// coordination view as the return target.
+type MemberSelectedMsg struct {
+	Slug string
+}
+
+// SessionSelectedMsg is emitted when Enter/l lands on a Sessions-tab row. The
+// host carries the row into the sessions workspace with its existing attach
+// semantics and records the coordination view as the return target.
+type SessionSelectedMsg struct {
+	RowID string
+}
+
 // DetailModel is the coordination arc detail: a tab host over Status
 // (Brief + pin + machine state), Sessions (the arc's sessions across
 // instances), Items (arc members with status badges), and Ledger (the full
@@ -44,7 +58,8 @@ type DetailModel struct {
 	contentStartY int
 	contentStartX int
 
-	members []work.WorkItem
+	members    []work.WorkItem
+	itemCursor int
 	// blocked lists member slugs with at least one still-active blocker,
 	// derived from the index projection the host pushes.
 	blocked []string
@@ -117,6 +132,7 @@ func (m *DetailModel) SetArc(arc string) {
 	}
 	m.arc = arc
 	m.members = nil
+	m.itemCursor = 0
 	m.blocked = nil
 	m.sessions = nil
 	m.sessionCursor = 0
@@ -135,7 +151,18 @@ func (m *DetailModel) SetArc(arc string) {
 // SetMembers replaces the arc's member items. active is the ActiveSlugs set
 // over the whole index, used to derive which members are still blocked.
 func (m *DetailModel) SetMembers(members []work.WorkItem, active map[string]bool) {
+	prevSlug := ""
+	if it, ok := m.CurrentItem(); ok {
+		prevSlug = it.Slug
+	}
 	m.members = members
+	m.itemCursor = 0
+	for i, it := range members {
+		if it.Slug == prevSlug {
+			m.itemCursor = i
+			break
+		}
+	}
 	m.blocked = nil
 	for _, it := range members {
 		for _, b := range it.BlockedBy {
@@ -196,6 +223,14 @@ func (m *DetailModel) SetLedger(content, brief string, briefFound bool) {
 	m.briefFound = briefFound
 	m.refreshStatus()
 	m.refreshLedger()
+}
+
+// CurrentItem returns the member item under the Items tab cursor.
+func (m DetailModel) CurrentItem() (work.WorkItem, bool) {
+	if m.itemCursor < 0 || m.itemCursor >= len(m.members) {
+		return work.WorkItem{}, false
+	}
+	return m.members[m.itemCursor], true
 }
 
 // CurrentSession returns the session row under the Sessions tab cursor.
@@ -407,7 +442,12 @@ func (m DetailModel) renderItems() string {
 		blocked[s] = true
 	}
 	var b strings.Builder
-	for _, it := range m.members {
+	for i, it := range m.members {
+		cursor := "  "
+		if i == m.itemCursor {
+			cursor = "▸ "
+		}
+		b.WriteString(cursor)
 		b.WriteString(statusBadge(it.Status))
 		b.WriteString("  ")
 		b.WriteString(it.Slug)
@@ -416,7 +456,7 @@ func (m DetailModel) renderItems() string {
 			b.WriteString(attentionStyle.Render("⧗ blocked"))
 		}
 		if it.Title != "" && it.Title != it.Slug {
-			b.WriteString("\n   ")
+			b.WriteString("\n     ")
 			b.WriteString(style.Dim.Render(it.Title))
 		}
 		b.WriteString("\n")
@@ -514,21 +554,56 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 			m.tabHost, _ = m.tabHost.Update(msg)
 			return m, nil
 		}
-		// Sessions tab: j/k walks the arc's session rows.
-		if m.tabHost.ActiveID() == TabSessions && len(m.sessions) > 0 {
-			switch msg.String() {
-			case "j", "down":
-				if m.sessionCursor < len(m.sessions)-1 {
-					m.sessionCursor++
-					m.syncSessionCard()
+		switch m.tabHost.ActiveID() {
+		case TabItems:
+			// Items tab: j/k walks the arc's members; Enter/l drills into the
+			// selected member's work detail.
+			if len(m.members) > 0 {
+				switch msg.String() {
+				case "j", "down":
+					if m.itemCursor < len(m.members)-1 {
+						m.itemCursor++
+						m.refreshItems()
+					}
+					return m, nil
+				case "k", "up":
+					if m.itemCursor > 0 {
+						m.itemCursor--
+						m.refreshItems()
+					}
+					return m, nil
+				case "enter", "l":
+					if it, ok := m.CurrentItem(); ok {
+						slug := it.Slug
+						return m, func() tea.Msg { return MemberSelectedMsg{Slug: slug} }
+					}
+					return m, nil
 				}
-				return m, nil
-			case "k", "up":
-				if m.sessionCursor > 0 {
-					m.sessionCursor--
-					m.syncSessionCard()
+			}
+		case TabSessions:
+			// Sessions tab: j/k walks the arc's session rows; Enter/l drills into
+			// the selected session's surface in the sessions workspace.
+			if len(m.sessions) > 0 {
+				switch msg.String() {
+				case "j", "down":
+					if m.sessionCursor < len(m.sessions)-1 {
+						m.sessionCursor++
+						m.syncSessionCard()
+					}
+					return m, nil
+				case "k", "up":
+					if m.sessionCursor > 0 {
+						m.sessionCursor--
+						m.syncSessionCard()
+					}
+					return m, nil
+				case "enter", "l":
+					if r, ok := m.CurrentSession(); ok {
+						id := r.RowID
+						return m, func() tea.Msg { return SessionSelectedMsg{RowID: id} }
+					}
+					return m, nil
 				}
-				return m, nil
 			}
 		}
 	}

@@ -95,9 +95,12 @@ const (
 	kmSessionsList
 	kmSessionsDetail
 	kmCoordinationList
-	// kmCoordinationDetail covers the arc detail's Status/Items/Ledger tabs;
-	// kmCoordinationSessions is the Sessions tab, which adds the close verb.
+	// kmCoordinationDetail covers the arc detail's Status/Ledger tabs;
+	// kmCoordinationItems is the Items tab (walk members, open item) and
+	// kmCoordinationSessions the Sessions tab (walk sessions, open session,
+	// close).
 	kmCoordinationDetail
+	kmCoordinationItems
 	kmCoordinationSessions
 	kmSettlementQueue
 	// kmSettlementClaimDetail / kmSettlementVerdictDetail cover the panel's
@@ -271,8 +274,14 @@ var keymapRegistry = []keymapSection{
 		{key: "j/k", label: "scroll", surfaces: surfStatusBar | surfHelp, helpKey: "j / k",
 			ownerLayers: []ownerLayer{ownerSubModel}},
 		{key: "h/Esc", label: "back to list", surfaces: surfStatusBar | surfHelp, helpKey: "h / Esc",
+			labelFn: func(m model) string {
+				if m.returnToCoordination {
+					return "coordination"
+				}
+				return "back to list"
+			},
 			ownerLayers: []ownerLayer{ownerRouter},
-			test:        "TestWorkDetailStatusBarKeybindContract/h (back to list), …/Esc (back to list)"},
+			test:        "TestWorkDetailStatusBarKeybindContract/h (back to list), …/Esc (back to list), TestCoordinationDrillInReturnKeybindContract"},
 		{key: "?", label: "help", surfaces: surfStatusBar,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestHelpModalKeybindContract"},
 	}},
@@ -286,8 +295,14 @@ var keymapRegistry = []keymapSection{
 		{key: "o", label: "coordination", surfaces: surfStatusBar | surfHelp, helpLabel: "coordination view",
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestCoordinationEntryKeybindContract/o (coordination)"},
 		{key: "h/Esc", label: "back", surfaces: surfStatusBar | surfHelp, helpKey: "h / Esc", helpLabel: "back to work",
+			labelFn: func(m model) string {
+				if m.returnToCoordination {
+					return "coordination"
+				}
+				return "back"
+			},
 			ownerLayers: []ownerLayer{ownerRouter},
-			test:        "TestSessionsListStatusBarKeybindContract/h (back), …/Esc (back)"},
+			test:        "TestSessionsListStatusBarKeybindContract/h (back), …/Esc (back), TestCoordinationDrillInReturnKeybindContract"},
 		{key: "q", label: "quit", surfaces: surfStatusBar,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestGlobalQuitKeybindContract"},
 		{key: "?", label: "help", surfaces: surfStatusBar,
@@ -334,13 +349,31 @@ var keymapRegistry = []keymapSection{
 		{key: "?", label: "help", surfaces: surfStatusBar,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestHelpModalKeybindContract"},
 	}},
-	// Sessions tab of the coordination detail: j/k walks the arc's sessions
-	// and x requests close on the selected one.
+	// Items tab of the coordination detail: j/k walks the arc's members and
+	// Enter/l drills into the selected member's work detail.
+	{ctx: kmCoordinationItems, entries: []keymapEntry{
+		{key: "Tab/Shift-Tab", label: "cycle tabs", surfaces: surfStatusBar,
+			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestCoordinationDetailKeybindContract/Tab (cycle tabs)"},
+		{key: "j/k", label: "items", surfaces: surfStatusBar,
+			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestCoordinationDetailKeybindContract/j/k (items)"},
+		{key: "l/Enter", label: "open item", surfaces: surfStatusBar, helpKey: "l / Enter",
+			ownerLayers: []ownerLayer{ownerSubModel, ownerRouter},
+			test:        "TestCoordinationDetailKeybindContract/l (open item), …/Enter (open item)"},
+		{key: "h/Esc", label: "back to list", surfaces: surfStatusBar,
+			ownerLayers: []ownerLayer{ownerRouter}, test: "TestCoordinationDetailKeybindContract/h (back to list)"},
+		{key: "?", label: "help", surfaces: surfStatusBar,
+			ownerLayers: []ownerLayer{ownerRouter}, test: "TestHelpModalKeybindContract"},
+	}},
+	// Sessions tab of the coordination detail: j/k walks the arc's sessions,
+	// Enter/l drills into the selected session, and x requests close on it.
 	{ctx: kmCoordinationSessions, entries: []keymapEntry{
 		{key: "Tab/Shift-Tab", label: "cycle tabs", surfaces: surfStatusBar,
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestCoordinationDetailKeybindContract/Tab (cycle tabs)"},
 		{key: "j/k", label: "sessions", surfaces: surfStatusBar,
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestCoordinationDetailKeybindContract/j/k (sessions)"},
+		{key: "l/Enter", label: "open session", surfaces: surfStatusBar, helpKey: "l / Enter",
+			ownerLayers: []ownerLayer{ownerSubModel, ownerRouter},
+			test:        "TestCoordinationDetailKeybindContract/l (open session), …/Enter (open session)"},
 		{key: "x", label: "close", surfaces: surfStatusBar,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestCoordinationDetailKeybindContract/x (close)"},
 		{key: "h/Esc", label: "back to list", surfaces: surfStatusBar,
@@ -534,6 +567,8 @@ func (m model) keymapContext() keymapContext {
 		switch {
 		case m.focusedPanel == panelLeft:
 			return kmCoordinationList
+		case m.coordinationDetail.ActiveTabID() == coordination.TabItems:
+			return kmCoordinationItems
 		case m.coordinationDetail.ActiveTabID() == coordination.TabSessions:
 			return kmCoordinationSessions
 		default:

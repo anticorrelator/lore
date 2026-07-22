@@ -191,6 +191,12 @@ type model struct {
 	// poll tick from any state so the tab-indicator count stays current.
 	coordinationList   coordination.ListModel
 	coordinationDetail coordination.DetailModel
+	// returnToCoordination is the one-shot return target set by a coordination
+	// drill-in (Items → work detail, Sessions → sessions workspace). While set,
+	// the landing surface's back seam re-enters the coordination view instead of
+	// its usual back behavior, then clears it; any explicit state-switch key
+	// clears it too. Zero value (false) = no pending return.
+	returnToCoordination bool
 
 	aiInputActive bool
 	aiLoading     bool

@@ -134,6 +134,46 @@ func (m model) handleCoordinationPinRead(msg coordinationPinReadMsg) (model, tea
 	return m, nil
 }
 
+// handleCoordinationMemberSelected carries an Items-tab drill-in into the work
+// detail: it points the work list cursor at the member, loads its detail with
+// the detail panel focused, and records the coordination view as the one-shot
+// return target. The cursor set and the detail load are both explicit because
+// the programmatic cursor move fires no onCursorChange hook.
+func (m model) handleCoordinationMemberSelected(msg coordination.MemberSelectedMsg) (model, tea.Cmd) {
+	m.state = stateWork
+	m.focusedPanel = panelRight
+	m.returnToCoordination = true
+	m.list.SetCursorBySlug(msg.Slug)
+	return m.loadDetail(msg.Slug)
+}
+
+// handleCoordinationSessionSelected carries a Sessions-tab drill-in into the
+// sessions workspace: it points the sessions list cursor at the row, loads its
+// detail card, applies the existing attach semantics (local live panel → terminal
+// focus; otherwise the read-only card), and records the coordination view as the
+// one-shot return target. The cursor set is paired with an explicit detail load
+// for the same reason the work path is.
+func (m model) handleCoordinationSessionSelected(msg coordination.SessionSelectedMsg) (model, tea.Cmd) {
+	m.state = stateSessions
+	m.returnToCoordination = true
+	m.sessionsList.SetCursorByID(msg.RowID)
+	m.loadSessionsDetail(msg.RowID)
+	return m.handleSessionSelected(sessionview.SessionSelectedMsg{RowID: msg.RowID})
+}
+
+// returnToCoordinationView consumes the one-shot coordination return target:
+// it re-enters the coordination workspace with the detail focused and refreshes
+// the arc and session joins. Arc selection, active tab, and row cursors survive
+// because they live in coordination model fields and its setters are
+// identity-preserving (SetArcs by slug, SetArc same-arc no-op).
+func (m model) returnToCoordinationView() (model, tea.Cmd) {
+	m.returnToCoordination = false
+	m.state = stateCoordination
+	m.terminalMode = false
+	m.focusedPanel = panelRight
+	return m, tea.Batch(m.scanArcsCmd(), m.sessionsRefreshCmd())
+}
+
 // loadCoordinationDetail points the detail at the given arc, re-syncs the
 // joins that derive from state already in memory, and kicks the disk reads
 // (ledger + pin) so selection does not wait for the next poll tick.
