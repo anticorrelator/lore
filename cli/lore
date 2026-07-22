@@ -548,6 +548,8 @@ Verbs:
   reconcile Freeze and validate immutable per-stream reconciliation evidence
   worktree  Allocate, bind, renew, transition, clean, sweep, or inspect a
             manager-owned stream worktree
+  pin       Set, clear, or read a project's sticky dispatch pin (sole writer
+            of the _coordination.json sidecar)
 
 Options:
   --help, -h    Show this help
@@ -904,6 +906,9 @@ cmd_coordinate() {
       ;;
     worktree)
       exec "$SCRIPTS_DIR/coordinate-worktree.sh" "$@"
+      ;;
+    pin)
+      exec "$SCRIPTS_DIR/coordinate-pin.sh" "$@"
       ;;
     *)
       echo "Error: unknown coordinate verb '$subcmd'" >&2
