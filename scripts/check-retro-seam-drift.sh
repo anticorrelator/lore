@@ -67,6 +67,9 @@ while IFS= read -r commit; do
   while IFS= read -r path; do
     paths+=("$path")
   done < <(git diff-tree --no-commit-id --name-only -r "$commit")
+  # Merge commits yield no paths from diff-tree (their changes arrive via the
+  # walked parent commits); an empty array also trips `set -u` under bash < 4.4.
+  [[ ${#paths[@]} -eq 0 ]] && continue
   reader_change=0
   for protected in "${PROTECTED_READERS[@]}"; do
     if contains_path "$protected" "${paths[@]}"; then
