@@ -1,8 +1,11 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -404,6 +407,110 @@ func TestCoordinationArcScanSyncsDetail(t *testing.T) {
 		t.Error("a scan with an unchanged selection should not re-dispatch reads")
 	}
 	_ = nm2
+}
+
+// arcHomeFixture writes a project home for arc under workDir, seeding
+// coordination.md and (when report is non-nil) report.md, each stamped with the
+// given mtime so the recency derivation is deterministic. A nil ledger skips
+// coordination.md entirely, standing in for a missing/unreadable ledger.
+func arcHomeFixture(t *testing.T, workDir, arc string, ledger, report *string, ledgerMod, reportMod time.Time) {
+	t.Helper()
+	home := work.ProjectHome(workDir, arc)
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if ledger != nil {
+		p := filepath.Join(home, "coordination.md")
+		if err := os.WriteFile(p, []byte(*ledger), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, ledgerMod, ledgerMod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if report != nil {
+		p := filepath.Join(home, "report.md")
+		if err := os.WriteFile(p, []byte(*report), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, reportMod, reportMod); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestReadArcLedgerDerivesClosed pins the live-vs-closed derivation in the
+// host's single ledger-read command across every classification boundary.
+func TestReadArcLedgerDerivesClosed(t *testing.T) {
+	ledger := "## Brief\n\nthe brief\n"
+	report := "# Report\n\nthe report\n"
+	early := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	late := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
+
+	run := func(t *testing.T, setup func(t *testing.T, workDir string)) coordinationLedgerReadMsg {
+		t.Helper()
+		workDir := t.TempDir()
+		setup(t, workDir)
+		msg, ok := readArcLedgerCmd(workDir, "arc-a")().(coordinationLedgerReadMsg)
+		if !ok {
+			t.Fatal("readArcLedgerCmd must return a coordinationLedgerReadMsg")
+		}
+		return msg
+	}
+
+	t.Run("report strictly newer is closed", func(t *testing.T) {
+		msg := run(t, func(t *testing.T, wd string) {
+			arcHomeFixture(t, wd, "arc-a", &ledger, &report, early, late)
+		})
+		if !msg.closed || !msg.reportFound {
+			t.Fatalf("newer report must classify closed with the report present: %+v", msg)
+		}
+		if msg.report != report || msg.brief != "the brief" {
+			t.Errorf("both files must be delivered in one message: %+v", msg)
+		}
+	})
+
+	t.Run("ledger newer is live", func(t *testing.T) {
+		msg := run(t, func(t *testing.T, wd string) {
+			arcHomeFixture(t, wd, "arc-a", &ledger, &report, late, early)
+		})
+		if msg.closed {
+			t.Errorf("a ledger newer than the report must stay live: %+v", msg)
+		}
+		if !msg.reportFound {
+			t.Errorf("the report must still be reachable while live: %+v", msg)
+		}
+	})
+
+	t.Run("equal mtimes is live", func(t *testing.T) {
+		msg := run(t, func(t *testing.T, wd string) {
+			arcHomeFixture(t, wd, "arc-a", &ledger, &report, early, early)
+		})
+		if msg.closed {
+			t.Errorf("equal mtimes must resolve to live: %+v", msg)
+		}
+	})
+
+	t.Run("missing report is live", func(t *testing.T) {
+		msg := run(t, func(t *testing.T, wd string) {
+			arcHomeFixture(t, wd, "arc-a", &ledger, nil, early, time.Time{})
+		})
+		if msg.closed || msg.reportFound {
+			t.Errorf("a home without report.md must be live with no report: %+v", msg)
+		}
+	})
+
+	t.Run("report beside a missing ledger is closed", func(t *testing.T) {
+		msg := run(t, func(t *testing.T, wd string) {
+			arcHomeFixture(t, wd, "arc-a", nil, &report, time.Time{}, late)
+		})
+		if !msg.closed || !msg.reportFound {
+			t.Fatalf("a report beside an unreadable ledger must classify closed: %+v", msg)
+		}
+		if msg.err == nil {
+			t.Errorf("an unreadable ledger must still surface its read error: %+v", msg)
+		}
+	})
 }
 
 // TestBuildSessionRowsProjectJoin pins the in-memory session→project join: a

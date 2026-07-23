@@ -232,3 +232,95 @@ func TestDetailLedgerRendersMarkdown(t *testing.T) {
 		t.Errorf("ledger tab must render the full document through the markdown pipeline:\n%s", out)
 	}
 }
+
+// TestDetailNoReportIsFourTabs pins that an arc whose home has no report.md
+// renders exactly as today: four tabs, Brief-first Status, no Report tab.
+func TestDetailNoReportIsFourTabs(t *testing.T) {
+	m := sizedDetail()
+	m.SetArc("arc-a")
+	m.SetLedger("## Brief\n\nlive brief\n", "live brief", true)
+	m.SetReport("", false, false)
+	if got := len(m.tabHost.Tabs()); got != 4 {
+		t.Fatalf("a home without report.md must render four tabs, got %d", got)
+	}
+	if m.ActiveTabID() != TabStatus {
+		t.Errorf("detail should rest on Status, got %q", m.ActiveTabID())
+	}
+	if out := stripANSI(m.View()); !strings.Contains(out, "live brief") {
+		t.Errorf("Status first section must be the Brief when no report is present:\n%s", out)
+	}
+}
+
+// TestDetailReportTabPresenceAndClosedStatus covers the report projection: the
+// fifth tab appears whenever report.md is present, the Status first section
+// switches from Brief (live) to the whole report (closed), and the Report tab
+// renders the report whole through the markdown pipeline.
+func TestDetailReportTabPresenceAndClosedStatus(t *testing.T) {
+	m := sizedDetail()
+	m.SetArc("arc-a")
+	m.SetLedger("## Brief\n\nlive brief\n", "live brief", true)
+
+	// Live successor arc: report present but not closed — five tabs, Status
+	// still shows the Brief, and the report is reachable through its tab.
+	m.SetReport("# Report\n\nthe whole report body\n", true, false)
+	if got := len(m.tabHost.Tabs()); got != 5 {
+		t.Fatalf("a present report must add a fifth tab, got %d tabs", got)
+	}
+	if out := stripANSI(m.View()); !strings.Contains(out, "live brief") {
+		t.Errorf("live arc Status first section must stay the Brief:\n%s", out)
+	}
+	m.tabHost.SetActiveID(TabReport)
+	if out := stripANSI(m.View()); !strings.Contains(out, "the whole report body") || !strings.Contains(out, "Report") {
+		t.Errorf("Report tab must render the whole report through markdown:\n%s", out)
+	}
+
+	// Closed arc: the Status first section becomes the report, not the Brief.
+	m.tabHost.SetActiveID(TabStatus)
+	m.SetReport("# Report\n\nclosed report body\n", true, true)
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "closed report body") {
+		t.Errorf("closed arc Status first section must render the report whole:\n%s", out)
+	}
+	if strings.Contains(out, "live brief") {
+		t.Errorf("closed arc Status must not show the Brief in its first section:\n%s", out)
+	}
+}
+
+// TestDetailReportTabIdentitySurvivesRebuild pins tab-identity preservation
+// across a SetReport rebuild and the Status fallback when the Report tab
+// vanishes.
+func TestDetailReportTabIdentitySurvivesRebuild(t *testing.T) {
+	m := sizedDetail()
+	m.SetArc("arc-a")
+	m.SetLedger("## Brief\n\nb\n", "b", true)
+	m.SetReport("# R\n\nbody\n", true, true)
+
+	// A rebuild while parked on Ledger keeps the user on Ledger.
+	m.tabHost.SetActiveID(TabLedger)
+	m.SetReport("# R\n\nbody v2\n", true, true)
+	if m.ActiveTabID() != TabLedger {
+		t.Errorf("a SetReport rebuild must preserve the active tab by ID, got %q", m.ActiveTabID())
+	}
+
+	// Parked on Report, a vanished report falls back to Status and drops the tab.
+	m.tabHost.SetActiveID(TabReport)
+	m.SetReport("", false, false)
+	if got := len(m.tabHost.Tabs()); got != 4 {
+		t.Fatalf("a vanished report must drop the Report tab, got %d tabs", got)
+	}
+	if m.ActiveTabID() != TabStatus {
+		t.Errorf("a vanished Report tab must fall back to Status, got %q", m.ActiveTabID())
+	}
+}
+
+// TestDetailClosedReportUnreadableIsExplicit pins that a closed arc whose
+// report reads empty renders an explicit dim state, never a silent blank.
+func TestDetailClosedReportUnreadableIsExplicit(t *testing.T) {
+	m := sizedDetail()
+	m.SetArc("arc-a")
+	m.SetLedger("## Brief\n\nb\n", "b", true)
+	m.SetReport("", true, true)
+	if out := stripANSI(m.View()); !strings.Contains(out, "report.md could not be read") {
+		t.Errorf("a closed arc with an unreadable report must render an explicit state:\n%s", out)
+	}
+}

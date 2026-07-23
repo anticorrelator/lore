@@ -16,12 +16,14 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
-// Tab IDs for the coordination detail's tab host.
+// Tab IDs for the coordination detail's tab host. TabReport is conditional:
+// the tab exists only while the arc's project home has a readable report.md.
 const (
 	TabStatus   = "status"
 	TabSessions = "sessions"
 	TabItems    = "items"
 	TabLedger   = "ledger"
+	TabReport   = "report"
 )
 
 var (
@@ -81,9 +83,19 @@ type DetailModel struct {
 	brief        string
 	briefFound   bool
 
+	// report holds report.md's content; reportFound is true whenever the
+	// project home has a report.md at all (an unreadable one still counts as
+	// present, rendering its own dim state). closed is the host's derived
+	// live-vs-closed classification: it drives which projection the Status
+	// tab's first section shows, independent of the report's mere presence.
+	report      string
+	reportFound bool
+	closed      bool
+
 	statusViewport viewport.Model
 	itemsViewport  viewport.Model
 	ledgerViewport viewport.Model
+	reportViewport viewport.Model
 }
 
 // NewDetailModel builds an empty coordination detail. A zero-value DetailModel
@@ -98,15 +110,20 @@ func NewDetailModel() DetailModel {
 	return m
 }
 
-// buildTabs returns the fixed four-tab set. Descriptors carry identity and
-// label only — content dispatch stays in Update/renderTabContent.
+// buildTabs returns the tab set: the fixed four, plus a trailing Report tab
+// whenever the arc's project home has a report.md. Descriptors carry identity
+// and label only — content dispatch stays in Update/View.
 func (m DetailModel) buildTabs() []collection.Tab {
-	return []collection.Tab{
+	tabs := []collection.Tab{
 		{ID: TabStatus, Label: "Status"},
 		{ID: TabSessions, Label: "Sessions"},
 		{ID: TabItems, Label: "Items"},
 		{ID: TabLedger, Label: "Ledger"},
 	}
+	if m.reportFound {
+		tabs = append(tabs, collection.Tab{ID: TabReport, Label: "Report"})
+	}
+	return tabs
 }
 
 // Arc returns the arc slug this detail renders, "" when none is selected.
@@ -145,6 +162,10 @@ func (m *DetailModel) SetArc(arc string) {
 	m.ledger = ""
 	m.brief = ""
 	m.briefFound = false
+	m.report = ""
+	m.reportFound = false
+	m.closed = false
+	m.tabHost.SetTabs(m.buildTabs())
 	m.refreshAll()
 }
 
@@ -225,6 +246,20 @@ func (m *DetailModel) SetLedger(content, brief string, briefFound bool) {
 	m.refreshLedger()
 }
 
+// SetReport records the arc's report.md content, its presence, and the host's
+// derived live-vs-closed classification. found toggles the conditional Report
+// tab; closed switches the Status tab's first section to the report. A found
+// report with empty content is a present-but-unreadable report, rendered as an
+// explicit dim state — never a silent blank.
+func (m *DetailModel) SetReport(report string, found, closed bool) {
+	m.report = report
+	m.reportFound = found
+	m.closed = closed
+	m.tabHost.SetTabs(m.buildTabs())
+	m.refreshStatus()
+	m.refreshReport()
+}
+
 // CurrentItem returns the member item under the Items tab cursor.
 func (m DetailModel) CurrentItem() (work.WorkItem, bool) {
 	if m.itemCursor < 0 || m.itemCursor >= len(m.members) {
@@ -299,6 +334,7 @@ func (m *DetailModel) refreshAll() {
 	m.refreshStatus()
 	m.refreshItems()
 	m.refreshLedger()
+	m.refreshReport()
 }
 
 func (m *DetailModel) refreshStatus() {
@@ -323,6 +359,14 @@ func (m *DetailModel) refreshLedger() {
 	vp.SetContent(m.renderLedger())
 	vp.SetYOffset(offset)
 	m.ledgerViewport = vp
+}
+
+func (m *DetailModel) refreshReport() {
+	offset := m.reportViewport.YOffset()
+	vp := viewport.New(viewport.WithWidth(m.contentWidth()), viewport.WithHeight(m.contentHeight()))
+	vp.SetContent(m.renderReport())
+	vp.SetYOffset(offset)
+	m.reportViewport = vp
 }
 
 // sectionRule renders "─ Label ────…" in the shared section-framing tokens.
@@ -373,17 +417,28 @@ func (m DetailModel) renderStatus(width int) string {
 	}
 	var b strings.Builder
 
-	b.WriteString(sectionRule("Brief", width))
-	b.WriteString("\n")
-	switch {
-	case !m.ledgerLoaded:
-		b.WriteString(style.Dim.Render("reading coordination.md…"))
+	if m.closed {
+		b.WriteString(sectionRule("Report", width))
 		b.WriteString("\n")
-	case m.briefFound:
-		b.WriteString(render.Markdown(m.brief, width))
-	default:
-		b.WriteString(style.Dim.Render("no Brief yet — the ledger has no ## Brief section"))
+		if m.report == "" {
+			b.WriteString(style.Dim.Render("report.md could not be read"))
+			b.WriteString("\n")
+		} else {
+			b.WriteString(render.Markdown(m.report, width))
+		}
+	} else {
+		b.WriteString(sectionRule("Brief", width))
 		b.WriteString("\n")
+		switch {
+		case !m.ledgerLoaded:
+			b.WriteString(style.Dim.Render("reading coordination.md…"))
+			b.WriteString("\n")
+		case m.briefFound:
+			b.WriteString(render.Markdown(m.brief, width))
+		default:
+			b.WriteString(style.Dim.Render("no Brief yet — the ledger has no ## Brief section"))
+			b.WriteString("\n")
+		}
 	}
 	b.WriteString("\n")
 
@@ -474,6 +529,18 @@ func (m DetailModel) renderLedger() string {
 		return style.Dim.Render("coordination.md could not be read")
 	}
 	return render.Markdown(m.ledger, m.contentWidth())
+}
+
+func (m DetailModel) renderReport() string {
+	switch {
+	case m.arc == "":
+		return style.Dim.Render("Select an arc.")
+	case !m.reportFound:
+		return style.Dim.Render("no report.md for this arc")
+	case m.report == "":
+		return style.Dim.Render("report.md could not be read")
+	}
+	return render.Markdown(m.report, m.contentWidth())
 }
 
 // renderSessions renders the Sessions tab: the arc's rows with a cursor, then
@@ -617,6 +684,8 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		m.itemsViewport, cmd = m.itemsViewport.Update(msg)
 	case TabLedger:
 		m.ledgerViewport, cmd = m.ledgerViewport.Update(msg)
+	case TabReport:
+		m.reportViewport, cmd = m.reportViewport.Update(msg)
 	}
 	return m, cmd
 }
@@ -637,6 +706,8 @@ func (m DetailModel) View() string {
 		b.WriteString(m.itemsViewport.View())
 	case TabLedger:
 		b.WriteString(m.ledgerViewport.View())
+	case TabReport:
+		b.WriteString(m.reportViewport.View())
 	default:
 		b.WriteString(m.statusViewport.View())
 	}
