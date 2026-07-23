@@ -19,14 +19,21 @@ type coordinationArcsScannedMsg struct {
 }
 
 // coordinationLedgerReadMsg carries one arc's coordination.md content plus the
-// extracted ## Brief section. err leaves content empty so the Ledger tab
-// renders the unreadable state explicitly.
+// extracted ## Brief section, and — from the same read — the arc's report.md
+// content and the derived live-vs-closed classification. err leaves content
+// empty so the Ledger tab renders the unreadable state explicitly; reportFound
+// is true whenever report.md is present (even if unreadable), and closed is the
+// recency-derived signal (report strictly newer than the ledger, or present
+// beside a missing/unreadable ledger).
 type coordinationLedgerReadMsg struct {
-	arc        string
-	content    string
-	brief      string
-	briefFound bool
-	err        error
+	arc         string
+	content     string
+	brief       string
+	briefFound  bool
+	report      string
+	reportFound bool
+	closed      bool
+	err         error
 }
 
 // coordinationPinReadMsg carries one arc's derived pin state. Liveness is
@@ -58,16 +65,45 @@ func (m model) scanArcsCmd() tea.Cmd {
 	}
 }
 
-// readArcLedgerCmd reads an arc's coordination.md and extracts its Brief off
-// the UI thread.
+// readArcLedgerCmd reads an arc's coordination.md and report.md off the UI
+// thread, extracts the ledger's Brief, and derives the live-vs-closed signal
+// from the two files' relative recency. Reading both in one command yields a
+// consistent snapshot: the closed classification never straddles a close that
+// lands between two separate reads.
+//
+// The arc is closed when report.md is present and either the ledger is
+// missing/unreadable or report.md's mtime is strictly newer than the ledger's.
+// Every other case — no report, an older or equal-mtime report — is live. A
+// present-but-unreadable report still reports reportFound so the detail renders
+// its absence as a first-class dim state rather than dropping the tab.
 func readArcLedgerCmd(workDir, arc string) tea.Cmd {
 	return func() tea.Msg {
-		data, err := os.ReadFile(filepath.Join(work.ProjectHome(workDir, arc), "coordination.md"))
-		if err != nil {
-			return coordinationLedgerReadMsg{arc: arc, err: err}
+		home := work.ProjectHome(workDir, arc)
+		ledgerPath := filepath.Join(home, "coordination.md")
+		reportPath := filepath.Join(home, "report.md")
+
+		msg := coordinationLedgerReadMsg{arc: arc}
+
+		ledgerData, ledgerErr := os.ReadFile(ledgerPath)
+		if ledgerErr != nil {
+			msg.err = ledgerErr
+		} else {
+			msg.content = string(ledgerData)
+			msg.brief, msg.briefFound = work.ExtractSection(string(ledgerData), "Brief")
 		}
-		brief, found := work.ExtractSection(string(data), "Brief")
-		return coordinationLedgerReadMsg{arc: arc, content: string(data), brief: brief, briefFound: found}
+
+		if reportInfo, err := os.Stat(reportPath); err == nil {
+			msg.reportFound = true
+			if reportData, rerr := os.ReadFile(reportPath); rerr == nil {
+				msg.report = string(reportData)
+			}
+			if ledgerInfo, lerr := os.Stat(ledgerPath); lerr != nil {
+				msg.closed = true
+			} else if reportInfo.ModTime().After(ledgerInfo.ModTime()) {
+				msg.closed = true
+			}
+		}
+		return msg
 	}
 }
 
@@ -114,9 +150,10 @@ func (m model) handleCoordinationLedgerRead(msg coordinationLedgerReadMsg) (mode
 	}
 	if msg.err != nil {
 		m.coordinationDetail.SetLedger("", "", false)
-		return m, nil
+	} else {
+		m.coordinationDetail.SetLedger(msg.content, msg.brief, msg.briefFound)
 	}
-	m.coordinationDetail.SetLedger(msg.content, msg.brief, msg.briefFound)
+	m.coordinationDetail.SetReport(msg.report, msg.reportFound, msg.closed)
 	return m, nil
 }
 
