@@ -61,6 +61,11 @@ def fail(message):
     raise SystemExit(f"Error: {message}")
 
 
+def warn(message):
+    # stderr only — stdout is the JSON record contract.
+    print(f"Warning: {message}", file=sys.stderr)
+
+
 def run(args, cwd=None, input_bytes=None, check=True):
     proc = subprocess.run(
         [str(x) for x in args], cwd=cwd, input=input_bytes,
@@ -217,6 +222,38 @@ class Manager:
             safe_id(value, label)
         if args.owner_kind not in ("session", "seat"):
             fail("owner kind must be session or seat")
+        # The lease is a dead-man's switch, not a timer: sweep_all reclaims an
+        # expired tree only when owner_live() cannot prove the owner is still
+        # there. owner_live() knows exactly two proofs — owner.pid and
+        # owner.tmux_name — so an owner record carrying neither is
+        # unprotectable by construction and its tree is reclaimed at
+        # LEASE_SECONDS while the owner is alive and working in it.
+        #
+        # Refusing at allocate beats a silent countdown: the failure lands on
+        # the dispatcher, at dispatch, with a fixable message, instead of on a
+        # worker fifteen minutes later with its checkout gone.
+        if not args.owner_pid and not args.owner_tmux:
+            if args.owner_kind == "seat":
+                fail(
+                    "seat lease requires a liveness handle: pass --owner-pid or --owner-tmux.\n"
+                    "  Without one the owner cannot be proven alive, and the tree is swept "
+                    f"{LEASE_SECONDS}s after allocation even while the seat is working in it.\n"
+                    "  --owner-pid must be the long-lived harness process that owns the seat. "
+                    "Do NOT pass $$: a subshell's pid dies when the command returns, which "
+                    "records a handle that looks live at allocate time and fails identically later."
+                )
+            # `session` is deliberately still permitted. No automated caller
+            # allocates at all (the TUI's allocateSessionWorktreeCmd drives the
+            # Go guard-identity path, and session-request.sh only consumes an
+            # already-allocated --worktree-id), so there is no call site that
+            # can be shown to already pass a handle — the precondition for
+            # tightening this path. Warn instead of refusing, so the hole is
+            # visible without breaking the documented flow.
+            warn(
+                f"session lease allocated with no liveness handle; this tree will be swept "
+                f"{LEASE_SECONDS}s after allocation even if the session is alive. "
+                "Pass --owner-pid (the long-lived harness process, never $$) or --owner-tmux."
+            )
         item_dir = self.kdir / "_work" / args.work_item
         if not item_dir.is_dir():
             fail(f"active owner work item not found: {args.work_item}")
@@ -334,7 +371,17 @@ class Manager:
         tmux_name = owner.get("tmux_name")
         if tmux_name:
             server = owner.get("tmux_server") or "lore-tui"
-            proc = run(["tmux", "-L", server, "has-session", "-t", tmux_name], check=False)
+            try:
+                proc = run(["tmux", "-L", server, "has-session", "-t", tmux_name], check=False)
+            except FileNotFoundError:
+                # tmux is not installed, so this owner's liveness is
+                # unknowable. Report LIVE: the switch reclaims on proof of
+                # death, and inability to check is not that proof. Matches the
+                # PermissionError branch above, which also protects rather than
+                # reclaims. Without this the exception propagates out of
+                # sweep_all's per-row try, marking the row "failed" — which in
+                # turn blocks every subsequent `allocate`.
+                return True
             if proc.returncode == 0:
                 return True
         return False
@@ -440,6 +487,21 @@ class Manager:
             "verified_at": iso(now()),
         }
         proof["verified"] = path_absent and registry_absent and branch_absent and guard_absent
+        # Carry the recovery pointer INTO the cleanup proof. The proof is the
+        # artifact a human or agent reads at reclamation time, and on its own it
+        # reads as pure destruction — branch deleted, path absent, verified true
+        # — with no hint that the work survives in the `recovery` field of the
+        # same manifest. That omission cost forty minutes and a wrong data-loss
+        # report. Duplicating one path is cheap; re-deriving "was anything
+        # saved?" from a deleted checkout is not.
+        recovery = row.get("recovery") or {}
+        proof["recovery_bundle_path"] = recovery.get("bundle_path")
+        proof["recovery_hint"] = (
+            "Work is recoverable from recovery.bundle_path: apply the patches with "
+            "plain `git apply <patch>` — never `git apply --3way`, which fails "
+            "'does not match index' because the quarantined blobs are not in the "
+            "target repository's index."
+        ) if recovery.get("bundle_path") else None
         row["cleanup_proof"] = proof
         if not proof["verified"]:
             raise RuntimeError("cleanup proof incomplete across path, Git registry, or refs")
@@ -472,13 +534,18 @@ class Manager:
         return self.finish_claim(row, False, args.reason or "normal cleanup")
 
     def sweep_all(self):
-        result = {"swept": [], "protected": [], "not_expired": [], "failed": []}
+        # `recovery` maps each swept id to its bundle path. A sweep result that
+        # lists only ids reads as pure destruction, which is how a reclaimed
+        # tree got reported as data loss; the pointer belongs in the same
+        # payload as the id, not one lookup away in an archived manifest.
+        result = {"swept": [], "protected": [], "not_expired": [], "failed": [], "recovery": {}}
         for path in sorted(self.claims.glob("*.json")):
             try:
                 row = json.loads(path.read_text(encoding="utf-8"))
                 self.validate_manifest(row)
-                self.finish_claim(row, True, "resume interrupted cleanup claim")
+                row = self.finish_claim(row, True, "resume interrupted cleanup claim")
                 result["swept"].append(row["worktree_id"])
+                self.note_recovery(result, row)
             except BaseException:
                 result["failed"].append(path.stem)
         for path in sorted(self.registry.glob("*.json")):
@@ -494,11 +561,23 @@ class Manager:
                     continue
                 self.validate_identity(row)
                 self.claim(row)
-                self.finish_claim(row, True, "expired owner lease")
+                row = self.finish_claim(row, True, "expired owner lease")
                 result["swept"].append(row["worktree_id"])
+                self.note_recovery(result, row)
             except BaseException:
                 result["failed"].append(path.stem)
         return result
+
+    def note_recovery(self, result, row):
+        bundle = (row.get("recovery") or {}).get("bundle_path")
+        if bundle:
+            result["recovery"][row["worktree_id"]] = bundle
+            warn(
+                f"swept {row['worktree_id']}; work is recoverable from {bundle} — "
+                "apply with plain `git apply <patch>`, never `git apply --3way` "
+                "(it fails 'does not match index': the quarantined blobs are not "
+                "in the target repository's index)"
+            )
 
     def show(self, args):
         if args.worktree_id:
@@ -523,22 +602,53 @@ def parser():
     root = argparse.ArgumentParser(prog="coordinate-worktree.sh")
     sub = root.add_subparsers(dest="command", required=True)
 
-    allocate = sub.add_parser("allocate", parents=[common])
+    handle_help = (
+        "Liveness handle. The lease is a dead-man's switch, not a timer: an "
+        "expired tree is reclaimed only when the owner cannot be proven alive, "
+        "and the only two proofs are --owner-pid and --owner-tmux. An owner "
+        f"with neither is swept {LEASE_SECONDS}s after allocation even while it "
+        "is working in the tree. Required for --owner-kind seat."
+    )
+    pid_help = (
+        "PID of the LONG-LIVED harness process that owns the seat or session. "
+        "Never pass $$: a bash subshell's pid dies the moment the command "
+        "returns, recording a handle that looks live at allocate time and fails "
+        "identically to no handle at all later. " + handle_help
+    )
+
+    allocate = sub.add_parser(
+        "allocate", parents=[common],
+        description=(
+            "Allocate a manager-owned stream worktree under a lease. Pass a "
+            "liveness handle or the tree is reclaimed while you are using it. "
+            "If a tree is reclaimed, its work is not lost: the manifest's "
+            "`recovery.bundle_path` holds a patch set and the quarantine ref. "
+            "Recover with plain `git apply <patch>` — never `git apply --3way`, "
+            "which fails 'does not match index' because the quarantined blobs "
+            "are not in the target repository's index."
+        ),
+    )
     allocate.add_argument("--work-item", required=True)
     allocate.add_argument("--stream", required=True)
     allocate.add_argument("--attempt", required=True)
-    allocate.add_argument("--owner-kind", required=True)
+    allocate.add_argument("--owner-kind", required=True, help="session or seat")
     allocate.add_argument("--owner-id", required=True)
-    allocate.add_argument("--owner-pid", type=int)
-    allocate.add_argument("--owner-tmux")
+    allocate.add_argument("--owner-pid", type=int, help=pid_help)
+    allocate.add_argument("--owner-tmux", help="tmux session name of the owner. " + handle_help)
     allocate.add_argument("--tmux-server", default="lore-tui")
     allocate.add_argument("--source-dir", required=True)
 
-    bind = sub.add_parser("bind", parents=[common])
+    bind = sub.add_parser(
+        "bind", parents=[common],
+        description=(
+            "Attach or update the owner's liveness handle on an existing lease. "
+            "This is the repair path for a tree allocated without one."
+        ),
+    )
     bind.add_argument("--worktree-id", required=True)
     bind.add_argument("--owner-id", required=True)
-    bind.add_argument("--owner-pid", type=int)
-    bind.add_argument("--owner-tmux")
+    bind.add_argument("--owner-pid", type=int, help=pid_help)
+    bind.add_argument("--owner-tmux", help="tmux session name of the owner. " + handle_help)
     bind.add_argument("--tmux-server", default="lore-tui")
 
     transition = sub.add_parser("transition", parents=[common])

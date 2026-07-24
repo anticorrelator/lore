@@ -51,11 +51,22 @@ if [[ $? -ne 0 ]]; then
   exit 1
 fi
 
+# A seat allocation must carry a liveness handle, so the default handle here is
+# a tmux session on a server that does not exist: `has-session` fails, the owner
+# is provably dead, and the row is sweepable. That is what these lifecycle tests
+# need, and it exercises the real dead-man's-switch path (handle present, owner
+# gone) rather than the handle-less case the manager now refuses. Callers that
+# want a LIVE owner pass --owner-pid explicitly.
+DEAD_TMUX_SERVER="lore-test-dead-$$"
 allocate() {
   local attempt="$1" owner_id="$2"; shift 2
+  local handle=(--owner-tmux "dead-$owner_id" --tmux-server "$DEAD_TMUX_SERVER")
+  for arg in "$@"; do
+    [[ "$arg" == "--owner-pid" || "$arg" == "--owner-tmux" ]] && handle=()
+  done
   bash "$MANAGER" allocate --kdir "$KDIR" --work-item demo --stream stream-a \
     --attempt "$attempt" --owner-kind seat --owner-id "$owner_id" \
-    --source-dir "$SOURCE" --json "$@"
+    --source-dir "$SOURCE" --json ${handle[@]+"${handle[@]}"} "$@"
 }
 
 expire_manifest() {
@@ -204,6 +215,83 @@ git --git-dir="$ACCEPT_COMMON" merge-base --is-ancestor "$TIP" "$SRC_REF"
 assert_eq "stream tip reachable from acceptance ref after sweep" "0" "$?"
 git --git-dir="$ACCEPT_COMMON" merge-base --is-ancestor "$TIP" main
 assert_eq "stream tip is not reachable from main" "1" "$?"
+
+# --- Liveness handle is mandatory for a seat lease ---------------------------
+# The lease is a dead-man's switch: sweep_all reclaims an expired tree only when
+# owner_live() cannot prove the owner is there, and it knows exactly two proofs
+# (owner.pid, owner.tmux_name). A seat carrying neither is unprotectable by
+# construction and was reclaimed mid-flight from a live worker.
+NOHANDLE="$(bash "$MANAGER" allocate --kdir "$KDIR" --work-item demo --stream stream-a \
+  --attempt no-handle --owner-kind seat --owner-id bare-seat \
+  --source-dir "$SOURCE" --json 2>&1)"
+NOHANDLE_RC=$?
+assert_eq "handle-less seat allocation is refused" "1" "$NOHANDLE_RC"
+case "$NOHANDLE" in
+  *"--owner-pid"*"--owner-tmux"*) pass "refusal names both handle flags" ;;
+  *) fail "refusal names both handle flags" "$NOHANDLE" ;;
+esac
+case "$NOHANDLE" in
+  *'$$'*) pass "refusal warns against the \$\$ subshell trap" ;;
+  *) fail "refusal warns against the \$\$ subshell trap" "$NOHANDLE" ;;
+esac
+assert_eq "refused allocation leaves no registry row" "0" \
+  "$(find "$KDIR/_coordination/worktrees/registry" -name '*.json' -newer "$SOURCE/tracked.txt" \
+     -exec grep -l '"attempt_id": "no-handle"' {} + 2>/dev/null | wc -l | tr -d ' ')"
+
+# A session lease is deliberately still permitted — no automated caller
+# allocates, so there is no call site that can be shown to already pass a
+# handle. It warns rather than refusing, so the hole stays visible.
+SESSION_ERR="$TEST_ROOT/session-warn.txt"
+SESSION_ALLOC="$(bash "$MANAGER" allocate --kdir "$KDIR" --work-item demo --stream stream-a \
+  --attempt session-no-handle --owner-kind session --owner-id bare-session \
+  --source-dir "$SOURCE" --json 2>"$SESSION_ERR")"
+assert_eq "handle-less session allocation still succeeds" "reserved" \
+  "$(jq -r '.state' <<<"$SESSION_ALLOC")"
+case "$(cat "$SESSION_ERR")" in
+  *"no liveness handle"*) pass "handle-less session warns on stderr" ;;
+  *) fail "handle-less session warns on stderr" "$(cat "$SESSION_ERR")" ;;
+esac
+
+# bind is the repair path for a lease that was allocated without a handle.
+SESSION_ID="$(jq -r '.worktree_id' <<<"$SESSION_ALLOC")"
+BOUND="$(bash "$MANAGER" bind --kdir "$KDIR" --worktree-id "$SESSION_ID" \
+  --owner-id bare-session --owner-pid "$$" --json)"
+assert_eq "bind attaches a liveness handle after allocation" "$$" \
+  "$(jq -r '.owner.pid' <<<"$BOUND")"
+expire_manifest "$KDIR/_coordination/worktrees/registry/$SESSION_ID.json"
+REPAIRED_SWEEP="$(bash "$MANAGER" sweep --kdir "$KDIR" --json 2>/dev/null)"
+assert_eq "a bound live pid protects a previously handle-less lease" "$SESSION_ID" \
+  "$(jq -r --arg id "$SESSION_ID" '.protected[] | select(. == $id)' <<<"$REPAIRED_SWEEP")"
+
+# --- Reclamation reports where the work went ---------------------------------
+# cleanup_proof read as pure destruction and never mentioned the recovery
+# bundle sitting in the same manifest; that cost forty minutes and a wrong
+# data-loss report.
+RECOV="$(allocate recovery-pointer recovery-seat)"
+RECOV_ID="$(jq -r '.worktree_id' <<<"$RECOV")"
+printf 'unsaved work\n' > "$(jq -r '.execution_dir' <<<"$RECOV")/scratch.txt"
+expire_manifest "$KDIR/_coordination/worktrees/registry/$RECOV_ID.json"
+RECOV_SWEEP="$(bash "$MANAGER" sweep --kdir "$KDIR" --json 2>/dev/null)"
+RECOV_BUNDLE="$(jq -r --arg id "$RECOV_ID" '.recovery[$id] // ""' <<<"$RECOV_SWEEP")"
+assert_dir "sweep result carries the recovery bundle path" "$RECOV_BUNDLE"
+RECOV_ARCHIVE="$KDIR/_coordination/worktrees/archive/$RECOV_ID.json"
+assert_eq "cleanup proof carries the recovery bundle path" "$RECOV_BUNDLE" \
+  "$(jq -r '.cleanup_proof.recovery_bundle_path' "$RECOV_ARCHIVE")"
+case "$(jq -r '.cleanup_proof.recovery_hint' "$RECOV_ARCHIVE")" in
+  *"never"*"--3way"*) pass "cleanup proof warns against git apply --3way" ;;
+  *) fail "cleanup proof warns against git apply --3way" ;;
+esac
+
+# --- allocate --help states the contract and the $$ trap ---------------------
+ALLOC_HELP="$(bash "$MANAGER" allocate --help 2>&1)"
+case "$ALLOC_HELP" in
+  *'$$'*) pass "allocate help names the \$\$ trap" ;;
+  *) fail "allocate help names the \$\$ trap" ;;
+esac
+case "$ALLOC_HELP" in
+  *"--3way"*) pass "allocate help points at the recovery path" ;;
+  *) fail "allocate help points at the recovery path" ;;
+esac
 
 REFUSE="$(allocate refuse-missing-identity refuse-seat)"
 REFUSE_ID="$(jq -r '.worktree_id' <<<"$REFUSE")"
