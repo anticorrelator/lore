@@ -64,12 +64,17 @@ removed`; abnormal cleanup claims advance through `sweep_claimed → swept`, whi
 `cleanup_blocked` remains retryable and never means success.
 
 Allocation authority stays with the coordinator or dispatching seat. A session owns
-the 900-second lease through its durable registry identity. A mutating subagent may
-run only inside a worktree allocated to its dispatching seat; it neither allocates
-nor receives independent ownership. If no seat lease is available, use an item-backed
-worker session. Read-only agents require no worktree. Live PID or tmux ownership
-protects the tree regardless of lease age; renewals rewrite the manager row through
-the sole manager rather than relying on registry mtime.
+the 900-second lease through its durable registry identity; a seat owns it only
+through an explicit liveness handle — `--owner-pid` (the long-lived harness process,
+never a `$$` subshell pid) or `--owner-tmux` — which allocate requires for
+seat-owned trees. The lease is a dead-man's switch: live PID or tmux ownership
+protects the tree regardless of lease age, expiry only sets the liveness re-test
+cadence, and a reclaimed tree is quarantined with a recovery bundle, never
+destroyed silently. A mutating subagent may run only inside a worktree allocated
+to its dispatching seat; it neither allocates nor receives independent ownership.
+If no seat lease is available, use an item-backed worker session. Read-only agents
+require no worktree. Renewals rewrite the manager row through the sole manager
+rather than relying on registry mtime.
 
 After quiescence, freeze the immutable source manifest, reconcile from the stable
 control checkout, and freeze the integrated manifest before cleanup. The coordinator
