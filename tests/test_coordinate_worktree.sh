@@ -216,6 +216,44 @@ assert_eq "stream tip reachable from acceptance ref after sweep" "0" "$?"
 git --git-dir="$ACCEPT_COMMON" merge-base --is-ancestor "$TIP" main
 assert_eq "stream tip is not reachable from main" "1" "$?"
 
+# --- allocate names the next lifecycle step ----------------------------------
+# A fresh allocation sits at `reserved` and nothing downstream complains: a seat
+# can allocate, dispatch, and integrate without ever leaving that state, and only
+# discovers it at teardown. The hint rides the output the caller already reads.
+HINT_ALLOC="$(allocate lifecycle-hint hint-seat)"
+HINT="$(jq -r '.next // ""' <<<"$HINT_ALLOC")"
+HINT_ID="$(jq -r '.worktree_id' <<<"$HINT_ALLOC")"
+case "$HINT" in
+  *"bind"*) pass "seat allocation names bind as the next verb" ;;
+  *) fail "seat allocation names bind as the next verb" "$HINT" ;;
+esac
+case "$HINT" in
+  *quiescent*reconciling*cleanup_due*) pass "hint names the accept/integrate transitions" ;;
+  *) fail "hint names the accept/integrate transitions" "$HINT" ;;
+esac
+case "$HINT" in
+  *"$HINT_ID"*) pass "hint carries the worktree id the caller must pass back" ;;
+  *) fail "hint carries the worktree id the caller must pass back" "$HINT" ;;
+esac
+# The hint is advice to the caller, not state the manager owns: it must not land
+# in the durable manifest, where a later reader would mistake it for a record.
+assert_eq "hint stays out of the persisted manifest" "null" \
+  "$(jq -r '.next // "null"' "$KDIR/_coordination/worktrees/registry/$HINT_ID.json")"
+# Plain (non---json) output carries it too — the manager has one output shape and
+# --json only changes the indentation.
+assert_eq "plain allocate output carries the hint" "1" \
+  "$(bash "$MANAGER" allocate --kdir "$KDIR" --work-item demo --stream stream-a \
+     --attempt lifecycle-hint-plain --owner-kind seat --owner-id hint-plain-seat \
+     --owner-tmux dead-hint-plain --tmux-server "$DEAD_TMUX_SERVER" \
+     --source-dir "$SOURCE" 2>/dev/null | jq -r 'if (.next // "") | test("bind") then 1 else 0 end')"
+# A session lease is driven by the TUI, which follows its own path; the hint is
+# for the seat that has to drive the lifecycle by hand.
+SESSION_HINT="$(bash "$MANAGER" allocate --kdir "$KDIR" --work-item demo --stream stream-a \
+  --attempt session-hint --owner-kind session --owner-id session-hint-owner \
+  --owner-pid "$$" --source-dir "$SOURCE" --json 2>/dev/null)"
+assert_eq "session allocation carries no seat lifecycle hint" "null" \
+  "$(jq -r '.next // "null"' <<<"$SESSION_HINT")"
+
 # --- Liveness handle is mandatory for a seat lease ---------------------------
 # The lease is a dead-man's switch: sweep_all reclaims an expired tree only when
 # owner_live() cannot prove the owner is there, and it knows exactly two proofs

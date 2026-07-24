@@ -670,6 +670,28 @@ def parser():
     return root
 
 
+def next_hint(row):
+    """One line naming the lifecycle verb the owner has to drive next.
+
+    A fresh allocation sits at `reserved`, and nothing downstream complains
+    about that: the seat can allocate, dispatch, and integrate without the
+    manifest ever leaving the state it started in — the omission only surfaces
+    at teardown, when the tree it thought it had finished with is still holding
+    a lease. The hint rides the allocate output rather than the manifest,
+    because it is advice to the caller, not state the manager owns.
+    """
+    if row["owner"]["kind"] != "seat":
+        return None
+    return (
+        "bind this tree before you dispatch into it "
+        f"(lore coordinate worktree bind --worktree-id {row['worktree_id']} "
+        f"--owner-id {row['owner']['id']} --owner-pid <long-lived harness pid>), "
+        "then walk it through quiescent -> reconciling -> cleanup_due as you "
+        "accept and integrate; a tree left at reserved is still leased at "
+        "teardown and nothing before then will say so."
+    )
+
+
 def resolve_kdir(value):
     if value:
         path = Path(value).resolve()
@@ -685,6 +707,11 @@ args = parser().parse_args(ARGV)
 manager = Manager(resolve_kdir(args.kdir))
 if args.command == "allocate":
     output = manager.allocate(args)
+    # Added after the manifest is persisted, so the durable record stays exactly
+    # the manager's own state and the hint lives only in what the caller reads.
+    hint = next_hint(output)
+    if hint:
+        output = {**output, "next": hint}
 elif args.command == "bind":
     output = manager.bind(args)
 elif args.command == "transition":
