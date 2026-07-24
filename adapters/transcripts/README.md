@@ -301,26 +301,31 @@ timestamp = data.get('timestamp')
 ```
 
 These are *per-line* fields in Claude's JSONL (every entry carries
-its own `sessionId`/`timestamp`); the extractor only needs the values
-from the first parseable entry, so `parse_transcript` MUST surface
-them via a sixth operation:
+its own `sessionId`/`timestamp`), surfaced via a sixth operation:
 
 | Operation             | Inputs        | Outputs                                                                               |
 |-----------------------|---------------|---------------------------------------------------------------------------------------|
-| `session_metadata`    | session_id or path | dict `{"session_id": str, "session_date": datetime \| None}` — values from the first parseable entry; both fields tolerate missing data with `"unknown"` / `None` sentinels |
+| `session_metadata`    | session_id or path | dict `{"session_id": str, "session_date": datetime \| None}` — id from the first parseable entry, date from the *earliest timestamp anywhere in the artifact*; both fields tolerate missing data with `"unknown"` / `None` sentinels |
 
-The Phase 5 verification gate "Claude Code transcript behavior remains
-unchanged behind the provider boundary" is asserted concretely here:
-the `claude-code.py` provider MUST return the same `(session_id,
-session_date)` pair the in-tree `parse_jsonl_file` returns today,
-including the file-mtime fallback for `session_date` when `timestamp`
-is absent.
+**No mtime fallback for `session_date` (2026-07-24).** Providers
+originally backfilled `session_date` from the artifact's file mtime
+when the first entry carried no `timestamp`, mirroring the in-tree
+`parse_jsonl_file`. That is a synthesized value in the sense rule 5
+forbids: mtime records the last *write* to the file, so any touch —
+copy, re-sync, re-read — restamps a session with a date it never had.
+Observed: a 2026-07-10 claude-code session whose first line carried no
+`timestamp` produced `**Date:** 2026-07-24 14:13:51` in
+`_pending_digest.md`, matching the file's mtime to the second, fourteen
+days off. Providers now scan the artifact for the earliest parseable
+`timestamp` and return `None` when there is none — the digest writer
+renders `unknown`, which is honest where the mtime date was
+confidently wrong.
 
 | Harness     | `session_metadata` source                                                                          |
 |-------------|----------------------------------------------------------------------------------------------------|
-| claude-code | `data.get('sessionId')` + `data.get('timestamp')` (first parseable line); fallback: file mtime    |
+| claude-code | `data.get('sessionId')` (first parseable line) + earliest `data.get('timestamp')` in the file      |
 | opencode    | OpenCode session uuid from plugin event payload + earliest event timestamp from accumulator       |
-| codex       | Codex session id from hook payload + rollout-file first-entry timestamp                            |
+| codex       | Codex session id from hook payload + earliest rollout-entry timestamp                              |
 
 #### 4. Message type discriminator
 
@@ -382,7 +387,7 @@ operations here is the schema-bump-eligible action documented in
 | `previous_session_path`    | cwd                                   | path to the second-most-recent prior session by mtime, or `None`                                    |
 | `provider_status`          | (no inputs)                           | one of: `full` / `partial` / `unavailable`, plus a one-line degraded reason                         |
 | `read_raw_lines`           | session_id or path                    | list of strings (one per JSONL line / serialized event), index-aligned with `parse_transcript`     |
-| `session_metadata`         | session_id or path                    | `{"session_id": str, "session_date": datetime \| None}` from the first parseable entry             |
+| `session_metadata`         | session_id or path                    | `{"session_id": str, "session_date": datetime \| None}` — id from the first parseable entry, date from the earliest timestamp in the artifact (never file mtime) |
 | `tool_use_timestamps`      | session_id or path, tool_name         | list of `(message_index, ISO-8601 timestamp str)` for entries whose tool_use blocks invoke `tool_name`, in transcript order |
 | `list_session_paths`       | cwd                                   | ALL session artifact paths for that cwd sorted by mtime descending (index 0 is typically the in-flight current session at hook time), or `[]` when session enumeration is unavailable |
 | `session_spend`            | session binding (path for file-based harnesses; session id for the opencode store) | normalized spend dict (see below), or `{"basis": "duration-only"}` when spend is unavailable |
