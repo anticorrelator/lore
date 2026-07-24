@@ -976,6 +976,106 @@ framework_interaction_field() {
     '.frameworks[$fw].interaction[$r][$f]' "$capabilities_file" 2>/dev/null
 }
 
+# --- Session journal reading ---
+# Shared by every verb that reads _sessions/events.jsonl through the reference
+# reader (session-events.sh) rather than opening the file itself: session-wait.sh
+# and coordinate-watch.sh today. Keeping the vocabulary mirror, the retry policy,
+# and the cursor-alignment check here means a new watcher inherits them instead
+# of re-deriving them slightly differently.
+
+# Mirror of the sole writer's event vocabulary (session-event-append.sh's
+# validation case-arm). tests/session-verbs.bats cross-checks this list against
+# the writer and names any drift; if that test fails, reconcile this line with
+# the writer rather than silencing the test.
+SESSION_EVENT_VOCAB="requested claimed spawned needs_input quiescent resumed recovered closed orphaned step_completed terminus_reached harness_turn_ended spawn_failed request_reclaimed request_abandoned request_cancelled close_requested close_failed restore_refused worktree_quarantined send_requested sent send_refused answer_requested answered answer_refused modal_blocked review_flagged review_held review_notified review_released"
+
+# The events a coordinator can actually do something about, and therefore the
+# default stop set for anything that waits on the journal. It covers both ends of
+# a session's life: the terminal outcomes teardown can reach (closed,
+# close_failed, orphaned, worktree_quarantined) and the mid-stream edges where a
+# session has parked and is waiting on somebody (needs_input, modal_blocked,
+# restore_refused) or has finished its protocol without closing
+# (terminus_reached). A stop set of terminal outcomes alone means an autonomous
+# session parked at a prompt wakes nobody — the watcher sits there while the work
+# does too. Narrow it with an explicit --until when you want exactly one edge.
+SESSION_ACTIONABLE_EVENTS="closed close_failed orphaned terminus_reached needs_input modal_blocked restore_refused worktree_quarantined"
+
+# session_event_in_vocab <name> — 0 when the writer would accept <name> as an
+# event. Validating an event-name argument up front turns a typo into a usage
+# error instead of a wait that can never end.
+session_event_in_vocab() {
+  local candidate="$1" known
+  for known in $SESSION_EVENT_VOCAB; do
+    [[ "$candidate" == "$known" ]] && return 0
+  done
+  return 1
+}
+
+# session_events_run <events_sh> [args...]
+# Run the reference reader at most three times with a fixed 1s/2s backoff,
+# echoing its stdout on the first success. The bound is deliberate: a caller
+# waiting on the journal is a reader, not a supervisor, so a reader that stays
+# broken becomes the caller's internal-error terminal rather than an endless
+# retry. Returns 1 when all three attempts fail.
+session_events_run() {
+  local events_sh="$1"; shift
+  local delays=(1 2) output attempt
+  for attempt in 0 1 2; do
+    if output="$(bash "$events_sh" "$@")"; then
+      printf '%s\n' "$output"
+      return 0
+    fi
+    if [[ $attempt -lt 2 ]]; then
+      sleep "${delays[$attempt]}"
+    fi
+  done
+  return 1
+}
+
+# session_events_read <events_sh> <kdir> <cursor>
+# One incremental journal read from <cursor>, echoing the reference reader's
+# {events, records, next_cursor} object. Composing the reader means torn-row,
+# interior-malformed, and past-EOF-reset tolerance are inherited, not re-derived
+# per caller.
+session_events_read() {
+  local events_sh="$1" kdir="$2" cursor="$3"
+  session_events_run "$events_sh" --json --since "$cursor" --kdir "$kdir"
+}
+
+# session_events_cursor <events_sh> <kdir>
+# The journal's current end offset — the baseline for "wake on what happens
+# next". An O(1) stat through the reader, not a row replay.
+session_events_cursor() {
+  local events_sh="$1" kdir="$2"
+  session_events_run "$events_sh" --cursor-only --kdir "$kdir"
+}
+
+# session_cursor_row_aligned <events_file> <cursor>
+# 0 when <cursor> sits on a row boundary, 2 when it points into the middle of a
+# row, 1 when the check itself could not run. A cursor is a row boundary, not an
+# arbitrary byte offset: rejecting an interior offset here stops the tolerant
+# reference reader from reading a valid row's suffix as corrupt JSON and
+# reporting the caller's own bad input as journal damage. Past-EOF is left to the
+# reader's reset behavior.
+session_cursor_row_aligned() {
+  local events_file="$1" cursor="$2" status=0
+  python3 - "$events_file" "$cursor" <<'PYEOF' || status=$?
+import os, sys
+
+path, cursor = sys.argv[1], int(sys.argv[2])
+try:
+    size = os.path.getsize(path)
+except FileNotFoundError:
+    size = 0
+if cursor <= size:
+    with open(path, "rb") as f:
+        f.seek(cursor - 1)
+        if f.read(1) != b"\n":
+            raise SystemExit(2)
+PYEOF
+  return "$status"
+}
+
 # --- resolve_session_owner ---
 # Echo the name of the single live TUI instance whose registry row hosts <slug>,
 # or nothing when none is live within <ttl_seconds>. The owning instance is the

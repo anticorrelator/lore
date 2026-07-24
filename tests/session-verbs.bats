@@ -26,6 +26,8 @@ SEND="$REPO_DIR/scripts/session-send.sh"
 ANSWER="$REPO_DIR/scripts/session-answer.sh"
 PEEK="$REPO_DIR/scripts/session-peek.sh"
 WAIT="$REPO_DIR/scripts/session-wait.sh"
+WATCH="$REPO_DIR/scripts/coordinate-watch.sh"
+LIB="$REPO_DIR/scripts/lib.sh"
 APPEND="$REPO_DIR/scripts/session-event-append.sh"
 STEP="$REPO_DIR/scripts/session-step.sh"
 TERMINUS="$REPO_DIR/scripts/session-terminus.sh"
@@ -1456,8 +1458,10 @@ for tok in block.split('|'):
 PY
 }
 
+# session-wait.sh and coordinate-watch.sh both validate --until against lib.sh's
+# single mirror, so the drift guard reads it there rather than in either verb.
 mirror_event_vocab() {
-  grep -E '^SESSION_EVENT_VOCAB=' "$WAIT" | head -n1 \
+  grep -E '^SESSION_EVENT_VOCAB=' "$LIB" | head -n1 \
     | sed -E 's/^SESSION_EVENT_VOCAB="([^"]*)".*/\1/' \
     | tr ' ' '\n' | grep -v '^$'
 }
@@ -1704,20 +1708,19 @@ EOF
   [[ "$output" == *'"event":"modal_blocked"'* ]]
 }
 
-@test "wait: --until terminus_reached wakes without changing the teardown default" {
+@test "wait: --until terminus_reached wakes, and so does the actionable default" {
   write_instance inst-a feature-x
   echo '{"event":"terminus_reached","actor_instance":"inst-a","slug":"feature-x","session_type":"implement","reason":"impl-close"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
   run bash "$WAIT" feature-x --until terminus_reached --since 0 --timeout 1 --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
   [[ "$output" == *'"event":"terminus_reached"'* ]]
 
-  local out code
-  out="$(bash "$WAIT" feature-x --since 0 --timeout 1 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
-  [ "$code" -eq 2 ]
-  echo "$out" | jq -e '.until==["closed","close_failed","orphaned"]'
+  run bash "$WAIT" feature-x --since 0 --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"terminus_reached"'* ]]
 }
 
-@test "wait: --until step_completed wakes with exact step fields without changing the teardown default" {
+@test "wait: --until step_completed wakes with exact step fields; step_completed stays out of the default" {
   write_instance inst-a feature-x
   echo '{"event":"step_completed","actor_instance":"inst-a","slug":"feature-x","session_type":"implement","step_id":"implement:task:task-1","step_label":"Task 1 accepted"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
   run bash "$WAIT" feature-x --until step_completed --since 0 --timeout 1 --kdir "$TEST_KDIR"
@@ -1725,19 +1728,63 @@ EOF
   [[ "$output" == *'"step_id":"implement:task:task-1"'* ]]
   [[ "$output" == *'"step_label":"Task 1 accepted"'* ]]
 
+  # step_completed is progress, not a parked session: a default watcher that woke
+  # on every step would wake constantly and mean nothing.
   local out code
   out="$(bash "$WAIT" feature-x --since 0 --timeout 1 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
   [ "$code" -eq 2 ]
-  echo "$out" | jq -e '.until==["closed","close_failed","orphaned"]'
+  echo "$out" | jq -e '(.until | index("step_completed")) == null'
 }
 
-@test "wait: modal_blocked does not change the default close wake set" {
+@test "wait: the default until-set is the actionable set, not the teardown-only set" {
   write_instance inst-a feature-x
-  echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  : > "$TEST_KDIR/_sessions/events.jsonl"
   local out code
   out="$(bash "$WAIT" feature-x --since 0 --timeout 1 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
   [ "$code" -eq 2 ]
-  echo "$out" | jq -e '.outcome=="timeout" and (.until==["closed","close_failed","orphaned"])'
+  echo "$out" | jq -e '(.until | sort) == (["closed","close_failed","orphaned","terminus_reached","needs_input","modal_blocked","restore_refused","worktree_quarantined"] | sort)'
+}
+
+@test "wait: the default until-set wakes on modal_blocked" {
+  write_instance inst-a feature-x
+  echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  run bash "$WAIT" feature-x --since 0 --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"modal_blocked"'* ]]
+}
+
+# The defect the actionable default exists to fix: an autonomous session parked at
+# a prompt journals needs_input and nothing else, so a teardown-only stop set left
+# its watcher asleep until the timeout while the work sat waiting on somebody.
+@test "wait: a needs_input row wakes a default wait; --until closed still ignores it" {
+  write_instance inst-a feature-x
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  ( sleep 1
+    echo '{"event":"needs_input","slug":"feature-x","reason":"prompt"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  run bash "$WAIT" feature-x --since 0 --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"needs_input"'* ]]
+
+  # Narrowing explicitly still narrows exactly as before.
+  run bash "$WAIT" feature-x --until closed --since 0 --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+  [[ "$output" != *'"event":"needs_input"'* ]]
+}
+
+@test "wait: the default until-set wakes on restore_refused and worktree_quarantined" {
+  write_instance inst-a feature-x
+  printf '%s\n' '{"event":"restore_refused","slug":"feature-x","reason":"digest-mismatch"}' \
+    > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WAIT" feature-x --since 0 --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"restore_refused"'* ]]
+
+  printf '%s\n' '{"event":"worktree_quarantined","slug":"feature-x","reason":"reclaimed"}' \
+    > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WAIT" feature-x --since 0 --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"worktree_quarantined"'* ]]
 }
 
 @test "wait: the default until-set wakes on orphaned" {
@@ -1911,7 +1958,7 @@ EOF
   local out code
   out="$(bash "$WAIT" feature-x --since 0 --timeout 1 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
   [ "$code" -eq 2 ]
-  echo "$out" | jq -e '.outcome=="timeout" and .matched==null and (.next_cursor|type=="number") and .slug=="feature-x" and (.until==["closed","close_failed","orphaned"])'
+  echo "$out" | jq -e '.outcome=="timeout" and .matched==null and (.next_cursor|type=="number") and .slug=="feature-x" and (.until|type=="array") and ((.until|index("closed")) != null)'
 }
 
 @test "wait: --json emits the matched object on the match terminal" {
@@ -1930,4 +1977,252 @@ EOF
   : > "$TEST_KDIR/_sessions/events.jsonl"
   run bash "$LORE" session wait ghost --until spawned --since 0 --timeout 1 --kdir "$TEST_KDIR"
   [ "$status" -eq 2 ]                          # pre-spawn until suppresses gone; times out
+}
+
+# =====================================================================
+# coordinate watch — board-scoped wake
+# =====================================================================
+#
+# Watch is the zero-argument counterpart to `session wait`: no slug, no
+# hand-carried cursor, one call that re-arms itself. The tests below pin the
+# three things that makes true — the self-managed cursor, board scope, and the
+# pending-queue check that covers the one park no journal watcher can see.
+
+WATCH_CURSOR="_coordination/watch-cursor.json"
+
+# Read the persisted cursor value, or "-" when no cursor file exists.
+watch_cursor() {
+  if [ -f "$TEST_KDIR/$WATCH_CURSOR" ]; then
+    jq -r '.cursor' "$TEST_KDIR/$WATCH_CURSOR"
+  else
+    echo -
+  fi
+}
+
+# Write one pending spawn request whose requested_at is <age> seconds old.
+write_pending_request() {
+  local id="$1" slug="$2" target="$3" age="$4"
+  mkdir -p "$TEST_KDIR/_sessions/requests/pending"
+  local at
+  at="$(python3 -c 'import sys,time,datetime;print(datetime.datetime.fromtimestamp(time.time()-float(sys.argv[1]),datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$age")"
+  cat > "$TEST_KDIR/_sessions/requests/pending/$id.json" <<EOF
+{"request_id":"$id","type":"worker","slug":"$slug","target_instance":"$target","initiator":"agent","requested_by":"inst-a","requested_at":"$at","attempts":0,"extra_context":{},"last_error":null,"last_attempt_at":null}
+EOF
+}
+
+@test "watch: the first-ever zero-arg run baselines at journal end instead of replaying history" {
+  printf '%s\n' \
+    '{"event":"closed","request_id":"old","slug":"already-handled"}' \
+    '{"event":"needs_input","slug":"also-handled"}' > "$TEST_KDIR/_sessions/events.jsonl"
+  local size; size="$(wc -c < "$TEST_KDIR/_sessions/events.jsonl" | tr -d '[:space:]')"
+
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]                          # nothing NEW happened
+  [[ "$output" != *'"event"'* ]]               # no replayed row
+  [ "$(watch_cursor)" = "$size" ]              # baselined at the end
+}
+
+@test "watch: a row landing after the baseline wakes the next zero-arg call" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+  local baseline; baseline="$(watch_cursor)"
+
+  echo '{"event":"needs_input","slug":"feature-x","reason":"prompt"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  run bash "$WATCH" --timeout 5 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"needs_input"'* ]]
+  [[ "$output" == *'"slug":"feature-x"'* ]]
+  [[ "$output" == *'"next_cursor"'* ]]
+
+  # The cursor advanced past the consumed row, so re-arming does not re-match it.
+  local advanced; advanced="$(watch_cursor)"
+  [ "$advanced" -gt "$baseline" ]
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+}
+
+@test "watch: the cursor file advances on a timeout too, not only on a match" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+  [ "$(watch_cursor)" = "0" ]
+
+  # A row nobody is waking on still moves the read position: the next call must
+  # not re-scan it.
+  printf '%s\n' '{"event":"step_completed","slug":"feature-x","step_id":"one"}' \
+    > "$TEST_KDIR/_sessions/events.jsonl"
+  local size; size="$(wc -c < "$TEST_KDIR/_sessions/events.jsonl" | tr -d '[:space:]')"
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+  [ "$(watch_cursor)" = "$size" ]
+  jq -e '.schema_version == 1 and (.updated_at | type == "string")' "$TEST_KDIR/$WATCH_CURSOR"
+}
+
+@test "watch: is board-scoped — any slug's actionable row wakes it" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+  echo '{"event":"terminus_reached","actor_instance":"inst-b","slug":"some-other-stream--w3","session_type":"implement","reason":"impl-close"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  run bash "$WATCH" --timeout 5 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"slug":"some-other-stream--w3"'* ]]
+}
+
+@test "watch: an explicit --since wins over the persisted cursor" {
+  printf '%s\n' '{"event":"closed","request_id":"r1","slug":"feature-x"}' \
+    > "$TEST_KDIR/_sessions/events.jsonl"
+  # Baseline past the row, so a zero-arg call would find nothing.
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+
+  run bash "$WATCH" --since 0 --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"closed"'* ]]
+}
+
+@test "watch: an out-of-vocabulary --until is a usage error, not a watch that never returns" {
+  run bash "$WATCH" --until closd --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid --until event: 'closd'"* ]]
+
+  run bash "$WATCH" --until bogus --json --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  echo "$output" | jq -e '.error | test("invalid --until")'
+}
+
+@test "watch: --until narrows the default set exactly as session wait does" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WATCH" --until closed --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+  echo '{"event":"needs_input","slug":"feature-x","reason":"prompt"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  run bash "$WATCH" --until closed --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]                          # narrowed away
+  run bash "$WATCH" --since 0 --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]                          # default set still sees it
+}
+
+@test "watch: --json mirrors wait's matched shape and carries the until-set" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  local out code
+  out="$(bash "$WATCH" --timeout 0 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 2 ]
+  echo "$out" | jq -e '.outcome=="timeout" and .matched==null and (.next_cursor|type=="number") and (.until|type=="array")'
+  echo "$out" | jq -e '(.until | sort) == (["closed","close_failed","orphaned","terminus_reached","needs_input","modal_blocked","restore_refused","worktree_quarantined"] | sort)'
+
+  echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  out="$(bash "$WATCH" --timeout 5 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 0 ]
+  echo "$out" | jq -e '.outcome=="matched" and .matched.event=="modal_blocked" and .matched.slug=="feature-x" and (.next_cursor|type=="number")'
+  # Board scope: identity rides the matched row, so there is no watch-level slug.
+  echo "$out" | jq -e 'has("slug") | not'
+}
+
+@test "watch: a stale pending request wakes the watch; a fresh one does not" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  write_pending_request req-fresh feature-x--w1 inst-a 5
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]                          # 5s old, threshold 300s
+  [[ "$output" != *"pending_stale"* ]]
+
+  # The live defect: a request pinned to an instance that died between enqueue
+  # and claim emits no journal row at all, so nothing else can report it.
+  write_pending_request req-stuck feature-x--w2 dead-instance 3600
+  local out code
+  out="$(bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 0 ]
+  [[ "$out" == *'"advisory":"pending_stale"'* ]]
+  [[ "$out" == *'"request_id":"req-stuck"'* ]]
+  [[ "$out" == *'"slug":"feature-x--w2"'* ]]
+  [[ "$out" == *'"target_instance":"dead-instance"'* ]]
+  [[ "$out" == *'"next_cursor"'* ]]
+  # Only the stuck one is reported, and the age is real.
+  local rows
+  rows="$(printf '%s\n' "$out" | jq -cs 'map(select(.advisory=="pending_stale")) | .[0].requests')"
+  [ "$(printf '%s' "$rows" | jq -r 'length')" -eq 1 ]
+  [ "$(printf '%s' "$rows" | jq -r '.[0].age_seconds >= 3600')" = "true" ]
+  [ "$(printf '%s' "$rows" | jq -r '.[0].age_source')" = "requested_at" ]
+}
+
+@test "watch: --pending-stale 0 ignores the pending queue entirely" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  write_pending_request req-stuck feature-x--w2 dead-instance 3600
+  run bash "$WATCH" --pending-stale 0 --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+  [[ "$output" != *"pending_stale"* ]]
+
+  # A tighter threshold catches what the default would have let sit.
+  write_pending_request req-recent feature-y--w1 inst-a 30
+  run bash "$WATCH" --pending-stale 10 --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"advisory":"pending_stale"'* ]]
+}
+
+@test "watch: a journal match takes precedence over a stale pending advisory" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  write_pending_request req-stuck feature-x--w2 dead-instance 3600
+  echo '{"event":"closed","request_id":"r1","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  run bash "$WATCH" --since 0 --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"closed"'* ]]
+  [[ "$output" != *"pending_stale"* ]]
+}
+
+@test "watch: --json reports a pending-staleness wake as its own outcome" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  write_pending_request req-stuck feature-x--w2 dead-instance 3600
+  local out code
+  out="$(bash "$WATCH" --timeout 0 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 0 ]
+  echo "$out" | jq -e '.outcome=="pending_stale" and .matched==null and (.pending|length)==1 and .pending[0].request_id=="req-stuck" and (.next_cursor|type=="number")'
+}
+
+@test "watch: a mid-row --since fails with the cursor-not-row-aligned remediation" {
+  printf '%s\n' '{"event":"closed","request_id":"r1","slug":"feature-x"}' > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WATCH" --since 7 --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cursor-not-row-aligned"* ]]
+}
+
+@test "watch: refuses a non-numeric --timeout and --pending-stale" {
+  run bash "$WATCH" --timeout soon --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid --timeout"* ]]
+
+  run bash "$WATCH" --pending-stale later --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid --pending-stale"* ]]
+}
+
+@test "watch: an unknown argument is a usage error naming the flag" {
+  run bash "$WATCH" --slug feature-x --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Unknown argument: --slug"* ]]
+}
+
+@test "coordinate watch routes through the dispatcher and is advertised" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  # cli/lore always resolves SCRIPTS_DIR through the ~/.lore/scripts symlink, so
+  # a dispatcher test run from a worktree reaches the INSTALLED scripts, not the
+  # ones under test. What the wiring itself guarantees is that `watch` is a known
+  # verb: it must never fall through to the unknown-verb arm.
+  run bash "$LORE" coordinate watch --timeout 0 --kdir "$TEST_KDIR"
+  [[ "$output" != *"unknown coordinate verb"* ]]
+
+  run bash "$LORE" coordinate --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"watch"* ]]
+}
+
+@test "watch: never appends to the journal — the substrate keeps one writer" {
+  printf '%s\n' '{"event":"needs_input","slug":"feature-x"}' > "$TEST_KDIR/_sessions/events.jsonl"
+  write_pending_request req-stuck feature-x--w2 dead-instance 3600
+  local before; before="$(shasum -a 256 "$TEST_KDIR/_sessions/events.jsonl" | awk '{print $1}')"
+  run bash "$WATCH" --since 0 --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"    # pending advisory path
+  [ "$status" -eq 0 ]
+  [ "$(shasum -a 256 "$TEST_KDIR/_sessions/events.jsonl" | awk '{print $1}')" = "$before" ]
 }
