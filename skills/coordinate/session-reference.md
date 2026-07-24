@@ -172,12 +172,30 @@ event with `matched`, `next_cursor`, and `terminal`, then an existing
 terminal-shaped object on a non-match exit. Inspect every row's event and fields
 before acting. `--request-id` narrows
 `closed` rows only; a slug-matched `close_failed` still wakes — sloppy wake, exact
-read (c2c34e2). The default stop set remains
-`closed,close_failed,orphaned`; progress (`step_completed`), completion
-(`terminus_reached`), worktree refusal/quarantine (`restore_refused`,
-`worktree_quarantined`), and stall (`modal_blocked`, one journal row per genuine
-modal entry) are explicit `--until` choices. `wait` has no session-type filter —
-scope every watcher by exact slug or `--request-id`.
+read (c2c34e2). The default stop set is the actionable set: `closed`,
+`close_failed`, `orphaned`, `terminus_reached`, `needs_input`, `modal_blocked`,
+`restore_refused`, `worktree_quarantined` — narrowing is the explicit act now, not
+widening. `step_completed` stays an explicit `--until` opt-in: it is the one
+high-frequency name in the vocabulary, and a default that woke per step would wake
+constantly and carry no signal. `wait` has no session-type filter — scope every
+watcher by exact slug or `--request-id`.
+
+## Watch mechanics
+
+`lore coordinate watch` is the board-scoped standing eye: zero arguments, wakes on
+the first actionable row from any session, prints that row then the cursor row,
+exit 0. Its cursor lives at `_coordination/watch-cursor.json` (written atomically
+on every exit path — match, advisory, timeout, reader failure), so re-arming is
+the same bare call; precedence is `--since` > cursor file > journal end, and the
+first-ever run baselines at journal end. Exit 2 is timeout with the cursor
+persisted. `--pending-stale <sec>` (default 300, `0` disables) additionally wakes
+on a pending request older than the threshold — age from the row's `requested_at`,
+not mtime, which claim retries rewrite — emitting an `{"advisory":
+"pending_stale", …}` row; a journal match outranks an advisory in the same poll.
+Discriminate plain-mode rows by shape: `has("event")` / `has("advisory")` /
+`has("next_cursor")`. `--json` mirrors wait's matched-object shape but omits
+`slug` deliberately — watch has no target, and identity rides the matched row.
+The verb reads the journal and writes nothing to it.
 
 `--next-session` requires `--follow`, a positional exact slug, and no caller-supplied
 `--request-id`. It starts at a supplied cursor or an invocation-time journal-end
@@ -252,6 +270,13 @@ kept for provenance. Live wants stay in SKILL.md.
   claim/spawn reordering. Rewriting the wait closure remains a calibrated n=4
   watcher hazard, so raw journal polling is a stream-scoped migration handoff only
   → [[work:session-watch-persistent-follow-sane-timeout-next]].
+- actionable default stop set + `lore coordinate watch` + allocate lifecycle hint —
+  SHIPPED 2026-07-24 → [[work:coordinator-seat-orientation-fixes-automatic-sleep]]:
+  the safe stop set became wait's default (the prose warning it replaced is gone);
+  watch retired per-session watcher fleets and covers the silent-park gap
+  (a targeted request whose instance died pre-claim sat pending 61 minutes with
+  zero journal rows — the incident that earned `--pending-stale`); allocate now
+  names the next lifecycle verb for seat-owned trees.
 - close retry-on-unblock + `terminus_reached` — SHIPPED 2026-07-12 (park-open arc →
   [[work:completed-sessions-park-open-close-retry-on-unbloc]]), both legs. Origin: a
   spec session completed its protocol but both terminus auto-closes died against a
