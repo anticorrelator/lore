@@ -9,6 +9,8 @@
 #   2. Role-binding x model_routing capability conflicts  (with set-model fix)
 #   3. Per-repo .lore.config cwd-vs-user-config diff
 #   4. Capability override inspection (overrides + evidence-ceiling check)
+#   5. Ceremony overlay: which ceremony_roles bindings override the [roles]
+#      table, and which are written but shadowed by a higher layer
 #
 # Doctor is the operator-facing surface that maps each problem to the
 # remediation command (`bash install.sh ...`, `lore framework set-model ...`,
@@ -49,6 +51,9 @@ Sections (doctor):
   Roles        Resolved role->model bindings (full env->per-repo->user->default
                chain); rejects bindings that conflict with the active
                harness's model_routing capability
+  Ceremony     Per-ceremony overlay bindings that override the Roles table
+               (harnesses.<active>.ceremony_roles), and bindings written there
+               that a higher-precedence layer shadows
   Per-repo     Diff between cwd resolution (.lore.config + env) and the
                user-config defaults (so operators see what cwd changes)
 
@@ -90,6 +95,7 @@ DATA_DIR="${LORE_DATA_DIR:-$HOME/.lore}"
 CONFIG_PATH="$DATA_DIR/config/settings.json"
 CAPABILITIES_FILE="$LORE_LIB_DIR/../adapters/capabilities.json"
 ROLES_FILE="$LORE_LIB_DIR/../adapters/roles.json"
+CEREMONIES_FILE="$LORE_LIB_DIR/../adapters/ceremonies.json"
 EVIDENCE_FILE="$LORE_LIB_DIR/../adapters/capabilities-evidence.md"
 COMPAT_DOC="$LORE_LIB_DIR/../docs/framework-compatibility.md"
 
@@ -253,6 +259,134 @@ PYEOF
   )
 fi
 
+# --- Ceremony overlay resolution ----------------------------------------------
+# The [roles] block above calls resolve_model_for_role with NO ceremony
+# argument, so it renders layer 4 and below and skips layer 3
+# (harnesses.<active>.ceremony_roles.<ceremony>.<role>) entirely. That made the
+# operative binding invisible: a store with ceremony_roles.spec.lead=fable
+# rendered a clean all-opus [roles] table while every /spec lead ran on fable.
+# This block resolves the overlay through the same lib.sh helper so the binding
+# that actually applies is on screen.
+#
+# Ceremony ids come from the closed registry lib.sh validates against
+# (adapters/ceremonies.json) — never a list spelled out here, or doctor would
+# drift from the resolver the moment a ceremony is added.
+CEREMONY_IDS=""
+if [[ -f "$CEREMONIES_FILE" ]]; then
+  CEREMONY_IDS=$(jq -r '.ceremonies[].id' "$CEREMONIES_FILE" 2>/dev/null | tr '\n' ' ')
+fi
+
+# Which ceremonies carry any binding on the active harness. A ceremony with an
+# empty (or absent) map is not resolved at all: layer 3 falls through for every
+# role, so every pair is identical to its [roles] row by construction.
+CEREMONY_BOUND_IDS=""
+CEREMONY_UNKNOWN_IDS=""
+CEREMONY_RESOLUTIONS_JSON='[]'
+if [[ -n "$CEREMONY_IDS" && -n "$ROLE_IDS" && -n "$ACTIVE_FRAMEWORK" && "$CONFIG_STATUS" == "present" && -f "$ROLES_FILE" ]]; then
+  CEREMONY_BOUND_IDS=$(jq -r --arg fw "$ACTIVE_FRAMEWORK" \
+    '(.harnesses[$fw].ceremony_roles // {}) | to_entries[] | select((.value | length) > 0) | .key' \
+    "$CONFIG_PATH" 2>/dev/null | tr '\n' ' ')
+
+  # Keys under ceremony_roles that are not in the registry. The render loop
+  # below walks the registry, so an unknown key would otherwise never appear —
+  # yet the resolver rejects it on every ceremony-scoped call, so it breaks all
+  # of them. Collected separately because no (ceremony, role) pair exists to
+  # hang it on.
+  CEREMONY_UNKNOWN_IDS=$(jq -r --arg fw "$ACTIVE_FRAMEWORK" --slurpfile C "$CEREMONIES_FILE" \
+    '($C[0].ceremonies | map(.id)) as $valid
+     | ((.harnesses[$fw].ceremony_roles // {}) | keys) - $valid | .[]' \
+    "$CONFIG_PATH" 2>/dev/null | tr '\n' ' ')
+
+  # Candidate pairs to resolve, as "<ceremony>\t<role>\t<written-or-empty>".
+  # A pair can diverge from its [roles] row only if layer 3 yields a value for
+  # it: either the role is keyed directly under the ceremony map, or the
+  # resolver's fallback_role re-resolution (layer 4b, which forwards the
+  # ceremony argument) lands on a role that is. Walking the fallback chain with
+  # `recurse` keeps that closed even if a future role declares a multi-hop
+  # chain. Pairs outside this set are provably equal to [roles], so skipping
+  # them costs no fidelity — only the resolver forks.
+  CEREMONY_PAIRS=$(jq -r \
+    --arg fw "$ACTIVE_FRAMEWORK" \
+    --slurpfile R "$ROLES_FILE" \
+    --slurpfile C "$CEREMONIES_FILE" \
+    '
+    ($R[0].roles | map({key: .id, value: (.fallback_role // null)}) | from_entries) as $fb
+    | ($R[0].roles | map(.id)) as $allroles
+    | ($C[0].ceremonies | map(.id)) as $cers
+    | (.harnesses[$fw].ceremony_roles // {}) as $cr
+    | $cers[] as $c
+    | (($cr[$c] // {}) | keys) as $bound
+    | if ($bound | length) == 0 then empty
+      else
+        $allroles[] as $r
+        | ([$r | recurse($fb[.] // empty)] | unique) as $chain
+        | if ($chain | any(. as $x | $bound | index($x))) then
+            "\($c)\t\($r)\t\((($cr[$c] // {})[$r]) // "")"
+          else empty end
+      end
+    ' "$CONFIG_PATH" 2>/dev/null || true)
+
+  if [[ -n "$CEREMONY_PAIRS" ]]; then
+    CEREMONY_ROWS=""
+    while IFS=$'\t' read -r cer rol written; do
+      [[ -n "$cer" && -n "$rol" ]] || continue
+      # Same canonical helper the [roles] block uses — with the ceremony
+      # argument, so layer 3 is actually consulted.
+      #
+      # A non-zero return is a real signal, not noise to swallow: the resolver
+      # rejects an unknown ceremony key or an unknown role key stored under
+      # ceremony_roles, and that rejection applies to EVERY ceremony-scoped
+      # resolution. The [roles] block cannot see it (layer 3 is only validated
+      # when a ceremony is passed), so without this the malformed map surfaces
+      # nowhere — or worse, an empty resolution reads as a shadowed binding.
+      cer_err=""
+      if ! cer_resolved=$(resolve_model_for_role "$rol" "$cer" 2>&1); then
+        cer_err=$(printf '%s' "$cer_resolved" | head -1)
+        cer_resolved=""
+      fi
+      CEREMONY_ROWS+="${cer}"$'\t'"${rol}"$'\t'"${written}"$'\t'"${cer_resolved}"$'\t'"${cer_err}"$'\n'
+    done <<< "$CEREMONY_PAIRS"
+
+    CEREMONY_RESOLUTIONS_JSON=$(
+      CEREMONY_ROWS_FOR_PY="$CEREMONY_ROWS" \
+      ROLE_RESOLUTIONS_JSON_FOR_PY="$ROLE_RESOLUTIONS_JSON" \
+      python3 - <<'PYEOF'
+import json, os
+
+general = json.loads(os.environ["ROLE_RESOLUTIONS_JSON_FOR_PY"])
+out = []
+for line in os.environ["CEREMONY_ROWS_FOR_PY"].split("\n"):
+    if not line.strip():
+        continue
+    parts = line.split("\t")
+    if len(parts) < 5:
+        continue
+    cer, rol, written, resolved, err = parts[0], parts[1], parts[2], parts[3], parts[4]
+    gen_entry = general.get(rol) or {}
+    gen = gen_entry.get("resolved", "")
+    out.append({
+        "ceremony": cer,
+        "role": rol,
+        "written": written,
+        "resolved": resolved,
+        "general": gen,
+        # The resolver refused this pair — a malformed ceremony_roles map.
+        # Reported on its own, never folded into differs/shadowed, because an
+        # empty resolution is not evidence about precedence.
+        "error": err,
+        # The overlay changes the operative model for this seat.
+        "differs": not err and bool(resolved) and resolved != gen,
+        # A binding is written under ceremony_roles but a higher-precedence
+        # layer (env / per-repo .lore.config) wins — the operator wrote it and
+        # it does not apply.
+        "shadowed": not err and bool(written) and resolved != written,
+    })
+print(json.dumps(out))
+PYEOF
+    ) || CEREMONY_RESOLUTIONS_JSON='[]'
+  fi
+fi
+
 # Validate each role binding against the active harness's model_routing
 # shape. Emits one line per conflict; resolved bindings that pass validation
 # produce no row.
@@ -260,15 +394,21 @@ ROLE_CONFLICTS_JSON='[]'
 if [[ -n "$ROLE_IDS" && -n "$ACTIVE_FRAMEWORK" ]]; then
   ROLE_CONFLICTS_JSON=$(
     ROLE_RESOLUTIONS_JSON_FOR_PY="$ROLE_RESOLUTIONS_JSON" \
+    CEREMONY_RESOLUTIONS_JSON_FOR_PY="$CEREMONY_RESOLUTIONS_JSON" \
     MODEL_ROUTING_SHAPE_FOR_PY="$MODEL_ROUTING_SHAPE" \
     ACTIVE_FRAMEWORK_FOR_PY="$ACTIVE_FRAMEWORK" \
     python3 - <<'PYEOF'
 import json, os
 
 resolutions = json.loads(os.environ["ROLE_RESOLUTIONS_JSON_FOR_PY"])
+ceremonies = json.loads(os.environ["CEREMONY_RESOLUTIONS_JSON_FOR_PY"])
 shape = os.environ["MODEL_ROUTING_SHAPE_FOR_PY"]
 fw = os.environ["ACTIVE_FRAMEWORK_FOR_PY"]
 conflicts = []
+
+# Provider/model syntax requires multi-shape; mirrors validate_role_model_binding.
+def bad_shape(model):
+    return "/" in model and shape != "multi"
 
 for rid, entry in resolutions.items():
     model = entry.get("resolved", "")
@@ -277,10 +417,10 @@ for rid, entry in resolutions.items():
         # error already told the caller "no binding for role X". Doctor flags
         # this separately under the unbound-roles diagnostic, not here.
         continue
-    # Provider/model syntax requires multi-shape; mirrors validate_role_model_binding.
-    if "/" in model and shape != "multi":
+    if bad_shape(model):
         conflicts.append({
             "role": rid,
+            "ceremony": "",
             "model": model,
             "source": entry.get("resolved_source"),
             "framework": fw,
@@ -288,6 +428,27 @@ for rid, entry in resolutions.items():
             "remediation": "lore framework set-model " + rid + " <bare-model-without-provider>",
             "reason": "provider/model syntax requires model_routing.shape=multi (active harness is " + shape + ")",
         })
+
+# Ceremony-scoped bindings get the same shape check. Once the overlay is
+# visible it must also be validated — otherwise the conflict diagnostic keeps
+# exactly the blind spot the [roles] block just lost, and a malformed
+# ceremony binding stays invisible until a protocol session fails on it.
+for row in ceremonies:
+    model = row.get("written", "")
+    if not model or not bad_shape(model):
+        continue
+    conflicts.append({
+        "role": row.get("role", ""),
+        "ceremony": row.get("ceremony", ""),
+        "model": model,
+        "source": "ceremony",
+        "framework": fw,
+        "shape": shape,
+        # No CLI reaches the ceremony overlay — set-model writes roles.<role>
+        # only — so the remediation is the config path, not a command.
+        "remediation": "edit harnesses." + fw + ".ceremony_roles." + row.get("ceremony", "") + "." + row.get("role", "") + " to a bare model (no `lore framework set-model` equivalent exists)",
+        "reason": "provider/model syntax requires model_routing.shape=multi (active harness is " + shape + ")",
+    })
 
 print(json.dumps(conflicts))
 PYEOF
@@ -425,7 +586,12 @@ fi
 DIAG_COUNT=0
 HAS_CONFLICT=$(echo "$ROLE_CONFLICTS_JSON" | jq 'length' 2>/dev/null || echo 0)
 HAS_CEILING=$(echo "$CAPABILITY_REPORT_JSON" | jq '[.[] | select(.ceiling_violation == true)] | length' 2>/dev/null || echo 0)
-DIAG_COUNT=$((HAS_CONFLICT + HAS_CEILING))
+# A ceremony pair the resolver refuses means the ceremony_roles map names an
+# unknown ceremony or role. That breaks every ceremony-scoped resolution, so it
+# is a diagnostic, unlike a merely diverging binding.
+HAS_CEREMONY_ERROR=$(echo "$CEREMONY_RESOLUTIONS_JSON" | jq '[.[] | select(.error != "")] | length' 2>/dev/null || echo 0)
+HAS_CEREMONY_UNKNOWN=$(printf '%s' "$CEREMONY_UNKNOWN_IDS" | wc -w | tr -d '[:space:]')
+DIAG_COUNT=$((HAS_CONFLICT + HAS_CEILING + HAS_CEREMONY_ERROR + HAS_CEREMONY_UNKNOWN))
 
 # --- capability-overrides subcommand path -------------------------------------
 if [[ "$SUBCOMMAND" == "capability-overrides" ]]; then
@@ -504,6 +670,7 @@ if [[ "$JSON_OUTPUT" -eq 1 ]]; then
   LORE_CONFIG_PATH_FOR_PY="$LORE_CONFIG_PATH" \
   CAPABILITY_REPORT_JSON_FOR_PY="$CAPABILITY_REPORT_JSON" \
   ROLE_RESOLUTIONS_JSON_FOR_PY="$ROLE_RESOLUTIONS_JSON" \
+  CEREMONY_RESOLUTIONS_JSON_FOR_PY="$CEREMONY_RESOLUTIONS_JSON" \
   ROLE_CONFLICTS_JSON_FOR_PY="$ROLE_CONFLICTS_JSON" \
   PER_REPO_DIFF_JSON_FOR_PY="$PER_REPO_DIFF_JSON" \
   DIAG_COUNT_FOR_PY="$DIAG_COUNT" \
@@ -529,6 +696,9 @@ out = {
     },
     "capabilities": json.loads(os.environ["CAPABILITY_REPORT_JSON_FOR_PY"]),
     "roles": list(json.loads(os.environ["ROLE_RESOLUTIONS_JSON_FOR_PY"]).values()),
+    # One row per (ceremony, role) pair the overlay can move. Pairs absent here
+    # resolve exactly as their "roles" entry.
+    "ceremony_roles": json.loads(os.environ["CEREMONY_RESOLUTIONS_JSON_FOR_PY"]),
     "role_conflicts": json.loads(os.environ["ROLE_CONFLICTS_JSON_FOR_PY"]),
     "per_repo_diff": json.loads(os.environ["PER_REPO_DIFF_JSON_FOR_PY"]),
     "diagnostics_fired": int(os.environ["DIAG_COUNT_FOR_PY"]),
@@ -653,15 +823,72 @@ else
   done <<< "$rows"
 fi
 
+# Ceremony overlay — the layer [roles] cannot see.
+#
+# Rendering decision: show only the pairs whose resolved model DIFFERS from the
+# [roles] row (plus written-but-shadowed bindings), never a full role table per
+# ceremony. A per-ceremony dump would reproduce the original failure in a new
+# place — an operator would have to diff two ten-row blocks by eye to find the
+# one seat that moved, which is the manual step this block exists to remove.
+# The closing line states the invariant that makes the short list complete.
+#
+# Divergence is NOT a diagnostic and does not affect the exit code: a ceremony
+# binding that overrides the general row is the overlay working as designed.
+# Only a ceremony binding that conflicts with the harness's model_routing shape
+# fires, via the shared role-conflict diagnostic below.
+echo ""
+echo "[ceremony roles]"
+if [[ -z "$CEREMONY_IDS" ]]; then
+  echo "  (ceremony registry unavailable at $CEREMONIES_FILE)"
+elif [[ -z "$ACTIVE_FRAMEWORK" || "$CONFIG_STATUS" != "present" ]]; then
+  echo "  (no config to inspect — see [config] above)"
+else
+  echo "  Overlay:    harnesses.$ACTIVE_FRAMEWORK.ceremony_roles.<ceremony>.<role>"
+  echo "  Precedence: env > per-repo .lore.config > CEREMONY > roles > roles.default"
+  for bad_cer in $CEREMONY_UNKNOWN_IDS; do
+    echo "  $bad_cer: UNKNOWN ceremony — not in $CEREMONIES_FILE; the resolver rejects every ceremony-scoped call while this key is present"
+  done
+  for cer in $CEREMONY_IDS; do
+    if [[ " $CEREMONY_BOUND_IDS " != *" $cer "* ]]; then
+      echo "  $cer: (no bindings — every role resolves as in [roles])"
+      continue
+    fi
+    cer_rows=$(echo "$CEREMONY_RESOLUTIONS_JSON" | jq -r --arg c "$cer" --arg sep $'\x1f' \
+      '.[] | select(.ceremony == $c) | select(.differs or .shadowed or (.error != "")) | "\(.role)\($sep)\(.resolved)\($sep)\(.general)\($sep)\(.written)\($sep)\(.differs)\($sep)\(.shadowed)\($sep)\(.error)"' 2>/dev/null || true)
+    if [[ -z "$cer_rows" ]]; then
+      echo "  $cer: (bindings present, none change the resolved model)"
+      continue
+    fi
+    echo "  $cer:"
+    while IFS=$'\x1f' read -r role resolved general written differs shadowed cerror; do
+      [[ -z "$role" ]] && continue
+      if [[ -n "$cerror" ]]; then
+        echo "    $role -> (unresolvable)   $cerror"
+      fi
+      if [[ "$differs" == "true" ]]; then
+        echo "    $role -> $resolved   OVERRIDES [roles] $role -> ${general:-(unset)}"
+      fi
+      if [[ "$shadowed" == "true" ]]; then
+        echo "    $role -> ${resolved:-(unset)}   ceremony binding '$written' is SHADOWED by a higher-precedence layer (env or per-repo .lore.config)"
+      fi
+    done <<< "$cer_rows"
+  done
+  echo "  Roles not listed above resolve exactly as in [roles]."
+fi
+
 # Conflict diagnostics (one line per conflict + remediation).
 if [[ "$HAS_CONFLICT" -gt 0 ]]; then
   echo ""
   echo "[diagnostic] role-binding conflicts with active harness model_routing"
   rows=$(echo "$ROLE_CONFLICTS_JSON" | jq -r --arg sep $'\x1f' \
-    '.[] | "\(.role)\($sep)\(.model)\($sep)\(.framework)\($sep)\(.shape)\($sep)\(.reason)\($sep)\(.remediation)"')
-  while IFS=$'\x1f' read -r role model fw shape reason remediation; do
+    '.[] | "\(.role)\($sep)\(.model)\($sep)\(.framework)\($sep)\(.shape)\($sep)\(.reason)\($sep)\(.remediation)\($sep)\(.ceremony // "")"')
+  while IFS=$'\x1f' read -r role model fw shape reason remediation ceremony; do
     [[ -z "$role" ]] && continue
-    echo "  $role -> $model"
+    if [[ -n "$ceremony" ]]; then
+      echo "  $role -> $model (ceremony: $ceremony)"
+    else
+      echo "  $role -> $model"
+    fi
     echo "    Active harness: $fw (model_routing.shape=$shape)"
     echo "    Reason: $reason"
     echo "    Remediation: $remediation"

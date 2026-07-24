@@ -10,7 +10,6 @@ Scale declaration required for `lore search` and `lore prefetch` — use `--scal
 **preferences/** (1 entries)
 **architecture/** (1 entries)
 **gotchas/** (1 entries)
-**domains/** (1 entries)
 **domains/** (1 files, lazy-loaded)
 
 --- Direct-resolved entries (from backlinks) ---
@@ -58,6 +57,6 @@ run it again without the flag to ship widgets.
 
 [Stale] Entries needing review: conventions/widget-superseded.md (low-confidence)
 [Budget] 2081/8000 chars | 6 full, 0 summary, 0 skipped
-[knowledge] 9 entries across 8 categories
+[knowledge] 8 entries across 7 categories
 
 === End Project Knowledge ===
