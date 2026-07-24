@@ -5,11 +5,13 @@ Runs during SessionStart hook and writes _pending_digest.md for LLM processing.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import sys
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add the repo root to sys.path so `adapters` package is importable.
@@ -372,6 +374,116 @@ def write_digest(knowledge_dir, user_messages, assistant_texts, session_id, sess
     return digest_path
 
 
+# ---------------------------------------------------------------------------
+# Digested-session ledger
+# ---------------------------------------------------------------------------
+#
+# A session must be digested at most once. The previous guard compared
+# `_pending_digest.md`'s mtime against the transcript's mtime, which fails in
+# both directions: the pending digest is DELETED by /remember Step 0b once it
+# is consumed (so there is nothing left to compare against), and any touch of
+# an old transcript makes it look newer than the digest, re-opening a digest
+# for a session that was already processed weeks ago. The result was a replay
+# — an old session's highlights presented as the previous session's.
+#
+# The ledger records identity instead of timing: one line per digested
+# session, in the knowledge store's `_threads/` area, surviving the pending
+# digest's deletion because it is a separate file.
+
+DIGESTED_LEDGER_NAME = '_digested_sessions.jsonl'
+
+# Bound the ledger. Duplicate suppression only needs recent history — a
+# session old enough to have fallen off the tail is far outside the
+# previous-session window the writer can ever select again.
+MAX_LEDGER_RECORDS = 500
+
+
+def digested_ledger_path(knowledge_dir):
+    """Path to the append-only digested-session ledger."""
+    return Path(knowledge_dir) / '_threads' / DIGESTED_LEDGER_NAME
+
+
+def session_identity(session_id, transcript_path):
+    """Return a stable identity key for a transcript.
+
+    Prefers the harness-assigned session id (stable across mtime churn, file
+    moves, and re-reads). Falls back to a content hash when the provider
+    reports `unknown` — an identity derived from the bytes is still stable
+    for an unchanged transcript, which is the case that matters.
+    """
+    if session_id and session_id != 'unknown':
+        return f'session-id:{session_id}'
+
+    h = hashlib.sha256()
+    try:
+        with open(transcript_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b''):
+                h.update(chunk)
+    except OSError:
+        # Unreadable transcript: fall back to the path so the caller still
+        # gets a key. It will simply never match, and the transcript is
+        # unusable anyway.
+        return f'path:{transcript_path}'
+    return f'sha256:{h.hexdigest()}'
+
+
+def already_digested(knowledge_dir, identity):
+    """True when `identity` appears in the digested-session ledger."""
+    path = digested_ledger_path(knowledge_dir)
+    if not path.exists():
+        return False
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict) and record.get('key') == identity:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def record_digested(knowledge_dir, identity, transcript_path):
+    """Append `identity` to the ledger, trimming it to MAX_LEDGER_RECORDS.
+
+    Called only after a digest has actually been written — skipped sessions
+    (headless, too short) are not recorded, so the cheap skip re-fires next
+    time rather than consuming a ledger slot.
+    """
+    threads_dir = Path(knowledge_dir) / '_threads'
+    threads_dir.mkdir(parents=True, exist_ok=True)
+    path = threads_dir / DIGESTED_LEDGER_NAME
+
+    record = {
+        'key': identity,
+        'transcript': os.path.basename(transcript_path),
+        'digested_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    }
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(record) + '\n')
+
+    # Trim from the head when the ledger outgrows its bound. Rewrite through a
+    # temp file + atomic replace so a concurrent reader never sees a half file.
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+    except OSError:
+        return path
+    if len(lines) > MAX_LEDGER_RECORDS:
+        tmp = path.with_suffix('.jsonl.tmp')
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.writelines(lines[-MAX_LEDGER_RECORDS:])
+        os.replace(tmp, path)
+
+    return path
+
+
 def find_project_dir(cwd):
     """Convert CWD to project-id format and find Claude Code project directory.
 
@@ -474,14 +586,16 @@ def main():
             # No previous session available
             sys.exit(0)
 
-        # Check if already processed
-        digest_path = Path(knowledge_dir) / '_threads' / '_pending_digest.md'
-        if digest_path.exists():
-            digest_mtime = digest_path.stat().st_mtime
-            session_mtime = os.path.getmtime(prev_session_path)
-            if digest_mtime > session_mtime:
-                # Already processed this session
-                sys.exit(0)
+        # Get session metadata via provider (session_id + content-derived date)
+        meta = provider.session_metadata(prev_session_path)
+        session_id = meta.get('session_id', 'unknown')
+        session_date = meta.get('session_date')
+
+        # Check if already processed. Identity, not mtime — see the
+        # digested-session ledger notes above.
+        identity = session_identity(session_id, prev_session_path)
+        if already_digested(knowledge_dir, identity):
+            sys.exit(0)
 
         # Get raw lines for debugging detection (windowed adjacency requires raw lines)
         raw_lines = provider.read_raw_lines(prev_session_path)
@@ -497,11 +611,6 @@ def main():
 
         # Parse the transcript via provider (replaces parse_jsonl_file)
         messages = provider.parse_transcript(prev_session_path)
-
-        # Get session metadata via provider (replaces parse_jsonl_file session_id/date extraction)
-        meta = provider.session_metadata(prev_session_path)
-        session_id = meta.get('session_id', 'unknown')
-        session_date = meta.get('session_date')
 
         # Extract user messages and assistant texts from normalized schema
         user_messages, assistant_texts = extract_messages_from_normalized(messages)
@@ -539,6 +648,10 @@ def main():
             debug_tool_results=debug_tool_results,
             files_touched=files_touched,
         )
+
+        # Record the session as digested only after the digest exists, so a
+        # failed write leaves the session eligible for the next run.
+        record_digested(knowledge_dir, identity, prev_session_path)
 
         # Success (silent)
         sys.exit(0)

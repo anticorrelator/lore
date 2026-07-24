@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -273,18 +273,23 @@ def read_raw_lines(path: str) -> list[str]:
 
 
 def session_metadata(path: str) -> dict:
-    """Return `{"session_id": str, "session_date": datetime | None}` from the
-    first parseable rollout entry.
+    """Return `{"session_id": str, "session_date": datetime | None}`.
 
-    Codex rollout entries carry `session_id` (from the hook payload) and a
-    per-entry `timestamp` (ISO-8601).  Falls back to file mtime for
-    `session_date` when no timestamp is present in the first entry.
+    `session_id` comes from the first parseable rollout entry.
+    `session_date` is the earliest `timestamp` (ISO-8601) carried anywhere
+    in the rollout, and `None` when no entry carries one — there is no
+    file-mtime fallback, for the reason documented on
+    `claude_code.py::session_metadata`: mtime records the last write to the
+    file, not when the session ran, so touching an old rollout would report
+    a session date days off from the conversation it describes.
     """
     session_id = "unknown"
-    session_date = None
+    earliest = None
+    earliest_key = None
 
     try:
         with open(path, "r", encoding="utf-8") as f:
+            first_seen = False
             for line in f:
                 line = line.strip()
                 if not line:
@@ -293,30 +298,31 @@ def session_metadata(path: str) -> dict:
                     data = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                session_id = (
-                    data.get("session_id", "")
-                    or data.get("sessionId", "")
-                    or "unknown"
-                )
+                if not isinstance(data, dict):
+                    continue
+                if not first_seen:
+                    session_id = (
+                        data.get("session_id", "")
+                        or data.get("sessionId", "")
+                        or "unknown"
+                    )
+                    first_seen = True
                 ts = data.get("timestamp")
-                if ts:
-                    try:
-                        session_date = datetime.fromisoformat(
-                            str(ts).replace("Z", "+00:00")
-                        )
-                    except (ValueError, TypeError):
-                        session_date = None
-                break
+                if not ts:
+                    continue
+                try:
+                    when = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    continue
+                # Naive and aware stamps cannot be compared directly; compare
+                # on a UTC-normalized key while returning the value as parsed.
+                key = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+                if earliest_key is None or key < earliest_key:
+                    earliest, earliest_key = when, key
     except OSError:
         return {"session_id": "unknown", "session_date": None}
 
-    if session_date is None:
-        try:
-            session_date = datetime.fromtimestamp(os.path.getmtime(path))
-        except OSError:
-            session_date = None
-
-    return {"session_id": session_id, "session_date": session_date}
+    return {"session_id": session_id, "session_date": earliest}
 
 
 # ---------------------------------------------------------------------------

@@ -215,23 +215,38 @@ def read_raw_lines(path: str) -> list[str]:
 
 
 def session_metadata(path: str) -> dict:
-    """Return `{"session_id": str, "session_date": datetime | None}`
-    from the first parseable entry in the transcript.
+    """Return `{"session_id": str, "session_date": datetime | None}`.
 
-    Reproduces `extract-session-digest.py::parse_jsonl_file`'s
-    metadata-extraction path (lines 84–90, 117–119) without
-    re-parsing the entire file. Falls back to file mtime for
-    `session_date` when no `timestamp` field is present in the
-    first line.
+    `session_id` comes from the first parseable entry (Claude Code stamps
+    `sessionId` on every line, so the first one is representative).
+
+    `session_date` is the **earliest `timestamp` carried anywhere in the
+    transcript** — the moment the session actually ran. There is
+    deliberately no file-mtime fallback: mtime records the last *write* to
+    the file, which moves whenever a transcript is copied, re-synced, or
+    otherwise touched, so an mtime-derived date can be days or weeks off
+    from the conversation it claims to describe. Observed 2026-07-24: a
+    2026-07-10 session whose first line carried no `timestamp` produced
+    `**Date:** 2026-07-24 14:13:51` in `_pending_digest.md`, matching the
+    file's mtime to the second. `extract-session-digest.py` stamps this
+    value into the digest header, where a confident wrong date is strictly
+    worse than an honest `unknown` — so when no entry carries a parseable
+    timestamp, this returns `None` and the writer emits `unknown`.
+
+    Scanning for the minimum rather than stopping at the first timestamped
+    entry costs one pass but does not assume the file is append-ordered;
+    the earliest timestamp is the session's start under either ordering.
     """
     import json
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     session_id = "unknown"
-    session_date = None
+    earliest = None
+    earliest_key = None
 
     try:
         with open(path, "r", encoding="utf-8") as f:
+            first_seen = False
             for line in f:
                 line = line.strip()
                 if not line:
@@ -240,27 +255,28 @@ def session_metadata(path: str) -> dict:
                     data = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                # First parseable line wins.
-                session_id = data.get("sessionId", "unknown")
+                if not isinstance(data, dict):
+                    continue
+                if not first_seen:
+                    # First parseable line wins for the id.
+                    session_id = data.get("sessionId") or "unknown"
+                    first_seen = True
                 ts = data.get("timestamp")
-                if ts:
-                    try:
-                        session_date = datetime.fromisoformat(
-                            ts.replace("Z", "+00:00")
-                        )
-                    except (ValueError, TypeError):
-                        session_date = None
-                break
+                if not ts:
+                    continue
+                try:
+                    when = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    continue
+                # Naive and aware stamps cannot be compared directly; compare
+                # on a UTC-normalized key while returning the value as parsed.
+                key = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+                if earliest_key is None or key < earliest_key:
+                    earliest, earliest_key = when, key
     except OSError:
         return {"session_id": "unknown", "session_date": None}
 
-    if session_date is None:
-        try:
-            session_date = datetime.fromtimestamp(os.path.getmtime(path))
-        except OSError:
-            session_date = None
-
-    return {"session_id": session_id, "session_date": session_date}
+    return {"session_id": session_id, "session_date": earliest}
 
 
 # ---------------------------------------------------------------------------
