@@ -13,15 +13,22 @@
 #                            [--kdir <path>] [--json]
 #
 # Options:
-#   --until <events>  Comma-separated event names to wake on (default:
-#                     closed,close_failed,orphaned — terminal close/recovery outcomes
-#                     teardown can end in either). Each name is checked against the
-#                     journal's event vocabulary up front; a name that is not in it
-#                     is a usage error, not a wait that never ends.
+#   --until <events>  Comma-separated event names to wake on. The default is the
+#                     actionable set: closed, close_failed, orphaned,
+#                     worktree_quarantined, terminus_reached, needs_input,
+#                     modal_blocked, restore_refused — every edge where a session
+#                     either ended or parked waiting on somebody. A default wait
+#                     therefore returns when the session needs you, not only when
+#                     it is over: an autonomous session sitting at needs_input used
+#                     to wake nobody, which read as a hang. Pass --until explicitly
+#                     to narrow to exactly the edge you care about. Each name is
+#                     checked against the journal's event vocabulary up front; a
+#                     name that is not in it is a usage error, not a wait that never
+#                     ends.
 #                     `step_completed` is an explicit progress wake: inspect the
 #                     matched row's step_id and step_label before acting. It is not
-#                     part of the default teardown set and does not mean the whole
-#                     protocol reached terminus.
+#                     in the default set and does not mean the whole protocol
+#                     reached terminus.
 #   --since <cursor>  Byte-offset cursor to start reading from. Omit to start at
 #                     the journal's current end ("wake on what happens next").
 #                     Treat the value as opaque — pass back a cursor this verb or
@@ -84,6 +91,11 @@
 #   C=$(lore session events --cursor-only)
 #   lore session close <slug>
 #   lore session wait <slug> --since "$C"
+#
+# This verb watches ONE session, so N live sessions need N of them, each with its
+# own cursor to carry. When you want to sleep until anything on the board moves,
+# `lore coordinate watch` is the board-scoped form: zero arguments, one
+# self-managed cursor, same actionable stop set.
 
 set -euo pipefail
 
@@ -93,7 +105,7 @@ source "$SCRIPT_DIR/lib.sh"
 SLUG_ARG=""
 WORK_ITEM=""
 WORK_ITEM_SET=0
-UNTIL="closed,close_failed,orphaned"
+UNTIL="${SESSION_ACTIONABLE_EVENTS// /,}"
 SINCE=""
 SINCE_SET=0
 TIMEOUT=3600
@@ -105,13 +117,11 @@ REQUEST_ID=""
 REQUEST_ID_SET=0
 FOLLOW=0
 NEXT_SESSION=0
-EVENTS_RETRY_DELAYS=(1 2)
 
-# Mirror of the sole writer's event vocabulary (session-event-append.sh's
-# validation case-arm). tests/session-verbs.bats cross-checks this list against
-# the writer and names any drift; if that test fails, reconcile this line with the
-# writer rather than silencing the test.
-SESSION_EVENT_VOCAB="requested claimed spawned needs_input quiescent resumed recovered closed orphaned step_completed terminus_reached harness_turn_ended spawn_failed request_reclaimed request_abandoned request_cancelled close_requested close_failed restore_refused worktree_quarantined send_requested sent send_refused answer_requested answered answer_refused modal_blocked review_flagged review_held review_notified review_released"
+# The writer's event vocabulary mirror (SESSION_EVENT_VOCAB), the actionable
+# default stop set (SESSION_ACTIONABLE_EVENTS), and the reference-reader retry
+# policy come from lib.sh, so this verb and coordinate-watch.sh validate against
+# one copy instead of drifting apart.
 
 # Waiting on any of these queue/pre-spawn events means an unhosted slug is the
 # normal starting state, so the session-gone (liveness) exit is disabled for them —
@@ -130,7 +140,7 @@ while [[ $# -gt 0 ]]; do
     --ttl) TTL="$2"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,72p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,82p' "$0"; exit 0 ;;
     --*)
       echo "Unknown argument: $1" >&2
       echo "Usage: session-wait.sh (<slug> | --work-item <base-slug>) [--until <events>] [--since <cursor>] [--request-id <id>] [--follow] [--next-session] [--timeout <sec>] [--ttl <sec>] [--kdir <path>] [--json]" >&2
@@ -197,11 +207,8 @@ IFS=',' read -r -a _until_raw <<< "$UNTIL"
 for tok in "${_until_raw[@]}"; do
   tok="${tok// }"   # tolerate incidental spaces around the commas
   [[ -n "$tok" ]] || continue
-  ok=0
-  for v in $SESSION_EVENT_VOCAB; do
-    if [[ "$tok" == "$v" ]]; then ok=1; break; fi
-  done
-  [[ $ok -eq 1 ]] || fail "invalid --until event: '$tok' (not in the session event vocabulary)"
+  session_event_in_vocab "$tok" \
+    || fail "invalid --until event: '$tok' (not in the session event vocabulary)"
   UNTIL_TOKENS+=("$tok")
 done
 [[ ${#UNTIL_TOKENS[@]} -gt 0 ]] || fail "empty --until: pass at least one event name"
@@ -234,20 +241,7 @@ EVENTS_FILE="$SESSIONS_DIR/events.jsonl"
 # row suffix for corrupt JSON. Past-EOF retains the reader's reset behavior.
 if [[ $SINCE_SET -eq 1 && "$SINCE" -gt 0 ]]; then
   ALIGNMENT_STATUS=0
-  python3 - "$EVENTS_FILE" "$SINCE" <<'PYEOF' || ALIGNMENT_STATUS=$?
-import os, sys
-
-path, cursor = sys.argv[1], int(sys.argv[2])
-try:
-    size = os.path.getsize(path)
-except FileNotFoundError:
-    size = 0
-if cursor <= size:
-    with open(path, "rb") as f:
-        f.seek(cursor - 1)
-        if f.read(1) != b"\n":
-            raise SystemExit(2)
-PYEOF
+  session_cursor_row_aligned "$EVENTS_FILE" "$SINCE" || ALIGNMENT_STATUS=$?
   case "$ALIGNMENT_STATUS" in
     0) ;;
     2) fail "invalid --since cursor $SINCE: cursor-not-row-aligned (preceding byte is not newline); reuse a next_cursor emitted by lore session events or lore session wait" ;;
@@ -258,27 +252,10 @@ fi
 # --until rendered as a JSON array — reused for matching and the --json terminal.
 UNTIL_JSON="$(printf '%s\n' "${UNTIL_TOKENS[@]}" | jq -R . | jq -s -c .)"
 
-# One incremental read from the given cursor. Composing the reference reader means
-# torn-row, interior-malformed, and past-EOF-reset tolerance are inherited, not
-# re-derived here. Echoes the reader's {events, records, next_cursor} object.
-# Run the reference reader at most three times. The fixed 1s/2s backoff is
-# intentionally bounded: this remains a caller-owned wait, not a supervisor.
-run_events() {
-  local output attempt
-  for attempt in 0 1 2; do
-    if output="$(bash "$EVENTS_SH" "$@")"; then
-      printf '%s\n' "$output"
-      return 0
-    fi
-    if [[ $attempt -lt 2 ]]; then
-      sleep "${EVENTS_RETRY_DELAYS[$attempt]}"
-    fi
-  done
-  return 1
-}
-
+# One incremental read from the given cursor, via lib.sh's shared reader wrapper
+# (three attempts, fixed 1s/2s backoff, reference-reader tolerances inherited).
 read_from() {
-  run_events --json --since "$1" --kdir "$KNOWLEDGE_DIR"
+  session_events_read "$EVENTS_SH" "$KNOWLEDGE_DIR" "$1"
 }
 
 # First target-matched event in the until-set. Positional targets are exact;
@@ -473,7 +450,7 @@ emit_internal_error() {
 if [[ $SINCE_SET -eq 1 ]]; then
   CURSOR="$SINCE"
 else
-  CURSOR="$(run_events --cursor-only --kdir "$KNOWLEDGE_DIR")" || emit_internal_error null
+  CURSOR="$(session_events_cursor "$EVENTS_SH" "$KNOWLEDGE_DIR")" || emit_internal_error null
 fi
 
 NEXT_BOUND=0

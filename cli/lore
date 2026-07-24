@@ -119,7 +119,7 @@ Commands:
   impl         /implement bookkeeping verbs (see: lore impl --help)
   spec         /spec bookkeeping verbs (see: lore spec --help)
   evolve       /evolve review-queue and filing verbs (see: lore evolve --help)
-  coordinate   Coordination status, reconciliation, and stream worktrees (see: lore coordinate --help)
+  coordinate   Coordination status, board watch, reconciliation, and stream worktrees (see: lore coordinate --help)
   session      Multi-session coordination substrate verbs (see: lore session --help)
   retro        Federated retro pooling (see: lore retro --help)
   correction   Verdict-driven correction management (see: lore correction --help)
@@ -546,6 +546,11 @@ Verbs:
   status    Project work, session, ceremony, retro, and evolve evidence into
             Act now, Needs judgment, Waiting, and Reconcile
   reconcile Freeze and validate immutable per-stream reconciliation evidence
+  watch     Sleep until anything on the board needs you: follows the whole
+            session journal from a self-managed cursor, wakes on the first
+            actionable row from any session, and also reports a spawn request
+            left unclaimed in the pending queue. Takes no arguments — the same
+            call re-arms it after every wake
   worktree  Allocate, bind, renew, transition, clean, sweep, or inspect a
             manager-owned stream worktree
   pin       Set, clear, or read a project's sticky dispatch pin (sole writer
@@ -574,10 +579,12 @@ Verbs:
             required --expect text still matches; --wait for verified outcome
   peek      Snapshot a live session's rendered screen (<slug>) plus its
             readiness classification; --raw for the ANSI variant
-  wait      Block until a journal event lands for a session (<slug>), waking on
-            closed/close_failed by default; --request-id narrows same-slug reuse,
-            and session-gone waits through teardown grace before returning a
-            resume cursor on stdout
+  wait      Block until a journal event lands for a session (<slug>), waking by
+            default on every actionable edge — the terminal outcomes and the
+            points where a session parks waiting on somebody; --request-id
+            narrows same-slug reuse, and session-gone waits through teardown
+            grace before returning a resume cursor on stdout. For the whole
+            board rather than one session, see `lore coordinate watch`
 
 Options:
   --help, -h    Show this help
@@ -903,6 +910,9 @@ cmd_coordinate() {
       ;;
     reconcile)
       exec "$SCRIPTS_DIR/coordinate-reconcile.sh" "$@"
+      ;;
+    watch)
+      exec "$SCRIPTS_DIR/coordinate-watch.sh" "$@"
       ;;
     worktree)
       exec "$SCRIPTS_DIR/coordinate-worktree.sh" "$@"
