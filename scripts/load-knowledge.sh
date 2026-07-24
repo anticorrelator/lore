@@ -43,8 +43,10 @@ PACKET_ENTRIES=()
 
 # Rubric categories: always loaded at SessionStart
 RUBRIC_CATEGORIES=(principles workflows conventions team preferences)
-# Scale-bearing categories: loaded only when a session scope declaration is present
-SCALE_BEARING_CATEGORIES=(architecture abstractions gotchas domains)
+# Scale-bearing categories: loaded only when a session scope declaration is present.
+# `domains` is deliberately NOT listed here — it has its own lazy-loaded block
+# below, and naming it in both places rendered (and counted) it twice.
+SCALE_BEARING_CATEGORIES=(architecture abstractions gotchas design-rationale)
 
 # --- Extract context signal from git branch + matched work item ---
 # Used to bias which knowledge sections load first (when signal exists)
@@ -93,46 +95,36 @@ echo "IMPORTANT: Run \`lore search \"<topic>\"\` BEFORE Grep/Glob/Explore. The k
 echo "Scale declaration required for \`lore search\` and \`lore prefetch\` — use \`--scale-set <bucket>\`. Rubric in \`/spec\`, \`/implement\`, or \`/memory\`."
 echo ""
 
-# --- Dynamic index: build full and compact versions ---
-  # Full index: category names + per-entry titles
-  # Compact index: category names + entry counts only (saves ~90% of index budget)
-  INDEX_FULL=""
+# --- Dynamic index: category names + entry counts ---
+  # Counts are RECURSIVE. Entries have been filed into category subdirectories
+  # since the April restructure; the depth-1 count this block used to take
+  # under-reported the store by roughly 11x (e.g. conventions/ 28 vs 465), and
+  # an agent orienting from that number believes the store is too small to be
+  # worth querying — the exact behavior the knowledge system exists to prevent.
+  #
+  # The compact index is an ORIENTATION surface, not a catalogue: which
+  # categories exist and how much is in each, so `lore search` (which already
+  # reaches nested entries) is the obvious next move. Listing 1000+ titles
+  # would swamp session start for no retrieval benefit, so only the counts
+  # scale with the store — the rendered size stays flat at a handful of lines.
   INDEX_COMPACT=""
 
   for category in "${ACTIVE_CATEGORIES[@]}"; do
     CAT_DIR="$KNOWLEDGE_DIR/$category"
     [[ -d "$CAT_DIR" ]] || continue
 
-    ENTRY_FILES=()
-    while IFS= read -r -d '' f; do
-      ENTRY_FILES+=("$f")
-    done < <(find "$CAT_DIR" -maxdepth 1 -name '*.md' -print0 2>/dev/null | sort -z)
+    ENTRY_COUNT=$(find "$CAT_DIR" -type f -name '*.md' 2>/dev/null | wc -l | tr -d '[:space:]')
+    [[ "${ENTRY_COUNT:-0}" -gt 0 ]] || continue
 
-    ENTRY_COUNT=${#ENTRY_FILES[@]}
-    [[ $ENTRY_COUNT -gt 0 ]] || continue
-
-    INDEX_FULL+="**${category}/** (${ENTRY_COUNT} entries):"$'\n'
     INDEX_COMPACT+="**${category}/** (${ENTRY_COUNT} entries)"$'\n'
-    # Extract titles from first lines (# Title) — one awk fork for the whole
-    # category instead of head+sed forks per file (O(N) forks dominated hook
-    # runtime once the store passed ~500 entries)
-    INDEX_FULL+=$(awk 'FNR==1 { sub(/^# /, ""); print "  - " $0 }' "${ENTRY_FILES[@]}")$'\n'
-    INDEX_FULL+=$'\n'
   done
 
   # Include domains if present
   DOMAINS_DIR="$KNOWLEDGE_DIR/domains"
   if [[ -d "$DOMAINS_DIR" ]]; then
-    DOMAIN_FILES=()
-    while IFS= read -r -d '' f; do
-      DOMAIN_FILES+=("$f")
-    done < <(find "$DOMAINS_DIR" -maxdepth 1 -name '*.md' -print0 2>/dev/null | sort -z)
-
-    if [[ ${#DOMAIN_FILES[@]} -gt 0 ]]; then
-      INDEX_FULL+="**domains/** (${#DOMAIN_FILES[@]} files, lazy-loaded):"$'\n'
-      INDEX_COMPACT+="**domains/** (${#DOMAIN_FILES[@]} files, lazy-loaded)"$'\n'
-      INDEX_FULL+=$(awk 'FNR==1 { sub(/^# /, ""); print "  - " $0 }' "${DOMAIN_FILES[@]}")$'\n'
-      INDEX_FULL+=$'\n'
+    DOMAIN_COUNT=$(find "$DOMAINS_DIR" -type f -name '*.md' 2>/dev/null | wc -l | tr -d '[:space:]')
+    if [[ "${DOMAIN_COUNT:-0}" -gt 0 ]]; then
+      INDEX_COMPACT+="**domains/** (${DOMAIN_COUNT} files, lazy-loaded)"$'\n'
     fi
   fi
 
@@ -369,13 +361,18 @@ for e in data.get('titles_only', []):
   # invocations: one stat for all mtimes, one grep for all low-confidence
   # markers. The previous per-file get_mtime + grep -c forks were the hook's
   # dominant cost at store scale (~3s for ~600 entries).
+  #
+  # The walk is recursive for the same reason the index count is: entries live
+  # in category subdirectories, and a depth-1 scan silently declared ~93% of the
+  # store non-stale. Batching already made the cost per-invocation rather than
+  # per-file, so the wider walk is two forks either way.
   ALL_ENTRY_FILES=()
   for category in "${ACTIVE_CATEGORIES[@]}"; do
     CAT_DIR="$KNOWLEDGE_DIR/$category"
     [[ -d "$CAT_DIR" ]] || continue
     while IFS= read -r -d '' file; do
       ALL_ENTRY_FILES+=("$file")
-    done < <(find "$CAT_DIR" -maxdepth 1 -name '*.md' -print0 2>/dev/null)
+    done < <(find "$CAT_DIR" -type f -name '*.md' -print0 2>/dev/null)
   done
 
   if [[ ${#ALL_ENTRY_FILES[@]} -gt 0 ]]; then
@@ -415,18 +412,29 @@ for e in data.get('titles_only', []):
     done < <(grep -l 'confidence: low' "${ALL_ENTRY_FILES[@]}" 2>/dev/null || true)
   fi
 
+  # The COUNT is truthful; the LISTING is bounded. Now that the scan is
+  # recursive it draws from the whole store, and an unbounded inline list would
+  # trade one under-reporting surface for a session-start flood.
+  STALE_RENDER_CAP=10
   if [[ $STALE_COUNT -gt 0 ]]; then
     echo ""
-    echo "[Stale] Entries needing review: ${STALE_ENTRIES[*]}"
+    if [[ $STALE_COUNT -gt $STALE_RENDER_CAP ]]; then
+      echo "[Stale] ${STALE_COUNT} entries needing review (showing ${STALE_RENDER_CAP}): ${STALE_ENTRIES[*]:0:$STALE_RENDER_CAP} … +$((STALE_COUNT - STALE_RENDER_CAP)) more"
+    else
+      echo "[Stale] Entries needing review: ${STALE_ENTRIES[*]}"
+    fi
   fi
 
   # --- Stats (v2): count entry files per category ---
+  # Recursive, for the same reason the compact index is: this footer is the
+  # headline "how big is the store" number an agent reads at session start, and
+  # a depth-1 total contradicted `lore stats` by an order of magnitude.
   TOTAL_ENTRIES=0
   TOTAL_CATEGORIES=0
   for category in "${ACTIVE_CATEGORIES[@]}"; do
     CAT_DIR="$KNOWLEDGE_DIR/$category"
     [[ -d "$CAT_DIR" ]] || continue
-    COUNT=$(find "$CAT_DIR" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d '[:space:]')
+    COUNT=$(find "$CAT_DIR" -type f -name '*.md' 2>/dev/null | wc -l | tr -d '[:space:]')
     if [[ "${COUNT:-0}" -gt 0 ]]; then
       TOTAL_ENTRIES=$((TOTAL_ENTRIES + COUNT))
       TOTAL_CATEGORIES=$((TOTAL_CATEGORIES + 1))
@@ -434,7 +442,7 @@ for e in data.get('titles_only', []):
   done
   # Include domain files
   if [[ -d "$KNOWLEDGE_DIR/domains" ]]; then
-    DCOUNT=$(find "$KNOWLEDGE_DIR/domains" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d '[:space:]')
+    DCOUNT=$(find "$KNOWLEDGE_DIR/domains" -type f -name '*.md' 2>/dev/null | wc -l | tr -d '[:space:]')
     if [[ "${DCOUNT:-0}" -gt 0 ]]; then
       TOTAL_ENTRIES=$((TOTAL_ENTRIES + DCOUNT))
       TOTAL_CATEGORIES=$((TOTAL_CATEGORIES + 1))

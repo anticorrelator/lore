@@ -41,8 +41,28 @@ if [[ ! -d "$KNOWLEDGE_DIR" ]]; then
   exit 1
 fi
 
-# Category directories in priority order
-CATEGORIES=(principles workflows conventions architecture gotchas abstractions domains team)
+# Category directories in priority order. The list is a display ORDER, not a
+# closed set: any other category directory in the store is appended after it,
+# so a category added to the taxonomy can never be silently dropped from the
+# index (the previous hardcoded list omitted `preferences` and
+# `design-rationale` entirely). Directories that do not exist are skipped
+# below, so listing a not-yet-created category costs nothing.
+CATEGORY_ORDER=(principles workflows conventions architecture preferences gotchas design-rationale abstractions domains team)
+
+CATEGORIES=()
+for category in "${CATEGORY_ORDER[@]}"; do
+  [[ -d "$KNOWLEDGE_DIR/$category" ]] && CATEGORIES+=("$category")
+done
+# Append any category directory not named in the order list (skip the store's
+# internal `_`-prefixed and dotted directories, which are not knowledge).
+while IFS= read -r discovered; do
+  [[ -n "$discovered" ]] || continue
+  for known in "${CATEGORY_ORDER[@]}"; do
+    [[ "$discovered" == "$known" ]] && continue 2
+  done
+  CATEGORIES+=("$discovered")
+done < <(find "$KNOWLEDGE_DIR" -mindepth 1 -maxdepth 1 -type d \
+  ! -name '_*' ! -name '.*' -exec basename {} \; 2>/dev/null | sort)
 
 for category in "${CATEGORIES[@]}"; do
   # Apply category filter if specified
@@ -51,16 +71,17 @@ for category in "${CATEGORIES[@]}"; do
   fi
 
   cat_dir="$KNOWLEDGE_DIR/$category"
-  if [[ ! -d "$cat_dir" ]]; then
-    continue
-  fi
 
-  # Count entries
-  entry_count=0
-  for f in "$cat_dir"/*.md; do
-    [[ -f "$f" ]] && entry_count=$((entry_count + 1))
-  done
+  # Entries live in category SUBDIRECTORIES since the April restructure, so
+  # this walk is recursive. The previous non-recursive `$cat_dir/*.md` glob
+  # under-reported the store by roughly 11x and listed only the handful of
+  # entries that happened to sit at the category root.
+  entry_files=()
+  while IFS= read -r -d '' f; do
+    entry_files+=("$f")
+  done < <(find "$cat_dir" -type f -name '*.md' -print0 2>/dev/null | sort -z)
 
+  entry_count=${#entry_files[@]}
   if [[ "$entry_count" -eq 0 ]]; then
     continue
   fi
@@ -68,22 +89,25 @@ for category in "${CATEGORIES[@]}"; do
   echo "## $category ($entry_count entries)"
   echo ""
 
-  for filepath in "$cat_dir"/*.md; do
-    [[ -f "$filepath" ]] || continue
+  # Title + summary + meta-comment extraction runs as ONE awk pass over the
+  # whole category, not the ~8 forks per entry (head x2, awk, grep x3, sed, tr,
+  # xargs) the per-file loop used. At depth-1 that cost was invisible — 82
+  # entries. Once the walk went recursive it dominated: 1173 entries took ~59s,
+  # which makes `lore index` unusable as an interactive command. Same batching
+  # already applied to the session-start index in load-knowledge.sh.
+  #
+  # Record shape: <path>US<title>US<summary>US<meta-comment>, US = \x1f (a
+  # control byte that cannot occur in markdown). The parent-edge parsing stays
+  # in shell but is gated on the record actually mentioning `parents:` — the
+  # ungated path returned empty for every other entry anyway, so the gate is
+  # behavior-preserving and skips the forks for ~99% of the store.
+  while IFS=$'\x1f' read -r filepath title summary meta; do
+    [[ -n "$filepath" ]] || continue
 
-    fname=$(basename "$filepath")
-
-    # Extract title from H1 heading, fallback to filename
-    title=$(head -1 "$filepath" | sed 's/^# //')
-    if [[ -z "$title" || "$title" == "$(head -1 "$filepath")" ]]; then
-      # No H1 found, use filename as title
-      title="${fname%.md}"
-    fi
-
-    # Extract first-line summary (first non-empty line after H1)
-    summary=$(awk 'NR==1{next} /^[[:space:]]*$/{next} /^<!--/{next} /^See also:/{next} {print; exit}' "$filepath")
-
-    # Truncate summary to 120 chars
+    # Truncate in bash, not awk: `${#s}`/`${s:0:117}` count characters under a
+    # UTF-8 locale, while this platform's awk length()/substr() count bytes and
+    # split multibyte characters mid-sequence. Both are builtins, so the fork
+    # count is unchanged.
     if [[ ${#summary} -gt 120 ]]; then
       summary="${summary:0:117}..."
     fi
@@ -95,10 +119,9 @@ for category in "${CATEGORIES[@]}"; do
     fi
 
     # Extract and render parent edges distinctly (explicit vs inferred)
-    meta_comment=$(grep -o '<!--.*-->' "$filepath" 2>/dev/null | head -1 || true)
-    if [[ -n "$meta_comment" ]]; then
-      explicit_parents=$(echo "$meta_comment" | grep -o '[^_]parents: [^|>]*' 2>/dev/null | grep -v 'inferred' | sed 's/[^ ]*parents: //' | tr -d ' ' || true)
-      inferred_parents=$(echo "$meta_comment" | grep -o 'inferred_parents: [^|]*' 2>/dev/null | sed 's/inferred_parents: //' | sed 's/[[:space:]]*-->$//' | xargs 2>/dev/null || true)
+    if [[ "$meta" == *"parents:"* ]]; then
+      explicit_parents=$(echo "$meta" | grep -o '[^_]parents: [^|>]*' 2>/dev/null | grep -v 'inferred' | sed 's/[^ ]*parents: //' | tr -d ' ' || true)
+      inferred_parents=$(echo "$meta" | grep -o 'inferred_parents: [^|]*' 2>/dev/null | sed 's/inferred_parents: //' | sed 's/[[:space:]]*-->$//' | xargs 2>/dev/null || true)
       if [[ -n "$explicit_parents" && "$explicit_parents" != "none" ]]; then
         echo "  - Parents (explicit): $explicit_parents"
       fi
@@ -106,6 +129,41 @@ for category in "${CATEGORIES[@]}"; do
         echo "  - Parents (inferred): $inferred_parents"
       fi
     fi
+  done < <(awk -v SEP=$'\x1f' '
+    function emit() {
+      if (cur == "") return
+      printf "%s%s%s%s%s%s%s\n", cur, SEP, title, SEP, summary, SEP, meta
+    }
+    FNR == 1 {
+      emit()
+      cur = FILENAME; meta = ""; summary = ""; have_summary = 0
+      # H1 title, else filename stem — mirrors the `sed "s/^# //"` +
+      # unchanged-line test the per-file path used.
+      title = (substr($0, 1, 2) == "# ") ? substr($0, 3) : ""
+      if (title == "") {
+        n = split(FILENAME, parts, "/"); title = parts[n]; sub(/\.md$/, "", title)
+      }
+    }
+    {
+      # First complete <!-- ... --> on any line, including line 1.
+      if (meta == "" && match($0, /<!--.*-->/)) meta = substr($0, RSTART, RLENGTH)
+      # First non-blank, non-comment, non-"See also:" line after the H1.
+      if (FNR > 1 && !have_summary && $0 !~ /^[ \t]*$/ && $0 !~ /^<!--/ && $0 !~ /^See also:/) {
+        summary = $0
+        have_summary = 1
+      }
+    }
+    END { emit() }
+  ' "${entry_files[@]}")
+
+  # A zero-length entry file never reaches awk (no FNR==1 record), so those are
+  # listed here with the same filename fallback the per-file path produced.
+  # Order within the category is otherwise preserved; a contentless entry is a
+  # broken entry, and surfacing it at all beats dropping it from the listing.
+  for filepath in "${entry_files[@]}"; do
+    [[ -s "$filepath" ]] && continue
+    fname=$(basename "$filepath")
+    echo "- **${fname%.md}**"
   done
 
   echo ""

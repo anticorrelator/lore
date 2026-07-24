@@ -158,6 +158,42 @@ EOF
   done
 }
 
+# --- Setup a store whose entries live in category SUBDIRECTORIES ---
+# Mirrors the real store's post-April layout. A depth-1 walk sees only the
+# handful of entries at each category root, which is how the session-start
+# index came to report ~1/11th of the store.
+setup_nested_v2_knowledge_store() {
+  setup_v2_knowledge_store
+
+  mkdir -p "$KNOWLEDGE_DIR/conventions/scripting" \
+           "$KNOWLEDGE_DIR/conventions/skills" \
+           "$KNOWLEDGE_DIR/principles/design"
+
+  for i in $(seq 1 7); do
+    cat > "$KNOWLEDGE_DIR/conventions/scripting/nested-scripting-$i.md" << EOF
+# Nested Scripting Convention $i
+
+Nested scripting convention number $i.
+EOF
+  done
+
+  for i in $(seq 1 5); do
+    cat > "$KNOWLEDGE_DIR/conventions/skills/nested-skill-$i.md" << EOF
+# Nested Skill Convention $i
+
+Nested skill convention number $i.
+EOF
+  done
+
+  for i in $(seq 1 4); do
+    cat > "$KNOWLEDGE_DIR/principles/design/nested-design-$i.md" << EOF
+# Nested Design Principle $i
+
+Nested design principle number $i.
+EOF
+  done
+}
+
 # --- Build FTS5 index so pk_cli.py search works ---
 build_index() {
   python3 "$SCRIPT_DIR/pk_cli.py" index "$KNOWLEDGE_DIR" 2>/dev/null || true
@@ -376,6 +412,71 @@ setup_v2_knowledge_store
 rm "$KNOWLEDGE_DIR/_manifest.json"
 OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
 assert_contains "health detects missing manifest" "$OUTPUT" "No knowledge store found"
+
+# =============================================
+# Test 13: Index counts entries in category SUBDIRECTORIES
+# =============================================
+echo ""
+echo "Test 13: Compact index counts nested entries"
+rm -rf "$KNOWLEDGE_DIR"
+setup_nested_v2_knowledge_store
+OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
+# conventions/: 3 at the category root + 7 scripting + 5 skills = 15.
+assert_contains "conventions counted recursively" "$OUTPUT" "**conventions/** (15 entries)"
+assert_not_contains "conventions not counted depth-1" "$OUTPUT" "**conventions/** (3 entries)"
+# principles/: 1 at the root + 4 design = 5.
+assert_contains "principles counted recursively" "$OUTPUT" "**principles/** (5 entries)"
+assert_not_contains "principles not counted depth-1" "$OUTPUT" "**principles/** (1 entries)"
+
+# =============================================
+# Test 14: Index stays a bounded orientation surface
+# =============================================
+# The counts scale with the store; the rendered listing must not. A recursive
+# walk that also listed titles would put 1000+ lines into every session start.
+echo ""
+echo "Test 14: Recursive counts do not enlarge the rendered index"
+assert_not_contains "index omits nested entry titles" "$OUTPUT" "Nested Scripting Convention 1"
+assert_not_contains "index omits root entry titles" "$OUTPUT" "  - Naming Patterns"
+INDEX_LINES=$(echo "$OUTPUT" | sed -n '/--- Index (compact) ---/,/^$/p' | grep -c '^\*\*' || true)
+if [[ "$INDEX_LINES" -le 10 ]]; then
+  echo "  PASS: index is one line per category ($INDEX_LINES lines)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: index rendered $INDEX_LINES category lines (expected one per category)"
+  FAIL=$((FAIL + 1))
+fi
+
+# =============================================
+# Test 15: [knowledge] footer agrees with the compact index
+# =============================================
+# Both surfaces count the same active categories. Before the fix the index and
+# the footer were consistently wrong together; this pins them consistent AND
+# recursive, so a future depth-1 regression in either one fails here.
+echo ""
+echo "Test 15: Footer total matches the compact index"
+INDEX_SUM=$(echo "$OUTPUT" | sed -n '/--- Index (compact) ---/,/^$/p' \
+  | sed -n 's/^\*\*.*\*\* (\([0-9][0-9]*\) .*/\1/p' \
+  | awk '{s += $1} END {print s + 0}')
+FOOTER_TOTAL=$(echo "$OUTPUT" | sed -n 's/^\[knowledge\] \([0-9][0-9]*\) entries.*/\1/p' | head -1)
+assert_eq_num() {
+  local label="$1" actual="$2" expected="$3"
+  if [[ "$actual" == "$expected" ]]; then
+    echo "  PASS: $label"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: $label (index sum=$expected, footer=$actual)"
+    FAIL=$((FAIL + 1))
+  fi
+}
+assert_eq_num "footer total equals index sum" "${FOOTER_TOTAL:-missing}" "$INDEX_SUM"
+# And the total must exceed what a depth-1 walk would have produced.
+if [[ "${FOOTER_TOTAL:-0}" -gt 12 ]]; then
+  echo "  PASS: footer total is recursive (${FOOTER_TOTAL} > depth-1 ceiling)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: footer total ${FOOTER_TOTAL:-missing} looks like a depth-1 count"
+  FAIL=$((FAIL + 1))
+fi
 
 # =============================================
 # Summary
