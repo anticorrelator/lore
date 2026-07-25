@@ -119,6 +119,7 @@ Commands:
   impl         /implement bookkeeping verbs (see: lore impl --help)
   spec         /spec bookkeeping verbs (see: lore spec --help)
   evolve       /evolve review-queue and filing verbs (see: lore evolve --help)
+  arc          Coordination arcs — open, close, archive, list, and inspect (see: lore arc --help)
   coordinate   Coordination status, board watch, reconciliation, and stream worktrees (see: lore coordinate --help)
   session      Multi-session coordination substrate verbs (see: lore session --help)
   retro        Federated retro pooling (see: lore retro --help)
@@ -534,6 +535,103 @@ Verbs:
 Options:
   --help, -h    Show this help
 EOF
+}
+
+arc_usage() {
+  cat >&2 <<'EOF'
+lore arc — coordination arcs as their own findable documents
+
+Usage: lore arc <verb> [args...]
+
+Verbs:
+  open      Open an arc: create its directory, instantiate its ledger, and
+            record it. The slug comes from `--title`; `--slug` names it directly
+  close     Record the arc as closed. A missing report.md is called out and
+            never blocks the close — closure is your decision, not a file check
+  archive   Record the arc as archived, from either active or closed. The
+            directory stays put, so archived arcs stay addressable and findable
+  list      List arcs newest first, in an Active and a Complete section, with
+            the project as a column. Archived arcs need `--status archived`
+  show      Show one arc's record, its documents, and its ledger rows verbatim
+  set       Update the descriptive fields — title, anchor, project label
+  member    Add or remove a work item from the arc's members
+  migrate   Move the arcs that predate this store into it. A bare run is a
+            preflight that reports the plan and writes nothing; `--commit`
+            performs it and `--verify` checks it afterwards
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+cmd_arc() {
+  if [[ $# -eq 0 ]]; then
+    arc_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      arc_usage
+      return 0
+      ;;
+    open)
+      exec "$SCRIPTS_DIR/arc-open.sh" "$@"
+      ;;
+    close)
+      exec "$SCRIPTS_DIR/arc-close.sh" "$@"
+      ;;
+    archive)
+      exec "$SCRIPTS_DIR/arc-archive.sh" "$@"
+      ;;
+    list)
+      exec "$SCRIPTS_DIR/arc-list.sh" "$@"
+      ;;
+    show)
+      exec "$SCRIPTS_DIR/arc-show.sh" "$@"
+      ;;
+    set)
+      exec "$SCRIPTS_DIR/arc-set.sh" "$@"
+      ;;
+    member)
+      cmd_arc_member "$@"
+      ;;
+    migrate)
+      exec "$SCRIPTS_DIR/arc-migrate.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown arc verb '$subcmd'" >&2
+      echo "" >&2
+      arc_usage
+      return 1
+      ;;
+  esac
+}
+
+cmd_arc_member() {
+  if [[ $# -eq 0 ]]; then
+    arc_usage
+    return 1
+  fi
+
+  case "$1" in
+    --help|-h)
+      arc_usage
+      return 0
+      ;;
+    add|rm)
+      exec "$SCRIPTS_DIR/arc-member.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown arc member action '$1'" >&2
+      echo "" >&2
+      arc_usage
+      return 1
+      ;;
+  esac
 }
 
 coordinate_usage() {
@@ -2281,6 +2379,10 @@ case "$1" in
   evolve)
     shift
     cmd_evolve "$@"
+    ;;
+  arc)
+    shift
+    cmd_arc "$@"
     ;;
   coordinate)
     shift
