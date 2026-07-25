@@ -168,8 +168,18 @@ func (m model) Init() tea.Cmd {
 		// tmux-hosted sessions and adopt them, once at startup (before the first
 		// poll tick, which is scheduled 5s out). tmux-gated — with tmux off,
 		// sessions were TUI-lifetime-bound and there is nothing to recover.
+		//
+		// The sweep then reclaims session checkouts nothing owns any more. It is
+		// sequenced after the adoption scan rather than batched beside it:
+		// adoption is what drives a dead instance's sessions to a terminal state
+		// with preserved refs, and only then can the sweep see those checkouts as
+		// reclaimable. It runs with tmux off too — there is nothing to adopt in
+		// that mode, but checkouts an earlier tmux-hosted run leaked are still on
+		// disk and nothing else will ever visit them.
 		if m.tmuxEnabled {
-			cmds = append(cmds, m.adoptionScanCmd())
+			cmds = append(cmds, tea.Sequence(m.adoptionScanCmd(), m.sweepSessionWorktreesCmd()))
+		} else {
+			cmds = append(cmds, m.sweepSessionWorktreesCmd())
 		}
 	}
 	return tea.Batch(cmds...)
@@ -614,6 +624,12 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 	case adoptionScanMsg:
 		return m.handleAdoptionScan(msg)
+
+	case sessionWorktreeCleanedMsg:
+		return m.handleSessionWorktreeCleaned(msg)
+
+	case sessionWorktreeSweptMsg:
+		return m.handleSessionWorktreeSwept(msg)
 
 	case queueTickResultMsg:
 		return m.handleQueueTickResult(msg)

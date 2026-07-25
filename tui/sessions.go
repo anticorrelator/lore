@@ -109,6 +109,23 @@ type managedWorktreeQuiescedMsg struct {
 	err            error
 }
 
+// sessionWorktreeCleanedMsg reports the reclaim of one session checkout after
+// its disposition landed. Cleanup is disk hygiene layered on top of an already
+// durable outcome, so a failure here is surfaced and dropped — never retried in
+// a way that could hold the session's teardown open.
+type sessionWorktreeCleanedMsg struct {
+	slug  string
+	epoch string
+	proof worktree.CleanupProof
+	err   error
+}
+
+// sessionWorktreeSweptMsg carries the crash-resume backstop's results.
+type sessionWorktreeSweptMsg struct {
+	proofs   []worktree.CleanupProof
+	failures []error
+}
+
 // --- Cmds ---
 
 // readInstancesCmd reads the instance registry (a full snapshot).
@@ -279,12 +296,98 @@ func (m model) handleWorktreeDisposition(msg worktreeDispositionMsg) (model, tea
 	}
 	var terminalCmds []tea.Cmd
 	m, terminalCmds = m.finalizeLocalSessionClosed(msg.slug, msg.closeRequestID)
-	cmds := make([]tea.Cmd, 0, len(terminalCmds)+1)
+	cmds := make([]tea.Cmd, 0, len(terminalCmds)+2)
 	if outcomeCmd != nil {
 		cmds = append(cmds, outcomeCmd)
 	}
 	cmds = append(cmds, terminalCmds...)
+	// The session is over and its result is preserved as refs, so the checkout on
+	// disk is now pure cost. Sequenced last: the durable outcome is journaled
+	// before anything is removed.
+	if cleanup := sessionWorktreeCleanupCmd(msg.slug, ls); cleanup != nil {
+		cmds = append(cmds, cleanup)
+	}
 	return m, tea.Sequence(cmds...)
+}
+
+// sessionWorktreeCleanupCmd returns the reclaim Cmd for a session-owned checkout
+// that has reached a terminal state, or nil when the checkout must be left where
+// it is. Two exclusions matter and are stated rather than implied:
+//
+// A managed session (worktreeID set) executes in a tree the coordination
+// worktree manager owns and reclaims from its own registry, so the session close
+// path must never remove it — that session quiesces its placement and stops.
+// Only a session-owned tree (worktreeID empty, identity present) is this path's
+// to reclaim. A tree still in a non-terminal lifecycle state is nobody's to
+// remove yet.
+func sessionWorktreeCleanupCmd(slug string, ls liveSession) tea.Cmd {
+	if ls.worktreeID != "" || ls.worktree == nil || !ls.worktree.CleanupEligible() {
+		return nil
+	}
+	return cleanupSessionWorktreeCmd(slug, *ls.worktree)
+}
+
+// cleanupSessionWorktreeCmd reclaims a terminal session's checkout, preserving
+// every refs/lore ref that records what the session produced.
+func cleanupSessionWorktreeCmd(slug string, identity worktree.Identity) tea.Cmd {
+	return func() tea.Msg {
+		proof, err := worktree.CleanupSessionCheckout(context.Background(), identity)
+		return sessionWorktreeCleanedMsg{slug: slug, epoch: identity.Epoch, proof: proof, err: err}
+	}
+}
+
+func (m model) handleSessionWorktreeCleaned(msg sessionWorktreeCleanedMsg) (model, tea.Cmd) {
+	if msg.err != nil {
+		m.flashErr = compactErr("session worktree cleanup ("+msg.slug+" "+msg.epoch+")", msg.err)
+	}
+	return m, nil
+}
+
+// sweepSessionWorktreesCmd is the crash-resume backstop. A TUI killed
+// mid-teardown never reaches the close path above, leaving a checkout with no
+// handler to reclaim it; nothing else will ever visit that directory, so the
+// scan is the only way to find it. Paths any registry row still claims are held
+// back, and each remaining checkout must prove its own terminal state and
+// content preservation before it is touched.
+func (m model) sweepSessionWorktreesCmd() tea.Cmd {
+	worktreesDir := filepath.Join(m.config.KnowledgeDir, "_sessions", "worktrees")
+	sessionsDir := m.sessionsDir
+	return func() tea.Msg {
+		var claimed []string
+		for _, inst := range session.ListInstances(sessionsDir) {
+			for _, s := range inst.Sessions {
+				if s.Worktree != nil {
+					claimed = append(claimed, s.Worktree.CanonicalPath)
+				}
+				if s.ExecutionDir != "" {
+					claimed = append(claimed, s.ExecutionDir)
+				}
+			}
+		}
+		proofs, failures := worktree.SweepSessionWorktrees(context.Background(), worktreesDir,
+			worktree.ReservedWorktreePaths(claimed))
+		worktree.SortProofs(proofs)
+		return sessionWorktreeSweptMsg{proofs: proofs, failures: failures}
+	}
+}
+
+func (m model) handleSessionWorktreeSwept(msg sessionWorktreeSweptMsg) (model, tea.Cmd) {
+	if len(msg.failures) > 0 {
+		m.flashErr = compactErr("session worktree sweep", msg.failures[0])
+		return m, nil
+	}
+	if len(msg.proofs) > 0 {
+		m.statusNotice = fmt.Sprintf("reclaimed %s left by earlier sessions",
+			pluralize(len(msg.proofs), "leaked worktree", "leaked worktrees"))
+	}
+	return m, nil
+}
+
+func pluralize(n int, singular, plural string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, singular)
+	}
+	return fmt.Sprintf("%d %s", n, plural)
 }
 
 // queueTickCmd runs one reclaim+claim pass. The live-instance set is read inside
