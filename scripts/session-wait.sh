@@ -60,6 +60,12 @@
 #   back the cursor so the caller can re-arm with --since <that cursor> — no journal
 #   replay, and it never re-matches the row it just consumed.
 #
+#   On a match that cursor is the boundary immediately after the matched row, not
+#   the end of the read that found it: one read can hold several matching rows and
+#   one-shot delivers only the first, so re-arming from the emitted cursor resumes
+#   at the next one rather than past it. Exits that deliver no row (timeout,
+#   session-gone) withhold nothing and so carry the read's end.
+#
 # Output (--json): one-shot emits one object
 #   {outcome, matched, next_cursor, slug, until}. Follow emits one NDJSON matched
 #   object per target row, with terminal=true on the --until stop row; timeout,
@@ -258,10 +264,17 @@ read_from() {
   session_events_read "$EVENTS_SH" "$KNOWLEDGE_DIR" "$1"
 }
 
-# First target-matched event in the until-set. Positional targets are exact;
-# work-item targets admit only the base and canonical worker suffix. A supplied
-# request ID narrows `closed` only; other requested outcomes remain loose wakes.
-first_match() {
+# First target-matched event in the until-set, paired with the cursor the reader
+# assigned to that row's end. Positional targets are exact; work-item targets
+# admit only the base and canonical worker suffix. A supplied request ID narrows
+# `closed` only; other requested outcomes remain loose wakes.
+#
+# The pairing is what makes a one-shot wait re-armable without loss. One read can
+# hold several matching rows, and one-shot hands over only the first; reporting
+# the read's end cursor would consume the rest without ever delivering them, so a
+# caller re-arming from the cursor it was given would never see them. Records
+# carry each row's own boundary — the same boundaries follow mode already uses.
+first_match_record() {
   printf '%s' "$1" | jq -c --arg slug "$SLUG" --argjson until "$UNTIL_JSON" \
     --arg request_id "$REQUEST_ID" --argjson request_id_set "$REQUEST_ID_SET" \
     --argjson work_item_set "$WORK_ITEM_SET" \
@@ -271,10 +284,10 @@ first_match() {
         and startswith($slug + "--w")
         and (.[($slug | length) + 3:] | test("^[0-9]+$"))
       );
-    first(.events[] | select(
-      (.slug | target_matches)
-      and (.event as $e | $until | index($e))
-      and ($request_id_set == 0 or .event != "closed" or .request_id? == $request_id)
+    first(.records[] | select(
+      (.event.slug | target_matches)
+      and (.event.event as $e | $until | index($e))
+      and ($request_id_set == 0 or .event.event != "closed" or .event.request_id? == $request_id)
     ))' 2>/dev/null || true
 }
 
@@ -461,14 +474,17 @@ DEADLINE=$(( $(date +%s) + TIMEOUT ))
 while :; do
   RESULT="$(read_from "$CURSOR")" || emit_internal_error "$CURSOR"
   if [[ $FOLLOW -eq 0 ]]; then
-    MATCH="$(first_match "$RESULT")"
-    if [[ -n "$MATCH" && "$MATCH" != "null" ]]; then
-      NC="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
-      emit_matched "$MATCH" "$NC"
+    RECORD="$(first_match_record "$RESULT")"
+    if [[ -n "$RECORD" && "$RECORD" != "null" ]]; then
+      emit_matched \
+        "$(printf '%s' "$RECORD" | jq -c '.event')" \
+        "$(printf '%s' "$RECORD" | jq -r '.next_cursor')"
     fi
   else
     process_follow_result "$RESULT"
   fi
+  # No match: nothing was withheld from the caller, so the read's end is where
+  # the next poll belongs.
   CURSOR="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
 
   if [[ $LIVENESS_ENABLED -eq 1 ]]; then
@@ -480,15 +496,18 @@ while :; do
       sleep "$SESSION_GONE_GRACE_SECONDS"
       RESULT="$(read_from "$CURSOR")" || emit_internal_error "$CURSOR"
       if [[ $FOLLOW -eq 0 ]]; then
-        MATCH="$(first_match "$RESULT")"
-        NC="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
-        if [[ -n "$MATCH" && "$MATCH" != "null" ]]; then
-          emit_matched "$MATCH" "$NC"
+        RECORD="$(first_match_record "$RESULT")"
+        if [[ -n "$RECORD" && "$RECORD" != "null" ]]; then
+          emit_matched \
+            "$(printf '%s' "$RECORD" | jq -c '.event')" \
+            "$(printf '%s' "$RECORD" | jq -r '.next_cursor')"
         fi
       else
         process_follow_result "$RESULT"
-        NC="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
       fi
+      # Reached only when the final read matched nothing, so session-gone
+      # withholds no row and re-arms from the read's end.
+      NC="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
       emit_terminal "session_gone" "$NC" 3 \
         "[session] no live instance hosts '$SLUG' and no matching event arrived; session gone (re-armable from cursor $NC)"
     fi
