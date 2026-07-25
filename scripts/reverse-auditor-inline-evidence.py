@@ -19,8 +19,9 @@ Resolution is a pure manifest derivation over the RA input the wrapper already
 assembled (artifact_id, work_item, curated_top_k, change_context,
 referenced_files). Each file is resolved against the repo that owns it (the lore
 checkout for repo-relative source paths; the knowledge KDIR repo for _work/
-paths). `_work/<slug>/` paths that are absent at HEAD fall back to
-`_work/_archive/<slug>/` before being declared unresolved. Unresolved markers
+paths). A curated claim is resolved from its `file_relative` first and its
+recorded `file` second. `_work/<slug>/` paths that are absent at HEAD fall back
+to `_work/_archive/<slug>/` before being declared unresolved. Unresolved markers
 are themselves signal: the adjudicate-only template treats an inadequate packet
 as grounds to abstain rather than spin.
 
@@ -142,16 +143,32 @@ def locate_snippet(text: str, snippet: str) -> int | None:
     return None
 
 
+def anchor_candidates(claim: dict) -> list[str]:
+    """File references for one claim, most durable first.
+
+    `file_relative` carries no absolute prefix, so it outlives the checkout the
+    claim was captured in — a worktree-absolute `file` stops resolving the
+    moment that worktree is removed. The recorded `file` stays as a fallback so
+    rows predating the relative-path writer, and rows with no `file_relative` at
+    all, resolve exactly as before.
+    """
+    refs: list[str] = []
+    for ref in (claim.get("file_relative"), claim.get("file")):
+        if isinstance(ref, str) and ref.strip() and ref not in refs:
+            refs.append(ref)
+    return refs
+
+
 def resolve_claim_window(
     claim: dict, window: int, lore_repo: Path, kdir: Path
 ) -> dict:
     """Resolve one curated claim to an inlined evidence window + locate verdict."""
-    file_path = claim.get("file")
+    candidates = anchor_candidates(claim)
     snippet = claim.get("exact_snippet")
     lr = parse_line_range(claim.get("line_range"))
     out = {
         "claim_id": claim.get("claim_id"),
-        "file": file_path,
+        "file": candidates[0] if candidates else None,
         "captured_line_range": claim.get("line_range"),
         "resolved": False,
         "resolution": None,
@@ -159,14 +176,24 @@ def resolve_claim_window(
         "window_text": None,
         "window_line_range": None,
     }
-    if not file_path:
+    if not candidates:
         out["resolution"] = "no-file-reference"
         return out
 
-    repo, rel = classify_repo(file_path, lore_repo, kdir)
-    text, resolved_rel = show_with_archive_fallback(repo, "HEAD", rel)
+    text = None
+    resolved_rel = ""
+    preferred_rel = ""
+    for candidate in candidates:
+        repo, rel = classify_repo(candidate, lore_repo, kdir)
+        if not preferred_rel:
+            preferred_rel = rel
+        candidate_text, candidate_rel = show_with_archive_fallback(repo, "HEAD", rel)
+        if candidate_text is not None:
+            text, resolved_rel = candidate_text, candidate_rel
+            out["file"] = candidate
+            break
     if text is None:
-        out["resolution"] = f"file-absent-at-HEAD ({rel})"
+        out["resolution"] = f"file-absent-at-HEAD ({preferred_rel})"
         out["content_locate_verdict"] = PROVENANCE_LOST
         return out
 

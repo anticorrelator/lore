@@ -233,6 +233,92 @@ else
   fail "non-ASCII window content mangled: $(jq_get 'd["inlined_evidence"]["claim_windows"][0].get("window_text",None)')"
 fi
 
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 5c: file_relative is preferred — a dangling worktree-absolute file still grounds"
+cat > "$TEST_ROOT/in5c.json" <<JSON
+{
+  "artifact_id": "a5c",
+  "work_item": "demo-slug",
+  "curated_top_k": [
+    {"claim_id": "c5c",
+     "file": "$TEST_ROOT/wt-9d041e7c/scripts/foo.py",
+     "file_relative": "scripts/foo.py",
+     "line_range": "5-6",
+     "exact_snippet": "def beta():\n    return 2"}
+  ],
+  "change_context": {"diff_ref": null, "changed_files": ["scripts/foo.py"]}
+}
+JSON
+run_resolver "$TEST_ROOT/in5c.json" >/dev/null
+if [[ "$(jq_get 'd["inlined_evidence"]["claim_windows"][0]["resolved"]')" == "True" ]]; then
+  pass "claim with a dangling absolute file resolved via file_relative"
+else
+  fail "not resolved: $(jq_get 'd["inlined_evidence"]["claim_windows"][0]')"
+fi
+if [[ "$(jq_get 'd["inlined_evidence"]["claim_windows"][0]["content_locate_verdict"]')" == "verified" ]]; then
+  pass "content_locate_verdict=verified (was provenance-lost when grounding on file)"
+else
+  fail "expected verified, got $(jq_get 'd["inlined_evidence"]["claim_windows"][0]["content_locate_verdict"]')"
+fi
+if [[ "$(jq_get 'd["inlined_evidence"]["claim_windows"][0]["file"]')" == "scripts/foo.py" ]]; then
+  pass "window reports the reference it actually resolved from"
+else
+  fail "expected scripts/foo.py, got $(jq_get 'd["inlined_evidence"]["claim_windows"][0]["file"]')"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 5d: no file_relative — resolution falls back to the recorded absolute file"
+cat > "$TEST_ROOT/in5d.json" <<JSON
+{
+  "artifact_id": "a5d",
+  "work_item": "demo-slug",
+  "curated_top_k": [
+    {"claim_id": "c5d",
+     "file": "$LORE_REPO/scripts/foo.py",
+     "line_range": "5-6",
+     "exact_snippet": "def beta():\n    return 2"}
+  ],
+  "change_context": {"diff_ref": null, "changed_files": ["scripts/foo.py"]}
+}
+JSON
+run_resolver "$TEST_ROOT/in5d.json" >/dev/null
+if [[ "$(jq_get 'd["inlined_evidence"]["claim_windows"][0]["content_locate_verdict"]')" == "verified" ]]; then
+  pass "absolute-path row with no file_relative still verifies"
+else
+  fail "expected verified, got $(jq_get 'd["inlined_evidence"]["claim_windows"][0]["content_locate_verdict"]')"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 5e: file_relative absent at HEAD — resolution falls back to a file that resolves"
+cat > "$TEST_ROOT/in5e.json" <<JSON
+{
+  "artifact_id": "a5e",
+  "work_item": "demo-slug",
+  "curated_top_k": [
+    {"claim_id": "c5e",
+     "file": "$LORE_REPO/scripts/foo.py",
+     "file_relative": "scripts/renamed-away.py",
+     "line_range": "5-6",
+     "exact_snippet": "def beta():\n    return 2"}
+  ],
+  "change_context": {"diff_ref": null, "changed_files": ["scripts/foo.py"]}
+}
+JSON
+run_resolver "$TEST_ROOT/in5e.json" >/dev/null
+if [[ "$(jq_get 'd["inlined_evidence"]["claim_windows"][0]["content_locate_verdict"]')" == "verified" ]]; then
+  pass "unresolvable file_relative does not strand a row whose file resolves"
+else
+  fail "expected verified, got $(jq_get 'd["inlined_evidence"]["claim_windows"][0]["content_locate_verdict"]')"
+fi
+if [[ "$(jq_get 'd["inlined_evidence"]["claim_windows"][0]["file"]')" == "$LORE_REPO/scripts/foo.py" ]]; then
+  pass "window reports the fallback reference it resolved from"
+else
+  fail "expected the recorded file, got $(jq_get 'd["inlined_evidence"]["claim_windows"][0]["file"]')"
+fi
+
 # ===========================================================================
 # Deterministic re-anchoring (scripts/reanchor-omission-claim.py)
 #

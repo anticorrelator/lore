@@ -16,7 +16,7 @@ One row per claim. JSONL — one JSON object per line. Sole writer: `evidence-ap
 | `task_id` | string | Task ID this claim is attached to. |
 | `phase_id` | string | Phase ID this claim is attached to. |
 | `scale` | string | One of the IDs from `scale-registry.sh get-ids`; `"unknown"` is rejected. |
-| `file` | string | Non-empty path to the file the claim anchors on. |
+| `file` | string | Non-empty path to the file the claim anchors on. `evidence-append.sh` records it relative to the file's own git root whenever one is derivable, so the reference outlives the checkout it was captured in; an absolute path is recorded only when no git root is found. Rows written before this rule carry absolute paths and remain valid. |
 | `line_range` | string | `N-M` with `N <= M`. |
 | `exact_snippet` | string | Verbatim substring of `file` at `line_range`. Non-empty. |
 | `normalized_snippet_hash` | string | Lowercase 64-char hex, equal to `sha256(v1_normalize(exact_snippet))`. The v1 recipe lives only in `scripts/snippet_normalize.py`. |
@@ -30,7 +30,7 @@ One row per claim. JSONL — one JSON object per line. Sole writer: `evidence-ap
 | Field | Type | Notes |
 |---|---|---|
 | `diff_ref` | string \| null | Optional diff reference. |
-| `changed_files` | array of non-empty strings | Must include `file`. |
+| `changed_files` | array of non-empty strings | Must include `file`. When the writer makes `file` repo-relative it strips the same git-root prefix from every other entry carrying it, so sibling references do not dangle either. |
 | `summary` | string | Non-empty. |
 
 ## Slow-path (legacy migration) terminal state
@@ -49,11 +49,13 @@ Derived automatically by `evidence-append.sh` at capture time. The validator typ
 
 | Field | Type | Derivation |
 |---|---|---|
-| `file_relative` | string | Path of `file` relative to its nearest `.git/` ancestor. When `file` is already a relative path, equal to `file` verbatim. Omitted silently when no `.git/` ancestor exists. |
+| `file_relative` | string | Path of `file` relative to its nearest `.git/` ancestor. Equal to `file` on rows the writer canonicalized, and on rows whose `file` was already relative. Omitted silently when no `.git/` ancestor exists. |
 | `captured_origin_ref` | string \| null | First ref under `refs/remotes/origin/` that contains the cwd repo's HEAD (e.g. `"origin/main"`). `null` when HEAD is not reachable from any `origin/*` ref. Omitted when not inside a git work tree. |
 | `anchor_warning` | string | Set to `"unpushed_local_only"` iff `captured_origin_ref` is `null`. `evidence-append.sh` additionally emits a single-line stderr soft-warning so the producer sees the anchor is fragile. Capture continues — this is informational, not gating. |
 
 These fields exist to give the audit-side claim-reconciliation cascade (see `architecture/evidence/claim-reconciliation-in-lore-anchors-on-content-no.md`) a stable mid-tier anchor between the volatile `captured_at_sha` (orphaned by squash) and the over-broad `origin/main` (which decays as the file evolves). Phase 2's preflight cascade reads them; Phase 1's substrate captures them.
+
+Both audit-side resolvers ground on `file_relative` ahead of `file`: `scripts/grounding-preflight.py`'s reconciliation cascade reads it exclusively, and `scripts/reverse-auditor-inline-evidence.py` tries it first and falls back to `file`. `scripts/audit-artifact.sh`'s task-claims extractor carries `file_relative`, `captured_at_sha`, and `captured_origin_ref` into each `claim_payload` entry so downstream consumers can see them.
 
 ## Validation model
 

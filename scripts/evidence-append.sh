@@ -112,8 +112,12 @@ fi
 #   commits). Derived from the cwd, not from `file`'s repo.
 # anchor_warning: set to "unpushed_local_only" iff captured_origin_ref is null,
 #   AND emit a single-line stderr soft-warning. Capture continues either way.
+#
+# In a worktree, `.git` is a gitdir file rather than a directory, so `-e`
+# matches it and the derived root is the worktree's own root.
 ROW_FILE=$(printf '%s' "$ROW" | jq -r '.file // ""' 2>/dev/null || echo "")
 FILE_RELATIVE=""
+FILE_REPO_ROOT=""
 if [[ -n "$ROW_FILE" ]]; then
   if [[ "$ROW_FILE" != /* ]]; then
     FILE_RELATIVE="$ROW_FILE"
@@ -122,6 +126,7 @@ if [[ -n "$ROW_FILE" ]]; then
     while [[ "$SEARCH_DIR" != "/" && "$SEARCH_DIR" != "." ]]; do
       if [[ -e "$SEARCH_DIR/.git" ]]; then
         FILE_RELATIVE="${ROW_FILE#$SEARCH_DIR/}"
+        FILE_REPO_ROOT="$SEARCH_DIR"
         break
       fi
       SEARCH_DIR=$(dirname "$SEARCH_DIR")
@@ -136,6 +141,27 @@ CAPTURED_ORIGIN_REF=$(git for-each-ref --contains HEAD --format '%(refname:short
 if [[ -n "$FILE_RELATIVE" ]]; then
   ROW=$(printf '%s' "$ROW" | jq --arg v "$FILE_RELATIVE" '.file_relative = $v')
 fi
+
+# --- Record `file` as a repo-relative path ---
+# An absolute path recorded inside a temporary checkout stops resolving once
+# that checkout is removed; the repo-relative form has no prefix to dangle.
+# validate-tier2.sh requires change_context.changed_files to contain `file`
+# verbatim, so both move together — and any sibling entry under the same repo
+# root is stripped by the same derived prefix, since it would otherwise dangle
+# the same way. Rows whose `file` has no derivable git root are left verbatim.
+if [[ -n "$FILE_REPO_ROOT" && -n "$FILE_RELATIVE" ]]; then
+  ROW=$(printf '%s' "$ROW" | jq --arg rel "$FILE_RELATIVE" --arg root "$FILE_REPO_ROOT/" '
+    .file = $rel
+    | if (.change_context | type) == "object"
+         and (.change_context.changed_files | type) == "array"
+      then .change_context.changed_files |= map(
+             if type == "string" and startswith($root)
+             then .[($root | length):]
+             else . end)
+      else . end
+  ')
+fi
+
 if [[ -n "$CAPTURED_ORIGIN_REF" ]]; then
   ROW=$(printf '%s' "$ROW" | jq --arg v "$CAPTURED_ORIGIN_REF" '.captured_origin_ref = $v')
 else
