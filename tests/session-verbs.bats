@@ -2042,6 +2042,52 @@ EOF
   [ "$status" -eq 2 ]
 }
 
+@test "watch: a second actionable row in the same read is delivered, not skipped" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+
+  # Two actionable rows land between wakes, so one read carries both. Only the
+  # first is handed over — if the cursor that came with it were the read's end
+  # rather than that row's own boundary, the second would be buried forever.
+  echo '{"event":"worktree_quarantined","slug":"feature-x","reason":"dirty-tree"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  echo '{"event":"closed","request_id":"r1","slug":"feature-y"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"worktree_quarantined"'* ]]
+  [[ "$output" != *'"event":"closed"'* ]]
+
+  # Re-arming zero-argument must land on the row the first wake did not deliver.
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"closed"'* ]]
+  [[ "$output" == *'"slug":"feature-y"'* ]]
+
+  # Only then is the board genuinely drained.
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+}
+
+@test "watch: the persisted cursor equals the next_cursor printed with a match" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+  echo '{"event":"needs_input","slug":"feature-x","reason":"prompt"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  echo '{"event":"closed","request_id":"r1","slug":"feature-y"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  local printed
+  printed="$(printf '%s\n' "$output" | jq -r 'select(has("next_cursor")) | .next_cursor')"
+  [ -n "$printed" ]
+  # Re-arming from the printed cursor and re-arming zero-argument are the same
+  # call: what the caller was told is what was stored.
+  [ "$(watch_cursor)" = "$printed" ]
+  # And both stop short of the undelivered row rather than at the journal's end.
+  [ "$printed" -lt "$(wc -c < "$TEST_KDIR/_sessions/events.jsonl" | tr -d '[:space:]')" ]
+}
+
 @test "watch: the cursor file advances on a timeout too, not only on a match" {
   : > "$TEST_KDIR/_sessions/events.jsonl"
   run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
