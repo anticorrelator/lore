@@ -637,6 +637,169 @@ load_harness_args() {
   fi
 }
 
+# --- filter_harness_args_for_headless ---
+# Print the subset of a harness argument list that the harness's
+# non-interactive surface accepts, one arg per line, preserving order and
+# repetition. Every dropped argument group is announced on stderr as a
+# `[lore] degraded:` line.
+#
+# Args: $1 = framework id; $2.. = the argument list (typically the output of
+#       load_harness_args, which this helper never calls — the caller decides
+#       which list it is filtering).
+#
+# The contract is read from adapters/capabilities.json
+# `.frameworks.<fw>.capabilities.headless_runner.argument_contract`:
+#   mode=shared_parser  the harness parses interactive and non-interactive
+#                       invocations with one option list; pass everything
+#                       through, no notice.
+#   mode=filtered       `source_grammar` maps each exact flag spelling to
+#                       {arity, headless}. A flag is grouped with the number
+#                       of following tokens its arity declares, then kept or
+#                       dropped as a whole. Dropping the flag without its
+#                       values is what this arity exists to prevent: a
+#                       stranded value binds as the subcommand's positional
+#                       prompt, turning a crash into a silently wrong run.
+#   absent/empty        the surface has not been probed; pass everything
+#                       through with a one-shot notice. Never synthesize a
+#                       grammar.
+#
+# Exit codes:
+#   0   filtered list printed (possibly empty).
+#   64  setup error, raised before the caller spawns anything: an argument
+#       whose flag is not in the grammar (its value boundary cannot be
+#       inferred, so neither keeping nor dropping it is safe), an argument
+#       list that ends mid-group, a structurally invalid declaration, or an
+#       unreadable capabilities.json.
+#
+# Deliberately bash-only — see adapters/README.md § Why the headless argument
+# filter is bash-only.
+filter_harness_args_for_headless() {
+  local framework="${1:-}"
+  if [[ -z "$framework" ]]; then
+    echo "Error: filter_harness_args_for_headless requires a framework id" >&2
+    return 64
+  fi
+  shift
+
+  local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
+  if ! command -v jq &>/dev/null || [[ ! -f "$capabilities_file" ]]; then
+    echo "Error: filter_harness_args_for_headless cannot read the argument contract (needs jq and $capabilities_file)" >&2
+    return 64
+  fi
+
+  local mode
+  mode=$(jq -r --arg fw "$framework" \
+    '(.frameworks[$fw].capabilities.headless_runner.argument_contract // {}) | .mode // ""' \
+    "$capabilities_file" 2>/dev/null) || mode=""
+
+  if [[ -z "$mode" ]]; then
+    _lore_warn_headless_arg_contract_once "$framework"
+    if (( $# > 0 )); then printf '%s\n' "$@"; fi
+    return 0
+  fi
+
+  case "$mode" in
+    shared_parser)
+      if (( $# > 0 )); then printf '%s\n' "$@"; fi
+      return 0
+      ;;
+    filtered) ;;
+    *)
+      echo "Error: framework '$framework' declares headless argument-contract mode '$mode', which is not one of: filtered, shared_parser" >&2
+      return 64
+      ;;
+  esac
+
+  # Flatten the grammar to `flag<TAB>arity<TAB>policy` rows. jq errors out on
+  # any malformed entry so a half-written declaration fails here rather than
+  # silently narrowing the accepted surface.
+  local grammar
+  grammar=$(jq -er --arg fw "$framework" '
+    (.frameworks[$fw].capabilities.headless_runner.argument_contract.source_grammar) as $g
+    | if ($g | type) != "object" or ($g | length) == 0 then
+        error("mode=filtered with a missing or empty source_grammar")
+      else
+        $g | to_entries | map(
+          if (.key | startswith("-")) != true then
+            error("source_grammar key \(.key) is not a flag spelling")
+          elif (.value | type) != "object" then
+            error("source_grammar entry \(.key) is not an object")
+          elif (.value.arity | type) != "number" or .value.arity < 0 then
+            error("source_grammar entry \(.key) has no non-negative numeric arity")
+          elif (.value.headless != "accepted" and .value.headless != "rejected") then
+            error("source_grammar entry \(.key) has no accepted/rejected headless policy")
+          else
+            "\(.key)\t\(.value.arity)\t\(.value.headless)"
+          end
+        ) | .[]
+      end
+  ' "$capabilities_file" 2>&1) || {
+    echo "Error: framework '$framework' has a structurally invalid headless argument contract in $capabilities_file" >&2
+    printf '%s\n' "$grammar" >&2
+    return 64
+  }
+
+  local out=()
+  local group=()
+  local tok flag row arity policy inline n
+  while (( $# > 0 )); do
+    tok="$1"
+    if [[ "$tok" != -?* ]]; then
+      echo "Error: '$tok' in the '$framework' harness argument list is not a flag; the headless argument contract can only group tokens by a declared flag's arity" >&2
+      return 64
+    fi
+    flag="$tok"
+    inline=0
+    if [[ "$tok" == --*=* ]]; then
+      flag="${tok%%=*}"
+      inline=1
+    fi
+    row=$(printf '%s\n' "$grammar" | awk -F'\t' -v f="$flag" '$1 == f { print $2 "\t" $3; exit }')
+    if [[ -z "$row" ]]; then
+      echo "Error: '$flag' is not declared in the '$framework' headless argument contract, so its value boundary is unknown — add it to source_grammar in adapters/capabilities.json (with the CLI version it was probed against) before this harness can run headless." >&2
+      return 64
+    fi
+    arity="${row%%$'\t'*}"
+    policy="${row##*$'\t'}"
+
+    group=("$tok")
+    shift
+    if (( inline == 0 )); then
+      n=0
+      while (( n < arity )); do
+        if (( $# == 0 )); then
+          echo "Error: '$flag' takes $arity value(s) on the '$framework' surface but the harness argument list ends early" >&2
+          return 64
+        fi
+        group+=("$1")
+        shift
+        n=$((n + 1))
+      done
+    fi
+
+    if [[ "$policy" == "accepted" ]]; then
+      out+=("${group[@]}")
+    else
+      echo "[lore] degraded: headless argument filter via headless_runner.argument_contract=partial (framework '$framework' dropped ${group[*]} — $flag is not accepted by the non-interactive surface)" >&2
+    fi
+  done
+
+  if (( ${#out[@]} > 0 )); then printf '%s\n' "${out[@]}"; fi
+}
+
+# --- _lore_warn_headless_arg_contract_once ---
+# Announce an unprobed non-interactive argument surface at most once per
+# framework per shell. The latch is exported so subshells inherit it and a
+# batch of judge invocations produces a single line.
+_lore_warn_headless_arg_contract_once() {
+  local framework="$1"
+  case " ${_LORE_HEADLESS_ARG_CONTRACT_WARNED:-} " in
+    *" $framework "*) return 0 ;;
+  esac
+  export _LORE_HEADLESS_ARG_CONTRACT_WARNED="${_LORE_HEADLESS_ARG_CONTRACT_WARNED:-}${_LORE_HEADLESS_ARG_CONTRACT_WARNED:+ }$framework"
+  echo "[lore] degraded: headless argument filter via headless_runner.argument_contract=no-evidence (framework '$framework' has no probed non-interactive argument surface; passing harness args through unfiltered)" >&2
+}
+
 # --- load_claude_args (deprecated alias) ---
 # Backwards-compatible shim for callers not yet migrated to
 # load_harness_args. Always reads the `claude-code` slot regardless of

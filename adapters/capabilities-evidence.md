@@ -192,6 +192,24 @@ non-`none` cell points at an id that exists here.
   used by `audit-artifact.sh` and other batch judges.
 - **Consumed by:** `claude-code.capabilities.headless_runner`.
 
+### claude-code-headless-argument-contract
+
+- **Source:** local probe — `claude --version` and `claude --help` on the
+  installed binary.
+- **URL / path:** `claude --help` (option list precedes the `Commands:` block)
+- **Retrieved:** 2026-07-25
+- **Product / version:** Claude Code 2.1.220
+- **Claim:** `claude` exposes a single flat option parser — usage is
+  `claude [options] [command] [prompt]` and `-p, --print` appears in that one
+  option list rather than as a subcommand. Non-interactive runs therefore
+  accept exactly the options an interactive session accepts, so the
+  `headless_runner` argument contract is `shared_parser` and no configured
+  argument is filtered out. `audit-artifact.sh` spawns both `claude-code` and
+  `opencode` judges through this same `claude` binary, so the finding covers
+  both frameworks.
+- **Consumed by:** `claude-code.capabilities.headless_runner.argument_contract`,
+  `opencode.capabilities.headless_runner.argument_contract`.
+
 ### claude-code-model-routing
 
 - **Source:** Anthropic — Claude Code CLI reference (`--model`) and
@@ -581,6 +599,28 @@ non-`none` cell points at an id that exists here.
   `headless_runner` adapter.
 - **Consumed by:** `codex.capabilities.headless_runner`.
 
+### codex-headless-argument-contract
+
+- **Source:** local probe — `codex --version`, `codex --help`, and
+  `codex exec --help` on the installed binary.
+- **URL / path:** `codex --help` (root option list) and `codex exec --help`
+  (subcommand option list)
+- **Retrieved:** 2026-07-25
+- **Product / version:** codex-cli 0.144.3
+- **Claim:** `codex exec` is a subcommand with its own option parser, and its
+  option list is not a superset of the root parser's. Five root options are
+  absent from `codex exec --help` and are rejected there: `--remote <ADDR>`,
+  `--remote-auth-token-env <ENV_VAR>`, `-a, --ask-for-approval
+  <APPROVAL_POLICY>`, `--search`, and `--no-alt-screen`. `--ask-for-approval`
+  takes one value, so dropping the flag without its value would leave the
+  value to bind as `codex exec [PROMPT]`. The remaining root options
+  (`-c/--config`, `--enable`, `--disable`, `--strict-config`, `-i/--image`,
+  `-m/--model`, `--oss`, `--local-provider`, `-p/--profile`, `-s/--sandbox`,
+  `--dangerously-bypass-approvals-and-sandbox`,
+  `--dangerously-bypass-hook-trust`, `-C/--cd`, `--add-dir`) appear in both
+  parsers with the same arity and are accepted.
+- **Consumed by:** `codex.capabilities.headless_runner.argument_contract`.
+
 ### codex-model-routing
 
 - **Source:** OpenAI Developers — Codex CLI reference (`--model, -m`)
@@ -800,6 +840,7 @@ matches the union of all `evidence:` fields in capabilities.json.
 - claude-code-team-messaging
 - claude-code-transcript-provider
 - claude-code-headless-runner
+- claude-code-headless-argument-contract
 - claude-code-model-routing
 - claude-code-interaction
 - claude-code-spend-telemetry
@@ -832,6 +873,7 @@ matches the union of all `evidence:` fields in capabilities.json.
 - codex-subagents
 - codex-transcript-provider
 - codex-headless-runner
+- codex-headless-argument-contract
 - codex-model-routing
 - codex-interaction
 - codex-spend-telemetry

@@ -207,6 +207,28 @@ _headless_runner_invoke_once() {
   while IFS= read -r arg; do
     harness_args+=("$arg")
   done < <(load_harness_args "$active")
+
+  # The configured harness args were written for the harness's interactive
+  # surface; every branch below invokes a non-interactive one. Filter against
+  # the declared contract before building any command line, so a flag the
+  # non-interactive parser rejects can never reach the spawn. Rejections are
+  # deterministic — a stale contract stops the audit here rather than after
+  # three retries behind a CLI usage error.
+  local filtered_file filter_rc=0
+  filtered_file=$(mktemp "${TMPDIR:-/tmp}/audit-headless-args.XXXXXX")
+  filter_harness_args_for_headless "$active" \
+    ${harness_args[@]+"${harness_args[@]}"} > "$filtered_file" || filter_rc=$?
+  if (( filter_rc != 0 )); then
+    rm -f "$filtered_file"
+    echo "[audit] Error: harness arguments for '$active' cannot be reconciled with its non-interactive surface — no judge was spawned." >&2
+    return 64
+  fi
+  harness_args=()
+  while IFS= read -r arg; do
+    harness_args+=("$arg")
+  done < "$filtered_file"
+  rm -f "$filtered_file"
+
   local err_file
   err_file=$(mktemp "${TMPDIR:-/tmp}/audit-headless-stderr.XXXXXX")
   local rc=0
@@ -240,7 +262,7 @@ _headless_runner_invoke_once() {
         local stream_file
         stream_file=$(mktemp "${TMPDIR:-/tmp}/audit-headless-stream.XXXXXX")
         printf '%s' "$user_prompt" | claude -p \
-          "${harness_args[@]}" \
+          ${harness_args[@]+"${harness_args[@]}"} \
           --append-system-prompt "$(cat "$system_prompt_file")" \
           --model "$JUDGE_MODEL" \
           --output-format stream-json \
@@ -316,7 +338,7 @@ PYEOF
         rm -f "$stream_file"
       else
         printf '%s' "$user_prompt" | claude -p \
-          "${harness_args[@]}" \
+          ${harness_args[@]+"${harness_args[@]}"} \
           --append-system-prompt "$(cat "$system_prompt_file")" \
           --model "$JUDGE_MODEL" \
           --output-format text \
@@ -340,14 +362,14 @@ $(cat "$system_prompt_file")
 User prompt:
 $user_prompt"
       local has_sandbox_arg=0
-      for arg in "${harness_args[@]}"; do
+      for arg in ${harness_args[@]+"${harness_args[@]}"}; do
         case "$arg" in
           --sandbox|-s|--dangerously-bypass-approvals-and-sandbox)
             has_sandbox_arg=1
             ;;
         esac
       done
-      local cmd=(codex exec "${harness_args[@]}" --ephemeral --skip-git-repo-check -m "$codex_model" -o "$output_file")
+      local cmd=(codex exec ${harness_args[@]+"${harness_args[@]}"} --ephemeral --skip-git-repo-check -m "$codex_model" -o "$output_file")
       if [[ "$has_sandbox_arg" -eq 0 ]]; then
         cmd+=(--sandbox read-only)
       fi
@@ -385,6 +407,18 @@ $user_prompt"
       # does not exist / model_not_found) stderr shapes.
       if grep -Eiq 'not_found_error.*model|model_not_found|invalid model|unknown model|model not found|model .* does not exist' "$err_file"; then
         echo "[audit] headless runner stderr matches a model-not-found signature — classifying as setup error (no retry). Check the configured judge model alias." >&2
+        rm -f "$err_file"
+        return 64
+      fi
+      # A CLI that rejects its own command line rejects it identically every
+      # time, so argument-parse and usage errors get the same fail-fast
+      # treatment. Keyed on the stderr signature rather than the exit code:
+      # claude and codex disagree on which code a usage error carries. The
+      # bare `Usage:` banner only counts when no output was produced, since a
+      # judge is free to print the word in its own prose.
+      if grep -Eiq 'unexpected argument|unrecognized (option|argument|subcommand|command)|invalid value for|unknown (option|flag|argument)|error: unexpected' "$err_file" \
+         || { [[ ! -s "$output_file" ]] && grep -Eq '^[[:space:]]*Usage:' "$err_file"; }; then
+        echo "[audit] headless runner stderr matches a CLI argument-parse/usage signature — classifying as setup error (no retry). The harness arguments the runner assembled are not accepted by its non-interactive surface; check headless_runner.argument_contract in adapters/capabilities.json." >&2
         rm -f "$err_file"
         return 64
       fi

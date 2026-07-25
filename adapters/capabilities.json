@@ -21,7 +21,7 @@
     "subagents": "Spawns fresh subagent contexts for fanout (worker, researcher, reviewer) so each receives a clean context window.",
     "team_messaging": "Inter-agent messaging primitive (TeamCreate / SendMessage / shared team-state) so a lead can coordinate workers in flight.",
     "transcript_provider": "Exposes a parseable session/transcript artifact that capture, digest, novelty, and ceremony-detection scripts can consume.",
-    "headless_runner": "Non-interactive `<harness> -p <prompt>` mode used by audit-artifact.sh (correctness-gate, curator, reverse-auditor) and other batch judges.",
+    "headless_runner": "Non-interactive `<harness> -p <prompt>` mode used by audit-artifact.sh (correctness-gate, curator, reverse-auditor) and other batch judges. The optional `argument_contract` sub-block declares which of the harness's configured CLI arguments the non-interactive surface accepts, and is read by filter_harness_args_for_headless in scripts/lib.sh. `mode: shared_parser` states the positive finding that the harness parses interactive and non-interactive invocations with one option list, so nothing is filtered. `mode: filtered` carries a `source_grammar` map from exact flag spelling (each alias its own key) to `{arity, headless}`, where `arity` is how many following tokens the flag consumes on the surface the configured args were written against, and `headless` is `accepted` or `rejected` on the non-interactive surface. Arity is what makes a rejected flag's values droppable — dropping the flag alone would leave its value behind to bind as a positional. Both modes carry an `evidence` id resolving in capabilities-evidence.md and the `cli_version` the two surfaces were probed against. An absent or empty block means the surface is unprobed: callers pass the arguments through unfiltered with a `[lore] degraded:` notice and never synthesize a grammar. Under `filtered`, a flag absent from `source_grammar` has no known argument boundary and is a setup error (rc=64) before any spawn.",
     "plugin_runtime": "Native plugin/extension runtime where lore can register code (TypeScript, shell, etc.) that participates in lifecycle events.",
     "model_routing": "Whether the harness exposes a single model/provider per session or can route per-spawn to multiple providers; values: `single` or `multi`. Route resolvers use the closed frameworks keyset to recognize a framework-qualified role value, then validate the remaining native binding against the selected target's shape. The optional `tiers` array lists the harness's validated model aliases in ascending capability order (consumed by the settlement panel's tier cycle and framework_model_routing_tiers); an empty array means no validated alias ladder — consumers must not guess one.",
     "interaction": "Per-framework probed PTY interaction contract (sibling of `capabilities` and `model_routing`, like `model_routing`). Each row is an evidence-gated cell — `support` from the closed level set plus an `evidence` id resolving in capabilities-evidence.md — carrying one typed payload: `sequence` rows (submit_sequence, newline_sequence, graceful_exit_sequence) hold the literal PTY bytes a caller writes to the harness master (JSON escapes: \\r=CR, \\n=LF, \\u0003=Ctrl-C, \\u001b=ESC); `matcher` rows (composer_signature, permission_prompt_signature) hold the human-readable screen-state description the readiness gate's matcher function implements; `value` rows carry a closed-vocabulary token — honors_bracketed_paste is a boolean, paste_multiline_semantics is one of {`held-multiline-needs-submit`, `auto-submit-on-close`}, mid_generation_semantics is one of {`queued-autosubmit`, `buffered-draft`, `dropped`, `interrupts`}. Rows are derived from tests/probes/session_injection and pinned by that suite's contract tests. Consumed by config.interactionProfile in tui/internal/config/framework.go (the close ladder reads graceful_exit_sequence via HarnessGracefulExitSequence) and by framework_interaction_field in scripts/lib.sh. An absent row or a framework without an interaction block degrades explicitly (`unsupported` / not-supported) with a `[lore] degraded:` notice — callers skip, never substitute a value from another harness.",
@@ -328,7 +328,13 @@
         "headless_runner": {
           "support": "full",
           "evidence": "claude-code-headless-runner",
-          "notes": "`claude -p <prompt>` non-interactive mode used by audit-artifact.sh judges."
+          "notes": "`claude -p <prompt>` non-interactive mode used by audit-artifact.sh judges.",
+          "argument_contract": {
+            "mode": "shared_parser",
+            "evidence": "claude-code-headless-argument-contract",
+            "cli_version": "2.1.220",
+            "notes": "`claude` parses one flat option list (`claude [options] [command] [prompt]`) and `-p/--print` is an option within it, not a subcommand. Print mode therefore accepts exactly the options an interactive session accepts, so there is no narrower surface to filter against and every configured argument passes through unchanged."
+          }
         },
         "plugin_runtime": {
           "support": "none",
@@ -486,7 +492,13 @@
         "headless_runner": {
           "support": "partial",
           "evidence": "opencode-headless-runner",
-          "notes": "Non-interactive run mode exists; flag spelling differs from `claude -p` so audit-artifact.sh routes through the headless_runner adapter."
+          "notes": "Non-interactive run mode exists; flag spelling differs from `claude -p` so audit-artifact.sh routes through the headless_runner adapter.",
+          "argument_contract": {
+            "mode": "shared_parser",
+            "evidence": "claude-code-headless-argument-contract",
+            "cli_version": "2.1.220",
+            "notes": "audit-artifact.sh spawns opencode judges through the `claude` binary, so the argument surface in force is claude's flat option parser rather than opencode's own. Shares the claude-code evidence row for that reason."
+          }
         },
         "plugin_runtime": {
           "support": "full",
@@ -646,7 +658,41 @@
         "headless_runner": {
           "support": "full",
           "evidence": "codex-headless-runner",
-          "notes": "Codex supports non-interactive prompt invocation; audit-artifact.sh routes correctness-gate / curator / reverse-auditor through the headless_runner adapter."
+          "notes": "Codex supports non-interactive prompt invocation; audit-artifact.sh routes correctness-gate / curator / reverse-auditor through the headless_runner adapter.",
+          "argument_contract": {
+            "mode": "filtered",
+            "evidence": "codex-headless-argument-contract",
+            "cli_version": "0.144.3",
+            "notes": "`codex exec` is a subcommand with its own option parser, so the interactive root parser accepts flags `exec` rejects. Arity comes from `codex --help` (the surface a `harnesses.codex.args` list is written against); accepted/rejected comes from whether `codex exec --help` lists the same flag. `-i/--image` is variadic upstream but declared arity 1 — a multi-value use fails closed on the trailing values rather than passing an unbounded group. `-h/--help` and `-V/--version` are deliberately absent: they terminate the process instead of configuring a run, so their appearance in a settings args list is an operator error the unknown-flag path should stop.",
+            "source_grammar": {
+              "-c": {"arity": 1, "headless": "accepted"},
+              "--config": {"arity": 1, "headless": "accepted"},
+              "--enable": {"arity": 1, "headless": "accepted"},
+              "--disable": {"arity": 1, "headless": "accepted"},
+              "--remote": {"arity": 1, "headless": "rejected"},
+              "--remote-auth-token-env": {"arity": 1, "headless": "rejected"},
+              "--strict-config": {"arity": 0, "headless": "accepted"},
+              "-i": {"arity": 1, "headless": "accepted"},
+              "--image": {"arity": 1, "headless": "accepted"},
+              "-m": {"arity": 1, "headless": "accepted"},
+              "--model": {"arity": 1, "headless": "accepted"},
+              "--oss": {"arity": 0, "headless": "accepted"},
+              "--local-provider": {"arity": 1, "headless": "accepted"},
+              "-p": {"arity": 1, "headless": "accepted"},
+              "--profile": {"arity": 1, "headless": "accepted"},
+              "-s": {"arity": 1, "headless": "accepted"},
+              "--sandbox": {"arity": 1, "headless": "accepted"},
+              "--dangerously-bypass-approvals-and-sandbox": {"arity": 0, "headless": "accepted"},
+              "--dangerously-bypass-hook-trust": {"arity": 0, "headless": "accepted"},
+              "-C": {"arity": 1, "headless": "accepted"},
+              "--cd": {"arity": 1, "headless": "accepted"},
+              "--add-dir": {"arity": 1, "headless": "accepted"},
+              "-a": {"arity": 1, "headless": "rejected"},
+              "--ask-for-approval": {"arity": 1, "headless": "rejected"},
+              "--search": {"arity": 0, "headless": "rejected"},
+              "--no-alt-screen": {"arity": 0, "headless": "rejected"}
+            }
+          }
         },
         "plugin_runtime": {
           "support": "none",
