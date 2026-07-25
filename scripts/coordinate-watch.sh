@@ -48,6 +48,12 @@
 #   baselines at the journal's current end ("wake on what happens next"), which
 #   means it will not replay history the board has already dealt with.
 #
+#   On a match the cursor is the boundary immediately after the matched row, not
+#   the end of the read that found it. One read can carry several actionable
+#   rows; only the first is handed to the caller, so persisting the read's end
+#   would drop the rest permanently. The no-match exits (advisory, timeout,
+#   reader failure) withhold nothing, so they carry the read's end cursor.
+#
 # Output (plain): the matched event row, then a final {"next_cursor": N} row.
 #   A pending-staleness wake emits an advisory row instead of an event row.
 #   Timeout emits only the cursor row, with a diagnostic on stderr. Every row is
@@ -242,11 +248,19 @@ emit_internal_error() {
 
 # --- Readers -----------------------------------------------------------------
 
-# First row in the until-set, whatever session it belongs to. No slug filter:
-# board scope is the whole point of this verb.
-first_match() {
+# First row in the until-set, whatever session it belongs to, paired with the
+# cursor the reader assigned to that row's end. No slug filter: board scope is
+# the whole point of this verb.
+#
+# The pairing is the point: one read can contain several actionable rows, and a
+# match that reported the batch's end cursor would persist a position past the
+# rows it never handed over — they would be skipped forever, since the next
+# zero-argument call resumes from that cursor. The reader owns each row's byte
+# boundary in `.records`, the same boundaries `session wait` follows in follow
+# mode; this verb only applies the until-set filter.
+first_match_record() {
   printf '%s' "$1" | jq -c --argjson until "$UNTIL_JSON" \
-    'first(.events[] | select(.event as $e | $until | index($e)))' 2>/dev/null || true
+    'first(.records[] | select(.event.event as $e | $until | index($e)))' 2>/dev/null || true
 }
 
 # Pending spawn requests older than the staleness bound, newest-first age order.
@@ -328,11 +342,15 @@ fi
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
 while :; do
   RESULT="$(session_events_read "$EVENTS_SH" "$KNOWLEDGE_DIR" "$CURSOR")" || emit_internal_error "$CURSOR"
-  MATCH="$(first_match "$RESULT")"
+  RECORD="$(first_match_record "$RESULT")"
   NEXT="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
-  if [[ -n "$MATCH" && "$MATCH" != "null" ]]; then
-    emit_matched "$MATCH" "$NEXT"
+  if [[ -n "$RECORD" && "$RECORD" != "null" ]]; then
+    emit_matched \
+      "$(printf '%s' "$RECORD" | jq -c '.event')" \
+      "$(printf '%s' "$RECORD" | jq -r '.next_cursor')"
   fi
+  # No match: nothing was withheld from the caller, so the batch cursor is the
+  # row after the last row this read consumed, and advancing to it is correct.
   CURSOR="$NEXT"
 
   # A journal row always wins: it is the real event, and the pending check is
