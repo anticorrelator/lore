@@ -1520,6 +1520,55 @@ coordinate_event_vocab() {
   [ "$status" -eq 2 ]
 }
 
+@test "wait: a second matching row in the same read is reachable by re-arming, not skipped" {
+  write_instance inst-a feature-x
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  # Both rows are on disk before the wait starts, so one read carries both and
+  # one-shot delivers only the first. The cursor it hands back is the caller's
+  # only way back to the second row.
+  echo '{"event":"needs_input","slug":"feature-x","reason":"prompt"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  echo '{"event":"closed","request_id":"r1","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+
+  local out code nc
+  out="$(bash "$WAIT" feature-x --since 0 --timeout 5 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 0 ]
+  [ "$(printf '%s\n' "$out" | jq -rs 'map(select(has("event")).event) | join(",")')" = "needs_input" ]
+  nc="$(printf '%s\n' "$out" | jq -rs 'map(select(has("next_cursor")).next_cursor)[0]')"
+
+  # Re-arming from the emitted cursor must land on the row the first wait did
+  # not deliver — not past it.
+  out="$(bash "$WAIT" feature-x --since "$nc" --timeout 5 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 0 ]
+  [ "$(printf '%s\n' "$out" | jq -rs 'map(select(has("event")).event) | join(",")')" = "closed" ]
+  nc="$(printf '%s\n' "$out" | jq -rs 'map(select(has("next_cursor")).next_cursor)[0]')"
+
+  # Only then is the journal drained for this target.
+  run bash "$WAIT" feature-x --since "$nc" --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+}
+
+@test "wait: the one-shot match cursor is the matched row's boundary, not the read's end" {
+  write_instance inst-a feature-x
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  echo '{"event":"needs_input","slug":"feature-x","reason":"prompt"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  echo '{"event":"closed","request_id":"r1","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  local first_row_end total
+  first_row_end="$(head -1 "$TEST_KDIR/_sessions/events.jsonl" | wc -c | tr -d '[:space:]')"
+  total="$(wc -c < "$TEST_KDIR/_sessions/events.jsonl" | tr -d '[:space:]')"
+  [ "$first_row_end" -lt "$total" ]            # the fixture really does hold two rows
+
+  local out code nc
+  out="$(bash "$WAIT" feature-x --since 0 --timeout 5 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 0 ]
+  nc="$(printf '%s\n' "$out" | jq -rs 'map(select(has("next_cursor")).next_cursor)[0]')"
+  [ "$nc" = "$first_row_end" ]
+
+  # --json reports the same boundary as the plain cursor row.
+  out="$(bash "$WAIT" feature-x --since 0 --timeout 5 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 0 ]
+  echo "$out" | jq -e --argjson nc "$first_row_end" '.matched.event=="needs_input" and .next_cursor==$nc'
+}
+
 @test "wait follow: one process emits every row through terminal (sleep-blocked delegation regression)" {
   write_instance inst-a feature-x
   local f="$TEST_KDIR/_sessions/events.jsonl"
@@ -1865,7 +1914,10 @@ count=0
 count=$((count + 1))
 printf '%s\n' "$count" > "$count_file"
 if [ "${EVENTS_STUB_MODE:-}" = fail-twice ] && [ "$count" -ge 3 ]; then
-  printf '%s\n' '{"events":[{"event":"closed","request_id":"spawn-rid","slug":"retry-slug"}],"next_cursor":77}'
+  # Stands in for the reference reader, so it emits the reader's full object:
+  # `records` pairs each event with its own end boundary, and one-shot matching
+  # reads that pairing rather than the batch cursor.
+  printf '%s\n' '{"events":[{"event":"closed","request_id":"spawn-rid","slug":"retry-slug"}],"records":[{"event":{"event":"closed","request_id":"spawn-rid","slug":"retry-slug"},"next_cursor":77}],"next_cursor":77}'
   exit 0
 fi
 exit 9
