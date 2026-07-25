@@ -1513,6 +1513,14 @@ assert_eq "L3: expired lease left the hot file" "$(jq -r '.leases | has("lease-e
 assert_eq "L3: two dead leases landed in the archive ledger" "$(wc -l < "$KDIR_L3/_settlement/archive/leases.jsonl" | tr -d ' ')" "2"
 assert_eq "L3: two run files moved to the archive dir" "$(ls "$KDIR_L3/_settlement/archive/runs" | wc -l | tr -d ' ')" "2"
 assert_eq "L3: archive index carries the two moved runs" "$(wc -l < "$KDIR_L3/_settlement/archive/runs-index.jsonl" | tr -d ' ')" "2"
+# The index row keeps enough invalidation provenance for --stranded to tell a
+# retry invalidation from a settled-verdict one without reopening the file.
+assert_eq "L3: archive index projects the invalidation reason" \
+  "$(jq -r 'select(.run_id == "run-invalidated-old") | .invalidated_reason' "$KDIR_L3/_settlement/archive/runs-index.jsonl")" \
+  "superseded_by_settled_run"
+assert_eq "L3: archive index projects work_item for requeue" \
+  "$(jq -r 'select(.run_id == "run-settled-old") | .work_item' "$KDIR_L3/_settlement/archive/runs-index.jsonl")" \
+  "wi"
 assert_eq "L3: non-invalidated infra run stays hot (live retry ledger)" "$([[ -f "$KDIR_L3/_settlement/runs/run-infra-old.json" ]] && echo yes || echo no)" "yes"
 assert_eq "L3: recent settled run stays hot (below retention age)" "$([[ -f "$KDIR_L3/_settlement/runs/run-recent.json" ]] && echo yes || echo no)" "yes"
 assert_eq "L3: archived settled run left the hot dir" "$([[ -f "$KDIR_L3/_settlement/runs/run-settled-old.json" ]] && echo present || echo gone)" "gone"
@@ -1615,6 +1623,267 @@ APPLY_OUT=$(LORE_KNOWLEDGE_DIR="$KDIR_L3A" bash "$SCRIPTS_DIR/apply-correction.s
   --replacement-text "The tail element is compared before processing." 2>&1 || true)
 assert_eq "L3 apply-correction: archived verdict resolves and mutates the entry body" \
   "$(grep -cxF 'The tail element is compared before processing.' "$ENTRY_L3A")" "1"
+
+echo ""
+echo "Test 36: retry-errors --limit bounds a wave, advances across invocations, and dry-run selects the same ids"
+KDIR_LIM="$TEST_DIR/kdir-retry-limit"
+SETTINGS_LIM="$TEST_DIR/settings-retry-limit.json"
+setup_kdir "$KDIR_LIM" "wi"
+write_settings "$SETTINGS_LIM" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false},"enabled":true,"max_concurrency":1,"max_auto_retry_attempts":3,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+for LIM_CLAIM in claim-lim-a claim-lim-b claim-lim-c; do
+  printf '%s\n' "$(row_json "$LIM_CLAIM")" >> "$KDIR_LIM/_work/wi/task-claims.jsonl"
+done
+python3 - "$KDIR_LIM" <<'PY'
+import hashlib, json, pathlib, sys
+runs = pathlib.Path(sys.argv[1]) / "_settlement" / "runs"
+runs.mkdir(parents=True, exist_ok=True)
+for i, claim in enumerate(["claim-lim-a", "claim-lim-b", "claim-lim-c"]):
+    item_id = "task-claim-" + hashlib.sha256(f"task-claim:wi:{claim}".encode()).hexdigest()[:20]
+    run_id = f"run-lim-{i}"
+    (runs / f"{run_id}.json").write_text(json.dumps({
+        "version": 1, "run_id": run_id, "item_id": item_id, "kind": "task-claim",
+        "source_id": claim, "claim_id": claim, "work_item": "wi",
+        "status": "failed", "reason": "executor_audit_error",
+        "started_at": f"2026-05-0{i + 1}T00:00:00Z", "completed_at": f"2026-05-0{i + 1}T00:00:00Z",
+        "verdict": {"verdict_format": "envelope", "verdict": "error", "evidence": "seeded infra failure"},
+    }))
+PY
+LIM_DRY=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_LIM" bash "$QUEUE" retry-errors --kdir "$KDIR_LIM" --limit 2 --dry-run --json)
+assert_json_eq "limit: dry-run matches the cap, not the eligible set" "$LIM_DRY" '.matched' "2"
+assert_json_eq "limit: dry-run reports the pre-limit eligible count" "$LIM_DRY" '.eligible' "3"
+assert_json_eq "limit: dry-run enqueues nothing" "$LIM_DRY" '.enqueued' "0"
+assert_json_eq "limit: dry-run invalidates nothing" "$LIM_DRY" '.invalidated' "0"
+LIM_DRY_STATUS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_LIM" bash "$QUEUE" status --kdir "$KDIR_LIM" --json)
+assert_json_eq "limit: dry-run leaves the queue empty" "$LIM_DRY_STATUS" '[.items[] | select(.status == "pending")] | length' "0"
+LIM_DRY_IDS=$(printf '%s' "$LIM_DRY" | jq -r '[.items[].id] | sort | join(",")')
+LIM_W1=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_LIM" bash "$QUEUE" retry-errors --kdir "$KDIR_LIM" --limit 2 --json)
+LIM_W1_IDS=$(printf '%s' "$LIM_W1" | jq -r '[.items[].id] | sort | join(",")')
+assert_eq "limit: mutating wave selects exactly the dry-run ids" "$LIM_W1_IDS" "$LIM_DRY_IDS"
+assert_json_eq "limit: first wave enqueues the cap" "$LIM_W1" '.enqueued' "2"
+LIM_W2=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_LIM" bash "$QUEUE" retry-errors --kdir "$KDIR_LIM" --limit 2 --json)
+assert_json_eq "limit: second wave picks up the remaining item" "$LIM_W2" '.enqueued' "1"
+LIM_W2_ID=$(printf '%s' "$LIM_W2" | jq -r '.items[0].id')
+assert_eq "limit: second wave advances past the first wave's head" \
+  "$([[ ",$LIM_W1_IDS," == *",$LIM_W2_ID,"* ]] && echo repeated || echo advanced)" "advanced"
+LIM_W3=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_LIM" bash "$QUEUE" retry-errors --kdir "$KDIR_LIM" --limit 2 --json)
+assert_json_eq "limit: drained backlog reports zero matched" "$LIM_W3" '.matched' "0"
+assert_json_eq "limit: drained backlog enqueues nothing" "$LIM_W3" '.enqueued' "0"
+LIM_STATUS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_LIM" bash "$QUEUE" status --kdir "$KDIR_LIM" --json)
+assert_json_eq "limit: every item requeued exactly once across the waves" "$LIM_STATUS" '.counts.pending' "3"
+
+echo ""
+echo "Test 37: retry-errors --stderr-match isolates one failure cohort"
+KDIR_SM="$TEST_DIR/kdir-retry-stderr-match"
+SETTINGS_SM="$TEST_DIR/settings-retry-stderr-match.json"
+setup_kdir "$KDIR_SM" "wi"
+write_settings "$SETTINGS_SM" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false},"enabled":true,"max_concurrency":1,"max_auto_retry_attempts":3,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+for SM_CLAIM in claim-sm-flag claim-sm-dup claim-sm-silent; do
+  printf '%s\n' "$(row_json "$SM_CLAIM")" >> "$KDIR_SM/_work/wi/task-claims.jsonl"
+done
+python3 - "$KDIR_SM" <<'PY'
+import hashlib, json, pathlib, sys
+runs = pathlib.Path(sys.argv[1]) / "_settlement" / "runs"
+runs.mkdir(parents=True, exist_ok=True)
+# Three infra failures with different stderr signatures; the third records no
+# tail at all, which must never satisfy a pattern.
+tails = {
+    "claim-sm-flag": "error: unexpected argument '--ask-for-approval' found",
+    "claim-sm-dup": "resolved 2 source rows in task-claims.jsonl (expected exactly 1)",
+    "claim-sm-silent": None,
+}
+for i, (claim, tail) in enumerate(tails.items()):
+    item_id = "task-claim-" + hashlib.sha256(f"task-claim:wi:{claim}".encode()).hexdigest()[:20]
+    run_id = f"run-sm-{i}"
+    run = {
+        "version": 1, "run_id": run_id, "item_id": item_id, "kind": "task-claim",
+        "source_id": claim, "claim_id": claim, "work_item": "wi",
+        "status": "failed", "reason": "executor_audit_error",
+        "started_at": f"2026-05-0{i + 1}T00:00:00Z", "completed_at": f"2026-05-0{i + 1}T00:00:00Z",
+        "verdict": {"verdict_format": "envelope", "verdict": "error", "evidence": "seeded infra failure"},
+    }
+    if tail is not None:
+        run["stderr_tail"] = tail
+    (runs / f"{run_id}.json").write_text(json.dumps(run))
+PY
+SM_DRY=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_SM" bash "$QUEUE" retry-errors --kdir "$KDIR_SM" --stderr-match 'ask-for-approval' --dry-run --json)
+assert_json_eq "stderr-match: only the matching cohort is selected" "$SM_DRY" '.matched' "1"
+assert_json_eq "stderr-match: the selected item is the flag-signature one" "$SM_DRY" '.items[0].source_id' "claim-sm-flag"
+assert_json_eq "stderr-match: eligible reflects the filtered set" "$SM_DRY" '.eligible' "1"
+SM_MISS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_SM" bash "$QUEUE" retry-errors --kdir "$KDIR_SM" --stderr-match 'ASK-FOR-APPROVAL' --dry-run --json)
+assert_json_eq "stderr-match: matching is case-sensitive" "$SM_MISS" '.matched' "0"
+SM_ABSENT=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_SM" bash "$QUEUE" retry-errors --kdir "$KDIR_SM" --stderr-match 'seeded infra failure' --dry-run --json)
+assert_json_eq "stderr-match: an absent stderr_tail never matches" "$SM_ABSENT" '.matched' "0"
+SM_RUN=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_SM" bash "$QUEUE" retry-errors --kdir "$KDIR_SM" --stderr-match 'ask-for-approval' --json)
+assert_json_eq "stderr-match: mutating mode enqueues the same one item" "$SM_RUN" '.enqueued' "1"
+assert_eq "stderr-match: mutating mode selects the dry-run id" \
+  "$(printf '%s' "$SM_RUN" | jq -r '.items[0].id')" "$(printf '%s' "$SM_DRY" | jq -r '.items[0].id')"
+SM_STATUS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_SM" bash "$QUEUE" status --kdir "$KDIR_SM" --json)
+assert_json_eq "stderr-match: the other cohorts stay out of the queue" "$SM_STATUS" '.counts.pending' "1"
+SM_OTHER_RUNS=$(jq -s '[.[] | select(.invalidated_at)] | length' "$KDIR_SM"/_settlement/runs/*.json)
+assert_eq "stderr-match: only the matched item's run was invalidated" "$SM_OTHER_RUNS" "1"
+
+echo ""
+echo "Test 38: retry-errors --stranded re-drives items a prior wave left without a result"
+KDIR_ST="$TEST_DIR/kdir-retry-stranded"
+SETTINGS_ST="$TEST_DIR/settings-retry-stranded.json"
+setup_kdir "$KDIR_ST" "wi"
+write_settings "$SETTINGS_ST" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false},"enabled":true,"max_concurrency":1,"max_auto_retry_attempts":3,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+for ST_CLAIM in claim-st-stranded claim-st-superseded claim-st-redriven claim-st-never; do
+  printf '%s\n' "$(row_json "$ST_CLAIM")" >> "$KDIR_ST/_work/wi/task-claims.jsonl"
+done
+python3 - "$KDIR_ST" <<'PY'
+import hashlib, json, pathlib, sys
+runs = pathlib.Path(sys.argv[1]) / "_settlement" / "runs"
+runs.mkdir(parents=True, exist_ok=True)
+
+def item_id(claim):
+    return "task-claim-" + hashlib.sha256(f"task-claim:wi:{claim}".encode()).hexdigest()[:20]
+
+def write(run_id, claim, **extra):
+    run = {
+        "version": 1, "run_id": run_id, "item_id": item_id(claim), "kind": "task-claim",
+        "source_id": claim, "claim_id": claim, "work_item": "wi",
+        "status": "failed", "reason": "executor_audit_error",
+        "started_at": "2026-05-01T00:00:00Z", "completed_at": "2026-05-01T00:00:00Z",
+        "verdict": {"verdict_format": "envelope", "verdict": "error", "evidence": "seeded infra failure"},
+    }
+    run.update(extra)
+    (runs / f"{run_id}.json").write_text(json.dumps(run))
+
+# Stranded: a retry wave invalidated the failure and the re-audit never landed.
+write("run-st-stranded", "claim-st-stranded",
+      invalidated_at="2026-05-10T00:00:00Z", invalidated_reason="retry_infrastructure_failure",
+      invalidated_detail="previous_audit_error")
+# Not stranded: invalidated because a real verdict superseded it.
+write("run-st-superseded", "claim-st-superseded",
+      invalidated_at="2026-05-10T00:00:00Z", invalidated_reason="superseded_by_settled_run",
+      invalidated_detail="previous_audit_error")
+# Not stranded: the promised re-audit did land a later terminal result.
+write("run-st-redriven", "claim-st-redriven",
+      invalidated_at="2026-05-10T00:00:00Z", invalidated_reason="retry_infrastructure_failure",
+      invalidated_detail="previous_audit_error")
+write("run-st-redriven-2", "claim-st-redriven", status="completed", reason="audited",
+      completed_at="2026-05-11T00:00:00Z",
+      verdict={"verdict_format": "envelope", "verdict": "verified", "evidence": "re-audit landed"})
+# claim-st-never has a source row and no run at all.
+PY
+ST_DRY=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_ST" bash "$QUEUE" retry-errors --kdir "$KDIR_ST" --stranded --dry-run --json)
+assert_json_eq "stranded: exactly one item is stranded" "$ST_DRY" '.matched' "1"
+assert_json_eq "stranded: the stranded item is the one whose re-audit never landed" "$ST_DRY" '.items[0].source_id' "claim-st-stranded"
+assert_json_eq "stranded: the response records the selection mode" "$ST_DRY" '.stranded' "true"
+ST_PLAIN=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_ST" bash "$QUEUE" retry-errors --kdir "$KDIR_ST" --dry-run --json)
+assert_json_eq "stranded: plain retry-errors cannot see the stranded item" "$ST_PLAIN" '.matched' "0"
+ST_RUN=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_ST" bash "$QUEUE" retry-errors --kdir "$KDIR_ST" --stranded --json)
+assert_json_eq "stranded: mutating mode re-enqueues rather than only reporting" "$ST_RUN" '.enqueued' "1"
+assert_json_eq "stranded: an already-invalidated ledger needs no further invalidation" "$ST_RUN" '.invalidated' "0"
+ST_STATUS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_ST" bash "$QUEUE" status --kdir "$KDIR_ST" --json)
+assert_json_eq "stranded: only the stranded item entered the queue" "$ST_STATUS" '.counts.pending' "1"
+assert_json_eq "stranded: the requeued item carries the retry selection reason" "$ST_STATUS" '.items[0].selection_reason' "retry_infrastructure_failure"
+
+echo ""
+echo "Test 39: retry-errors --stranded reads archived runs through the projection and the legacy fallback"
+KDIR_SA="$TEST_DIR/kdir-retry-stranded-archived"
+SETTINGS_SA="$TEST_DIR/settings-retry-stranded-archived.json"
+setup_kdir "$KDIR_SA" "wi"
+write_settings "$SETTINGS_SA" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false},"enabled":true,"max_concurrency":1,"max_auto_retry_attempts":3,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+for SA_CLAIM in claim-sa-projected claim-sa-legacy claim-sa-legacy-settled; do
+  printf '%s\n' "$(row_json "$SA_CLAIM")" >> "$KDIR_SA/_work/wi/task-claims.jsonl"
+done
+python3 - "$KDIR_SA" <<'PY'
+import hashlib, json, pathlib, sys
+archive = pathlib.Path(sys.argv[1]) / "_settlement" / "archive"
+(archive / "runs").mkdir(parents=True, exist_ok=True)
+
+def item_id(claim):
+    return "task-claim-" + hashlib.sha256(f"task-claim:wi:{claim}".encode()).hexdigest()[:20]
+
+def record(run_id, claim, reason):
+    return {
+        "version": 1, "run_id": run_id, "item_id": item_id(claim), "kind": "task-claim",
+        "source_id": claim, "claim_id": claim, "work_item": "wi",
+        "status": "failed", "reason": "executor_audit_error",
+        "completed_at": "2026-05-01T00:00:00Z",
+        "invalidated_at": "2026-05-10T00:00:00Z", "invalidated_reason": reason,
+        "invalidated_detail": "previous_audit_error",
+        "verdict": {"verdict_format": "envelope", "verdict": "error", "evidence": "seeded infra failure"},
+    }
+
+rows = []
+# Written by the current archiver: the index row answers the predicate itself.
+projected = record("run-sa-projected", "claim-sa-projected", "retry_infrastructure_failure")
+rows.append({
+    "run_id": "run-sa-projected", "item_id": projected["item_id"], "status": "failed",
+    "kind": "task-claim", "work_item": "wi", "source_id": "claim-sa-projected",
+    "infra_failure": True, "invalidated": True,
+    "invalidated_reason": "retry_infrastructure_failure",
+    "invalidated_detail": "previous_audit_error",
+    "invalidated_at": "2026-05-10T00:00:00Z", "completed_at": "2026-05-01T00:00:00Z",
+})
+# Predating the projection: the row knows only that the run was invalidated,
+# so the reason has to come from the archived file.
+legacy = record("run-sa-legacy", "claim-sa-legacy", "retry_infrastructure_failure")
+rows.append({
+    "run_id": "run-sa-legacy", "item_id": legacy["item_id"], "status": "failed",
+    "kind": "task-claim", "infra_failure": True, "invalidated": True,
+    "completed_at": "2026-05-01T00:00:00Z",
+})
+# Same legacy shape, but the archived file names a settled-verdict
+# invalidation — hydration must read the reason, not assume it.
+legacy_settled = record("run-sa-legacy-settled", "claim-sa-legacy-settled", "superseded_by_settled_run")
+rows.append({
+    "run_id": "run-sa-legacy-settled", "item_id": legacy_settled["item_id"], "status": "failed",
+    "kind": "task-claim", "infra_failure": True, "invalidated": True,
+    "completed_at": "2026-05-01T00:00:00Z",
+})
+for run in (projected, legacy, legacy_settled):
+    (archive / "runs" / f"{run['run_id']}.json").write_text(json.dumps(run))
+with (archive / "runs-index.jsonl").open("w", encoding="utf-8") as fh:
+    for row in rows:
+        fh.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
+PY
+SA_DRY=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_SA" bash "$QUEUE" retry-errors --kdir "$KDIR_SA" --stranded --dry-run --json)
+assert_json_eq "stranded-archived: both retry-invalidated archived runs are found" "$SA_DRY" '.matched' "2"
+assert_eq "stranded-archived: the projected and hydrated rows are the two selected" \
+  "$(printf '%s' "$SA_DRY" | jq -r '[.items[].source_id] | sort | join(",")')" \
+  "claim-sa-legacy,claim-sa-projected"
+SA_RUN=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_SA" bash "$QUEUE" retry-errors --kdir "$KDIR_SA" --stranded --json)
+assert_json_eq "stranded-archived: both are re-enqueued from the archive" "$SA_RUN" '.enqueued' "2"
+SA_STATUS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_SA" bash "$QUEUE" status --kdir "$KDIR_SA" --json)
+assert_json_eq "stranded-archived: the settled-verdict invalidation stayed out" "$SA_STATUS" '.counts.pending' "2"
+
+echo ""
+echo "Test 40: retry-errors rejects invalid flag combinations before touching state"
+KDIR_UE="$TEST_DIR/kdir-retry-usage"
+SETTINGS_UE="$TEST_DIR/settings-retry-usage.json"
+setup_kdir "$KDIR_UE" "wi"
+write_settings "$SETTINGS_UE" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false},"enabled":true,"max_concurrency":1,"max_auto_retry_attempts":3,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+printf '%s\n' "$(row_json "claim-usage")" >> "$KDIR_UE/_work/wi/task-claims.jsonl"
+python3 - "$KDIR_UE" <<'PY'
+import hashlib, json, pathlib, sys
+runs = pathlib.Path(sys.argv[1]) / "_settlement" / "runs"
+runs.mkdir(parents=True, exist_ok=True)
+item_id = "task-claim-" + hashlib.sha256(b"task-claim:wi:claim-usage").hexdigest()[:20]
+(runs / "run-usage.json").write_text(json.dumps({
+    "version": 1, "run_id": "run-usage", "item_id": item_id, "kind": "task-claim",
+    "source_id": "claim-usage", "claim_id": "claim-usage", "work_item": "wi",
+    "status": "failed", "reason": "executor_audit_error",
+    "started_at": "2026-05-01T00:00:00Z", "completed_at": "2026-05-01T00:00:00Z",
+    "stderr_tail": "error: unexpected argument '--ask-for-approval' found",
+    "verdict": {"verdict_format": "envelope", "verdict": "error", "evidence": "seeded infra failure"},
+}))
+PY
+UE_RC=0
+UE_ERR=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_UE" bash "$QUEUE" retry-errors --kdir "$KDIR_UE" --stranded --stderr-match 'ask-for-approval' --json 2>&1 >/dev/null) || UE_RC=$?
+assert_eq "usage: --stranded with --stderr-match exits non-zero" "$([[ $UE_RC -ne 0 ]] && echo error || echo ok)" "error"
+assert_eq "usage: the error names the conflicting flags" "$([[ "$UE_ERR" == *"--stranded and --stderr-match are mutually exclusive"* ]] && echo named || echo silent)" "named"
+UE_LIM_RC=0
+UE_LIM_ERR=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_UE" bash "$QUEUE" retry-errors --kdir "$KDIR_UE" --limit 0 --json 2>&1 >/dev/null) || UE_LIM_RC=$?
+assert_eq "usage: --limit 0 is rejected" "$([[ $UE_LIM_RC -ne 0 ]] && echo error || echo ok)" "error"
+assert_eq "usage: the --limit error explains the bound" "$([[ "$UE_LIM_ERR" == *"--limit must be > 0"* ]] && echo named || echo silent)" "named"
+assert_eq "usage: no queue file was written by either rejected invocation" \
+  "$([[ -f "$KDIR_UE/_settlement/queue.json" ]] && echo present || echo absent)" "absent"
+assert_eq "usage: the seeded run was not invalidated" \
+  "$(jq -r 'has("invalidated_at")' "$KDIR_UE/_settlement/runs/run-usage.json")" "false"
 
 echo ""
 echo "=== Summary ==="

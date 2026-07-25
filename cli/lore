@@ -612,6 +612,12 @@ Subcommands:
                                       for settlement-executed audits)
   model --unset --json                Remove settlement.auditor_model
   retry-errors --json                 Requeue audit errors and timeout-blocked attempts
+    --limit N                         Requeue at most N items, oldest failure first
+    --stderr-match TEXT               Only items whose last failure's stderr
+                                      contains TEXT (not valid with --stranded)
+    --stranded                        Requeue items a previous retry wave
+                                      invalidated but never re-audited
+    --dry-run                         List what would be requeued, change nothing
 
 Options:
   --help, -h                          Show this help

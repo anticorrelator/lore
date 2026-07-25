@@ -57,6 +57,10 @@ ARCHIVE_MIN_AGE_SECONDS = STATUS_METRICS_WINDOW_SECONDS
 # Cap on run files parsed-and-moved per compaction pass, so the GC block's
 # lock hold stays bounded when a large dead backlog first becomes eligible.
 ARCHIVE_RUNS_PER_PASS = 500
+# invalidated_reason written by retry-errors at enqueue time. Distinct from
+# "superseded_by_settled_run", which records an invalidation caused by a real
+# verdict landing — only the retry reason implies a re-audit was promised.
+RETRY_INVALIDATION_REASON = "retry_infrastructure_failure"
 
 # Source-stream registry. Each kind maps to:
 #   filename: glob-relative name under _work/<slug>/
@@ -1355,16 +1359,29 @@ class Settlement:
             if not run_id or run_id in seen:
                 continue
             seen.add(run_id)
-            merged.append({
+            entry = {
                 "run_id": run_id,
                 "item_id": row.get("item_id"),
                 "status": row.get("status"),
                 "kind": row.get("kind"),
+                "work_item": row.get("work_item"),
+                "source_id": row.get("source_id"),
                 "completed_at": row.get("completed_at"),
                 "invalidated": bool(row.get("invalidated")),
                 "_archived": True,
                 "_census_infra_failure": bool(row.get("infra_failure")),
-            })
+            }
+            if "invalidated_reason" in row:
+                entry["invalidated_reason"] = row.get("invalidated_reason")
+                entry["invalidated_detail"] = row.get("invalidated_detail")
+                entry["invalidated_at"] = row.get("invalidated_at")
+            elif entry["invalidated"]:
+                # Rows written before the index carried invalidation provenance
+                # say only *that* the run was invalidated. Readers that need to
+                # know by what — the stranded selector — hydrate the archived
+                # file for these rows alone.
+                entry["_archive_invalidation_unprojected"] = True
+            merged.append(entry)
         return merged
 
     def census_infra_failure(self, run: dict[str, Any]) -> bool:
@@ -1709,7 +1726,77 @@ class Settlement:
         # pair directly (the run-records path that always emits kind=task-claim).
         return self.find_source_row(KIND_TASK_CLAIM, work_item, claim_id)
 
-    def retry_error_audits(self, work_item: str | None = None, claim_ids: list[str] | None = None, dry_run: bool = False) -> dict[str, Any]:
+    def archived_run_record(self, run_id: str) -> dict[str, Any] | None:
+        """One archived run file by run_id, or None. For questions the compact
+        index row cannot answer; never a substitute for reading the index."""
+        if not run_id:
+            return None
+        try:
+            data = json_load(self.archive_runs_dir / f"{run_id}.json", None)
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def stranded_retry_runs(self, runs: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        """Latest retry-invalidated run per item whose promised re-audit never
+        landed a later non-invalidated terminal result.
+
+        `retry-errors` invalidates an item's infrastructure-failure runs at
+        enqueue time, and it builds its latest-run map from non-invalidated
+        runs only — so a wave interrupted between enqueue and re-audit leaves
+        items that plain `retry-errors` can no longer see. These are those
+        items, and the returned runs carry the work_item / source_id needed to
+        re-enqueue them rather than only report them.
+
+        Items invalidated by a settled verdict (`superseded_by_settled_run`)
+        and items that were never audited are both absent by construction:
+        the first carries a different invalidated_reason, the second no run.
+        """
+        census = self.census_runs() if runs is None else runs
+        latest_terminal_at: dict[str, str] = {}
+        candidates: dict[str, dict[str, Any]] = {}
+        for run in census:
+            item_id = str(run.get("item_id") or "")
+            if not item_id:
+                continue
+            if not self.run_invalidated(run):
+                if run.get("status") in TERMINAL:
+                    completed = str(run.get("completed_at") or "")
+                    if completed > latest_terminal_at.get(item_id, ""):
+                        latest_terminal_at[item_id] = completed
+                continue
+            record = run
+            if run.get("_archive_invalidation_unprojected"):
+                record = self.archived_run_record(str(run.get("run_id") or "")) or run
+            if str(record.get("invalidated_reason") or "") != RETRY_INVALIDATION_REASON:
+                continue
+            incumbent = candidates.get(item_id)
+            if incumbent is None or str(record.get("invalidated_at") or "") > str(incumbent.get("invalidated_at") or ""):
+                candidates[item_id] = record
+        stranded: list[dict[str, Any]] = []
+        for item_id, record in candidates.items():
+            if str(record.get("invalidated_at") or "") <= latest_terminal_at.get(item_id, ""):
+                continue
+            stranded.append(record)
+        return stranded
+
+    def retry_error_audits(
+        self,
+        work_item: str | None = None,
+        claim_ids: list[str] | None = None,
+        dry_run: bool = False,
+        limit: int | None = None,
+        stderr_match: str | None = None,
+        stranded: bool = False,
+    ) -> dict[str, Any]:
+        # Flag validation precedes ensure() and the repo lock so an invalid
+        # combination cannot touch state on its way to the error.
+        if stranded and stderr_match is not None:
+            raise SystemExit("[settlement] Error: retry-errors --stranded and --stderr-match are mutually exclusive")
+        if stderr_match is not None and not stderr_match:
+            raise SystemExit("[settlement] Error: retry-errors --stderr-match requires a non-empty pattern")
+        if limit is not None and limit <= 0:
+            raise SystemExit("[settlement] Error: retry-errors --limit must be > 0")
         self.ensure()
         claim_filter = set(claim_ids or [])
         with repo_lock(self.state):
@@ -1742,10 +1829,20 @@ class Settlement:
                     continue
                 infra_runs_by_item.setdefault(run_item_id, []).append(run)
 
+            if stranded:
+                # A stranded item's own infra runs are already invalidated, so
+                # the retry reason comes from the invalidation record rather
+                # than from re-classifying the run.
+                candidates = [
+                    (run, str(run.get("invalidated_detail") or "") or "previous_retry_stranded")
+                    for run in self.stranded_retry_runs()
+                ]
+            else:
+                candidates = [(run, self.retryable_infrastructure_failure_reason(run)) for run in latest_by_item.values()]
+
             targets: list[tuple[dict[str, Any], dict[str, Any], str, str, str]] = []
             skipped: list[dict[str, Any]] = []
-            for run in latest_by_item.values():
-                retry_reason = self.retryable_infrastructure_failure_reason(run)
+            for run, retry_reason in candidates:
                 if not retry_reason:
                     continue
                 run_work_item = str(run.get("work_item") or "")
@@ -1755,6 +1852,8 @@ class Settlement:
                 if work_item and run_work_item != work_item:
                     continue
                 if claim_filter and run_source_id not in claim_filter:
+                    continue
+                if stderr_match is not None and stderr_match not in str(run.get("stderr_tail") or ""):
                     continue
                 if item_id in active_item_ids:
                     skipped.append({"run_id": run.get("run_id"), "item_id": item_id, "reason": "active_lease"})
@@ -1767,6 +1866,15 @@ class Settlement:
                     skipped.append({"run_id": run.get("run_id"), "item_id": item_id, "reason": f"missing_{run_kind.replace('-', '_')}"})
                     continue
                 targets.append((run, row, retry_reason, run_kind, item_id))
+
+            # Oldest failure first, run_id breaking ties: the order is a pure
+            # function of the run census, so --dry-run and the mutating run
+            # select the same ids, and each capped wave enqueues (and thereby
+            # removes from the next selection) a different head.
+            targets.sort(key=lambda target: (str(target[0].get("completed_at") or target[0].get("started_at") or ""), str(target[0].get("run_id") or "")))
+            eligible = len(targets)
+            if limit is not None:
+                targets = targets[:limit]
 
             retry_items: list[dict[str, Any]] = []
             batch_id = f"retry-{hashlib.sha256((utc_now() + str(len(targets))).encode()).hexdigest()[:16]}"
@@ -1802,7 +1910,7 @@ class Settlement:
                 for run in runs_to_invalidate:
                     detail = self.retryable_infrastructure_failure_reason(run)
                     run["invalidated_at"] = recomputed_at
-                    run["invalidated_reason"] = "retry_infrastructure_failure"
+                    run["invalidated_reason"] = RETRY_INVALIDATION_REASON
                     run["invalidated_detail"] = detail
                     run["retry_batch_id"] = batch_id
                     json_dump(self.run_path(str(run["run_id"])), run)
@@ -1811,11 +1919,15 @@ class Settlement:
                 # exhausted status; refresh the summary from the census.
                 self.rebuild_infra_exhausted_summary()
 
-            # Unit contract: `matched`/`enqueued` count items, `invalidated`
+            # Unit contract: `matched`/`enqueued` count items and reflect
+            # --limit; `eligible` is the pre-limit item count; `invalidated`
             # counts run records (an exhausted item carries several).
             return {
                 "ok": True,
                 "dry_run": dry_run,
+                "stranded": stranded,
+                "eligible": eligible,
+                "limit": limit,
                 "matched": len(targets),
                 "invalidated": 0 if dry_run else len(runs_to_invalidate),
                 "enqueued": 0 if dry_run else len(retry_items),
@@ -2212,13 +2324,23 @@ class Settlement:
         return not self.retryable_infrastructure_failure_reason(run)
 
     def _archive_run_index_row(self, run: dict[str, Any]) -> dict[str, Any]:
+        # invalidated_reason / invalidated_at / work_item / source_id are here
+        # so the stranded selector can both recognize a retry-invalidated run
+        # and rebuild its queue item without opening the archived file. The
+        # keys are always written, even when null: their absence is what marks
+        # a row as predating this projection.
         return {
             "run_id": str(run.get("run_id") or ""),
             "item_id": run.get("item_id"),
             "status": run.get("status"),
             "kind": str(run.get("kind") or KIND_TASK_CLAIM),
+            "work_item": run.get("work_item"),
+            "source_id": str(run.get("source_id") or run.get("claim_id") or ""),
             "infra_failure": bool(self.retryable_infrastructure_failure_reason(run)),
             "invalidated": self.run_invalidated(run),
+            "invalidated_reason": run.get("invalidated_reason"),
+            "invalidated_detail": run.get("invalidated_detail"),
+            "invalidated_at": run.get("invalidated_at"),
             "completed_at": run.get("completed_at"),
             "enqueued_at": run.get("enqueued_at"),
             "judge": run.get("judge"),
@@ -2293,7 +2415,7 @@ class Settlement:
         failures_today = 0
         for run in runs:
             completed_at = str(run.get("completed_at") or "")
-            if str(run.get("invalidated_at") or "").startswith(today) and run.get("invalidated_reason") == "retry_infrastructure_failure":
+            if str(run.get("invalidated_at") or "").startswith(today) and run.get("invalidated_reason") == RETRY_INVALIDATION_REASON:
                 requeues_today += 1
             if run.get("status") == "failed" and completed_at.startswith(today):
                 failures_today += 1
@@ -4056,6 +4178,9 @@ def main() -> int:
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--force", action="store_true", help="triggers: bypass the pump throttle")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--limit", type=int, default=None, help="retry-errors: enqueue at most N items, oldest failure first")
+    ap.add_argument("--stderr-match", help="retry-errors: only items whose latest infrastructure-failure run's stderr_tail contains this literal substring")
+    ap.add_argument("--stranded", action="store_true", help="retry-errors: select items a previous retry wave invalidated but never re-audited")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--window-start", help="status: inclusive RFC3339 lower bound for the retro projection")
     ap.add_argument("--window-end", help="status: exclusive RFC3339 upper bound for the retro projection")
@@ -4110,7 +4235,14 @@ def main() -> int:
             raise SystemExit("[settlement] Error: queue currently requires recompute")
         out = settlement.recompute_queue(settings, reason="manual", force=False)
     elif args.command == "retry-errors":
-        out = settlement.retry_error_audits(work_item=args.work_item, claim_ids=args.claim_id, dry_run=args.dry_run)
+        out = settlement.retry_error_audits(
+            work_item=args.work_item,
+            claim_ids=args.claim_id,
+            dry_run=args.dry_run,
+            limit=args.limit,
+            stderr_match=args.stderr_match,
+            stranded=args.stranded,
+        )
     elif args.command == "drain":
         if args.max_iterations <= 0:
             raise SystemExit("[settlement] Error: --max-iterations must be > 0")
