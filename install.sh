@@ -490,48 +490,28 @@ PYEOF
 fi
 
 # Retired-key pruning: strip top-level keys from existing settings.json that
-# the schema no longer accepts. Each entry here is a key the schema retired
-# without leaving a backward-compat shim; without this pass, doctor's schema
-# check flags the stale block on every run.
+# the schema no longer accepts. Without this pass, doctor's schema check flags
+# a stale block on every run (the schema is additionalProperties:false at root).
 #
-# - "settlement" — retired 2026-05 when the probabilistic settlement settings
-#   were no longer wired into hook adapters.
-# - "capture" — retired 2026-05-06 with stop-novelty-check.py; the schema
-#   removed `capture` in 884c20b. install.sh used to migrate the legacy
-#   capture-config.json into this block; the migration was removed but
-#   existing installs still carry the stale data.
+# The retired set is DERIVED from adapters/settings.schema.json, never listed
+# here. This block used to carry a hand-maintained tuple, and it drifted: it
+# named "settlement", which 884c20b put back into the schema in 2026-05, so
+# every install deleted live settlement configuration -- on a fresh install,
+# the very block seeded from the template ~250 lines above. A list kept next to
+# the schema is a list that can disagree with it; a derivation cannot.
+#
+# The prune refuses rather than guesses. If the schema is missing or cannot
+# support the derivation, prune-retired-settings.py exits non-zero and the file
+# is left alone: a doctor warning is cheap, deleted config is not. It also
+# writes settings.json.bak before the atomic replace.
+SETTINGS_SCHEMA="$LORE_REPO_DIR/adapters/settings.schema.json"
 if [ -f "$SETTINGS_FILE" ]; then
-  info "Pruning retired top-level keys from $SETTINGS_FILE"
+  info "Pruning schema-rejected top-level keys from $SETTINGS_FILE"
   if ! $DRY_RUN; then
-    SETTINGS_FILE="$SETTINGS_FILE" python3 - <<'PYEOF'
-import json
-import os
-import tempfile
-
-settings_path = os.environ["SETTINGS_FILE"]
-with open(settings_path, "r", encoding="utf-8") as f:
-    doc = json.load(f)
-
-retired_keys = ("settlement", "capture")
-removed = [k for k in retired_keys if isinstance(doc, dict) and k in doc]
-if removed:
-    for k in removed:
-        doc.pop(k, None)
-    config_dir = os.path.dirname(settings_path)
-    fd, tmp_path = tempfile.mkstemp(prefix=".settings.", suffix=".tmp", dir=config_dir)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(doc, f, indent=2, sort_keys=True)
-            f.write("\n")
-        os.replace(tmp_path, settings_path)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
-    print(f"  [lore] pruned: {', '.join(removed)}")
-PYEOF
+    if ! python3 "$LORE_REPO_DIR/scripts/prune-retired-settings.py" \
+      --settings "$SETTINGS_FILE" --schema "$SETTINGS_SCHEMA"; then
+      echo "  [warning] skipped retired-key prune — settings left unchanged"
+    fi
   fi
 fi
 
