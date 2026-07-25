@@ -825,6 +825,117 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# =============================================
+# Tests 31-33: the non-interactive harness-argument contract. The framework is
+# selected with LORE_FRAMEWORK and the argument list with LORE_HARNESS_ARGS, so
+# none of these read or write the operator's settings.json.
+# =============================================
+
+codex_shim() {
+  # codex_shim <dir> <behavior> — install a `codex` on PATH that appends its
+  # argv to $CODEX_SHIM_ARGV and one line per invocation to $CODEX_SHIM_CALLS.
+  # behavior=verdict: write a gate verdict to the file named by -o and exit 0.
+  # behavior=usage-error: emit a clap-style argument rejection and exit 2.
+  local dir="$1" behavior="$2"
+  mkdir -p "$dir"
+  cat > "$dir/codex" <<SHIMEOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >> "\$CODEX_SHIM_ARGV"
+echo invoked >> "\$CODEX_SHIM_CALLS"
+cat > /dev/null
+if [[ "$behavior" == "usage-error" ]]; then
+  echo "error: unexpected argument '--not-a-real-flag' found" >&2
+  echo "Usage: codex exec [OPTIONS] [PROMPT]" >&2
+  exit 2
+fi
+out=""
+prev=""
+for a in "\$@"; do
+  [[ "\$prev" == "-o" ]] && out="\$a"
+  prev="\$a"
+done
+if [[ -n "\$out" ]]; then
+  cat > "\$out" <<'JSON'
+{"judge":"correctness-gate-assertion","judge_template_version":"codex-shim","verdicts":[{"claim_id":"task-claim-a","verdict":"unverified","evidence":"shim leaves the claim unresolved"}]}
+JSON
+fi
+SHIMEOF
+  chmod +x "$dir/codex"
+}
+
+echo ""
+echo "Test 31: rejected harness arg never reaches the non-interactive surface"
+KDIR31="$TEST_DIR/kdir31"
+setup_task_claims_fixture "$KDIR31" "wi-argfilter"
+SHIM31="$TEST_DIR/shim31"
+codex_shim "$SHIM31" verdict
+export CODEX_SHIM_ARGV="$TEST_DIR/argv31.txt"
+export CODEX_SHIM_CALLS="$TEST_DIR/calls31.txt"
+: > "$CODEX_SHIM_ARGV"
+: > "$CODEX_SHIM_CALLS"
+
+OUT31=$(PATH="$SHIM31:$PATH" LORE_FRAMEWORK=codex \
+  LORE_HARNESS_ARGS='["--ask-for-approval","on-request","--enable","guardian_approval"]' \
+  bash "$AUDIT" "wi-argfilter" --kdir "$KDIR31" --model shim-judge --skip-scorecard 2>&1) || true
+ARGV31=$(cat "$CODEX_SHIM_ARGV")
+
+assert_contains "arg contract: judge still produced a verdict" "$OUT31" "correctness-gate-assertion complete"
+assert_contains "arg contract: drop is announced on stderr"    "$OUT31" "[lore] degraded:"
+assert_contains "arg contract: notice names the dropped flag"  "$OUT31" "--ask-for-approval"
+if grep -qxF -- "--ask-for-approval" <<<"$ARGV31" || grep -qxF -- "on-request" <<<"$ARGV31"; then
+  echo "  FAIL: arg contract: rejected flag or its value reached codex exec"
+  echo "    argv: $(tr '\n' ' ' <<<"$ARGV31")"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS: arg contract: neither the rejected flag nor its value reached codex exec"
+  PASS=$((PASS + 1))
+fi
+assert_contains "arg contract: accepted flag still reaches codex exec"  "$ARGV31" "--enable"
+assert_contains "arg contract: accepted flag keeps its value"           "$ARGV31" "guardian_approval"
+
+echo ""
+echo "Test 32: an undeclared harness arg fails closed before any spawn"
+KDIR32="$TEST_DIR/kdir32"
+setup_task_claims_fixture "$KDIR32" "wi-argunknown"
+SHIM32="$TEST_DIR/shim32"
+codex_shim "$SHIM32" verdict
+export CODEX_SHIM_ARGV="$TEST_DIR/argv32.txt"
+export CODEX_SHIM_CALLS="$TEST_DIR/calls32.txt"
+: > "$CODEX_SHIM_ARGV"
+: > "$CODEX_SHIM_CALLS"
+
+OUT32=$(PATH="$SHIM32:$PATH" LORE_FRAMEWORK=codex \
+  LORE_HARNESS_ARGS='["--not-a-real-flag"]' \
+  bash "$AUDIT" "wi-argunknown" --kdir "$KDIR32" --model shim-judge --skip-scorecard 2>&1) || true
+CALLS32=$(wc -l < "$CODEX_SHIM_CALLS" | tr -d ' ')
+
+assert_eq       "unknown arg: codex was never spawned"          "$CALLS32" "0"
+assert_contains "unknown arg: the undeclared flag is named"     "$OUT32" "--not-a-real-flag"
+assert_contains "unknown arg: the operator is pointed at the contract" \
+  "$OUT32" "source_grammar in adapters/capabilities.json"
+
+echo ""
+echo "Test 33: a CLI usage rejection is a setup error, not a transient flake"
+KDIR33="$TEST_DIR/kdir33"
+setup_task_claims_fixture "$KDIR33" "wi-argusage"
+SHIM33="$TEST_DIR/shim33"
+codex_shim "$SHIM33" usage-error
+export CODEX_SHIM_ARGV="$TEST_DIR/argv33.txt"
+export CODEX_SHIM_CALLS="$TEST_DIR/calls33.txt"
+: > "$CODEX_SHIM_ARGV"
+: > "$CODEX_SHIM_CALLS"
+
+OUT33=$(PATH="$SHIM33:$PATH" LORE_FRAMEWORK=codex LORE_HARNESS_ARGS='[]' \
+  LORE_JUDGE_RETRY_BACKOFF_SECS=0 \
+  bash "$AUDIT" "wi-argusage" --kdir "$KDIR33" --model shim-judge --skip-scorecard 2>&1) || true
+CALLS33=$(wc -l < "$CODEX_SHIM_CALLS" | tr -d ' ')
+
+assert_eq       "usage error: exactly one attempt, not the full retry budget" "$CALLS33" "1"
+assert_contains "usage error: classified as an argument-parse setup error" \
+  "$OUT33" "argument-parse/usage signature"
+
+unset CODEX_SHIM_ARGV CODEX_SHIM_CALLS
+
 echo ""
 echo "=== Results ==="
 TOTAL=$((PASS + FAIL))

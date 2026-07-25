@@ -93,6 +93,9 @@ for fw_id, fw in data.get("frameworks", {}).items():
     for cap_name, cell in (fw.get("capabilities") or {}).items():
         if cell.get("evidence"):
             ids.add(cell["evidence"])
+        ac = cell.get("argument_contract") or {}
+        if ac.get("evidence"):
+            ids.add(ac["evidence"])
     for row_name, cell in (fw.get("interaction") or {}).items():
         if isinstance(cell, dict) and cell.get("evidence"):
             ids.add(cell["evidence"])
@@ -368,6 +371,85 @@ for fw_id, fw in d["frameworks"].items():
         for f in fields:
             if f not in FIELD_VOCAB:
                 bad.append(f"{fw_id}.spend_telemetry.fields has unknown field {f!r}")
+if bad:
+    for b in bad: print(b)
+    sys.exit(1)
+' "$CAPS"
+  [ "$status" -eq 0 ]
+}
+
+@test "every headless_runner cell declares a typed argument contract" {
+  # Every non-none headless_runner cell declares how its non-interactive
+  # surface differs from the interactive one, evidence-gated and CLI-version
+  # stamped. `filtered` carries a source_grammar whose entries give each flag
+  # spelling an arity and an accepted/rejected policy; `shared_parser` is the
+  # positive finding that there is no narrower surface and must not carry one.
+  run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+MODES = {"filtered", "shared_parser"}
+POLICY = {"accepted", "rejected"}
+bad = []
+for fw_id, fw in d["frameworks"].items():
+    cell = (fw.get("capabilities") or {}).get("headless_runner") or {}
+    if cell.get("support") == "none":
+        continue
+    ac = cell.get("argument_contract")
+    if not isinstance(ac, dict):
+        bad.append(f"{fw_id}.headless_runner has no argument_contract block"); continue
+    mode = ac.get("mode")
+    if mode not in MODES:
+        bad.append(f"{fw_id}.headless_runner.argument_contract.mode={mode!r} outside {sorted(MODES)}")
+    for field in ("evidence", "cli_version"):
+        val = ac.get(field)
+        if not isinstance(val, str) or not val.strip():
+            bad.append(f"{fw_id}.headless_runner.argument_contract.{field} missing")
+    grammar = ac.get("source_grammar")
+    if mode == "shared_parser":
+        if grammar is not None:
+            bad.append(f"{fw_id}.headless_runner.argument_contract declares shared_parser with a source_grammar")
+        continue
+    if mode != "filtered":
+        continue
+    if not isinstance(grammar, dict) or not grammar:
+        bad.append(f"{fw_id}.headless_runner.argument_contract mode=filtered with empty source_grammar"); continue
+    for flag, entry in grammar.items():
+        where = f"{fw_id}.headless_runner.argument_contract.source_grammar.{flag}"
+        if not flag.startswith("-"):
+            bad.append(f"{where} is not a flag spelling")
+        if not isinstance(entry, dict):
+            bad.append(f"{where} is not an object"); continue
+        arity = entry.get("arity")
+        if not isinstance(arity, int) or isinstance(arity, bool) or arity < 0:
+            bad.append(f"{where}.arity={arity!r} is not a non-negative integer")
+        policy = entry.get("headless")
+        if policy not in POLICY:
+            bad.append(f"{where}.headless={policy!r} outside {sorted(POLICY)}")
+if bad:
+    for b in bad: print(b)
+    sys.exit(1)
+' "$CAPS"
+  [ "$status" -eq 0 ]
+}
+
+@test "codex declares --ask-for-approval rejected at arity 1 for headless use" {
+  # The flag that took the settlement executor path down: it exists on the
+  # codex root parser but not on `codex exec`. Both spellings must be declared
+  # rejected AND carry arity 1 — arity is what lets the filter drop the value
+  # with the flag instead of leaving it to bind as the subcommand positional.
+  run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+g = d["frameworks"]["codex"]["capabilities"]["headless_runner"]["argument_contract"]["source_grammar"]
+bad = []
+for flag in ("-a", "--ask-for-approval"):
+    entry = g.get(flag)
+    if not entry:
+        bad.append(f"codex source_grammar missing {flag}"); continue
+    if entry.get("headless") != "rejected":
+        bad.append(f"codex source_grammar {flag} is not rejected for headless use")
+    if entry.get("arity") != 1:
+        bad.append(f"codex source_grammar {flag} must declare arity 1 so its value drops with it")
 if bad:
     for b in bad: print(b)
     sys.exit(1)

@@ -248,6 +248,44 @@ sessions; it is not ambient process truth.
 
 ---
 
+## Why the headless argument filter is bash-only
+
+`filter_harness_args_for_headless` in `scripts/lib.sh` has no Go counterpart,
+and adding one would be a mistake rather than a gap.
+
+Every helper in the table above answers a question both sides ask: the TUI
+renders a config panel and the shell reads the same config to spawn a
+process. This helper answers a question only one side has. It filters an
+argument list against the option surface of a *non-interactive* invocation —
+`codex exec`, `claude -p` — and the TUI does not make those. The TUI launches
+interactive sessions, where the configured arguments are exactly right and
+filtering them would strip settings the operator deliberately set. The one Go
+caller that reads a harness argument list,
+`tui/internal/config/framework.go`'s `autonomous_args` selection, is choosing
+which list an interactive spawn gets, not narrowing a list for a headless one.
+
+So the rule that governs the table — identical inputs produce identical
+outputs — has no content here: there is no shared input. A Go port would be
+dead code that a future maintainer would eventually wire into an interactive
+spawn on the assumption that parity implies interchangeability, which is the
+one call the helper must never serve.
+
+The declaration the helper reads,
+`capabilities.headless_runner.argument_contract`, is still shared data in
+`adapters/capabilities.json`. If a Go consumer ever needs the *contract* — to
+show an operator which configured flags a headless run would drop, say — it
+should read that block directly. What stays bash-only is the filtering, not
+the declaration.
+
+Both `capabilities.json` cells carry a `cli_version`. That records which CLI
+the surfaces were probed against; it does not detect an upgrade. A harness CLI
+that gains or moves a flag makes the declaration wrong while it still looks
+authoritative, so re-probe `<binary> --help` and the non-interactive
+subcommand's `--help` when bumping a harness, and update the matching
+`capabilities-evidence.md` row.
+
+---
+
 ## Adding a new dual-impl helper
 
 1. **Bash first.** Implement in `scripts/lib.sh`, keep the docstring above the function with a `Mirrors config.<GoName>() in tui/internal/config/config.go (T<N>).` line.

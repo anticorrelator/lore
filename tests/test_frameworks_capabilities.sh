@@ -267,6 +267,84 @@ if bad:
 ' "$CAPS"
 }
 
+check_headless_argument_contract() {
+  # Every non-none headless_runner cell declares how its non-interactive
+  # surface differs from the interactive one, evidence-gated and CLI-version
+  # stamped. `filtered` carries a source_grammar whose entries give each flag
+  # spelling an arity and an accepted/rejected policy; `shared_parser` is the
+  # positive finding that there is no narrower surface and must not carry one.
+  python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+MODES = {"filtered", "shared_parser"}
+POLICY = {"accepted", "rejected"}
+bad = []
+for fw_id, fw in d["frameworks"].items():
+    cell = (fw.get("capabilities") or {}).get("headless_runner") or {}
+    if cell.get("support") == "none":
+        continue
+    ac = cell.get("argument_contract")
+    if not isinstance(ac, dict):
+        bad.append(f"{fw_id}.headless_runner has no argument_contract block"); continue
+    mode = ac.get("mode")
+    if mode not in MODES:
+        bad.append(f"{fw_id}.headless_runner.argument_contract.mode={mode!r} outside {sorted(MODES)}")
+    for field in ("evidence", "cli_version"):
+        val = ac.get(field)
+        if not isinstance(val, str) or not val.strip():
+            bad.append(f"{fw_id}.headless_runner.argument_contract.{field} missing")
+    grammar = ac.get("source_grammar")
+    if mode == "shared_parser":
+        if grammar is not None:
+            bad.append(f"{fw_id}.headless_runner.argument_contract declares shared_parser with a source_grammar")
+        continue
+    if mode != "filtered":
+        continue
+    if not isinstance(grammar, dict) or not grammar:
+        bad.append(f"{fw_id}.headless_runner.argument_contract mode=filtered with empty source_grammar"); continue
+    for flag, entry in grammar.items():
+        where = f"{fw_id}.headless_runner.argument_contract.source_grammar.{flag}"
+        if not flag.startswith("-"):
+            bad.append(f"{where} is not a flag spelling")
+        if not isinstance(entry, dict):
+            bad.append(f"{where} is not an object"); continue
+        arity = entry.get("arity")
+        if not isinstance(arity, int) or isinstance(arity, bool) or arity < 0:
+            bad.append(f"{where}.arity={arity!r} is not a non-negative integer")
+        policy = entry.get("headless")
+        if policy not in POLICY:
+            bad.append(f"{where}.headless={policy!r} outside {sorted(POLICY)}")
+if bad:
+    for b in bad: print(b)
+    sys.exit(1)
+' "$CAPS"
+}
+
+check_codex_rejects_ask_for_approval() {
+  # The flag that took the settlement executor path down: `--ask-for-approval`
+  # exists on the codex root parser but not on `codex exec`. Both spellings
+  # must be declared rejected AND carry arity 1 — arity is what lets the
+  # filter drop the value with the flag instead of leaving it to bind as the
+  # subcommand positional prompt.
+  python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+g = d["frameworks"]["codex"]["capabilities"]["headless_runner"]["argument_contract"]["source_grammar"]
+bad = []
+for flag in ("-a", "--ask-for-approval"):
+    entry = g.get(flag)
+    if not entry:
+        bad.append(f"codex source_grammar missing {flag}"); continue
+    if entry.get("headless") != "rejected":
+        bad.append(f"codex source_grammar {flag} is not rejected for headless use")
+    if entry.get("arity") != 1:
+        bad.append(f"codex source_grammar {flag} must declare arity 1 so its value drops with it")
+if bad:
+    for b in bad: print(b)
+    sys.exit(1)
+' "$CAPS"
+}
+
 # --- Evidence cross-reference ---
 
 evidence_index() {
@@ -307,6 +385,8 @@ for fw_id, fw in data.get("frameworks", {}).items():
     if st.get("evidence"): ids.add(st["evidence"])
     for cap, cell in (fw.get("capabilities") or {}).items():
         if cell.get("evidence"): ids.add(cell["evidence"])
+        ac = cell.get("argument_contract") or {}
+        if ac.get("evidence"): ids.add(ac["evidence"])
     for row, cell in (fw.get("interaction") or {}).items():
         if isinstance(cell, dict) and cell.get("evidence"): ids.add(cell["evidence"])
 for cid in sorted(ids): print(cid)
@@ -511,6 +591,157 @@ if "subagents=none" not in text or "spec-short" not in text:
 ' "$CAPS"
 }
 
+# --- filter_harness_args_for_headless behavior ---
+#
+# The declaration is only worth anything if its consumer groups by it, so
+# these drive scripts/lib.sh::filter_harness_args_for_headless directly. The
+# shipped contract covers the filtered and shared-parser modes; the absence
+# cases need a fixture, because no shipped framework leaves the block out.
+
+FILTER_TMP=$(mktemp -d "${TMPDIR:-/tmp}/cap-filter.XXXXXX")
+trap 'rm -rf "$FILTER_TMP"' EXIT
+
+FILTER_OUT=""
+FILTER_ERR=""
+FILTER_RC=0
+
+run_filter() {
+  # run_filter <lib.sh> <framework> [arg...] — leaves the filtered list in
+  # FILTER_OUT with newlines rendered as `|` (so an assertion can pin the
+  # exact sequence), stderr in FILTER_ERR, and the exit code in FILTER_RC.
+  local lib="$1"
+  shift
+  local outf errf
+  outf=$(mktemp "$FILTER_TMP/out.XXXXXX")
+  errf=$(mktemp "$FILTER_TMP/err.XXXXXX")
+  FILTER_RC=0
+  bash -c 'source "$1"; shift; filter_harness_args_for_headless "$@"' \
+    _ "$lib" "$@" >"$outf" 2>"$errf" || FILTER_RC=$?
+  FILTER_OUT=$(tr '\n' '|' <"$outf")
+  FILTER_ERR=$(cat "$errf")
+  rm -f "$outf" "$errf"
+}
+
+fixture_lib() {
+  # fixture_lib <capabilities.json body> — build a throwaway repo layout whose
+  # adapters/capabilities.json is the supplied document and print the path to
+  # its lib.sh copy. lib.sh locates the registry relative to its own file, so
+  # the copy reads the fixture registry.
+  local caps_json="$1"
+  local dir
+  dir=$(mktemp -d "$FILTER_TMP/fixture.XXXXXX")
+  mkdir -p "$dir/scripts" "$dir/adapters"
+  cp "$REPO_DIR/scripts/lib.sh" "$dir/scripts/lib.sh"
+  printf '%s\n' "$caps_json" > "$dir/adapters/capabilities.json"
+  echo "$dir/scripts/lib.sh"
+}
+
+assert_str() {
+  local label="$1" actual="$2" expected="$3"
+  if [[ "$actual" == "$expected" ]]; then
+    echo "  PASS: $label"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: $label"
+    echo "    expected: $expected"
+    echo "    actual:   $actual"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_has() {
+  local label="$1" haystack="$2" needle="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    echo "  PASS: $label"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: $label — expected to contain: $needle"
+    echo "    actual: $haystack"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_lacks() {
+  local label="$1" haystack="$2" needle="$3"
+  if [[ "$haystack" != *"$needle"* ]]; then
+    echo "  PASS: $label"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: $label — expected NOT to contain: $needle"
+    echo "    actual: $haystack"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+fixture_caps() {
+  # fixture_caps <argument_contract JSON or the literal `omit`> — a one-framework
+  # registry whose headless_runner cell carries the supplied declaration.
+  local contract="$1"
+  local cell='"headless_runner": {"support": "full", "evidence": "fixture"}'
+  if [[ "$contract" != "omit" ]]; then
+    cell='"headless_runner": {"support": "full", "evidence": "fixture", "argument_contract": '"$contract"'}'
+  fi
+  printf '{"frameworks": {"fixture": {"id": "fixture", "capabilities": {%s}}}}' "$cell"
+}
+
+LIB="$REPO_DIR/scripts/lib.sh"
+
+run_filter_suite() {
+  echo "== filter_harness_args_for_headless =="
+
+  run_filter "$LIB" codex --enable guardian_approval
+  assert_str   "accepted flag keeps its value with it"       "$FILTER_OUT" "--enable|guardian_approval|"
+  assert_str   "accepted pair exits 0"                       "$FILTER_RC"  "0"
+  assert_lacks "accepted pair emits no degradation notice"   "$FILTER_ERR" "[lore] degraded:"
+
+  run_filter "$LIB" codex --ask-for-approval on-request --model gpt-5.6
+  assert_str   "rejected pair drops flag and value together" "$FILTER_OUT" "--model|gpt-5.6|"
+  assert_lacks "rejected value never survives as positional" "$FILTER_OUT" "on-request"
+  assert_has   "drop is announced in the closed vocabulary"  "$FILTER_ERR" "[lore] degraded:"
+  assert_has   "drop notice names the dropped flag"          "$FILTER_ERR" "--ask-for-approval"
+  assert_str   "dropping a flag is not an error"             "$FILTER_RC"  "0"
+
+  run_filter "$LIB" codex --sandbox=read-only
+  assert_str "--flag=value passes as one group" "$FILTER_OUT" "--sandbox=read-only|"
+
+  run_filter "$LIB" codex -c 'a="1"' --enable feat -c 'b="2"'
+  assert_str "repetition and order are preserved" "$FILTER_OUT" '-c|a="1"|--enable|feat|-c|b="2"|'
+
+  run_filter "$LIB" claude-code --dangerously-skip-permissions
+  assert_str   "shared-parser mode passes args through"        "$FILTER_OUT" "--dangerously-skip-permissions|"
+  assert_lacks "shared-parser mode emits no notice"            "$FILTER_ERR" "[lore] degraded:"
+
+  run_filter "$LIB" codex --no-such-codex-flag
+  assert_str   "unknown flag under a present contract is rc=64" "$FILTER_RC"  "64"
+  assert_str   "unknown flag yields no filtered list at all"    "$FILTER_OUT" ""
+
+  local absent_lib empty_lib nogrammar_lib
+  absent_lib=$(fixture_lib "$(fixture_caps omit)")
+  run_filter "$absent_lib" fixture --anything value
+  assert_str "absent declaration passes args through unfiltered" "$FILTER_OUT" "--anything|value|"
+  assert_str "absent declaration is not an error"                "$FILTER_RC"  "0"
+  assert_has "absent declaration degrades explicitly"            "$FILTER_ERR" "no-evidence"
+
+  empty_lib=$(fixture_lib "$(fixture_caps '{}')")
+  run_filter "$empty_lib" fixture --anything value
+  assert_str "empty declaration passes args through unfiltered" "$FILTER_OUT" "--anything|value|"
+  assert_has "empty declaration degrades explicitly"            "$FILTER_ERR" "no-evidence"
+
+  nogrammar_lib=$(fixture_lib "$(fixture_caps '{"mode": "filtered", "evidence": "fixture", "cli_version": "0"}')")
+  run_filter "$nogrammar_lib" fixture --anything
+  assert_str "filtered mode without a grammar is rc=64" "$FILTER_RC" "64"
+
+  # The unprobed-surface notice is latched per framework so a batch of judge
+  # invocations in one shell reports it once rather than once per claim.
+  local repeat_count
+  repeat_count=$(bash -c '
+    source "$1"
+    filter_harness_args_for_headless fixture --anything >/dev/null
+    filter_harness_args_for_headless fixture --anything >/dev/null
+  ' _ "$absent_lib" 2>&1 | grep -c "no-evidence" || true)
+  assert_str "unprobed-surface notice fires once per shell" "$repeat_count" "1"
+}
+
 # --- Run all ---
 
 echo "== Schema shape =="
@@ -527,6 +758,8 @@ assert_ok "every non-none cell carries a non-empty evidence pointer"  check_evid
 assert_ok "every framework's model_routing.shape and evidence valid"  check_model_routing
 assert_ok "every framework's interaction rows are evidence-gated + typed" check_interaction_rows
 assert_ok "every framework's spend_telemetry block is evidence-gated + typed" check_spend_telemetry
+assert_ok "every headless_runner cell declares a typed argument contract" check_headless_argument_contract
+assert_ok "codex rejects --ask-for-approval at arity 1 for headless use"   check_codex_rejects_ask_for_approval
 
 echo "== Evidence cross-reference =="
 assert_ok "every consumed evidence id resolves in _index"             check_consumed_resolve_in_index
@@ -541,6 +774,9 @@ assert_ok "every skills.<name>.requires id is known"                  check_skil
 assert_ok "object-form requires entries name valid levels"            check_skills_requires_levels
 assert_ok "team-heavy skills declare partial-mode tolerance"          check_team_heavy_partial_mode
 assert_ok "spec team_messaging=none preserves researcher fanout"      check_spec_team_messaging_fanout_contract
+
+echo ""
+run_filter_suite
 
 echo ""
 echo "Total: $((PASS + FAIL)) | PASS: $PASS | FAIL: $FAIL"

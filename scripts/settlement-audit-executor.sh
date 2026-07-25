@@ -279,6 +279,16 @@ if [[ "$audit_exit" -eq 3 ]]; then
   echo "[settlement-executor] audit exit 3 (grounding preflight routed omission to audit-attempts); deriving verdict from stdout" >&2
 fi
 
+# The child's stderr is otherwise discarded once the audit succeeds — only the
+# failure branch above folds it into the envelope. Degradation notices are the
+# exception: they report that the run executed with something the operator
+# configured silently removed, which is exactly the kind of divergence a
+# successful run would otherwise hide. Forwarding them here puts them in
+# stderr_tail on the runs that produced a verdict.
+if [[ -s "$audit_stderr" ]]; then
+  grep -F '[lore] degraded:' "$audit_stderr" >&2 || true
+fi
+
 derivation_file="$tmp_dir/derivation.json"
 if ! python3 - "$audit_stdout" "$claim_id" >"$derivation_file" <<'PYEOF'
 import json
