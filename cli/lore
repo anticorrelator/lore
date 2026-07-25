@@ -562,7 +562,7 @@ EOF
 }
 
 session_usage() {
-  cat >&2 <<EOF
+  cat >&2 <<'EOF'
 lore session — multi-session coordination substrate verbs
 
 Usage: lore session <verb> [args...]
