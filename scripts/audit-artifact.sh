@@ -1222,6 +1222,14 @@ if task_claims_path:
                     "claim_id": claim_id,
                     "claim_text": claim_text,
                     "file": file_path or None,
+                    # The durable anchor downstream resolvers ground on:
+                    # file_relative survives the checkout `file` was captured
+                    # in, and the two refs narrow which revision the snippet is
+                    # checked against. Dropping them here left every consumer of
+                    # claim_payload with nothing but `file` to dereference.
+                    "file_relative": row.get("file_relative") or source.get("file_relative") or None,
+                    "captured_at_sha": row.get("captured_at_sha") or None,
+                    "captured_origin_ref": row.get("captured_origin_ref") or None,
                     "line_range": line_range or None,
                     "exact_snippet": row.get("exact_snippet") or None,
                     "normalized_snippet_hash": row.get("normalized_snippet_hash") or None,
