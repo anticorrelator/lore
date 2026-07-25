@@ -505,17 +505,11 @@ func snapshotTree(ctx context.Context, path, gitDir string) (string, error) {
 	return gitStringEnv(ctx, path, env, "write-tree")
 }
 
-func capturedRef(identity Identity) string {
-	return "refs/lore/worktrees/" + identity.Epoch + "/captured"
-}
+func capturedRef(identity Identity) string { return capturedRefFor(identity.Epoch) }
 
-func resultRef(identity Identity) string {
-	return "refs/lore/worktrees/" + identity.Epoch + "/result"
-}
+func resultRef(identity Identity) string { return resultRefFor(identity.Epoch) }
 
-func quarantineRef(identity Identity) string {
-	return "refs/lore/quarantine/" + identity.Epoch
-}
+func quarantineRef(identity Identity) string { return quarantineRefFor(identity.Epoch) }
 
 func nulList(ctx context.Context, path string, args ...string) ([]string, error) {
 	data, err := gitOutput(ctx, path, nil, nil, args...)
