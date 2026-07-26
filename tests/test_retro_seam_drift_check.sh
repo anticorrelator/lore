@@ -13,6 +13,8 @@ new_repo() {
   cp "$CHECKER" "$repo/scripts/check-retro-seam-drift.sh"
   printf 'registry baseline\n' > "$repo/scripts/retro-prepare.sh"
   printf 'reader test baseline\n' > "$repo/tests/frameworks/retro_prepare.bats"
+  printf 'settlement reader baseline\n' > "$repo/scripts/settlement-processor.py"
+  printf 'settlement contract baseline\n' > "$repo/tests/test_settlement_queue.sh"
   printf 'retro skill baseline\n' > "$repo/skills/retro/SKILL.md"
   printf 'other skill baseline\n' > "$repo/skills/other/SKILL.md"
   printf 'protocol baseline\n' > "$repo/tests/test_retro_evidence_pack_protocol.sh"
@@ -79,6 +81,41 @@ new_repo "$repo"
 base="$(git -C "$repo" rev-parse HEAD)"
 printf 'owner calibration\n' >> "$repo/skills/other/SKILL.md"
 commit_all "$repo" "other skill prose"
+expect_pass "$repo" "$base"
+
+# scripts/settlement-processor.py serves the retro projection and the settlement
+# queue commands from one file. Which contract test discharges a change depends
+# on whether the diff names the retro surface.
+
+repo="$TMP/settlement-non-retro-paired"
+new_repo "$repo"
+base="$(git -C "$repo" rev-parse HEAD)"
+printf 'def retry_error_audits(self, limit=None):\n    return []\n' >> "$repo/scripts/settlement-processor.py"
+printf 'retry-errors bounds case\n' >> "$repo/tests/test_settlement_queue.sh"
+commit_all "$repo" "settlement queue change with its own contract test"
+expect_pass "$repo" "$base"
+
+repo="$TMP/settlement-non-retro-unpaired"
+new_repo "$repo"
+base="$(git -C "$repo" rev-parse HEAD)"
+printf 'def retry_error_audits(self, limit=None):\n    return []\n' >> "$repo/scripts/settlement-processor.py"
+commit_all "$repo" "settlement queue change with no contract test"
+expect_fail "$repo" "$base"
+
+repo="$TMP/settlement-retro-surface-unpaired"
+new_repo "$repo"
+base="$(git -C "$repo" rev-parse HEAD)"
+printf 'def retro_status_projection(self, queue, start, end):\n    return {}\n' >> "$repo/scripts/settlement-processor.py"
+printf 'queue-side case\n' >> "$repo/tests/test_settlement_queue.sh"
+commit_all "$repo" "retro projection change paired only with the queue suite"
+expect_fail "$repo" "$base"
+
+repo="$TMP/settlement-retro-surface-paired"
+new_repo "$repo"
+base="$(git -C "$repo" rev-parse HEAD)"
+printf 'def retro_status_projection(self, queue, start, end):\n    return {}\n' >> "$repo/scripts/settlement-processor.py"
+printf 'projection contract case\n' >> "$repo/tests/frameworks/retro_prepare.bats"
+commit_all "$repo" "retro projection change paired with the reader contract"
 expect_pass "$repo" "$base"
 
 repo="$TMP/rollout-boundary"
