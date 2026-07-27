@@ -1,6 +1,6 @@
 ---
 name: evolve
-description: "Review and apply accumulated protocol evolution suggestions from retro and self-test"
+description: "Review and apply accumulated protocol evolution suggestions from retro"
 user_invocable: true
 argument_description: "[--since <date>]"
 ---
