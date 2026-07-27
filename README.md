@@ -306,10 +306,7 @@ lore harness status
 
 | Skill | Description |
 |-------|-------------|
-| `/pr-review` | Holistic multi-lens PR review with adaptive lens selection |
-| `/pr-self-review` | Author-calibrated self-review before submitting |
-| `/pr-pair-review` | Interactive pair-review with turn-based protocol |
-| `/pr-revise` | Read PR feedback and create a work item to address it |
+| `/pr-review` | Holistic multi-lens PR review with adaptive lens selection; `--self` for author self-review |
 | `/pr-correctness` | Focused lens: trace logic paths for correctness bugs |
 | `/pr-security` | Focused lens: evaluate security vulnerabilities and edge cases |
 | `/pr-blast-radius` | Focused lens: trace impact of changes on code outside the diff |
@@ -321,7 +318,6 @@ lore harness status
 
 | Skill | Description |
 |-------|-------------|
-| `/self-test` | Evaluate system health across 8 dimensions with scored results |
 | `/retro` | Post-work-cycle retrospective — scores 5 dimensions, writes journal entry |
 | `/renormalize` | Full knowledge store normalization — prune, merge, rebalance |
 | `/bootstrap` | Explore a new codebase and seed initial knowledge |
@@ -445,13 +441,13 @@ Within Claude Code, the knowledge store is searched automatically before grep/gl
 
 Runs a multi-lens review (correctness, security, blast radius, test quality, regressions, thematic coherence) on the PR, enriched with knowledge store context. For focused analysis, use an individual lens like `/pr-security 142`.
 
-After receiving review feedback on your own PR:
+Before requesting review on your own PR:
 
 ```
-> /pr-revise 142
+> /pr-review --self
 ```
 
-Reads all comments and creates a categorized work item to address them.
+Runs the same pipeline in self-review posture — grounded checks (tests, call-site greps, blast-radius tracing) instead of judgment re-reads, since the author can't be surprised by their own diff. Findings land in the TUI Triage tab, where you choose what becomes a work item.
 
 ### Session continuity
 
@@ -467,7 +463,6 @@ When you return to a project, run `/work` to see where things stand.
 ### System maintenance
 
 ```
-> /self-test              # Score system health across 8 dimensions
 > /retro                  # Post-work retrospective with journal entry
 > /memory curate          # Deduplicate, prune stale entries, fix backlinks
 > /renormalize            # Full knowledge store normalization

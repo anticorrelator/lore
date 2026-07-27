@@ -25,5 +25,5 @@ Comments not attached to a review submission are grouped by time proximity. Comm
 - Unselected batches are noted as deferred — they can be revisited in a subsequent pass.
 - If only one reviewer batch exists (plus any orphans), skip selection and work through it directly.
 
-All consuming skills (`/pr-review`, `/pr-self-review`, `/pr-pair-review`, `/pr-revise`) reference this step after fetching PR data and before applying the review checklist or categorization logic.
+Consuming skills reference this step after fetching PR data and before applying review logic. In the current family that is `/pr-review` (standard and `--self` modes), which uses the grouped batches to note existing reviewer concerns and avoid duplicate findings.
 
