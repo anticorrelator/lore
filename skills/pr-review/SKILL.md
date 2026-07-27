@@ -1,8 +1,8 @@
 ---
 name: pr-review
-description: "Holistic multi-lens PR review with adaptive lens selection, cross-lens synthesis, and structured findings. Use individual lens skills (/pr-correctness, /pr-security, etc.) for focused single-concern analysis."
+description: "Holistic multi-lens PR review with adaptive lens selection, cross-lens synthesis, and structured findings; --self runs the same pipeline as an author's self-review. Use individual lens skills (/pr-correctness, /pr-security, etc.) for focused single-concern analysis."
 user_invocable: true
-argument_description: "[PR_number_or_URL] [--self] [--pair] [--thorough] — PR to review. Modes: --self (self-review with perspective lenses), --pair (pair review dialog), --thorough (all lenses)"
+argument_description: "[PR_number_or_URL] [--self] [--thorough] [focus context] — PR to review (auto-detected from the current branch if omitted). Modes: --self (author self-review of your own PR), --thorough (all lenses). Free text after flags steers lens attention (e.g., '42 focus on error handling')"
 ---
 
 # /pr-review Skill
@@ -19,7 +19,15 @@ Argument provided: `$ARGUMENTS`
 
 ### 1a. Parse PR identifier
 
-Extract the PR number from the first token that matches digits or a GitHub PR URL. If no PR identifier is found, ask the user for the PR number.
+Extract the PR number from the first token that matches digits or a GitHub PR URL. If no PR identifier is found, detect from the current branch:
+
+```bash
+gh pr list --state open --head "$(git branch --show-current)" --json number,title --jq '.[] | "#\(.number) \(.title)"'
+```
+
+If exactly one PR matches, use it. If several match, present the list and ask which to review. If none match, ask the user for the PR number.
+
+Any remaining free text after the identifier and mode flags is **focus context** — carry it into the review brief (Step 3a) so lens attention concentrates where the requester asked.
 
 Resolve the repo owner/name from the git remote:
 ```bash
@@ -33,19 +41,28 @@ Parse remaining arguments for mode flags. Exactly one mode applies — if multip
 
 | Flag | Mode | Priority | Effect |
 |------|------|----------|--------|
-| `--self` | Self-review | 1 (highest) | Adds perspective-lens agents after the parallel lens phase. |
-| `--pair` | Pair review | 2 | Enables turn-based dialog between findings. |
-| `--thorough` | Thorough | 3 | Selects all lenses regardless of signal matching. |
-| (none) | Default | 4 (lowest) | Standard holistic review with adaptive lens selection. |
+| `--self` | Self-review | 1 (highest) | Author reviewing their own PR — same pipeline, self-review posture. See Self-Review Mode at the end of this document. |
+| `--thorough` | Thorough | 2 | Selects all lenses regardless of signal matching. |
+| (none) | Default | 3 (lowest) | Standard holistic review with adaptive lens selection. |
 
-### 1c. Fetch PR data
+### 1c. Commit expectations, then fetch
 
-Run these in parallel:
+**1c-i. Fetch intent first** — metadata only, not the diff:
+
+```bash
+gh pr view <PR_NUMBER> --json title,body,author,commits,headRefOid
+```
+
+**1c-ii. Write down what the diff should touch — before opening it.** From the title, body, and commit messages alone, commit to a short expectation: which files or surfaces this change should touch, which it should not, and the rough shape of the implementation (new module, edit in place, config plus code). A few written lines are enough; the value is that they exist before the diff can anchor you.
+
+Skip this sub-step in `--self` mode — the author wrote the diff, so there is no naive expectation left to commit (see Self-Review Mode).
+
+**1c-iii. Fetch the diff and compare.**
 
 ```bash
 bash ~/.lore/scripts/fetch-pr-data.sh <PR_NUMBER>
 gh pr diff <PR_NUMBER>
-gh pr view <PR_NUMBER> --json files,title,body,author,commits,headRefOid
+gh pr view <PR_NUMBER> --json files
 ```
 
 From the fetched data, extract:
@@ -53,6 +70,8 @@ From the fetched data, extract:
 - **PR intent** — title, body, and commit messages
 - **Existing reviews** — from `fetch-pr-data.sh` grouped output. Filter out outdated threads (`isOutdated: true`). Note existing review concerns to avoid duplicate findings.
 - **Diff stats** — total LOC changed (additions + deletions)
+
+Then diff your expectation against reality. Surfaces you expected touched but that weren't, and files touched that nothing in the intent predicts, are **divergences** — record each as a one-line note. Divergences are attention anchors, not findings: they feed the alignment map and design signals in Step 3a, where the review decides whether each is a missing piece, scope creep, or simply an expectation error.
 
 <!-- section-boundary -->
 
@@ -90,6 +109,8 @@ cat ~/.lore/claude-md/review-protocol/risk-triage.md
 
 ### 2b. Select lenses
 
+**Diff-size gate:** if the total changed lines are below 50 and mode is not `--thorough`, do not fan out — a diff this small does not repay a team of parallel readings. Select no built-in lenses and take the holistic path at Step 3-solo instead. Ceremony lenses are exempt from the gate: they are user-configured and dispatch regardless of diff size (Step 3b-ceremony). Above the threshold, select lenses as follows.
+
 **If mode is `--thorough`:** Select all lenses. Skip signal matching.
 
 **Otherwise:** Start with the default set (Correctness + Regressions + Test Quality + Interface Clarity + User Impact + Structural Read), then: 1. For each remaining lens (Security, Blast Radius), check trigger signals against the PR's changed files and diff content 2. If risk tier is High: force-add Security regardless of signals 3. Apply skip conditions — only skip a lens if ALL its skip conditions are true
@@ -126,7 +147,6 @@ Change types detected: [list]
 | Test Quality | Default selection |
 | User Impact | Default selection |
 | Structural Read | Default selection (whole-PR) |
-| [ceremony] insecure-defaults | Ceremony config |
 
 Proceed with this lens set? You can add or remove lenses before we begin.
 ```
@@ -142,6 +162,17 @@ Consider splitting the PR if feasible. Proceeding with full review.
 ## Step 3: Lens Review
 
 This step builds context for lens agents, spawns them, and collects results.
+
+### 3-solo. Small-diff holistic pass (when the Step 2b gate fired)
+
+When the diff-size gate selected no built-in lenses, run Step 3 as one pass, yourself:
+
+- Build the review brief (3a) and the narrative (3a-narrative) as usual — on a diff this small the diagram's multi-module gate rarely fires, and that is fine.
+- Run a single prefetch at diff-local scale: `lore prefetch "<primary topic>" --scale-set subsystem,implementation` (Step 3a-knowledge reduced to one topic; the same empty-vs-failed handling applies).
+- Read the diff once, end to end, holding the default lens concerns together — correctness, regressions, test coverage, interface clarity, user impact, solution shape — plus the security methodology when the change type warrants it. Emit findings in the same Findings Output Format, subject to the same grounding, hunk-anchoring, budget, and voice rules the lens prompt imposes (Step 3b Output).
+- Ceremony lenses, when configured, still dispatch per Step 3b-ceremony and are collected per Step 3d.
+
+Then continue at Step 4. Compound detection has nothing to correlate with a single source, but the materiality gate, deduplication, verdict, and the full Step 5–7 pipeline apply unchanged.
 
 ### 3a. Build review brief
 
@@ -227,7 +258,7 @@ in the diff or source. The brief alone is never sufficient basis for a finding.
 
 ### 3b. Read lens methodologies and spawn agents
 
-**Dispatch guidance gate:** For every built-in, Structural Read, ceremony, or perspective-agent launch or retry, run `lore dispatch guidance` immediately before assembling that launch's prompt. Prepend that launch attempt's complete output verbatim as the first block; never copy, summarize, cache, or reuse it for another launch. If any render fails while preparing the single parallel lens batch, issue none of that batch; a retry renders a fresh block independently for every member before launch. This changes neither model routing nor concurrency.
+**Dispatch guidance gate:** For every built-in, Structural Read, or ceremony lens launch or retry, run `lore dispatch guidance` immediately before assembling that launch's prompt. Prepend that launch attempt's complete output verbatim as the first block; never copy, summarize, cache, or reuse it for another launch. If any render fails while preparing the single parallel lens batch, issue none of that batch; a retry renders a fresh block independently for every member before launch. This changes neither model routing nor concurrency.
 
 For each selected lens, read its Step 3 methodology:
 
@@ -298,6 +329,10 @@ Produce findings JSON conforming to the Findings Output Format:
 - repo: "<owner>/<repo>"
 - Severity: blocking / suggestion / question (default to suggestion when uncertain)
 - Each finding: severity, title, file, line, body, knowledge_context
+
+**Budget: at most 5 findings.** Precision is the binding constraint — a lens that returns everything it noticed exports its triage cost to every later stage of the review. Rank what you found and return only what survives the ranking; if material findings were cut by the budget, say so in one line rather than squeezing them in.
+
+**Anchor every finding in a changed hunk.** `file` and `line` must name a line this diff adds or modifies — never untouched code. When the problem lives outside the diff (a caller, a consumer, a missed update), anchor on the changed line that causes it and name the external site in the body.
 
 Every `blocking`/`suggestion` finding needs a `**Grounding:**` line: the **path to the problem**, for a reviewer who's never seen this code — *what someone does to hit it → what they'd see*, in usage terms, not code terms:
 
@@ -413,17 +448,9 @@ Do NOT skip this step. Do NOT omit a ceremony lens because the PR is small. Do N
 
 Ceremony lens results are collected in Step 3d alongside built-in results; output not in the standard Findings Output Format is handled as non-conforming there.
 
-### 3c. Self-review perspective lenses (--self mode only)
+### 3c. Self-review verification passes (--self mode only)
 
-If mode is `--self`, after standard lens agents complete, spawn perspective-lens agents:
-
-Immediately before each perspective-lens launch or retry, render a new complete dispatch-guidance block and prepend that launch's output verbatim to its prompt below. Fail before that launch if rendering fails rather than dispatching a floorless prompt.
-
-**External reviewer perspective:** "Review these findings as if seeing this code for the first time. Flag any finding where the explanation relies on context not available in the diff."
-
-**Weakest assumption probe:** "For each suggestion, ask: what is the weakest assumption? If wrong, does the severity change to blocking?"
-
-**Cross-boundary invariant trace:** "For each file in the diff, identify what external code depends on it. Flag any dependency where the change could alter behavior without the dependent code being updated."
+If mode is `--self`, after the parallel lens batch completes, run the grounded verification passes defined in Self-Review Mode (end of this document): tests executed, call sites enumerated, cross-boundary dependencies traced. These are mechanical checks whose outcomes the author does not control — in place of judgment re-reads that would largely re-confirm the mental model that produced the diff.
 
 ### 3d. Collect and finalize
 
@@ -450,6 +477,8 @@ Load synthesis rules:
 cat ~/.lore/claude-md/review-protocol/cross-lens-synthesis.md
 cat ~/.lore/claude-md/review-protocol/severity.md
 ```
+
+**Grounded refutation only.** At every stage that can overturn a finding — the materiality gate below, deduplication, the Step 6d-i re-check, and any verification pass in any mode — refuting a finding as *wrong* requires citable evidence: a test that passes, a reproduction that fails to reproduce, or a file:line showing the guard the finding missed. A model's confidence score or judge rating is never grounds for refutation. Dropping a finding as *immaterial* is different — that is the magnitude judgment the materiality gate owns, and it needs no counter-evidence.
 
 ### 4a. Identify compound findings
 
@@ -546,7 +575,7 @@ After presenting findings, offer the user a chance to discuss or ask questions, 
 
 ## Step 6: Generate Followup Report
 
-This step is mandatory and must not be skipped. It always runs after Step 5c resolves.
+This step is mandatory and must not be skipped. It always runs after Step 5c resolves. In `--self` mode it runs with a different output shape — no comments are proposed for posting; see Self-Review Mode for the Step 6 deltas.
 
 ### 6a. PR Narrative
 
@@ -656,6 +685,8 @@ line: <N>
 
 Proposed comments are a **curated subset** — the posted artifact, not a projection of the Review Findings list. They need not be 1:1 with the Section 3 findings: immaterial findings (the `minor (N)` tally) are never posted, and where it reads better, several findings may collapse into one comment. Only material findings with both `file` and `line` become proposed comments.
 
+**Posted-set budget: at most 10 proposed comments, of which at most 2 are nits.** A nit is a polish-grade suggestion — real, but cheap for the author to ignore (naming, small clarity wins). The budget is a hard cap, not a target: when the material set exceeds it, propose the findings with the largest stakes and keep the remainder cockpit-only in Section 3. An author buried in comments re-triages everything themselves, and precision is what earns the next review its attention. Never pad toward the cap.
+
 Build the array by walking the proposed comments in severity-group order (`blocking` → `suggestion` → `question`). Within each group, number them with a fresh 1-based `finding_ordinal` over the proposed comments themselves — this counter is the comment's own identity, **not** tied to any Section 3 `#### N.` position (the two are allowed to diverge). For each proposed comment, emit `{"path": "<file>", "line": <line>, "body": "<finding body>", "title": "<finding title>", "finding_ordinal": <N>}`. Each `body` must be the **posted-comment variant** from Step 6d-ii — a distilled usage-terms translation, one line, with internal scaffolding, criticality, **and** mechanism stripped; not a copy of the Section 3 cockpit prose.
 
 Pass the **complete report body from 6e** as `--content`:
@@ -692,6 +723,74 @@ When nothing cleared the bar, omit all three — `--review-body-selected` withou
 **Gate:** Do not execute this step until Step 6 has completed and `create-followup.sh` has been called. If Step 6 was not executed, go back and execute it now before proceeding.
 
 Read `skills/pr-review/templates/capture-invocation.md` for the full `/remember` invocation to dispatch.
+
+## Self-Review Mode (--self)
+
+You are the author reviewing your own PR before asking colleagues for their time — a colleague being rigorous with their own work. The full pipeline runs: triage, lens fan-out, synthesis, materiality gate, followup. The deltas below all trace to one structural fact: **the author cannot be surprised by their own diff.** Re-reading code you just wrote mostly re-confirms the mental model that produced it, blind spots included. The leverage is in checks whose outcomes you do not control — tests executed, call sites enumerated, dependencies traced — so self-review leans harder on grounded, mechanical evidence and lighter on judgment re-reading.
+
+Deltas from the standard flow:
+
+**Setup (Step 1).** The usual invocation is bare `--self` on the PR branch; Step 1a's branch detection resolves the PR. Skip Step 1c-ii: commit-before-reading is structurally unavailable to the author — there is no naive expectation left to write down — so fetch order stops mattering; fetch everything at once.
+
+**Lens selection (Step 2b).** Force-add Blast Radius to the selected set. Its evidence is gathered outside the diff — callers, consumers, invariants in files you did not open — which is exactly where the author can still be surprised. Everything else, including the diff-size gate and the ceremony agency constraint, applies unchanged.
+
+**Lens dispatch (Step 3b).** One modification to the Correctness lens prompt — append: "Skip intent alignment — the author already knows the intent. Spend that effort tracing execution paths instead." All other prompt structure, prior knowledge, grounding, budget, and anchoring rules are identical: the lens agents are the fresh eyes the author lacks.
+
+**Verification passes (Step 3c).** After the lens batch reports, run these yourself and record the evidence:
+
+- **Tests:** run the suites the diff touches (a targeted subset is fine). Record what ran and what passed — the review does not take the PR's word for it.
+- **Call-site enumeration:** for every symbol the diff renames, removes, or re-signatures, grep for its call sites and confirm each is updated or unaffected.
+- **Blast-radius trace:** for each changed file, identify what external code depends on it and whether this change can alter behavior without that dependent code changing.
+
+This evidence feeds Step 4 both ways: it grounds new findings the lenses missed, and it is the only admissible basis for refuting a lens finding. Grounded refutation applies with full force here — being the author does not lower the bar, it raises the risk of motivated refutation, so cite the test run, the grep output, or the file:line.
+
+**Synthesis (Step 4).** Unchanged.
+
+**Output (Steps 5–6).** Nothing is proposed for posting — author and reviewer are the same person, so there is no one on the other side of the wall. Present findings (Step 5) and assemble the full report body (Steps 6a–6e, cockpit variants included) as usual, with these substitutions:
+
+- Skip the posted-comment translation targets: no `proposed-comments` array, no structural `review_body` block (the Structural Assessment still renders cockpit-side).
+- Report Section 4 becomes a **Findings Summary** table instead of Proposed Comments:
+
+  ```markdown
+  ## Findings Summary
+
+  | # | Severity | Title | Lens | File:Line | Selected |
+  |---|----------|-------|------|-----------|----------|
+  | 1 | blocking | <title> | <lens> | <file:line> | true |
+  ```
+
+  Include every finding that survived the materiality gate; if there are none, emit the section with `None.` rather than omitting it.
+- The followup carries a `lens-findings.json` sidecar for TUI triage — payload shape per `skills/pr-review/templates/lens-findings-json.md`. Two fields, two surfaces: `body` carries the reviewer-cockpit detail; `grounding` carries the distilled one-line usage-terms translation, produced by the same translate-don't-copy discipline as Step 6d-ii. Selection contract: every material `blocking` and `suggestion` finding gets `selected: true`; `question` findings get `selected: false`; immaterial findings were already dropped at the gate. `work_item` stays `""` — the TUI fills it when the user promotes.
+
+The Step 6f call becomes:
+
+```bash
+source ~/.lore/scripts/lib.sh
+SKILLS_DIR=$(resolve_harness_install_path skills)
+TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$SKILLS_DIR/pr-review/SKILL.md")
+
+bash ~/.lore/scripts/create-followup.sh \
+  --source "pr-review" \
+  --title "Self-Review: <PR title>" \
+  --lens-findings '<lens-findings JSON>' \
+  --content "<complete report body from 6e — all sections>" \
+  --attachments '[{"type":"pr","ref":"#<N>"}]' \
+  --pr <N> \
+  --owner <owner> \
+  --repo <repo> \
+  --head-sha <headRefOid> \
+  --producer-role "pr-review" \
+  --protocol-slot "Observations" \
+  --template-version "$TEMPLATE_VERSION"
+```
+
+Keep `--title` at or under 70 characters — truncate the PR title if needed. If `template-version.sh` fails, omit the `--template-version` flag — downstream scripts accept its absence. Per-finding provenance: `create-followup.sh` fills CLI-provided provenance into any finding that does not already carry its own, so lens findings keep their `lens-<name>` attribution.
+
+The followup is this mode's sole artifact. Work-item creation is deferred to TUI triage — the user promotes selected findings via the Triage tab's `p` action — which keeps self-review a read-only producer: what becomes actionable work is chosen by a human after seeing the evaluated findings.
+
+**Capture (Step 7).** Runs unchanged. Cross-boundary invariants surfaced by the blast-radius trace are prime capture candidates — they are exactly the knowledge the next reviewer of this area cannot get from a diff.
+
+**Re-invocation.** Each self-review run produces an independent followup. If one already exists for this PR, say so and confirm before creating a second; the prior followup is never modified.
 
 ## Error Handling
 
