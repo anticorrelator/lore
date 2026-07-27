@@ -69,7 +69,7 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
 
 ### D1: <Decision Title>
 **Decision:** What was decided — a concrete, actionable statement
-**Rationale:** Why this choice over others — the reasoning, constraints, or evidence that led here
+**Rationale:** Why this choice over others — cite the specific findings or assertions it rests on, keeping their provenance, rather than restating them in looser words
 **Alternatives considered:** What other approaches were evaluated and why they were rejected
 **Applies to:** Phase N (<name>), Phase M (<name>) — which phases/tasks this decision affects
 
@@ -83,7 +83,10 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
 ## Phases
 <!-- One phase per plan by default. Add a second phase only when all three Plan-as-unit conditions
      hold (Step 5b): cross-phase parallelism, independent deliverable boundary, architectural
-     checkpoint. File-overlap-forced sequencing is not a checkpoint — merge into one phase. -->
+     checkpoint. File-overlap-forced sequencing is not a checkpoint — merge into one phase.
+     Every phase carries the standing premise-wrong exit (Step 5b): a worker report that the phase
+     cannot be built as scoped, naming what blocked it, is a sanctioned deliverable — never write
+     a phase whose only expressible outcome is success. -->
 
 ### Phase 1: <Name>
 **Objective:** What this phase accomplishes
