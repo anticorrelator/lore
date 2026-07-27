@@ -54,14 +54,9 @@
       "notes": "Team-heavy skill. partial-mode contract: bootstrap runs with reduced parallelism + lead-side validation when team_messaging or task_completed_hook are below `full`. Hard-refuses on `subagents=none` or `task_completed_hook=none`; `team_messaging=none` is tolerated (lead-only fanout)."
     },
     "evolve": {
-      "summary": "Review and apply accumulated protocol evolution suggestions from retro and self-test.",
+      "summary": "Review and apply accumulated protocol evolution suggestions from retro.",
       "requires": [],
       "notes": "Reads/writes knowledge store files inline; no subagent fanout, no PR I/O."
-    },
-    "followup-discuss": {
-      "summary": "Structured discussion of followup findings with source-aware routing.",
-      "requires": [],
-      "notes": "Interactive conversation; reads knowledge store + work-item state."
     },
     "implement": {
       "summary": "Execute a spec's plan with a knowledge-aware worker team and capture observations.",
@@ -98,31 +93,18 @@
       "summary": "Focused lens review: evaluate interface clarity, naming, and abstraction coherence.",
       "requires": ["gh_cli"]
     },
-    "pr-pair-review": {
-      "summary": "Interactive pair-review with knowledge-enriched turn protocol.",
-      "requires": ["gh_cli"]
-    },
     "pr-regressions": {
       "summary": "Focused lens review: detect capability loss from deletions and modifications.",
       "requires": ["gh_cli"]
     },
     "pr-review": {
-      "summary": "Holistic multi-lens PR review with adaptive lens selection and cross-lens synthesis.",
+      "summary": "Holistic multi-lens PR review with adaptive lens selection and cross-lens synthesis; --self runs the same pipeline as an author's self-review.",
       "requires": ["gh_cli", "subagents"],
-      "notes": "Fans out per-lens Agent tasks in parallel; without subagents, falls back to sequential lens execution (slower; same coverage)."
-    },
-    "pr-revise": {
-      "summary": "Read all PR review feedback and create a work item with categorized findings.",
-      "requires": ["gh_cli"]
+      "notes": "Fans out per-lens Agent tasks in parallel; without subagents, falls back to sequential lens execution (slower; same coverage). The --self mode shares this profile."
     },
     "pr-security": {
       "summary": "Focused lens review: evaluate security vulnerabilities, edge cases, adversarial paths.",
       "requires": ["gh_cli"]
-    },
-    "pr-self-review": {
-      "summary": "Author-calibrated self-review: parallel lens pre-scan then grounding evaluation.",
-      "requires": ["gh_cli", "subagents"],
-      "notes": "Fans out per-lens Skill invocations in parallel; without subagents, falls back to sequential lens execution."
     },
     "pr-test-quality": {
       "summary": "Focused lens review: evaluate test coverage, quality, and assertion rigor.",
@@ -150,11 +132,6 @@
       "summary": "Evaluate knowledge system effectiveness after a work cycle.",
       "requires": [],
       "notes": "Reads execution-log.md, worker SendMessage history, and knowledge store; emits a journal entry. No fanout."
-    },
-    "self-test": {
-      "summary": "Evaluate the lore memory system across 8 dimensions via subagent evaluators.",
-      "requires": ["subagents"],
-      "notes": "Each dimension runs in a subagent for clean-context evaluation; without subagents, falls back to sequential same-context evaluation (degraded — context contamination affects scores)."
     },
     "spec": {
       "summary": "Create a technical specification via team-based investigation and synthesis.",

@@ -70,14 +70,9 @@ The matrix below classifies skills by their hardest required capability. Skills 
 | `/work`              | no (single-agent)  | no                      | no                                 | no                                       |
 | `/memory`            | no                 | no                      | no                                 | no                                       |
 | `/remember`          | no                 | no                      | no                                 | no                                       |
-| `/self-test`         | no                 | no                      | no                                 | no                                       |
 | `/evolve`            | no                 | no                      | no                                 | no                                       |
-| `/followup-discuss`  | no                 | no                      | no                                 | no                                       |
-| `/pr-review`         | yes (lens fanout)  | no (lead-only aggregation) | no                              | no                                       |
-| `/pr-self-review`    | yes                | no                      | no                                 | no                                       |
+| `/pr-review` (incl. `--self`) | yes (lens fanout) | no (lead-only aggregation) | no                          | no                                       |
 | `/pr-create`         | no                 | no                      | no                                 | no                                       |
-| `/pr-revise`         | no                 | no                      | no                                 | no                                       |
-| `/pr-pair-review`    | no                 | no                      | no                                 | no                                       |
 | Single-lens reviews (`/pr-{correctness,security,blast-radius,test-quality,interface-clarity,regressions,thematic,user-impact}`) | no | no | no | no |
 | `/codex-plan-review` | no (delegates to codex CLI) | no                | no                                 | no                                       |
 | `/codex-pr-review`   | no (delegates to codex CLI) | no                | no                                 | no                                       |
@@ -98,7 +93,6 @@ The classification below applies the dependency table above against each harness
 | `/retro`             | full        | partial   | partial   |
 | `/work`              | full        | full      | full      |
 | `/pr-review`         | full        | full      | full      |
-| `/pr-self-review`    | full        | full      | full      |
 | `/codex-plan-review` | full        | full      | full      |
 | `/codex-pr-review`   | full        | full      | full      |
 | Single-agent skills  | full        | full      | full      |

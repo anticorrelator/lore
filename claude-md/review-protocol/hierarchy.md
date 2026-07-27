@@ -1,6 +1,6 @@
 ## Review Protocol
 
-Shared reference for all PR review skills (`/pr-review`, `/pr-self-review`, `/pr-pair-review`, `/pr-revise`). Skills reference this protocol rather than duplicating the checklist.
+Shared reference for the PR review family: `/pr-review` (standard and `--self` modes) and the focused lens skills. Skills reference this protocol rather than duplicating the checklist.
 
 ### Review Hierarchy
 

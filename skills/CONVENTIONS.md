@@ -35,7 +35,7 @@ Matches the invocation syntax. Examples: `# /implement Skill`, `# /spec Skill`, 
 ## Skill Types
 
 ### Procedural Skills
-Sequential numbered steps that execute a workflow. Used for skills that perform a multi-step process (implement, spec, remember, bootstrap, self-test, renormalize).
+Sequential numbered steps that execute a workflow. Used for skills that perform a multi-step process (implement, spec, remember, bootstrap, renormalize).
 
 ### Routing-Table Skills
 Command dispatch: match the first argument to a subcommand, execute the corresponding section. Used for skills that expose multiple independent operations (work, memory).
@@ -118,11 +118,11 @@ When `/<skill>` is called on existing state:
 4. Resume from last incomplete step
 ```
 
-Not all skills need resume. Single-session skills (remember, self-test) omit it.
+Not all skills need resume. Single-session skills (e.g., remember) omit it.
 
 ## Review Skill Family
 
-Four skills share the `pr-` prefix and a common structure for PR analysis: `/pr-self-review`, `/pr-review`, `/pr-pair-review`, `/pr-revise`.
+Skills with the `pr-` prefix operate on pull requests. `/pr-review` is the integrated multi-lens review; its `--self` mode runs the same pipeline as an author's self-review of their own PR. The focused lens skills (`/pr-correctness`, `/pr-security`, `/pr-blast-radius`, `/pr-regressions`, `/pr-test-quality`, `/pr-interface-clarity`, `/pr-thematic`, `/pr-user-impact`) each apply a single concern and double as the methodology sources `/pr-review` embeds in its lens agents. `/pr-create` authors the PR itself. (`/pr-revise` and `/pr-pair-review` are archived; `/pr-self-review` was folded into `/pr-review` as its `--self` mode.)
 
 ### Naming
 
@@ -132,13 +132,13 @@ All review skills use the `pr-` prefix. The prefix groups them visually in skill
 
 All review skills use `scripts/fetch-pr-data.sh` for GraphQL data retrieval — no inline queries. The script encapsulates the single-query approach (reviewThreads + reviews + general comments in one call) so query changes propagate to all skills automatically.
 
-### Checklist Embedding
+### Shared Protocol Files
 
-All review skills embed the 8-item review checklist defined in `claude-md/review-protocol/checklist.md`. The checklist is referenced (read at invocation time), not duplicated into each SKILL.md. This ensures checklist updates apply uniformly.
+Behavioral rules shared across the family — risk triage, severity and materiality, cross-lens synthesis, enrichment, escalation, findings format, review voice — live in `claude-md/review-protocol/` and are read at invocation time, not duplicated into SKILL.md files. Each skill `cat`s only the sections it needs.
 
 ### Knowledge Enrichment
 
-All review skills implement mandatory knowledge enrichment for substantive findings: when a checklist item surfaces a non-trivial concern, the skill enriches the finding with context from the knowledge store and codebase before reporting it. Cross-boundary concerns (findings that touch multiple subsystems or contradict known conventions) trigger conditional investigation escalation — deeper exploration before concluding. The enrichment protocol is defined in `claude-md/review-protocol/enrichment.md`.
+All review skills enrich substantive findings with context from the knowledge store before reporting them, per `claude-md/review-protocol/enrichment.md`. Cross-boundary concerns (findings that touch multiple subsystems or contradict known conventions) trigger conditional investigation escalation — deeper exploration before concluding.
 
 ### Capture Convention
 
@@ -146,14 +146,11 @@ All review skills end with `/remember` using review-scoped constraints. The key 
 
 ### Output Convention
 
-All review skills produce work items as their primary output, but the type varies by skill:
+All review skills are analysis-only — they produce findings, not source changes. The output surface differs by audience:
 
-- `/pr-self-review` — implement-ready work item (author can act on findings immediately)
-- `/pr-revise` — implement-ready work item (feedback is already scoped to specific changes)
-- `/pr-pair-review` — implement-ready or spec-ready work item (depends on finding complexity)
-- `/pr-review` — posts GitHub comments + creates a documentation work item summarizing the review
-
-All four are analysis-only — they produce plans and findings but do not modify source code.
+- `/pr-review` (standard) — a followup report for the reviewer's TUI triage, plus a curated subset of findings proposed as GitHub review comments; the reviewer selects what posts.
+- `/pr-review --self` — a followup with a `lens-findings.json` sidecar for TUI triage; nothing is proposed for posting, and work-item creation is deferred to the user's promote action.
+- Focused lens skills — structured findings presented to the invoking context (a user session or a `/pr-review` lens agent).
 
 ## Investigation Escalation Pattern
 
@@ -195,5 +192,4 @@ These are deliberate design choices, not inconsistencies:
 - **Pre-resolved vs prefetched knowledge** — implement pre-resolves backlinks at task generation time (optimization for well-authored plans); spec/bootstrap prefetch at spawn time (appropriate for discovery-oriented work). Both use the `## Prior Knowledge` header.
 - **Bootstrap batch capture** — documented exception to the `/remember` delegation rule; uses `lore batch-capture` with a JSON file instead of per-entry `lore capture` calls.
 - **Skill-specific agent types** — spec uses `Explore` agents (read-only research); implement uses `general-purpose` agents (need edit/write for implementation).
-- **Review skill output types** — `/pr-review` posts GitHub comments (external-facing); the other three produce only local work items. This reflects the audience: `/pr-review` is for someone else's PR, the others are for your own.
-- **Review skill label sets** — `/pr-review` uses blocking/suggestion/question (maps to GitHub review states: REQUEST_CHANGES/COMMENT/COMMENT). The other three use full Conventional Comments labels (suggestion/issue/question/thought/nitpick/praise) because their output is local work items, not GitHub API submissions.
+- **Review output surfaces** — standard `/pr-review` proposes GitHub comments because the PR is someone else's: findings must cross to its author. `--self` mode proposes none because author and reviewer are the same person; its findings land in TUI triage instead.

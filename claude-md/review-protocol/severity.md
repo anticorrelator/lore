@@ -38,7 +38,7 @@ Examples:
 
 #### Relationship to Conventional Comments labels
 
-Existing review skills (`/pr-review`, `/pr-self-review`, `/pr-pair-review`, `/pr-revise`) use the full Conventional Comments label set (`suggestion`, `issue`, `question`, `thought`, `nitpick`, `praise`). The severity levels above are a simplified taxonomy for lens skills that produce structured findings. The mapping:
+All skills in the current review family use the three-level taxonomy above; none emits the Conventional Comments label set (`suggestion`, `issue`, `question`, `thought`, `nitpick`, `praise`). When translating findings from tools or reviewers that do use those labels, apply this mapping:
 
 | Severity    | Conventional Comments equivalents        |
 |-------------|------------------------------------------|
