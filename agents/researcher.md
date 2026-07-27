@@ -154,7 +154,15 @@ Template-version: {{template_version}}
   registration/factory mechanisms (intended extension point), pipeline
   ordering (compositional protocol), guard mechanisms enforcing usage
   patterns.
-  ✓ "All knowledge entries are resolved at query time, not write time"
+  Shape each observation as it will be captured: what to do paired with
+  the tempting alternative it replaces, in the codebase's own vocabulary,
+  with an applicability trigger ("when you touch X and see Y") and a
+  file:line anchor — drawn from what surprised you in the evidence, not
+  from a summary of your own work.
+  ✓ "Knowledge entries resolve at query time, not write time — caching
+     resolved paths at write time is the tempting shortcut and goes stale
+     when entries move; applies when you add a consumer of entry paths
+     (pk_resolve.py:12-30)"
   ✓ "The two-tier delivery exists to avoid context inflation at session start"
   ✓ "pk_search.py is the single query entry point — all retrieval paths
      route through it regardless of source type; callers must not bypass it
@@ -220,6 +228,7 @@ Keep findings to 500-1000 characters. Facts over opinions.
   - **Design rationale:** why things are built the way they are — "this was chosen because X", "this pattern exists to prevent Y", trade-offs that shaped the current design
   - **Structural footprint:** for key files investigated — its role in one phrase, what else connects to or through it, what constrains changes here. Report even when expected — builds an emergent architectural picture across investigation runs. Sub-target: **design contracts** — intended usage, composition, and extension models: how components are designed to work together, how subsystems are meant to be extended, what usage patterns maintain coherence. Look for: repeated structural patterns across files (extension model), registration/factory mechanisms (intended extension point), pipeline ordering (compositional protocol), guard mechanisms enforcing usage patterns.
   - Also: contradictions between the investigation question's assumptions and actual system behavior
+  - Shape each observation as it will be captured downstream, and report generously — verification happens later, when an entry meets real code, so an observation withheld never gets that chance. Five parts: pair what to do with the tempting alternative it replaces or avoids (the avoid-half carries the hard-won part); use the codebase's own symbol names and error strings, never a paraphrase — retrieval matches on similarity to a future agent's working context; state the applicability trigger ("applies when you touch X and see Y"); draw the content from what contradicted your expectations in the evidence, not from narration about your own work; and anchor it with a file:line pointer.
 - **Narrative** is an optional prose slot below the structured Observations, preserved for judgment, synthesis, and cross-observation connections that don't fit the structured-field shape. Keep it brief. Use when the captured signal is stronger than any single structured assertion or observation. Do NOT use Narrative to work around structured-field discipline — if a claim can be made with a falsifier, make it an Assertion.
   - Structured assertions and observations capture load-bearing claims; narrative captures judgment, context, and emergent observations that don't fit the schema. Both are valuable — neither supersedes the other.
 - **Worker leads** is a REQUIRED always-present field. Use it to surface implementation-level observations you spotted during investigation but should not canonicalize yourself — items a worker could act on within this cycle or the next. The researcher-scope × worker-scope gap lives here. `None` is a correct and common answer; always include the section even when empty. The *rate* at which this field is non-None is a calibration signal — do NOT conditionally emit based on whether you found anything. Always include it; the rate of non-None emissions is the signal. Trigger-based conditional emission was explicitly considered and rejected in Phase 5.

@@ -11,13 +11,13 @@ Produces a `plan.md` inside a work item's `_work/<slug>/` directory.
 
 ## Short Flow (`/spec short`)
 
-Single-agent path: the spec-lead reads key files directly (Step 2 `--short` branch) and drafts the plan without dispatching a researcher team. For well-understood, small-scope work where parallel investigation is unnecessary overhead.
+Single-agent path: the spec-lead reads key files directly (Step 2 `--short` branch) and drafts the plan without dispatching a researcher team. Single-context work is the sanctioned norm, not a degraded mode — one context that reads the code itself serves most specs well.
 
 The `--short` conditional activates at Step 2 only. From Step 3 onward, short and full paths share every step: collect findings and emit Tier-2 artifacts, strategy gate, synthesis, design ceremony, task review, post-research extraction, post-plan ceremony, and terminal finalization.
 
 ## Full Flow (`/spec`)
 
-Team-based divide-and-conquer: the spec-lead composes an investigation plan table (Step 2 full branch), dispatches parallel researcher agents, collects findings, emits Tier-2 artifacts, and then synthesizes — following the shared downstream steps. For complex or uncertain-scope work.
+Team-based divide-and-conquer: the spec-lead composes an investigation plan table (Step 2 full branch), dispatches parallel researcher agents, collects findings, emits Tier-2 artifacts, and then synthesizes — following the shared downstream steps. Team ceremony engages where scale demands it: investigation breadth one context cannot hold, or unknowns that genuinely parallelize.
 
 > **Sequencing constraint:** Do not dispatch research agents before completing Step 2. The investigation plan is a completeness checklist and user approval gate, not just a dispatch list.
 
@@ -116,7 +116,7 @@ If the user's description is already specific enough (clear scope, stated constr
 1. From the feature description, identify 3-7 focused investigation questions. Each should target a specific codebase concern, be answerable by exploring files, and be independent enough to run in parallel.
 2. Always include two mandatory fixed investigations (both count toward the 3-7 total): a. External skill and agent applicability (strict)... b. Preferences and conventions applicability (permissive)...
 
-   a. **External skill and agent applicability (strict)** — which installed *external* (non-lore) skills and agent templates should be invoked during **implementation** of this work item. Lore-managed skills (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) are **excluded** — protocol toolchain, not advisors. The researcher filters them out before reporting matches. Key files: `<skills_dir>/*/SKILL.md`, `<agents_dir>/*.md` (resolve via `resolve_harness_install_path skills` / `resolve_harness_install_path agents`); exclusion list comes from the canonical Lore source repo (`source ~/.lore/scripts/lib.sh && printf '%s\n' "$LORE_REPO_DIR"` + `/skills/` and `/agents/`). Do not use `resolve-repo.sh` here — it returns the project's knowledge store, not the Lore source tree. Match criterion is **strict** — include only skills whose stated domain plausibly contributes to *this* work item's implementation.
+   a. **External skill and agent applicability (strict)** — which installed *external* (non-lore) skills and agent templates should be invoked during **implementation** of this work item. Lore-managed skills (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/bootstrap`, `/pr-*`, `/codex-*`) are **excluded** — protocol toolchain, not advisors. The researcher filters them out before reporting matches. Key files: `<skills_dir>/*/SKILL.md`, `<agents_dir>/*.md` (resolve via `resolve_harness_install_path skills` / `resolve_harness_install_path agents`); exclusion list comes from the canonical Lore source repo (`source ~/.lore/scripts/lib.sh && printf '%s\n' "$LORE_REPO_DIR"` + `/skills/` and `/agents/`). Do not use `resolve-repo.sh` here — it returns the project's knowledge store, not the Lore source tree. Match criterion is **strict** — include only skills whose stated domain plausibly contributes to *this* work item's implementation.
 
    b. **Preferences and conventions applicability (permissive)** — which entries from `preferences/`, `conventions/`, and `cross-cutting-conventions/` the work might need to honor. **Inclusion criterion is permissive — the inverse of skill discovery.** The test is "is it *possible* the work might need this" — not "will we definitely apply it." Err on over-inclusion; synthesis culls. Missing an applicable preference is worse than carrying an inapplicable one through review. Key files: `$KDIR/preferences/`, `$KDIR/conventions/`, `$KDIR/cross-cutting-conventions/` (full enumeration; absent = zero) plus BM25 from `lore search "<topic>" --type knowledge --scale-set subsystem,implementation --limit 10` and `--scale-set abstract,architecture --limit 5`.
 3. Check the knowledge store index for file hints per investigation.
@@ -262,6 +262,8 @@ This step is **read-only** — do not modify `surfaced_concerns.jsonl`.
 ### Step 5: Synthesize — abstract plan
 
 Produce the conceptual frame first before committing to phase breakdown.
+
+Synthesis organizes the itemized findings; it does not narrate over them. Keep each finding's provenance intact and cite items rather than restating them in looser words — prose that absorbs the itemized record is where evidence quietly drops out. The Narrative section is the deliberate exception: it tells the story, while the record underneath stays itemized.
 
 1. **Goal** — what we're building/changing and why (1 paragraph).
 2. **Design Decisions** — use the `### DN: Title` format from the template. Each decision requires `**Decision:**`, `**Rationale:**`, `**Alternatives considered:**`, and `**Applies to:**` fields. Number decisions sequentially (D1, D2, ...).
@@ -422,7 +424,7 @@ Draft concrete implementation sections on top of the approved abstract plan:
 
    **Deliverable contract gate.** Every task line names a durable artifact outcome — what gets built, refactored, authored, migrated, wired, or added. The valid primary verbs are: Implement / Refactor / Author / Migrate / Add support for / Wire... The following primary verbs are **never tasks** — they belong elsewhere: Verify / Check / Inspect / Run / Capture / Append / Cross-link / Note / Document-only.
 
-   A valid task line states the **deliverable**, the **owned file or surface**, and at least one **design or integration constraint** that scopes the worker's choices.
+   A valid task line states the **deliverable**, the **owned file or surface**, and at least one **design or integration constraint** that scopes the worker's choices. Write the constraint's *why* in the codebase's own vocabulary — the actual symbol, flag, or error string it protects, not a paraphrase. Rationale is what a handoff loses first, and a worker who knows the reason can adapt when the letter of the constraint doesn't fit what the code turns out to be. When the task responds to a concrete failure, include the reproduction handle — the exact failing command, test case, or input — ranked above architectural narrative: a pointer the worker can run outranks a description of what it would show.
 
    **Judgment-class marker (required).** Every task line ends with a trailing `[class: mechanical | standard | judgment-dense]` marker, placed after any `[[knowledge:...]]` backlinks so the deliverable verb stays first. It declares the **judgment class** — the worker tier `/implement` routes the task to:
    - **mechanical** — deterministic edits: uniform text substitution, one known transform swept across files, scaffolding. No design judgment; routes to the cheapest worker binding.
@@ -464,6 +466,8 @@ Draft concrete implementation sections on top of the approved abstract plan:
    - **Single-line edits, single CLI invocations, sub-edits** → fold into the adjacent implementation task.
 
    **Task format (intent+constraints).** Default. State what the change accomplishes, what not to do, and what success looks like at the deliverable level. Opt into prescriptive format with `**Task format:** prescriptive` for mechanical work where step-by-step instructions are required.
+
+   **Premise-wrong exit (standing, every phase).** A phase brief hands its worker two sanctioned outcomes, not one: the deliverable, or the report "this cannot be built as scoped — here is what blocked me," naming the premise that failed contact with the code. The second is a first-class result from a colleague closer to the ground than the plan was; it routes to Step 6 follow-up investigation instead of forcing an approximation of a wrong plan. Never write a phase whose only expressible outcome is success.
 
 2. **Concordance-assisted annotation** — after drafting phases, widen each phase's `**Knowledge context:**` block:
    ```bash
@@ -628,7 +632,15 @@ Before finalizing, present the plan phases as structured summaries. This is a se
 
 ### Step 5.4: Post-research extraction
 
-Invoke `/remember` scoped to the spec investigation. **Always invoke it — even when no observation appears to meet the gate.** The gate lives in `/remember`; rejecting candidates is `/remember`'s job, not the lead's. Pre-filtering observations because "nothing qualifies, so `/remember` would be a no-op" is the bypass shape named in the commitment protocol — the lead's commitment is to invoke the gate and surface the result, not to short-circuit it. A run that captures zero entries is a valid terminal so long as `/remember` actually evaluated the observations.
+Invoke `/remember` scoped to the spec investigation. **Always invoke it — even when no observation appears to meet the gate.** The gate lives in `/remember`; rejecting candidates is `/remember`'s job, not the lead's. Pre-filtering observations because "nothing qualifies, so `/remember` would be a no-op" is the bypass shape named in the commitment protocol. A run that captures zero entries is a valid terminal so long as `/remember` actually evaluated the observations.
+
+**Capture posture: generous in, exacting in form.** Verification happens downstream, at consumption — every entry meets real code when a later agent reads it, and entries that fail that contact get pruned. So the expensive mistake is a malformed entry, not an extra one: don't spend effort predicting whether a future session will need an insight; spend it putting the insight in the form that lets that session retrieve and check it. Every capture written or promoted here takes the five-part form:
+
+1. **Contrastive pair** — what to do *and* what it replaces or avoids: "use X; the tempting Y fails because Z." The avoid-half carries the hard-won part.
+2. **The codebase's own vocabulary** — actual symbol names, actual error strings, never a paraphrase. Retrieval matches on similarity to a future agent's working context, and that context is made of real identifiers.
+3. **Explicit applicability trigger** — "applies when you touch X and see Y." Distillation strips applicability cues, so the entry must re-supply its own.
+4. **Extracted from surprises, not summaries** — capture what contradicted an expectation during investigation, drawn from the evidence itself, not from an agent's self-narration about its work.
+5. **Provenance pointer** — `file:line@SHA` anchoring the claim; this is the anchor `lore verify` checks.
 
 Every `lore capture` call must carry provenance flags; for captures promoted from researcher observations, preserve the original producer's attribution:
 
@@ -637,7 +649,7 @@ Every `lore capture` call must carry provenance flags; for captures promoted fro
 - **Multi-producer synthesis:** one capture call per distinct producer — never merge.
 
 ```
-/remember Research findings from <work item title> — Read all **Observations:** entries from investigation reports in plan.md and evaluate each: mechanism-level patterns, design rationale, and structural footprint signals all qualify; implementation facts already expressed in Tier-2 assertions do not. Also capture cross-investigation synthesis patterns not surfaced individually.
+/remember Research findings from <work item title> — Read all **Observations:** entries from investigation reports in plan.md and evaluate each: mechanism-level patterns, design rationale, and structural footprint signals all qualify; implementation facts already expressed in Tier-2 assertions do not. Also capture cross-investigation synthesis patterns not surfaced individually. Shape every capture in the five-part form: contrastive pair, the codebase's own vocabulary, explicit applicability trigger, surprise-derived content, provenance pointer.
 
 Apply the provenance flags above on every `lore capture`.
 ```
@@ -656,9 +668,9 @@ Invoke every registered evaluator. Present its output to the user. If the lead a
 
 Do not finalize while a post-plan result still requires a plan edit or human decision. `needs-decision` is durable evidence of that open judgment, not permission to route around it.
 
-Run Step 5.6's two lead-owned preflight asserts now, without finalizing: check every instructed invocation against the **live script**, and check that **Tier-2 emission instructions** point to the canonical validator contract. If either assert — or the finalize verb itself — refuses, fix `plan.md` and re-run the affected ceremony before Step 5.6 invokes `lore spec finalize`.
+Run Step 5.6's three lead-owned preflight asserts now, without finalizing: sweep the plan's named **paths, symbols, and packages** against the live tree (marking unresolvable names `(unverified)`), check every instructed invocation against the **live script**, and check that **Tier-2 emission instructions** point to the canonical validator contract. If any assert — or the finalize verb itself — refuses, fix `plan.md` and re-run the affected ceremony before Step 5.6 invokes `lore spec finalize`.
 
-With the post-plan ceremony terminal and both preflight asserts passing, a hosted session journals the plan-ready milestone before entering Step 5.6:
+With the post-plan ceremony terminal and all three preflight asserts passing, a hosted session journals the plan-ready milestone before entering Step 5.6:
 
 ```bash
 if [[ -n "${LORE_SESSION_INSTANCE:-}" && -n "${LORE_SESSION_SLUG:-}" && -n "${LORE_SESSION_TYPE:-}" ]]; then
@@ -674,7 +686,7 @@ Finalization emits no step of its own — `lore spec finalize` keeps the later, 
 
 ### Step 5.6: Finalize through the spec verb
 
-**Lead-owned preflight (two prose asserts the verb cannot run):** validate emitted artifacts against their live consumers, never from memory: (1) any script invocation block the plan instructs agents to run must match the live script's current flags (check `--help` or source — script schemas drift faster than plans); (2) Tier-2 emission instructions point at the validator's canonical required-field set rather than enumerating fields inline. Fix `plan.md` first if either fails — a deterministic script can assert JSON structure, but adjudicating prose against live sources is the lead's judgment.
+**Lead-owned preflight (three prose asserts the verb cannot run):** validate the plan against live sources, never from memory: (1) every path, symbol, and package the plan names resolves against the live tree — a mechanical grep or lookup per name; mark anything that doesn't resolve `(unverified)` where it appears, so the marking itself is the falsifier a later reader checks; (2) any script invocation block the plan instructs agents to run must match the live script's current flags (check `--help` or source — script schemas drift faster than plans); (3) Tier-2 emission instructions point at the validator's canonical required-field set rather than enumerating fields inline. Fix `plan.md` first if any fails — a deterministic script can assert JSON structure, but adjudicating prose against live sources is the lead's judgment.
 
 Then close the plan through the finalize verb. Do not hand-run its composed checks or writers; `finalize` owns backlink verification, the intent-anchor hard gate, task regeneration, healing, retrieval-directive assertions, its `spec-verb` atom, and last-write telemetry:
 
