@@ -13,6 +13,13 @@
 # additive, so the readers that still consume those files keep working until
 # they are cut over.
 #
+# A ledger that is an absorbed pointer — a tombstone whose whole body points at
+# the item that absorbed the work — is not an arc. It is excluded from
+# migration, the exclusion is recorded on the manifest with its source path and
+# absorbed-into target, and a record an earlier run migrated from it is retired
+# from the store, provided that record is byte-identical to what the migration
+# wrote.
+#
 # Exit codes: 0 clean, 1 refusal or error, 3 verification found drift.
 
 set -euo pipefail
@@ -27,7 +34,10 @@ Usage:
 
 Moves every coordination arc that exists today into its own directory under
 _work/_arcs/, carrying its ledger, its report, and its history. Source files
-stay exactly where they are.
+stay exactly where they are. A ledger that is an absorbed pointer — an ABSORBED
+heading over a body naming the item that absorbed the work — is not an arc: it
+is excluded, and the exclusion is recorded on the manifest with its source path
+and absorbed-into target.
 
 Modes:
   (none)      Preflight. Scans and reports the full plan without writing
@@ -42,7 +52,7 @@ Modes:
 Options:
   --json                Emit the result as JSON.
   --kdir <path>         Override the resolved knowledge dir (testing).
-  --classify <seat> <report-present> <origin-status> <stub>
+  --classify <seat> <report-present> <origin-status> <stub> <absorbed>
                         Print how a record with those characteristics
                         classifies. Read-only; useful when a preflight refusal
                         names a record you did not expect.
@@ -64,13 +74,13 @@ while [[ $# -gt 0 ]]; do
     --json) JSON_MODE=1; shift ;;
     --kdir) KDIR_OVERRIDE="${2:-}"; shift 2 ;;
     --classify)
-      if [[ $# -lt 5 ]]; then
-        echo "[arc] Error: --classify takes four values: <seat> <report-present> <origin-status> <stub>" >&2
+      if [[ $# -lt 6 ]]; then
+        echo "[arc] Error: --classify takes five values: <seat> <report-present> <origin-status> <stub> <absorbed>" >&2
         exit 1
       fi
       MODE="classify"
-      CLASSIFY_ARGS=("$2" "$3" "$4" "$5")
-      shift 5 ;;
+      CLASSIFY_ARGS=("$2" "$3" "$4" "$5" "$6")
+      shift 6 ;;
     -h|--help) usage; exit 0 ;;
     --*)
       if [[ $JSON_MODE -eq 1 ]]; then json_error "Unknown option '$1'"; fi
@@ -139,6 +149,8 @@ TITLE_LABELS = ("Coordination Ledger —", "Coordination Ledger -",
                 "Coordination —", "Coordination -", "Coordination:")
 POINTER = re.compile(r"→\s*`([^`]+\.md)`")
 WORK_BACKLINK = re.compile(r"\[\[work:([a-z0-9][a-z0-9-]*)\]\]")
+ABSORBED_TITLE = re.compile(r"^ABSORBED\b")
+ABSORBED_INTO = re.compile(r"Absorbed into \*\*([^*]+)\*\*")
 
 
 def out(message):
@@ -245,6 +257,19 @@ def ledger_anchor(path):
     return ""
 
 
+def absorbed_target(path):
+    """The absorbed-into target, when the ledger is an absorbed pointer.
+
+    Two marks make the signature: a heading that opens with ABSORBED, and a
+    body line naming the item that absorbed the work. Either alone is prose;
+    a ledger carrying both is a tombstone, not an arc.
+    """
+    if not ABSORBED_TITLE.match(ledger_h1(path)):
+        return None
+    match = ABSORBED_INTO.search(read_text(path))
+    return match.group(1).strip() if match else None
+
+
 def ledger_cited_items(path):
     """Work items named in the ledger's header block and its Brief section.
 
@@ -302,14 +327,18 @@ def opened_for(path):
 
 # --- classification --------------------------------------------------------
 
-def classify(seat, report_present, origin_status, is_stub):
+def classify(seat, report_present, origin_status, is_stub, is_absorbed):
     """Which row of the migration's status table a record lands on.
 
     Rows are evaluated top down and the first match wins. A record matching no
     row is an error to surface, never a case to route somewhere plausible.
     Returns (row, status); row "merge" means the record folds into the record
-    it forwards to. (None, None) means nothing matched.
+    it forwards to, and row "absorbed" means the record is an absorbed pointer
+    — excluded from migration and recorded on the manifest's exclusions list.
+    (None, None) means nothing matched.
     """
+    if is_absorbed:
+        return ("absorbed", None)
     if is_stub:
         return ("merge", None)
     if seat == "ledgers":
@@ -324,7 +353,7 @@ def classify(seat, report_present, origin_status, is_stub):
 
 
 if MODE == "classify":
-    seat, report_raw, origin, stub_raw = sys.argv[1:5]
+    seat, report_raw, origin, stub_raw, absorbed_raw = sys.argv[1:6]
     truthy = {"yes": True, "no": False, "true": True, "false": False, "1": True, "0": False}
     if seat not in SEATS:
         sys.stderr.write("[arc] Error: '%s' is not a seat — use one of %s\n"
@@ -334,19 +363,23 @@ if MODE == "classify":
         sys.stderr.write("[arc] Error: '%s' is not an originating-item status — use one of %s\n"
                          % (origin, ", ".join(ORIGIN_STATUSES)))
         sys.exit(1)
-    if report_raw.lower() not in truthy or stub_raw.lower() not in truthy:
-        sys.stderr.write("[arc] Error: report-present and stub take yes or no\n")
+    if (report_raw.lower() not in truthy or stub_raw.lower() not in truthy
+            or absorbed_raw.lower() not in truthy):
+        sys.stderr.write("[arc] Error: report-present, stub, and absorbed take yes or no\n")
         sys.exit(1)
-    row, status = classify(seat, truthy[report_raw.lower()], origin, truthy[stub_raw.lower()])
+    row, status = classify(seat, truthy[report_raw.lower()], origin,
+                           truthy[stub_raw.lower()], truthy[absorbed_raw.lower()])
     if row is None:
         sys.stderr.write(
-            "[arc] Error: no row covers seat=%s report=%s origin=%s stub=%s\n"
-            % (seat, report_raw, origin, stub_raw))
+            "[arc] Error: no row covers seat=%s report=%s origin=%s stub=%s absorbed=%s\n"
+            % (seat, report_raw, origin, stub_raw, absorbed_raw))
         sys.exit(1)
     if JSON_MODE:
         print(json.dumps({"row": row, "status": status}))
     else:
-        print("row %s → %s" % (row, status if status else "merged into its target"))
+        unmigrated = {"merge": "merged into its target",
+                      "absorbed": "excluded as an absorbed pointer"}
+        print("row %s → %s" % (row, status if status else unmigrated[row]))
     sys.exit(0)
 
 
@@ -424,6 +457,9 @@ def discover():
                 "report": report if os.path.isfile(report) else None,
                 "project": (meta.get("project") or None), "item": name, "origin": origin,
             })
+
+    for record in records:
+        record["absorbed_into"] = absorbed_target(record["ledger"])
 
     return records, problems
 
@@ -523,6 +559,10 @@ def build_plan():
     notes = []
     derived = {}
     for record in records:
+        # An absorbed pointer contributes nothing to any record, so nothing
+        # about it needs deriving.
+        if record["absorbed_into"] is not None:
+            continue
         fields, record_notes, failure = derive(record)
         # A stub's own derivations feed the merge, not a record of its own, so
         # notes about them would name an arc nobody will find on disk.
@@ -534,13 +574,13 @@ def build_plan():
         derived[id(record)] = fields
 
     rows = []
+    exclusions = []
+    excluded_ids = set()
     for record in records:
-        fields = derived.get(id(record))
-        if fields is None:
-            continue
         is_stub = record["forwards_to"] is not None
         row, status = classify(record["seat"], record["report"] is not None,
-                               record["origin"], is_stub)
+                               record["origin"], is_stub,
+                               record["absorbed_into"] is not None)
         if row is None:
             problems.append(
                 "%s matches no row of the status table (seat %s, report %s, "
@@ -548,9 +588,25 @@ def build_plan():
                 % (rel(record["ledger"]), record["seat"],
                    "present" if record["report"] else "absent", record["origin"]))
             continue
+        if row == "absorbed":
+            excluded_ids.add(id(record))
+            exclusions.append({"ledger": record["ledger"],
+                               "absorbed_into": record["absorbed_into"]})
+            continue
         if row == "merge":
             continue
+        fields = derived.get(id(record))
+        if fields is None:
+            continue
         rows.append({"record": record, "fields": fields, "row": row, "status": status})
+
+    for record in records:
+        target = record["forwards_to"]
+        if target is not None and id(target) in excluded_ids:
+            problems.append(
+                "%s forwards to %s, which is excluded as an absorbed pointer — "
+                "untangle it before migrating"
+                % (rel(record["ledger"]), rel(target["ledger"])))
 
     for row in rows:
         record = row["record"]
@@ -605,7 +661,8 @@ def build_plan():
                    ", ".join(rel(r["record"]["ledger"]) for r in colliding)))
 
     rows.sort(key=lambda r: r["fields"]["slug"])
-    return rows, problems, notes
+    exclusions.sort(key=lambda e: e["ledger"])
+    return rows, exclusions, problems, notes
 
 
 # --- manifest --------------------------------------------------------------
@@ -613,7 +670,9 @@ def build_plan():
 def load_manifest():
     data = read_json(MANIFEST)
     if not isinstance(data, dict) or not isinstance(data.get("rows"), list):
-        return {"schema_version": 1, "rows": []}
+        return {"schema_version": 1, "rows": [], "exclusions": []}
+    if not isinstance(data.get("exclusions"), list):
+        data["exclusions"] = []
     return data
 
 
@@ -691,10 +750,62 @@ def stage_record(row, staging):
             for name in row["documents"]}, None
 
 
-def commit(rows):
+def retire_and_record(exclusions, manifest, failures):
+    """Honor each exclusion: retire the record an earlier run migrated from the
+    excluded source, then record the exclusion so it stays checkable.
+
+    Retirement removes only what this migration itself wrote — a destination
+    that has diverged from its manifest row is named and refused, exactly as an
+    overwrite would be."""
+    excluded, retired = [], []
+    for exclusion in exclusions:
+        source_rel = rel(exclusion["ledger"])
+        blocked = False
+        for row in [r for r in manifest["rows"]
+                    if any(s.get("path") == source_rel for s in r.get("sources", []))]:
+            if [s.get("path") for s in row.get("sources", [])] != [source_rel]:
+                failures.append(
+                    "%s is excluded as an absorbed pointer, but the migrated record "
+                    "'%s' carries other sources too — untangle it before retiring"
+                    % (source_rel, row.get("slug")))
+                blocked = True
+                continue
+            destination = os.path.join(KDIR, row.get("destination", ""))
+            if os.path.isdir(destination):
+                if (not artifacts_match(destination, row.get("artifacts") or {})
+                        or not identity_matches(destination, row.get("identity") or {})):
+                    failures.append(
+                        "%s is excluded as an absorbed pointer, but %s has changed "
+                        "since it was migrated — refusing to retire it"
+                        % (source_rel, row.get("destination")))
+                    blocked = True
+                    continue
+                shutil.rmtree(destination)
+            manifest["rows"] = [r for r in manifest["rows"] if r is not row]
+            retired.append(row.get("slug"))
+            save_manifest(manifest)
+        if blocked:
+            continue
+        recorded = next((e for e in manifest["exclusions"]
+                         if (e.get("source") or {}).get("path") == source_rel), None)
+        if recorded is None:
+            manifest["exclusions"].append({
+                "source": {"path": source_rel,
+                           "sha256": sha256_file(exclusion["ledger"])},
+                "absorbed_into": exclusion["absorbed_into"],
+                "classification_row": "absorbed",
+            })
+            manifest["exclusions"].sort(key=lambda e: e["source"]["path"])
+            save_manifest(manifest)
+        excluded.append(source_rel)
+    return excluded, retired
+
+
+def commit(rows, exclusions):
     os.makedirs(ARCS, exist_ok=True)
     manifest = load_manifest()
     migrated, skipped, failures = [], [], []
+    excluded, retired = retire_and_record(exclusions, manifest, failures)
 
     for row in rows:
         slug = row["fields"]["slug"]
@@ -766,15 +877,15 @@ def commit(rows):
         save_manifest(manifest)
         migrated.append(slug)
 
-    return migrated, skipped, failures
+    return migrated, skipped, excluded, retired, failures
 
 
 # --- verify ----------------------------------------------------------------
 
 def verify():
     if not os.path.isfile(MANIFEST):
-        return None, None, ["no migration manifest at %s — nothing has been migrated yet"
-                            % rel(MANIFEST)]
+        return None, None, None, ["no migration manifest at %s — nothing has been "
+                                  "migrated yet" % rel(MANIFEST)]
     manifest = load_manifest()
     drift, failures = [], []
 
@@ -808,7 +919,16 @@ def verify():
                 drift.append("%s: the legacy source %s has changed since migration"
                              % (slug, source.get("path")))
 
-    return len(manifest["rows"]), drift, failures
+    for excl in manifest["exclusions"]:
+        source = excl.get("source") or {}
+        path = os.path.join(KDIR, source.get("path", ""))
+        if not os.path.isfile(path):
+            drift.append("the excluded absorbed pointer %s is gone" % source.get("path"))
+        elif sha256_file(path) != source.get("sha256"):
+            drift.append("the excluded absorbed pointer %s has changed since it was "
+                         "recorded" % source.get("path"))
+
+    return len(manifest["rows"]), len(manifest["exclusions"]), drift, failures
 
 
 # --- reporting -------------------------------------------------------------
@@ -832,9 +952,10 @@ def plan_json(rows):
 
 
 if MODE == "verify":
-    checked, drift, failures = verify()
+    checked, exclusions_checked, drift, failures = verify()
     if JSON_MODE:
         print(json.dumps({"mode": "verify", "checked": checked or 0,
+                          "exclusions": exclusions_checked or 0,
                           "drift": drift or [], "failures": failures}, indent=2))
     else:
         if failures:
@@ -844,17 +965,24 @@ if MODE == "verify":
             for line in drift:
                 sys.stderr.write("[arc] Drift: %s\n" % line)
         if checked is not None:
-            out("[arc] Verified %d migrated arc%s." % (checked, "" if checked == 1 else "s"))
+            message = "[arc] Verified %d migrated arc%s" % (checked, "" if checked == 1 else "s")
+            if exclusions_checked:
+                message += " and %d recorded exclusion%s" % (
+                    exclusions_checked, "" if exclusions_checked == 1 else "s")
+            out(message + ".")
     if failures:
         sys.exit(1)
     sys.exit(3 if drift else 0)
 
 
-rows, problems, notes = build_plan()
+rows, exclusions, problems, notes = build_plan()
 
 if MODE == "preflight":
     if JSON_MODE:
         print(json.dumps({"mode": "preflight", "records": plan_json(rows),
+                          "exclusions": [{"source": rel(e["ledger"]),
+                                          "absorbed_into": e["absorbed_into"]}
+                                         for e in exclusions],
                           "notes": notes, "refusals": problems}, indent=2))
     else:
         out("[arc] %d arc%s to migrate." % (len(rows), "" if len(rows) == 1 else "s"))
@@ -862,6 +990,12 @@ if MODE == "preflight":
             out("  %-50s %-8s row %s  %s"
                 % (row["fields"]["slug"], row["status"], row["row"],
                    rel(row["record"]["ledger"])))
+        if exclusions:
+            out("")
+            out("Excluded as absorbed pointers:")
+            for exclusion in exclusions:
+                out("  %s — absorbed into %s"
+                    % (rel(exclusion["ledger"]), exclusion["absorbed_into"]))
         if notes:
             out("")
             out("Worth knowing:")
@@ -874,6 +1008,7 @@ if MODE == "preflight":
 if problems:
     if JSON_MODE:
         print(json.dumps({"mode": "commit", "migrated": [], "skipped": [],
+                          "excluded": [], "retired": [],
                           "failures": problems}, indent=2))
     else:
         for line in problems:
@@ -881,13 +1016,19 @@ if problems:
         sys.stderr.write("[arc] Error: nothing was written — resolve the above and re-run.\n")
     sys.exit(1)
 
-migrated, skipped, failures = commit(rows)
+migrated, skipped, excluded, retired, failures = commit(rows, exclusions)
 if JSON_MODE:
     print(json.dumps({"mode": "commit", "migrated": migrated, "skipped": skipped,
+                      "excluded": excluded, "retired": retired,
                       "failures": failures}, indent=2))
 else:
     out("[arc] Migrated %d arc%s; %d already in place."
         % (len(migrated), "" if len(migrated) == 1 else "s", len(skipped)))
+    if excluded:
+        out("[arc] %d absorbed pointer%s excluded from the store."
+            % (len(excluded), "" if len(excluded) == 1 else "s"))
+    if retired:
+        out("[arc] Retired: %s." % ", ".join(retired))
     for line in failures:
         sys.stderr.write("[arc] Error: %s\n" % line)
 sys.exit(1 if failures else 0)
