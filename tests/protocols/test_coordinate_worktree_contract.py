@@ -47,7 +47,7 @@ def test_mutating_subagents_require_a_seat_lease_and_never_allocate():
     for token in (
         "allocation authority never",
         "dispatching seat",
-        "seat's durable lease",
+        "durable owner backs the writer",
         "item-backed worker session",
         "Unleased mutating subagents are prohibited",
         "Read-only streams need no worktree",

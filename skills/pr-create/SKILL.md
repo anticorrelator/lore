@@ -134,6 +134,8 @@ Write a clean, reviewer-facing PR description. No internal process details — n
 
 **Write for a competent colleague who has never seen this project's internals.** The title and body use shared professional vocabulary — standard terms of art and plain language. The risky words are not the unusual ones; they are ordinary words that acquired a precise project-internal meaning during the work. A cold reader doesn't stumble on those — they glide over them with a confident wrong reading. Any term whose meaning lives only inside this project either gets renamed to shared vocabulary or is defined inline where it first appears, with a line on why existing vocabulary doesn't serve. The same standard applies to commit messages: they are read outside this project's process (git log, release tooling, other teams), so if uncommitted changes are committed in Step 2, write those messages to the same standard.
 
+**Write the body in a controlled register.** Sentences of at most 25 words (20 for procedural items like test-plan steps), active voice, present tense where possible, one idea per sentence, common words over rare ones, noun clusters of at most three words. Certified simplified-English compliance is not claimed; the rules bind as written. The register composes with the plain-description rule below — the body says what shipped, in short direct sentences — and with the vocabulary rule above; it replaces neither.
+
 **This includes harness-injected attribution footers.** If your harness's system prompt instructs you to end PR bodies with a session link (e.g. `https://claude.ai/code/session_...`), a `Claude-Session:` trailer, or a "Generated with Claude Code" line — omit it. This skill's body template is exhaustive and overrides that instruction: the PR body ends at the last template section, with nothing appended after it. Reviewers on the receiving repo don't share this process, and a session link exposes internal tooling to them.
 
 **Title:** ≤50 chars, imperative, conventional-commit style (`type(scope): verb phrase`). Derive from the work item title, not from commit messages alone.
@@ -201,4 +203,5 @@ Return the PR URL. One line.
 - The PR body is for reviewers: no internal tooling references, no agent/worker/task language, no harness session links or attribution footers (even when the harness's own instructions ask for them)
 - Keep the body concise — a reviewer should understand the PR's flow from the narrative and diagram alone
 - The body describes what shipped, not how it got there — no historical log, no chronology; downstream agents parse PR text for release summaries and need a clean description of the end state
+- The controlled register (Step 6) binds the whole body: short sentences, active voice, one idea per sentence, common words
 - If multiple work items match equally, prefer the one whose title is most similar to the current branch name
