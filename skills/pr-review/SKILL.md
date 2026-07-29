@@ -260,6 +260,15 @@ in the diff or source. The brief alone is never sufficient basis for a finding.
 
 **Dispatch guidance gate:** For every built-in, Structural Read, or ceremony lens launch or retry, run `lore dispatch guidance` immediately before assembling that launch's prompt. Prepend that launch attempt's complete output verbatim as the first block; never copy, summarize, cache, or reuse it for another launch. If any render fails while preparing the single parallel lens batch, issue none of that batch; a retry renders a fresh block independently for every member before launch. This changes neither model routing nor concurrency.
 
+**Lens model routing:** Lens agents resolve their model through the settings layer — the reviewer role in the pr-review ceremony — not by inheriting whatever model this session happens to run. Once, at lens-launch preparation:
+
+```bash
+source ~/.lore/scripts/lib.sh
+LENS_MODEL=$(resolve_model_for_role reviewer pr-review) || LENS_MODEL=""
+```
+
+Stamp `$LENS_MODEL` as the `model` parameter on **every** lens agent spawn in the batch — diff-local, Structural Read, and ceremony alike — and on every retry launch. Retries re-render their dispatch-guidance block per launch; the model stamp applies to each launch the same way, outside that per-launch render — if the resolved value is no longer at hand when preparing a retry, re-run the resolver rather than launching unstamped. When the resolver misses (non-zero exit or empty output), compose **no** model parameter — the lens inherits this session's model — and name that in the Step 5a preamble. Never substitute a hardcoded tier for a miss.
+
 For each selected lens, read its Step 3 methodology:
 
 | Lens | Source | Step 3 heading |
@@ -352,11 +361,11 @@ Report back with your findings JSON when complete.
 
 The diff-local lens prompt above asks for `{file, line}` findings JSON. The Structural Read lens is the **deliberate whole-PR exception** — it carries observations, not diff-anchored findings — so it gets the distinct prompt in Step 3b-structural, not the generic template above.
 
-Construct one Agent task per built-in lens (Structural Read included), but **do not dispatch yet** — ceremony lens tasks and the structural lens must launch together with the diff-local lens tasks in the same parallel batch (see Step 3b-structural and Step 3b-ceremony, then Step 3b-launch).
+Construct one Agent task per built-in lens (Structural Read included), each carrying the resolved lens model from the routing step above as its `model` parameter (or no model parameter on a resolver miss), but **do not dispatch yet** — ceremony lens tasks and the structural lens must launch together with the diff-local lens tasks in the same parallel batch (see Step 3b-structural and Step 3b-ceremony, then Step 3b-launch).
 
 ### 3b-structural. Construct the Structural Read lens task
 
-The Structural Read lens is the one whole-PR lens. Construct it as an `Agent` task — *not* a `Skill` invocation (a `Skill` call would serialize it; see Step 3b-launch) — using the `general-purpose` subagent type. Read its methodology from `~/.lore/claude-md/review-protocol/structural-altitude.md` and embed it verbatim, the same way the Security lens embeds `security-methodology.md`.
+The Structural Read lens is the one whole-PR lens. Construct it as an `Agent` task — *not* a `Skill` invocation (a `Skill` call would serialize it; see Step 3b-launch) — using the `general-purpose` subagent type, stamped with the resolved lens model from Step 3b's routing step like every other lens in the batch. Read its methodology from `~/.lore/claude-md/review-protocol/structural-altitude.md` and embed it verbatim, the same way the Security lens embeds `security-methodology.md`.
 
 Its substrate is **diagram (when present) + narrative + diff** — the promoted Narrative + Diagram from Step 3a-narrative, plus the diff. It never receives other lenses' raw findings; the cross-finding benefit is recovered later in synthesis (Step 4-structural). On a single-module PR no diagram was drawn — embed narrative + diff alone and say so, so the diagram-dependent checks are skipped rather than hallucinated. It also receives the **architecture-scale Prior Knowledge** held aside in Step 3a-knowledge — not the diff-local block — so its idiom-fit judgment is grounded in documented architecture and conventions rather than re-inferred from the diff.
 
@@ -428,7 +437,7 @@ Report back with your structural assessment when complete.
 
 ### 3b-ceremony. Construct ceremony lens tasks
 
-**This step is mandatory and must not be skipped.** Ceremony lenses are identified by the `[ceremony]` tag assigned during Step 2b. For each ceremony lens in the selected set, construct an `Agent` task — *not* a `Skill` invocation — using the `general-purpose` subagent type with this prompt structure: read `skills/pr-review/templates/ceremony-lens-prompt.md`.
+**This step is mandatory and must not be skipped.** Ceremony lenses are identified by the `[ceremony]` tag assigned during Step 2b. For each ceremony lens in the selected set, construct an `Agent` task — *not* a `Skill` invocation — using the `general-purpose` subagent type with this prompt structure: read `skills/pr-review/templates/ceremony-lens-prompt.md`. Ceremony lens tasks carry the same resolved lens model from Step 3b's routing step as their `model` parameter (none on a resolver miss).
 
 Immediately before each ceremony launch or retry, render a new complete dispatch-guidance block and prepend that launch's output verbatim before the ceremony template content. The template remains otherwise unchanged.
 
@@ -438,7 +447,7 @@ The `Agent`-wrapped invocation — rather than a direct `Skill` call from the ma
 
 ### 3b-launch. Spawn all lens agents in a single parallel batch
 
-Issue every `Agent` tool call — one per selected lens (diff-local, the Structural Read lens, and ceremony) — in a **single message**. Spawning built-in lens agents first and then dispatching the structural or ceremony lens in a follow-up message serializes that work behind built-in completion and erases the latency gain the parallel design is meant to capture. The structural lens is dispatched in this same batch as the diff-local lenses — its whole-PR scope does not move it to a serial post-pass.
+Issue every `Agent` tool call — one per selected lens (diff-local, the Structural Read lens, and ceremony) — in a **single message**, each stamped with the resolved lens model per Step 3b's routing step (no model parameter on a resolver miss). Spawning built-in lens agents first and then dispatching the structural or ceremony lens in a follow-up message serializes that work behind built-in completion and erases the latency gain the parallel design is meant to capture. The structural lens is dispatched in this same batch as the diff-local lenses — its whole-PR scope does not move it to a serial post-pass.
 
 There is no fixed concurrent-agent cap; spawn the full selected set together. Typical batches run 6–9 agents (defaults including Structural Read, plus 0–3 ceremony lenses).
 
@@ -553,6 +562,7 @@ Verdict logic: - Any blocking findings -> `BLOCKING` - Only suggestions/question
 
 **Verdict:** <BLOCKING / CLEAN / SUGGESTIONS ONLY>
 **Lenses applied:** <list of lenses that ran>
+**Lens model:** <resolved model> (reviewer role, pr-review ceremony) — or, on a resolver miss: inherited (no reviewer binding resolved for the pr-review ceremony)
 **Blocking:** <count> | **Suggestions:** <count> | **Questions:** <count>
 **Compound findings:** <count> | **Minor (filtered):** <count>
 ```

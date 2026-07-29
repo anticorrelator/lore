@@ -129,7 +129,7 @@
 
     "ceremony_id": {
       "type": "string",
-      "enum": ["spec", "implement"],
+      "enum": ["spec", "implement", "pr-review"],
       "description": "Closed ceremony registry. MUST stay in lockstep with adapters/ceremonies.json `ceremonies[].id` — drift is caught by tests/frameworks/settings_schema_keyset_parity.bats. Adding a ceremony requires updating ceremonies.json AND this enum AND $defs/ceremony_roles properties AND scripts/lib.sh resolve_model_for_role AND tui/internal/config/framework.go."
     },
 
@@ -139,7 +139,8 @@
       "description": "Per-harness ceremony-scoped role -> model bindings. Outer keyset is closed against $defs/ceremony_id (lockstep with adapters/ceremonies.json). Each value is a roles_map_overlay resolved ahead of the harness role overlay when resolve_model_for_role is called with a ceremony argument; without a ceremony argument this key is not consulted. Absent ceremony key or absent role inside it falls through to the role overlay; empty-string values are rejected by role_value the same way the role overlay rejects them.",
       "properties": {
         "spec":      {"$ref": "#/$defs/roles_map_overlay"},
-        "implement": {"$ref": "#/$defs/roles_map_overlay"}
+        "implement": {"$ref": "#/$defs/roles_map_overlay"},
+        "pr-review": {"$ref": "#/$defs/roles_map_overlay"}
       }
     },
 

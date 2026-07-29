@@ -17,6 +17,21 @@
         "skills/implement/templates/worker-spawn.md",
         "scripts/batch-implement.sh"
       ]
+    },
+    {
+      "id": "pr-review",
+      "description": "The PR-review lens fan-out: /pr-review's lens agent batch and any agent dispatch of a standalone pr-* lens skill. Lens launches resolve the reviewer role in this ceremony at launch preparation and stamp the result as the agent's model parameter; a resolver miss composes no model parameter (the lens inherits the invoking session's model).",
+      "call_sites": [
+        "skills/pr-review/SKILL.md",
+        "skills/pr-correctness/SKILL.md",
+        "skills/pr-security/SKILL.md",
+        "skills/pr-regressions/SKILL.md",
+        "skills/pr-test-quality/SKILL.md",
+        "skills/pr-interface-clarity/SKILL.md",
+        "skills/pr-blast-radius/SKILL.md",
+        "skills/pr-thematic/SKILL.md",
+        "skills/pr-user-impact/SKILL.md"
+      ]
     }
   ]
 }

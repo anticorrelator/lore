@@ -13,6 +13,17 @@ You are running the **security lens** — a focused review that evaluates PR cha
 
 Findings are structured JSON written to a shared work item. Posting to GitHub is a separate step via `post-review.sh`.
 
+## Lens Model Routing
+
+This lens resolves its model through the settings layer — the reviewer role in the pr-review ceremony — rather than inheriting the invoking session's model. When dispatching this skill (or this lens's analysis) as a subagent, resolve the binding once at launch preparation and stamp the result as the agent's `model` parameter, on the first launch and on every retry:
+
+```bash
+source ~/.lore/scripts/lib.sh
+resolve_model_for_role reviewer pr-review
+```
+
+A resolver miss (non-zero exit or empty output) composes no model parameter — the agent inherits the invoking session's model — and is named alongside the presented findings. Never substitute a hardcoded tier for a miss. When this skill runs inline with no subagent, the analysis runs on the current session's model; `/pr-review`'s lens batch applies this same routing at its Step 3b.
+
 ## Step 1: Identify PR
 
 Argument provided: `$ARGUMENTS`

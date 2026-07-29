@@ -528,7 +528,8 @@ instance = {
     "harnesses": {
         "claude-code": {"args": [], "ceremony_roles": {
             "spec": {"researcher": "haiku", "lead": "fable"},
-            "implement": {"lead": "opus"}
+            "implement": {"lead": "opus"},
+            "pr-review": {"reviewer": "opus"}
         }},
         "opencode": {"args": []},
         "codex": {"args": []}
