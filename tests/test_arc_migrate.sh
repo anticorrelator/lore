@@ -6,8 +6,9 @@
 #     store before and after the run and asserting byte-identity, not by
 #     reading the code and concluding it looks read-only;
 #   * the status classifier is total — every combination of source seat, report
-#     presence, originating-item status, and forwarding-stub relationship either
-#     lands on exactly one row or is refused by name. There is no fallback row.
+#     presence, originating-item status, forwarding-stub relationship, and
+#     absorbed-pointer signature either lands on exactly one row or is refused
+#     by name. There is no fallback row.
 #
 # The rest covers the transaction: a clean run, an identical re-run, a resumed
 # interruption, a divergent destination, and a manifest that survives a change
@@ -88,12 +89,27 @@ print("<no row>")
 PYEOF
 }
 
+manifest_exclusion() {
+  python3 - "$1" "$2" "$3" <<'PYEOF'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+for row in data.get("exclusions", []):
+    if (row.get("source") or {}).get("path") == sys.argv[2]:
+        value = row.get(sys.argv[3], "<absent>")
+        print(json.dumps(value) if isinstance(value, (list, dict)) else value)
+        sys.exit(0)
+print("<no exclusion>")
+PYEOF
+}
+
 # A store covering every reachable row of the status table at once.
 new_store() {
   local kdir="$TEST_DIR/store.$RANDOM.$RANDOM"
   mkdir -p "$kdir/_work/_projects/alpha/_ledgers" "$kdir/_work/_projects/beta" \
            "$kdir/_work/live" "$kdir/_work/done" \
-           "$kdir/_work/_archive/gone" "$kdir/_work/_archive/stub"
+           "$kdir/_work/_archive/gone" "$kdir/_work/_archive/stub" \
+           "$kdir/_work/_archive/eaten"
 
   # Row 6 — project home carrying a report.
   printf '# Coordination Ledger — Alpha Home\n\n**Intent anchor:** alpha intent\n\n## Brief\ncites [[work:live]]\n' \
@@ -135,6 +151,12 @@ new_store() {
   printf '# Coordination Ledger — Gone Work\n' > "$kdir/_work/_archive/gone/coordination.md"
   printf '{"slug":"gone","status":"archived"}\n' > "$kdir/_work/_archive/gone/_meta.json"
 
+  # An absorbed pointer — a tombstone whose whole body points at the item that
+  # absorbed the work. Not an arc: excluded, and the exclusion recorded.
+  printf '# ABSORBED — eaten work\n\n2026-01-05: Absorbed into **beta-filed** (see its `coordination.md`).\n' \
+    > "$kdir/_work/_archive/eaten/coordination.md"
+  printf '{"slug":"eaten","status":"archived"}\n' > "$kdir/_work/_archive/eaten/_meta.json"
+
   # A forwarding stub pointing at the filed ledger it was moved to. The path it
   # names is stale, as the real one is — resolution falls back to the filename.
   printf '# Coordination Ledger — MOVED\n\n**→ `_work/_projects/alpha/alpha-2026-01-02-beta-arc.md`**\n' \
@@ -159,6 +181,9 @@ assert_eq "the store is byte-identical after preflight" "$BEFORE" "$AFTER"
 assert_no_file "preflight creates no arcs directory" "$KDIR/_work/_arcs"
 assert_contains "preflight reports the row count it discovered" "$OUT" "8 arcs to migrate"
 assert_contains "preflight names each record's classification row" "$OUT" "row 4"
+assert_contains "preflight names the excluded absorbed pointer" "$OUT" \
+  "_work/_archive/eaten/coordination.md"
+assert_contains "with its absorbed-into target" "$OUT" "absorbed into beta-filed"
 
 echo "== the row set is discovered, not enumerated =="
 NEW=$(new_store)
@@ -173,6 +198,7 @@ LEGACY_BEFORE=$(snapshot "$KDIR")
 OUT=$(bash "$MIGRATE" --kdir "$KDIR" --commit); RC=$?
 assert_eq "commit exits clean" "0" "$RC"
 assert_contains "commit reports what it migrated" "$OUT" "Migrated 8 arcs"
+assert_contains "and what it excluded" "$OUT" "1 absorbed pointer excluded"
 
 ARCS="$KDIR/_work/_arcs"
 assert_file "the project-home arc landed" "$ARCS/alpha-home/_meta.json"
@@ -249,6 +275,17 @@ assert_file "an -arc- mid-string is left alone" "$ARCS/delta-arc-mid-string/coor
 assert_eq "a stem-named arc gets a title derived from its name" "Gamma arc close report" \
   "$(meta_field "$ARCS/gamma-arc-close-report/_meta.json" title)"
 
+echo "== an absorbed pointer is excluded, and checkably so =="
+assert_no_file "it becomes no arc of its own" "$ARCS/absorbed-eaten-work"
+assert_eq "the exclusion records the absorbed-into target" "beta-filed" \
+  "$(manifest_exclusion "$ARCS/_migration-manifest.json" _work/_archive/eaten/coordination.md absorbed_into)"
+assert_eq "and its classification row" "absorbed" \
+  "$(manifest_exclusion "$ARCS/_migration-manifest.json" _work/_archive/eaten/coordination.md classification_row)"
+EXPECTED_SHA=$(shasum -a 256 "$KDIR/_work/_archive/eaten/coordination.md" | cut -d' ' -f1)
+assert_contains "and the source content it excluded" \
+  "$(manifest_exclusion "$ARCS/_migration-manifest.json" _work/_archive/eaten/coordination.md source)" \
+  "$EXPECTED_SHA"
+
 echo "== the forwarding stub merges into its target =="
 assert_no_file "the stub does not become an arc of its own" "$ARCS/moved"
 assert_file "the target's ledger is the canonical one" "$ARCS/beta-filed/coordination.md"
@@ -276,6 +313,7 @@ echo "== --verify against the manifest =="
 OUT=$(bash "$MIGRATE" --kdir "$KDIR" --verify 2>&1); RC=$?
 assert_eq "a clean migration verifies" "0" "$RC"
 assert_contains "and reports what it checked" "$OUT" "Verified 8 migrated arcs"
+assert_contains "exclusions included" "$OUT" "1 recorded exclusion"
 
 bash "$CLOSE" beta-home --kdir "$KDIR" >/dev/null 2>&1
 OUT=$(bash "$MIGRATE" --kdir "$KDIR" --verify 2>&1); RC=$?
@@ -287,6 +325,12 @@ printf 'a later append\n' >> "$KDIR/_work/_projects/beta/coordination.md"
 OUT=$(bash "$MIGRATE" --kdir "$KDIR" --verify 2>&1); RC=$?
 assert_eq "a changed legacy source is drift, not failure" "3" "$RC"
 assert_contains "named by source path" "$OUT" "_work/_projects/beta/coordination.md has changed"
+
+printf 'a later append\n' >> "$KDIR/_work/_archive/eaten/coordination.md"
+OUT=$(bash "$MIGRATE" --kdir "$KDIR" --verify 2>&1); RC=$?
+assert_eq "a changed excluded source is drift too" "3" "$RC"
+assert_contains "named as the exclusion it is" "$OUT" \
+  "excluded absorbed pointer _work/_archive/eaten/coordination.md has changed"
 
 printf 'tampered\n' >> "$ARCS/gone-work/coordination.md"
 OUT=$(bash "$MIGRATE" --kdir "$KDIR" --verify 2>&1); RC=$?
@@ -373,6 +417,57 @@ assert_eq "a destination with no manifest row is refused too" "1" "$RC"
 assert_contains "since the migration cannot claim it wrote it" "$OUT" \
   "already exists and this migration did not write it"
 
+echo "== an absorbed pointer retires the record an earlier run migrated =="
+RETIRE=$(new_store)
+# Yesterday's classifier saw an ordinary archived ledger and migrated it; today
+# the same source reads as an absorbed pointer. The re-run must retire the
+# record itself — by machine, not by hand.
+printf '# Coordination Ledger — Eaten Work\n' > "$RETIRE/_work/_archive/eaten/coordination.md"
+bash "$MIGRATE" --kdir "$RETIRE" --commit >/dev/null 2>&1
+assert_file "the record was migrated while its source still read as an arc" \
+  "$RETIRE/_work/_arcs/eaten-work/_meta.json"
+printf '# ABSORBED — eaten work\n\n2026-01-05: Absorbed into **beta-filed** (see its `coordination.md`).\n' \
+  > "$RETIRE/_work/_archive/eaten/coordination.md"
+OUT=$(bash "$MIGRATE" --kdir "$RETIRE" --commit); RC=$?
+assert_eq "the retiring re-run exits clean" "0" "$RC"
+assert_no_file "the record is retired from the store" "$RETIRE/_work/_arcs/eaten-work"
+assert_eq "its manifest row is gone" "<no row>" \
+  "$(manifest_field "$RETIRE/_work/_arcs/_migration-manifest.json" eaten-work slug)"
+assert_eq "and the exclusion is recorded in its place" "beta-filed" \
+  "$(manifest_exclusion "$RETIRE/_work/_arcs/_migration-manifest.json" _work/_archive/eaten/coordination.md absorbed_into)"
+assert_contains "the run names what it retired" "$OUT" "Retired: eaten-work"
+RC=0; bash "$MIGRATE" --kdir "$RETIRE" --verify >/dev/null 2>&1 || RC=$?
+assert_eq "the store verifies after retirement" "0" "$RC"
+BEFORE=$(snapshot "$RETIRE")
+bash "$MIGRATE" --kdir "$RETIRE" --commit >/dev/null 2>&1
+AFTER=$(snapshot "$RETIRE")
+assert_eq "and a further re-run writes nothing" "$BEFORE" "$AFTER"
+
+echo "== a diverged record blocks its own retirement =="
+BLOCKED=$(new_store)
+printf '# Coordination Ledger — Eaten Work\n' > "$BLOCKED/_work/_archive/eaten/coordination.md"
+bash "$MIGRATE" --kdir "$BLOCKED" --commit >/dev/null 2>&1
+printf 'edited after migration\n' >> "$BLOCKED/_work/_arcs/eaten-work/coordination.md"
+printf '# ABSORBED — eaten work\n\n2026-01-05: Absorbed into **beta-filed** (see its `coordination.md`).\n' \
+  > "$BLOCKED/_work/_archive/eaten/coordination.md"
+OUT=$(bash "$MIGRATE" --kdir "$BLOCKED" --commit 2>&1); RC=$?
+assert_eq "the run refuses" "1" "$RC"
+assert_contains "naming the record it will not retire" "$OUT" "refusing to retire"
+assert_file "the record is left in place" "$BLOCKED/_work/_arcs/eaten-work/coordination.md"
+assert_eq "and no exclusion is recorded for it" "<no exclusion>" \
+  "$(manifest_exclusion "$BLOCKED/_work/_arcs/_migration-manifest.json" _work/_archive/eaten/coordination.md absorbed_into)"
+
+echo "== a stub forwarding to an absorbed pointer is refused =="
+TANGLED=$(new_store)
+mkdir -p "$TANGLED/_work/_archive/stub2"
+printf '# Coordination Ledger — MOVED TOO\n\n**→ `_work/_archive/eaten/coordination.md`**\n' \
+  > "$TANGLED/_work/_archive/stub2/coordination.md"
+printf '{"slug":"stub2","status":"archived"}\n' > "$TANGLED/_work/_archive/stub2/_meta.json"
+OUT=$(bash "$MIGRATE" --kdir "$TANGLED" --commit 2>&1); RC=$?
+assert_eq "the run refuses rather than losing the stub" "1" "$RC"
+assert_contains "naming both ends" "$OUT" \
+  "which is excluded as an absorbed pointer"
+
 echo "== preflight refuses what it cannot name or classify =="
 BAD=$(mktemp -d "$TEST_DIR/bad.XXXXXX")
 mkdir -p "$BAD/_work/_projects/alpha/_ledgers" "$BAD/_work/limbo"
@@ -411,11 +506,14 @@ for seat in project-home ledgers active-item archived-item; do
   for report in yes no; do
     for origin in active archived none; do
       for stub in yes no; do
+       for absorbed in yes no; do
         COMBOS=$((COMBOS + 1))
-        OUT=$(bash "$MIGRATE" --kdir "$TEST_DIR" --classify "$seat" "$report" "$origin" "$stub" 2>&1)
+        OUT=$(bash "$MIGRATE" --kdir "$TEST_DIR" --classify "$seat" "$report" "$origin" "$stub" "$absorbed" 2>&1)
         RC=$?
         # The table, restated independently of the implementation.
-        if [[ "$stub" == "yes" ]]; then
+        if [[ "$absorbed" == "yes" ]]; then
+          want="absorbed"
+        elif [[ "$stub" == "yes" ]]; then
           want="merge"
         elif [[ "$seat" == "ledgers" ]]; then
           want="row 2 → closed"
@@ -436,7 +534,13 @@ for seat in project-home ledgers active-item archived-item; do
           REFUSED=$((REFUSED + 1))
           if [[ $RC -ne 1 || "$OUT" != *"no row covers"* ]]; then
             MISROUTED=$((MISROUTED + 1))
-            echo "    unexpected acceptance: $seat report=$report origin=$origin stub=$stub -> $OUT"
+            echo "    unexpected acceptance: $seat report=$report origin=$origin stub=$stub absorbed=$absorbed -> $OUT"
+          fi
+        elif [[ "$want" == "absorbed" ]]; then
+          ACCEPTED=$((ACCEPTED + 1))
+          if [[ $RC -ne 0 || "$OUT" != *"excluded as an absorbed pointer"* ]]; then
+            MISROUTED=$((MISROUTED + 1))
+            echo "    absorbed pointer not excluded: $seat report=$report origin=$origin stub=$stub -> $OUT"
           fi
         elif [[ "$want" == "merge" ]]; then
           ACCEPTED=$((ACCEPTED + 1))
@@ -448,16 +552,17 @@ for seat in project-home ledgers active-item archived-item; do
           ACCEPTED=$((ACCEPTED + 1))
           if [[ $RC -ne 0 || "$OUT" != "$want" ]]; then
             MISROUTED=$((MISROUTED + 1))
-            echo "    wrong row: $seat report=$report origin=$origin stub=$stub -> '$OUT', wanted '$want'"
+            echo "    wrong row: $seat report=$report origin=$origin stub=$stub absorbed=$absorbed -> '$OUT', wanted '$want'"
           fi
         fi
+       done
       done
     done
   done
 done
-assert_eq "every combination of the four inputs is exercised" "48" "$COMBOS"
+assert_eq "every combination of the five inputs is exercised" "96" "$COMBOS"
 assert_eq "each lands on exactly the row the table gives it" "0" "$MISROUTED"
-assert_eq "the reachable combinations classify" "40" "$ACCEPTED"
+assert_eq "the reachable combinations classify" "88" "$ACCEPTED"
 assert_eq "the unreachable ones are refused, not defaulted" "8" "$REFUSED"
 
 echo "== the grammar =="
@@ -466,6 +571,9 @@ assert_eq "--commit and --verify together are refused" "1" "$RC"
 assert_contains "with a reason" "$OUT" "ask for different runs"
 OUT=$(bash "$MIGRATE" --kdir "$TEST_DIR" --nonsense 2>&1); RC=$?
 assert_eq "an unknown flag is refused" "1" "$RC"
+OUT=$(bash "$MIGRATE" --kdir "$TEST_DIR" --classify ledgers no none no 2>&1); RC=$?
+assert_eq "--classify with four values is refused" "1" "$RC"
+assert_contains "and says it takes five" "$OUT" "takes five values"
 OUT=$(bash "$MIGRATE" --kdir "$TEST_DIR" stray 2>&1); RC=$?
 assert_eq "so is a positional" "1" "$RC"
 EMPTY=$(mktemp -d "$TEST_DIR/empty.XXXXXX")
