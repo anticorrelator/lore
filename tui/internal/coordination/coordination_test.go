@@ -64,9 +64,12 @@ func TestReadPinCorruptSidecarSurfacesError(t *testing.T) {
 
 // --- ListModel ---
 
-func TestListModelRowsAreItemsNotHeaders(t *testing.T) {
+func TestListModelCursorRestsOnArcsNotSectionHeaders(t *testing.T) {
 	m := NewListModel()
-	m.SetArcs([]Arc{{Slug: "arc-b", Members: 2}, {Slug: "arc-a", Members: 1}})
+	m.SetArcs([]Arc{
+		{Slug: "arc-b", Status: StatusActive, Items: 2},
+		{Slug: "arc-a", Status: StatusActive, Items: 1},
+	}, 0)
 	if m.CurrentSlug() != "arc-b" {
 		t.Fatalf("cursor should rest on the first arc, got %q", m.CurrentSlug())
 	}
@@ -75,15 +78,105 @@ func TestListModelRowsAreItemsNotHeaders(t *testing.T) {
 		t.Fatalf("j should move to the next arc, got %q", m.CurrentSlug())
 	}
 	// Cursor preserved by slug across a reload.
-	m.SetArcs([]Arc{{Slug: "arc-c"}, {Slug: "arc-a"}, {Slug: "arc-b"}})
+	m.SetArcs([]Arc{
+		{Slug: "arc-c", Status: StatusActive},
+		{Slug: "arc-a", Status: StatusActive},
+		{Slug: "arc-b", Status: StatusActive},
+	}, 0)
 	if m.CurrentSlug() != "arc-a" {
 		t.Errorf("reload should preserve the cursor by slug, got %q", m.CurrentSlug())
 	}
 }
 
+// A closed arc lands under its own section header, and walking from the first
+// active arc to the last closed one never parks the cursor on a header.
+func TestListModelSectionsSplitActiveFromComplete(t *testing.T) {
+	m := NewListModel()
+	m.SetArcs([]Arc{
+		{Slug: "live", Status: StatusActive},
+		{Slug: "done", Status: StatusClosed},
+	}, 0)
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "Active (1)") || !strings.Contains(out, "Complete (1)") {
+		t.Errorf("both sections should carry a counted header:\n%s", out)
+	}
+	if m.CurrentSlug() != "live" {
+		t.Fatalf("cursor should open on the first active arc, got %q", m.CurrentSlug())
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if m.CurrentSlug() != "done" {
+		t.Errorf("j should step over the Complete header onto the closed arc, got %q", m.CurrentSlug())
+	}
+}
+
+func TestListModelArchivedHiddenUntilToggled(t *testing.T) {
+	m := NewListModel()
+	m.SetArcs([]Arc{
+		{Slug: "live", Status: StatusActive},
+		{Slug: "old", Status: StatusArchived},
+	}, 0)
+	if out := stripANSI(m.View()); strings.Contains(out, "old") {
+		t.Errorf("archived arcs must be hidden by default:\n%s", out)
+	}
+	if m.Count() != 1 {
+		t.Errorf("the tab count should exclude hidden archived arcs, got %d", m.Count())
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "Archived (1)") || !strings.Contains(out, "old") {
+		t.Errorf("ctrl+a should reveal the Archived section:\n%s", out)
+	}
+	if m.Count() != 2 {
+		t.Errorf("revealed archived arcs should count, got %d", m.Count())
+	}
+}
+
+// The list renders the project as a column, and an arc with no project label
+// shows the no-label cell rather than borrowing its slug.
+func TestListModelProjectIsAColumn(t *testing.T) {
+	m := NewListModel()
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m.SetArcs([]Arc{
+		{Slug: "labeled", Status: StatusActive, Project: "proj-x"},
+		{Slug: "bare", Status: StatusActive},
+	}, 0)
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "PROJECT") || !strings.Contains(out, "proj-x") {
+		t.Errorf("project should render as its own column:\n%s", out)
+	}
+	if !strings.Contains(out, noProjectCell) {
+		t.Errorf("a project-less arc should render %q:\n%s", noProjectCell, out)
+	}
+}
+
+func TestListModelSkippedRecordsSurfaceInEmptyState(t *testing.T) {
+	m := NewListModel()
+	m.SetArcs(nil, 3)
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "lore arc open") {
+		t.Errorf("the empty state should name the verb that starts an arc:\n%s", out)
+	}
+	if !strings.Contains(out, "3 unreadable") {
+		t.Errorf("skipped records should surface in the UI, not on stderr:\n%s", out)
+	}
+}
+
+func TestListModelClosedArcsExcludesArchived(t *testing.T) {
+	m := NewListModel()
+	m.SetArcs([]Arc{
+		{Slug: "live", Status: StatusActive},
+		{Slug: "done", Status: StatusClosed},
+		{Slug: "old", Status: StatusArchived},
+	}, 0)
+	closed := m.ClosedArcs()
+	if len(closed) != 1 || closed[0].Slug != "done" {
+		t.Errorf("only closed arcs are archivable, got %v", closed)
+	}
+}
+
 func TestListModelEnterEmitsArcSelected(t *testing.T) {
 	m := NewListModel()
-	m.SetArcs([]Arc{{Slug: "arc-a", Members: 1}})
+	m.SetArcs([]Arc{{Slug: "arc-a", Status: StatusActive, Items: 1}}, 0)
 	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatal("Enter should emit a selection command")
@@ -96,6 +189,46 @@ func TestListModelEnterEmitsArcSelected(t *testing.T) {
 }
 
 // --- DetailModel first-class states ---
+
+// An arc with no project label has no pin home, which is a different fact from
+// having one and finding no pin in it.
+func TestDetailPinNoProjectIsItsOwnState(t *testing.T) {
+	m := sizedDetail()
+	m.SetArc("arc-a")
+	m.SetLedger("x", "", false)
+	m.SetPin(PinNoProject, nil)
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "no project label") {
+		t.Errorf("a project-less arc must say so on the pin line:\n%s", out)
+	}
+	if strings.Contains(out, "no standing target") {
+		t.Errorf("no pin home must not read as an empty pin home:\n%s", out)
+	}
+}
+
+// A declared member the index cannot resolve keeps its row: the arc still
+// declares it, and dropping it would hide a membership list that has drifted.
+func TestDetailUnresolvedMemberRendersDimAndIsNotOpenable(t *testing.T) {
+	m := sizedDetail()
+	m.SetArc("arc-a")
+	m.SetMembers([]Member{
+		{Slug: "gone"},
+		{Slug: "here", Resolved: true, Item: work.WorkItem{Slug: "here", Status: "active"}},
+	}, nil)
+	m.tabHost.SetActiveID(TabItems)
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "gone") || !strings.Contains(out, "unresolved") {
+		t.Errorf("an unresolved member must still render, marked:\n%s", out)
+	}
+	if _, ok := m.CurrentItem(); ok {
+		t.Error("an unresolved member has no work detail to open")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	it, ok := m.CurrentItem()
+	if !ok || it.Slug != "here" {
+		t.Errorf("the resolved member below it should open, got %+v ok=%v", it, ok)
+	}
+}
 
 func sizedDetail() DetailModel {
 	m := NewDetailModel()
@@ -156,9 +289,9 @@ func TestDetailStatusCountsAndAttention(t *testing.T) {
 	m.SetArc("arc-a")
 	m.SetLedger("x", "", false)
 	m.SetPin(PinAbsent, nil)
-	m.SetMembers([]work.WorkItem{
-		{Slug: "m1", Status: "active", BlockedBy: []string{"m2"}},
-		{Slug: "m2", Status: "active"},
+	m.SetMembers([]Member{
+		{Slug: "m1", Resolved: true, Item: work.WorkItem{Slug: "m1", Status: "active", BlockedBy: []string{"m2"}}},
+		{Slug: "m2", Resolved: true, Item: work.WorkItem{Slug: "m2", Status: "active"}},
 	}, map[string]bool{"m1": true, "m2": true})
 	m.SetSessions([]sessionview.SessionRow{
 		{RowID: "r1", Display: "m1", Type: "implement", Local: true},
@@ -233,15 +366,15 @@ func TestDetailLedgerRendersMarkdown(t *testing.T) {
 	}
 }
 
-// TestDetailNoReportIsFourTabs pins that an arc whose home has no report.md
+// TestDetailNoReportIsFourTabs pins that an arc with no report.md
 // renders exactly as today: four tabs, Brief-first Status, no Report tab.
 func TestDetailNoReportIsFourTabs(t *testing.T) {
 	m := sizedDetail()
 	m.SetArc("arc-a")
 	m.SetLedger("## Brief\n\nlive brief\n", "live brief", true)
-	m.SetReport("", false, false)
+	m.SetReport("", false)
 	if got := len(m.tabHost.Tabs()); got != 4 {
-		t.Fatalf("a home without report.md must render four tabs, got %d", got)
+		t.Fatalf("an arc without report.md must render four tabs, got %d", got)
 	}
 	if m.ActiveTabID() != TabStatus {
 		t.Errorf("detail should rest on Status, got %q", m.ActiveTabID())
@@ -262,7 +395,7 @@ func TestDetailReportTabPresenceAndClosedStatus(t *testing.T) {
 
 	// Live successor arc: report present but not closed — five tabs, Status
 	// still shows the Brief, and the report is reachable through its tab.
-	m.SetReport("# Report\n\nthe whole report body\n", true, false)
+	m.SetReport("# Report\n\nthe whole report body\n", true)
 	if got := len(m.tabHost.Tabs()); got != 5 {
 		t.Fatalf("a present report must add a fifth tab, got %d tabs", got)
 	}
@@ -276,7 +409,8 @@ func TestDetailReportTabPresenceAndClosedStatus(t *testing.T) {
 
 	// Closed arc: the Status first section becomes the report, not the Brief.
 	m.tabHost.SetActiveID(TabStatus)
-	m.SetReport("# Report\n\nclosed report body\n", true, true)
+	m.SetClosed(true)
+	m.SetReport("# Report\n\nclosed report body\n", true)
 	out := stripANSI(m.View())
 	if !strings.Contains(out, "closed report body") {
 		t.Errorf("closed arc Status first section must render the report whole:\n%s", out)
@@ -293,18 +427,19 @@ func TestDetailReportTabIdentitySurvivesRebuild(t *testing.T) {
 	m := sizedDetail()
 	m.SetArc("arc-a")
 	m.SetLedger("## Brief\n\nb\n", "b", true)
-	m.SetReport("# R\n\nbody\n", true, true)
+	m.SetClosed(true)
+	m.SetReport("# R\n\nbody\n", true)
 
 	// A rebuild while parked on Ledger keeps the user on Ledger.
 	m.tabHost.SetActiveID(TabLedger)
-	m.SetReport("# R\n\nbody v2\n", true, true)
+	m.SetReport("# R\n\nbody v2\n", true)
 	if m.ActiveTabID() != TabLedger {
 		t.Errorf("a SetReport rebuild must preserve the active tab by ID, got %q", m.ActiveTabID())
 	}
 
 	// Parked on Report, a vanished report falls back to Status and drops the tab.
 	m.tabHost.SetActiveID(TabReport)
-	m.SetReport("", false, false)
+	m.SetReport("", false)
 	if got := len(m.tabHost.Tabs()); got != 4 {
 		t.Fatalf("a vanished report must drop the Report tab, got %d tabs", got)
 	}
@@ -319,7 +454,8 @@ func TestDetailClosedReportUnreadableIsExplicit(t *testing.T) {
 	m := sizedDetail()
 	m.SetArc("arc-a")
 	m.SetLedger("## Brief\n\nb\n", "b", true)
-	m.SetReport("", true, true)
+	m.SetClosed(true)
+	m.SetReport("", true)
 	if out := stripANSI(m.View()); !strings.Contains(out, "report.md could not be read") {
 		t.Errorf("a closed arc with an unreadable report must render an explicit state:\n%s", out)
 	}

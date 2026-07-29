@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,7 +26,10 @@ func coordinationContractModel(t *testing.T) model {
 		{Slug: "item-b", Title: "Item B", Project: "arc-b", Status: "active"},
 	}, nil)
 	m.width, m.height = 120, 40
-	m.coordinationList.SetArcs([]coordination.Arc{{Slug: "arc-a", Members: 1}, {Slug: "arc-b", Members: 1}})
+	m.coordinationList.SetArcs([]coordination.Arc{
+		{Slug: "arc-a", Status: coordination.StatusActive, Items: 1, Members: []string{"item-a"}},
+		{Slug: "arc-b", Status: coordination.StatusActive, Items: 1, Members: []string{"item-b"}},
+	}, 0)
 	m.coordinationDetail.SetArc("arc-a")
 	m.coordinationDetail.SetLedger("## Brief\n\nlanded: mirror\n", "landed: mirror", true)
 	m.coordinationDetail.SetPin(coordination.PinAbsent, nil)
@@ -225,9 +229,9 @@ func TestCoordinationDetailKeybindContract(t *testing.T) {
 	itemsTab := func(t *testing.T) model {
 		t.Helper()
 		m := detailFocused(t)
-		m.coordinationDetail.SetMembers([]work.WorkItem{
-			{Slug: "item-a", Title: "Item A", Status: "active"},
-			{Slug: "item-b", Title: "Item B", Status: "active"},
+		m.coordinationDetail.SetMembers([]coordination.Member{
+			{Slug: "item-a", Resolved: true, Item: work.WorkItem{Slug: "item-a", Title: "Item A", Status: "active"}},
+			{Slug: "item-b", Resolved: true, Item: work.WorkItem{Slug: "item-b", Title: "Item B", Status: "active"}},
 		}, nil)
 		m, _ = updateModel(t, m, press(tea.KeyTab)) // Status → Sessions
 		m, _ = updateModel(t, m, press(tea.KeyTab)) // Sessions → Items
@@ -325,7 +329,7 @@ func TestCoordinationDrillInReturnKeybindContract(t *testing.T) {
 	t.Run("work detail back hint reads coordination and Esc returns", func(t *testing.T) {
 		m := coordinationContractModel(t)
 		m.focusedPanel = panelRight
-		m.coordinationDetail.SetMembers([]work.WorkItem{{Slug: "item-a", Status: "active"}}, nil)
+		m.coordinationDetail.SetMembers([]coordination.Member{{Slug: "item-a", Resolved: true, Item: work.WorkItem{Slug: "item-a", Status: "active"}}}, nil)
 		m, _ = updateModel(t, m, press(tea.KeyTab)) // Status → Sessions
 		m, _ = updateModel(t, m, press(tea.KeyTab)) // Sessions → Items
 		_, cmd := updateModel(t, m, press(tea.KeyEnter))
@@ -374,7 +378,7 @@ func TestCoordinationDrillInReturnKeybindContract(t *testing.T) {
 	t.Run("explicit state switch clears the pending return", func(t *testing.T) {
 		m := coordinationContractModel(t)
 		m.focusedPanel = panelRight
-		m.coordinationDetail.SetMembers([]work.WorkItem{{Slug: "item-a", Status: "active"}}, nil)
+		m.coordinationDetail.SetMembers([]coordination.Member{{Slug: "item-a", Resolved: true, Item: work.WorkItem{Slug: "item-a", Status: "active"}}}, nil)
 		m, _ = updateModel(t, m, press(tea.KeyTab))
 		m, _ = updateModel(t, m, press(tea.KeyTab))
 		_, cmd := updateModel(t, m, press(tea.KeyEnter))
@@ -395,53 +399,54 @@ func TestCoordinationDrillInReturnKeybindContract(t *testing.T) {
 func TestCoordinationArcScanSyncsDetail(t *testing.T) {
 	m := minimalModel(stateCoordination, nil, nil)
 	m.width, m.height = 120, 40
-	nm, cmd := updateModel(t, m, coordinationArcsScannedMsg{arcs: []coordination.Arc{{Slug: "arc-a", Members: 1}}})
+	nm, cmd := updateModel(t, m, coordinationArcsScannedMsg{arcs: []coordination.Arc{{Slug: "arc-a", Status: coordination.StatusActive, Items: 1}}})
 	if nm.coordinationDetail.Arc() != "arc-a" {
 		t.Fatalf("scan should sync the detail to the cursor arc, got %q", nm.coordinationDetail.Arc())
 	}
 	if cmd == nil {
 		t.Error("first sync should dispatch the ledger and pin reads")
 	}
-	nm2, cmd2 := updateModel(t, nm, coordinationArcsScannedMsg{arcs: []coordination.Arc{{Slug: "arc-a", Members: 1}}})
+	nm2, cmd2 := updateModel(t, nm, coordinationArcsScannedMsg{arcs: []coordination.Arc{{Slug: "arc-a", Status: coordination.StatusActive, Items: 1}}})
 	if cmd2 != nil {
 		t.Error("a scan with an unchanged selection should not re-dispatch reads")
 	}
 	_ = nm2
 }
 
-// arcHomeFixture writes a project home for arc under workDir, seeding
-// coordination.md and (when report is non-nil) report.md, each stamped with the
-// given mtime so the recency derivation is deterministic. A nil ledger skips
-// coordination.md entirely, standing in for a missing/unreadable ledger.
-func arcHomeFixture(t *testing.T, workDir, arc string, ledger, report *string, ledgerMod, reportMod time.Time) {
+// arcStoreFixture writes an arc record under workDir/_arcs/, plus its ledger
+// and (when report is non-nil) its report. The mtimes are stamped so tests can
+// order the two files against each other; nothing in the read path consults
+// them. A nil ledger skips coordination.md, standing in for an unreadable one.
+func arcStoreFixture(t *testing.T, workDir, arc, status string, ledger, report *string, ledgerMod, reportMod time.Time) {
 	t.Helper()
-	home := work.ProjectHome(workDir, arc)
-	if err := os.MkdirAll(home, 0o755); err != nil {
+	dir := coordination.ArcDir(workDir, arc)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if ledger != nil {
-		p := filepath.Join(home, "coordination.md")
-		if err := os.WriteFile(p, []byte(*ledger), 0o644); err != nil {
+	rec := fmt.Sprintf(`{"schema_version":1,"slug":%q,"title":"Arc %s","status":%q,"members":[],"opened":"2026-07-20T09:00:00Z"}`, arc, arc, status)
+	if err := os.WriteFile(filepath.Join(dir, "_meta.json"), []byte(rec), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string, body *string, mod time.Time) {
+		if body == nil {
+			return
+		}
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(*body), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chtimes(p, ledgerMod, ledgerMod); err != nil {
+		if err := os.Chtimes(p, mod, mod); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if report != nil {
-		p := filepath.Join(home, "report.md")
-		if err := os.WriteFile(p, []byte(*report), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chtimes(p, reportMod, reportMod); err != nil {
-			t.Fatal(err)
-		}
-	}
+	write("coordination.md", ledger, ledgerMod)
+	write("report.md", report, reportMod)
 }
 
-// TestReadArcLedgerDerivesClosed pins the live-vs-closed derivation in the
-// host's single ledger-read command across every classification boundary.
-func TestReadArcLedgerDerivesClosed(t *testing.T) {
+// TestReadArcLedgerReadsTheStoreAndNeverDerivesClosure pins that the ledger
+// read targets the arc's own directory and carries no closure signal at all —
+// the file timestamps it once compared are gone from the path.
+func TestReadArcLedgerReadsTheStoreAndNeverDerivesClosure(t *testing.T) {
 	ledger := "## Brief\n\nthe brief\n"
 	report := "# Report\n\nthe report\n"
 	early := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
@@ -458,57 +463,189 @@ func TestReadArcLedgerDerivesClosed(t *testing.T) {
 		return msg
 	}
 
-	t.Run("report strictly newer is closed", func(t *testing.T) {
+	t.Run("both documents arrive in one message", func(t *testing.T) {
 		msg := run(t, func(t *testing.T, wd string) {
-			arcHomeFixture(t, wd, "arc-a", &ledger, &report, early, late)
+			arcStoreFixture(t, wd, "arc-a", "closed", &ledger, &report, early, late)
 		})
-		if !msg.closed || !msg.reportFound {
-			t.Fatalf("newer report must classify closed with the report present: %+v", msg)
-		}
-		if msg.report != report || msg.brief != "the brief" {
-			t.Errorf("both files must be delivered in one message: %+v", msg)
-		}
-	})
-
-	t.Run("ledger newer is live", func(t *testing.T) {
-		msg := run(t, func(t *testing.T, wd string) {
-			arcHomeFixture(t, wd, "arc-a", &ledger, &report, late, early)
-		})
-		if msg.closed {
-			t.Errorf("a ledger newer than the report must stay live: %+v", msg)
+		if msg.report != report || msg.brief != "the brief" || !msg.briefFound {
+			t.Errorf("both documents must be delivered in one message: %+v", msg)
 		}
 		if !msg.reportFound {
-			t.Errorf("the report must still be reachable while live: %+v", msg)
+			t.Errorf("a present report must be reported found: %+v", msg)
 		}
 	})
 
-	t.Run("equal mtimes is live", func(t *testing.T) {
-		msg := run(t, func(t *testing.T, wd string) {
-			arcHomeFixture(t, wd, "arc-a", &ledger, &report, early, early)
+	t.Run("mtime order does not change the read", func(t *testing.T) {
+		reportNewer := run(t, func(t *testing.T, wd string) {
+			arcStoreFixture(t, wd, "arc-a", "closed", &ledger, &report, early, late)
 		})
-		if msg.closed {
-			t.Errorf("equal mtimes must resolve to live: %+v", msg)
+		ledgerNewer := run(t, func(t *testing.T, wd string) {
+			arcStoreFixture(t, wd, "arc-a", "closed", &ledger, &report, late, early)
+		})
+		if reportNewer != ledgerNewer {
+			t.Errorf("file order must not change the ledger read:\n%+v\n%+v", reportNewer, ledgerNewer)
 		}
 	})
 
-	t.Run("missing report is live", func(t *testing.T) {
+	t.Run("missing report leaves the tab off", func(t *testing.T) {
 		msg := run(t, func(t *testing.T, wd string) {
-			arcHomeFixture(t, wd, "arc-a", &ledger, nil, early, time.Time{})
+			arcStoreFixture(t, wd, "arc-a", "active", &ledger, nil, early, time.Time{})
 		})
-		if msg.closed || msg.reportFound {
-			t.Errorf("a home without report.md must be live with no report: %+v", msg)
+		if msg.reportFound {
+			t.Errorf("an arc without report.md must report no report: %+v", msg)
 		}
 	})
 
-	t.Run("report beside a missing ledger is closed", func(t *testing.T) {
+	t.Run("unreadable ledger surfaces its error", func(t *testing.T) {
 		msg := run(t, func(t *testing.T, wd string) {
-			arcHomeFixture(t, wd, "arc-a", nil, &report, time.Time{}, late)
+			arcStoreFixture(t, wd, "arc-a", "closed", nil, &report, time.Time{}, late)
 		})
-		if !msg.closed || !msg.reportFound {
-			t.Fatalf("a report beside an unreadable ledger must classify closed: %+v", msg)
-		}
 		if msg.err == nil {
-			t.Errorf("an unreadable ledger must still surface its read error: %+v", msg)
+			t.Errorf("an unreadable ledger must surface its read error: %+v", msg)
+		}
+		if !msg.reportFound {
+			t.Errorf("the report must still be reachable: %+v", msg)
+		}
+	})
+}
+
+// TestLateLedgerAppendNeverFlipsClosure is the regression the declared-status
+// cutover exists for: appending to a closed arc's ledger after its report was
+// written once flipped the Status tab back to the Brief. Closure now comes from
+// the record, so the append changes nothing.
+func TestLateLedgerAppendNeverFlipsClosure(t *testing.T) {
+	workDir := t.TempDir()
+	ledger := "## Brief\n\nthe brief\n"
+	report := "# Report\n\nthe closing report\n"
+	arcStoreFixture(t, workDir, "arc-a", "closed", &ledger, &report,
+		time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC))
+
+	m := minimalModel(stateCoordination, nil, nil)
+	m.width, m.height = 120, 40
+	m.config.WorkDir = workDir
+
+	scan, ok := m.scanArcStoreCmd()().(coordinationArcsScannedMsg)
+	if !ok {
+		t.Fatal("scanArcStoreCmd must return a coordinationArcsScannedMsg")
+	}
+	m, _ = updateModel(t, m, scan)
+	m, _ = updateModel(t, m, readArcLedgerCmd(workDir, "arc-a")())
+	if out := stripANSI(m.coordinationDetail.View()); !strings.Contains(out, "the closing report") {
+		t.Fatalf("a closed arc must lead its Status tab with the report:\n%s", out)
+	}
+
+	// The sanctioned late append: the ledger is now the newest file on disk.
+	p := filepath.Join(coordination.ArcDir(workDir, "arc-a"), "coordination.md")
+	if err := os.WriteFile(p, []byte(ledger+"\n- a row added after the close\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(p, time.Now(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	scan2, _ := m.scanArcStoreCmd()().(coordinationArcsScannedMsg)
+	m, _ = updateModel(t, m, scan2)
+	m, _ = updateModel(t, m, readArcLedgerCmd(workDir, "arc-a")())
+	out := stripANSI(m.coordinationDetail.View())
+	if !strings.Contains(out, "the closing report") {
+		t.Errorf("a late ledger append must not flip a closed arc back to its Brief:\n%s", out)
+	}
+}
+
+// TestQuitOffersArcArchiveForClosedArcs pins the close-time affordance: `q`
+// with a closed arc present holds the quit and offers the archive, an
+// untouched offer quits without writing, and ctrl+c never sees it.
+func TestQuitOffersArcArchiveForClosedArcs(t *testing.T) {
+	arcs := []coordination.Arc{
+		{Slug: "live", Status: coordination.StatusActive},
+		{Slug: "done", Status: coordination.StatusClosed},
+	}
+
+	t.Run("q opens the offer instead of quitting", func(t *testing.T) {
+		m := minimalModel(stateCoordination, nil, nil)
+		m.width, m.height = 120, 40
+		m.coordinationList.SetArcs(arcs, 0)
+		nm, cmd := updateModel(t, m, press('q'))
+		if !nm.arcArchiveActive {
+			t.Fatal("q with a closed arc present should open the archive offer")
+		}
+		if cmd != nil {
+			t.Error("the offer must hold the quit, not race it")
+		}
+		if len(nm.selectedArchiveSlugs()) != 0 {
+			t.Error("the offer must open with nothing selected")
+		}
+		if out := stripANSI(nm.viewContent()); !strings.Contains(out, "Archive closed arcs?") || !strings.Contains(out, "done") {
+			t.Errorf("the offer should list the closed arcs:\n%s", out)
+		}
+		if strings.Contains(stripANSI(nm.viewContent()), "live") {
+			t.Error("an active arc is not archivable and must not be offered")
+		}
+	})
+
+	t.Run("Enter with nothing selected quits without archiving", func(t *testing.T) {
+		m := minimalModel(stateCoordination, nil, nil)
+		m.width, m.height = 120, 40
+		m.coordinationList.SetArcs(arcs, 0)
+		m, _ = updateModel(t, m, press('q'))
+		nm, cmd := updateModel(t, m, press(tea.KeyEnter))
+		if nm.arcArchiveActive {
+			t.Error("Enter should close the offer")
+		}
+		if cmd == nil {
+			t.Fatal("Enter should quit")
+		}
+		if _, isQuit := cmd().(tea.QuitMsg); !isQuit {
+			t.Error("an empty selection must quit directly, running no archive")
+		}
+	})
+
+	t.Run("Esc declines and quits", func(t *testing.T) {
+		m := minimalModel(stateCoordination, nil, nil)
+		m.width, m.height = 120, 40
+		m.coordinationList.SetArcs(arcs, 0)
+		m, _ = updateModel(t, m, press('q'))
+		nm, cmd := updateModel(t, m, press(tea.KeyEscape))
+		if nm.arcArchiveActive || cmd == nil {
+			t.Error("Esc should decline the offer and quit")
+		}
+	})
+
+	t.Run("space selects the arc under the cursor", func(t *testing.T) {
+		m := minimalModel(stateCoordination, nil, nil)
+		m.width, m.height = 120, 40
+		m.coordinationList.SetArcs(arcs, 0)
+		m, _ = updateModel(t, m, press('q'))
+		m, _ = updateModel(t, m, press(' '))
+		if got := m.selectedArchiveSlugs(); len(got) != 1 || got[0] != "done" {
+			t.Errorf("space should toggle the cursor arc, got %v", got)
+		}
+	})
+
+	t.Run("no closed arcs means no offer", func(t *testing.T) {
+		m := minimalModel(stateCoordination, nil, nil)
+		m.width, m.height = 120, 40
+		m.coordinationList.SetArcs([]coordination.Arc{{Slug: "live", Status: coordination.StatusActive}}, 0)
+		nm, cmd := updateModel(t, m, press('q'))
+		if nm.arcArchiveActive {
+			t.Error("with nothing closed, q should quit straight away")
+		}
+		if cmd == nil {
+			t.Fatal("q should quit")
+		}
+	})
+
+	t.Run("ctrl+c bypasses the offer", func(t *testing.T) {
+		m := minimalModel(stateCoordination, nil, nil)
+		m.width, m.height = 120, 40
+		m.coordinationList.SetArcs(arcs, 0)
+		nm, cmd := updateModel(t, m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+		if nm.arcArchiveActive {
+			t.Error("ctrl+c must never see the archive offer")
+		}
+		if cmd == nil {
+			t.Fatal("ctrl+c should quit")
 		}
 	})
 }
@@ -544,24 +681,33 @@ func TestBuildSessionRowsProjectJoin(t *testing.T) {
 	}
 }
 
-// TestCoordinationSessionsJoinFiltersByArc pins the per-refresh arc filter:
-// only rows whose Project matches the selected arc reach the detail.
+// TestCoordinationSessionsJoinFiltersByArc pins the per-refresh membership
+// join: a session reaches the detail when the arc declares its slug, or the
+// base item of its derived worker slug. The project label never joins — it is
+// the label that let unrelated work look like membership.
 func TestCoordinationSessionsJoinFiltersByArc(t *testing.T) {
 	m := coordinationContractModel(t)
 	m.sessionRows = []sessionview.SessionRow{
-		{RowID: "r1", Display: "impl-a", Project: "arc-a"},
-		{RowID: "r2", Display: "impl-b", Project: "arc-b"},
-		{RowID: "r3", Display: "stray", Project: ""},
+		{RowID: "r1", Display: "impl-a", Slug: "item-a"},
+		{RowID: "r4", Display: "worker-a", Slug: "item-a-w1", BaseItem: "item-a"},
+		{RowID: "r2", Display: "impl-b", Slug: "item-b"},
+		{RowID: "r3", Display: "stray", Project: "arc-a"},
 	}
 	m.syncCoordinationSessions()
 	m.focusedPanel = panelRight
 	m, _ = updateModel(t, m, press(tea.KeyTab)) // Status → Sessions
 	out := stripANSI(m.viewContent())
 	if !strings.Contains(out, "impl-a") {
-		t.Errorf("the arc's session must render:\n%s", out)
+		t.Errorf("a declared member's session must render:\n%s", out)
 	}
-	if strings.Contains(out, "impl-b") || strings.Contains(out, "stray") {
-		t.Errorf("other arcs' and unjoined sessions must not render:\n%s", out)
+	if !strings.Contains(out, "worker-a") {
+		t.Errorf("a derived worker must join through its base item:\n%s", out)
+	}
+	if strings.Contains(out, "impl-b") {
+		t.Errorf("another arc's member must not render:\n%s", out)
+	}
+	if strings.Contains(out, "stray") {
+		t.Errorf("a session carrying only the project label is not a member:\n%s", out)
 	}
 }
 

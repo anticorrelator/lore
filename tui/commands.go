@@ -248,6 +248,34 @@ func runArchive(slug string, unarchive bool) tea.Cmd {
 	}
 }
 
+// arcArchiveFinishedMsg reports the outcome of the quit-time archive run.
+// Failed names the arcs whose archive did not land; an empty slice means the
+// quit can proceed.
+type arcArchiveFinishedMsg struct {
+	Failed []string
+	Err    error
+}
+
+// runArcArchive archives the given arcs. It shells out to `lore arc archive`
+// per slug because that verb owns the record's validation, transition checks,
+// and atomic write — the TUI reads _meta.json and never writes it. A failure
+// comes back as a message so it can be shown in the UI; the quit waits for it
+// rather than exiting over an arc that is still open.
+func runArcArchive(slugs []string) tea.Cmd {
+	return func() tea.Msg {
+		msg := arcArchiveFinishedMsg{}
+		for _, slug := range slugs {
+			cmd := exec.Command("lore", "arc", "archive", slug)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if err := cmd.Run(); err != nil {
+				msg.Failed = append(msg.Failed, slug)
+				msg.Err = err
+			}
+		}
+		return msg
+	}
+}
+
 // runRelease runs `lore work release <slug>` and returns ReleaseFinishedMsg
 // when done. This is the TUI's only review-state write path: the verb clears
 // the item's _meta.json review block and emits the release journal event, so

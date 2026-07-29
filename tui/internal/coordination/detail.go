@@ -39,6 +39,16 @@ type MemberSelectedMsg struct {
 	Slug string
 }
 
+// Member is one entry of an arc's declared membership, joined against the
+// work index. A slug the index cannot resolve keeps its row with Resolved
+// false: the arc declares that member either way, and dropping it would hide
+// a membership list that has drifted from the items it names.
+type Member struct {
+	Slug     string
+	Item     work.WorkItem
+	Resolved bool
+}
+
 // SessionSelectedMsg is emitted when Enter/l lands on a Sessions-tab row. The
 // host carries the row into the sessions workspace with its existing attach
 // semantics and records the coordination view as the return target.
@@ -60,7 +70,7 @@ type DetailModel struct {
 	contentStartY int
 	contentStartX int
 
-	members    []work.WorkItem
+	members    []Member
 	itemCursor int
 	// blocked lists member slugs with at least one still-active blocker,
 	// derived from the index projection the host pushes.
@@ -83,11 +93,11 @@ type DetailModel struct {
 	brief        string
 	briefFound   bool
 
-	// report holds report.md's content; reportFound is true whenever the
-	// project home has a report.md at all (an unreadable one still counts as
-	// present, rendering its own dim state). closed is the host's derived
-	// live-vs-closed classification: it drives which projection the Status
-	// tab's first section shows, independent of the report's mere presence.
+	// report holds report.md's content; reportFound is true whenever the arc
+	// has a report.md at all (an unreadable one still counts as present,
+	// rendering its own dim state). closed comes from the arc record's
+	// declared status, not from the report's presence or age: it decides
+	// which projection the Status tab leads with.
 	report      string
 	reportFound bool
 	closed      bool
@@ -169,26 +179,26 @@ func (m *DetailModel) SetArc(arc string) {
 	m.refreshAll()
 }
 
-// SetMembers replaces the arc's member items. active is the ActiveSlugs set
-// over the whole index, used to derive which members are still blocked.
-func (m *DetailModel) SetMembers(members []work.WorkItem, active map[string]bool) {
+// SetMembers replaces the arc's members. active is the ActiveSlugs set over
+// the whole index, used to derive which members are still blocked.
+func (m *DetailModel) SetMembers(members []Member, active map[string]bool) {
 	prevSlug := ""
-	if it, ok := m.CurrentItem(); ok {
-		prevSlug = it.Slug
+	if i := m.itemCursor; i >= 0 && i < len(m.members) {
+		prevSlug = m.members[i].Slug
 	}
 	m.members = members
 	m.itemCursor = 0
-	for i, it := range members {
-		if it.Slug == prevSlug {
+	for i, mem := range members {
+		if mem.Slug == prevSlug {
 			m.itemCursor = i
 			break
 		}
 	}
 	m.blocked = nil
-	for _, it := range members {
-		for _, b := range it.BlockedBy {
+	for _, mem := range members {
+		for _, b := range mem.Item.BlockedBy {
 			if active[b] {
-				m.blocked = append(m.blocked, it.Slug)
+				m.blocked = append(m.blocked, mem.Slug)
 				break
 			}
 		}
@@ -246,26 +256,38 @@ func (m *DetailModel) SetLedger(content, brief string, briefFound bool) {
 	m.refreshLedger()
 }
 
-// SetReport records the arc's report.md content, its presence, and the host's
-// derived live-vs-closed classification. found toggles the conditional Report
-// tab; closed switches the Status tab's first section to the report. A found
-// report with empty content is a present-but-unreadable report, rendered as an
-// explicit dim state — never a silent blank.
-func (m *DetailModel) SetReport(report string, found, closed bool) {
+// SetReport records the arc's report.md content and its presence. found
+// toggles the conditional Report tab. A found report with empty content is a
+// present-but-unreadable report, rendered as an explicit dim state — never a
+// silent blank.
+func (m *DetailModel) SetReport(report string, found bool) {
 	m.report = report
 	m.reportFound = found
-	m.closed = closed
 	m.tabHost.SetTabs(m.buildTabs())
 	m.refreshStatus()
 	m.refreshReport()
 }
 
-// CurrentItem returns the member item under the Items tab cursor.
+// SetClosed records the arc's closure, which the host takes from the arc
+// record's declared status. It arrives with the selection rather than with
+// the ledger read, so the Status tab leads with the right section from the
+// first frame.
+func (m *DetailModel) SetClosed(closed bool) {
+	m.closed = closed
+	m.refreshStatus()
+}
+
+// CurrentItem returns the resolved member item under the Items tab cursor.
+// An unresolved member yields false: there is no work detail to open.
 func (m DetailModel) CurrentItem() (work.WorkItem, bool) {
 	if m.itemCursor < 0 || m.itemCursor >= len(m.members) {
 		return work.WorkItem{}, false
 	}
-	return m.members[m.itemCursor], true
+	mem := m.members[m.itemCursor]
+	if !mem.Resolved {
+		return work.WorkItem{}, false
+	}
+	return mem.Item, true
 }
 
 // CurrentSession returns the session row under the Sessions tab cursor.
@@ -406,6 +428,8 @@ func (m DetailModel) renderPinLine() string {
 		return label + m.pin.Instance + "  " + pinLiveStyle.Render("● live")
 	case m.pinStatus == PinDead:
 		return label + m.pin.Instance + "  " + pinDeadStyle.Render("✗ dead") + style.Dim.Render(" — registry row stale; repin before dispatch")
+	case m.pinStatus == PinNoProject:
+		return label + style.Dim.Render("no project label — no pin home")
 	default:
 		return label + style.Dim.Render("none — dispatch has no standing target")
 	}
@@ -497,12 +521,18 @@ func (m DetailModel) renderItems() string {
 		blocked[s] = true
 	}
 	var b strings.Builder
-	for i, it := range m.members {
+	for i, mem := range m.members {
 		cursor := "  "
 		if i == m.itemCursor {
 			cursor = "▸ "
 		}
 		b.WriteString(cursor)
+		if !mem.Resolved {
+			b.WriteString(style.Dim.Render("○ unresolved  " + mem.Slug))
+			b.WriteString("\n")
+			continue
+		}
+		it := mem.Item
 		b.WriteString(statusBadge(it.Status))
 		b.WriteString("  ")
 		b.WriteString(it.Slug)
@@ -693,7 +723,7 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 func (m DetailModel) View() string {
 	if m.arc == "" {
 		return "\n  " + style.Dim.Render("No arc selected.") + "\n\n  " +
-			style.Dim.Render("A project becomes an arc when its home gains a coordination.md ledger.") + "\n"
+			style.Dim.Render("`lore arc open` starts an arc; it appears here as its own row.") + "\n"
 	}
 	var b strings.Builder
 	b.WriteString("\n")

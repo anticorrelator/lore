@@ -72,7 +72,7 @@ func (m model) embeddedTerminalCursor() *tea.Cursor {
 	if !m.terminalMode || m.err != nil || m.state == stateNoRepo || m.state == stateOnboarding ||
 		m.state == stateKnowledge || m.state == stateSettlement || m.popupActive ||
 		m.sessionConfirmActive || m.aiInputActive || m.assignActive || m.confirmAction != "" ||
-		m.showHelp || (m.settingsActive && m.settingsPanel != nil) {
+		m.arcArchiveActive || m.showHelp || (m.settingsActive && m.settingsPanel != nil) {
 		return nil
 	}
 
@@ -179,6 +179,9 @@ func (m model) viewContent() string {
 	}
 	if m.confirmAction != "" {
 		return m.renderConfirmModal()
+	}
+	if m.arcArchiveActive {
+		return m.renderArcArchiveModal()
 	}
 	if m.showHelp {
 		return m.renderHelpModal()

@@ -278,6 +278,52 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		return m, cmd
 	}
 
+	// Quit-time arc archive offer: intercept all keys except the unconditional
+	// quits, which keep their escape-hatch semantics and never see the offer.
+	if m.arcArchiveActive {
+		if km, ok := msg.(tea.KeyPressMsg); ok {
+			switch km.String() {
+			case "ctrl+c", "ctrl+d":
+				m.cleanupAllSubprocesses()
+				return m, tea.Quit
+			case "j", "down":
+				if m.arcArchiveCursor < len(m.arcArchiveCandidates)-1 {
+					m.arcArchiveCursor++
+				}
+				return m, nil
+			case "k", "up":
+				if m.arcArchiveCursor > 0 {
+					m.arcArchiveCursor--
+				}
+				return m, nil
+			case "space", "x":
+				if a, ok := m.currentArchiveCandidate(); ok {
+					m.arcArchiveSelected[a.Slug] = !m.arcArchiveSelected[a.Slug]
+				}
+				return m, nil
+			case "a":
+				all := len(m.selectedArchiveSlugs()) < len(m.arcArchiveCandidates)
+				for _, a := range m.arcArchiveCandidates {
+					m.arcArchiveSelected[a.Slug] = all
+				}
+				return m, nil
+			case "enter":
+				slugs := m.selectedArchiveSlugs()
+				m.arcArchiveActive = false
+				m.cleanupAllSubprocesses()
+				if len(slugs) == 0 {
+					return m, tea.Quit
+				}
+				return m, runArcArchive(slugs)
+			default:
+				// Anything else declines: quit with nothing written.
+				m.arcArchiveActive = false
+				m.cleanupAllSubprocesses()
+				return m, tea.Quit
+			}
+		}
+	}
+
 	// Confirm modal for archive/delete: intercept all keys.
 	if m.confirmAction != "" {
 		if km, ok := msg.(tea.KeyPressMsg); ok {
@@ -800,12 +846,18 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 		case "q":
 			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateSettlement || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
+				if m.offerArcArchive() {
+					return m, nil
+				}
 				m.cleanupAllSubprocesses()
 				return m, tea.Quit
 			}
 			// Knowledge browser: q quits as the help modal's Global section
 			// advertises, except while the search input owns letter keys.
 			if m.state == stateKnowledge && !m.browser.SearchActive() {
+				if m.offerArcArchive() {
+					return m, nil
+				}
 				m.cleanupAllSubprocesses()
 				return m, tea.Quit
 			}
@@ -1081,7 +1133,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.terminalMode = false
 				m.focusedPanel = panelLeft
 				m.returnToCoordination = false
-				return m, tea.Batch(m.scanArcsCmd(), m.sessionsRefreshCmd())
+				return m, tea.Batch(m.scanArcStoreCmd(), m.sessionsRefreshCmd())
 			}
 		case "R":
 			// Release the current item's review gate — detail context only.
@@ -1290,7 +1342,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				}
 			}
 		}
-		// Keep the coordination member view in step with the reloaded index.
+		// Keep the coordination member join in step with the reloaded index.
 		m.syncCoordinationMembers()
 		return m, tea.Batch(cmds...)
 
@@ -1403,6 +1455,15 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 	case sessionsRefreshedMsg:
 		return m.handleSessionsRefreshed(msg)
+
+	case arcArchiveFinishedMsg:
+		// The quit was waiting on this. An arc that did not archive keeps the
+		// instance open so the failure is readable and retryable.
+		if len(msg.Failed) > 0 {
+			m.flashErr = fmt.Sprintf("arc archive failed for %s: %v", strings.Join(msg.Failed, ", "), msg.Err)
+			return m, nil
+		}
+		return m, tea.Quit
 
 	case coordinationArcsScannedMsg:
 		return m.handleCoordinationArcsScanned(msg)

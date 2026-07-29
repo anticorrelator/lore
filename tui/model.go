@@ -186,11 +186,19 @@ type model struct {
 	sessionRows []sessionview.SessionRow
 
 	// coordinationList / coordinationDetail back the coordination workspace
-	// (stateCoordination): an arc list (projects whose home carries a
-	// coordination.md ledger) and a four-tab detail. The arc scan rides the
-	// poll tick from any state so the tab-indicator count stays current.
+	// (stateCoordination): an arc list read from the arc store and a four-tab
+	// detail. The store scan rides the poll tick from any state so the
+	// tab-indicator count stays current.
 	coordinationList   coordination.ListModel
 	coordinationDetail coordination.DetailModel
+	// arcArchive* back the offer shown when quitting with `q` while closed
+	// arcs remain. Archiving is a judgment that the arc's residue has landed,
+	// so the offer never selects anything on the user's behalf, and declining
+	// it quits without writing.
+	arcArchiveActive     bool
+	arcArchiveCandidates []coordination.Arc
+	arcArchiveSelected   map[string]bool
+	arcArchiveCursor     int
 	// returnToCoordination is the one-shot return target set by a coordination
 	// drill-in (Items → work detail, Sessions → sessions workspace). While set,
 	// the landing surface's back seam re-enters the coordination view instead of
@@ -852,11 +860,20 @@ func (m model) buildPaneConfig() paneConfig {
 		if n := m.coordinationList.Count(); n > 0 {
 			listTitle += " " + style.TitleCount.Render(fmt.Sprintf("(%d)", n))
 		}
+
+		filterSel := 0
+		if m.coordinationList.ShowArchived() {
+			filterSel = 1
+		}
+		filterAnnot, filterAnnotW := annotArcFilter.render(filterSel)
+
 		return paneConfig{
 			listView:           m.coordinationList.View(),
 			detailView:         m.coordinationDetail.View(),
 			listTitle:          listTitle,
 			detailTitle:        m.coordinationDetail.Title(),
+			filterAnnot:        filterAnnot,
+			filterAnnotW:       filterAnnotW,
 			state:              stateCoordination,
 			listItemCount:      listItemCount,
 			fuItemCount:        fuItemCount,
