@@ -897,6 +897,31 @@ func TestResolveModelForRoleInCeremony_FallsThroughWhenRoleAbsentInCeremonyMap(t
 	}
 }
 
+func TestResolveModelForRoleInCeremony_PRReviewCeremonyBindingBeatsReviewerOverlay(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"reviewer": "opus"})
+	writeCeremonyRoles(t, "claude-code", map[string]map[string]string{
+		"pr-review": {"reviewer": "haiku"},
+	})
+	got, err := ResolveModelForRoleInCeremony("reviewer", "pr-review")
+	if err != nil {
+		t.Fatalf("ResolveModelForRoleInCeremony: %v", err)
+	}
+	if got != "haiku" {
+		t.Errorf("got %q, want haiku (pr-review ceremony binding should beat reviewer overlay)", got)
+	}
+}
+
+func TestResolveModelForRoleInCeremony_PRReviewFallsThroughToReviewerOverlay(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"reviewer": "opus"})
+	got, err := ResolveModelForRoleInCeremony("reviewer", "pr-review")
+	if err != nil {
+		t.Fatalf("ResolveModelForRoleInCeremony: %v", err)
+	}
+	if got != "opus" {
+		t.Errorf("got %q, want opus (absent pr-review ceremony key should fall through to reviewer overlay)", got)
+	}
+}
+
 func TestResolveModelForRole_RoleOnlyIgnoresCeremonyRoles(t *testing.T) {
 	setupFakeLoreData(t, "claude-code", map[string]string{"researcher": "opus"})
 	writeCeremonyRoles(t, "claude-code", map[string]map[string]string{

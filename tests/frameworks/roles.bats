@@ -339,6 +339,31 @@ JSON
   [ "$output" = "sonnet" ]
 }
 
+@test "resolve_model_for_role pr-review ceremony binding beats the reviewer overlay" {
+  write_settings <<'JSON'
+{ "version": 1, "tui_launch_framework": "claude-code",
+  "harnesses": {
+    "claude-code": { "args": [], "roles": {"reviewer": "opus"},
+      "ceremony_roles": { "pr-review": {"reviewer": "haiku"} } },
+    "opencode": {"args": []}, "codex": {"args": []} } }
+JSON
+  LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; resolve_model_for_role reviewer pr-review"
+  [ "$status" -eq 0 ]
+  [ "$output" = "haiku" ]
+}
+
+@test "resolve_model_for_role reviewer pr-review falls through to the reviewer overlay when the ceremony key is absent" {
+  write_settings <<'JSON'
+{ "version": 1, "tui_launch_framework": "claude-code",
+  "harnesses": {
+    "claude-code": { "args": [], "roles": {"reviewer": "opus"} },
+    "opencode": {"args": []}, "codex": {"args": []} } }
+JSON
+  LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; resolve_model_for_role reviewer pr-review"
+  [ "$status" -eq 0 ]
+  [ "$output" = "opus" ]
+}
+
 @test "resolve_model_for_role rejects unknown ceremony in the query" {
   run bash -c "source '$LIB'; resolve_model_for_role researcher bogus_ceremony"
   [ "$status" -ne 0 ]

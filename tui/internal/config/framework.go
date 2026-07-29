@@ -1062,7 +1062,7 @@ func ResolveModelForRole(role string) (string, error) {
 // overlay ahead of the role overlay when a non-empty ceremony id is supplied.
 //
 // The ceremony id MUST be one of the closed set in adapters/ceremonies.json
-// (spec, implement). An unknown ceremony — passed in the query, or stored as a
+// (spec, implement, pr-review). An unknown ceremony — passed in the query, or stored as a
 // key under `harnesses.<active>.ceremony_roles` — is rejected with an error
 // rather than routed to a default (feedback_dont_reintroduce_defaults). A role
 // key stored inside a ceremony map that is not in adapters/roles.json is the
