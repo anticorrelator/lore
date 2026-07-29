@@ -627,6 +627,8 @@ The test is decision-theoretic, not descriptive: not "can a scenario be describe
 
   **Everything posted to GitHub is written for a colleague outside this project's process.** This covers inline comments and the top-level structural-notes block (the review's summary comment) alike. Use shared professional vocabulary; a term whose precise meaning was established inside this project (in its docs, plans, or working sessions) either gets replaced with a common-vocabulary equivalent or is defined in the comment itself. The reader has no access to this project's internal writing and no obligation to acquire its vocabulary — a comment they can only parse with that context is a comment that will be confidently misread.
 
+  **Posted text also follows a controlled register**, which hardens the one-sentence bar above and never loosens it: at most 25 words per sentence, active voice, present tense where possible, one idea per sentence, common words over rare ones, noun clusters of at most three words. Certified simplified-English compliance is not claimed; the rules bind as written. Where the register and the one-sentence bar pull differently, the stricter demand wins.
+
   *Translate, don't copy* — the failure mode is shipping the cockpit prose verbatim:
 
   > **Bad (copied from cockpit — mechanism-led, do not post):** `applyModelNameDefaults` prefixes the name via `applyBedrockModelPrefix` when `provider === "AWS"`; no test sets `awsBedrockModelPrefix`, so if the `startsWith` idempotency guard regresses the agent sets an invalid model ID and `run_playground` fails.
@@ -635,7 +637,7 @@ The test is decision-theoretic, not descriptive: not "can a scenario be describe
 
   *(Per-comment criticality opt-in — letting the reviewer re-add a criticality lead to a specific comment — is a Phase-2 TUI affordance; until it lands, posted comments are uniformly neutral.)*
 
-**Voice:** hedge the inference, not the code fact — state what the code does, hedge what follows from it; impersonal, no overstatement, fixes only when non-obvious and framed as a question. Full guide: `~/.lore/claude-md/review-protocol/review-voice.md`.
+**Voice:** hedge the inference, not the code fact — state what the code does, hedge what follows from it; impersonal, no overstatement, fixes only when non-obvious and framed as a question. Full guide: `~/.lore/claude-md/review-protocol/review-voice.md`. The controlled register above binds every posted body alongside this voice guidance.
 
 ### 6d-structural. Route the structural assessment to three altitude channels
 

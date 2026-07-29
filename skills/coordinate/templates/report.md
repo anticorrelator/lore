@@ -11,6 +11,11 @@
      flags every term it cannot ground from general knowledge; resolve every flag —
      re-ground it, remove it, or judge it groundable for this reader and say why.
      Form: concise, bulleted, minimal prose.
+     Register (skills/coordinate/SKILL.md § Close the arc): sentences of at most
+     25 words (20 for procedural steps), active voice, present tense where
+     possible, one idea per sentence, common words, noun clusters of at most
+     three words, no coined vocabulary except technical names grounded at
+     first use.
 
      The body below is yours to organize — group and title by importance, the way
      you'd brief a colleague who owns many efforts at once. A report that reads like

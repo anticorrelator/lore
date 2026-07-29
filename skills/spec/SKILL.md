@@ -265,9 +265,9 @@ Produce the conceptual frame first before committing to phase breakdown.
 
 Synthesis organizes the itemized findings; it does not narrate over them. Keep each finding's provenance intact and cite items rather than restating them in looser words — prose that absorbs the itemized record is where evidence quietly drops out. The Narrative section is the deliberate exception: it tells the story, while the record underneath stays itemized.
 
-1. **Goal** — what we're building/changing and why (1 paragraph).
+1. **Goal** — what we're building/changing and why (1 paragraph). Write it in a controlled register, unconditionally: sentences of at most 25 words, active voice, present tense where possible, one idea per sentence, common words over rare ones, noun clusters of at most three words, no internal vocabulary except technical names grounded at first use. Certified simplified-English compliance is not claimed; the rules bind as written.
 2. **Design Decisions** — use the `### DN: Title` format from the template. Each decision requires `**Decision:**`, `**Rationale:**`, `**Alternatives considered:**`, and `**Applies to:**` fields. Number decisions sequentially (D1, D2, ...).
-3. **Draft Narrative** — synthesize goal and chosen approach into a `## Narrative` section (1-2 paragraphs). Place it after `## Goal`. Write for a reader who wants the story without reading all sections. Draw from Goal and Design Decisions. Omit file paths and task lists.
+3. **Draft Narrative** — synthesize goal and chosen approach into a `## Narrative` section (1-2 paragraphs). Place it after `## Goal`. Write for a reader who wants the story without reading all sections. Draw from Goal and Design Decisions. Omit file paths and task lists. Use the Goal's controlled register where it costs no precision; when the register and technical precision conflict, precision wins — say the precise thing.
 4. **Architecture Diagram (conditional)** — after drafting Narrative, include a `## Architecture Diagram` section when the work touches 2+ distinct modules.
 
    Read diagram conventions:
