@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
 	"github.com/anticorrelator/lore/tui/internal/style"
@@ -156,92 +157,129 @@ func TestListModelGroupsArcsByRecency(t *testing.T) {
 	}
 }
 
-// A live arc renders in its bucket however old it is, and its badge warns.
-// A closed arc of the same age folds away until the toggle reveals it, and the
-// Older header names what is hidden and the key that brings it back.
-func TestListModelLiveArcsNeverFoldAndTheFoldAnnouncesItself(t *testing.T) {
+// Every bucket shows everything in it. A live arc renders however old it is,
+// and a closed arc stays listed until it archives — nothing is folded, so no
+// header advertises a key to bring rows back.
+func TestListModelNoBucketHidesItsMembers(t *testing.T) {
 	m := NewListModel()
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m.SetArcs([]Arc{
 		{Slug: "still-open", Status: StatusActive, Opened: daysAgo(21)},
 		{Slug: "long-done", Status: StatusClosed, Opened: daysAgo(21), ClosedAt: daysAgo(20)},
 		{Slug: "also-done", Status: StatusClosed, Opened: daysAgo(30), ClosedAt: daysAgo(25)},
+		// Never eligible for the sweep, so the list is where it stays.
+		{Slug: "dateless-done", Status: StatusClosed},
 	}, 0)
 
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "still-open") {
-		t.Errorf("a live arc must render however old it is:\n%s", out)
+	for _, want := range []string{"still-open", "long-done", "also-done", "dateless-done"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("%q must render — no bucket hides its members:\n%s", want, out)
+		}
 	}
-	if strings.Contains(out, "long-done") {
-		t.Errorf("a closed arc past the week must fold away:\n%s", out)
+	if !strings.Contains(out, "Older (4)") {
+		t.Errorf("the Older header must count every arc beneath it:\n%s", out)
 	}
-	if !strings.Contains(out, "Older (1) · 2 closed hidden — ctrl+a") {
-		t.Errorf("the Older header must name the hidden count and the key:\n%s", out)
+	if strings.Contains(out, "closed hidden") || strings.Contains(out, "ctrl+a") {
+		t.Errorf("with nothing folded, no header may advertise a reveal key:\n%s", out)
 	}
-	if m.Count() != 1 {
-		t.Errorf("the tab count should exclude folded arcs, got %d", m.Count())
-	}
-
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
-	out = stripANSI(m.View())
-	if !strings.Contains(out, "long-done") || !strings.Contains(out, "Older (3)") {
-		t.Errorf("ctrl+a must reveal the folded closed arcs:\n%s", out)
-	}
-	if !strings.Contains(out, "still-open") {
-		t.Errorf("the live arc renders in its bucket with the toggle on too:\n%s", out)
-	}
-	if strings.Contains(out, "closed hidden") {
-		t.Errorf("nothing is hidden once the toggle is on:\n%s", out)
-	}
-	if m.Count() != 3 {
-		t.Errorf("revealed arcs should count, got %d", m.Count())
+	if m.Count() != 4 {
+		t.Errorf("the tab count should hold every listed arc, got %d", m.Count())
 	}
 }
 
-// With everything closed and folded, the Older header is the only row. It still
-// renders — the notice is what tells the user where the arcs went — and it
-// carries no count, because nothing is visible to count.
-func TestListModelFoldNoticeRendersWithoutVisibleMembers(t *testing.T) {
-	m := NewListModel()
-	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	m.SetArcs([]Arc{
-		{Slug: "long-done", Status: StatusClosed, Opened: daysAgo(21), ClosedAt: daysAgo(20)},
-	}, 0)
-	out := stripANSI(m.View())
-	if !strings.Contains(out, "Older · 1 closed hidden — ctrl+a") {
-		t.Errorf("a members-less Older header must still announce the fold:\n%s", out)
-	}
-	if strings.Contains(out, "Older (") {
-		t.Errorf("a members-less header must carry no count:\n%s", out)
-	}
-}
-
-// A fold-notice header can be the list's last row. Stepping down onto it must
-// leave the cursor where it was, not throw it to the top of the list.
-func TestListModelDownOntoTrailingHeaderHoldsTheCursor(t *testing.T) {
+// The first row is always a header. Stepping up onto it must leave the cursor
+// on the first arc rather than stranding it on a divider.
+func TestListModelUpOntoLeadingHeaderHoldsTheCursor(t *testing.T) {
 	m := NewListModel()
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m.SetArcs([]Arc{
 		{Slug: "fresh", Status: StatusActive, Opened: hoursAgo(1)},
 		{Slug: "still-open", Status: StatusActive, Opened: daysAgo(21)},
-		{Slug: "long-done", Status: StatusClosed, Opened: daysAgo(21), ClosedAt: daysAgo(20)},
 	}, 0)
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.CurrentSlug() != "still-open" {
 		t.Fatalf("j should step over the Older header onto the old live arc, got %q", m.CurrentSlug())
 	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
+	if m.CurrentSlug() != "fresh" {
+		t.Fatalf("k should step back over the header onto the first arc, got %q", m.CurrentSlug())
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
+	if m.CurrentSlug() != "fresh" {
+		t.Errorf("k onto the leading header must hold the cursor, got %q", m.CurrentSlug())
+	}
+}
 
-	// The Older header now sits below the cursor carrying only the notice.
+// A section header reads as a boundary and not as another arc row: its label
+// carries the accent-bold weight the work list gives its project headers, and a
+// rule runs from the label out to the panel edge.
+func TestListModelSectionHeadersRuleToThePanelEdge(t *testing.T) {
+	const width = 80
+	if sectionHeaderStyle.GetForeground() != style.ColorAccent || !sectionHeaderStyle.GetBold() {
+		t.Error("section header labels must carry the accent-bold weight the work list uses")
+	}
+
+	m := NewListModel()
+	m, _ = m.Update(tea.WindowSizeMsg{Width: width, Height: 30})
 	m.SetArcs([]Arc{
 		{Slug: "fresh", Status: StatusActive, Opened: hoursAgo(1)},
-		{Slug: "long-done", Status: StatusClosed, Opened: daysAgo(21), ClosedAt: daysAgo(20)},
+		{Slug: "older-one", Status: StatusActive, Opened: daysAgo(21)},
 	}, 0)
-	if m.CurrentSlug() != "fresh" {
-		t.Fatalf("cursor should fall to the remaining arc, got %q", m.CurrentSlug())
+
+	var header, row string
+	for _, line := range strings.Split(m.View(), "\n") {
+		plain := stripANSI(line)
+		switch {
+		case strings.Contains(plain, "Today (1)"):
+			header = line
+		case strings.Contains(plain, "fresh"):
+			row = line
+		}
 	}
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
-	if m.CurrentSlug() != "fresh" {
-		t.Errorf("j onto a trailing header must hold the cursor, not jump to the top, got %q", m.CurrentSlug())
+	if header == "" || row == "" {
+		t.Fatalf("expected both a Today header and an arc row:\n%s", stripANSI(m.View()))
+	}
+
+	plain := stripANSI(header)
+	if lipgloss.Width(plain) != width {
+		t.Errorf("the header must span the panel, got %d of %d columns: %q", lipgloss.Width(plain), width, plain)
+	}
+	if !strings.HasPrefix(plain, headerRuleLead) || !strings.HasSuffix(plain, "─") {
+		t.Errorf("the rule must open the line and reach the panel edge: %q", plain)
+	}
+	if !strings.Contains(header, sectionHeaderStyle.Render("Today (1)")) {
+		t.Errorf("the header label must render in the section-header style: %q", header)
+	}
+	if strings.Contains(row, sectionHeaderStyle.Render("fresh")) {
+		t.Errorf("an arc row must not carry the section-header style: %q", row)
+	}
+}
+
+// The sweep predicate is stricter than the bucket, because its callers write to
+// the record: an arc whose instant cannot be read has not been shown to be old,
+// even though it still sorts and buckets under Older.
+func TestArcAgedOutAtRequiresAReadableInstant(t *testing.T) {
+	now := time.Date(2026, 7, 29, 9, 0, 0, 0, time.Local)
+	cases := []struct {
+		name string
+		arc  Arc
+		want bool
+	}{
+		{"closed three weeks back", Arc{ClosedAt: iso(now.AddDate(0, 0, -21))}, true},
+		{"closed a moment past the boundary", Arc{ClosedAt: iso(time.Date(2026, 7, 22, 23, 59, 0, 0, time.Local))}, true},
+		{"closed six days back", Arc{ClosedAt: iso(time.Date(2026, 7, 23, 0, 0, 0, 0, time.Local))}, false},
+		{"closed this morning", Arc{ClosedAt: iso(now.Add(-2 * time.Hour))}, false},
+		{"no declared instant", Arc{}, false},
+		{"unparseable instant", Arc{ClosedAt: "whenever"}, false},
+	}
+	for _, c := range cases {
+		if got := c.arc.AgedOutAt(now); got != c.want {
+			t.Errorf("%s: AgedOutAt=%v want %v", c.name, got, c.want)
+		}
+	}
+	if got := (Arc{ClosedAt: "whenever"}).BucketAt(now); got != BucketOlder {
+		t.Errorf("an unreadable instant must still bucket as older, got %v", got)
 	}
 }
 
@@ -347,19 +385,6 @@ func TestListModelSkippedRecordsSurfaceInEmptyState(t *testing.T) {
 	}
 	if !strings.Contains(out, "3 unreadable") {
 		t.Errorf("skipped records should surface in the UI, not on stderr:\n%s", out)
-	}
-}
-
-func TestListModelClosedArcsExcludesArchived(t *testing.T) {
-	m := NewListModel()
-	m.SetArcs([]Arc{
-		{Slug: "live", Status: StatusActive},
-		{Slug: "done", Status: StatusClosed},
-		{Slug: "old", Status: StatusArchived},
-	}, 0)
-	closed := m.ClosedArcs()
-	if len(closed) != 1 || closed[0].Slug != "done" {
-		t.Errorf("only closed arcs are archivable, got %v", closed)
 	}
 }
 

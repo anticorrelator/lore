@@ -2,6 +2,7 @@ package coordination
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -70,10 +71,24 @@ func bucketOf(recency string, now time.Time) Bucket {
 	return BucketOlder
 }
 
-// BucketAt places the arc's Recency in a bucket. It is the same predicate the
-// list headers, the closed-arc fold, and the quit-time archive offer use, so
-// the three cannot disagree about what "older than a week" means.
+// BucketAt places the arc's Recency in a bucket. The headers and the row
+// ordering share it, so a row's position and its age always tell the same
+// story.
 func (a Arc) BucketAt(now time.Time) Bucket { return bucketOf(a.Recency(), now) }
+
+// AgedOutAt reports whether the arc's latest declared instant is both readable
+// and more than a week old. It is deliberately stricter than BucketAt, which
+// buckets an empty or unreadable instant as older: bucketing is a reversible
+// placement, while the callers of this predicate write to the record. An arc
+// whose record cannot say when it last moved has not been shown to be old.
+//
+// Status is not consulted here — the caller decides which states are eligible.
+func (a Arc) AgedOutAt(now time.Time) bool {
+	if _, ok := parseInstant(a.Recency()); !ok {
+		return false
+	}
+	return a.BucketAt(now) == BucketOlder
+}
 
 // parseInstant reads a declared instant, accepting the record's RFC3339 form
 // and the date-only form, matching what work.FormatRelativeTime tolerates.
@@ -130,9 +145,47 @@ var (
 	closedOlderStyle    = lipgloss.NewStyle().Foreground(style.ColorChrome).Faint(true)
 )
 
+// List section-header styles, hoisted per the allocate-once rule (style.go).
+// sectionHeaderStyle matches the work list's project headers so the two views
+// delineate their sections at the same weight; headerRuleStyle draws the rule
+// that carries the label out to the panel edge.
+var (
+	sectionHeaderStyle = lipgloss.NewStyle().Foreground(style.ColorAccent).Bold(true)
+	headerRuleStyle    = lipgloss.NewStyle().Foreground(style.ColorChrome)
+)
+
+// headerRuleLead opens a header line, so the rule starts at the panel edge
+// rather than at the column where arc rows begin.
+const headerRuleLead = "── "
+
+// decorateHeaderRule redraws an unselected header as a label on a rule spanning
+// the panel: the boundary between two recency sections has to read as a
+// boundary, not as another arc row. The width comes from the incoming line,
+// which the engine has already padded to the panel width.
+//
+// A selected header passes through untouched so its selection background stays
+// one unbroken run. So does a header too wide for its own rule — the engine's
+// own truncated, styled line is the better answer at that width.
+func decorateHeaderRule(row collection.Row, selected bool, lines []string) []string {
+	if !row.Header || selected || len(lines) == 0 {
+		return lines
+	}
+	label := row.Title.Text
+	fill := lipgloss.Width(lines[0]) - lipgloss.Width(headerRuleLead) - lipgloss.Width(label) - 1
+	if fill < 1 {
+		return lines
+	}
+	decorated := make([]string, len(lines))
+	copy(decorated, lines)
+	decorated[0] = headerRuleStyle.Render(headerRuleLead) +
+		sectionHeaderStyle.Render(label) + " " +
+		headerRuleStyle.Render(strings.Repeat("─", fill))
+	return decorated
+}
+
 // closedRamp fades a closed arc's row as its close recedes. It is indexed on
-// the same bucket that drives the headers and the fold, so a row's dimness and
-// its position always tell the same story.
+// the same bucket that drives the headers and the ordering, so a row's dimness
+// and its position always tell the same story.
 func closedRamp(bucket Bucket) lipgloss.Style {
 	switch bucket {
 	case BucketToday:
@@ -149,9 +202,9 @@ func closedRamp(bucket Bucket) lipgloss.Style {
 // construction.
 type ListModel struct {
 	arcs []Arc
-	// showArchived reveals the Archived section and the closed arcs that have
-	// aged out of the recency buckets. Both are filed away, in the sense the
-	// key means; unfolded they would drown the live set.
+	// showArchived reveals the Archived section. Archived arcs are filed away,
+	// in the sense the key means; listed by default they would drown the live
+	// set.
 	showArchived bool
 	// skipped counts store records the scan could not use.
 	skipped int
@@ -161,6 +214,7 @@ type ListModel struct {
 // NewListModel builds an empty arc list.
 func NewListModel() ListModel {
 	m := ListModel{list: collection.NewList(listColumns)}
+	m.list.SetDecorator(decorateHeaderRule)
 	m.list.SetOnSelect(func(r collection.Row) tea.Cmd {
 		if r.Header || r.ID == "" {
 			return nil
@@ -180,58 +234,36 @@ func (m *ListModel) SetArcs(arcs []Arc, skipped int) {
 	m.refreshRows()
 }
 
-// ShowArchived reports whether the archived arcs and the folded closed arcs
-// are revealed.
+// ShowArchived reports whether the archived arcs are revealed.
 func (m ListModel) ShowArchived() bool { return m.showArchived }
 
-// visibleArcs returns the arcs the list currently shows. A live arc is always
-// visible, however old — an arc still open past a week is the thing this view
-// exists to keep in front of you. A closed arc folds away once it ages out of
-// the recency buckets, and an archived arc is hidden until the toggle reveals
-// it. Both the rendered rows and the tab count read from here so they cannot
-// disagree.
-func (m ListModel) visibleArcs(now time.Time) []Arc {
+// visibleArcs returns the arcs the list currently shows. Every bucket shows
+// everything in it: a live arc is always visible, however old — an arc still
+// open past a week is the thing this view exists to keep in front of you — and
+// a closed arc stays listed until it archives. Only an archived arc is hidden,
+// until the toggle reveals it. Both the rendered rows and the tab count read
+// from here so they cannot disagree.
+func (m ListModel) visibleArcs() []Arc {
 	var visible []Arc
 	for _, a := range m.arcs {
-		switch a.Status {
-		case StatusArchived:
-			if !m.showArchived {
-				continue
-			}
-		case StatusClosed:
-			if !m.showArchived && a.BucketAt(now) == BucketOlder {
-				continue
-			}
+		if a.Status == StatusArchived && !m.showArchived {
+			continue
 		}
 		visible = append(visible, a)
 	}
 	return visible
 }
 
-// foldedCount counts the closed arcs the fold is currently hiding.
-func (m ListModel) foldedCount(now time.Time) int {
-	if m.showArchived {
-		return 0
-	}
-	n := 0
-	for _, a := range m.arcs {
-		if a.Status == StatusClosed && a.BucketAt(now) == BucketOlder {
-			n++
-		}
-	}
-	return n
-}
-
 // refreshRows rebuilds the row set: the recency buckets newest-first, each
 // under a counted header, then the archived arcs under their own terminal
-// header. Arcs keep scan order within a bucket, which is already recency
-// order. The Older header carries the fold notice when closed arcs are hidden,
-// so rows never vanish without something pointing at the key that returns them.
+// header. Arcs keep scan order within a bucket, which is already recency order.
+// A header renders only with rows beneath it, so no section ever announces an
+// emptiness.
 func (m *ListModel) refreshRows() {
 	now := time.Now()
 	buckets := map[Bucket][]Arc{}
 	var archived []Arc
-	for _, a := range m.visibleArcs(now) {
+	for _, a := range m.visibleArcs() {
 		if a.Status == StatusArchived {
 			archived = append(archived, a)
 			continue
@@ -239,25 +271,19 @@ func (m *ListModel) refreshRows() {
 		b := a.BucketAt(now)
 		buckets[b] = append(buckets[b], a)
 	}
-	folded := m.foldedCount(now)
 
 	var rows []collection.Row
 	for _, b := range []Bucket{BucketToday, BucketThisWeek, BucketOlder} {
 		members := buckets[b]
-		notice := ""
-		if b == BucketOlder && folded > 0 {
-			notice = fmt.Sprintf(" · %d closed hidden — ctrl+a", folded)
-		}
-		if len(members) == 0 && notice == "" {
+		if len(members) == 0 {
 			continue
-		}
-		header := b.Label()
-		if len(members) > 0 {
-			header += fmt.Sprintf(" (%d)", len(members))
 		}
 		rows = append(rows, collection.Row{
 			Header: true,
-			Title:  collection.Cell{Text: header + notice},
+			Title: collection.Cell{
+				Text:  fmt.Sprintf("%s (%d)", b.Label(), len(members)),
+				Style: sectionHeaderStyle,
+			},
 		})
 		for _, a := range members {
 			rows = append(rows, arcRow(a, b))
@@ -266,7 +292,10 @@ func (m *ListModel) refreshRows() {
 	if len(archived) > 0 {
 		rows = append(rows, collection.Row{
 			Header: true,
-			Title:  collection.Cell{Text: fmt.Sprintf("Archived (%d)", len(archived))},
+			Title: collection.Cell{
+				Text:  fmt.Sprintf("Archived (%d)", len(archived)),
+				Style: sectionHeaderStyle,
+			},
 		})
 		for _, a := range archived {
 			rows = append(rows, arcRow(a, a.BucketAt(now)))
@@ -337,12 +366,11 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 // always name an arc so the detail never loses its selection mid-list.
 //
 // It keeps going in the direction of travel and reverses only when that
-// direction runs out of list. The Older header can be the last row when it
-// carries a fold notice and no visible members, and the engine's cursor moves
-// clamp at both ends, so a downward step that lands there cannot be recovered
-// by jumping to the top — that would throw the cursor across the whole list on
-// one keypress. Looping rather than stepping once also holds when two headers
-// end up adjacent.
+// direction runs out of list. The first row is always a header and the engine's
+// cursor moves clamp at both ends, so an upward step that lands there has no
+// further up to travel and is recovered by resuming downward — not by jumping
+// across the whole list on one keypress. Looping rather than stepping once also
+// holds when two headers end up adjacent.
 func (m *ListModel) skipHeaders(travel tea.Msg) tea.Cmd {
 	var cmds []tea.Cmd
 	step := func(msg tea.Msg) bool {
@@ -401,22 +429,9 @@ func (m ListModel) ArcBySlug(slug string) (Arc, bool) {
 // CurrentArc returns the arc under the cursor and whether one exists.
 func (m ListModel) CurrentArc() (Arc, bool) { return m.ArcBySlug(m.CurrentSlug()) }
 
-// ClosedArcs returns the arcs whose declared status is closed — the set the
-// quit-time archive offer draws from. Already-archived arcs are excluded;
-// there is nothing left to offer for them.
-func (m ListModel) ClosedArcs() []Arc {
-	var closed []Arc
-	for _, a := range m.arcs {
-		if a.Status == StatusClosed {
-			closed = append(closed, a)
-		}
-	}
-	return closed
-}
-
 // Count is the number of arcs currently listed. It feeds the tab indicator,
 // which should read as "arcs in front of you", not "records on disk".
-func (m ListModel) Count() int { return len(m.visibleArcs(time.Now())) }
+func (m ListModel) Count() int { return len(m.visibleArcs()) }
 
 // Arcs returns the full arc set, including archived arcs.
 func (m ListModel) Arcs() []Arc { return m.arcs }

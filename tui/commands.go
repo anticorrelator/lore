@@ -248,19 +248,20 @@ func runArchive(slug string, unarchive bool) tea.Cmd {
 	}
 }
 
-// arcArchiveFinishedMsg reports the outcome of the quit-time archive run.
-// Failed names the arcs whose archive did not land; an empty slice means the
-// quit can proceed.
+// arcArchiveFinishedMsg reports the outcome of one archive run. Archived names
+// the arcs whose record now says archived, Failed the ones whose archive did
+// not land. One run can produce both.
 type arcArchiveFinishedMsg struct {
-	Failed []string
-	Err    error
+	Archived []string
+	Failed   []string
+	Err      error
 }
 
 // runArcArchive archives the given arcs. It shells out to `lore arc archive`
 // per slug because that verb owns the record's validation, transition checks,
-// and atomic write — the TUI reads _meta.json and never writes it. A failure
-// comes back as a message so it can be shown in the UI; the quit waits for it
-// rather than exiting over an arc that is still open.
+// and atomic write — the TUI reads _meta.json and never writes it. A failing
+// slug does not stop the run: the rest still archive, and the outcome comes
+// back as a message so both halves can be shown.
 func runArcArchive(slugs []string) tea.Cmd {
 	return func() tea.Msg {
 		msg := arcArchiveFinishedMsg{}
@@ -270,7 +271,9 @@ func runArcArchive(slugs []string) tea.Cmd {
 			if err := cmd.Run(); err != nil {
 				msg.Failed = append(msg.Failed, slug)
 				msg.Err = err
+				continue
 			}
+			msg.Archived = append(msg.Archived, slug)
 		}
 		return msg
 	}

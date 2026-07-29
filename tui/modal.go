@@ -124,52 +124,6 @@ func (m model) renderSessionConfirmModal() string {
 	return m.placeModal(buildModalBox(s, title, body))
 }
 
-// renderArcArchiveModal shows the quit-time offer to archive closed arcs.
-// Arcs closed more than a week ago open checked, and each line carries its age
-// so the proposed set is auditable at a glance. The footer names the keys that
-// change the selection and the two ways out.
-func (m model) renderArcArchiveModal() string {
-	s := modalStyles
-	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString(s.dim.Render(" These arcs are closed. Ones older than a week start checked."))
-	b.WriteString("\n\n")
-	for i, a := range m.arcArchiveCandidates {
-		cursor := "  "
-		if i == m.arcArchiveCursor {
-			cursor = " ▸"
-		}
-		box := "[ ]"
-		if m.arcArchiveSelected[a.Slug] {
-			box = "[x]"
-		}
-		label := a.Slug
-		if a.Title != "" && a.Title != a.Slug {
-			label = a.Title
-		}
-		age := work.FormatRelativeTime(a.Recency())
-		labelW := modalInnerW - 8
-		if age != "" {
-			labelW -= lipgloss.Width(age) + 2
-		}
-		b.WriteString(cursor + " " + s.key.Render(box) + " " + style.Truncate(label, max(0, labelW)))
-		if age != "" {
-			b.WriteString("  " + s.dim.Render(age))
-		}
-		b.WriteString("\n")
-	}
-	b.WriteString("\n ")
-	b.WriteString(s.key.Render("Space") + " " + s.dim.Render("toggle") +
-		s.sep.Render("  ·  ") +
-		s.key.Render("a") + " " + s.dim.Render("all") +
-		s.sep.Render("  ·  ") +
-		s.key.Render("Enter") + " " + s.dim.Render("archive checked & quit") +
-		s.sep.Render("  ·  ") +
-		s.key.Render("Esc") + " " + s.dim.Render("quit, archive nothing"))
-	b.WriteString("\n")
-	return m.placeModal(buildModalBox(s, "Archive closed arcs?", b.String()))
-}
-
 // renderAIModal shows a centered modal for the AI work-item creation prompt.
 func (m model) renderAIModal() string {
 	s := modalStyles

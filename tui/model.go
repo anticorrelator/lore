@@ -191,14 +191,13 @@ type model struct {
 	// tab-indicator count stays current.
 	coordinationList   coordination.ListModel
 	coordinationDetail coordination.DetailModel
-	// arcArchive* back the offer shown when quitting with `q` while closed
-	// arcs remain. Archiving is a judgment that the arc's residue has landed,
-	// so the offer never selects anything on the user's behalf, and declining
-	// it quits without writing.
-	arcArchiveActive     bool
-	arcArchiveCandidates []coordination.Arc
-	arcArchiveSelected   map[string]bool
-	arcArchiveCursor     int
+	// arcSweepInFlight and arcSwept guard the automatic archiving of closed
+	// arcs that have aged past a week. The sweep rides the arc-store scan, so
+	// without them a single aged arc would be resubmitted on every poll tick
+	// until its archive landed. A slug enters arcSwept when it is submitted and
+	// stays there whether or not the archive succeeded.
+	arcSweepInFlight bool
+	arcSwept         map[string]bool
 	// returnToCoordination is the one-shot return target set by a coordination
 	// drill-in (Items → work detail, Sessions → sessions workspace). While set,
 	// the landing surface's back seam re-enters the coordination view instead of

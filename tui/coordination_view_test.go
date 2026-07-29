@@ -556,143 +556,161 @@ func TestLateLedgerAppendNeverFlipsClosure(t *testing.T) {
 	}
 }
 
-// TestQuitOffersArcArchiveForClosedArcs pins the close-time affordance: `q`
-// with a closed arc present holds the quit and offers the archive, arcs closed
-// more than a week ago open checked while newer ones do not, leaving quits
-// without writing, and ctrl+c never sees the offer.
-func TestQuitOffersArcArchiveForClosedArcs(t *testing.T) {
-	isoAgo := func(days int) string { return time.Now().AddDate(0, 0, -days).Format(time.RFC3339) }
+// The sweep archives exactly the closed arcs whose record shows them more than
+// a week past their latest declared instant. A live arc of the same age is never
+// eligible, and neither is a closed arc whose instant cannot be read — archiving
+// writes to the record, and an unreadable date is not evidence of age.
+func TestArcSweepSelectsAgedClosedArcsOnly(t *testing.T) {
+	now := time.Date(2026, 7, 29, 9, 0, 0, 0, time.Local)
+	ago := func(days int) string { return now.AddDate(0, 0, -days).Format(time.RFC3339) }
 	arcs := []coordination.Arc{
-		{Slug: "live", Status: coordination.StatusActive, Opened: isoAgo(0)},
-		{Slug: "stale-done", Status: coordination.StatusClosed, Opened: isoAgo(30), ClosedAt: isoAgo(20)},
-		{Slug: "fresh-done", Status: coordination.StatusClosed, Opened: isoAgo(9), ClosedAt: isoAgo(1)},
-	}
-	freshOnly := []coordination.Arc{
-		{Slug: "live", Status: coordination.StatusActive, Opened: isoAgo(0)},
-		{Slug: "fresh-done", Status: coordination.StatusClosed, Opened: isoAgo(9), ClosedAt: isoAgo(1)},
+		{Slug: "stale-done", Status: coordination.StatusClosed, Opened: ago(30), ClosedAt: ago(9)},
+		{Slug: "stale-live", Status: coordination.StatusActive, Opened: ago(9)},
+		{Slug: "fresh-done", Status: coordination.StatusClosed, Opened: ago(9), ClosedAt: ago(1)},
+		{Slug: "dateless-done", Status: coordination.StatusClosed},
+		{Slug: "unreadable-done", Status: coordination.StatusClosed, ClosedAt: "whenever"},
+		{Slug: "already-archived", Status: coordination.StatusArchived, ClosedAt: ago(30)},
 	}
 
-	t.Run("q opens the offer instead of quitting", func(t *testing.T) {
-		m := minimalModel(stateCoordination, nil, nil)
+	m := minimalModel(stateCoordination, nil, nil)
+	got := m.arcSweepSet(arcs, now)
+	if len(got) != 1 || got[0] != "stale-done" {
+		t.Errorf("only a closed arc with a readable instant past the week is swept, got %v", got)
+	}
+}
+
+// The sweep rides the arc-store scan, which runs on the poll heartbeat from
+// every application state — so an aged closed arc archives whether or not the
+// coordination tab is the one in front of the coordinator.
+func TestArcSweepRidesTheScanFromAnyState(t *testing.T) {
+	ago := func(days int) string { return time.Now().AddDate(0, 0, -days).Format(time.RFC3339) }
+	scan := coordinationArcsScannedMsg{arcs: []coordination.Arc{
+		{Slug: "stale-done", Status: coordination.StatusClosed, Opened: ago(30), ClosedAt: ago(9)},
+		{Slug: "stale-live", Status: coordination.StatusActive, Opened: ago(9)},
+	}}
+
+	for _, state := range []appState{stateWork, stateCoordination} {
+		m := minimalModel(state, nil, nil)
 		m.width, m.height = 120, 40
-		m.coordinationList.SetArcs(arcs, 0)
-		nm, cmd := updateModel(t, m, press('q'))
-		if !nm.arcArchiveActive {
-			t.Fatal("q with a closed arc present should open the archive offer")
+		nm, cmd := updateModel(t, m, scan)
+		if !nm.arcSweepInFlight {
+			t.Errorf("state %v: the scan should have dispatched the sweep", state)
 		}
+		if !nm.arcSwept["stale-done"] {
+			t.Errorf("state %v: the aged closed arc should have been submitted", state)
+		}
+		if nm.arcSwept["stale-live"] {
+			t.Errorf("state %v: a live arc is never submitted, whatever its age", state)
+		}
+		if cmd == nil {
+			t.Errorf("state %v: the sweep should ride out with the scan's commands", state)
+		}
+	}
+}
+
+// One sweep runs at a time and each slug is submitted once. The heartbeat
+// rescans while an arc stays closed until its archive lands, so without both
+// guards a single aged arc would respawn the subprocess on every tick.
+func TestArcSweepSubmitsEachSlugOnce(t *testing.T) {
+	now := time.Date(2026, 7, 29, 9, 0, 0, 0, time.Local)
+	arcs := []coordination.Arc{{
+		Slug:     "stale-done",
+		Status:   coordination.StatusClosed,
+		Opened:   now.AddDate(0, 0, -30).Format(time.RFC3339),
+		ClosedAt: now.AddDate(0, 0, -9).Format(time.RFC3339),
+	}}
+
+	m := minimalModel(stateCoordination, nil, nil)
+	if cmd := m.startArcSweep(arcs); cmd == nil {
+		t.Fatal("the first scan holding an aged closed arc should dispatch a sweep")
+	}
+	if !m.arcSweepInFlight || !m.arcSwept["stale-done"] {
+		t.Fatal("dispatching a sweep must mark it in flight and record the submitted slug")
+	}
+	if cmd := m.startArcSweep(arcs); cmd != nil {
+		t.Error("a second scan while a sweep is in flight must not dispatch another")
+	}
+
+	m.arcSweepInFlight = false
+	if cmd := m.startArcSweep(arcs); cmd != nil {
+		t.Error("a slug already submitted this session must not be submitted again")
+	}
+	if got := m.arcSweepSet(arcs, now); len(got) != 0 {
+		t.Errorf("a submitted slug leaves the eligible set, got %v", got)
+	}
+}
+
+// The sweep was never asked for, so it reports through channels that clear on
+// the next key press and never holds the coordinator up. A failure names the
+// arcs; a clean run counts them. Either outcome releases the in-flight guard so
+// the next scan can pick up what this one did not cover.
+func TestArcSweepReportsThroughTransientChannels(t *testing.T) {
+	t.Run("a clean sweep counts the arcs it archived", func(t *testing.T) {
+		m := minimalModel(stateCoordination, nil, nil)
+		m.arcSweepInFlight = true
+		nm, cmd := updateModel(t, m, arcArchiveFinishedMsg{Archived: []string{"one", "two"}})
 		if cmd != nil {
-			t.Error("the offer must hold the quit, not race it")
+			t.Error("the sweep must not quit or block on its own result")
 		}
-		out := stripANSI(nm.viewContent())
-		if !strings.Contains(out, "Archive closed arcs?") || !strings.Contains(out, "stale-done") || !strings.Contains(out, "fresh-done") {
-			t.Errorf("the offer should list the closed arcs:\n%s", out)
+		if nm.arcSweepInFlight {
+			t.Error("a finished sweep must release the guard")
 		}
-		if strings.Contains(out, "live") {
-			t.Error("an active arc is not archivable and must not be offered")
+		if !strings.Contains(nm.statusNotice, "2 arcs") {
+			t.Errorf("a clean sweep should count what it archived, got %q", nm.statusNotice)
 		}
-		if !strings.Contains(out, "20d ago") || !strings.Contains(out, "1d ago") {
-			t.Errorf("each candidate should carry its age, so the checked set is auditable:\n%s", out)
-		}
-	})
-
-	t.Run("arcs closed past the week open checked, newer ones do not", func(t *testing.T) {
-		m := minimalModel(stateCoordination, nil, nil)
-		m.width, m.height = 120, 40
-		m.coordinationList.SetArcs(arcs, 0)
-		nm, _ := updateModel(t, m, press('q'))
-		got := nm.selectedArchiveSlugs()
-		if len(got) != 1 || got[0] != "stale-done" {
-			t.Errorf("only arcs closed more than a week ago should start checked, got %v", got)
+		if nm.flashErr != "" {
+			t.Errorf("a clean sweep raises no error, got %q", nm.flashErr)
 		}
 	})
 
-	t.Run("an all-recent offer opens with nothing checked", func(t *testing.T) {
+	t.Run("one archived arc reads as one arc", func(t *testing.T) {
 		m := minimalModel(stateCoordination, nil, nil)
-		m.width, m.height = 120, 40
-		m.coordinationList.SetArcs(freshOnly, 0)
-		nm, _ := updateModel(t, m, press('q'))
-		if !nm.arcArchiveActive {
-			t.Fatal("a recently closed arc still opens the offer")
-		}
-		if got := nm.selectedArchiveSlugs(); len(got) != 0 {
-			t.Errorf("nothing older than a week means nothing checked, got %v", got)
+		nm, _ := updateModel(t, m, arcArchiveFinishedMsg{Archived: []string{"one"}})
+		if !strings.Contains(nm.statusNotice, "1 arc ") {
+			t.Errorf("a single arc should not read as a plural, got %q", nm.statusNotice)
 		}
 	})
 
-	t.Run("Enter with nothing selected quits without archiving", func(t *testing.T) {
+	t.Run("a failure names the arcs that did not archive", func(t *testing.T) {
 		m := minimalModel(stateCoordination, nil, nil)
-		m.width, m.height = 120, 40
-		m.coordinationList.SetArcs(freshOnly, 0)
-		m, _ = updateModel(t, m, press('q'))
-		nm, cmd := updateModel(t, m, press(tea.KeyEnter))
-		if nm.arcArchiveActive {
-			t.Error("Enter should close the offer")
+		m.arcSweepInFlight = true
+		nm, cmd := updateModel(t, m, arcArchiveFinishedMsg{
+			Failed: []string{"stubborn"},
+			Err:    fmt.Errorf("still open"),
+		})
+		if cmd != nil {
+			t.Error("a failed sweep must not quit")
 		}
-		if cmd == nil {
-			t.Fatal("Enter should quit")
+		if nm.arcSweepInFlight {
+			t.Error("a failed sweep must still release the guard")
 		}
-		if _, isQuit := cmd().(tea.QuitMsg); !isQuit {
-			t.Error("an empty selection must quit directly, running no archive")
+		if !strings.Contains(nm.flashErr, "stubborn") {
+			t.Errorf("the failure should name the arc, got %q", nm.flashErr)
 		}
 	})
+}
 
-	t.Run("Esc quits archiving nothing", func(t *testing.T) {
-		m := minimalModel(stateCoordination, nil, nil)
-		m.width, m.height = 120, 40
-		m.coordinationList.SetArcs(arcs, 0)
-		m, _ = updateModel(t, m, press('q'))
-		if len(m.selectedArchiveSlugs()) == 0 {
-			t.Fatal("this case needs a preselected candidate to be worth anything")
-		}
-		nm, cmd := updateModel(t, m, press(tea.KeyEscape))
-		if nm.arcArchiveActive || cmd == nil {
-			t.Fatal("Esc should decline the offer and quit")
-		}
-		if _, isQuit := cmd().(tea.QuitMsg); !isQuit {
-			t.Error("Esc must quit directly, archiving nothing even with candidates checked")
-		}
-	})
+// Quitting is immediate. Closed arcs no longer hold the quit open on an offer:
+// they archive on their own, so `q` writes nothing and leaves.
+func TestQuitFromCoordinationIsImmediate(t *testing.T) {
+	m := minimalModel(stateCoordination, nil, nil)
+	m.width, m.height = 120, 40
+	m.coordinationList.SetArcs([]coordination.Arc{
+		{Slug: "live", Status: coordination.StatusActive, Opened: time.Now().Format(time.RFC3339)},
+		{Slug: "stale-done", Status: coordination.StatusClosed,
+			ClosedAt: time.Now().AddDate(0, 0, -20).Format(time.RFC3339)},
+	}, 0)
 
-	t.Run("space toggles the arc under the cursor", func(t *testing.T) {
-		m := minimalModel(stateCoordination, nil, nil)
-		m.width, m.height = 120, 40
-		m.coordinationList.SetArcs(arcs, 0)
-		m, _ = updateModel(t, m, press('q'))
-		m, _ = updateModel(t, m, press(' '))
-		if got := m.selectedArchiveSlugs(); len(got) != 0 {
-			t.Errorf("space should clear the preselected cursor arc, got %v", got)
-		}
-		m, _ = updateModel(t, m, press(' '))
-		if got := m.selectedArchiveSlugs(); len(got) != 1 || got[0] != "stale-done" {
-			t.Errorf("space should check it again, got %v", got)
-		}
-	})
-
-	t.Run("no closed arcs means no offer", func(t *testing.T) {
-		m := minimalModel(stateCoordination, nil, nil)
-		m.width, m.height = 120, 40
-		m.coordinationList.SetArcs([]coordination.Arc{{Slug: "live", Status: coordination.StatusActive}}, 0)
-		nm, cmd := updateModel(t, m, press('q'))
-		if nm.arcArchiveActive {
-			t.Error("with nothing closed, q should quit straight away")
-		}
-		if cmd == nil {
-			t.Fatal("q should quit")
-		}
-	})
-
-	t.Run("ctrl+c bypasses the offer", func(t *testing.T) {
-		m := minimalModel(stateCoordination, nil, nil)
-		m.width, m.height = 120, 40
-		m.coordinationList.SetArcs(arcs, 0)
-		nm, cmd := updateModel(t, m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
-		if nm.arcArchiveActive {
-			t.Error("ctrl+c must never see the archive offer")
-		}
-		if cmd == nil {
-			t.Fatal("ctrl+c should quit")
-		}
-	})
+	nm, cmd := updateModel(t, m, press('q'))
+	if cmd == nil {
+		t.Fatal("q should quit")
+	}
+	if _, isQuit := cmd().(tea.QuitMsg); !isQuit {
+		t.Error("a closed arc must not hold the quit open")
+	}
+	if out := stripANSI(nm.viewContent()); strings.Contains(out, "Archive closed arcs") {
+		t.Errorf("no archive modal may render on the way out:\n%s", out)
+	}
 }
 
 // TestBuildSessionRowsProjectJoin pins the in-memory session→project join: a
