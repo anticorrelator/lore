@@ -6,10 +6,12 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
+	"github.com/anticorrelator/lore/tui/internal/style"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
@@ -88,24 +90,211 @@ func TestListModelCursorRestsOnArcsNotSectionHeaders(t *testing.T) {
 	}
 }
 
-// A closed arc lands under its own section header, and walking from the first
-// active arc to the last closed one never parks the cursor on a header.
-func TestListModelSectionsSplitActiveFromComplete(t *testing.T) {
+// iso renders an instant the way an arc record declares one.
+func iso(t time.Time) string { return t.Format(time.RFC3339) }
+
+// hoursAgo and daysAgo build declared instants relative to the running clock,
+// which is the clock the list buckets against.
+func hoursAgo(n int) string { return iso(time.Now().Add(-time.Duration(n) * time.Hour)) }
+func daysAgo(n int) string  { return iso(time.Now().AddDate(0, 0, -n)) }
+
+// The bucket boundary is the local calendar day, not a rolling window: an arc
+// closed late yesterday reads as this week all through today.
+func TestBucketOfSplitsOnLocalCalendarDays(t *testing.T) {
+	now := time.Date(2026, 7, 29, 9, 0, 0, 0, time.Local)
+	cases := []struct {
+		name    string
+		recency string
+		want    Bucket
+	}{
+		{"this morning", iso(now.Add(-2 * time.Hour)), BucketToday},
+		{"local midnight today", iso(time.Date(2026, 7, 29, 0, 0, 0, 0, time.Local)), BucketToday},
+		{"late yesterday", iso(time.Date(2026, 7, 28, 23, 30, 0, 0, time.Local)), BucketThisWeek},
+		{"six days back at midnight", iso(time.Date(2026, 7, 23, 0, 0, 0, 0, time.Local)), BucketThisWeek},
+		{"a moment before that", iso(time.Date(2026, 7, 22, 23, 59, 0, 0, time.Local)), BucketOlder},
+		{"three weeks ago", iso(now.AddDate(0, 0, -21)), BucketOlder},
+		{"no declared instant", "", BucketOlder},
+		{"unparseable", "whenever", BucketOlder},
+	}
+	for _, c := range cases {
+		if got := bucketOf(c.recency, now); got != c.want {
+			t.Errorf("%s: bucketOf(%q)=%v want %v", c.name, c.recency, got, c.want)
+		}
+	}
+}
+
+// Rows sit under recency headers, newest first, and the retired Active and
+// Complete sections appear nowhere.
+func TestListModelGroupsArcsByRecency(t *testing.T) {
 	m := NewListModel()
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	// midweek carries the backfill shape most closed records have: an open
+	// written at migration time, later than the close it preserved. It buckets
+	// on the close.
 	m.SetArcs([]Arc{
-		{Slug: "live", Status: StatusActive},
-		{Slug: "done", Status: StatusClosed},
+		{Slug: "fresh", Status: StatusActive, Opened: hoursAgo(2)},
+		{Slug: "midweek", Status: StatusClosed, Opened: hoursAgo(1), ClosedAt: daysAgo(3)},
+		{Slug: "ancient", Status: StatusActive, Opened: daysAgo(21)},
 	}, 0)
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "Active (1)") || !strings.Contains(out, "Complete (1)") {
-		t.Errorf("both sections should carry a counted header:\n%s", out)
+	for _, want := range []string{"Today (1)", "This week (1)", "Older (1)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q header:\n%s", want, out)
+		}
 	}
-	if m.CurrentSlug() != "live" {
-		t.Fatalf("cursor should open on the first active arc, got %q", m.CurrentSlug())
+	if strings.Contains(out, "Active (") || strings.Contains(out, "Complete (") {
+		t.Errorf("the retired sections must not render:\n%s", out)
+	}
+	order := []string{"Today", "fresh", "This week", "midweek", "Older", "ancient"}
+	at := 0
+	for _, want := range order {
+		i := strings.Index(out[at:], want)
+		if i < 0 {
+			t.Fatalf("expected %q after position %d, newest bucket first:\n%s", want, at, out)
+		}
+		at += i + len(want)
+	}
+}
+
+// A live arc renders in its bucket however old it is, and its badge warns.
+// A closed arc of the same age folds away until the toggle reveals it, and the
+// Older header names what is hidden and the key that brings it back.
+func TestListModelLiveArcsNeverFoldAndTheFoldAnnouncesItself(t *testing.T) {
+	m := NewListModel()
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.SetArcs([]Arc{
+		{Slug: "still-open", Status: StatusActive, Opened: daysAgo(21)},
+		{Slug: "long-done", Status: StatusClosed, Opened: daysAgo(21), ClosedAt: daysAgo(20)},
+		{Slug: "also-done", Status: StatusClosed, Opened: daysAgo(30), ClosedAt: daysAgo(25)},
+	}, 0)
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "still-open") {
+		t.Errorf("a live arc must render however old it is:\n%s", out)
+	}
+	if strings.Contains(out, "long-done") {
+		t.Errorf("a closed arc past the week must fold away:\n%s", out)
+	}
+	if !strings.Contains(out, "Older (1) · 2 closed hidden — ctrl+a") {
+		t.Errorf("the Older header must name the hidden count and the key:\n%s", out)
+	}
+	if m.Count() != 1 {
+		t.Errorf("the tab count should exclude folded arcs, got %d", m.Count())
+	}
+
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	out = stripANSI(m.View())
+	if !strings.Contains(out, "long-done") || !strings.Contains(out, "Older (3)") {
+		t.Errorf("ctrl+a must reveal the folded closed arcs:\n%s", out)
+	}
+	if !strings.Contains(out, "still-open") {
+		t.Errorf("the live arc renders in its bucket with the toggle on too:\n%s", out)
+	}
+	if strings.Contains(out, "closed hidden") {
+		t.Errorf("nothing is hidden once the toggle is on:\n%s", out)
+	}
+	if m.Count() != 3 {
+		t.Errorf("revealed arcs should count, got %d", m.Count())
+	}
+}
+
+// With everything closed and folded, the Older header is the only row. It still
+// renders — the notice is what tells the user where the arcs went — and it
+// carries no count, because nothing is visible to count.
+func TestListModelFoldNoticeRendersWithoutVisibleMembers(t *testing.T) {
+	m := NewListModel()
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.SetArcs([]Arc{
+		{Slug: "long-done", Status: StatusClosed, Opened: daysAgo(21), ClosedAt: daysAgo(20)},
+	}, 0)
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "Older · 1 closed hidden — ctrl+a") {
+		t.Errorf("a members-less Older header must still announce the fold:\n%s", out)
+	}
+	if strings.Contains(out, "Older (") {
+		t.Errorf("a members-less header must carry no count:\n%s", out)
+	}
+}
+
+// A fold-notice header can be the list's last row. Stepping down onto it must
+// leave the cursor where it was, not throw it to the top of the list.
+func TestListModelDownOntoTrailingHeaderHoldsTheCursor(t *testing.T) {
+	m := NewListModel()
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.SetArcs([]Arc{
+		{Slug: "fresh", Status: StatusActive, Opened: hoursAgo(1)},
+		{Slug: "still-open", Status: StatusActive, Opened: daysAgo(21)},
+		{Slug: "long-done", Status: StatusClosed, Opened: daysAgo(21), ClosedAt: daysAgo(20)},
+	}, 0)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if m.CurrentSlug() != "still-open" {
+		t.Fatalf("j should step over the Older header onto the old live arc, got %q", m.CurrentSlug())
+	}
+
+	// The Older header now sits below the cursor carrying only the notice.
+	m.SetArcs([]Arc{
+		{Slug: "fresh", Status: StatusActive, Opened: hoursAgo(1)},
+		{Slug: "long-done", Status: StatusClosed, Opened: daysAgo(21), ClosedAt: daysAgo(20)},
+	}, 0)
+	if m.CurrentSlug() != "fresh" {
+		t.Fatalf("cursor should fall to the remaining arc, got %q", m.CurrentSlug())
 	}
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
-	if m.CurrentSlug() != "done" {
-		t.Errorf("j should step over the Complete header onto the closed arc, got %q", m.CurrentSlug())
+	if m.CurrentSlug() != "fresh" {
+		t.Errorf("j onto a trailing header must hold the cursor, not jump to the top, got %q", m.CurrentSlug())
+	}
+}
+
+// The badge says what an arc is without the reader tracing back to its header.
+// A live arc past the week is drawn in the warn color; the row never claims the
+// arc has stalled.
+func TestListModelStateBadges(t *testing.T) {
+	m := NewListModel()
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.SetArcs([]Arc{
+		{Slug: "fresh", Status: StatusActive, Opened: hoursAgo(1)},
+		{Slug: "still-open", Status: StatusActive, Opened: daysAgo(21)},
+		{Slug: "recent-close", Status: StatusClosed, Opened: daysAgo(9), ClosedAt: hoursAgo(3)},
+		{Slug: "filed", Status: StatusArchived, Opened: daysAgo(30), ClosedAt: daysAgo(29)},
+	}, 0)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "STATE") || !strings.Contains(out, "AGE") {
+		t.Errorf("the row should carry state and age columns:\n%s", out)
+	}
+	for _, want := range []string{"live", "closed", "archived"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q badge:\n%s", want, out)
+		}
+	}
+	if strings.Contains(strings.ToLower(out), "stall") {
+		t.Errorf("the row must not assert inactivity the record cannot support:\n%s", out)
+	}
+
+	if got := stateStyle(StatusActive, BucketOlder); got.GetForeground() != style.StatusWarn.GetForeground() {
+		t.Errorf("a live arc past the week should warn, got %v", got.GetForeground())
+	}
+	if got := stateStyle(StatusActive, BucketToday); got.GetForeground() != style.StatusActive.GetForeground() {
+		t.Errorf("a recent live arc should read as active, got %v", got.GetForeground())
+	}
+	if got := stateStyle(StatusArchived, BucketOlder); got.GetForeground() != style.StatusDone.GetForeground() {
+		t.Errorf("an archived arc should read as done, got %v", got.GetForeground())
+	}
+}
+
+// The closed ramp fades a row as its close recedes, and it is keyed on the same
+// bucket that decides the row's header and its fold.
+func TestClosedRampFadesWithTheBucket(t *testing.T) {
+	if closedRamp(BucketToday).GetForeground() != style.StatusDone.GetForeground() {
+		t.Error("a close from today should read as an ordinary settled row")
+	}
+	if closedRamp(BucketThisWeek).GetForeground() != style.ColorChrome {
+		t.Error("a close from this week should recede to chrome")
+	}
+	older := closedRamp(BucketOlder)
+	if older.GetForeground() != style.ColorChrome || !older.GetFaint() {
+		t.Errorf("the oldest step should be fainter still, got %v faint=%v", older.GetForeground(), older.GetFaint())
 	}
 }
 

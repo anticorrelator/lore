@@ -82,28 +82,68 @@ func TestScanArcsToleratesOmittedProjectAndClosedAt(t *testing.T) {
 	if a.Project != "" || a.ClosedAt != "" {
 		t.Errorf("omitted keys should normalize to empty, got project=%q closed_at=%q", a.Project, a.ClosedAt)
 	}
-	if a.Title != "Bare" || a.Section != SectionActive {
-		t.Errorf("row should carry the record's title and its section, got %+v", a)
+	if a.Title != "Bare" {
+		t.Errorf("row should carry the record's title, got %+v", a)
 	}
 }
 
-func TestScanArcsSortsByOpenedThenSlugDescending(t *testing.T) {
+// A closed arc's latest declared instant is its close; a live arc's is its
+// open. An arc with neither has no instant at all.
+func TestArcRecencyPrefersClosedAtOverOpened(t *testing.T) {
+	cases := []struct {
+		name string
+		arc  Arc
+		want string
+	}{
+		{"live arc falls back to opened", Arc{Status: StatusActive, Opened: "2026-07-20T00:00:00Z"}, "2026-07-20T00:00:00Z"},
+		{"closed arc keys on its close", Arc{Status: StatusClosed, Opened: "2026-07-20T00:00:00Z", ClosedAt: "2026-07-22T00:00:00Z"}, "2026-07-22T00:00:00Z"},
+		{"backfilled open does not win", Arc{Status: StatusClosed, Opened: "2026-07-20T00:00:00Z", ClosedAt: "2026-06-01T00:00:00Z"}, "2026-06-01T00:00:00Z"},
+		{"no declared instant", Arc{Status: StatusActive}, ""},
+	}
+	for _, c := range cases {
+		if got := c.arc.Recency(); got != c.want {
+			t.Errorf("%s: Recency()=%q want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// The scan orders arcs by their latest declared instant. Most closed records
+// carry a close that precedes their migration-backfilled open, so a close-keyed
+// order and an open-keyed order disagree — this pins the close-keyed one.
+func TestScanArcsSortsByRecencyThenSlugDescending(t *testing.T) {
 	wd := t.TempDir()
-	writeArc(t, wd, "older", `{"slug":"older","status":"active","opened":"2026-07-01T00:00:00Z"}`)
-	writeArc(t, wd, "newer", `{"slug":"newer","status":"active","opened":"2026-07-20T00:00:00Z"}`)
-	writeArc(t, wd, "tie-a", `{"slug":"tie-a","status":"active","opened":"2026-07-10T00:00:00Z"}`)
-	writeArc(t, wd, "tie-b", `{"slug":"tie-b","status":"active","opened":"2026-07-10T00:00:00Z"}`)
+	writeArc(t, wd, "live-old", `{"slug":"live-old","status":"active","opened":"2026-07-01T00:00:00Z"}`)
+	writeArc(t, wd, "live-new", `{"slug":"live-new","status":"active","opened":"2026-07-20T00:00:00Z"}`)
+	// Both closed records were backfilled with the same late open and kept
+	// their real, earlier close.
+	writeArc(t, wd, "closed-recent", `{"slug":"closed-recent","status":"closed","opened":"2026-07-25T00:00:00Z","closed_at":"2026-07-10T00:00:00Z"}`)
+	writeArc(t, wd, "closed-ancient", `{"slug":"closed-ancient","status":"closed","opened":"2026-07-25T00:00:00Z","closed_at":"2026-05-02T00:00:00Z"}`)
+	writeArc(t, wd, "tie-a", `{"slug":"tie-a","status":"active","opened":"2026-07-15T00:00:00Z"}`)
+	writeArc(t, wd, "tie-b", `{"slug":"tie-b","status":"active","opened":"2026-07-15T00:00:00Z"}`)
 
 	arcs, _ := ScanArcs(wd)
 	var got []string
 	for _, a := range arcs {
 		got = append(got, a.Slug)
 	}
-	want := []string{"newer", "tie-b", "tie-a", "older"}
+	want := []string{"live-new", "tie-b", "tie-a", "closed-recent", "live-old", "closed-ancient"}
 	for i := range want {
 		if i >= len(got) || got[i] != want[i] {
-			t.Fatalf("newest first, slug descending on a tie: got %v want %v", got, want)
+			t.Fatalf("newest declared instant first, slug descending on a tie: got %v want %v", got, want)
 		}
+	}
+}
+
+// A record with no declared instant at all sorts last rather than jumping to
+// the top on an empty key.
+func TestScanArcsSortsInstantlessRecordsOldest(t *testing.T) {
+	wd := t.TempDir()
+	writeArc(t, wd, "dated", `{"slug":"dated","status":"active","opened":"2026-01-01T00:00:00Z"}`)
+	writeArc(t, wd, "undated", `{"slug":"undated","status":"active"}`)
+
+	arcs, _ := ScanArcs(wd)
+	if len(arcs) != 2 || arcs[0].Slug != "dated" || arcs[1].Slug != "undated" {
+		t.Errorf("a record declaring no instant sorts oldest, got %+v", arcs)
 	}
 }
 
@@ -151,6 +191,22 @@ func TestScanArcsKeepsLabelSeparateFromMembership(t *testing.T) {
 	}
 	if arcs[0].Items != 0 || len(arcs[0].Members) != 0 {
 		t.Errorf("items sharing the label are not members, got %d items %v", arcs[0].Items, arcs[0].Members)
+	}
+}
+
+// The status validator is what keeps malformed records out of the list; it
+// admits exactly the three statuses the store records.
+func TestValidStatusAdmitsOnlyRecordedStatuses(t *testing.T) {
+	for status, want := range map[string]bool{
+		StatusActive:   true,
+		StatusClosed:   true,
+		StatusArchived: true,
+		"paused":       false,
+		"":             false,
+	} {
+		if got := validStatus(status); got != want {
+			t.Errorf("status %q: validStatus()=%v want %v", status, got, want)
+		}
 	}
 }
 

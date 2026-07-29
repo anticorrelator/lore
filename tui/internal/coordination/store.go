@@ -16,12 +16,6 @@ const (
 	StatusArchived = "archived"
 )
 
-// Sections group arcs in the list: active arcs, then everything finished.
-const (
-	SectionActive   = "Active"
-	SectionComplete = "Complete"
-)
-
 // Arc is one row of the arc store. It mirrors the `lore arc list --json` row
 // contract: every field is present on every row, with Project and ClosedAt
 // normalized to "" when the record omits them. The record itself takes the
@@ -31,7 +25,6 @@ type Arc struct {
 	Slug    string
 	Title   string
 	Status  string
-	Section string
 	Project string
 	// Members is the arc's declared membership. Item and session joins go
 	// through it; an arc's project label says nothing about who belongs to it.
@@ -47,6 +40,20 @@ type Arc struct {
 // ledger appended after the close still reads as closed.
 func (a Arc) Closed() bool {
 	return a.Status == StatusClosed || a.Status == StatusArchived
+}
+
+// Recency is the latest instant the arc declares: its close if it has one,
+// otherwise its open. It orders and buckets every arc whatever its status,
+// and it says nothing about the arc's state — the declared status does that.
+//
+// Closed arcs need the close instant rather than the open: the arc-store
+// migration backfilled `opened` at migration time while preserving each arc's
+// real close, so most closed records declare a close that precedes their open.
+func (a Arc) Recency() string {
+	if a.ClosedAt != "" {
+		return a.ClosedAt
+	}
+	return a.Opened
 }
 
 // arcRecord is the on-disk _meta.json shape. Project and ClosedAt are absent
@@ -67,20 +74,19 @@ func ArcDir(workDir, slug string) string {
 	return filepath.Join(workDir, "_arcs", slug)
 }
 
-// sectionOf maps a declared status to its list section, reporting false for
-// any status outside the recorded set.
-func sectionOf(status string) (string, bool) {
+// validStatus reports whether a declared status is one the store records.
+// Anything else marks the record malformed, and ScanArcs skips it rather than
+// admitting a row whose status no reader can interpret.
+func validStatus(status string) bool {
 	switch status {
-	case StatusActive:
-		return SectionActive, true
-	case StatusClosed, StatusArchived:
-		return SectionComplete, true
+	case StatusActive, StatusClosed, StatusArchived:
+		return true
 	}
-	return "", false
+	return false
 }
 
 // ScanArcs reads every arc record under workDir/_arcs/ and returns the rows
-// newest-first by (opened, slug), plus a count of records it could not use.
+// newest-first by (recency, slug), plus a count of records it could not use.
 // Callers invoke it inside a tea.Cmd; it is the list's sole arc source.
 //
 // Skipped records are counted rather than logged: a malformed record is a
@@ -112,8 +118,7 @@ func ScanArcs(workDir string) (arcs []Arc, skipped int) {
 			skipped++
 			continue
 		}
-		section, ok := sectionOf(rec.Status)
-		if !ok {
+		if !validStatus(rec.Status) {
 			skipped++
 			continue
 		}
@@ -125,7 +130,6 @@ func ScanArcs(workDir string) (arcs []Arc, skipped int) {
 			Slug:     slug,
 			Title:    rec.Title,
 			Status:   rec.Status,
-			Section:  section,
 			Project:  rec.Project,
 			Members:  rec.Members,
 			Items:    countActiveMembers(workDir, rec.Members),
@@ -134,8 +138,9 @@ func ScanArcs(workDir string) (arcs []Arc, skipped int) {
 		})
 	}
 	sort.Slice(arcs, func(i, j int) bool {
-		if arcs[i].Opened != arcs[j].Opened {
-			return arcs[i].Opened > arcs[j].Opened
+		ri, rj := arcs[i].Recency(), arcs[j].Recency()
+		if ri != rj {
+			return ri > rj
 		}
 		return arcs[i].Slug > arcs[j].Slug
 	})

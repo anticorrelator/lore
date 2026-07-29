@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -250,17 +251,26 @@ func (m *model) syncCoordinationMembers() {
 }
 
 // offerArcArchive opens the quit-time archive offer when the last scan holds
-// at least one closed arc, reporting whether the quit should be held. Nothing
-// starts selected: archiving is the coordinator's judgment that an arc's
-// residue has landed, so confirming an untouched offer writes nothing.
+// at least one closed arc, reporting whether the quit should be held. Arcs
+// closed more than a week ago start checked — the same boundary that folds
+// them out of the list proposes them here. Nothing is archived without the
+// coordinator's confirmation: Enter files the checked set, Esc quits writing
+// nothing, and an offer whose arcs all closed recently opens with nothing
+// checked at all.
 func (m *model) offerArcArchive() bool {
 	candidates := m.coordinationList.ClosedArcs()
 	if len(candidates) == 0 {
 		return false
 	}
+	now := time.Now()
 	m.arcArchiveActive = true
 	m.arcArchiveCandidates = candidates
 	m.arcArchiveSelected = make(map[string]bool, len(candidates))
+	for _, a := range candidates {
+		if a.BucketAt(now) == coordination.BucketOlder {
+			m.arcArchiveSelected[a.Slug] = true
+		}
+	}
 	m.arcArchiveCursor = 0
 	return true
 }

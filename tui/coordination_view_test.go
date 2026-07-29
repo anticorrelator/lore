@@ -423,7 +423,10 @@ func arcStoreFixture(t *testing.T, workDir, arc, status string, ledger, report *
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	rec := fmt.Sprintf(`{"schema_version":1,"slug":%q,"title":"Arc %s","status":%q,"members":[],"opened":"2026-07-20T09:00:00Z"}`, arc, arc, status)
+	// The record opens now so the arc sits in the list's newest bucket: these
+	// fixtures exercise the ledger and report projections, not the fold.
+	opened := time.Now().Format(time.RFC3339)
+	rec := fmt.Sprintf(`{"schema_version":1,"slug":%q,"title":"Arc %s","status":%q,"members":[],"opened":%q}`, arc, arc, status, opened)
 	if err := os.WriteFile(filepath.Join(dir, "_meta.json"), []byte(rec), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -554,12 +557,19 @@ func TestLateLedgerAppendNeverFlipsClosure(t *testing.T) {
 }
 
 // TestQuitOffersArcArchiveForClosedArcs pins the close-time affordance: `q`
-// with a closed arc present holds the quit and offers the archive, an
-// untouched offer quits without writing, and ctrl+c never sees it.
+// with a closed arc present holds the quit and offers the archive, arcs closed
+// more than a week ago open checked while newer ones do not, leaving quits
+// without writing, and ctrl+c never sees the offer.
 func TestQuitOffersArcArchiveForClosedArcs(t *testing.T) {
+	isoAgo := func(days int) string { return time.Now().AddDate(0, 0, -days).Format(time.RFC3339) }
 	arcs := []coordination.Arc{
-		{Slug: "live", Status: coordination.StatusActive},
-		{Slug: "done", Status: coordination.StatusClosed},
+		{Slug: "live", Status: coordination.StatusActive, Opened: isoAgo(0)},
+		{Slug: "stale-done", Status: coordination.StatusClosed, Opened: isoAgo(30), ClosedAt: isoAgo(20)},
+		{Slug: "fresh-done", Status: coordination.StatusClosed, Opened: isoAgo(9), ClosedAt: isoAgo(1)},
+	}
+	freshOnly := []coordination.Arc{
+		{Slug: "live", Status: coordination.StatusActive, Opened: isoAgo(0)},
+		{Slug: "fresh-done", Status: coordination.StatusClosed, Opened: isoAgo(9), ClosedAt: isoAgo(1)},
 	}
 
 	t.Run("q opens the offer instead of quitting", func(t *testing.T) {
@@ -573,21 +583,46 @@ func TestQuitOffersArcArchiveForClosedArcs(t *testing.T) {
 		if cmd != nil {
 			t.Error("the offer must hold the quit, not race it")
 		}
-		if len(nm.selectedArchiveSlugs()) != 0 {
-			t.Error("the offer must open with nothing selected")
-		}
-		if out := stripANSI(nm.viewContent()); !strings.Contains(out, "Archive closed arcs?") || !strings.Contains(out, "done") {
+		out := stripANSI(nm.viewContent())
+		if !strings.Contains(out, "Archive closed arcs?") || !strings.Contains(out, "stale-done") || !strings.Contains(out, "fresh-done") {
 			t.Errorf("the offer should list the closed arcs:\n%s", out)
 		}
-		if strings.Contains(stripANSI(nm.viewContent()), "live") {
+		if strings.Contains(out, "live") {
 			t.Error("an active arc is not archivable and must not be offered")
+		}
+		if !strings.Contains(out, "20d ago") || !strings.Contains(out, "1d ago") {
+			t.Errorf("each candidate should carry its age, so the checked set is auditable:\n%s", out)
+		}
+	})
+
+	t.Run("arcs closed past the week open checked, newer ones do not", func(t *testing.T) {
+		m := minimalModel(stateCoordination, nil, nil)
+		m.width, m.height = 120, 40
+		m.coordinationList.SetArcs(arcs, 0)
+		nm, _ := updateModel(t, m, press('q'))
+		got := nm.selectedArchiveSlugs()
+		if len(got) != 1 || got[0] != "stale-done" {
+			t.Errorf("only arcs closed more than a week ago should start checked, got %v", got)
+		}
+	})
+
+	t.Run("an all-recent offer opens with nothing checked", func(t *testing.T) {
+		m := minimalModel(stateCoordination, nil, nil)
+		m.width, m.height = 120, 40
+		m.coordinationList.SetArcs(freshOnly, 0)
+		nm, _ := updateModel(t, m, press('q'))
+		if !nm.arcArchiveActive {
+			t.Fatal("a recently closed arc still opens the offer")
+		}
+		if got := nm.selectedArchiveSlugs(); len(got) != 0 {
+			t.Errorf("nothing older than a week means nothing checked, got %v", got)
 		}
 	})
 
 	t.Run("Enter with nothing selected quits without archiving", func(t *testing.T) {
 		m := minimalModel(stateCoordination, nil, nil)
 		m.width, m.height = 120, 40
-		m.coordinationList.SetArcs(arcs, 0)
+		m.coordinationList.SetArcs(freshOnly, 0)
 		m, _ = updateModel(t, m, press('q'))
 		nm, cmd := updateModel(t, m, press(tea.KeyEnter))
 		if nm.arcArchiveActive {
@@ -601,25 +636,35 @@ func TestQuitOffersArcArchiveForClosedArcs(t *testing.T) {
 		}
 	})
 
-	t.Run("Esc declines and quits", func(t *testing.T) {
+	t.Run("Esc quits archiving nothing", func(t *testing.T) {
 		m := minimalModel(stateCoordination, nil, nil)
 		m.width, m.height = 120, 40
 		m.coordinationList.SetArcs(arcs, 0)
 		m, _ = updateModel(t, m, press('q'))
+		if len(m.selectedArchiveSlugs()) == 0 {
+			t.Fatal("this case needs a preselected candidate to be worth anything")
+		}
 		nm, cmd := updateModel(t, m, press(tea.KeyEscape))
 		if nm.arcArchiveActive || cmd == nil {
-			t.Error("Esc should decline the offer and quit")
+			t.Fatal("Esc should decline the offer and quit")
+		}
+		if _, isQuit := cmd().(tea.QuitMsg); !isQuit {
+			t.Error("Esc must quit directly, archiving nothing even with candidates checked")
 		}
 	})
 
-	t.Run("space selects the arc under the cursor", func(t *testing.T) {
+	t.Run("space toggles the arc under the cursor", func(t *testing.T) {
 		m := minimalModel(stateCoordination, nil, nil)
 		m.width, m.height = 120, 40
 		m.coordinationList.SetArcs(arcs, 0)
 		m, _ = updateModel(t, m, press('q'))
 		m, _ = updateModel(t, m, press(' '))
-		if got := m.selectedArchiveSlugs(); len(got) != 1 || got[0] != "done" {
-			t.Errorf("space should toggle the cursor arc, got %v", got)
+		if got := m.selectedArchiveSlugs(); len(got) != 0 {
+			t.Errorf("space should clear the preselected cursor arc, got %v", got)
+		}
+		m, _ = updateModel(t, m, press(' '))
+		if got := m.selectedArchiveSlugs(); len(got) != 1 || got[0] != "stale-done" {
+			t.Errorf("space should check it again, got %v", got)
 		}
 	})
 

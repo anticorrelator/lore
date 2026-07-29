@@ -125,13 +125,14 @@ func (m model) renderSessionConfirmModal() string {
 }
 
 // renderArcArchiveModal shows the quit-time offer to archive closed arcs.
-// Nothing is checked when it opens, and the footer says what Enter does with
-// an empty selection, so quitting without archiving takes one keystroke.
+// Arcs closed more than a week ago open checked, and each line carries its age
+// so the proposed set is auditable at a glance. The footer names the keys that
+// change the selection and the two ways out.
 func (m model) renderArcArchiveModal() string {
 	s := modalStyles
 	var b strings.Builder
 	b.WriteString("\n")
-	b.WriteString(s.dim.Render(" These arcs are closed. Archive them before quitting?"))
+	b.WriteString(s.dim.Render(" These arcs are closed. Ones older than a week start checked."))
 	b.WriteString("\n\n")
 	for i, a := range m.arcArchiveCandidates {
 		cursor := "  "
@@ -146,7 +147,15 @@ func (m model) renderArcArchiveModal() string {
 		if a.Title != "" && a.Title != a.Slug {
 			label = a.Title
 		}
-		b.WriteString(cursor + " " + s.key.Render(box) + " " + style.Truncate(label, modalInnerW-8))
+		age := work.FormatRelativeTime(a.Recency())
+		labelW := modalInnerW - 8
+		if age != "" {
+			labelW -= lipgloss.Width(age) + 2
+		}
+		b.WriteString(cursor + " " + s.key.Render(box) + " " + style.Truncate(label, max(0, labelW)))
+		if age != "" {
+			b.WriteString("  " + s.dim.Render(age))
+		}
 		b.WriteString("\n")
 	}
 	b.WriteString("\n ")
@@ -154,7 +163,7 @@ func (m model) renderArcArchiveModal() string {
 		s.sep.Render("  ·  ") +
 		s.key.Render("a") + " " + s.dim.Render("all") +
 		s.sep.Render("  ·  ") +
-		s.key.Render("Enter") + " " + s.dim.Render("archive & quit") +
+		s.key.Render("Enter") + " " + s.dim.Render("archive checked & quit") +
 		s.sep.Render("  ·  ") +
 		s.key.Render("Esc") + " " + s.dim.Render("quit, archive nothing"))
 	b.WriteString("\n")
