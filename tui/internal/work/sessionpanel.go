@@ -131,8 +131,15 @@ type SessionProcessStartedMsg struct {
 	Notices []OperatorNotice
 }
 
-// OperatorNotice is a non-fatal launch degradation returned to the Bubble Tea
-// host instead of being written directly to the parent terminal.
+// OperatorNotice is a non-fatal launch fact returned to the Bubble Tea host
+// instead of being written directly to the parent terminal. Most are
+// degradations (a concern the harness could not honor, a fallback taken); the
+// lead-model notice is the exception — it reports the composed lead model on
+// every launch, because a lead silently running on an unowned default is
+// invisible otherwise.
+//
+// The host routes notices last-wins onto one status line, so ordering is
+// load-bearing: emit routine facts before degradations, never after.
 type OperatorNotice struct {
 	Code    string
 	Message string
@@ -1179,6 +1186,34 @@ func buildInitialPrompt(d SessionDescriptor) string {
 	}
 }
 
+// leadSeatForSessionType maps a descriptor's session Type onto the (role,
+// ceremony) pair its top-level agent occupies, which is what the spawn resolves
+// a lead model against when the request names none.
+//
+// The mapping follows the protocol each session type runs: a spec or implement
+// session's top-level agent is the lead of that ceremony, so it takes the
+// ceremony-scoped `lead` seat and its overlay. A worker session runs a
+// lead-composed brief — it *is* the worker, with no fanout of its own — so it
+// takes the plain `worker` seat with no ceremony. A chat session leads nothing;
+// it takes `default`, which resolves to whatever the harness's shared default
+// binding is.
+//
+// The default branch mirrors buildInitialPrompt and sessionType(): an unknown
+// Type runs /spec, so it resolves the spec lead's seat. The two switches must
+// agree — a session must not run one protocol on another's model binding.
+func leadSeatForSessionType(t string) (role, ceremony string) {
+	switch t {
+	case SessionImplement:
+		return "lead", "implement"
+	case SessionWorker:
+		return "worker", ""
+	case SessionChat:
+		return "default", ""
+	default: // SessionSpec, and the sessionType() spec fallback for any unknown Type
+		return "lead", "spec"
+	}
+}
+
 // StartTerminalCmd spawns the harness subprocess for the descriptor's session
 // inside a PTY and returns SessionProcessStartedMsg with the PTY master, exec.Cmd,
 // and a channel of raw byte chunks read from the PTY. The PTY master is the
@@ -1262,6 +1297,65 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 		// substituting a different flag (opencode/codex would error on an
 		// unknown flag). See adapters/agents/README.md §"TUI Launch Concerns".
 		args := append([]string(nil), config.LoadHarnessArgsForInitiator(activeFramework, d.Initiator)...)
+
+		// Session-lead model. The top-level agent of a TUI-spawned session *is* the
+		// session lead, so the model it runs on is lead selection. Two sources feed
+		// it, in this order:
+		//
+		//  1. The descriptor's per-dispatch Model — a coordinator naming a model for
+		//     this one dispatch always wins, unchanged.
+		//  2. Otherwise the role binding for the seat this session type occupies,
+		//     resolved against `activeFramework` — the framework claiming *this*
+		//     session, not the TUI process's own. Resolving against the claiming
+		//     framework is what makes `harnesses.<fw>.roles.lead` and its ceremony
+		//     overlays live at the session seam instead of dead config, which is why
+		//     the framework-explicit resolver exists.
+		//
+		// Both ride the harness's universal `--model` flag — the same flag
+		// model_routing.tiers aliases feed — so the value lands on every framework
+		// without a per-harness spelling. The value stays opaque here (validated for
+		// non-emptiness at enqueue, never against a model list): a bad id surfaces as
+		// an honest harness launch error, not a silent drop.
+		//
+		// Neither an unbound role nor a resolver error composes a flag. The spawn
+		// falls through to the harness's own default rather than inventing a tier,
+		// and says so: a misconfiguration gives the operator something to fix, and an
+		// honest absence is announced too, because a lead silently inheriting the
+		// harness's personal `model` setting is exactly the tier drift this
+		// resolution exists to make visible.
+		//
+		// Composed here, ahead of the degradation notices below, because notice
+		// routing is last-wins on the status line: this always-emitted informational
+		// notice must never outrank a real launch degradation.
+		leadRole, leadCeremony := leadSeatForSessionType(d.Type)
+		leadSeat := leadRole
+		if leadCeremony != "" {
+			leadSeat = leadCeremony + "." + leadRole
+		}
+		if d.Model != "" {
+			args = append(args, "--model", d.Model)
+			notices = append(notices, OperatorNotice{
+				Code:    "lead-model-override",
+				Message: fmt.Sprintf("lead model %s on %s (per-dispatch override)", d.Model, activeFramework),
+			})
+		} else if model, err := config.ResolveModelForRoleInCeremonyOnFramework(leadRole, leadCeremony, activeFramework); err == nil {
+			args = append(args, "--model", model)
+			notices = append(notices, OperatorNotice{
+				Code:    "lead-model-role-resolved",
+				Message: fmt.Sprintf("lead model %s on %s (role %s)", model, activeFramework, leadSeat),
+			})
+		} else if errors.Is(err, config.ErrNoModelBinding) {
+			notices = append(notices, OperatorNotice{
+				Code:    "lead-model-unbound",
+				Message: fmt.Sprintf("no %s binding on %s; lead runs on the harness default", leadSeat, activeFramework),
+			})
+		} else {
+			notices = append(notices, OperatorNotice{
+				Code:    "lead-model-resolve-failed",
+				Message: fmt.Sprintf("lead model resolution failed for %s on %s (%v); lead runs on the harness default", leadSeat, activeFramework, err),
+			})
+		}
+
 		if d.FollowupMode && slug != "" {
 			if sysPrompt := loadFollowupContext(slug, knowledgeDir, d.FindingIndex); sysPrompt != "" {
 				flag, supported, err := config.HarnessSystemPromptFlag(activeFramework)
@@ -1289,17 +1383,6 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 				Code:    "inline-settings-unsupported",
 				Message: fmt.Sprintf("inline_settings_override skipped for %s; session settings overrides unavailable", activeFramework),
 			})
-		}
-
-		// Lead-model override: the descriptor's Model rides the harness's universal
-		// `--model` flag — the same flag model_routing.tiers aliases feed, so a
-		// coordinator's per-dispatch lead selection lands on every framework without
-		// a per-harness spelling. The value is opaque here (validated for non-
-		// emptiness at enqueue, never against a model list): a bad id surfaces as an
-		// honest harness launch error, not a silent drop. Empty injects nothing,
-		// leaving the lead on the harness/settings default.
-		if d.Model != "" {
-			args = append(args, "--model", d.Model)
 		}
 
 		// Deterministic transcript binding: when the active harness joins its

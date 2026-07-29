@@ -26,6 +26,7 @@ package config
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1085,6 +1086,58 @@ func ResolveModelForRole(role string) (string, error) {
 // When ceremony == "" the ceremony layer (both its upfront query validation and
 // the overlay lookup) is skipped entirely.
 func ResolveModelForRoleInCeremony(role, ceremony string) (string, error) {
+	// Resolve the active harness up front and hand it to the shared body. The
+	// error is discarded (an unknown framework yields ""), which skips the three
+	// overlay layers and terminates in the ErrNoModelBinding miss — the
+	// pre-extraction behavior, preserved byte-for-byte.
+	active, _ := ResolveActiveFramework()
+	return resolveModelForRoleOn(role, ceremony, active)
+}
+
+// ResolveModelForRoleInCeremonyOnFramework resolves a role binding against an
+// explicitly named framework rather than the calling process's own active one.
+// It exists for callers that compose a launch for a *different* harness than
+// they are running under — the TUI session spawn resolves the session lead's
+// model against the framework claiming that session, which is chosen per
+// request and is not the TUI process's LORE_FRAMEWORK.
+//
+// Precedence, closed-set rejection, and the ErrNoModelBinding miss are
+// identical to ResolveModelForRoleInCeremony; only the source of the overlay
+// framework differs. The framework name is validated against
+// adapters/capabilities.json (soft-failing when that file is unreadable, as
+// ResolveActiveFramework does) so an unknown name errors rather than silently
+// resolving against no overlay at all.
+//
+// This is the one exported function in this file with no scripts/lib.sh
+// counterpart, and deliberately so: a bash caller always resolves for the
+// harness it is itself running under, so the framework-explicit shape has no
+// bash call site to be in parity with. The parity that matters — resolution
+// precedence — is shared verbatim through resolveModelForRoleOn.
+func ResolveModelForRoleInCeremonyOnFramework(role, ceremony, framework string) (string, error) {
+	if framework == "" {
+		return "", fmt.Errorf("resolve_model_for_role requires a framework name")
+	}
+	if caps, err := loadCapabilitiesFile(); err == nil {
+		if _, ok := caps.Frameworks[framework]; !ok {
+			return "", fmt.Errorf("unknown framework %q; not present in adapters/capabilities.json", framework)
+		}
+	}
+	return resolveModelForRoleOn(role, ceremony, framework)
+}
+
+// ErrNoModelBinding marks the resolver's terminal miss: every layer was
+// consulted and none carried a binding for the role. It is distinct from the
+// resolver's *error* returns (unknown role, unknown ceremony, misconfigured
+// overlay key), which report a configuration the operator must fix. Callers
+// that degrade gracefully on an unbound role — composing nothing rather than
+// inventing a default — match on this sentinel so a genuine misconfiguration
+// is not swallowed as "just unbound".
+var ErrNoModelBinding = errors.New("no model binding for role")
+
+// resolveModelForRoleOn is the shared resolution body. `active` is the
+// framework whose `harnesses.<active>.…` overlays layers 3-5 read; an empty
+// value skips those layers entirely.
+func resolveModelForRoleOn(role, ceremony, active string) (string, error) {
 	if role == "" {
 		return "", fmt.Errorf("resolve_model_for_role requires a role name")
 	}
@@ -1128,9 +1181,6 @@ func ResolveModelForRoleInCeremony(role, ceremony string) (string, error) {
 	if v := resolveModelForRole_perRepoConfig(role); v != "" {
 		return v, nil
 	}
-
-	// Resolve active harness once for the overlay layers.
-	active, _ := ResolveActiveFramework()
 
 	// 3. Ceremony overlay `.harnesses.<active>.ceremony_roles.<ceremony>.<role>`.
 	// Consulted only when a ceremony id is passed, so role-only resolution
@@ -1190,7 +1240,7 @@ func ResolveModelForRoleInCeremony(role, ceremony string) (string, error) {
 	// of the shared default. The fallback target declares no fallback_role of
 	// its own, so this recurses at most once.
 	if fb := roleFallbacks[role]; fb != "" {
-		return ResolveModelForRoleInCeremony(fb, ceremony)
+		return resolveModelForRoleOn(fb, ceremony, active)
 	}
 
 	// 5. Unified `.harnesses.<active>.roles.default`.
@@ -1200,7 +1250,7 @@ func ResolveModelForRoleInCeremony(role, ceremony string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("no model binding for role %q (no env var, no per-repo .lore.config, no harnesses.<active>.roles.%s or harnesses.<active>.roles.default in settings.json)", role, role)
+	return "", fmt.Errorf("%w %q (no env var, no per-repo .lore.config, no harnesses.<active>.roles.%s or harnesses.<active>.roles.default in settings.json)", ErrNoModelBinding, role, role)
 }
 
 // ModelRoute is the structured sibling of the scalar role binding. Binding is

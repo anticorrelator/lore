@@ -62,7 +62,12 @@ type SessionDescriptor struct {
 	// lead selection. Composed into the launch command as the harness's universal
 	// `--model` flag at StartTerminalCmd (the same flag model_routing.tiers aliases
 	// feed). Distinct from RoutingOverrides, which routes *sub-agent* roles via env.
-	// Empty injects no flag, leaving the lead on the harness/settings default.
+	//
+	// Empty does not mean "no flag": StartTerminalCmd falls back to the role
+	// binding for the seat this session type occupies (leadSeatForSessionType),
+	// so a session with no per-dispatch model still honors
+	// `harnesses.<fw>.roles.lead` and its ceremony overlays. Only when that
+	// resolution finds nothing does the lead run on the harness's own default.
 	Model string
 
 	// Framework is the per-request launch framework override. Empty leaves the

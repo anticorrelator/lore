@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -779,6 +780,43 @@ func TestResolveModelForRole_RejectsEmpty(t *testing.T) {
 	}
 }
 
+// writeRoles stages a `roles` block on the given framework in the isolated
+// settings.json. Call after setupFakeLoreData. Unlike that helper's `roles`
+// argument — which only ever writes the framework it stages — this writes any
+// framework's overlay, which is what the framework-explicit resolver needs to
+// be tested against.
+func writeRoles(t *testing.T, framework string, roles map[string]string) {
+	t.Helper()
+	dataDir := os.Getenv("LORE_DATA_DIR")
+	if dataDir == "" {
+		t.Fatal("LORE_DATA_DIR not set; call setupFakeLoreData first")
+	}
+	path := filepath.Join(dataDir, "config", "settings.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	harnesses, _ := out["harnesses"].(map[string]any)
+	if harnesses == nil {
+		harnesses = map[string]any{}
+		out["harnesses"] = harnesses
+	}
+	block, _ := harnesses[framework].(map[string]any)
+	if block == nil {
+		block = map[string]any{}
+		harnesses[framework] = block
+	}
+	block["roles"] = roles
+	data, _ := json.MarshalIndent(out, "", "  ")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // writeCeremonyRoles stages a `ceremony_roles` block on the given framework in
 // the isolated settings.json. Call after setupFakeLoreData; existing `roles`
 // bindings are preserved. Mirrors the bash ceremony-layer fixtures in
@@ -1043,6 +1081,88 @@ func TestResolveModelForRole_ClassRoleErrorsNamingWorkerWhenUnbound(t *testing.T
 	}
 	if !strings.Contains(err.Error(), `role "worker"`) {
 		t.Errorf("error = %v, want it to name the fallback role \"worker\"", err)
+	}
+}
+
+// TestResolveModelForRoleInCeremonyOnFramework_ReadsNamedFrameworkOverlay
+// asserts the framework-explicit entry point reads the named framework's
+// overlay rather than the calling process's active one. Both frameworks bind
+// `lead` to a different model, so a resolution that fell back to the active
+// framework would return the wrong value instead of nothing.
+func TestResolveModelForRoleInCeremonyOnFramework_ReadsNamedFrameworkOverlay(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"lead": "claude-model"})
+	writeRoles(t, "opencode", map[string]string{"lead": "opencode-model"})
+
+	// The process's active framework is claude-code (no LORE_FRAMEWORK set).
+	got, err := ResolveModelForRoleInCeremonyOnFramework("lead", "", "opencode")
+	if err != nil {
+		t.Fatalf("ResolveModelForRoleInCeremonyOnFramework: %v", err)
+	}
+	if got != "opencode-model" {
+		t.Errorf("got %q, want opencode-model (named framework's overlay)", got)
+	}
+	active, err := ResolveModelForRole("lead")
+	if err != nil {
+		t.Fatalf("ResolveModelForRole: %v", err)
+	}
+	if active != "claude-model" {
+		t.Errorf("active-framework resolution = %q, want claude-model — the two entry points must not have merged", active)
+	}
+}
+
+// TestResolveModelForRoleInCeremonyOnFramework_ConsultsCeremonyOverlay asserts
+// the ceremony layer is live on the framework-explicit path too, not only the
+// active-framework one.
+func TestResolveModelForRoleInCeremonyOnFramework_ConsultsCeremonyOverlay(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", nil)
+	writeRoles(t, "opencode", map[string]string{"lead": "overlay-model"})
+	writeCeremonyRoles(t, "opencode", map[string]map[string]string{
+		"implement": {"lead": "ceremony-model"},
+	})
+
+	got, err := ResolveModelForRoleInCeremonyOnFramework("lead", "implement", "opencode")
+	if err != nil {
+		t.Fatalf("ResolveModelForRoleInCeremonyOnFramework: %v", err)
+	}
+	if got != "ceremony-model" {
+		t.Errorf("got %q, want ceremony-model", got)
+	}
+}
+
+func TestResolveModelForRoleInCeremonyOnFramework_RejectsEmptyAndUnknownFramework(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"lead": "claude-model"})
+
+	if _, err := ResolveModelForRoleInCeremonyOnFramework("lead", "", ""); err == nil {
+		t.Error("expected error for empty framework, got nil")
+	}
+	if _, err := ResolveModelForRoleInCeremonyOnFramework("lead", "", "definitely-not-a-harness"); err == nil {
+		t.Error("expected error for unknown framework, got nil")
+	}
+}
+
+// TestResolveModelForRole_MissIsDistinguishableFromMisconfiguration asserts the
+// two failure classes are separable by the caller: an unbound role wraps
+// ErrNoModelBinding (degrade quietly, compose nothing), while a misconfigured
+// overlay key does not (the operator has something to fix). Callers that
+// collapse the two would either invent a default for a real misconfiguration or
+// refuse a spawn over an honest absence.
+func TestResolveModelForRole_MissIsDistinguishableFromMisconfiguration(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", nil)
+	_, err := ResolveModelForRole("lead")
+	if err == nil {
+		t.Fatal("expected an error for an unbound role")
+	}
+	if !errors.Is(err, ErrNoModelBinding) {
+		t.Errorf("unbound-role error = %v, want it to wrap ErrNoModelBinding", err)
+	}
+
+	setupFakeLoreData(t, "claude-code", map[string]string{"lead": "opus", "not-a-real-role": "x"})
+	_, err = ResolveModelForRole("lead")
+	if err == nil {
+		t.Fatal("expected an error for an unknown role key in the overlay")
+	}
+	if errors.Is(err, ErrNoModelBinding) {
+		t.Errorf("misconfiguration error = %v, must not wrap ErrNoModelBinding", err)
 	}
 }
 
