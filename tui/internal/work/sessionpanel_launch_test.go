@@ -509,12 +509,34 @@ func TestStartTerminalCmd_OpenCodeSkipsUnsupportedConcerns(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("StartTerminalCmd wrote parent stderr: %q", stderr)
 	}
-	if len(started.Notices) != 2 {
-		t.Fatalf("Notices = %#v, want append-system-prompt and inline-settings degradations", started.Notices)
+	// Assert by code, not by position: the spawn also emits a lead-model notice
+	// on every launch, and the two concern degradations are what this test owns.
+	for _, code := range []string{"append-system-prompt-unsupported", "inline-settings-unsupported"} {
+		if !noticesContainCode(started.Notices, code) {
+			t.Errorf("Notices missing %q: %#v", code, started.Notices)
+		}
 	}
-	if started.Notices[0].Code != "append-system-prompt-unsupported" || started.Notices[1].Code != "inline-settings-unsupported" {
-		t.Errorf("notice codes = %q, %q", started.Notices[0].Code, started.Notices[1].Code)
+}
+
+// noticesContainCode reports whether any operator notice carries the code.
+func noticesContainCode(notices []OperatorNotice, code string) bool {
+	for _, n := range notices {
+		if n.Code == code {
+			return true
+		}
 	}
+	return false
+}
+
+// noticeByCode returns the first notice carrying the code, and whether one was
+// found.
+func noticeByCode(notices []OperatorNotice, code string) (OperatorNotice, bool) {
+	for _, n := range notices {
+		if n.Code == code {
+			return n, true
+		}
+	}
+	return OperatorNotice{}, false
 }
 
 func TestStartTerminalCmd_CodexSkipsUnsupportedConcerns(t *testing.T) {
@@ -638,7 +660,9 @@ func TestStartTerminalCmd_NoSessionIDWithoutBinding(t *testing.T) {
 
 // TestStartTerminalCmd_ComposesModelFlag asserts the lead-model override rides
 // the harness's universal `--model` flag: a descriptor carrying Model spawns with
-// `--model <id>` before the positional prompt, and an empty Model injects nothing.
+// `--model <id>` before the positional prompt. The second half spawns with no
+// Model against settings that bind no role, which is the unbound case —
+// nothing is composed. (The role-resolved path has its own test below.)
 func TestStartTerminalCmd_ComposesModelFlag(t *testing.T) {
 	stageFakeBinaries(t)
 	dir := stageFakeLoreData(t, "claude-code", nil)
@@ -663,6 +687,218 @@ func TestStartTerminalCmd_ComposesModelFlag(t *testing.T) {
 	started2 := msg2.(SessionProcessStartedMsg)
 	if argsContains(started2.Cmd.Args, "--model") {
 		t.Errorf("Cmd.Args should not contain --model when Model is empty: %v", started2.Cmd.Args)
+	}
+}
+
+// stageLeadModelSettings stages a LORE_DATA_DIR whose settings.json binds the
+// given `harnesses.claude-code.roles` and `.ceremony_roles` blocks, and clears
+// every LORE_MODEL_* var the resolver's top-precedence env layer would read.
+// The env clearing matters: without it a developer shell that exports
+// LORE_MODEL_LEAD would beat the overlay under test and the assertion would
+// pass for the wrong reason.
+func stageLeadModelSettings(t *testing.T, roles map[string]string, ceremonyRoles map[string]map[string]string) string {
+	t.Helper()
+	for _, role := range []string{"LEAD", "WORKER", "DEFAULT", "RESEARCHER"} {
+		t.Setenv("LORE_MODEL_"+role, "")
+	}
+	dataDir := stageFakeLoreData(t, "claude-code", nil)
+	path := filepath.Join(dataDir, "config", "settings.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	harness := cfg["harnesses"].(map[string]any)["claude-code"].(map[string]any)
+	if roles != nil {
+		harness["roles"] = roles
+	}
+	if ceremonyRoles != nil {
+		harness["ceremony_roles"] = ceremonyRoles
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	return dataDir
+}
+
+// spawnForLeadModel runs StartTerminalCmd for a descriptor of the given session
+// type and per-dispatch model, returning the started message.
+func spawnForLeadModel(t *testing.T, sessionType, model, knowledgeDir string) SessionProcessStartedMsg {
+	t.Helper()
+	identity := mustSessionWorktree(t)
+	d := SessionDescriptor{Type: sessionType, Slug: "lead-model-slug", Title: "lead model",
+		Model: model, SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+	msg := StartTerminalCmd(d, 80, 24, knowledgeDir, SessionEnv{}, false)()
+	started, ok := msg.(SessionProcessStartedMsg)
+	if !ok {
+		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
+	}
+	if started.Ptmx != nil {
+		_ = started.Ptmx.Close()
+	}
+	return started
+}
+
+// TestStartTerminalCmd_LeadModelOverrideBeatsRoleBinding asserts the
+// per-dispatch override stays top precedence: a descriptor Model composes
+// unchanged even when the session type's role seat is bound to something else.
+func TestStartTerminalCmd_LeadModelOverrideBeatsRoleBinding(t *testing.T) {
+	stageFakeBinaries(t)
+	dir := stageLeadModelSettings(t,
+		map[string]string{"lead": "overlay-model"},
+		map[string]map[string]string{"spec": {"lead": "ceremony-model"}},
+	)
+
+	started := spawnForLeadModel(t, SessionSpec, "dispatch-model", dir)
+	if !argsContainPair(started.Cmd.Args, "--model", "dispatch-model") {
+		t.Errorf("Cmd.Args missing `--model dispatch-model`: %v", started.Cmd.Args)
+	}
+	if argsContains(started.Cmd.Args, "ceremony-model") || argsContains(started.Cmd.Args, "overlay-model") {
+		t.Errorf("role binding leaked past the per-dispatch override: %v", started.Cmd.Args)
+	}
+	notice, ok := noticeByCode(started.Notices, "lead-model-override")
+	if !ok || !strings.Contains(notice.Message, "dispatch-model") {
+		t.Errorf("Notices = %#v, want a lead-model-override notice naming dispatch-model", started.Notices)
+	}
+}
+
+// TestStartTerminalCmd_LeadModelResolvesPerSessionType asserts each session type
+// resolves the seat its top-level agent actually occupies: spec and implement
+// take the ceremony-scoped lead seat (so the two ceremonies can bind different
+// tiers), a worker session takes plain `worker`, and chat takes `default`. Each
+// case binds a distinct model so a mis-mapped seat fails loudly rather than
+// coincidentally matching.
+func TestStartTerminalCmd_LeadModelResolvesPerSessionType(t *testing.T) {
+	cases := []struct {
+		sessionType string
+		wantModel   string
+		wantSeat    string
+	}{
+		{SessionSpec, "spec-lead-model", "spec.lead"},
+		{SessionImplement, "implement-lead-model", "implement.lead"},
+		{SessionWorker, "worker-model", "worker"},
+		{SessionChat, "default-model", "default"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.sessionType, func(t *testing.T) {
+			stageFakeBinaries(t)
+			dir := stageLeadModelSettings(t,
+				map[string]string{
+					"lead":    "role-overlay-lead-model",
+					"worker":  "worker-model",
+					"default": "default-model",
+				},
+				map[string]map[string]string{
+					"spec":      {"lead": "spec-lead-model"},
+					"implement": {"lead": "implement-lead-model"},
+				},
+			)
+
+			started := spawnForLeadModel(t, tc.sessionType, "", dir)
+			if !argsContainPair(started.Cmd.Args, "--model", tc.wantModel) {
+				t.Errorf("%s: Cmd.Args missing `--model %s`: %v", tc.sessionType, tc.wantModel, started.Cmd.Args)
+			}
+			notice, ok := noticeByCode(started.Notices, "lead-model-role-resolved")
+			if !ok {
+				t.Fatalf("%s: Notices = %#v, want a lead-model-role-resolved notice", tc.sessionType, started.Notices)
+			}
+			if !strings.Contains(notice.Message, tc.wantModel) || !strings.Contains(notice.Message, tc.wantSeat) {
+				t.Errorf("%s: notice %q does not name model %q and seat %q", tc.sessionType, notice.Message, tc.wantModel, tc.wantSeat)
+			}
+		})
+	}
+}
+
+// TestStartTerminalCmd_LeadModelUnboundComposesNoFlag asserts an unbound seat
+// composes no flag rather than an invented tier: with no roles block at all the
+// spawn falls through to the harness's own default and says so.
+func TestStartTerminalCmd_LeadModelUnboundComposesNoFlag(t *testing.T) {
+	stageFakeBinaries(t)
+	dir := stageLeadModelSettings(t, nil, nil)
+
+	started := spawnForLeadModel(t, SessionSpec, "", dir)
+	if argsContains(started.Cmd.Args, "--model") {
+		t.Errorf("unbound lead seat composed a --model flag: %v", started.Cmd.Args)
+	}
+	if _, ok := noticeByCode(started.Notices, "lead-model-unbound"); !ok {
+		t.Errorf("Notices = %#v, want a lead-model-unbound notice", started.Notices)
+	}
+}
+
+// TestStartTerminalCmd_LeadModelResolverErrorComposesNoFlag asserts a
+// misconfigured overlay degrades to flag-less with a distinct notice rather than
+// refusing the spawn. The trigger is an unknown role key stored under
+// `harnesses.claude-code.roles`, which the resolver rejects by closed set — a
+// different failure class than "nothing bound", and one the operator must fix.
+func TestStartTerminalCmd_LeadModelResolverErrorComposesNoFlag(t *testing.T) {
+	stageFakeBinaries(t)
+	dir := stageLeadModelSettings(t,
+		map[string]string{"lead": "overlay-model", "not-a-real-role": "whatever"},
+		nil,
+	)
+
+	started := spawnForLeadModel(t, SessionSpec, "", dir)
+	if argsContains(started.Cmd.Args, "--model") {
+		t.Errorf("resolver error composed a --model flag: %v", started.Cmd.Args)
+	}
+	notice, ok := noticeByCode(started.Notices, "lead-model-resolve-failed")
+	if !ok {
+		t.Fatalf("Notices = %#v, want a lead-model-resolve-failed notice", started.Notices)
+	}
+	if !strings.Contains(notice.Message, "not-a-real-role") {
+		t.Errorf("notice %q does not name the offending key", notice.Message)
+	}
+	if _, ok := noticeByCode(started.Notices, "lead-model-unbound"); ok {
+		t.Errorf("a misconfiguration was reported as an unbound seat: %#v", started.Notices)
+	}
+}
+
+// TestStartTerminalCmd_LeadModelResolvesAgainstRequestFramework asserts the
+// resolution reads the overlay of the framework claiming *this* session, not the
+// TUI process's own active framework. Binding differs between the two so a
+// resolver that consulted the process framework would compose the wrong value.
+func TestStartTerminalCmd_LeadModelResolvesAgainstRequestFramework(t *testing.T) {
+	stageFakeBinaries(t)
+	dir := stageLeadModelSettings(t, map[string]string{"lead": "claude-lead-model"}, nil)
+
+	// Add an opencode overlay binding a different model, then claim the session
+	// for opencode via the descriptor while the process framework stays
+	// claude-code.
+	path := filepath.Join(dir, "config", "settings.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg["harnesses"].(map[string]any)["opencode"].(map[string]any)["roles"] = map[string]string{"lead": "opencode-lead-model"}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	identity := mustSessionWorktree(t)
+	d := SessionDescriptor{Type: SessionSpec, Slug: "cross-framework", Title: "cross framework",
+		Framework: "opencode", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+	msg := StartTerminalCmd(d, 80, 24, dir, SessionEnv{}, false)()
+	started, ok := msg.(SessionProcessStartedMsg)
+	if !ok {
+		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
+	}
+	if started.Ptmx != nil {
+		_ = started.Ptmx.Close()
+	}
+	if !argsContainPair(started.Cmd.Args, "--model", "opencode-lead-model") {
+		t.Errorf("Cmd.Args missing `--model opencode-lead-model`: %v", started.Cmd.Args)
+	}
+	if argsContains(started.Cmd.Args, "claude-lead-model") {
+		t.Errorf("resolved against the process framework, not the session's: %v", started.Cmd.Args)
 	}
 }
 
