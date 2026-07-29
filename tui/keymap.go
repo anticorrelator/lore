@@ -331,6 +331,9 @@ var keymapRegistry = []keymapSection{
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestCoordinationListStatusBarKeybindContract/v (sessions)"},
 		{key: "t", label: "settlement", surfaces: surfStatusBar | surfHelp, helpLabel: "settlement panel",
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestCoordinationListStatusBarKeybindContract/t (settlement)"},
+		{key: "ctrl+a", label: "live · +archived", surfaces: surfHelp | surfAnnot, role: roleAnnot, helpLabel: "reveal archived arcs",
+			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestCoordinationListStatusBarKeybindContract/ctrl+a (live · +archived)",
+			annot: &annotArcFilter},
 		{key: "h/Esc", label: "back", surfaces: surfStatusBar | surfHelp, helpKey: "h / Esc", helpLabel: "back to work",
 			ownerLayers: []ownerLayer{ownerRouter},
 			test:        "TestCoordinationListStatusBarKeybindContract/h (back), …/Esc (back)"},
@@ -638,6 +641,10 @@ type annotSpec struct {
 var (
 	annotWorkFilter     = annotSpec{key: "ctrl+a", states: []string{"active", "archived"}}
 	annotFollowupFilter = annotSpec{key: "ctrl+a", states: []string{"open", "closed"}}
+	// annotArcFilter tracks whether the arc list reveals archived arcs. Live
+	// and complete arcs are always listed; the toggle only adds the archived
+	// tail, so the states name what is shown, not a swap between two sets.
+	annotArcFilter = annotSpec{key: "ctrl+a", states: []string{"live", "+archived"}}
 	// annotSettlementFocus tracks what j/k walks: the queue at the root, or
 	// claims/verdicts inside the panel's drill-ins.
 	annotSettlementFocus = annotSpec{key: "j/k", states: []string{"queue", "claim", "verdict"}}

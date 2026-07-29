@@ -1,7 +1,7 @@
 // Package coordination backs the coordination-centric TUI view: an arc list
-// (projects whose home carries a coordination.md ledger) with a four-tab
-// detail — Status, Sessions, Items, Ledger. The package renders host-pushed
-// state and does no disk I/O of its own except ReadPin, which callers invoke
+// read from the arc store at _work/_arcs/, with a four-tab detail — Status,
+// Sessions, Items, Ledger. The package renders host-pushed state and does no
+// disk I/O of its own except ScanArcs and ReadPin, which callers invoke
 // inside a tea.Cmd.
 package coordination
 
@@ -10,12 +10,6 @@ import (
 	"os"
 	"path/filepath"
 )
-
-// Arc is one coordination arc: a project whose home contains coordination.md.
-type Arc struct {
-	Slug    string
-	Members int
-}
 
 // Pin is the sticky dispatch pin from _coordination.json (schema v1). Field
 // types must match the sidecar exactly — the sole writer is
@@ -34,12 +28,16 @@ type pinSidecar struct {
 // PinStatus is the derived pin state. Liveness is never stored in the
 // sidecar: readers join Pin.Instance against the session registry's mtime TTL
 // at read time. Absent, live, and dead are three distinct first-class states.
+// PinNoProject is a fourth: the pin sidecar is project-scoped, so an arc with
+// no project label has nowhere to carry one — which is different from having
+// a pin home and finding it empty.
 type PinStatus int
 
 const (
 	PinAbsent PinStatus = iota
 	PinLive
 	PinDead
+	PinNoProject
 )
 
 // ReadPin reads the pin sidecar in the given project home. A missing sidecar

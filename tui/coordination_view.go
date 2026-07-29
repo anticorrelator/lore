@@ -12,19 +12,19 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
-// coordinationArcsScannedMsg carries the arc fold: every project label whose
-// home contains coordination.md, in the work list's recency order.
+// coordinationArcsScannedMsg carries one scan of the arc store: every usable
+// record as its own row, plus the count of records the scan could not use.
 type coordinationArcsScannedMsg struct {
-	arcs []coordination.Arc
+	arcs    []coordination.Arc
+	skipped int
 }
 
 // coordinationLedgerReadMsg carries one arc's coordination.md content plus the
 // extracted ## Brief section, and — from the same read — the arc's report.md
-// content and the derived live-vs-closed classification. err leaves content
-// empty so the Ledger tab renders the unreadable state explicitly; reportFound
-// is true whenever report.md is present (even if unreadable), and closed is the
-// recency-derived signal (report strictly newer than the ledger, or present
-// beside a missing/unreadable ledger).
+// content. err leaves content empty so the Ledger tab renders the unreadable
+// state explicitly; reportFound is true whenever report.md is present, even if
+// unreadable. Closure is not part of this message: it is the arc record's
+// declared status, which the host already holds.
 type coordinationLedgerReadMsg struct {
 	arc         string
 	content     string
@@ -32,7 +32,6 @@ type coordinationLedgerReadMsg struct {
 	briefFound  bool
 	report      string
 	reportFound bool
-	closed      bool
 	err         error
 }
 
@@ -45,46 +44,29 @@ type coordinationPinReadMsg struct {
 	err    error
 }
 
-// scanArcsCmd folds the project groups against a coordination.md existence
-// check. One stat per project label — cheap enough to ride every poll tick
-// from any state, keeping the tab-indicator count current.
-func (m model) scanArcsCmd() tea.Cmd {
+// scanArcStoreCmd reads the arc store off the UI thread. It is the view's
+// sole arc source: one row per record, sectioned by the record's declared
+// status. The scan rides every poll tick, so it stays a native read — one
+// directory walk plus a small JSON parse per arc.
+func (m model) scanArcStoreCmd() tea.Cmd {
 	workDir := m.config.WorkDir
-	items := m.list.Items()
 	return func() tea.Msg {
-		var arcs []coordination.Arc
-		for _, g := range work.GroupByProject(items) {
-			if g.Project == "" {
-				continue
-			}
-			if _, err := os.Stat(filepath.Join(work.ProjectHome(workDir, g.Project), "coordination.md")); err == nil {
-				arcs = append(arcs, coordination.Arc{Slug: g.Project, Members: len(g.Items)})
-			}
-		}
-		return coordinationArcsScannedMsg{arcs: arcs}
+		arcs, skipped := coordination.ScanArcs(workDir)
+		return coordinationArcsScannedMsg{arcs: arcs, skipped: skipped}
 	}
 }
 
 // readArcLedgerCmd reads an arc's coordination.md and report.md off the UI
-// thread, extracts the ledger's Brief, and derives the live-vs-closed signal
-// from the two files' relative recency. Reading both in one command yields a
-// consistent snapshot: the closed classification never straddles a close that
-// lands between two separate reads.
-//
-// The arc is closed when report.md is present and either the ledger is
-// missing/unreadable or report.md's mtime is strictly newer than the ledger's.
-// Every other case — no report, an older or equal-mtime report — is live. A
-// present-but-unreadable report still reports reportFound so the detail renders
-// its absence as a first-class dim state rather than dropping the tab.
+// thread and extracts the ledger's Brief. Reading both in one command yields a
+// consistent snapshot. A present-but-unreadable report still reports
+// reportFound so the detail renders its absence as a first-class dim state
+// rather than dropping the tab.
 func readArcLedgerCmd(workDir, arc string) tea.Cmd {
 	return func() tea.Msg {
-		home := work.ProjectHome(workDir, arc)
-		ledgerPath := filepath.Join(home, "coordination.md")
-		reportPath := filepath.Join(home, "report.md")
-
+		dir := coordination.ArcDir(workDir, arc)
 		msg := coordinationLedgerReadMsg{arc: arc}
 
-		ledgerData, ledgerErr := os.ReadFile(ledgerPath)
+		ledgerData, ledgerErr := os.ReadFile(filepath.Join(dir, "coordination.md"))
 		if ledgerErr != nil {
 			msg.err = ledgerErr
 		} else {
@@ -92,28 +74,30 @@ func readArcLedgerCmd(workDir, arc string) tea.Cmd {
 			msg.brief, msg.briefFound = work.ExtractSection(string(ledgerData), "Brief")
 		}
 
-		if reportInfo, err := os.Stat(reportPath); err == nil {
+		reportData, reportErr := os.ReadFile(filepath.Join(dir, "report.md"))
+		switch {
+		case reportErr == nil:
 			msg.reportFound = true
-			if reportData, rerr := os.ReadFile(reportPath); rerr == nil {
-				msg.report = string(reportData)
-			}
-			if ledgerInfo, lerr := os.Stat(ledgerPath); lerr != nil {
-				msg.closed = true
-			} else if reportInfo.ModTime().After(ledgerInfo.ModTime()) {
-				msg.closed = true
-			}
+			msg.report = string(reportData)
+		case !os.IsNotExist(reportErr):
+			msg.reportFound = true
 		}
 		return msg
 	}
 }
 
-// readArcPinCmd reads an arc's pin sidecar and derives its liveness by joining
-// pin.instance against the registry's mtime TTL.
-func (m model) readArcPinCmd(arc string) tea.Cmd {
+// readArcPinCmd reads the pin sidecar for the arc's project and derives its
+// liveness by joining pin.instance against the registry's mtime TTL. The
+// sidecar is project-scoped, so an arc with no project label has no pin home
+// — reported as its own state rather than as an absent pin.
+func (m model) readArcPinCmd(arc, project string) tea.Cmd {
 	workDir := m.config.WorkDir
 	sessionsDir := m.sessionsDir
 	return func() tea.Msg {
-		pin, err := coordination.ReadPin(work.ProjectHome(workDir, arc))
+		if project == "" {
+			return coordinationPinReadMsg{arc: arc, status: coordination.PinNoProject}
+		}
+		pin, err := coordination.ReadPin(work.ProjectHome(workDir, project))
 		if err != nil {
 			return coordinationPinReadMsg{arc: arc, err: err}
 		}
@@ -131,14 +115,16 @@ func (m model) readArcPinCmd(arc string) tea.Cmd {
 
 // handleCoordinationArcsScanned replaces the arc set (cursor preserved by
 // slug) and re-syncs the detail when the selection identity changed — the
-// cursor diff, not the raw index, drives detail sync.
+// cursor diff, not the raw index, drives detail sync. A same-identity scan
+// still refreshes the joins, so membership edits land without a reselect.
 func (m model) handleCoordinationArcsScanned(msg coordinationArcsScannedMsg) (model, tea.Cmd) {
-	m.coordinationList.SetArcs(msg.arcs)
+	m.coordinationList.SetArcs(msg.arcs, msg.skipped)
 	if m.state == stateCoordination {
 		if cur := m.coordinationList.CurrentSlug(); cur != m.coordinationDetail.Arc() {
 			return m, m.loadCoordinationDetail(cur)
 		}
 	}
+	m.syncCoordinationArc()
 	return m, nil
 }
 
@@ -153,7 +139,7 @@ func (m model) handleCoordinationLedgerRead(msg coordinationLedgerReadMsg) (mode
 	} else {
 		m.coordinationDetail.SetLedger(msg.content, msg.brief, msg.briefFound)
 	}
-	m.coordinationDetail.SetReport(msg.report, msg.reportFound, msg.closed)
+	m.coordinationDetail.SetReport(msg.report, msg.reportFound)
 	return m, nil
 }
 
@@ -208,7 +194,7 @@ func (m model) returnToCoordinationView() (model, tea.Cmd) {
 	m.state = stateCoordination
 	m.terminalMode = false
 	m.focusedPanel = panelRight
-	return m, tea.Batch(m.scanArcsCmd(), m.sessionsRefreshCmd())
+	return m, tea.Batch(m.scanArcStoreCmd(), m.sessionsRefreshCmd())
 }
 
 // loadCoordinationDetail points the detail at the given arc, re-syncs the
@@ -216,44 +202,106 @@ func (m model) returnToCoordinationView() (model, tea.Cmd) {
 // (ledger + pin) so selection does not wait for the next poll tick.
 func (m *model) loadCoordinationDetail(arc string) tea.Cmd {
 	m.coordinationDetail.SetArc(arc)
-	m.syncCoordinationMembers()
-	m.syncCoordinationSessions()
+	m.syncCoordinationArc()
 	if arc == "" {
 		return nil
 	}
-	return tea.Batch(readArcLedgerCmd(m.config.WorkDir, arc), m.readArcPinCmd(arc))
+	project := ""
+	if a, ok := m.coordinationList.ArcBySlug(arc); ok {
+		project = a.Project
+	}
+	return tea.Batch(readArcLedgerCmd(m.config.WorkDir, arc), m.readArcPinCmd(arc, project))
 }
 
-// syncCoordinationMembers pushes the selected arc's member items (and the
-// index-wide active set their blocked state derives from) into the detail.
+// syncCoordinationArc pushes everything the selected arc's record decides:
+// its closure and the two membership joins. All three read state already in
+// memory, so they re-derive on any refresh without touching disk.
+func (m *model) syncCoordinationArc() {
+	arc, ok := m.coordinationList.ArcBySlug(m.coordinationDetail.Arc())
+	m.coordinationDetail.SetClosed(ok && arc.Closed())
+	m.syncCoordinationMembers()
+	m.syncCoordinationSessions()
+}
+
+// syncCoordinationMembers joins the arc's declared members against the work
+// index and pushes them into the detail, along with the index-wide active set
+// their blocked state derives from. A member the index cannot resolve keeps
+// its row, marked unresolved.
 func (m *model) syncCoordinationMembers() {
-	arc := m.coordinationDetail.Arc()
-	if arc == "" {
+	arc, ok := m.coordinationList.ArcBySlug(m.coordinationDetail.Arc())
+	if !ok {
 		m.coordinationDetail.SetMembers(nil, nil)
 		return
 	}
 	items := m.list.Items()
-	var members []work.WorkItem
+	bySlug := make(map[string]work.WorkItem, len(items))
 	for _, it := range items {
-		if it.Project == arc {
-			members = append(members, it)
+		bySlug[it.Slug] = it
+	}
+	members := make([]coordination.Member, 0, len(arc.Members))
+	for _, slug := range arc.Members {
+		if it, found := bySlug[slug]; found {
+			members = append(members, coordination.Member{Slug: slug, Item: it, Resolved: true})
+		} else {
+			members = append(members, coordination.Member{Slug: slug})
 		}
 	}
 	m.coordinationDetail.SetMembers(members, work.ActiveSlugs(items))
 }
 
+// offerArcArchive opens the quit-time archive offer when the last scan holds
+// at least one closed arc, reporting whether the quit should be held. Nothing
+// starts selected: archiving is the coordinator's judgment that an arc's
+// residue has landed, so confirming an untouched offer writes nothing.
+func (m *model) offerArcArchive() bool {
+	candidates := m.coordinationList.ClosedArcs()
+	if len(candidates) == 0 {
+		return false
+	}
+	m.arcArchiveActive = true
+	m.arcArchiveCandidates = candidates
+	m.arcArchiveSelected = make(map[string]bool, len(candidates))
+	m.arcArchiveCursor = 0
+	return true
+}
+
+// currentArchiveCandidate returns the arc under the offer's cursor.
+func (m model) currentArchiveCandidate() (coordination.Arc, bool) {
+	if m.arcArchiveCursor < 0 || m.arcArchiveCursor >= len(m.arcArchiveCandidates) {
+		return coordination.Arc{}, false
+	}
+	return m.arcArchiveCandidates[m.arcArchiveCursor], true
+}
+
+// selectedArchiveSlugs returns the checked arcs in the order they are listed.
+func (m model) selectedArchiveSlugs() []string {
+	var slugs []string
+	for _, a := range m.arcArchiveCandidates {
+		if m.arcArchiveSelected[a.Slug] {
+			slugs = append(slugs, a.Slug)
+		}
+	}
+	return slugs
+}
+
 // syncCoordinationSessions recomputes the read-side session→arc join from the
 // last substrate refresh and pushes the selected arc's rows into the detail.
-// Nothing is persisted — the join lives for one render generation.
+// A session belongs to an arc when the arc declares its slug — or, for a
+// derived-slug worker, its base item. Nothing is persisted; the join lives for
+// one render generation.
 func (m *model) syncCoordinationSessions() {
-	arc := m.coordinationDetail.Arc()
-	if arc == "" {
+	arc, ok := m.coordinationList.ArcBySlug(m.coordinationDetail.Arc())
+	if !ok {
 		m.coordinationDetail.SetSessions(nil)
 		return
 	}
+	member := make(map[string]bool, len(arc.Members))
+	for _, slug := range arc.Members {
+		member[slug] = true
+	}
 	var rows []sessionview.SessionRow
 	for _, r := range m.sessionRows {
-		if r.Project == arc {
+		if member[r.Slug] || (r.BaseItem != "" && member[r.BaseItem]) {
 			rows = append(rows, r)
 		}
 	}

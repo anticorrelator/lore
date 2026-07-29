@@ -282,14 +282,14 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 			cmds = append(cmds, captureSessionMirrorCmd(rowID, tmuxName))
 		}
 	}
-	// Coordination arcs ride this same heartbeat: the existence fold is one
-	// stat per project label (cheap from any state) so the tab count stays
-	// current; ledger and pin reads are scoped to the selected arc while the
-	// view is displayed, and the mirror capture to a displayed remote row.
-	cmds = append(cmds, m.scanArcsCmd())
+	// Coordination arcs ride this same heartbeat: the store scan is one
+	// directory walk (cheap from any state) so the tab count stays current;
+	// ledger and pin reads are scoped to the selected arc while the view is
+	// displayed, and the mirror capture to a displayed remote row.
+	cmds = append(cmds, m.scanArcStoreCmd())
 	if m.state == stateCoordination {
-		if arc := m.coordinationList.CurrentSlug(); arc != "" {
-			cmds = append(cmds, readArcLedgerCmd(m.config.WorkDir, arc), m.readArcPinCmd(arc))
+		if arc, ok := m.coordinationList.CurrentArc(); ok {
+			cmds = append(cmds, readArcLedgerCmd(m.config.WorkDir, arc.Slug), m.readArcPinCmd(arc.Slug, arc.Project))
 		}
 		if m.tmuxEnabled {
 			if rowID, tmuxName, ok := m.coordinationDetail.RemoteMirror(); ok {
