@@ -71,13 +71,13 @@ capability probe over the non-goals list.
 The one participant that sees the whole feature. It drives the arc across sessions
 by deciding what happens next and recording why: the five kernel judgments are
 **spec depth**, **ceremony rung**, **granularity/routing**, **gate mechanism**, and
-**step selection**, plus the **unknowns inventory** at arc open. Its seat is a
-`coordination.md` ledger whose location follows the arc's span — a single-item arc
-keeps it in that item's directory (`_work/<slug>/`), while a **multi-item arc**
-seats it at the project home (`_work/_projects/<project-slug>/coordination.md`,
-created by `lore work project describe`). Every dynamic act lands there as decision
-+ one-line rationale + evidence pointer, so a fresh coordinator (or the human) can
-resume mid-flight from the ledger and item notes alone.
+**step selection**, plus the **unknowns inventory** at arc open. Its seat is the
+arc directory: `lore arc open` creates `_work/_arcs/<slug>/`, instantiates the
+`coordination.md` ledger there, and records the arc; closure and archival are
+recorded through `lore arc close` and `lore arc archive` (a status value — the
+directory stays put). Every dynamic act lands in the ledger as decision + one-line
+rationale + evidence pointer, so a fresh coordinator (or the human) can resume
+mid-flight from the ledger and item notes alone.
 
 What binds it: **judgment inline, implementation dispatched.** The kernel reviews,
 verifies, synthesizes, and adjudicates — and writes *substrate only* (work items,
@@ -200,7 +200,7 @@ them locally and point back rather than re-arguing them.
   exposes, which fields writers populate, what a `closed` event actually carries)
   rather than trusting either a doc's non-goals list or a sibling plan's status.
 - **The worked example** of the kernel driving all four layers is a coordination
-  ledger: `_work/model-routing-across-roles-harnesses-spend-telemet/coordination.md`
+  ledger: `_work/_arcs/model-routing-tranche-1/coordination.md`
   (the arc that built the coordinator role by hand before the skill existed). The
   live-run friction that this architecture was pressure-tested against is logged in
-  `_work/tmux-backed-tui-sessions-crash-recovery-reattach/coordination.md`.
+  `_work/_arcs/tmux-backed-tui-sessions-arc-grew-multi-item-seate/coordination.md`.

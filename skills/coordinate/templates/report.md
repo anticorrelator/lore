@@ -2,8 +2,7 @@
 
 <!-- Copied from skills/coordinate/templates/report.md. Authored by the coordinator at
      arc close (obligation: skills/coordinate/SKILL.md § Close the arc). Lives beside
-     the ledger: project home for a multi-item arc, the item's directory for a
-     single-item arc.
+     the ledger in the arc directory: _work/_arcs/<slug>/report.md.
      Perfect tense throughout — what the arc made permanently true. The Brief says
      what works now; the report says what became true.
      Written for a reader spanning many concurrent arcs who holds none of this arc's

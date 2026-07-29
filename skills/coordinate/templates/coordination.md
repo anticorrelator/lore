@@ -1,8 +1,9 @@
 # Coordination Ledger — <feature name>
 
-<!-- Copied from skills/coordinate/templates/coordination.md. Authored directly by the
-     coordinator (freeform work-item artifact). Resumability test: a fresh coordinator
-     or the human can resume mid-flight from this file + item notes alone.
+<!-- Instantiated by `lore arc open` from skills/coordinate/templates/coordination.md
+     (the verb fills the title and feature lines); authored directly by the coordinator
+     from then on. Resumability test: a fresh coordinator or the human can resume
+     mid-flight from this file + item notes alone.
      Vocabulary is pinned in skills/coordinate/SKILL.md § The ledger:
        step status:    pending | in-flight | blocked-on:<ref> | blocked-on-input | done | dropped
        step verdict:   full | partial | none
@@ -10,7 +11,7 @@
        retro outcome:  due (unhandled) | done | deferred (rate, stratum) | skipped (user) | dispatched:<ref> -->
 
 **Feature under coordination:** <one line — what this arc delivers>
-**Intent anchor:** [[work:<slug>]] — read it there; don't paraphrase it here.
+**Intent anchor:** stored verbatim in the arc record at open — read it back with `lore arc show`, or from the member item ([[work:<slug>]]); don't paraphrase it here.
 **Budget posture:** <e.g. cost-sensitive; duration-only until spend telemetry lands>
 **Standing directives in force:** <model floor, routing policy, retro cadence — cite the preference entries>
 **Concurrency ceiling:** <settings key/value rendered by `lore defaults`; runtime capacity may lower it>
