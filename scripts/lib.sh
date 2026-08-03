@@ -1239,6 +1239,160 @@ PYEOF
   return "$status"
 }
 
+# --- Scoping a journal reader to a set of work items ---
+
+# SESSION_SCOPE_JQ_PREDICATE — jq program text defining `scope_state`, the shared
+# two-key scope test. Apply it to one journal row (not to a `.records` entry) with
+# the scope's slug array and a 0/1 flag for whether a scope was requested at all;
+# it evaluates to {matched, unattributed}.
+#
+# Two keys, because the journal has two disjoint identity keys and neither covers
+# every row: `.slug` identifies spec and implement sessions (whose slug is the
+# work-item slug), `links.work_item` identifies worker sessions (the sole writer
+# derives it from the `<work-item>--w<n>` slug shape). Matching only `.slug`
+# silently drops every worker row.
+#
+# A row carrying neither key matches unconditionally and is reported
+# `unattributed`. Such a row cannot be scoped in or out on the evidence it
+# carries, and a scoping filter that dropped it would turn an actionable event
+# into silence; the caller labels the wake instead.
+SESSION_SCOPE_JQ_PREDICATE='
+def scope_state($scoped; $slugs):
+  (.slug // "") as $s
+  | (.links.work_item // "") as $w
+  | if ($s == "" and $w == "") then {matched: true, unattributed: true}
+    elif $scoped == 0 then {matched: true, unattributed: false}
+    elif ($s != "" and ($slugs | index($s)) != null) then {matched: true, unattributed: false}
+    elif ($w != "" and ($slugs | index($w)) != null) then {matched: true, unattributed: false}
+    else {matched: false, unattributed: false}
+    end;
+'
+
+# session_arc_member_slugs <kdir> <arc-slug>
+# Print an arc's declared member slugs, one per line, for expansion into a scope.
+#
+# Membership is whatever the record's `members[]` lists. A work item carrying the
+# arc's project label is NOT a member: labels and membership are separate, and
+# records with an empty `members[]` alongside several labeled items are a live
+# case, so a label join would silently widen the scope.
+#
+# Statuses follow `arc list`'s default listing (active and closed). The record
+# omits keys it has no value for rather than storing null, so every field is read
+# defensively.
+#
+# Exit: 0 listed (possibly nothing), 1 no such record, 2 record unparseable,
+#       3 record status outside active/closed.
+session_arc_member_slugs() {
+  local kdir="$1" arc="$2"
+  python3 - "$kdir" "$arc" <<'PYEOF'
+import json, os, sys
+
+kdir, arc = sys.argv[1], sys.argv[2]
+path = os.path.join(kdir, "_work", "_arcs", arc, "_meta.json")
+if not os.path.isfile(path):
+    raise SystemExit(1)
+try:
+    with open(path, encoding="utf-8") as handle:
+        record = json.load(handle)
+except (OSError, ValueError):
+    raise SystemExit(2)
+if not isinstance(record, dict):
+    raise SystemExit(2)
+if record.get("status") not in ("active", "closed"):
+    raise SystemExit(3)
+for member in record.get("members") or []:
+    if isinstance(member, str) and member:
+        print(member)
+PYEOF
+}
+
+# --- Owner liveness for a watcher ---
+
+# session_owner_alive <pid> <tmux_name> [tmux_server]
+# 0 when at least one handle PROVES the owner process is still there, 1 otherwise.
+# Either handle may be empty; with both empty the answer is 1.
+#
+# This is the stop-biased reading of the same two handles the coordination seat
+# lease records. The lease treats an unknowable answer (EPERM, no tmux binary) as
+# alive, because reclaiming a live seat's checkout destroys work. A watcher's
+# false positive is the opposite failure — it keeps running with nothing left to
+# report to — so here unknowable does not count as alive. `kill -0` gives that
+# for free: it fails on EPERM as well as on a reaped pid.
+#
+# Callers must still treat this as a hint, not a verdict: prove-death paths lag
+# the journal during teardown, so pair a not-alive answer with a grace period and
+# one final authoritative read before acting on it.
+session_owner_alive() {
+  local pid="${1:-}" tmux_name="${2:-}" tmux_server="${3:-lore-tui}"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && [[ "$pid" -gt 0 ]]; then
+    kill -0 "$pid" 2>/dev/null && return 0
+  fi
+  if [[ -n "$tmux_name" ]] && command -v tmux >/dev/null 2>&1; then
+    tmux -L "${tmux_server:-lore-tui}" has-session -t "$tmux_name" >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+# --- Classifying a parked session from its rendered screen ---
+
+# The events after which a session has stopped and is waiting on somebody, and
+# the row alone cannot say whether it is still waiting now. Every other actionable
+# event states its own outcome, so the row is the authority and no screen read is
+# warranted.
+SESSION_PARK_SHAPED_EVENTS="needs_input modal_blocked"
+
+# Version of the signature set session_park_classify accepts. It travels in the
+# consumer's output so a matcher-contract change surfaces there instead of
+# silently reclassifying parks. Bump it whenever the accepted set below changes.
+SESSION_PARK_SIGNATURE_VERSION=1
+
+# session_park_classify <event> <ready> <blocked_reason>
+# Compare one peek result against the strict signature set for <event> and print
+# "<verdict><TAB><label>" (exit 0 either way).
+#
+#   verdict  `confirmed` when the screen strictly agrees the session is still
+#            parked; `unconfirmed` otherwise.
+#   label    which signature fired, or the reason none did. An unconfirmed park
+#            is a labeled result, never a dropped one — the label is what the
+#            caller reports.
+#
+# <ready> is a peek response's `.ready` (`true`/`false`) and <blocked_reason> its
+# `.blocked_reason`, whose vocabulary is the send/peek readiness gate's:
+# generating, modal, no-signature, no-contract, error.
+#
+# The strict sets are deliberately narrow. A session that emitted modal_blocked
+# but renders as generating is not parked now — on some harnesses that row fires
+# at turn cadence on healthy sessions — so it does not confirm.
+session_park_classify() {
+  local event="$1" ready="$2" reason="$3"
+  case "$event" in
+    modal_blocked)
+      if [[ "$ready" == "false" && "$reason" == "modal" ]]; then
+        printf 'confirmed\tmodal-signature\n'
+        return 0
+      fi
+      ;;
+    needs_input)
+      if [[ "$ready" == "true" ]]; then
+        printf 'confirmed\tcomposer-awaiting-input\n'
+        return 0
+      fi
+      if [[ "$reason" == "modal" ]]; then
+        printf 'confirmed\tmodal-signature\n'
+        return 0
+      fi
+      ;;
+  esac
+  case "$reason" in
+    generating)   printf 'unconfirmed\tscreen-reports-generating\n' ;;
+    no-signature) printf 'unconfirmed\tmatcher-found-no-known-signature\n' ;;
+    no-contract)  printf 'unconfirmed\tharness-has-no-gate-contract\n' ;;
+    error)        printf 'unconfirmed\tscreen-read-failed\n' ;;
+    '')           printf 'unconfirmed\tpeek-returned-no-reason\n' ;;
+    *)            printf 'unconfirmed\tunrecognized-blocked-reason\n' ;;
+  esac
+}
+
 # --- resolve_session_owner ---
 # Echo the name of the single live TUI instance whose registry row hosts <slug>,
 # or nothing when none is live within <ttl_seconds>. The owning instance is the

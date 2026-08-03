@@ -35,6 +35,7 @@ EOF
   for leaf in evolve-prepare evolve-file; do
     cp "$TEST_SCRIPTS/session-wait.sh" "$TEST_SCRIPTS/$leaf.sh"
   done
+  cp "$TEST_SCRIPTS/session-wait.sh" "$TEST_SCRIPTS/coordinate-arm.sh"
 }
 
 @test "evolve prepare and file exec at their deepest external dispatch arms" {
@@ -115,6 +116,30 @@ teardown() {
     wait "$ROUTER_PID" 2>/dev/null || true
   fi
   rm -rf "$TEST_ROOT"
+}
+
+@test "coordinate arm execs its leaf and does not fall through to unknown-verb" {
+  # The armed watcher window is a long-lived leaf: the router must hand the
+  # process over rather than stay alive as its parent, so the pid the harness
+  # signals at the hook timeout is the one running the window.
+  : > "$PID_FILE"
+  rm -f "$RELEASE_FILE"
+  HOME="$TEST_HOME" PID_FILE="$PID_FILE" RELEASE_FILE="$RELEASE_FILE" \
+    bash "$TEST_ROUTER" coordinate arm --owner-pid 1 &
+  ROUTER_PID=$!
+
+  for _ in $(seq 1 200); do
+    [[ -s "$PID_FILE" ]] && break
+    sleep 0.01
+  done
+  [[ -s "$PID_FILE" ]]
+  [[ "$(<"$PID_FILE")" == "$ROUTER_PID" ]]
+
+  touch "$RELEASE_FILE"
+  local leaf_status=0
+  wait "$ROUTER_PID" || leaf_status=$?
+  ROUTER_PID=""
+  [[ "$leaf_status" -eq 37 ]]
 }
 
 @test "session wait execs the leaf before a mid-wait router edit" {

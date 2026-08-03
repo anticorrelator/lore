@@ -84,6 +84,28 @@ non-`none` cell points at an id that exists here.
   `{"decision":"block","reason":"..."}` for fine-grained control.
 - **Consumed by:** `claude-code.capabilities.stop_hook`.
 
+### claude-code-turn-boundary-rewake
+
+- **Source:** Local empirical test against the shipped binary — armed a
+  Stop hook with `asyncRewake: true` and observed the wake chain, plus
+  schema extraction from the bundled hook handler.
+- **URL / path:** local artifact; investigation recorded in
+  `_work/standing-eye-without-seat-owned-re-arm-mechanize-w/evidence.md`
+- **Retrieved:** 2026-08-03
+- **Product / version:** Claude Code 2.1.220
+- **Claim:** A Stop hook entry carrying `asyncRewake: true` runs its
+  command in the background while the session parks idle; exit code 2
+  enqueues the command's stderr as a priority-next task notification
+  that re-invokes the model, and Stop re-fires at the end of that turn
+  (7 wake cycles observed in 45s). The entry's `timeout` field is in
+  seconds and stays armed for asyncRewake hooks: a 15s timeout SIGTERMed
+  a 90s command, which exited 143 and fired no rewake, while the
+  default-timeout control ran 91s and did fire. A detached successor
+  (nohup / double-fork, ppid=1) runs and exits invisibly — no
+  notification fires for it — so a self-perpetuating watcher chain is
+  not an alternative on this harness.
+- **Consumed by:** `claude-code.capabilities.turn_boundary_rewake`.
+
 ### claude-code-pre-compact-hook
 
 - **Source:** Anthropic — Claude Code Hooks reference
@@ -480,27 +502,49 @@ non-`none` cell points at an id that exists here.
 
 ### codex-stop-hook
 
-- **Source:** OpenAI Developers — Codex Hooks reference
+- **Source:** OpenAI Developers — Codex Hooks reference, plus string
+  extraction from the locally installed binary.
 - **URL / path:** https://developers.openai.com/codex/hooks
-- **Retrieved:** 2026-05-03
-- **Product / version:** Codex CLI 0.124.0 (hooks stable), April 2026
-- **Claim:** Codex's `Stop` hook fires when a conversation turn stops;
-  hooks can return continuation instructions rather than reject. No
-  matcher support.
+- **Retrieved:** 2026-08-03
+- **Product / version:** Codex CLI 0.146.0 (docs written against 0.124.0)
+- **Claim:** Codex's `Stop` hook fires when a conversation turn stops and
+  is blockable: the 0.146.0 binary carries the error `Stop hook exited
+  with code 2 but did not write a continuation prompt to stderr`, which
+  only makes sense if exit 2 + stderr is an honored continuation
+  channel. No matcher support.
 - **Consumed by:** `codex.capabilities.stop_hook`.
+
+### codex-turn-boundary-rewake
+
+- **Source:** String and schema extraction from the locally installed
+  binary and its generated protocol bindings.
+- **URL / path:** local artifact; investigation recorded in
+  `_work/standing-eye-without-seat-owned-re-arm-mechanize-w/evidence.md`
+- **Retrieved:** 2026-08-03
+- **Product / version:** Codex CLI 0.146.0
+- **Claim:** The continuation channel exists (see `codex-stop-hook`) but
+  asynchronous hook execution does not. `ConfiguredHookHandler` declares
+  an `async: boolean` field and `HookExecutionMode` includes `async`,
+  yet the loader emits `skipping async hook: async hooks are not
+  supported yet`. A hook-hosted watcher therefore holds the turn for its
+  whole window rather than running while the session is idle. Reading
+  the generated bindings alone would have produced the opposite claim —
+  the rejection string is the load-bearing artifact.
+- **Consumed by:** `codex.capabilities.turn_boundary_rewake`.
 
 ### codex-pre-compact-hook
 
 - **Source:** OpenAI Developers — Codex Hooks reference (event list,
   no PreCompact-equivalent in current docs)
 - **URL / path:** https://developers.openai.com/codex/hooks
-- **Retrieved:** 2026-05-03
-- **Product / version:** Codex CLI 0.124.0, April 2026
-- **Claim:** No native PreCompact event documented in the current
-  Codex hook surface (SessionStart, UserPromptSubmit, PreToolUse,
-  PermissionRequest, PostToolUse, Stop). Lore falls back to using
-  Stop / SessionStart bookends to remind the user to persist plans
-  before compaction events the harness does not expose.
+- **Retrieved:** 2026-08-03
+- **Product / version:** Codex CLI 0.146.0 (docs written against 0.124.0)
+- **Claim:** The 0.146.0 `HookEventName` enum does include `preCompact`
+  and `postCompact`, superseding the earlier reading of the documented
+  event list as complete. Their payload shape and delivery are unprobed
+  and no lore adapter consumes them, so the cell stays `fallback` on
+  lore's side — Stop / SessionStart bookends remind the user to persist
+  plans — until a probe replaces this row.
 - **Consumed by:** `codex.capabilities.pre_compact_hook`.
 
 ### codex-tool-hooks
@@ -543,17 +587,18 @@ non-`none` cell points at an id that exists here.
 
 ### codex-task-completed-hook
 
-- **Source:** OpenAI Developers — Codex Hooks reference (event list,
-  no TaskCompleted-equivalent)
+- **Source:** OpenAI Developers — Codex Hooks reference, plus the
+  `HookEventName` enum in the locally installed binary.
 - **URL / path:** https://developers.openai.com/codex/hooks
-- **Retrieved:** 2026-05-03
-- **Product / version:** Codex CLI 0.124.0, April 2026
-- **Claim:** No native subagent-completion blocking event in the
-  documented hook surface. The `Stop` hook fires at turn end but does
-  not target a per-task report and does not have an `exit 2 + stderr`
-  blocking interface like Claude's TaskCompleted. Lore falls back to
-  the lead-side validator pattern (D9 fallback mode: lead-side
-  validator after result collection).
+- **Retrieved:** 2026-08-03
+- **Product / version:** Codex CLI 0.146.0 (docs written against 0.124.0)
+- **Claim:** The 0.146.0 `HookEventName` enum does include
+  `subagentStart` and `subagentStop`, superseding the earlier "no native
+  subagent-completion event" reading. Whether `subagentStop` can *block*
+  a completion — the semantic this cell is about — is unprobed, and
+  `Stop` still does not target a per-task report. Lore keeps the
+  lead-side validator pattern (D9 fallback mode: lead-side validator
+  after result collection) until a probe replaces this row.
 - **Consumed by:** `codex.capabilities.task_completed_hook`.
 
 ### codex-subagents
@@ -831,6 +876,7 @@ matches the union of all `evidence:` fields in capabilities.json.
 - claude-code-mcp
 - claude-code-session-start-hook
 - claude-code-stop-hook
+- claude-code-turn-boundary-rewake
 - claude-code-pre-compact-hook
 - claude-code-tool-hooks
 - claude-code-permission-hooks
@@ -865,6 +911,7 @@ matches the union of all `evidence:` fields in capabilities.json.
 - codex-mcp
 - codex-session-start-hook
 - codex-stop-hook
+- codex-turn-boundary-rewake
 - codex-pre-compact-hook
 - codex-tool-hooks
 - codex-permission-hooks

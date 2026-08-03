@@ -2128,10 +2128,13 @@ EOF
   echo '{"event":"needs_input","slug":"feature-x","reason":"prompt"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
   echo '{"event":"closed","request_id":"r1","slug":"feature-y"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
 
-  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
-  [ "$status" -eq 0 ]
+  # stdout only: the rows are the contract, the [coordinate] line on stderr is a
+  # diagnostic and is not JSON.
+  local rows code
+  rows="$(bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 0 ]
   local printed
-  printed="$(printf '%s\n' "$output" | jq -r 'select(has("next_cursor")) | .next_cursor')"
+  printed="$(printf '%s\n' "$rows" | jq -r 'select(has("next_cursor")) | .next_cursor')"
   [ -n "$printed" ]
   # Re-arming from the printed cursor and re-arming zero-argument are the same
   # call: what the caller was told is what was stored.
@@ -2262,10 +2265,15 @@ EOF
   : > "$TEST_KDIR/_sessions/events.jsonl"
   write_pending_request req-stuck feature-x--w2 dead-instance 3600
   echo '{"event":"closed","request_id":"r1","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
-  run bash "$WATCH" --since 0 --timeout 0 --kdir "$TEST_KDIR"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *'"event":"closed"'* ]]
-  [[ "$output" != *"pending_stale"* ]]
+  local rows code
+  rows="$(bash "$WATCH" --since 0 --timeout 0 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 0 ]
+  [[ "$rows" == *'"event":"closed"'* ]]
+  # The wake is the journal row: no advisory row is emitted in its place. The
+  # wake body still reserves an advisories slot, but that is information carried
+  # along, not the thing that woke the watch.
+  [[ "$rows" != *'"advisory":"pending_stale"'* ]]
+  printf '%s\n' "$rows" | jq -e -s 'map(select(has("wake"))) | .[0].wake.outcome == "matched"'
 }
 
 @test "watch: --json reports a pending-staleness wake as its own outcome" {
@@ -2295,9 +2303,292 @@ EOF
 }
 
 @test "watch: an unknown argument is a usage error naming the flag" {
-  run bash "$WATCH" --slug feature-x --kdir "$TEST_KDIR"
+  run bash "$WATCH" --session feature-x --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Unknown argument: --slug"* ]]
+  [[ "$output" == *"Unknown argument: --session"* ]]
+}
+
+# ---------------------------------------------------------------------
+# coordinate watch — scoping, classification, and the owner hard stop
+#
+# The watch above is the board-wide seat. These pin the scoped seat: which rows
+# reach it, what a wake tells it, and when it stops. The board delta runs a real
+# board projection on every wake, so --no-board-delta appears wherever the delta
+# itself is not what is under test.
+
+# Write an arc record declaring <members...>.
+write_arc() {
+  local slug="$1" status="$2"; shift 2
+  mkdir -p "$TEST_KDIR/_work/_arcs/$slug"
+  local members; members="$(printf '%s\n' "$@" | jq -R . | jq -s -c .)"
+  jq -n --arg s "$slug" --arg st "$status" --argjson m "$members" \
+    '{schema_version: 1, slug: $s, title: "arc", status: $st, project: "p",
+      members: $m, opened: "2026-08-01T00:00:00Z"}' \
+    > "$TEST_KDIR/_work/_arcs/$slug/_meta.json"
+}
+
+# One wake body from a --json run, whatever the exit code.
+watch_json() {
+  bash "$WATCH" "$@" --json --kdir "$TEST_KDIR" 2>/dev/null || true
+}
+
+@test "watch: --slug scopes on both identity keys and leaves other sessions asleep" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WATCH" --slug feature-x --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+
+  # A different work item's row is not this seat's business.
+  echo '{"event":"closed","request_id":"r1","slug":"other-item"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  run bash "$WATCH" --slug feature-x --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+
+  # .slug is the spec/implement session key.
+  echo '{"event":"needs_input","slug":"feature-x","reason":"prompt"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  local out; out="$(watch_json --slug feature-x --no-board-delta --timeout 0)"
+  echo "$out" | jq -e '.outcome=="matched" and .matched.slug=="feature-x"'
+
+  # links.work_item is the worker-session key. A slug-only filter drops this row,
+  # which is every worker session on the board.
+  echo '{"event":"terminus_reached","actor_instance":"inst-b","slug":"feature-x--w3","session_type":"implement","reason":"impl-close"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  out="$(watch_json --slug feature-x --no-board-delta --timeout 0)"
+  echo "$out" | jq -e '.outcome=="matched" and .matched.slug=="feature-x--w3" and .matched.links.work_item=="feature-x"'
+}
+
+@test "watch: an actionable row carrying neither identity key wakes a scoped watch as a labeled advisory" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WATCH" --slug feature-x --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+
+  # Roughly 2% of journal rows carry neither key. Dropping them would make a
+  # scoped watch silent on a real event, which is the one outcome the wake
+  # contract forbids.
+  echo '{"event":"orphaned","reason":"no host"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  local out; out="$(watch_json --slug feature-x --no-board-delta --timeout 0)"
+  echo "$out" | jq -e '.outcome=="matched" and .matched.event=="orphaned"'
+  echo "$out" | jq -e '.tier=="advisory" and .classification.state=="unattributed_row"'
+  echo "$out" | jq -e '.classification.label=="row-carries-neither-slug-nor-work-item"'
+}
+
+@test "watch: two scopes keep separate cursors and neither clobbers the other" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WATCH" --slug alpha --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+  run bash "$WATCH" --slug beta --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+
+  local files; files="$(ls "$TEST_KDIR/_coordination" | grep -c '^watch-cursor-')"
+  [ "$files" -eq 2 ]
+  # The board-wide cursor is a third position, unaffected by either scope.
+  [ ! -f "$TEST_KDIR/$WATCH_CURSOR" ]
+
+  echo '{"event":"closed","request_id":"r1","slug":"alpha"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  local out; out="$(watch_json --slug alpha --no-board-delta --timeout 0)"
+  echo "$out" | jq -e '.outcome=="matched"'
+  local alpha_cursor; alpha_cursor="$(echo "$out" | jq -r '.next_cursor')"
+
+  # Beta consuming its own timeout must not move alpha's position, and alpha
+  # must not have moved beta past the row beta never saw.
+  run bash "$WATCH" --slug beta --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+  out="$(watch_json --slug alpha --no-board-delta --timeout 0)"
+  echo "$out" | jq -e --argjson c "$alpha_cursor" '.outcome=="timeout" and .next_cursor==$c'
+
+  # Same scope written a different way resumes the same cursor, not a new one.
+  run bash "$WATCH" --slug alpha --slug alpha --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+  [ "$(ls "$TEST_KDIR/_coordination" | grep -c '^watch-cursor-')" -eq 2 ]
+}
+
+@test "watch: --arc expands the record's declared members, never the project label" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  write_arc live-arc active alpha beta
+  local out; out="$(watch_json --arc live-arc --no-board-delta --timeout 0)"
+  echo "$out" | jq -e '.scope.mode=="scoped" and (.scope.slugs==["alpha","beta"]) and .scope.arcs==["live-arc"]'
+
+  # gamma carries the arc's project label but was never added as a member, so it
+  # is not in scope; beta is.
+  echo '{"event":"closed","request_id":"r1","slug":"gamma"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  run bash "$WATCH" --arc live-arc --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+  echo '{"event":"closed","request_id":"r2","slug":"beta"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  out="$(watch_json --arc live-arc --no-board-delta --timeout 0)"
+  echo "$out" | jq -e '.outcome=="matched" and .matched.slug=="beta"'
+}
+
+@test "watch: an unusable --arc is a usage error rather than a watch that never wakes" {
+  run bash "$WATCH" --arc missing --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"unknown --arc: 'missing'"* ]]
+
+  write_arc gone archived x
+  run bash "$WATCH" --arc gone --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"archived or carries an unknown status"* ]]
+
+  # An arc that declares nothing must not quietly widen back to the whole board.
+  write_arc hollow active
+  run bash "$WATCH" --arc hollow --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"expands to no work items"* ]]
+}
+
+@test "watch: a wake names its tier, classifying authority, and signature version" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WATCH" --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+
+  # An emitter that recorded why the session parked is the authority for it; the
+  # screen is not consulted alongside a row that already answers the question.
+  echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  local out; out="$(watch_json --no-board-delta --timeout 0)"
+  echo "$out" | jq -e '.tier=="confirmed" and .authority=="hook-row"'
+  echo "$out" | jq -e '.classification.state=="confirmed_park" and .classification.reason=="modal"'
+  echo "$out" | jq -e '.classification.peek==null'
+  echo "$out" | jq -e '(.signature_version|type)=="number"'
+}
+
+@test "watch: a park nothing could confirm wakes as a labeled advisory, never silently" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WATCH" --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+
+  # A park-shaped row with no emitter state sends the watcher to the screen. No
+  # instance hosts this session, so no strict signature can fire — and the wake
+  # still happens, carrying the reason it could not be confirmed.
+  echo '{"event":"needs_input","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  local out; out="$(watch_json --no-board-delta --peek-timeout 1 --timeout 0)"
+  echo "$out" | jq -e '.outcome=="matched" and .matched.event=="needs_input"'
+  echo "$out" | jq -e '.tier=="advisory" and .authority=="screen-signature"'
+  echo "$out" | jq -e '.classification.state=="park_unconfirmed" and .classification.label=="peek-unavailable"'
+  echo "$out" | jq -e '.classification.peek.consulted==true and (.classification.peek.error|test("no live instance"))'
+
+  # The same unresolved advisory escalates once it has been repeating too long.
+  sleep 1
+  out="$(watch_json --no-board-delta --peek-timeout 1 --advisory-age 1 --since 0 --timeout 0)"
+  echo "$out" | jq -e '.tier=="aged_advisory" and (.classification.advisory_age_seconds|type)=="number"'
+}
+
+@test "watch: --peek-timeout 0 keeps the row as the only authority and still wakes" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WATCH" --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+  echo '{"event":"needs_input","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  local out; out="$(watch_json --no-board-delta --peek-timeout 0 --timeout 0)"
+  echo "$out" | jq -e '.outcome=="matched" and .tier=="advisory" and .authority=="hook-row"'
+  echo "$out" | jq -e '.classification.label=="screen-classification-disabled" and .classification.peek==null'
+}
+
+@test "watch: the wake carries a board delta and the advisory slot the board cannot express" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  # First wake for this scope has no baseline to diff against, so it reports the
+  # board's size rather than presenting every existing row as new.
+  local out; out="$(watch_json --timeout 0)"
+  echo "$out" | jq -e '.board_delta.consulted==true and .board_delta.first_observation==true'
+  echo "$out" | jq -e '.board_delta.counts=={"added":0,"removed":0,"changed":0}'
+  echo "$out" | jq -e '(.board_delta.bucket_counts|type)=="object"'
+  [ -f "$TEST_KDIR/_coordination/watch-board-baseline.json" ]
+
+  # A second wake diffs against the baseline the first one persisted.
+  echo '{"event":"closed","request_id":"r1","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  out="$(watch_json --timeout 0)"
+  echo "$out" | jq -e '.board_delta.first_observation==false'
+
+  # An unclaimed spawn request never becomes a board row, so the delta reserves a
+  # slot for advisories the projection has no way to carry.
+  write_pending_request req-stuck feature-x--w2 dead-instance 3600
+  out="$(watch_json --timeout 0)"
+  echo "$out" | jq -e '.outcome=="pending_stale"'
+  echo "$out" | jq -e '.board_delta.advisories.pending_stale[0].request_id=="req-stuck"'
+}
+
+@test "watch: --wake-shaped ends every re-armable window in one exit code, body on stderr" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WATCH" --wake-shaped --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+
+  # A match is a wake to re-arm from, not a different kind of ending.
+  echo '{"event":"closed","request_id":"r1","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  local err; err="$TEST_KDIR/wake.err"
+  bash "$WATCH" --wake-shaped --no-board-delta --timeout 0 --kdir "$TEST_KDIR" >/dev/null 2>"$err" && status=0 || status=$?
+  [ "$status" -eq 2 ]
+  tail -1 "$err" | jq -e '.outcome=="matched" and .tier=="confirmed" and (.next_cursor|type)=="number"'
+
+  # So is a stale-pending advisory.
+  write_pending_request req-stuck feature-x--w2 dead-instance 3600
+  run bash "$WATCH" --wake-shaped --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+
+  # Without --wake-shaped the same terminals keep their own codes.
+  run bash "$WATCH" --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+}
+
+@test "watch: a dead --owner-pid stops the watch after a grace and one final read" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  local before; before="$(shasum -a 256 "$TEST_KDIR/_sessions/events.jsonl" | awk '{print $1}')"
+  local dead; dead="$(bash -c 'echo $$')"
+
+  # The timeout is long: reaching it would mean the liveness check never fired.
+  local out; out="$(bash "$WATCH" --owner-pid "$dead" --no-board-delta --timeout 120 --json --kdir "$TEST_KDIR" 2>/dev/null || true)"
+  echo "$out" | jq -e '.outcome=="owner_gone" and .authority=="owner-handle"'
+
+  run bash "$WATCH" --owner-pid "$dead" --no-board-delta --timeout 120 --kdir "$TEST_KDIR"
+  [ "$status" -eq 3 ]
+
+  # Exit 3 stays 3 under --wake-shaped: it is the one terminal that must not be
+  # re-armed from.
+  run bash "$WATCH" --wake-shaped --owner-pid "$dead" --no-board-delta --timeout 120 --kdir "$TEST_KDIR"
+  [ "$status" -eq 3 ]
+
+  # A live owner is not a reason to stop.
+  run bash "$WATCH" --owner-pid $$ --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+
+  # Nothing on the classification, delta, or liveness path writes to the journal.
+  [ "$(shasum -a 256 "$TEST_KDIR/_sessions/events.jsonl" | awk '{print $1}')" = "$before" ]
+}
+
+@test "watch: the owner hard stop delivers a row that landed during the grace window" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  local dead; dead="$(bash -c 'echo $$')"
+  run bash "$WATCH" --owner-pid $$ --no-board-delta --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+
+  # Registry and process removal run ahead of the last journal append, so the
+  # final read exists to catch exactly this row rather than drop it on the way out.
+  ( sleep 1; echo '{"event":"closed","request_id":"r1","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  local out; out="$(bash "$WATCH" --owner-pid "$dead" --no-board-delta --timeout 120 --json --kdir "$TEST_KDIR" 2>/dev/null || true)"
+  wait
+  echo "$out" | jq -e '.outcome=="matched" and .matched.event=="closed"'
+}
+
+@test "watch: refuses a non-numeric --peek-timeout, --advisory-age, and --owner-pid" {
+  run bash "$WATCH" --peek-timeout soon --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid --peek-timeout"* ]]
+
+  run bash "$WATCH" --advisory-age later --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid --advisory-age"* ]]
+
+  run bash "$WATCH" --owner-pid nobody --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid --owner-pid"* ]]
+}
+
+@test "watch: --help prints the contract without running any verb it cites" {
+  run bash "$WATCH" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--arc <slug>"* ]]
+  [[ "$output" == *"--wake-shaped"* ]]
+  [[ "$output" == *"Exit codes"* ]]
+  # The help is a line range over the file's own header comment, so a header that
+  # grew past the range would silently print a truncated contract.
+  [[ "$output" == *"as a lifecycle event."* ]]
+  # The help cites sibling verbs in backticks. Rendering them through a
+  # substituting heredoc would run them — `lore session wait` blocks — so the
+  # backticked text must come back verbatim.
+  [[ "$output" == *'`lore session wait`'* ]]
 }
 
 @test "coordinate watch routes through the dispatcher and is advertised" {

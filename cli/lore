@@ -635,7 +635,7 @@ cmd_arc_member() {
 }
 
 coordinate_usage() {
-  cat >&2 <<EOF
+  cat >&2 <<'EOF'
 lore coordinate — cross-substrate coordination and stream lifecycle
 
 Usage: lore coordinate <verb> [args...]
@@ -649,6 +649,11 @@ Verbs:
             actionable row from any session, and also reports a spawn request
             left unclaimed in the pending queue. Takes no arguments — the same
             call re-arms it after every wake
+  arm       Hand the re-arming to the harness: prints (or installs) the
+            turn-boundary hook entry that runs a watcher window after every
+            turn. Requires an owner handle (--owner-pid / --owner-tmux); on a
+            harness with no async continuation it prints the watcher command
+            and says the seat re-arms it
   worktree  Allocate, bind, renew, transition, clean, sweep, or inspect a
             manager-owned stream worktree
   pin       Set, clear, or read a project's sticky dispatch pin (sole writer
@@ -1017,6 +1022,9 @@ cmd_coordinate() {
       ;;
     watch)
       exec "$SCRIPTS_DIR/coordinate-watch.sh" "$@"
+      ;;
+    arm)
+      exec "$SCRIPTS_DIR/coordinate-arm.sh" "$@"
       ;;
     worktree)
       exec "$SCRIPTS_DIR/coordinate-worktree.sh" "$@"

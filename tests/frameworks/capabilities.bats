@@ -378,6 +378,83 @@ if bad:
   [ "$status" -eq 0 ]
 }
 
+@test "turn_boundary_rewake is declared and directs callers away from framework-name branching" {
+  # The cell `lore coordinate arm` branches on. It has to be in the closed
+  # capability map (so every framework must answer it) and its description has
+  # to keep pointing callers at the support level rather than the harness name
+  # — the branch it replaces is exactly the one that goes stale.
+  run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+desc = d["capabilities"].get("turn_boundary_rewake")
+if not isinstance(desc, str) or not desc.strip():
+    print("turn_boundary_rewake missing from the global capabilities map"); sys.exit(1)
+if "never on the framework name" not in desc:
+    print("turn_boundary_rewake description must forbid framework-name branching"); sys.exit(1)
+' "$CAPS"
+  [ "$status" -eq 0 ]
+}
+
+@test "turn_boundary_rewake levels state the sync/async split per harness" {
+  # These three levels are the contract Phase 3 prose and `lore coordinate arm`
+  # both read. claude-code full = async, so a watcher can be armed; codex
+  # partial = the continuation channel exists but runs synchronously, holding
+  # the turn; opencode none = no continuation at all. Promoting codex to full
+  # without probing async execution is the specific regression guarded here.
+  run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+want = {"claude-code": "full", "codex": "partial", "opencode": "none"}
+bad = []
+for fw, level in want.items():
+    cell = d["frameworks"][fw]["capabilities"].get("turn_boundary_rewake")
+    if not cell:
+        bad.append(f"{fw} declares no turn_boundary_rewake cell"); continue
+    got = cell.get("support")
+    if got != level:
+        bad.append(f"{fw}.turn_boundary_rewake.support={got!r}, expected {level!r}")
+    notes = cell.get("notes", "")
+    if not notes.strip():
+        bad.append(f"{fw}.turn_boundary_rewake has no notes")
+cc = d["frameworks"]["claude-code"]["capabilities"]["turn_boundary_rewake"]["notes"]
+if "asyncRewake" not in cc or "timeout" not in cc:
+    bad.append("claude-code notes must name asyncRewake and the explicit timeout requirement")
+cx = d["frameworks"]["codex"]["capabilities"]["turn_boundary_rewake"]["notes"]
+if "async hooks are not supported yet" not in cx:
+    bad.append("codex notes must cite the loader rejection that keeps this cell below full")
+if bad:
+    for b in bad: print(b)
+    sys.exit(1)
+' "$CAPS"
+  [ "$status" -eq 0 ]
+}
+
+@test "codex fallback hook cells record what 0.146.0 actually exposes" {
+  # These two cells claimed the events did not exist. They do; what is unproven
+  # is their semantics. The cells stay `fallback`, but a note that still reads
+  # "no native event" is the stale state this guard exists to catch.
+  run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+caps = d["frameworks"]["codex"]["capabilities"]
+bad = []
+pc = caps["pre_compact_hook"]
+if pc["support"] != "fallback":
+    bad.append("codex.pre_compact_hook promoted without a probe")
+if "preCompact" not in pc["notes"]:
+    bad.append("codex.pre_compact_hook notes must record that the native event exists")
+tc = caps["task_completed_hook"]
+if tc["support"] != "fallback":
+    bad.append("codex.task_completed_hook promoted without a probe")
+if "subagentStop" not in tc["notes"]:
+    bad.append("codex.task_completed_hook notes must record that the native event exists")
+if bad:
+    for b in bad: print(b)
+    sys.exit(1)
+' "$CAPS"
+  [ "$status" -eq 0 ]
+}
+
 @test "every headless_runner cell declares a typed argument contract" {
   # Every non-none headless_runner cell declares how its non-interactive
   # surface differs from the interactive one, evidence-gated and CLI-version

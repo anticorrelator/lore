@@ -16,6 +16,14 @@
 #   smoke      Print the per-event support level + the native hook
 #              each Lore lifecycle event maps to. Honors the smoke
 #              contract documented in adapters/hooks/README.md.
+#   rewake-entry
+#              Render the Stop-hook entry that re-invokes a session at
+#              every turn boundary (`lore coordinate arm` composes the
+#              command; this subcommand owns the Claude Code shape).
+#   rewake-install / rewake-uninstall
+#              Write or remove that entry in a caller-named settings
+#              file. The file is never defaulted: it decides which
+#              sessions get armed.
 #
 # Refactored from install.sh's inline python block (formerly
 # install.sh:389-481 install + install.sh:147-184 uninstall). Behavior
@@ -244,6 +252,157 @@ with open(settings_path, "w") as f:
 PYEOF
 }
 
+# --- Subcommands: rewake-entry / rewake-install / rewake-uninstall ---
+#
+# Claude Code's Stop hook can carry `asyncRewake: true`, which runs the command
+# in the background while the session sits idle and, on exit 2, enqueues the
+# command's stderr as a notification that starts the next turn. Ending that turn
+# fires Stop again, so one installed entry keeps re-arming whatever the command
+# is — that is the whole arm-once primitive, and its shape lives here rather
+# than in the caller because it is Claude Code's, not lore's.
+#
+# `timeout` is seconds and is not optional for this entry: the harness SIGTERMs
+# the command at it, a signalled command exits 143, and 143 is not the exit code
+# that enqueues anything. So a hook that outlives its timeout ends the chain and
+# reports nothing. The caller is responsible for a command that finishes first;
+# this subcommand refuses an entry with no timeout at all.
+
+REWAKE_COMMAND=""
+REWAKE_TIMEOUT=""
+REWAKE_MESSAGE=""
+REWAKE_SETTINGS=""
+
+parse_rewake_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --framework)
+        [[ $# -lt 2 ]] && { echo "Error: --framework requires a value" >&2; return 1; }
+        TARGET_FRAMEWORK="$2"; shift 2 ;;
+      --command)
+        [[ $# -lt 2 ]] && { echo "Error: --command requires a value" >&2; return 1; }
+        REWAKE_COMMAND="$2"; shift 2 ;;
+      --timeout)
+        [[ $# -lt 2 ]] && { echo "Error: --timeout requires a value" >&2; return 1; }
+        REWAKE_TIMEOUT="$2"; shift 2 ;;
+      --message)
+        [[ $# -lt 2 ]] && { echo "Error: --message requires a value" >&2; return 1; }
+        REWAKE_MESSAGE="$2"; shift 2 ;;
+      --settings)
+        [[ $# -lt 2 ]] && { echo "Error: --settings requires a value" >&2; return 1; }
+        REWAKE_SETTINGS="$2"; shift 2 ;;
+      *)
+        echo "Error: unexpected argument '$1'" >&2
+        return 1 ;;
+    esac
+  done
+}
+
+require_rewake_payload() {
+  [[ -n "$REWAKE_COMMAND" ]] || { echo "Error: rewake entry requires --command" >&2; return 1; }
+  [[ "$REWAKE_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || {
+    echo "Error: rewake entry requires --timeout <seconds> as a positive integer; the harness kills the hook at it and a killed hook cannot re-arm" >&2
+    return 1
+  }
+}
+
+render_rewake_entry() {
+  python3 - "$REWAKE_COMMAND" "$REWAKE_TIMEOUT" "$REWAKE_MESSAGE" <<'PYEOF'
+import json, sys
+
+command, timeout, message = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+hook = {
+    "type": "command",
+    "command": command,
+    "timeout": timeout,
+    "asyncRewake": True,
+}
+if message:
+    hook["rewakeMessage"] = message
+print(json.dumps({"hooks": [hook]}, indent=2, ensure_ascii=False))
+PYEOF
+}
+
+cmd_rewake_entry() {
+  require_claude_code
+  require_rewake_payload
+  render_rewake_entry
+}
+
+# The marker is the command's own script path: `lore coordinate arm` is the only
+# writer of a Stop entry pointing at coordinate-arm.sh, so replacing on that
+# substring re-arms in place instead of stacking a second watcher per call.
+REWAKE_MARKER="coordinate-arm.sh"
+
+cmd_rewake_install() {
+  require_claude_code
+  require_rewake_payload
+  [[ -n "$REWAKE_SETTINGS" ]] || {
+    echo "Error: rewake-install requires --settings <path>; the settings file decides which sessions get armed, so it is never defaulted" >&2
+    return 1
+  }
+  mkdir -p "$(dirname "$REWAKE_SETTINGS")"
+  local entry
+  entry="$(render_rewake_entry)"
+  python3 - "$REWAKE_SETTINGS" "$REWAKE_MARKER" "$entry" <<'PYEOF'
+import json, os, sys
+
+settings_path, marker, entry_json = sys.argv[1], sys.argv[2], sys.argv[3]
+entry = json.loads(entry_json)
+
+settings = {}
+if os.path.exists(settings_path):
+    with open(settings_path) as f:
+        settings = json.load(f)
+
+hooks = settings.setdefault("hooks", {})
+stop = [
+    e for e in hooks.get("Stop", [])
+    if not any(marker in h.get("command", "") for h in e.get("hooks", []))
+]
+stop.append(entry)
+hooks["Stop"] = stop
+settings["hooks"] = hooks
+
+with open(settings_path, "w") as f:
+    json.dump(settings, f, indent=2)
+    f.write("\n")
+PYEOF
+}
+
+cmd_rewake_uninstall() {
+  require_claude_code
+  [[ -n "$REWAKE_SETTINGS" ]] || {
+    echo "Error: rewake-uninstall requires --settings <path>" >&2
+    return 1
+  }
+  [[ -f "$REWAKE_SETTINGS" ]] || return 0
+  python3 - "$REWAKE_SETTINGS" "$REWAKE_MARKER" <<'PYEOF'
+import json, sys
+
+settings_path, marker = sys.argv[1], sys.argv[2]
+with open(settings_path) as f:
+    settings = json.load(f)
+
+hooks = settings.get("hooks", {})
+stop = [
+    e for e in hooks.get("Stop", [])
+    if not any(marker in h.get("command", "") for h in e.get("hooks", []))
+]
+if stop:
+    hooks["Stop"] = stop
+else:
+    hooks.pop("Stop", None)
+if hooks:
+    settings["hooks"] = hooks
+else:
+    settings.pop("hooks", None)
+
+with open(settings_path, "w") as f:
+    json.dump(settings, f, indent=2)
+    f.write("\n")
+PYEOF
+}
+
 # --- Subcommand: smoke ---
 # Print, for the active framework (must be claude-code here), every
 # Lore lifecycle event paired with its support level and the native
@@ -266,7 +425,7 @@ cmd_smoke() {
   printf '  %-20s %-9s %s\n' post_tool          full      "(currently unused by lore; PostToolUse hook surface available)"
   printf '  %-20s %-9s %s\n' permission_request full      "PreToolUse JSON-stdout decision protocol (no separate lore handler)"
   printf '  %-20s %-9s %s\n' pre_compact        full      "PreCompact hook (~/.lore/scripts/pre-compact.sh)"
-  printf '  %-20s %-9s %s\n' stop               full      "(no lore Stop hook; ephemeral builtin plans are not auto-persisted)"
+  printf '  %-20s %-9s %s\n' stop               full      "(no Stop hook in the standard install; \`lore coordinate arm\` installs an asyncRewake entry into a settings file the caller names)"
   printf '  %-20s %-9s %s\n' session_end        full      "SessionEnd hook (matcher=clear -> pre-compact.sh)"
   printf '  %-20s %-9s %s\n' task_completed     full      "TaskCompleted hook (task-completed-capture-check.sh, exit-2 blocking)"
 }
@@ -277,6 +436,9 @@ case "$cmd" in
   install)   shift; parse_adapter_args "$@"; cmd_install ;;
   uninstall) shift; parse_adapter_args "$@"; cmd_uninstall ;;
   smoke)     shift; parse_adapter_args "$@"; cmd_smoke ;;
+  rewake-entry)     shift; parse_rewake_args "$@"; cmd_rewake_entry ;;
+  rewake-install)   shift; parse_rewake_args "$@"; cmd_rewake_install ;;
+  rewake-uninstall) shift; parse_rewake_args "$@"; cmd_rewake_uninstall ;;
   -h|--help|"")
     cat <<EOF >&2
 Usage: $(basename "$0") <subcommand> [--framework claude-code]
@@ -286,13 +448,22 @@ Subcommands:
   uninstall  Remove every lore-installed hook entry, preserving non-lore.
   smoke      Print Lore lifecycle event -> native hook mapping for
              the active framework (claude-code only).
+  rewake-entry --command <cmd> --timeout <sec> [--message <text>]
+             Print the asyncRewake Stop entry for that command.
+  rewake-install --settings <path> --command <cmd> --timeout <sec> [--message <text>]
+             Write that entry into the named settings file, replacing any
+             entry already armed there. A later 'install' rewrites the
+             lore-managed hooks in that file and drops the armed entry, so
+             re-arm after installing.
+  rewake-uninstall --settings <path>
+             Remove the armed entry from that settings file.
 
 Refer to adapters/hooks/README.md for the full hook adapter contract.
 EOF
     [[ -z "$cmd" ]] && exit 1 || exit 0
     ;;
   *)
-    echo "Error: unknown subcommand '$cmd' (allowed: install, uninstall, smoke)" >&2
+    echo "Error: unknown subcommand '$cmd' (allowed: install, uninstall, smoke, rewake-entry, rewake-install, rewake-uninstall)" >&2
     exit 1
     ;;
 esac

@@ -180,23 +180,6 @@ high-frequency name in the vocabulary, and a default that woke per step would wa
 constantly and carry no signal. `wait` has no session-type filter — scope every
 watcher by exact slug or `--request-id`.
 
-## Watch mechanics
-
-`lore coordinate watch` is the board-scoped standing eye: zero arguments, wakes on
-the first actionable row from any session, prints that row then the cursor row,
-exit 0. Its cursor lives at `_coordination/watch-cursor.json` (written atomically
-on every exit path — match, advisory, timeout, reader failure), so re-arming is
-the same bare call; precedence is `--since` > cursor file > journal end, and the
-first-ever run baselines at journal end. Exit 2 is timeout with the cursor
-persisted. `--pending-stale <sec>` (default 300, `0` disables) additionally wakes
-on a pending request older than the threshold — age from the row's `requested_at`,
-not mtime, which claim retries rewrite — emitting an `{"advisory":
-"pending_stale", …}` row; a journal match outranks an advisory in the same poll.
-Discriminate plain-mode rows by shape: `has("event")` / `has("advisory")` /
-`has("next_cursor")`. `--json` mirrors wait's matched-object shape but omits
-`slug` deliberately — watch has no target, and identity rides the matched row.
-The verb reads the journal and writes nothing to it.
-
 `--next-session` requires `--follow`, a positional exact slug, and no caller-supplied
 `--request-id`. It starts at a supplied cursor or an invocation-time journal-end
 baseline, ignores predecessor rows, and binds the first future request identity
@@ -204,6 +187,104 @@ from `requested`, `claimed`, `spawned`, or `spawn_failed`. Claim and spawn are
 unordered acquisition edges for that identity: failed or reclaimed attempts keep
 waiting, liveness begins only after correlated spawn (or recovery after claim),
 and correlated abandonment or cancellation emits and exits 3.
+
+## Arm mechanics
+
+`lore coordinate arm` installs the standing eye once, at seat open. It refuses a
+handle-less arm: `--owner-pid` (the long-lived harness process, never a `$$`
+subshell pid) or `--owner-tmux` is required, the same liveness-handle discipline
+as seat-owned worktree allocation. The handle feeds the watch's stop-biased
+liveness check (below); the refusal lands the failure on the dispatcher with a
+fixable message instead of on a watcher that cannot prove its seat.
+
+On a harness whose wake capability is async, arm installs a `Stop` hook entry
+carrying `asyncRewake: true`, a `rewakeMessage`, and an explicit `timeout`
+strictly greater than the watch deadline it configures; the hook spawns the watch
+wrapper in the background at every turn boundary. The deadline ordering is
+load-bearing: the watch ends every window itself with an exit-2 wake and the hook
+timeout stays a backstop, because a hook-timeout SIGTERM kills the wrapper
+silently — exit 143 never re-arms, and one such kill would end the chain
+invisibly. The wrapper traps SIGTERM and leaves a kill marker so a timeout-kill
+stays distinguishable from a clean trigger after the fact. The chain has no
+self-propulsion: it advances only through exit-2 delivery into a live harness
+turn, and every window is bounded by its hook timeout, so no watcher outlives
+its seat.
+
+Per-harness wake support is declared in `adapters/capabilities.json`; branch on
+the support flag, never the framework name. Async: claude-code —
+interactive/TUI-hosted sessions only; headless `claude -p` runs hooks
+synchronously (stream-json input is the headless exception). Sync-only: codex —
+the Stop continuation channel exists (exit 2 + stderr) but async hooks are
+refused at load, so windows are seat-owned; a short synchronous stop-check with a
+turn-friendly `timeoutSec` is the optional middle ground. None: opencode —
+seat-owned windows; the server-API wake (`session.promptAsync`) is a recorded
+lead, not a shipped path.
+
+## Watch mechanics
+
+`lore coordinate watch` is the standing eye. Bare, it is board-scoped: it wakes
+on the first actionable row from any session. Repeatable `--slug <s>` narrows the
+trigger set with a two-key predicate — a row matches when its `slug` or its
+`links.work_item` equals a scoped slug (workers run under derived `<item>--w<n>`
+slugs; the second key is what keeps them in scope). `--arc <slug>` expands the
+arc's declared `members[]` (statuses `active` and `closed`, matching `arc list`)
+into the same predicate — membership is declared, never inferred from project
+labels. An actionable row carrying neither key bypasses scope and wakes as a
+labeled unattributed advisory rather than being dropped.
+
+The board-wide cursor lives at `_coordination/watch-cursor.json`; each distinct
+scope persists its own cursor file beside it under a scope-derived name, so
+concurrent scoped seats never race one position. Cursors are written atomically
+on every exit path; precedence is `--since` > cursor file > journal end, and the
+first-ever run baselines at journal end. An explicit `--since` rewrites the
+persisted cursor on exit, so a ledgered cursor is seat-handoff material, never
+watcher feed — the verb owns its position, and any window resumes from it with no
+cursor arguments at all.
+
+Classification: on a park-shaped row the watcher peek-confirms through the owning
+instance's shared readiness gate before waking. A strict match against the
+versioned per-harness signature set wakes `confirmed`; no strict match wakes
+`advisory` carrying the labeled reason no signature fired; an advisory repeating
+past its age threshold wakes `aged`; a window reaching its deadline with nothing
+actionable wakes `quiet` with the cursor position. Strictness selects tier, never
+existence. `--advisory-age <sec>` sets the escalation threshold; `--peek-timeout
+<sec>` bounds the round-trip through the owning instance, and `0` skips the peek
+entirely — a skipped peek still wakes, at `advisory` tier with the skip as its
+label, because no classification outcome may end in silence. When the matched row itself carries authoritative lifecycle state,
+that state is final and the screen is not consulted for that session — authority
+`hook-row`, suppression, never blending; otherwise authority `screen-signature`.
+Every wake body names its authority and the signature-set version consulted, so
+matcher-contract drift (the codex composer-badge class — see Calibrations below)
+is detectable rather than silent; signatures are versioned and refreshable.
+
+The wake payload is six-part: tier, authority, signature version, the matched row
+or advisory, the board delta, and the next cursor. The delta comes from `lore
+coordinate status --json` (~1s per wake), diffed as per-bucket row-id sets
+against `_coordination/watch-board-baseline.json` beside the cursor (same
+per-scope naming) and refreshed on each wake; row ids are content-stable, so the
+diff is exact across runs. That projection is the wake's dominant cost, and
+`--no-board-delta` is the only lever on it: the wake still carries tier,
+authority, and the matched row, and you re-run `status` by hand. The delta is
+board-wide even under a scoped
+watch — scope governs triggers; the delta is information — and its shape reserves
+an advisory slot for signals outside the board projection: `--pending-stale
+<sec>` (default 300, `0` disables) wakes on a pending request older than the
+threshold, age read from the row's `requested_at`, never mtime, which claim
+retries rewrite; a journal match outranks an advisory in the same poll.
+
+Direct-call exits: 0 match or advisory, 2 timeout (cursor persisted), 3 owner
+gone, 4 reader failure after bounded retries — never read 4 as timeout.
+`--wake-shaped` (the arm wrapper's mode) collapses every terminal — match,
+advisory, quiet timeout — into exit 2 with the wake body on stderr, because on an
+async harness only exit 2 re-arms and a quiet wake is the loop's heartbeat. With
+an owner handle (`--owner-pid`/`--owner-tmux`, passed through by arm; add
+`--tmux-server <label>` when the seat runs on a non-default tmux server) the watch
+runs a stop-biased liveness check each poll: an owner provably dead — pid reaped,
+tmux session absent — gets a grace window, one final journal read, then exit 3
+and no re-arm. The bias is the worktree lease's inverted: a lease's false "dead"
+destroys work, a watcher's false "alive" is a runaway, so unknowable liveness
+never extends the chain past the current window. The verb reads the journal and
+writes nothing to it.
 
 Run watchers and coordinator control from the stable checkout, never from a mutating
 stream tree. This keeps a worker from rewriting the watcher or its dependency closure

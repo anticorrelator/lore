@@ -252,6 +252,210 @@ PY
 }
 
 # ============================================================
+# Arm-once: the Stop entry, and the command it runs
+# ============================================================
+#
+# `lore coordinate arm` composes a watcher command; the claude-code adapter
+# owns the Stop-entry shape that carries it. The two are tested together
+# because neither is correct alone: an entry with no explicit timeout is
+# killed silently mid-window, and a command that does not exit 2 is never
+# delivered even when the entry is perfect.
+
+ARM_SH="$REPO_DIR/scripts/coordinate-arm.sh"
+
+# Stage a scripts/ directory holding the real arm script and lib.sh next to a
+# stub watcher, so wrapper behavior is exercised without a live journal. The
+# stub's exit code is the watch terminal under test.
+stage_arm_harness() {
+  ARM_ROOT="$(mktemp -d)"
+  mkdir -p "$ARM_ROOT/scripts" "$ARM_ROOT/kdir/_coordination"
+  cp "$REPO_DIR/scripts/lib.sh" "$REPO_DIR/scripts/coordinate-arm.sh" "$ARM_ROOT/scripts/"
+  cat > "$ARM_ROOT/scripts/coordinate-watch.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "watch-args: $*"
+echo "watch-diagnostic" >&2
+exit "${STUB_WATCH_EXIT:-0}"
+EOF
+  chmod +x "$ARM_ROOT/scripts/coordinate-watch.sh"
+}
+
+teardown_arm_harness() {
+  [ -n "${ARM_ROOT:-}" ] && rm -rf "$ARM_ROOT"
+  ARM_ROOT=""
+}
+
+@test "coordinate arm refuses a handle-less arm and names both flags" {
+  set_framework claude-code
+  run bash "$ARM_SH"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--owner-pid"* ]]
+  [[ "$output" == *"--owner-tmux"* ]]
+}
+
+@test "coordinate arm refuses a hook timeout that does not outlast the window" {
+  set_framework claude-code
+  run bash "$ARM_SH" --owner-pid 1 --window 3600 --hook-timeout 3600
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"strictly greater"* ]]
+}
+
+@test "coordinate arm emits an asyncRewake entry whose timeout outlasts the window" {
+  set_framework claude-code
+  run bash "$ARM_SH" --owner-pid 1 --window 600 --hook-timeout 900 --json
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["turn_boundary_rewake"] == "full", d["turn_boundary_rewake"]
+hook = d["hook_entry"]["hooks"][0]
+assert hook["asyncRewake"] is True, hook
+assert hook["timeout"] == 900, hook
+assert hook["timeout"] > d["window_seconds"], hook
+assert hook["rewakeMessage"], "entry must carry a rewakeMessage"
+cmd = hook["command"]
+assert cmd.startswith("LORE_FRAMEWORK=claude-code "), cmd
+assert "~/.lore/scripts/coordinate-arm.sh run" in cmd, cmd
+assert "--owner-pid 1" in cmd, cmd
+assert "--window 600" in cmd, cmd
+'
+}
+
+@test "coordinate arm installs into the named settings file and re-arms in place" {
+  set_framework claude-code
+  settings="$TEST_LORE_DATA_DIR/seat-settings.json"
+  cat > "$settings" <<'JSON'
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"user-owned-stop"}]}]}}
+JSON
+  run bash "$ARM_SH" --owner-pid 1 --window 600 --hook-timeout 900 --install "$settings"
+  [ "$status" -eq 0 ]
+  run bash "$ARM_SH" --owner-pid 2 --window 700 --hook-timeout 1000 --install "$settings"
+  [ "$status" -eq 0 ]
+  run python3 - "$settings" <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1]))["hooks"]["Stop"]
+assert any(r["hooks"][0]["command"] == "user-owned-stop" for r in rows), rows
+armed = [r for r in rows if "coordinate-arm.sh" in r["hooks"][0]["command"]]
+assert len(armed) == 1, f"re-arming stacked {len(armed)} watchers"
+assert armed[0]["hooks"][0]["timeout"] == 1000, armed
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "rewake-entry refuses to render an entry with no explicit timeout" {
+  set_framework claude-code
+  run bash "$CC_ADAPTER" rewake-entry --command "bash ~/.lore/scripts/coordinate-arm.sh run"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"timeout"* ]]
+}
+
+@test "coordinate arm degrades without installing where rewake is not full" {
+  # codex has the continuation channel but not async execution; opencode has
+  # neither. Both must still print a runnable watcher command — a capability
+  # gap degrades the loop, it never aborts it — and both must refuse --install,
+  # because an installed entry there would re-arm nothing.
+  for fw in codex opencode; do
+    set_framework "$fw"
+    run bash "$ARM_SH" --owner-pid 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"degraded"* ]]
+    [[ "$output" == *"coordinate-arm.sh run"* ]]
+    [[ "$output" == *"LORE_FRAMEWORK=$fw"* ]]
+
+    run bash "$ARM_SH" --owner-pid 1 --install "$TEST_LORE_DATA_DIR/$fw-settings.json"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"refusing --install"* ]]
+    [ ! -f "$TEST_LORE_DATA_DIR/$fw-settings.json" ]
+  done
+}
+
+@test "the armed command turns every watch terminal into a wake on stderr" {
+  # The polarity shim. `coordinate watch` says 0 for a match and 2 for a quiet
+  # timeout; the rewake channel only reads exit 2 with something on stderr, and
+  # treats everything else as silence. A quiet window that stayed silent would
+  # end the chain, so it wakes too.
+  stage_arm_harness
+  for stub in 0 2; do
+    run env STUB_WATCH_EXIT="$stub" bash "$ARM_ROOT/scripts/coordinate-arm.sh" run \
+      --owner-pid $$ --window 5 --kdir "$ARM_ROOT/kdir"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"[coordinate wake]"* ]]
+    [[ "$output" == *"watch-args: --wake-shaped --timeout 5"* ]]
+  done
+  # A reader failure is a wake too, labeled as one, rather than a chain that
+  # ends without saying why.
+  run env STUB_WATCH_EXIT=4 LORE_ARM_ERROR_BACKOFF_SECONDS=1 \
+    bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 5 --kdir "$ARM_ROOT/kdir"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"watcher-failed"* ]]
+
+  # A watcher that returns nothing at all still has to exit 2 with a header on
+  # stderr. Anything else and the seat never wakes, so it never re-arms.
+  cat > "$ARM_ROOT/scripts/coordinate-watch.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 2
+EOF
+  chmod +x "$ARM_ROOT/scripts/coordinate-watch.sh"
+  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 3 --kdir "$ARM_ROOT/kdir"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"[coordinate wake] quiet"* ]]
+  teardown_arm_harness
+}
+
+@test "the armed command relays scope flags to the watcher" {
+  stage_arm_harness
+  run env STUB_WATCH_EXIT=0 bash "$ARM_ROOT/scripts/coordinate-arm.sh" run \
+    --owner-pid $$ --window 5 --kdir "$ARM_ROOT/kdir" --slug alpha --slug beta --arc gamma
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--slug alpha --slug beta --arc gamma"* ]]
+  teardown_arm_harness
+}
+
+@test "the armed command exits without a wake when the owner is provably gone" {
+  stage_arm_harness
+  # A pid the probe can prove is not there. No wake body, and an exit code the
+  # rewake channel ignores, so the chain stops instead of waking a dead seat.
+  run env STUB_WATCH_EXIT=0 bash "$ARM_ROOT/scripts/coordinate-arm.sh" run \
+    --owner-pid 2147483646 --window 5 --kdir "$ARM_ROOT/kdir"
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"[coordinate wake]"* ]]
+  [[ "$output" == *"owner is gone"* ]]
+  teardown_arm_harness
+}
+
+@test "a SIGTERMed window leaves a marker distinguishing the kill from a wake" {
+  stage_arm_harness
+  cat > "$ARM_ROOT/scripts/coordinate-watch.sh" <<'EOF'
+#!/usr/bin/env bash
+sleep 60
+EOF
+  chmod +x "$ARM_ROOT/scripts/coordinate-watch.sh"
+  bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 30 \
+    --kdir "$ARM_ROOT/kdir" >/dev/null 2>&1 &
+  arm_pid=$!
+  # Let the window start before signalling it.
+  for _ in $(seq 1 200); do
+    [ -n "$(pgrep -P "$arm_pid" 2>/dev/null)" ] && break
+    sleep 0.05
+  done
+  kill -TERM "$arm_pid"
+  arm_status=0
+  wait "$arm_pid" || arm_status=$?
+  # 143 is what the harness sees, and it is exactly the code the rewake branch
+  # does not read — hence the marker.
+  [ "$arm_status" -eq 143 ]
+  marker="$ARM_ROOT/kdir/_coordination/arm-window-killed.json"
+  [ -f "$marker" ]
+  run python3 - "$marker" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1]))
+for field in ("killed_at", "owner", "window_seconds", "elapsed_seconds", "note"):
+    assert row.get(field) not in (None, ""), field
+PY
+  [ "$status" -eq 0 ]
+  teardown_arm_harness
+}
+
+# ============================================================
 # opencode adapter (T26)
 # ============================================================
 

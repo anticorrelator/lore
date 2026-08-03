@@ -13,6 +13,7 @@
     "mcp": "Registers Model Context Protocol servers with the harness so lore-provided tools are reachable from agents.",
     "session_start_hook": "Fires a lore-controlled hook at session start; used to load knowledge, work, threads, and pending capture queues.",
     "stop_hook": "Fires a lore-controlled hook at agent stop / end-of-turn; used to gate session-end on plan persistence.",
+    "turn_boundary_rewake": "Whether a hook running at a turn boundary can enqueue a *new* turn for the same session — the primitive a standing watcher needs to re-arm itself without the session remembering to. Distinct from `stop_hook`, which only says the event fires. `full`: the harness both honors the continuation channel and runs the hook asynchronously, so the session parks idle for the hook's whole window and re-arms structurally at every subsequent turn boundary. `partial`: the continuation channel exists but the hook runs synchronously, holding the turn for its entire window — callers arm nothing long-running here and fall back to having the session itself restart the watcher. `none`: no hook-return continuation exists. Read via `framework_capability turn_boundary_rewake` and branch on the returned level, never on the framework name; `lore coordinate arm` is the consumer. A `full` cell's hook entry MUST carry an explicit timeout — see the per-cell notes for why an inherited default ends the chain silently.",
     "pre_compact_hook": "Fires a lore-controlled hook before context compaction; used to prompt thread/work updates before context is dropped.",
     "tool_hooks": "Fires lore-controlled hooks before/after tool calls; used by guard-work-writes and similar invariant enforcers.",
     "permission_hooks": "Allows lore-installed policy to approve or deny tool invocations (PreToolUse-style block decisions).",
@@ -260,7 +261,12 @@
         "stop_hook": {
           "support": "full",
           "evidence": "claude-code-stop-hook",
-          "notes": "Native Stop hook surface is fully supported but lore no longer installs a Stop hook. (check-plan-persistence.py was retired 2026-05-26 — it forced ephemeral builtin plans to be persisted as _work/ items, which produced ghost work items when the model used plan mode for quick scratch planning. stop-novelty-check.py was retired earlier on 2026-05-06 as a low-yield heuristic capture-suggester. See _meta/effectiveness-journal.jsonl and conventions/heuristic-vs-definite-condition-hooks.md.)"
+          "notes": "Native Stop hook surface is fully supported and the standard install ships no Stop entry. (check-plan-persistence.py was retired 2026-05-26 — it forced ephemeral builtin plans to be persisted as _work/ items, which produced ghost work items when the model used plan mode for quick scratch planning. stop-novelty-check.py was retired earlier on 2026-05-06 as a low-yield heuristic capture-suggester. Both were heuristic guesses about what the session had just done; see _meta/effectiveness-journal.jsonl and conventions/heuristic-vs-definite-condition-hooks.md.) The slot is now used by `lore coordinate arm`, which installs a definite-condition watcher — it wakes on a matched journal row or a reached deadline, never on an inference — into a settings file the caller names, not into the standard install."
+        },
+        "turn_boundary_rewake": {
+          "support": "full",
+          "evidence": "claude-code-turn-boundary-rewake",
+          "notes": "A Stop entry may carry `asyncRewake: true`: the command runs in the background while the session sits idle, and exit 2 enqueues its stderr as a priority-next notification that starts the next turn. Ending that turn fires Stop again, so a single armed entry re-arms structurally. The entry MUST set an explicit `timeout` (seconds) larger than the command's own deadline: asyncRewake keeps the kill timer armed, a SIGTERMed command exits 143 rather than 2, and the rewake branch never runs — the chain ends with no notification and no transcript event. Empirically proven on 2.1.220; a detached successor (nohup/double-fork) is NOT an alternative, since wake delivery binds to the harness-spawned shell handle. Interactive/TUI-hosted sessions only: `claude -p` runs hooks synchronously."
         },
         "pre_compact_hook": {
           "support": "full",
@@ -428,6 +434,10 @@
           "evidence": "opencode-stop-hook",
           "notes": "Plugin event for end-of-turn / agent stop; novelty-check fallback may run in degraded mode if the harness does not surface full context for heuristic detection."
         },
+        "turn_boundary_rewake": {
+          "support": "none",
+          "notes": "The plugin return contract carries no continuation: a `session.idle` handler cannot enqueue a turn no matter what it returns, so nothing installed at a turn boundary can re-arm itself. The open lead is the server API (`client.session.promptAsync`), which lore's plugin does not reach today and whose reachability from under the interactive TUI is unproven. Sessions here restart the watcher themselves after each wake."
+        },
         "pre_compact_hook": {
           "support": "fallback",
           "evidence": "opencode-pre-compact-hook",
@@ -591,12 +601,17 @@
         "stop_hook": {
           "support": "full",
           "evidence": "codex-stop-hook",
-          "notes": "Native Stop hook documented in current Codex releases."
+          "notes": "Native Stop hook, and it is blockable: 0.146.0 rejects an exit-2 Stop hook that writes nothing to stderr with `Stop hook exited with code 2 but did not write a continuation prompt to stderr`, which proves exit 2 + stderr is an honored continuation channel rather than a notification-only event. No matcher support."
+        },
+        "turn_boundary_rewake": {
+          "support": "partial",
+          "evidence": "codex-turn-boundary-rewake",
+          "notes": "The continuation channel exists (Stop honors exit 2 + a stderr continuation prompt) but asynchronous execution does not: `ConfiguredHookHandler` declares an `async` field, and the 0.146.0 loader skips such handlers with `skipping async hook: async hooks are not supported yet`. A hook-hosted watcher therefore holds the turn for its entire window instead of parking the session idle — materially different behavior, which is why this reads `partial` rather than `full`. Sessions here restart the watcher themselves after each wake; any Stop-hosted check must keep its `timeoutSec` short enough to be invisible inside a turn. Read off the shipped binary's rejection strings, not its config schema — the schema advertises what the engine refuses."
         },
         "pre_compact_hook": {
           "support": "fallback",
           "evidence": "codex-pre-compact-hook",
-          "notes": "No native PreCompact event documented. Fallback uses Stop/SessionStart bookends to remind the user to persist plans before compaction events that lore cannot intercept."
+          "notes": "Fallback uses Stop/SessionStart bookends to remind the user to persist plans before compaction. The cell stays `fallback` on lore's side rather than the harness's: 0.146.0's HookEventName enum does include `preCompact` and `postCompact`, so the earlier 'no native PreCompact event' claim is stale, but their payload shape and delivery are unprobed and no lore adapter is wired to them. Re-probe before promoting."
         },
         "tool_hooks": {
           "support": "full",
@@ -611,7 +626,7 @@
         "task_completed_hook": {
           "support": "fallback",
           "evidence": "codex-task-completed-hook",
-          "notes": "No native subagent-completion blocking event. Lead-side validator checks worker reports after collection (D9 fallback mode: lead-side validator)."
+          "notes": "Lead-side validator checks worker reports after collection (D9 fallback mode: lead-side validator). The cell stays `fallback` on lore's side rather than the harness's: 0.146.0's HookEventName enum does include `subagentStart` and `subagentStop`, so the earlier 'no native subagent-completion event' claim is stale, but whether `subagentStop` can *block* a completion — the semantic this cell is about — is unprobed. Re-probe before promoting."
         },
         "native_dispatch_guidance_hook": {
           "support": "full",

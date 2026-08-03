@@ -217,12 +217,25 @@ notification-shaped events:
 | PreToolUse         | exit 0                                 | exit non-zero (Codex aborts the tool)   | exit 0 + stderr                |
 | PostToolUse        | exit 0                                 | _not blockable; treat deny as `error`_  | exit 0 + stderr                |
 | PermissionRequest  | `{"behavior":"allow"}` JSON on stdout  | `{"behavior":"deny","reason":"..."}` JSON on stdout (or `{"behavior":"abstain"}` to delegate) | exit 0 + stderr |
-| Stop               | exit 0                                 | _not blockable; treat deny as `error`_  | exit 0 + stderr                |
+| Stop               | exit 0                                 | **`exit 2` + a continuation prompt on stderr** | exit 0 + stderr                |
 
-PreCompact and TaskCompleted-blocking are not part of the Codex native
-hook surface. The codex adapter MUST classify them as `unsupported` and
-the orchestration layer (T31/T32) MUST provide the lead-side validator
-fallback for the `task_completed` blocking semantics. See
+The Codex Stop row is a continuation channel, not a notification: 0.146.0
+rejects an exit-2 Stop hook that writes nothing to stderr with `Stop hook
+exited with code 2 but did not write a continuation prompt to stderr`. What
+Codex does not have is *asynchronous* hook execution — `ConfiguredHookHandler`
+declares an `async` field but the loader skips those handlers with `async hooks
+are not supported yet` — so a Stop hook here holds the turn for as long as it
+runs. That distinction is what the `turn_boundary_rewake` capability cell
+records, and it is why a standing watcher can be armed on the Claude Code Stop
+hook but not on this one.
+
+PreCompact and TaskCompleted-blocking remain lore-side fallbacks on Codex: the
+orchestration layer (T31/T32) provides the lead-side validator for the
+`task_completed` blocking semantics. The 0.146.0 `HookEventName` enum does list
+`preCompact`, `postCompact`, `subagentStart`, and `subagentStop`, so the older
+"not part of the Codex native hook surface" reading is stale — but their
+delivery and blocking semantics are unprobed and no adapter consumes them, so
+the cells stay `fallback` until a probe says otherwise. See
 [`docs/codex-migration.md`](https://github.com/anticorrelator/lore/blob/main/docs/codex-migration.md)
 (T67) for the migration narrative superseding the prior "notify-only"
 premise.
@@ -239,8 +252,10 @@ land-time and pinned by Tier 2 evidence rows on the implementing PR.
       the matching Lore handler script (`scripts/load-knowledge.sh`,
       `scripts/load-work.sh`, `scripts/load-threads.sh`,
       `scripts/pre-compact.sh`, `scripts/task-completed-capture-check.sh`,
-      plus any adapter-specific shims). Note: lore no longer ships a Stop
-      handler — `check-plan-persistence.py` was retired 2026-05-26.
+      plus any adapter-specific shims). Note: the standard install ships
+      no Stop entry — `check-plan-persistence.py` was retired 2026-05-26.
+      The Stop slot is now used by `lore coordinate arm`, which installs
+      an `asyncRewake` watcher into a settings file the caller names.
 - [ ] **2. Honor capability gates.** Read
       `adapters/capabilities.json:.frameworks[<active>].capabilities[<cap>].support`
       before dispatching. If the cell is `none`, return `unsupported`
@@ -306,6 +321,15 @@ Evidence ids resolve in
 | `stop`               | **full** — Stop hook                                         | **partial** — plugin `session.stop`               | **full** — Stop hook                             |
 | `session_end`        | **full** — SessionEnd hook (matcher=`clear`)                 | **partial** — plugin `session.end`                | **fallback** — derive from Stop                  |
 | `task_completed`     | **full** — TaskCompleted hook (exit-2 blocking)              | **fallback** — lead-side validator (see T31, T32) | **fallback** — lead-side validator (see T31, T32) |
+
+**Turn-boundary rewake is a separate cell from `stop`.** Whether the Stop
+event *fires* and whether a hook running at it can *enqueue the next turn*
+are different questions, and they answer differently per harness. The
+`turn_boundary_rewake` cell carries the second one: **full** on claude-code
+(`asyncRewake: true` runs the hook in the background and exit 2 starts the
+next turn), **partial** on codex (the exit-2 continuation channel exists but
+runs synchronously, holding the turn), **none** on opencode (plugin returns
+carry no continuation). `lore coordinate arm` branches on that level.
 
 **`user_prompt` proxy mapping.** There is no dedicated
 `user_prompt_hook` cell in `adapters/capabilities.json`; the support
