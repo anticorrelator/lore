@@ -27,7 +27,7 @@
 # table-array per native event:
 #
 #   [[hooks.SessionStart]]
-#   command = "bash ~/.lore/scripts/load-knowledge.sh"
+#   command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/load-knowledge.sh"
 #
 # Per gotchas/hooks/hook-system-gotchas.md (May 2026 update), Codex
 # signals via exit code (non-zero = abort the tool) for tool-shaped
@@ -117,9 +117,13 @@ resolve_settings_path() {
 # start) and SessionEnd is derived from Stop (skipped here — Stop hook
 # already runs the same work).
 #
-# Hook commands resolve codex from Codex's runtime shell markers when present.
-# TUI launch preference is not process truth, so later installs for another
-# harness cannot redirect these hook commands.
+# Every command carries the LORE_FRAMEWORK=codex prefix. framework.json holds a
+# single framework string (last install wins), so on a multi-harness install
+# every hook that resolved through it would route to whichever harness installed
+# last. lib.sh::resolve_active_framework reads LORE_FRAMEWORK ahead of
+# framework.json, so the prefix is what pins these hooks to codex's own
+# capability profile. TUI launch preference is not process truth either, so a
+# later install for another harness cannot redirect these commands.
 render_lore_block() {
   cat <<'TOML'
 # >>> lore hooks (managed) — do not edit between markers
@@ -130,31 +134,31 @@ render_lore_block() {
 # uninstall` (or re-run install.sh with --framework=<other>).
 
 [[hooks.SessionStart]]
-command = "bash ~/.lore/scripts/doctor.sh --quiet"
+command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/doctor.sh --quiet"
 
 [[hooks.SessionStart]]
-command = "bash ~/.lore/scripts/auto-reindex.sh"
+command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/auto-reindex.sh"
 
 [[hooks.SessionStart]]
-command = "python3 ~/.lore/scripts/mine-retrieval-misses.py"
+command = "LORE_FRAMEWORK=codex python3 ~/.lore/scripts/mine-retrieval-misses.py"
 
 [[hooks.SessionStart]]
-command = "bash ~/.lore/scripts/load-knowledge.sh"
+command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/load-knowledge.sh"
 
 [[hooks.SessionStart]]
-command = "bash ~/.lore/scripts/load-work.sh"
+command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/load-work.sh"
 
 [[hooks.SessionStart]]
-command = "bash ~/.lore/scripts/load-threads.sh"
+command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/load-threads.sh"
 
 [[hooks.SessionStart]]
-command = "python3 ~/.lore/scripts/extract-session-digest.py"
+command = "LORE_FRAMEWORK=codex python3 ~/.lore/scripts/extract-session-digest.py"
 
 # pre_compact fallback: Codex has no native PreCompact event, so the
 # pre-compact reminder runs at SessionStart as a bookend. See
 # adapters/hooks/README.md "Per-Harness Mapping" for the fallback.
 [[hooks.SessionStart]]
-command = "bash ~/.lore/scripts/pre-compact.sh"
+command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/pre-compact.sh"
 
 [[hooks.PreToolUse]]
 # Codex 0.124+ requires `matcher` to be a TOML string (the tool name),
@@ -164,7 +168,7 @@ command = "bash ~/.lore/scripts/pre-compact.sh"
 # (verified empirically against the installed binary). The bare-string
 # form below is the schema codex actually expects.
 matcher = "Write"
-command = "bash ~/.lore/scripts/guard-work-writes.sh"
+command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/guard-work-writes.sh"
 
 [[hooks.PreToolUse]]
 # Current Codex maps the spawn_agent local function onto the Agent matcher.

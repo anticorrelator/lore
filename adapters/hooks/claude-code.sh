@@ -117,10 +117,13 @@ else:
 # hook_kind is "command" or "agent"; payload is the shell command or
 # the agent prompt text. Identical to the list that previously lived
 # in install.sh:416-429.
-# Hook commands resolve claude-code from Claude's runtime shell markers when
-# present, falling back to the built-in default. TUI launch preference is not
-# process truth, so later installs for other harnesses cannot redirect these
-# hook commands.
+# Every command carries the LORE_FRAMEWORK=claude-code prefix. framework.json
+# holds a single framework string (last install wins), so on a multi-harness
+# install every hook that resolved through it would route to whichever harness
+# installed last. lib.sh::resolve_active_framework reads LORE_FRAMEWORK ahead of
+# framework.json, so the prefix is what pins these hooks to claude-code's own
+# capability profile. TUI launch preference is not process truth either, so a
+# later install for another harness cannot redirect these commands.
 lore_hooks = [
     # doctor.sh moved to TUI startup (tui/update.go::Model.Init via runDoctor) —
     # keeps drift checks attached to the lore surface that can act on them
@@ -132,22 +135,22 @@ lore_hooks = [
     # started with no knowledge context and no error anywhere. load-knowledge
     # also self-limits via LORE_LOAD_KNOWLEDGE_TIME_BUDGET (graceful
     # degradation before the cliff).
-    ("SessionStart", None, "command", "bash ~/.lore/scripts/auto-reindex.sh", 15),
+    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/auto-reindex.sh", 15),
     # mine-retrieval-misses and packet-assess run before load-knowledge so
     # candidates they write (directly, or via the assessor's missing[]
     # hand-off to the miner) are counted by load-knowledge.sh's [capture]
     # trigger in the same session start.
-    ("SessionStart", None, "command", "python3 ~/.lore/scripts/mine-retrieval-misses.py", 10),
-    ("SessionStart", None, "command", "python3 ~/.lore/scripts/packet-assess.py", 10),
-    ("SessionStart", None, "command", "bash ~/.lore/scripts/load-knowledge.sh", 15),
-    ("SessionStart", None, "command", "bash ~/.lore/scripts/load-work.sh", 5),
-    ("SessionStart", None, "command", "bash ~/.lore/scripts/load-threads.sh", 15),
-    ("SessionStart", None, "command", "python3 ~/.lore/scripts/extract-session-digest.py", 5),
-    ("PreCompact",   None, "command", "bash ~/.lore/scripts/pre-compact.sh", 5),
-    ("TaskCompleted", None, "command", "bash ~/.lore/scripts/task-completed-capture-check.sh", 10),
-    ("PreToolUse",   "Write", "command", "bash ~/.lore/scripts/guard-work-writes.sh", 5),
+    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code python3 ~/.lore/scripts/mine-retrieval-misses.py", 10),
+    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code python3 ~/.lore/scripts/packet-assess.py", 10),
+    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/load-knowledge.sh", 15),
+    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/load-work.sh", 5),
+    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/load-threads.sh", 15),
+    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code python3 ~/.lore/scripts/extract-session-digest.py", 5),
+    ("PreCompact",   None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/pre-compact.sh", 5),
+    ("TaskCompleted", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/task-completed-capture-check.sh", 10),
+    ("PreToolUse",   "Write", "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/guard-work-writes.sh", 5),
     ("PreToolUse",   "Agent", "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/validate-dispatch-guidance.sh --hook claude-code", 5),
-    ("SessionEnd",   "clear", "command", "bash ~/.lore/scripts/pre-compact.sh", 5),
+    ("SessionEnd",   "clear", "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/pre-compact.sh", 5),
 ]
 
 def is_lore_hook(entry):

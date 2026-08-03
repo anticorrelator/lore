@@ -275,8 +275,9 @@ fi
 # ---------------------------------------------------------------------------
 CHECKED+=("hooks")
 
-# The canonical list of expected lore hook commands (mirrors install.sh)
-EXPECTED_HOOK_COMMANDS=(
+# The canonical list of expected lore hook commands, without the framework
+# prefix the adapters emit (mirrors adapters/hooks/<framework>.sh).
+EXPECTED_HOOK_SCRIPTS=(
   "bash ~/.lore/scripts/auto-reindex.sh"
   "bash ~/.lore/scripts/load-knowledge.sh"
   "bash ~/.lore/scripts/load-work.sh"
@@ -288,6 +289,21 @@ EXPECTED_HOOK_COMMANDS=(
 )
 
 ACTIVE_FRAMEWORK=$(resolve_active_framework 2>/dev/null || true)
+
+# Every adapter-emitted hook command carries `LORE_FRAMEWORK=<harness> ` so the
+# handler resolves its own harness rather than whichever one wrote framework.json
+# last. The expected strings must carry it too, or a correct install reads as
+# drift. Comparison stays exact-match — a prefix-less command in the settings
+# file is precisely the misrouting this check should surface.
+EXPECTED_HOOK_COMMANDS=()
+for _expected_script in "${EXPECTED_HOOK_SCRIPTS[@]}"; do
+  if [[ -n "$ACTIVE_FRAMEWORK" ]]; then
+    EXPECTED_HOOK_COMMANDS+=("LORE_FRAMEWORK=$ACTIVE_FRAMEWORK $_expected_script")
+  else
+    EXPECTED_HOOK_COMMANDS+=("$_expected_script")
+  fi
+done
+unset _expected_script
 GUIDANCE_HOOK_SUPPORT="none"
 if [[ -n "$ACTIVE_FRAMEWORK" ]]; then
   GUIDANCE_HOOK_SUPPORT=$(framework_capability native_dispatch_guidance_hook "$ACTIVE_FRAMEWORK" 2>/dev/null || echo "none")

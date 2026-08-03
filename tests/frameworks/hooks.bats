@@ -251,6 +251,37 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "every claude-code hook command is pinned to LORE_FRAMEWORK=claude-code" {
+  # framework.json holds one framework string (last install wins), so on a
+  # multi-harness install any hook command that resolves through it routes to
+  # the wrong harness's capability profile. The env prefix is the only thing
+  # that pins a hook to its own adapter, so the assertion quantifies over every
+  # command the adapter writes — a hook added later without the prefix fails
+  # here rather than misrouting silently in a mixed install.
+  [ -f "$CC_ADAPTER" ] || skip "adapters/hooks/claude-code.sh missing"
+  set_framework claude-code
+  export HOME="$TEST_LORE_DATA_DIR/home"
+  mkdir -p "$HOME/.claude"
+  run bash "$CC_ADAPTER" install --framework claude-code
+  [ "$status" -eq 0 ]
+  run python3 - "$HOME/.claude/settings.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+commands = [
+    h["command"]
+    for entries in d["hooks"].values()
+    for entry in entries
+    for h in entry.get("hooks", [])
+    if h.get("type") == "command"
+]
+# Lower bound guards against a parse that finds nothing and passes vacuously.
+assert len(commands) >= 8, commands
+unpinned = [c for c in commands if not c.startswith("LORE_FRAMEWORK=claude-code ")]
+assert not unpinned, unpinned
+PY
+  [ "$status" -eq 0 ]
+}
+
 # ============================================================
 # Arm-once: the Stop entry, and the command it runs
 # ============================================================
@@ -657,4 +688,32 @@ TOML
   [ "$status" -eq 0 ]
   [ "$(grep -cF 'matcher = "Agent"' "$HOME/.codex/config.toml")" -eq 1 ]
   [ "$(grep -cF 'LORE_FRAMEWORK=codex bash ~/.lore/scripts/validate-dispatch-guidance.sh --hook codex' "$HOME/.codex/config.toml")" -eq 1 ]
+}
+
+@test "every codex hook command is pinned to LORE_FRAMEWORK=codex" {
+  # Same invariant as the claude-code case: framework.json cannot distinguish
+  # harnesses on a multi-harness install, so each adapter's commands carry
+  # their own LORE_FRAMEWORK. Read the installed TOML rather than the heredoc
+  # so the assertion covers what codex actually loads.
+  [ -f "$CODEX_ADAPTER" ] || skip "adapters/codex/hooks.sh missing"
+  set_framework codex
+  export HOME="$TEST_LORE_DATA_DIR/home"
+  mkdir -p "$HOME/.codex"
+  run bash "$CODEX_ADAPTER" install --framework codex
+  [ "$status" -eq 0 ]
+  run python3 - "$HOME/.codex/config.toml" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    settings = tomllib.load(f)
+commands = [
+    entry["command"]
+    for entries in settings.get("hooks", {}).values()
+    for entry in entries
+    if entry.get("command")
+]
+assert len(commands) >= 8, commands
+unpinned = [c for c in commands if not c.startswith("LORE_FRAMEWORK=codex ")]
+assert not unpinned, unpinned
+PY
+  [ "$status" -eq 0 ]
 }
