@@ -18,6 +18,7 @@
 #                         [--until <events>] [--since <cursor>]
 #                         [--timeout <sec>] [--pending-stale <sec>]
 #                         [--peek-timeout <sec>] [--advisory-age <sec>]
+#                         [--spawn-gap <sec>]
 #                         [--owner-pid <pid>] [--owner-tmux <name>]
 #                         [--tmux-server <name>] [--no-board-delta]
 #                         [--wake-shaped] [--kdir <path>] [--json]
@@ -78,6 +79,9 @@
 #                     How long an unresolved advisory may repeat before it
 #                     escalates from `advisory` to `aged_advisory` (default: 900;
 #                     0 disables escalation).
+#   --spawn-gap <sec> How young a session may be before a screen-confirmed park is
+#                     demoted to a `spawn-gap` advisory (default: 90; 0 disables
+#                     the age gate). See "Classification".
 #   --owner-pid <pid> / --owner-tmux <name> / --tmux-server <name>
 #                     Liveness handles for the seat this watcher reports to; the
 #                     same two handles a coordination worktree lease records
@@ -109,6 +113,19 @@
 #                       change is visible instead of silently reclassifying parks.
 #     owner-handle      The wake came from the owner-liveness check.
 #     none              Nothing to classify (a quiet timeout).
+#
+#   A screen signature that fires is then age-gated. Between a pane being spawned
+#   and its first prompt being submitted, a session renders a genuinely ready
+#   composer — the strict signature is truthful about the screen and wrong about
+#   the session, because "has not started" and "stopped, waiting on somebody" look
+#   the same there. So before a screen-confirmed park is promoted to `confirmed`,
+#   the row is joined against its own session's `spawned`/`claimed` row in the
+#   journal; a session younger than --spawn-gap is demoted to an advisory labeled
+#   `spawn-gap`. The age gate applies only to the screen-signature authority: a
+#   hook row carrying emitter state is a positive claim about why the session
+#   parked, not an inference from screen shape, so the same ambiguity does not
+#   reach it. Every wake reports what the gate did in
+#   `classification.spawn_gap`, including when it left the confirmation standing.
 #
 #   Strictness governs the wake's tier, never whether it wakes. A park nothing
 #   confirmed wakes as a labeled `advisory` naming why no signature fired; an
@@ -166,7 +183,8 @@
 # Output (--json): one object — the wake body, which is a superset of
 #   `session wait`'s matched shape:
 #     {schema_version, outcome, tier, authority, signature_version,
-#      classification: {state, label, reason, peek}, matched, pending,
+#      classification: {state, label, reason, advisory_age_seconds, peek,
+#                       spawn_gap}, matched, pending,
 #      scope: {mode, slugs, arcs, cursor_file}, board_delta, next_cursor, until}
 #   There is no top-level `slug`: session identity lives on the matched row.
 #
@@ -202,6 +220,17 @@ TIMEOUT=3600
 PENDING_STALE=300
 PEEK_TIMEOUT=10
 ADVISORY_AGE=900
+# The spawn-paste gap, measured rather than guessed. Live wakes on 2026-08-03 put
+# false confirmations — a ready composer on a session that had not taken its first
+# turn — at 11s and 13s past the session's start row, and true parks (a real
+# completion message sitting at a real prompt) at ~600s and ~900s. 90s is the
+# geometric middle of that separation: ~7x the widest observed spawn gap and ~7x
+# under the earliest observed true park, so both ends have an order of magnitude
+# to drift into before the gate starts being wrong. It errs generous on purpose —
+# a demoted true park still wakes the seat as an advisory that ages into
+# `aged_advisory`, while a promoted spawn gap sends the seat to steer a session
+# that is still booting, which is the failure this gate exists to stop.
+SPAWN_GAP=90
 OWNER_PID=""
 OWNER_TMUX=""
 TMUX_SERVER="lore-tui"
@@ -226,6 +255,7 @@ while [[ $# -gt 0 ]]; do
     --pending-stale) PENDING_STALE="${2:-}"; shift 2 ;;
     --peek-timeout) PEEK_TIMEOUT="${2:-}"; shift 2 ;;
     --advisory-age) ADVISORY_AGE="${2:-}"; shift 2 ;;
+    --spawn-gap) SPAWN_GAP="${2:-}"; shift 2 ;;
     --owner-pid) OWNER_PID="${2:-}"; shift 2 ;;
     --owner-tmux) OWNER_TMUX="${2:-}"; shift 2 ;;
     --tmux-server) TMUX_SERVER="${2:-}"; shift 2 ;;
@@ -233,10 +263,10 @@ while [[ $# -gt 0 ]]; do
     --wake-shaped) WAKE_SHAPED=1; shift ;;
     --kdir) KDIR_OVERRIDE="${2:-}"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,191p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,209p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: coordinate-watch.sh [--slug <s>]... [--arc <slug>]... [--until <events>] [--since <cursor>] [--timeout <sec>] [--pending-stale <sec>] [--peek-timeout <sec>] [--advisory-age <sec>] [--owner-pid <pid>] [--owner-tmux <name>] [--tmux-server <name>] [--no-board-delta] [--wake-shaped] [--kdir <path>] [--json]" >&2
+      echo "Usage: coordinate-watch.sh [--slug <s>]... [--arc <slug>]... [--until <events>] [--since <cursor>] [--timeout <sec>] [--pending-stale <sec>] [--peek-timeout <sec>] [--advisory-age <sec>] [--spawn-gap <sec>] [--owner-pid <pid>] [--owner-tmux <name>] [--tmux-server <name>] [--no-board-delta] [--wake-shaped] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -263,6 +293,7 @@ check_non_negative --timeout "$TIMEOUT"
 check_non_negative --pending-stale "$PENDING_STALE" "0 disables"
 check_non_negative --peek-timeout "$PEEK_TIMEOUT" "0 disables"
 check_non_negative --advisory-age "$ADVISORY_AGE" "0 disables"
+check_non_negative --spawn-gap "$SPAWN_GAP" "0 disables the age gate"
 if [[ -n "$OWNER_PID" ]] && ! [[ "$OWNER_PID" =~ ^[1-9][0-9]*$ ]]; then
   fail "invalid --owner-pid: '$OWNER_PID' (must be a positive integer)"
 fi
@@ -643,6 +674,7 @@ WAKE_PEEK="null"            # JSON
 WAKE_MATCHED="null"         # JSON
 WAKE_PENDING="[]"           # JSON
 WAKE_ADVISORY_AGE="null"    # JSON
+WAKE_SPAWN_GAP="null"       # JSON
 
 # emit_wake <cursor> <exit-code> <message>
 # The single terminal. Non-zero terminals print their JSON by hand: json_output
@@ -664,6 +696,7 @@ emit_wake() {
     --argjson reason "$WAKE_REASON" \
     --argjson peek "$WAKE_PEEK" \
     --argjson advisory_age "$WAKE_ADVISORY_AGE" \
+    --argjson spawn_gap "$WAKE_SPAWN_GAP" \
     --argjson matched "$WAKE_MATCHED" \
     --argjson pending "$WAKE_PENDING" \
     --arg mode "$SCOPE_MODE" \
@@ -676,7 +709,8 @@ emit_wake() {
     '{schema_version: $schema, outcome: $outcome, tier: $tier, authority: $authority,
       signature_version: $signature_version,
       classification: {state: $state, label: $label, reason: $reason,
-                       advisory_age_seconds: $advisory_age, peek: $peek},
+                       advisory_age_seconds: $advisory_age, peek: $peek,
+                       spawn_gap: $spawn_gap},
       matched: $matched, pending: $pending,
       scope: {mode: $mode, slugs: $slugs, arcs: $arcs, cursor_file: $cursor_file},
       board_delta: $delta, next_cursor: $nc, until: $until}')"
@@ -817,13 +851,66 @@ apply_advisory_tier() {
   fi
 }
 
+# spawn_gap_record <signature> <age-json> <resolution>
+# Compose the wake's `classification.spawn_gap` object. It is filled on every
+# screen-confirmed park, including the ones the gate leaves standing: a seat that
+# can see the gate ran and what it found can tell a correct confirmation from one
+# nobody checked.
+spawn_gap_record() {
+  jq -cn --argjson threshold "$SPAWN_GAP" --arg signature "$1" \
+    --argjson age "$2" --arg resolution "$3" \
+    '{threshold_seconds: $threshold, age_seconds: $age,
+      signature: $signature, resolution: $resolution}'
+}
+
+# spawn_gap_demotes <slug> <row-ts> <signature-label>
+# Fill WAKE_SPAWN_GAP with what the age gate concluded, and return 0 when the
+# screen's confirmation belongs at advisory tier instead of `confirmed`.
+#
+# Absence of evidence never demotes. A row with no timestamp to measure from and
+# a reader that would not answer both leave the confirmation standing: the gate
+# corrects one specific, observed misreading, and turning it into a general
+# distrust of confirmations would cost the tier its meaning.
+spawn_gap_demotes() {
+  local slug="$1" row_ts="$2" signature="$3" age status=0
+
+  if [[ "$SPAWN_GAP" -eq 0 ]]; then
+    WAKE_SPAWN_GAP="$(spawn_gap_record "$signature" null "disabled")"
+    return 1
+  fi
+  if [[ -z "$row_ts" ]]; then
+    WAKE_SPAWN_GAP="$(spawn_gap_record "$signature" null "row-has-no-timestamp")"
+    return 1
+  fi
+
+  age="$(session_events_start_age "$EVENTS_SH" "$KNOWLEDGE_DIR" "$slug" "$row_ts" "$SPAWN_GAP")" \
+    || status=$?
+  case "$status" in
+    0) ;;
+    # No start row inside the window is itself the answer: the session began
+    # before the window opened, so it is past the gap by construction.
+    1) WAKE_SPAWN_GAP="$(spawn_gap_record "$signature" null "no-start-row-in-window")"
+       return 1 ;;
+    *) WAKE_SPAWN_GAP="$(spawn_gap_record "$signature" null "start-row-unreadable")"
+       return 1 ;;
+  esac
+
+  if [[ "$age" -ge "$SPAWN_GAP" ]]; then
+    WAKE_SPAWN_GAP="$(spawn_gap_record "$signature" "$age" "older-than-threshold")"
+    return 1
+  fi
+  WAKE_SPAWN_GAP="$(spawn_gap_record "$signature" "$age" "demoted")"
+  return 0
+}
+
 # classify_match <row-json> <unattributed>
 # Fill the WAKE_* classification fields for one matched journal row.
 classify_match() {
-  local row="$1" unattributed="$2" event slug row_reason peek_out peek_status verdict label ready blocked
+  local row="$1" unattributed="$2" event slug row_ts row_reason peek_out peek_status verdict label ready blocked
 
   event="$(printf '%s' "$row" | jq -r '.event')"
   slug="$(printf '%s' "$row" | jq -r '.slug // ""')"
+  row_ts="$(printf '%s' "$row" | jq -r '.ts // ""')"
   row_reason="$(printf '%s' "$row" | jq -r '.reason // ""')"
 
   if [[ "$unattributed" == "true" ]]; then
@@ -892,6 +979,14 @@ classify_match() {
   IFS=$'\t' read -r verdict label <<< "$(session_park_classify "$event" "$ready" "$blocked")"
   WAKE_LABEL="$label"
   if [[ "$verdict" == "confirmed" ]]; then
+    # The screen agrees the session is parked. Whether that means "stopped and
+    # waiting" or only "has not started yet" is what the age gate settles — the
+    # two are indistinguishable on the screen alone.
+    if spawn_gap_demotes "$slug" "$row_ts" "$label"; then
+      WAKE_LABEL="spawn-gap"
+      apply_advisory_tier "park:$slug:$event:spawn-gap"
+      return 0
+    fi
     WAKE_TIER="confirmed"
     WAKE_STATE="confirmed_park"
     return 0

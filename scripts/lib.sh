@@ -1393,6 +1393,114 @@ session_park_classify() {
   esac
 }
 
+# --- How long a session has been running, from its own start row ---
+
+# The strict park signatures read the screen, and between a pane being spawned
+# and its first prompt being submitted a session renders a genuinely ready
+# composer. The signature is truthful about the screen and wrong about the
+# session: "not started yet" and "stopped, waiting on somebody" look identical
+# there. Nothing else on the screen separates them, so the discriminator has to
+# come from the journal — how old the session is.
+#
+# session_events_start_age <events_sh> <kdir> <slug> <ref_ts> <lookback>
+# Echo whole seconds from <slug>'s most recent `spawned`/`claimed` row to
+# <ref_ts>, when such a row lies within the <lookback>-second window ending at
+# <ref_ts>.
+#
+# Exit: 0 age printed; 1 no start row inside the window (the session started
+#       before it, or its start predates the journal); 2 the age could not be
+#       determined at all (unparseable <ref_ts>, or the reference reader failed).
+#       Callers must tell 1 and 2 apart: 1 is evidence the session is old, 2 is
+#       the absence of evidence either way.
+#
+# The window is what keeps this bounded. A confirmed park only needs to know
+# whether the session is younger than <lookback>, so the read is capped at that
+# span of journal rather than replaying history back to the store's first row.
+session_events_start_age() {
+  local events_sh="$1" kdir="$2" slug="$3" ref_ts="$4" lookback="$5"
+  local bounds window_start window_end payload age
+
+  bounds="$(python3 - "$ref_ts" "$lookback" <<'PYEOF'
+import sys
+from datetime import datetime, timedelta, timezone
+
+raw, lookback = sys.argv[1], float(sys.argv[2])
+text = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+try:
+    ref = datetime.fromisoformat(text)
+except ValueError:
+    raise SystemExit(1)
+if ref.tzinfo is None:
+    ref = ref.replace(tzinfo=timezone.utc)
+ref = ref.astimezone(timezone.utc)
+# The reader's window is half-open, so the end is nudged one second past the
+# reference row: a start row sharing that row's second belongs inside it.
+fmt = "%Y-%m-%dT%H:%M:%SZ"
+print((ref - timedelta(seconds=lookback)).strftime(fmt))
+print((ref + timedelta(seconds=1)).strftime(fmt))
+PYEOF
+)" || return 2
+  { IFS= read -r window_start; IFS= read -r window_end; } <<< "$bounds"
+  [[ -n "$window_start" && -n "$window_end" ]] || return 2
+
+  payload="$(session_events_run "$events_sh" --json \
+    --window-start "$window_start" --window-end "$window_end" --kdir "$kdir")" || return 2
+
+  # The payload rides an environment variable because the script itself owns
+  # this python's stdin.
+  age="$(SESSION_START_AGE_PAYLOAD="$payload" python3 - "$slug" "$ref_ts" <<'PYEOF'
+import json, os, sys
+from datetime import datetime, timezone
+
+slug, raw_ref = sys.argv[1], sys.argv[2]
+START_EVENTS = ("spawned", "claimed")
+
+
+def parse(value):
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    stamp = datetime.fromisoformat(text)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
+
+
+try:
+    payload = json.loads(os.environ.get("SESSION_START_AGE_PAYLOAD") or "")
+    ref = parse(raw_ref)
+except ValueError:
+    raise SystemExit(2)
+if not isinstance(payload, dict):
+    raise SystemExit(2)
+
+latest = None
+for row in payload.get("events") or []:
+    if not isinstance(row, dict):
+        continue
+    if row.get("event") not in START_EVENTS or row.get("slug") != slug:
+        continue
+    stamp = row.get("ts")
+    if not isinstance(stamp, str):
+        continue
+    try:
+        parsed = parse(stamp)
+    except ValueError:
+        continue
+    # The nudged window end can admit rows after the reference row; a start that
+    # has not happened yet cannot be the start of the run being measured.
+    if parsed > ref:
+        continue
+    if latest is None or parsed > latest:
+        latest = parsed
+
+if latest is None:
+    raise SystemExit(1)
+print(int((ref - latest).total_seconds()))
+PYEOF
+)" || return $?
+  [[ -n "$age" ]] || return 2
+  printf '%s\n' "$age"
+}
+
 # --- resolve_session_owner ---
 # Echo the name of the single live TUI instance whose registry row hosts <slug>,
 # or nothing when none is live within <ttl_seconds>. The owning instance is the
