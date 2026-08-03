@@ -432,6 +432,132 @@ EOF
   teardown_arm_harness
 }
 
+# A stub that keeps the alpha-scoped window open long enough to contend with,
+# and returns immediately for every other scope. Used by the guard tests so a
+# non-contending scope is proven by a fast, complete window rather than a
+# timeout.
+stage_slow_alpha_watcher() {
+  cat > "$ARM_ROOT/scripts/coordinate-watch.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "watch-args: $*"
+case "$*" in *alpha*) sleep 8 ;; esac
+exit 0
+EOF
+  chmod +x "$ARM_ROOT/scripts/coordinate-watch.sh"
+}
+
+# Block until the armed wrapper has actually entered its window — it forks the
+# watcher only after taking the lock, so a child is proof the lock is held.
+wait_for_window() {
+  local arm_pid="$1"
+  for _ in $(seq 1 200); do
+    [ -n "$(pgrep -P "$arm_pid" 2>/dev/null)" ] && return 0
+    sleep 0.05
+  done
+  echo "armed window never started for pid $arm_pid"
+  return 1
+}
+
+@test "a second armed window on the same scope exits silently instead of stacking a watcher" {
+  # Stop fires at every turn boundary and the harness deduplicates nothing, so
+  # this is the ordinary case, not a race: a user message mid-window arms a
+  # second watcher on the same scope and the same cursor.
+  stage_arm_harness
+  stage_slow_alpha_watcher
+
+  bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 25 \
+    --kdir "$ARM_ROOT/kdir" --slug alpha >"$ARM_ROOT/first.out" 2>"$ARM_ROOT/first.err" &
+  first_pid=$!
+  wait_for_window "$first_pid"
+
+  started="$(date +%s)"
+  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 25 \
+    --kdir "$ARM_ROOT/kdir" --slug alpha
+  elapsed=$(( $(date +%s) - started ))
+  # Exit 0 is the only terminal a completed window cannot reach (it wakes with 2
+  # or stops with 3), so this alone proves the second instance never ran one.
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  # And it declined immediately rather than blocking on the held lock.
+  [ "$elapsed" -lt 5 ]
+
+  # Exactly one lock for the scope, and exactly one wake from the one window
+  # that owned it.
+  locks=("$ARM_ROOT"/kdir/_coordination/arm-window-*.lock)
+  [ "${#locks[@]}" -eq 1 ]
+
+  first_status=0
+  wait "$first_pid" || first_status=$?
+  [ "$first_status" -eq 2 ]
+  [ "$(grep -c '\[coordinate wake\]' "$ARM_ROOT/first.err")" -eq 1 ]
+  teardown_arm_harness
+}
+
+@test "the window lock is per scope, so unrelated scopes both run" {
+  # The guard must not become a global mutex: two seats watching different work
+  # have no reason to serialize, and a beta window that waited on alpha's would
+  # be a wake the guard swallowed rather than deduplicated.
+  stage_arm_harness
+  stage_slow_alpha_watcher
+
+  bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 25 \
+    --kdir "$ARM_ROOT/kdir" --slug alpha >/dev/null 2>&1 &
+  first_pid=$!
+  wait_for_window "$first_pid"
+
+  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 25 \
+    --kdir "$ARM_ROOT/kdir" --slug beta
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"[coordinate wake] actionable"* ]]
+  [[ "$output" == *"--slug beta"* ]]
+
+  # Two scopes, two distinct locks.
+  locks=("$ARM_ROOT"/kdir/_coordination/arm-window-*.lock)
+  [ "${#locks[@]}" -eq 2 ]
+
+  # TERM the wrapper, not the watcher: the wrapper's own trap tears the window
+  # down, where killing the watcher underneath it would look like a reader
+  # failure and back off for a minute.
+  kill -TERM "$first_pid" 2>/dev/null || true
+  wait "$first_pid" || true
+  teardown_arm_harness
+}
+
+@test "a dead window releases its lock without leaving a stale holder behind" {
+  # The guard is an flock on a descriptor the wrapper holds, so the kernel drops
+  # it on process death — including a SIGKILL that runs no trap. Nothing here
+  # inspects or repairs a recorded pid, and nothing should need to.
+  stage_arm_harness
+  stage_slow_alpha_watcher
+
+  bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 25 \
+    --kdir "$ARM_ROOT/kdir" --slug alpha >/dev/null 2>&1 &
+  first_pid=$!
+  wait_for_window "$first_pid"
+  # SIGKILL the wrapper and reap the watcher it can no longer clean up. The
+  # watcher never inherited the lock descriptor, so its survival must not keep
+  # the scope locked either.
+  watch_pids="$(pgrep -P "$first_pid" 2>/dev/null || true)"
+  kill -KILL "$first_pid"
+  wait "$first_pid" || true
+  for p in $watch_pids; do kill -KILL "$p" 2>/dev/null || true; done
+
+  # Same scope, lock file still on disk — but unheld, so the next turn boundary
+  # re-arms normally instead of finding a corpse in the way.
+  [ -f "$(echo "$ARM_ROOT"/kdir/_coordination/arm-window-*.lock)" ]
+  cat > "$ARM_ROOT/scripts/coordinate-watch.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "watch-args: $*"
+exit 0
+EOF
+  chmod +x "$ARM_ROOT/scripts/coordinate-watch.sh"
+  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 25 \
+    --kdir "$ARM_ROOT/kdir" --slug alpha
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"[coordinate wake] actionable"* ]]
+  teardown_arm_harness
+}
+
 @test "the armed command relays scope flags to the watcher" {
   stage_arm_harness
   run env STUB_WATCH_EXIT=0 bash "$ARM_ROOT/scripts/coordinate-arm.sh" run \

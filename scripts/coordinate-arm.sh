@@ -346,6 +346,82 @@ KILL_MARKER_FILE="$KNOWLEDGE_DIR/_coordination/arm-window-killed.json"
 WATCH_PID=""
 WINDOW_STARTED_AT=""
 
+# --- One live window per scope ------------------------------------------------
+#
+# The harness does not deduplicate async hooks: "each execution creates a
+# separate background process. There is no deduplication across multiple firings
+# of the same async hook." Stop fires at every turn boundary, including turns a
+# user message or an unrelated notification causes while a window is already
+# running. Without a guard an active seat accumulates one watcher per turn — all
+# on the same scope, all racing the same cursor file, all waking for the same
+# row.
+#
+# So: one scope, one window. A second instance that finds the lock held exits 0
+# and emits nothing. That is not wake suppression. The instance holding the lock
+# owns this window and will deliver its wake on stderr with exit 2, and its exit
+# arms the next one; what the loser suppresses is a duplicate *watcher*, not a
+# wake. Every row still reaches the seat exactly once.
+#
+# The lock is an flock on a descriptor this process holds open, which is the
+# whole reason to use one: the kernel drops it when the process dies, including
+# a SIGKILL that runs no trap. Do not replace it with a pidfile and a staleness
+# check — that reintroduces by hand the stale-holder problem flock does not have,
+# and a wrong staleness verdict either strands the seat or stacks watchers again.
+#
+# Descriptor 9 is written literally rather than through a variable: bash 3.2 (the
+# system bash on macOS) cannot take a variable as a redirection target, and an
+# eval to work around that buys nothing over a named constant in comments.
+WINDOW_LOCK_FD=9
+
+# Same recipe the watcher uses for its per-scope sidecars: order-insensitive and
+# duplicate-insensitive, so one scope written two ways takes one lock. Keyed on
+# the declared scope rather than the arc-expanded one — the firings this guards
+# against all carry the identical command line the hook entry was armed with.
+scope_lock_file() {
+  local slug arc tokens="" key suffix=""
+  for slug in ${SLUGS+"${SLUGS[@]}"}; do tokens+="slug:$slug"$'\n'; done
+  for arc in ${ARCS+"${ARCS[@]}"}; do tokens+="arc:$arc"$'\n'; done
+  if [[ -n "$tokens" ]]; then
+    key="$(printf '%s' "$tokens" | LC_ALL=C sort -u \
+      | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])')"
+    suffix="-$key"
+  fi
+  printf '%s' "$KNOWLEDGE_DIR/_coordination/arm-window${suffix}.lock"
+}
+
+# 0 when this process now owns the window, 1 when another instance already does.
+# Anything that stops the lock from being taken at all — no python3, an
+# unwritable store — degrades to running the window: a missed dedup costs a
+# duplicate wake, while refusing to run would cost the wake itself.
+acquire_window_lock() {
+  local lock_file="$1"
+  mkdir -p "$(dirname "$lock_file")" 2>/dev/null || true
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "[coordinate] no python3 to take the per-scope window lock; running unguarded (duplicate watchers possible)" >&2
+    return 0
+  fi
+  if ! exec 9>"$lock_file"; then
+    echo "[coordinate] could not open $lock_file; running unguarded (duplicate watchers possible)" >&2
+    return 0
+  fi
+  local status=0
+  python3 - "$WINDOW_LOCK_FD" <<'PY' || status=$?
+import fcntl, sys
+try:
+    fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    sys.exit(1)
+PY
+  case "$status" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *)
+      echo "[coordinate] per-scope window lock could not be evaluated (exit $status); running unguarded" >&2
+      return 0
+      ;;
+  esac
+}
+
 # The harness kills this command at the hook timeout, and a killed hook is
 # indistinguishable from one that simply never woke anybody. The marker is the
 # distinguishing evidence, written where the next window's operator can find it.
@@ -394,6 +470,10 @@ emit_owner_gone() {
 }
 
 cmd_run() {
+  # Before anything else, and before the TERM trap: a losing instance should
+  # cost the seat one fork, not a grace sleep and a kill marker.
+  acquire_window_lock "$(scope_lock_file)" || exit 0
+
   trap on_sigterm TERM
 
   if ! owner_may_continue; then
@@ -408,10 +488,14 @@ cmd_run() {
   trap "rm -f '$out_file' '$err_file'" EXIT
 
   WINDOW_STARTED_AT="$(date +%s)"
+  # The watcher does not inherit the lock descriptor. The lock names the wrapper
+  # that can still deliver a wake, so it must die with the wrapper: an orphaned
+  # watcher holding it would block every re-arm for a whole window while having
+  # no channel left to wake anyone through.
   "$WATCH_SH" --wake-shaped --timeout "$WINDOW" \
     ${KDIR_OVERRIDE:+--kdir "$KDIR_OVERRIDE"} \
     ${SCOPE_ARGS+"${SCOPE_ARGS[@]}"} \
-    >"$out_file" 2>"$err_file" &
+    >"$out_file" 2>"$err_file" 9>&- &
   WATCH_PID=$!
 
   # The watcher owns its own deadline; this only catches the case where it does
