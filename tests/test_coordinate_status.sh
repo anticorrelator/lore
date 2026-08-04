@@ -313,5 +313,191 @@ assert_eq "session reader trailing-byte signal becomes a named gap" "1" \
 assert_eq "retro native malformed-row count becomes a named gap" "1" \
   "$(jq -r '[.source_manifest[] | select(.source_id=="retro-queue" and .read_status=="gap" and (.error|contains("malformed")))] | length' "$MALFORMED_JSON")"
 
+
+# --- coordination ledgers live in the arc record ---------------------------
+# The board resolves _work/_arcs/<slug>/coordination.md. These cases assert the
+# corrected behaviour: a ledger that is read renders streams, and a ledger that
+# is not read says so instead of rendering as an empty one.
+
+RECONCILE="$REPO_ROOT/scripts/coordinate-reconcile.py"
+
+write_arc() {
+  local kdir="$1" arc="$2" status="$3"
+  mkdir -p "$kdir/_work/_arcs/$arc"
+  cat > "$kdir/_work/_arcs/$arc/_meta.json" <<JSON
+{"schema_version":1,"slug":"$arc","title":"$arc","status":"$status","members":[]}
+JSON
+}
+
+write_worktree_identity() {
+  local kdir="$1" id="$2" item="$3" stream="$4" attempt="$5"
+  mkdir -p "$kdir/_coordination/worktrees/registry"
+  cat > "$kdir/_coordination/worktrees/registry/$id.json" <<JSON
+{"schema_version":1,"worktree_id":"$id","execution_dir":"$TEST_DIR/$id","temporary_branch":"refs/heads/$id","git_common_dir":"$TEST_DIR/$id/.git","allocation_base_sha":"base-$id","owner_item":"$item","stream_id":"$stream","attempt_id":"$attempt","owner":{"kind":"seat","id":"seat-1"},"lease":{"duration_seconds":900,"renewed_at":"2026-07-21T00:00:00Z","expires_at":"2099-07-21T00:15:00Z"},"guard_identity":{},"state":"quiescent","lifecycle":[]}
+JSON
+}
+
+# Case 1: an active arc whose ledger the board reads.
+LIVE="$TEST_DIR/arc-live"
+setup_store "$LIVE"
+write_arc "$LIVE" live-arc active
+cat > "$LIVE/_work/_arcs/live-arc/coordination.md" <<'EOF'
+| # | Step | Depends on | Tree | Status | Verdict |
+|---|---|---|---|---|---|
+| s-inflight | Live step | — | writer | in-flight | — |
+| s-prefreeze | Allocated step | — | writer | pending | — |
+| s-ready | Untouched step | — | writer | pending | — |
+| s-readonly | Dispatched read-only step | — | read-only | pending | — |
+| s-accepted | Accepted read-only step | — | read-only | pending | — |
+EOF
+write_worktree_identity "$LIVE" wt-prefreeze live-arc s-prefreeze a1
+python3 "$RECONCILE" register-attempt --kdir "$LIVE" --slug live-arc \
+  --stream s-prefreeze --attempt a1 --tree writer --worktree-id wt-prefreeze --json >/dev/null
+python3 "$RECONCILE" register-attempt --kdir "$LIVE" --slug live-arc \
+  --stream s-readonly --attempt a1 --tree read-only --json >/dev/null
+python3 "$RECONCILE" register-attempt --kdir "$LIVE" --slug live-arc \
+  --stream s-accepted --attempt a1 --tree read-only --json >/dev/null
+python3 "$RECONCILE" advance-attempt --kdir "$LIVE" --slug live-arc \
+  --stream s-accepted --attempt a1 --expected-status coord_dispatched \
+  --to coord_report_accepted --json >/dev/null
+write_arc "$LIVE" closed-arc closed
+cat > "$LIVE/_work/_arcs/closed-arc/coordination.md" <<'EOF'
+| # | Step | Depends on | Tree | Status | Verdict |
+|---|---|---|---|---|---|
+| s-closed | Step in a closed arc | — | writer | pending | — |
+EOF
+
+LIVE_JSON="$TEST_DIR/arc-live.json"
+bash "$COORDINATE" --kdir "$LIVE" --json > "$LIVE_JSON"
+assert_eq "arc ledger under _work/_arcs is read" "1" \
+  "$(jq -r '.coordination_dispatch.ledger_scan.ledgers_read' "$LIVE_JSON")"
+assert_eq "the arc ledger's stream rows are counted" "5" \
+  "$(jq -r '.coordination_dispatch.ledger_scan.streams_read' "$LIVE_JSON")"
+assert_eq "a live stream is an active attempt" "3" \
+  "$(jq -r '.coordination_dispatch.active_attempts' "$LIVE_JSON")"
+assert_eq "a read ledger with dispatchable streams names no reason" "null" \
+  "$(jq -r '.coordination_dispatch.ledger_scan.reason' "$LIVE_JSON")"
+assert_eq "an untouched pending stream is ready" "1" \
+  "$(jq -r '[.buckets.act_now[] | select(.kind=="ready-stream" and .observed_facts.stream_id=="s-ready")] | length' "$LIVE_JSON")"
+assert_eq "a stream whose attempt was accepted is released for dispatch" "1" \
+  "$(jq -r '[.buckets.act_now[] | select(.kind=="ready-stream" and .observed_facts.stream_id=="s-accepted")] | length' "$LIVE_JSON")"
+assert_eq "an allocated attempt is never redispatched" "0" \
+  "$(jq -r '[.buckets.act_now[] | select(.observed_facts.stream_id?=="s-prefreeze")] | length' "$LIVE_JSON")"
+assert_eq "an allocated attempt holds its stream under Waiting" "coord_allocated" \
+  "$(jq -r '[.buckets.waiting[] | select(.kind=="active-stream-attempt" and .observed_facts.stream_id=="s-prefreeze")][0].observed_facts.attempt_status' "$LIVE_JSON")"
+assert_eq "a dispatched read-only attempt is never redispatched" "0" \
+  "$(jq -r '[.buckets.act_now[] | select(.observed_facts.stream_id?=="s-readonly")] | length' "$LIVE_JSON")"
+assert_eq "a stream with no attempt records the absence explicitly" "false" \
+  "$(jq -r '[.buckets.act_now[] | select(.observed_facts.stream_id?=="s-ready")][0].observed_facts.attempt_present' "$LIVE_JSON")"
+assert_eq "the ledger locator points into the arc record" "true" \
+  "$(jq -r '[.buckets[][] | select(.evidence.locator | startswith("_work/_arcs/live-arc/coordination.md#L"))] | length > 0' "$LIVE_JSON")"
+assert_eq "a closed arc's ledger is not projected" "0" \
+  "$(jq -r '[.buckets[][] | select(.observed_facts.stream_id?=="s-closed")] | length' "$LIVE_JSON")"
+assert_contains "human render names the ledger scan" \
+  "$(bash "$COORDINATE" --kdir "$LIVE")" "Coordination dispatch"
+
+# Case 2: a record written before the lifecycle statuses existed.
+LEGACY="$TEST_DIR/arc-legacy"
+setup_store "$LEGACY"
+write_arc "$LEGACY" legacy-arc active
+cat > "$LEGACY/_work/_arcs/legacy-arc/coordination.md" <<'EOF'
+| # | Step | Depends on | Tree | Status | Verdict |
+|---|---|---|---|---|---|
+| s-nostatus | Attempt without a status | — | writer | pending | — |
+| s-merge | Attempt awaiting composition | — | writer | pending | — |
+EOF
+mkdir -p "$LEGACY/_coordination/reconciliation/legacy-arc"
+cat > "$LEGACY/_coordination/reconciliation/legacy-arc/streams.json" <<'JSON'
+{
+  "schema_version": 2,
+  "work_item": "legacy-arc",
+  "updated_at": "2026-07-21T00:00:00Z",
+  "streams": [
+    {"stream_id": "s-nostatus", "tree": "writer", "depends_on": [],
+     "attempts": [{"attempt_id": "a1", "updated_at": "2026-07-21T00:00:00Z"}]},
+    {"stream_id": "s-merge", "tree": "writer", "depends_on": [],
+     "attempts": [{"attempt_id": "a1", "status": "merge_ready", "updated_at": "2026-07-21T00:00:00Z"}]}
+  ]
+}
+JSON
+LEGACY_JSON="$TEST_DIR/arc-legacy.json"
+bash "$COORDINATE" --kdir "$LEGACY" --json > "$LEGACY_JSON"
+assert_eq "an attempt with no status is not dispatchable" "0" \
+  "$(jq -r '[.buckets.act_now[] | select(.observed_facts.stream_id?=="s-nostatus")] | length' "$LEGACY_JSON")"
+assert_eq "an absent status renders as absent, not as a default" "null" \
+  "$(jq -r '[.buckets.waiting[] | select(.observed_facts.stream_id?=="s-nostatus")][0].observed_facts.attempt_status' "$LEGACY_JSON")"
+assert_eq "an absent status is marked unrecorded" "false" \
+  "$(jq -r '[.buckets.waiting[] | select(.observed_facts.stream_id?=="s-nostatus")][0].observed_facts.attempt_status_recorded' "$LEGACY_JSON")"
+assert_eq "an attempt awaiting composition is not dispatchable" "0" \
+  "$(jq -r '[.buckets.act_now[] | select(.observed_facts.stream_id?=="s-merge")] | length' "$LEGACY_JSON")"
+assert_eq "a v2 record is read without error" "0" \
+  "$(jq -r '[.buckets.reconcile[] | select(.kind=="coordination-reconciliation-invalid")] | length' "$LEGACY_JSON")"
+
+# Case 3: the four ways the board can end up with nothing to dispatch stay
+# distinguishable from one another.
+NO_DIR="$TEST_DIR/arc-absent"
+setup_store "$NO_DIR"
+NO_DIR_JSON="$TEST_DIR/arc-absent.json"
+bash "$COORDINATE" --kdir "$NO_DIR" --json > "$NO_DIR_JSON"
+assert_eq "an absent arc directory is named as unread" "absent" \
+  "$(jq -r '.coordination_dispatch.ledger_scan.read_status' "$NO_DIR_JSON")"
+assert_contains "an absent arc directory names its locator in the reason" \
+  "$(jq -r '.coordination_dispatch.ledger_scan.reason' "$NO_DIR_JSON")" "_work/_arcs"
+
+NO_LEDGER="$TEST_DIR/arc-no-ledger"
+setup_store "$NO_LEDGER"
+write_arc "$NO_LEDGER" ledgerless active
+NO_LEDGER_JSON="$TEST_DIR/arc-no-ledger.json"
+bash "$COORDINATE" --kdir "$NO_LEDGER" --json > "$NO_LEDGER_JSON"
+assert_eq "an arc without a ledger reports the directory as read" "ok" \
+  "$(jq -r '.coordination_dispatch.ledger_scan.read_status' "$NO_LEDGER_JSON")"
+assert_eq "an arc without a ledger is still counted" "1" \
+  "$(jq -r '.coordination_dispatch.ledger_scan.arcs_active' "$NO_LEDGER_JSON")"
+assert_contains "an arc without a ledger names that as the reason" \
+  "$(jq -r '.coordination_dispatch.ledger_scan.reason' "$NO_LEDGER_JSON")" "carries a readable coordination.md"
+
+EMPTY_LEDGER="$TEST_DIR/arc-empty-ledger"
+setup_store "$EMPTY_LEDGER"
+write_arc "$EMPTY_LEDGER" empty-arc active
+cat > "$EMPTY_LEDGER/_work/_arcs/empty-arc/coordination.md" <<'EOF'
+# Coordination Ledger
+
+No step ledger has been written yet.
+EOF
+EMPTY_JSON="$TEST_DIR/arc-empty-ledger.json"
+bash "$COORDINATE" --kdir "$EMPTY_LEDGER" --json > "$EMPTY_JSON"
+assert_eq "a ledger with no stream table is read" "1" \
+  "$(jq -r '.coordination_dispatch.ledger_scan.ledgers_read' "$EMPTY_JSON")"
+assert_contains "an empty ledger reads differently from an unread one" \
+  "$(jq -r '.coordination_dispatch.ledger_scan.reason' "$EMPTY_JSON")" "no stream rows"
+assert_eq "the four zero-ready reasons are four different strings" "4" \
+  "$(printf '%s\n%s\n%s\n%s\n' \
+    "$(jq -r '.coordination_dispatch.ledger_scan.reason' "$NO_DIR_JSON")" \
+    "$(jq -r '.coordination_dispatch.ledger_scan.reason' "$NO_LEDGER_JSON")" \
+    "$(jq -r '.coordination_dispatch.ledger_scan.reason' "$EMPTY_JSON")" \
+    "$(jq -r '.coordination_dispatch.ledger_scan.reason' "$LEGACY_JSON")" | sort -u | wc -l | tr -d ' ')"
+
+BAD_ARC="$TEST_DIR/arc-unreadable"
+setup_store "$BAD_ARC"
+mkdir -p "$BAD_ARC/_work/_arcs/broken"
+printf '{torn' > "$BAD_ARC/_work/_arcs/broken/_meta.json"
+BAD_ARC_JSON="$TEST_DIR/arc-unreadable.json"
+bash "$COORDINATE" --kdir "$BAD_ARC" --json > "$BAD_ARC_JSON"
+assert_eq "an unreadable arc record becomes a Reconcile row" "1" \
+  "$(jq -r '[.buckets.reconcile[] | select(.kind=="coordination-arc-record-invalid")] | length' "$BAD_ARC_JSON")"
+
+BAD_LEDGER="$TEST_DIR/arc-bad-ledger"
+setup_store "$BAD_LEDGER"
+write_arc "$BAD_LEDGER" broken-ledger active
+cat > "$BAD_LEDGER/_work/_arcs/broken-ledger/coordination.md" <<'EOF'
+| # | Step | Depends on | Tree | Status | Verdict |
+|---|---|---|---|---|---|
+| — | Row with no stream identity | — | writer | pending | — |
+EOF
+BAD_LEDGER_JSON="$TEST_DIR/arc-bad-ledger.json"
+bash "$COORDINATE" --kdir "$BAD_LEDGER" --json > "$BAD_LEDGER_JSON"
+assert_eq "a malformed ledger becomes a Reconcile row at the arc locator" "1" \
+  "$(jq -r '[.buckets.reconcile[] | select(.kind=="coordination-ledger-invalid" and (.evidence.locator=="_work/_arcs/broken-ledger/coordination.md"))] | length' "$BAD_LEDGER_JSON")"
+
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]

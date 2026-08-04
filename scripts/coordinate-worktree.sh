@@ -429,6 +429,124 @@ class Manager:
         atomic_json(bundle / "manifest.json", manifest)
         return bundle, sha256_file(bundle / "manifest.json")
 
+    def reconcile(self, operation, row, *extra):
+        """Invoke the reconciliation sole writer.
+
+        streams.json belongs to coordinate-reconcile.py. The manager asks it
+        for changes and never edits the file, exactly as callers ask the
+        manager rather than editing the registry.
+        """
+        return run([
+            sys.executable, SCRIPT_DIR / "coordinate-reconcile.py", operation,
+            "--kdir", self.kdir, "--slug", row["owner_item"],
+            "--stream", row["stream_id"], "--attempt", row["attempt_id"],
+            "--json", *extra,
+        ], check=False)
+
+    @staticmethod
+    def proc_detail(proc):
+        return (proc.stderr.decode(errors="replace").strip()
+                or proc.stdout.decode(errors="replace").strip()
+                or f"exit {proc.returncode}")
+
+    def register_lifecycle(self, row):
+        """Give a fresh allocation its stream lifecycle record.
+
+        The registry row is already durable here, so a failure must not cost
+        the caller its checkout. It reports the repair instead of unwinding:
+        replaying register-attempt with the same identity adopts the existing
+        tree rather than allocating a second one.
+        """
+        proc = self.reconcile("register-attempt", row, "--tree", "writer",
+                              "--worktree-id", row["worktree_id"])
+        if proc.returncode == 0:
+            return {"registered": True}
+        detail = self.proc_detail(proc)
+        repair = (
+            f"lore coordinate reconcile register-attempt {row['owner_item']} "
+            f"--stream {row['stream_id']} --attempt {row['attempt_id']} "
+            f"--tree writer --worktree-id {row['worktree_id']}"
+        )
+        warn(f"stream lifecycle registration failed: {detail}\n"
+             f"  The tree exists and is yours. Replay registration: {repair}")
+        return {"registered": False, "error": detail, "repair": repair}
+
+    def project_sweep_recovery(self, row):
+        """Copy the recorded sweep facts onto the stream lifecycle record.
+
+        Cleanup has already finished and archived by the time this runs, so a
+        failure is a projection failure and not a cleanup failure. The facts
+        stay on the archived manager row, which is what makes the retry
+        possible after the checkout is gone.
+        """
+        fact = row.get("coord_sweep_recovery")
+        if not fact:
+            return {"projected": False, "reason": "no recorded sweep facts"}
+        probe = self.reconcile("lookup-attempt", row)
+        if probe.returncode != 0:
+            return {"projected": False, "failed": True, "reason": self.proc_detail(probe)}
+        try:
+            found = json.loads(probe.stdout.decode(errors="replace"))
+        except json.JSONDecodeError as exc:
+            return {"projected": False, "failed": True, "reason": f"lookup returned invalid JSON: {exc}"}
+        outcome = found.get("outcome")
+        if outcome in ("coord_lookup_record_absent", "coord_lookup_stream_absent",
+                       "coord_lookup_attempt_absent"):
+            # A tree allocated before the lifecycle record existed has nothing
+            # to project onto. That is an absence, not a failure.
+            return {"projected": False, "reason": outcome}
+        extra = ["--expected-status", found.get("status"),
+                 "--branch-relevance", fact["relevance"]]
+        for flag, key in (("--branch-base-sha", "allocation_base_sha"),
+                          ("--branch-tip-sha", "branch_tip_sha"),
+                          ("--recovery-bundle", "recovery_bundle_path"),
+                          ("--quarantine-patch", "quarantine_patch_path")):
+            if fact.get(key):
+                extra += [flag, fact[key]]
+        proc = self.reconcile("advance-attempt", row, *extra)
+        if proc.returncode == 0:
+            return {"projected": True}
+        detail = self.proc_detail(proc)
+        warn(f"sweep recovery projection failed for {row['worktree_id']}: {detail}\n"
+             "  Cleanup itself succeeded. The facts are on the archived manager "
+             "row under coord_sweep_recovery; retry the projection from there.")
+        return {"projected": False, "failed": True, "reason": detail}
+
+    def note_projection(self, result, row):
+        outcome = self.project_sweep_recovery(row)
+        if outcome.get("projected"):
+            result["projected"].append(row["worktree_id"])
+        elif outcome.get("failed"):
+            result["projection_failed"][row["worktree_id"]] = outcome.get("reason")
+
+    def branch_recovery_relevance(self, row, repository, branch_ref):
+        """Whether the temporary branch ever moved off its allocation base.
+
+        `coord_branch_unchanged` says only that there is no committed delta
+        beyond the base. It is not "nothing to recover": capture_bundle
+        collects staged, unstaged, and untracked state whether or not the
+        branch ever moved, so the bundle path is reported either way.
+        """
+        base = row.get("allocation_base_sha")
+        probe = git(repository, "rev-parse", "--verify", "--quiet",
+                    branch_ref + "^{commit}", check=False)
+        tip = probe.stdout.decode(errors="replace").strip() if probe.returncode == 0 else ""
+        if not tip or not base:
+            relevance = "coord_branch_unavailable"
+        elif tip == base:
+            relevance = "coord_branch_unchanged"
+        else:
+            relevance = "coord_branch_advanced"
+        recovery = row.get("recovery") or {}
+        artifact = recovery.get("result_artifact") or {}
+        return {
+            "relevance": relevance,
+            "allocation_base_sha": base,
+            "branch_tip_sha": tip or None,
+            "recovery_bundle_path": recovery.get("bundle_path"),
+            "quarantine_patch_path": artifact.get("patch_path"),
+        }
+
     def remove_and_prove(self, row, sweep, reason):
         worktree = Path(row["execution_dir"])
         repository = row["guard_identity"]["captured"]["canonical_path"]
@@ -465,6 +583,11 @@ class Manager:
             f"refs/lore/worktrees/{row['worktree_id']}/result",
             f"refs/lore/quarantine/{row['worktree_id']}",
         ]
+        # Read the branch tip while the ref still exists — the loop below
+        # deletes it, and after that nothing can tell whether the owner ever
+        # committed. The `coord_branch_*` vocabulary is defined in
+        # coordinate-reconcile.py; this is a quote of it, not a second copy.
+        row["coord_sweep_recovery"] = self.branch_recovery_relevance(row, repository, branch_ref)
         for ref in [branch_ref, *guard_refs]:
             git(repository, "update-ref", "-d", ref)
         registry_paths = []
@@ -495,13 +618,30 @@ class Manager:
         # report. Duplicating one path is cheap; re-deriving "was anything
         # saved?" from a deleted checkout is not.
         recovery = row.get("recovery") or {}
+        quarantine_patch = (recovery.get("result_artifact") or {}).get("patch_path")
         proof["recovery_bundle_path"] = recovery.get("bundle_path")
-        proof["recovery_hint"] = (
-            "Work is recoverable from recovery.bundle_path: apply the patches with "
-            "plain `git apply <patch>` — never `git apply --3way`, which fails "
-            "'does not match index' because the quarantined blobs are not in the "
-            "target repository's index."
-        ) if recovery.get("bundle_path") else None
+        # The bundle and the quarantine patch cover disjoint work: the bundle
+        # holds only what was uncommitted, so for a tree whose owner committed,
+        # naming the bundle alone reads as data loss.
+        proof["quarantine_patch_path"] = quarantine_patch
+        hints = []
+        if recovery.get("bundle_path"):
+            hints.append(
+                "Uncommitted work is in recovery.bundle_path (staged, unstaged, "
+                "and untracked)."
+            )
+        if quarantine_patch:
+            hints.append(
+                "Work the owner committed is in cleanup_proof.quarantine_patch_path, "
+                "not in the bundle."
+            )
+        if hints:
+            hints.append(
+                "Apply either with plain `git apply <patch>` — never "
+                "`git apply --3way`, which fails 'does not match index' because "
+                "the quarantined blobs are not in the target repository's index."
+            )
+        proof["recovery_hint"] = " ".join(hints) or None
         row["cleanup_proof"] = proof
         if not proof["verified"]:
             raise RuntimeError("cleanup proof incomplete across path, Git registry, or refs")
@@ -538,7 +678,8 @@ class Manager:
         # lists only ids reads as pure destruction, which is how a reclaimed
         # tree got reported as data loss; the pointer belongs in the same
         # payload as the id, not one lookup away in an archived manifest.
-        result = {"swept": [], "protected": [], "not_expired": [], "failed": [], "recovery": {}}
+        result = {"swept": [], "protected": [], "not_expired": [], "failed": [],
+                  "recovery": {}, "projected": [], "projection_failed": {}}
         for path in sorted(self.claims.glob("*.json")):
             try:
                 row = json.loads(path.read_text(encoding="utf-8"))
@@ -546,6 +687,7 @@ class Manager:
                 row = self.finish_claim(row, True, "resume interrupted cleanup claim")
                 result["swept"].append(row["worktree_id"])
                 self.note_recovery(result, row)
+                self.note_projection(result, row)
             except BaseException:
                 result["failed"].append(path.stem)
         for path in sorted(self.registry.glob("*.json")):
@@ -564,20 +706,33 @@ class Manager:
                 row = self.finish_claim(row, True, "expired owner lease")
                 result["swept"].append(row["worktree_id"])
                 self.note_recovery(result, row)
+                self.note_projection(result, row)
             except BaseException:
                 result["failed"].append(path.stem)
         return result
 
     def note_recovery(self, result, row):
+        fact = row.get("coord_sweep_recovery") or {}
         bundle = (row.get("recovery") or {}).get("bundle_path")
+        patch = fact.get("quarantine_patch_path")
+        if not bundle and not patch:
+            return
+        result["recovery"][row["worktree_id"]] = {
+            "bundle_path": bundle,
+            "quarantine_patch_path": patch,
+            "branch_relevance": fact.get("relevance"),
+        }
+        where = []
         if bundle:
-            result["recovery"][row["worktree_id"]] = bundle
-            warn(
-                f"swept {row['worktree_id']}; work is recoverable from {bundle} — "
-                "apply with plain `git apply <patch>`, never `git apply --3way` "
-                "(it fails 'does not match index': the quarantined blobs are not "
-                "in the target repository's index)"
-            )
+            where.append(f"uncommitted work in {bundle}")
+        if patch:
+            where.append(f"committed work in {patch}")
+        warn(
+            f"swept {row['worktree_id']}; work is recoverable — {'; '.join(where)} — "
+            "apply with plain `git apply <patch>`, never `git apply --3way` "
+            "(it fails 'does not match index': the quarantined blobs are not "
+            "in the target repository's index)"
+        )
 
     def show(self, args):
         if args.worktree_id:
@@ -709,6 +864,7 @@ if args.command == "allocate":
     output = manager.allocate(args)
     # Added after the manifest is persisted, so the durable record stays exactly
     # the manager's own state and the hint lives only in what the caller reads.
+    output = {**output, "lifecycle": manager.register_lifecycle(output)}
     hint = next_hint(output)
     if hint:
         output = {**output, "next": hint}
@@ -720,6 +876,7 @@ elif args.command == "renew":
     output = manager.renew(args)
 elif args.command == "cleanup":
     output = manager.cleanup(args)
+    output = {**output, "lifecycle_projection": manager.project_sweep_recovery(output)}
 elif args.command == "sweep":
     output = manager.sweep_all()
 else:

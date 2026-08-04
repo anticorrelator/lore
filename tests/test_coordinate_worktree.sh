@@ -105,6 +105,18 @@ assert_eq "temporary branch is checked out" "$BRANCH" "$(git -C "$WT_PATH" branc
 assert_eq "guard identity validates after manager branch creation" "$WT_PATH" \
   "$(jq -r '.guard_identity.canonical_path' <<<"$ALLOC")"
 
+# Allocation is the stream's birth, so the seat never has to hand a worktree id
+# back to the reconciler — it asks for the tree by stream and attempt instead.
+STREAMS="$KDIR/_coordination/reconciliation/demo/streams.json"
+assert_eq "allocation registers the stream lifecycle record" "true" \
+  "$(jq -r '.lifecycle.registered' <<<"$ALLOC")"
+LOOKUP="$(python3 "$RECONCILE" lookup-attempt --kdir "$KDIR" --slug demo \
+  --stream stream-a --attempt normal --json)"
+assert_eq "the record answers by stream and attempt" "coord_lookup_resolved" \
+  "$(jq -r '.outcome' <<<"$LOOKUP")"
+assert_eq "the answer carries the allocated tree" "$WT_ID" "$(jq -r '.worktree_id' <<<"$LOOKUP")"
+assert_eq "the attempt is born allocated" "coord_allocated" "$(jq -r '.status' <<<"$LOOKUP")"
+
 drive_cleanup_due "$WT_ID" seat-normal
 printf 'unstaged\n' >> "$WT_PATH/tracked.txt"
 printf 'staged\n' > "$WT_PATH/staged.txt"
@@ -123,6 +135,22 @@ assert_file "staged recovery patch precedes removal" "$BUNDLE/staged.patch"
 assert_file "untracked recovery archive precedes removal" "$BUNDLE/untracked.tar"
 assert_eq "recovery manifest hash validates" "$(jq -r '.recovery.manifest_sha256' <<<"$REMOVED")" \
   "$(shasum -a 256 "$BUNDLE/manifest.json" | awk '{print $1}')"
+
+# This owner never committed, so there is no delta beyond the allocation base —
+# but the bundle still holds its staged, unstaged, and untracked work, and the
+# proof has to say so.
+assert_eq "an uncommitted tree records the unchanged outcome" "coord_branch_unchanged" \
+  "$(jq -r '.coord_sweep_recovery.relevance' <<<"$REMOVED")"
+assert_eq "the unchanged outcome still names the bundle" "$BUNDLE" \
+  "$(jq -r '.coord_sweep_recovery.recovery_bundle_path' <<<"$REMOVED")"
+QPATCH="$(jq -r '.cleanup_proof.quarantine_patch_path' <<<"$REMOVED")"
+assert_file "cleanup proof names the quarantine patch" "$QPATCH"
+case "$(jq -r '.cleanup_proof.recovery_hint' <<<"$REMOVED")" in
+  *"Uncommitted work"*"committed"*) pass "recovery hint separates committed from uncommitted work" ;;
+  *) fail "recovery hint separates committed from uncommitted work" "$(jq -r '.cleanup_proof.recovery_hint' <<<"$REMOVED")" ;;
+esac
+assert_eq "the sweep facts reach the stream record" "coord_branch_unchanged" \
+  "$(jq -r '[.streams[].attempts[] | select(.attempt_id=="normal") | .coord_sweep_recovery.relevance][0]' "$STREAMS")"
 
 CRASH="$(allocate crash-before-enqueue seat-crashed)"
 CRASH_ID="$(jq -r '.worktree_id' <<<"$CRASH")"
@@ -203,6 +231,18 @@ assert_eq "acceptance integrated ref pinned before sweep" "$TIP" \
 bash "$MANAGER" transition --kdir "$KDIR" --worktree-id "$ACCEPT_ID" --to cleanup_due --json >/dev/null
 SWEEP_ACCEPT="$(bash "$MANAGER" cleanup --kdir "$KDIR" --worktree-id "$ACCEPT_ID" --json)"
 assert_eq "accepted stream cleanup proof verifies" "true" "$(jq -r '.cleanup_proof.verified' <<<"$SWEEP_ACCEPT")"
+# This owner committed onto the temporary branch, so the branch moved off its
+# allocation base and the committed work rides the quarantine patch.
+assert_eq "a committed tree records the advanced outcome" "coord_branch_advanced" \
+  "$(jq -r '.coord_sweep_recovery.relevance' <<<"$SWEEP_ACCEPT")"
+assert_eq "the advanced outcome records the tip it reached" "$TIP" \
+  "$(jq -r '.coord_sweep_recovery.branch_tip_sha' <<<"$SWEEP_ACCEPT")"
+assert_file "the advanced outcome names the quarantine patch" \
+  "$(jq -r '.coord_sweep_recovery.quarantine_patch_path' <<<"$SWEEP_ACCEPT")"
+assert_eq "the advanced outcome projects onto the stream record" "true" \
+  "$(jq -r '.lifecycle_projection.projected' <<<"$SWEEP_ACCEPT")"
+assert_eq "the projected fact survives the tree it describes" "coord_branch_advanced" \
+  "$(jq -r '[.streams[].attempts[] | select(.attempt_id=="accept-anchor") | .coord_sweep_recovery.relevance][0]' "$STREAMS")"
 assert_eq "accepted stream branch is deleted" "deleted" "$(jq -r '.cleanup_proof.branch_disposition' <<<"$SWEEP_ACCEPT")"
 assert_absent "accepted stream worktree path removed" "$ACCEPT_PATH"
 git --git-dir="$ACCEPT_COMMON" show-ref --verify --quiet "refs/heads/$ACCEPT_BRANCH"
@@ -310,8 +350,10 @@ RECOV_ID="$(jq -r '.worktree_id' <<<"$RECOV")"
 printf 'unsaved work\n' > "$(jq -r '.execution_dir' <<<"$RECOV")/scratch.txt"
 expire_manifest "$KDIR/_coordination/worktrees/registry/$RECOV_ID.json"
 RECOV_SWEEP="$(bash "$MANAGER" sweep --kdir "$KDIR" --json 2>/dev/null)"
-RECOV_BUNDLE="$(jq -r --arg id "$RECOV_ID" '.recovery[$id] // ""' <<<"$RECOV_SWEEP")"
+RECOV_BUNDLE="$(jq -r --arg id "$RECOV_ID" '.recovery[$id].bundle_path // ""' <<<"$RECOV_SWEEP")"
 assert_dir "sweep result carries the recovery bundle path" "$RECOV_BUNDLE"
+assert_file "sweep result carries the quarantine patch beside it" \
+  "$(jq -r --arg id "$RECOV_ID" '.recovery[$id].quarantine_patch_path // ""' <<<"$RECOV_SWEEP")"
 RECOV_ARCHIVE="$KDIR/_coordination/worktrees/archive/$RECOV_ID.json"
 assert_eq "cleanup proof carries the recovery bundle path" "$RECOV_BUNDLE" \
   "$(jq -r '.cleanup_proof.recovery_bundle_path' "$RECOV_ARCHIVE")"
@@ -319,6 +361,35 @@ case "$(jq -r '.cleanup_proof.recovery_hint' "$RECOV_ARCHIVE")" in
   *"never"*"--3way"*) pass "cleanup proof warns against git apply --3way" ;;
   *) fail "cleanup proof warns against git apply --3way" ;;
 esac
+
+# A projection failure is not a cleanup failure. The facts stay on the archived
+# manager row, which is what keeps the retry possible once the tree is gone.
+PROJ="$(allocate projection-retry projection-seat)"
+PROJ_ID="$(jq -r '.worktree_id' <<<"$PROJ")"
+python3 - "$STREAMS" <<'PY'
+import json, sys
+path = sys.argv[1]
+state = json.load(open(path, encoding="utf-8"))
+state["schema_version"] = 99
+json.dump(state, open(path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
+expire_manifest "$KDIR/_coordination/worktrees/registry/$PROJ_ID.json"
+PROJ_SWEEP="$(bash "$MANAGER" sweep --kdir "$KDIR" --json 2>/dev/null)"
+assert_eq "an unprojectable sweep still reports the tree as swept" "$PROJ_ID" \
+  "$(jq -r --arg id "$PROJ_ID" '.swept[] | select(. == $id)' <<<"$PROJ_SWEEP")"
+assert_eq "cleanup failure and projection failure stay separate" "0" \
+  "$(jq -r --arg id "$PROJ_ID" '[.failed[] | select(. == $id)] | length' <<<"$PROJ_SWEEP")"
+assert_eq "the projection failure is named on its own" "1" \
+  "$(jq -r --arg id "$PROJ_ID" '[.projection_failed | keys[] | select(. == $id)] | length' <<<"$PROJ_SWEEP")"
+assert_eq "the archived row keeps the facts the projection would have carried" "coord_branch_unchanged" \
+  "$(jq -r '.coord_sweep_recovery.relevance' "$KDIR/_coordination/worktrees/archive/$PROJ_ID.json")"
+python3 - "$STREAMS" <<'PY'
+import json, sys
+path = sys.argv[1]
+state = json.load(open(path, encoding="utf-8"))
+state["schema_version"] = 3
+json.dump(state, open(path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
 
 # --- allocate --help states the contract and the $$ trap ---------------------
 ALLOC_HELP="$(bash "$MANAGER" allocate --help 2>&1)"

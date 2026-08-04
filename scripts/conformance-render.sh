@@ -102,6 +102,7 @@ BASE_SHA=$(git -C "$REPO_ROOT" merge-base "$HEAD_SHA" "$BASE_TIP" 2>/dev/null) \
   || fail "could not compute merge-base for '$BASE_REF' and HEAD"
 
 RECONCILIATION_JSON=""
+RECONCILIATION_ABSENCE=""
 RECONCILIATION_STATE="$KDIR/_coordination/reconciliation/$SLUG/streams.json"
 if [[ -f "$RECONCILIATION_STATE" ]]; then
   set +e
@@ -112,6 +113,16 @@ if [[ -f "$RECONCILIATION_STATE" ]]; then
   [[ $RECONCILIATION_RC -eq 0 ]] || fail "coordinated stream evidence is invalid: $RECONCILIATION_JSON"
   printf '%s' "$RECONCILIATION_JSON" | jq -e '.valid == true' >/dev/null \
     || fail "coordinated stream evidence did not pass hash and identity validation"
+  # The record exists from the moment a stream is allocated, so its presence is
+  # not evidence of a shipped diff. Only a frozen manifest carries changed
+  # paths; without one the git diff remains the only account of what shipped.
+  if ! printf '%s' "$RECONCILIATION_JSON" \
+    | jq -e '[.streams[]?.attempts[]? | select(.source_manifest != null or .integrated_manifest != null)] | length > 0' >/dev/null; then
+    RECONCILIATION_ABSENCE="the coordinated stream record carries no frozen manifest yet; the diff is the account of what shipped"
+    RECONCILIATION_JSON=""
+  fi
+fi
+if [[ -n "$RECONCILIATION_JSON" ]]; then
   CHANGED_PATHS=$(_LORE_RECON_JSON="$RECONCILIATION_JSON" python3 - "$KDIR" <<'PY'
 import json, pathlib, sys
 kdir = pathlib.Path(sys.argv[1])
@@ -175,6 +186,7 @@ _LORE_CHANGED_PATHS="$CHANGED_PATHS" \
 _LORE_DISCOVERY_JSON="$DISCOVERY_JSON" \
 _LORE_DISCOVERY_ERROR="$DISCOVERY_ERROR" \
 _LORE_RECONCILIATION_JSON="$RECONCILIATION_JSON" \
+_LORE_RECONCILIATION_ABSENCE="$RECONCILIATION_ABSENCE" \
 _LORE_KDIR="$KDIR" \
   python3 - "$ITEM_DIR" "$SLUG" "$BASE_REF" "$BASE_SHA" "$HEAD_SHA" >"$SUMMARY_FILE" <<'PY'
 import datetime
@@ -345,7 +357,9 @@ for line in os.environ.get("_LORE_DIFF_NUMSTAT", "").splitlines():
         }
 diff_rows = [{"path": path, **numstat.get(path, {"added": 0, "deleted": 0})}
              for path in changed_paths]
-diff_cov = coverage("present" if diff_rows else "present-empty")
+reconciliation_absence = os.environ.get("_LORE_RECONCILIATION_ABSENCE", "").strip()
+diff_cov = coverage("present" if diff_rows else "present-empty",
+                    reconciliation_absence or None)
 
 reconciliation_raw = os.environ.get("_LORE_RECONCILIATION_JSON", "")
 stream_diffs = []
@@ -507,6 +521,8 @@ else:
     lines.append(f"Absent: {disp_cov.get('reason') or 'no honored or diverged dispositions were recorded.'}")
 
 lines.extend(["", "## Panel D — Shipped Diff", ""])
+if reconciliation_absence:
+    lines.extend([f"Stream evidence absent: {reconciliation_absence}.", ""])
 if stream_diffs:
     lines.extend([
         "| Stream / attempt | Verdict | Cleanup verified | Source manifest | Integrated manifest | Source-only paths |",

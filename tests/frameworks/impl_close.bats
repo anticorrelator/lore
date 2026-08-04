@@ -22,6 +22,7 @@
 REPO_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME:-$0}")/../.." && pwd)"
 LORE_CLI="$REPO_DIR/cli/lore"
 CLOSE_SH="$REPO_DIR/scripts/impl-close.sh"
+RECONCILE_SH="$REPO_DIR/scripts/coordinate-reconcile.py"
 
 setup() {
   [ -x "$LORE_CLI" ] || skip "cli/lore missing"
@@ -584,4 +585,65 @@ close_request_count() {
   run bash "$LORE_CLI" impl close anchored-open --verdict full --summary "done"
   [ "$status" -eq 1 ]
   [ "$(close_request_count)" -eq 0 ]
+}
+
+# --- Coordinated close against the stream lifecycle record -----------------
+# These invoke impl-close.sh directly: `lore` dispatches through the installed
+# scripts symlink, which is not necessarily this checkout.
+
+write_stream_worktree() {
+  local id="$1" slug="$2" stream="$3" attempt="$4"
+  mkdir -p "$TEST_KDIR/_coordination/worktrees/registry"
+  cat > "$TEST_KDIR/_coordination/worktrees/registry/$id.json" <<JSON
+{"schema_version":1,"worktree_id":"$id","execution_dir":"$TEST_KDIR/$id","temporary_branch":"refs/heads/$id","git_common_dir":"$TEST_KDIR/$id/.git","allocation_base_sha":"base-$id","owner_item":"$slug","stream_id":"$stream","attempt_id":"$attempt","owner":{"kind":"seat","id":"seat-1"},"lease":{"duration_seconds":900,"renewed_at":"2026-07-21T00:00:00Z","expires_at":"2099-07-21T00:15:00Z"},"guard_identity":{},"state":"quiescent","lifecycle":[]}
+JSON
+}
+
+@test "a read-only stream resting at its terminal phase closes without cleanup proof" {
+  python3 "$RECONCILE_SH" register-attempt --kdir "$TEST_KDIR" --slug anchored-done \
+    --stream s1 --attempt a1 --tree read-only --json >/dev/null
+  python3 "$RECONCILE_SH" advance-attempt --kdir "$TEST_KDIR" --slug anchored-done \
+    --stream s1 --attempt a1 --expected-status coord_dispatched \
+    --to coord_report_accepted --json >/dev/null
+
+  run bash "$CLOSE_SH" anchored-done --verdict full --summary "capability operable"
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q "cleanup is unproven"
+  [ -d "$WORK_DIR/_archive/anchored-done" ]
+}
+
+@test "an allocated writer attempt is exempt from the cleanup refusal but not from the terminal test" {
+  write_stream_worktree wt-alloc anchored-done s1 a1
+  python3 "$RECONCILE_SH" register-attempt --kdir "$TEST_KDIR" --slug anchored-done \
+    --stream s1 --attempt a1 --tree writer --worktree-id wt-alloc --json >/dev/null
+
+  run bash "$CLOSE_SH" anchored-done --verdict full --summary "capability operable"
+  [ "$status" -eq 1 ]
+  ! echo "$output" | grep -q "cleanup is unproven"
+  echo "$output" | grep -q "has not reached its terminal phase"
+  echo "$output" | grep -q "status=coord_allocated"
+  [ ! -d "$WORK_DIR/_archive/anchored-done" ]
+}
+
+@test "a record written before the lifecycle phases still refuses an unproven cleanup" {
+  mkdir -p "$TEST_KDIR/_coordination/reconciliation/anchored-done"
+  cat > "$TEST_KDIR/_coordination/reconciliation/anchored-done/streams.json" <<'JSON'
+{
+  "schema_version": 2,
+  "work_item": "anchored-done",
+  "updated_at": "2026-07-21T00:00:00Z",
+  "streams": [
+    {"stream_id": "s1", "tree": "writer", "depends_on": [],
+     "attempts": [{"attempt_id": "a1", "status": "source_frozen",
+                   "worktree_id": "wt-legacy", "updated_at": "2026-07-21T00:00:00Z"}]}
+  ]
+}
+JSON
+  write_stream_worktree wt-legacy anchored-done s1 a1
+
+  run bash "$CLOSE_SH" anchored-done --verdict full --summary "capability operable"
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "cleanup is unproven"
+  ! echo "$output" | grep -q "aggregate schema/hash validation failed"
+  [ ! -d "$WORK_DIR/_archive/anchored-done" ]
 }

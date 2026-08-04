@@ -8,7 +8,22 @@ source "$SCRIPT_DIR/lib.sh"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: lore coordinate reconcile <freeze-source|merge|record-conflict|freeze-integrated|status> <ref> [options]
+Usage: lore coordinate reconcile <operation> <ref> [options]
+
+Lifecycle operations, covering an attempt from allocation to hand-off:
+  register-attempt  --stream S --attempt A --tree writer --worktree-id ID
+                    --tree read-only registers a stream that owns no checkout.
+  advance-attempt   --stream S --attempt A --expected-status STATUS
+                    [--to STATUS] [--branch-relevance ...] [--delivery-classification ...]
+                    --expected-status is mandatory so a stale caller conflicts
+                    instead of overwriting a newer status.
+  lookup-attempt    --stream S --attempt A
+                    Answers with the tree's identity, so callers do not carry a
+                    worktree id by hand. Always exits 0: read `.outcome` to tell
+                    "no record yet" from "the pointer went stale".
+
+Evidence operations:
+  freeze-source | merge | record-conflict | freeze-integrated | status
 
 Freeze immutable source/integrated stream evidence, record unresolved merge
 conflicts, or validate the aggregate against the worktree lifecycle archive.
@@ -21,6 +36,7 @@ REF="$2"
 shift 2
 
 case "$OPERATION" in
+  register-attempt|advance-attempt|lookup-attempt) ;;
   freeze-source|merge|record-conflict|freeze-integrated|status) ;;
   *) echo "[coordinate-reconcile] Error: unknown operation '$OPERATION'" >&2; usage; exit 1 ;;
 esac

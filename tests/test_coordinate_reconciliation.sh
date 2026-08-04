@@ -33,7 +33,13 @@ EOF
 cat >"$KDIR/_work/coordinated/tasks.json" <<'JSON'
 {"phases":[{"tasks":[{"id":"task-1","subject":"Ship coordinated streams","blockedBy":[],"tree":"writer"}]}]}
 JSON
-cat >"$KDIR/_work/coordinated/coordination.md" <<'EOF'
+# The board reads the ledger from the arc record; the reconciliation store is
+# keyed by the same identity.
+mkdir -p "$KDIR/_work/_arcs/coordinated"
+cat >"$KDIR/_work/_arcs/coordinated/_meta.json" <<'JSON'
+{"schema_version":1,"slug":"coordinated","title":"Coordinated","status":"active","members":["coordinated"]}
+JSON
+cat >"$KDIR/_work/_arcs/coordinated/coordination.md" <<'EOF'
 | # | Step | Depends on | Tree | Status | Verdict | Evidence |
 |---|---|---|---|---|---|---|
 | stream-a | Produce A | — | writer | done | full | source-a |

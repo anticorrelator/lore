@@ -322,11 +322,11 @@ if [[ ! -f "$META" ]]; then
 fi
 
 # A coordinated close consumes the reconciliation reader rather than branch
-# state. No close verdict is recorded until every opened writer attempt has
-# proven path removal, Git-registry removal, and branch disposition. A full
-# close additionally requires each stream's latest attempt to be integrated
-# with a full verdict. Missing/unknown lifecycle state fails before any close
-# side effect.
+# state. No close verdict is recorded until every attempt that froze source
+# evidence has proven path removal, Git-registry removal, and branch
+# disposition. A full close additionally requires each stream's latest attempt
+# to have reached its terminal phase. Missing/unknown lifecycle state fails
+# before any close side effect.
 RECONCILIATION_STATE="$KNOWLEDGE_DIR/_coordination/reconciliation/$SLUG/streams.json"
 if [[ -f "$RECONCILIATION_STATE" ]]; then
   set +e
@@ -337,27 +337,57 @@ if [[ -f "$RECONCILIATION_STATE" ]]; then
   [[ $RECONCILIATION_RC -eq 0 ]] \
     || fail "coordinated close cannot validate reconciliation evidence: $RECONCILIATION_STATUS"
   set +e
-  RECONCILIATION_ERROR=$(_LORE_RECONCILIATION_STATUS="$RECONCILIATION_STATUS" python3 - "$VERDICT" <<'PYEOF'
-import json, os, sys
-verdict = sys.argv[1]
+  RECONCILIATION_ERROR=$(_LORE_RECONCILIATION_STATUS="$RECONCILIATION_STATUS" python3 - "$VERDICT" "$SCRIPT_DIR" <<'PYEOF'
+import importlib.util, json, os, sys
+verdict, script_dir = sys.argv[1:3]
+
+# The reconciler is the schema authority and the only definition site for the
+# lifecycle vocabulary; read both from it instead of repeating them here.
+spec = importlib.util.spec_from_file_location(
+    "coordinate_reconcile", os.path.join(script_dir, "coordinate-reconcile.py"))
+reconciler = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(reconciler)
+readable_schema_versions = set(reconciler.SUPPORTED_SCHEMA_VERSIONS)
+
+# An attempt in these phases has frozen no source evidence, so it owns no
+# reconciliation-side cleanup obligation: its worktree, if it has one, is the
+# manager registry's to sweep. A tree-less stream rests at the last of them for
+# good, which is as terminal as it gets.
+PRE_FREEZE_STATUSES = {reconciler.COORD_ALLOCATED, reconciler.COORD_DISPATCHED,
+                       reconciler.COORD_REPORT_ACCEPTED}
+READ_ONLY_TERMINAL_STATUS = reconciler.COORD_REPORT_ACCEPTED
+
 doc = json.loads(os.environ["_LORE_RECONCILIATION_STATUS"])
 errors = []
-if doc.get("schema_version") != 2 or doc.get("valid") is not True:
+if doc.get("schema_version") not in readable_schema_versions or doc.get("valid") is not True:
     errors.append("aggregate schema/hash validation failed")
 for stream in doc.get("streams", []):
     attempts = stream.get("attempts") or []
-    if not attempts and stream.get("tree") == "writer":
+    tree = stream.get("tree")
+    if not attempts and tree == "writer":
         errors.append(f"{stream.get('stream_id')}: writer stream has no attempt evidence")
         continue
     for attempt in attempts:
+        status = attempt.get("status")
+        if status in PRE_FREEZE_STATUSES:
+            continue
         cleanup = attempt.get("cleanup") or {}
         if cleanup.get("verified") is not True:
             errors.append(
                 f"{stream.get('stream_id')}/{attempt.get('attempt_id')}: cleanup is unproven "
-                f"(state={cleanup.get('state')}, source={cleanup.get('record_source')})"
+                f"(status={status if status else 'unrecorded'}, state={cleanup.get('state')}, "
+                f"source={cleanup.get('record_source')})"
             )
-    if verdict == "full" and attempts and attempts[-1].get("terminal_full_cleaned") is not True:
-        errors.append(f"{stream.get('stream_id')}: latest attempt is not integrated/full/cleaned")
+    if verdict == "full" and attempts:
+        latest = attempts[-1]
+        terminal = latest.get("terminal_full_cleaned") is True or (
+            tree == "read-only" and latest.get("status") == READ_ONLY_TERMINAL_STATUS
+        )
+        if not terminal:
+            errors.append(
+                f"{stream.get('stream_id')}: latest attempt has not reached its terminal phase "
+                f"(status={latest.get('status') if latest.get('status') else 'unrecorded'}, tree={tree})"
+            )
 print("; ".join(errors))
 PYEOF
   )

@@ -79,6 +79,20 @@ CEREMONY_OUTCOMES = set(os.environ["CEREMONY_OUTCOME_VOCAB"].split())
 CEREMONY_DISPOSITIONS = set(os.environ["CEREMONY_DISPOSITION_VOCAB"].split())
 
 EXPECTED_VERSION = "1"
+
+# Coordination ledgers live in the arc record, not in the work item — arc-open.sh
+# writes _work/_arcs/<slug>/coordination.md and arc-migrate.sh moved the older
+# item-local ledgers there.
+ARC_ROOT = "_work/_arcs"
+
+# Attempt statuses that release a stream for dispatch. Everything else — the
+# pre-freeze phases, a frozen source, a staged merge — still holds it. The
+# tokens are declared by scripts/coordinate-reconcile.py and quoted here rather
+# than imported: this board stays readable when that reader is broken, and
+# imports would put its failures in the projection's own call path.
+RELEASING_ATTEMPT_STATUS = "integrated"
+READ_ONLY_RELEASING_ATTEMPT_STATUS = "coord_report_accepted"
+
 SOURCE_ORDER = [
     "work-index",
     "session-journal",
@@ -271,6 +285,27 @@ def latest_attempt(stream):
     return attempts[-1] if isinstance(attempts, list) and attempts else None
 
 
+def attempt_liveness(attempt, tree):
+    """Whether the latest attempt still holds its stream against redispatch.
+
+    An attempt written before the lifecycle statuses existed carries no status
+    at all; that reads as holding, because starting a second session over a live
+    one is the direction that cannot be undone.
+    """
+    if attempt is None:
+        return {"attempt_present": False, "attempt_status": None,
+                "attempt_status_recorded": False, "holds_stream": False}
+    status = attempt.get("status")
+    if not isinstance(status, str) or not status:
+        return {"attempt_present": True, "attempt_status": None,
+                "attempt_status_recorded": False, "holds_stream": True}
+    released = status == RELEASING_ATTEMPT_STATUS or (
+        tree == "read-only" and status == READ_ONLY_RELEASING_ATTEMPT_STATUS
+    )
+    return {"attempt_present": True, "attempt_status": status,
+            "attempt_status_recorded": True, "holds_stream": not released}
+
+
 def dependency_cycles(rows):
     graph = {row["stream_id"]: [dep for dep in row["depends_on"]
                                 if dep in {item["stream_id"] for item in rows}]
@@ -294,6 +329,218 @@ def dependency_cycles(rows):
     for node in graph:
         walk(node, [])
     return cyclic
+
+
+def scan_arcs():
+    """Every arc record under _work/_arcs/, plus what the scan actually saw.
+
+    The counters exist so an absent directory, an arc set with no ledger, and a
+    ledger with no dispatchable stream stay three different answers instead of
+    one empty projection.
+    """
+    root = kdir / "_work" / "_arcs"
+    scan = {"locator": ARC_ROOT, "read_status": "absent", "error": None,
+            "arcs_scanned": 0, "arcs_active": 0, "ledgers_read": 0, "streams_read": 0}
+    records = []
+    if not root.is_dir():
+        return records, scan
+    scan["read_status"] = "ok"
+    try:
+        names = sorted(entry.name for entry in root.iterdir() if entry.is_dir())
+    except OSError as exc:
+        scan["read_status"] = "error"
+        scan["error"] = f"arc directory is unreadable: {exc}"
+        return records, scan
+    for name in names:
+        if name.startswith((".", "_")):
+            continue
+        scan["arcs_scanned"] += 1
+        meta_locator = f"{ARC_ROOT}/{name}/_meta.json"
+        meta = None
+        if (root / name / "_meta.json").is_file():
+            try:
+                loaded = json.loads((root / name / "_meta.json").read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    meta = loaded
+            except (OSError, json.JSONDecodeError):
+                meta = None
+        if meta is None:
+            buckets["reconcile"].append(make_row(
+                "reconcile", "work-index", "coordination-arc-record-invalid",
+                f"{name}: arc record lacks readable metadata",
+                {"arc": name, "metadata": None}, meta_locator, name,
+                "reconcile.work.action-evidence-gap",
+            ))
+            continue
+        ledger_path = root / name / "coordination.md"
+        record = {
+            "arc": name,
+            "status": meta.get("status"),
+            "members": [member for member in (meta.get("members") or []) if isinstance(member, str)],
+            "ledger_path": ledger_path,
+            "has_ledger": ledger_path.is_file(),
+        }
+        records.append(record)
+        if record["status"] == "active":
+            scan["arcs_active"] += 1
+    return records, scan
+
+
+def project_arc_coordination(record):
+    """Project one active arc's ledger into the dispatch buckets."""
+    arc = record["arc"]
+    ledger_locator = f"{ARC_ROOT}/{arc}/coordination.md"
+    ledger_rows, ledger_error = parse_ledger(record["ledger_path"])
+    if ledger_error:
+        buckets["reconcile"].append(make_row(
+            "reconcile", "work-index", "coordination-ledger-invalid",
+            f"{arc}: coordination ledger is malformed",
+            {"arc": arc, "error": ledger_error}, ledger_locator,
+            [arc, ledger_error], "reconcile.work.action-evidence-gap",
+        ))
+        return
+    arc_scan["ledgers_read"] += 1
+    arc_scan["streams_read"] += len(ledger_rows)
+    if not ledger_rows:
+        return
+
+    # The lifecycle record is keyed by the same identity as the ledger it
+    # reconciles. An arc without one yields an empty projection, which the
+    # per-attempt absent branches below carry as facts rather than as an error.
+    reconciled, reconciliation_error = reconciliation_projection(arc)
+    if reconciliation_error:
+        buckets["reconcile"].append(make_row(
+            "reconcile", "work-index", "coordination-reconciliation-invalid",
+            f"{arc}: reconciliation evidence failed validation",
+            {"arc": arc, "error": reconciliation_error},
+            f"_coordination/reconciliation/{arc}/streams.json",
+            [arc, reconciliation_error], "reconcile.source.gap",
+        ))
+    ledger_by_id = {row["stream_id"]: row for row in ledger_rows}
+    cyclic_streams = dependency_cycles(ledger_rows)
+    for row in ledger_rows:
+        stream_id = row["stream_id"]
+        locator = f"{ledger_locator}#L{row['line']}"
+        tree = row["tree"]
+        status = row["status"]
+        verdict = row["verdict"]
+        stream_state = reconciled.get(stream_id, {})
+        attempt = latest_attempt(stream_state)
+        liveness = attempt_liveness(attempt, tree)
+        facts = {
+            "arc": arc, "stream_id": stream_id, "depends_on": row["depends_on"],
+            "tree": tree, "status": status, "verdict": verdict,
+            "attempt": attempt, **liveness,
+        }
+        if stream_id in cyclic_streams:
+            buckets["reconcile"].append(make_row(
+                "reconcile", "work-index", "coordination-dependency-cycle",
+                f"{arc}/{stream_id}: dependency edge participates in a cycle",
+                facts, locator, [arc, stream_id, sorted(cyclic_streams)],
+                "reconcile.work.action-evidence-gap",
+            ))
+            continue
+        if tree not in {"writer", "read-only"}:
+            buckets["reconcile"].append(make_row(
+                "reconcile", "work-index", "coordination-tree-invalid",
+                f"{arc}/{stream_id}: unknown Tree value {tree!r}", facts, locator,
+                [arc, stream_id, tree], "reconcile.work.action-evidence-gap",
+            ))
+            continue
+        if attempt and attempt.get("status") == "needs_judgment":
+            buckets["needs_judgment"].append(make_row(
+                "needs_judgment", "work-index", "stream-merge-conflict",
+                f"{arc}/{stream_id}: merge conflict needs composition judgment",
+                facts, locator, [arc, stream_id, attempt.get("attempt_id")],
+                "needs.coordinate.conflict",
+            ))
+            continue
+        if status == "in-flight" or liveness["holds_stream"]:
+            coordination_active.append((arc, stream_id, tree))
+            buckets["waiting"].append(make_row(
+                "waiting", "work-index", "active-stream-attempt",
+                f"{arc}/{stream_id}: active attempt is not redispatched", facts,
+                locator, [arc, stream_id], "waiting.coordinate.active",
+            ))
+            continue
+        if status != "pending":
+            continue
+        unresolved = []
+        judgment = []
+        for dependency in row["depends_on"]:
+            predecessor = ledger_by_id.get(dependency)
+            if predecessor is None:
+                judgment.append({"stream_id": dependency, "reason": "missing ledger row"})
+                continue
+            predecessor_state = reconciled.get(dependency, {})
+            predecessor_attempt = latest_attempt(predecessor_state)
+            cleanup_ok = predecessor.get("tree") == "read-only" or bool(
+                predecessor_attempt and predecessor_attempt.get("terminal_full_cleaned")
+            )
+            if predecessor.get("status") == "done" and predecessor.get("verdict") == "full" and cleanup_ok:
+                continue
+            detail = {
+                "stream_id": dependency,
+                "status": predecessor.get("status"),
+                "verdict": predecessor.get("verdict"),
+                "cleanup_verified": cleanup_ok,
+            }
+            if predecessor.get("status") == "done" or predecessor.get("verdict") in {"partial", "none"}:
+                judgment.append(detail)
+            else:
+                unresolved.append(detail)
+        facts["unresolved_predecessors"] = unresolved
+        facts["judgment_predecessors"] = judgment
+        if judgment:
+            buckets["needs_judgment"].append(make_row(
+                "needs_judgment", "work-index", "predecessor-not-full-cleaned",
+                f"{arc}/{stream_id}: terminal predecessor is not full and cleaned",
+                facts, locator, [arc, stream_id, judgment],
+                "needs.coordinate.predecessor",
+            ))
+        elif unresolved:
+            buckets["waiting"].append(make_row(
+                "waiting", "work-index", "stream-dependency-wait",
+                f"{arc}/{stream_id}: waiting on explicit predecessors", facts,
+                locator, [arc, stream_id, unresolved],
+                "waiting.coordinate.dependency",
+            ))
+        else:
+            coordination_candidates.append((arc, stream_id, tree, facts, locator))
+
+
+def dispatch_reason(scan, ready_total):
+    """Name why nothing is ready, so no-read never reads as read-and-empty."""
+    if ready_total:
+        return None
+    if scan["read_status"] == "error":
+        return scan["error"]
+    if scan["read_status"] == "absent":
+        return f"no arc directory at {ARC_ROOT}; no coordination ledger was read"
+    if not scan["arcs_scanned"]:
+        return f"{ARC_ROOT} holds no arc record"
+    if not scan["arcs_active"]:
+        return "no arc record is active; only an active arc dispatches"
+    if not scan["ledgers_read"]:
+        return "no active arc carries a readable coordination.md ledger"
+    if not scan["streams_read"]:
+        return "the arc ledgers that were read carry no stream rows"
+    return "every stream read is active, waiting on a predecessor, or not pending"
+
+
+# --- arc coordination ledgers ---------------------------------------------
+arc_records, arc_scan = scan_arcs()
+# A work item coordinated by an active arc is projected as that arc's streams;
+# its own task DAG would double-count the same work. The item-local ledger check
+# keeps the same suppression for a store whose ledgers have not been migrated.
+arc_coordinated_items = {
+    member for record in arc_records
+    if record["status"] == "active" and record["has_ledger"]
+    for member in record["members"]
+}
+for record in arc_records:
+    if record["status"] == "active" and record["has_ledger"]:
+        project_arc_coordination(record)
 
 
 # --- work-index -----------------------------------------------------------
@@ -407,120 +654,11 @@ else:
                             [slug, not_before], "waiting.work.not-before",
                         ))
 
-                ledger_path = item_dir / "coordination.md"
-                ledger_rows, ledger_error = parse_ledger(ledger_path) if ledger_path.is_file() else ([], None)
-                has_coordination_ledger = bool(ledger_rows)
-                if ledger_error:
-                    buckets["reconcile"].append(make_row(
-                        "reconcile", "work-index", "coordination-ledger-invalid",
-                        f"{slug}: coordination ledger is malformed",
-                        {"slug": slug, "error": ledger_error}, f"_work/{slug}/coordination.md",
-                        [slug, ledger_error], "reconcile.work.action-evidence-gap",
-                    ))
-                elif has_coordination_ledger:
-                    reconciled, reconciliation_error = reconciliation_projection(slug)
-                    if reconciliation_error:
-                        buckets["reconcile"].append(make_row(
-                            "reconcile", "work-index", "coordination-reconciliation-invalid",
-                            f"{slug}: reconciliation evidence failed validation",
-                            {"slug": slug, "error": reconciliation_error},
-                            f"_coordination/reconciliation/{slug}/streams.json",
-                            [slug, reconciliation_error], "reconcile.source.gap",
-                        ))
-                    ledger_by_id = {row["stream_id"]: row for row in ledger_rows}
-                    cyclic_streams = dependency_cycles(ledger_rows)
-                    for row in ledger_rows:
-                        stream_id = row["stream_id"]
-                        locator = f"_work/{slug}/coordination.md#L{row['line']}"
-                        tree = row["tree"]
-                        status = row["status"]
-                        verdict = row["verdict"]
-                        stream_state = reconciled.get(stream_id, {})
-                        attempt = latest_attempt(stream_state)
-                        facts = {
-                            "slug": slug, "stream_id": stream_id, "depends_on": row["depends_on"],
-                            "tree": tree, "status": status, "verdict": verdict,
-                            "attempt": attempt,
-                        }
-                        if stream_id in cyclic_streams:
-                            buckets["reconcile"].append(make_row(
-                                "reconcile", "work-index", "coordination-dependency-cycle",
-                                f"{slug}/{stream_id}: dependency edge participates in a cycle",
-                                facts, locator, [slug, stream_id, sorted(cyclic_streams)],
-                                "reconcile.work.action-evidence-gap",
-                            ))
-                            continue
-                        if tree not in {"writer", "read-only"}:
-                            buckets["reconcile"].append(make_row(
-                                "reconcile", "work-index", "coordination-tree-invalid",
-                                f"{slug}/{stream_id}: unknown Tree value {tree!r}", facts, locator,
-                                [slug, stream_id, tree], "reconcile.work.action-evidence-gap",
-                            ))
-                            continue
-                        if attempt and attempt.get("status") == "needs_judgment":
-                            buckets["needs_judgment"].append(make_row(
-                                "needs_judgment", "work-index", "stream-merge-conflict",
-                                f"{slug}/{stream_id}: merge conflict needs composition judgment",
-                                facts, locator, [slug, stream_id, attempt.get("attempt_id")],
-                                "needs.coordinate.conflict",
-                            ))
-                            continue
-                        if status == "in-flight" or (attempt and attempt.get("status") == "source_frozen"):
-                            coordination_active.append((slug, stream_id, tree))
-                            buckets["waiting"].append(make_row(
-                                "waiting", "work-index", "active-stream-attempt",
-                                f"{slug}/{stream_id}: active attempt is not redispatched", facts,
-                                locator, [slug, stream_id], "waiting.coordinate.active",
-                            ))
-                            continue
-                        if status != "pending":
-                            continue
-                        unresolved = []
-                        judgment = []
-                        for dependency in row["depends_on"]:
-                            predecessor = ledger_by_id.get(dependency)
-                            if predecessor is None:
-                                judgment.append({"stream_id": dependency, "reason": "missing ledger row"})
-                                continue
-                            predecessor_state = reconciled.get(dependency, {})
-                            predecessor_attempt = latest_attempt(predecessor_state)
-                            cleanup_ok = predecessor.get("tree") == "read-only" or bool(
-                                predecessor_attempt and predecessor_attempt.get("terminal_full_cleaned")
-                            )
-                            if predecessor.get("status") == "done" and predecessor.get("verdict") == "full" and cleanup_ok:
-                                continue
-                            detail = {
-                                "stream_id": dependency,
-                                "status": predecessor.get("status"),
-                                "verdict": predecessor.get("verdict"),
-                                "cleanup_verified": cleanup_ok,
-                            }
-                            if predecessor.get("status") == "done" or predecessor.get("verdict") in {"partial", "none"}:
-                                judgment.append(detail)
-                            else:
-                                unresolved.append(detail)
-                        facts["unresolved_predecessors"] = unresolved
-                        facts["judgment_predecessors"] = judgment
-                        if judgment:
-                            buckets["needs_judgment"].append(make_row(
-                                "needs_judgment", "work-index", "predecessor-not-full-cleaned",
-                                f"{slug}/{stream_id}: terminal predecessor is not full and cleaned",
-                                facts, locator, [slug, stream_id, judgment],
-                                "needs.coordinate.predecessor",
-                            ))
-                        elif unresolved:
-                            buckets["waiting"].append(make_row(
-                                "waiting", "work-index", "stream-dependency-wait",
-                                f"{slug}/{stream_id}: waiting on explicit predecessors", facts,
-                                locator, [slug, stream_id, unresolved],
-                                "waiting.coordinate.dependency",
-                            ))
-                        else:
-                            coordination_candidates.append((slug, stream_id, tree, facts, locator))
+                is_coordinated = slug in arc_coordinated_items or (item_dir / "coordination.md").is_file()
 
                 plan_path = item_dir / "plan.md"
                 tasks_path = item_dir / "tasks.json"
-                if index_row.get("has_plan_doc") is True and not has_coordination_ledger:
+                if index_row.get("has_plan_doc") is True and not is_coordinated:
                     task_rows = None
                     plan_text = ""
                     try:
@@ -604,21 +742,21 @@ else:
 # no priority claim.
 coordination_candidates.sort(key=lambda row: (row[0], row[1]))
 coordination_capacity = max(0, coordination_ceiling - len(coordination_active))
-for index, (slug, stream_id, tree, facts, locator) in enumerate(coordination_candidates):
+for index, (arc, stream_id, tree, facts, locator) in enumerate(coordination_candidates):
     facts = {**facts, "concurrency_ceiling": coordination_ceiling,
              "active_attempts": len(coordination_active),
              "dispatch_slot": index + 1 if index < coordination_capacity else None}
     if index < coordination_capacity:
         buckets["act_now"].append(make_row(
             "act_now", "work-index", "ready-stream",
-            f"{slug}/{stream_id}: ready for eager dispatch", facts, locator,
-            [slug, stream_id], "act.coordinate.ready",
+            f"{arc}/{stream_id}: ready for eager dispatch", facts, locator,
+            [arc, stream_id], "act.coordinate.ready",
         ))
     else:
         buckets["waiting"].append(make_row(
             "waiting", "work-index", "ready-stream-at-capacity",
-            f"{slug}/{stream_id}: ready, waiting for a coordination seat", facts,
-            locator, [slug, stream_id], "waiting.coordinate.capacity",
+            f"{arc}/{stream_id}: ready, waiting for a coordination seat", facts,
+            locator, [arc, stream_id], "waiting.coordinate.capacity",
         ))
 
 
@@ -957,6 +1095,8 @@ projection = {
         "capacity": coordination_capacity,
         "ready_total": len(coordination_candidates),
         "eager_dispatch_count": min(coordination_capacity, len(coordination_candidates)),
+        "ledger_scan": {**arc_scan,
+                        "reason": dispatch_reason(arc_scan, len(coordination_candidates))},
     },
     "buckets": buckets,
 }
@@ -976,6 +1116,21 @@ for source in projection["source_manifest"]:
         f"vocabulary={source['vocabulary_version'] or 'missing'} "
         f"locator={source['locator']}{error}"
     )
+
+dispatch = projection["coordination_dispatch"]
+scan = dispatch["ledger_scan"]
+print("\nCoordination dispatch")
+print(
+    f"  ready={dispatch['ready_total']} active={dispatch['active_attempts']} "
+    f"capacity={dispatch['capacity']} ceiling={dispatch['concurrency_ceiling']}"
+)
+print(
+    f"  ledgers: {scan['read_status']} locator={scan['locator']} "
+    f"arcs={scan['arcs_scanned']} active={scan['arcs_active']} "
+    f"read={scan['ledgers_read']} streams={scan['streams_read']}"
+)
+if scan["reason"]:
+    print(f"  reason: {scan['reason']}")
 
 labels = [
     ("act_now", "Act now"),

@@ -114,6 +114,39 @@ PY
   grep -Fq '`scripts/widget.sh`' "$artifact"
 }
 
+@test "a stream record with no frozen manifest leaves the diff as the account of what shipped" {
+  python3 "$REPO_DIR/scripts/coordinate-reconcile.py" register-attempt \
+    --kdir "$LORE_KNOWLEDGE_DIR" --slug render-item --stream s1 --attempt a1 \
+    --tree read-only --json >/dev/null
+  [ -f "$LORE_KNOWLEDGE_DIR/_coordination/reconciliation/render-item/streams.json" ]
+
+  # Invoked directly: `lore` dispatches through the installed scripts symlink,
+  # which is not necessarily this checkout.
+  run bash -c 'cd "$1" && exec bash "$2" "$3" --diff-base "$4" --json' \
+    _ "$PROJECT" "$REPO_DIR/scripts/conformance-render.sh" render-item "$BASE_SHA"
+  [ "$status" -eq 0 ]
+  summary="$(printf '%s\n' "$output" | tail -n 1)"
+  printf '%s' "$summary" | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+assert payload["counts"]["changed_files"] == 2, payload["counts"]
+assert payload["counts"]["stream_diffs"] == 0, payload["counts"]
+reason = payload["panel_coverage"]["shipped_diff"]["reason"]
+assert "no frozen manifest" in reason, reason
+'
+  grep -Fq "Stream evidence absent:" "$ITEM_DIR/closure-conformance.md"
+  grep -Fq '`scripts/widget.sh`' "$ITEM_DIR/closure-conformance.md"
+  python3 - "$ITEM_DIR/closure-conformance.md" <<'PY'
+import json, re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+payload = json.loads(re.search(r"```json\n(.*?)\n```", text, re.S).group(1))
+assert payload["schema_version"] == 1, payload["schema_version"]
+assert "stream_diffs" not in payload
+assert {row["path"] for row in payload["diff"]["files"]} == {
+    "scripts/helper.md", "scripts/widget.sh"}
+PY
+}
+
 @test "unknown work references preserve resolver exit codes" {
   run bash -c 'cd "$1" && exec "$2" work conformance no-such-item --diff-base HEAD~1' \
     _ "$PROJECT" "$LORE"
