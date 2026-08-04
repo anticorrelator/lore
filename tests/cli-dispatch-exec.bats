@@ -35,7 +35,9 @@ EOF
   for leaf in evolve-prepare evolve-file; do
     cp "$TEST_SCRIPTS/session-wait.sh" "$TEST_SCRIPTS/$leaf.sh"
   done
-  cp "$TEST_SCRIPTS/session-wait.sh" "$TEST_SCRIPTS/coordinate-arm.sh"
+  for leaf in coordinate-arm coordinate-report coordinate-spend; do
+    cp "$TEST_SCRIPTS/session-wait.sh" "$TEST_SCRIPTS/$leaf.sh"
+  done
 }
 
 @test "evolve prepare and file exec at their deepest external dispatch arms" {
@@ -140,6 +142,62 @@ teardown() {
   wait "$ROUTER_PID" || leaf_status=$?
   ROUTER_PID=""
   [[ "$leaf_status" -eq 37 ]]
+}
+
+@test "the new coordinate verbs exec their leaves and do not fall through to unknown-verb" {
+  # disarm routes to the arm script with a leading positional; report and spend
+  # each have their own leaf. All three must hand the process over rather than
+  # stay alive as a wrapper.
+  local verb
+  for verb in disarm report spend; do
+    : > "$PID_FILE"
+    rm -f "$RELEASE_FILE"
+    HOME="$TEST_HOME" PID_FILE="$PID_FILE" RELEASE_FILE="$RELEASE_FILE" \
+      bash "$TEST_ROUTER" coordinate "$verb" &
+    ROUTER_PID=$!
+
+    for _ in $(seq 1 200); do
+      [[ -s "$PID_FILE" ]] && break
+      sleep 0.01
+    done
+    [[ -s "$PID_FILE" ]]
+    [[ "$(<"$PID_FILE")" == "$ROUTER_PID" ]]
+
+    touch "$RELEASE_FILE"
+    local leaf_status=0
+    wait "$ROUTER_PID" || leaf_status=$?
+    ROUTER_PID=""
+    [[ "$leaf_status" -eq 37 ]]
+  done
+}
+
+@test "coordinate --help lists every verb and returns promptly" {
+  # The usage heredoc cites sibling verbs in backticks. Were it unquoted, those
+  # would be command substitutions and printing the help would run a watcher —
+  # which does not fail, it hangs. So this is bounded rather than a plain run.
+  local help_out="$TEST_ROOT/coordinate-help.txt"
+  HOME="$TEST_HOME" bash "$TEST_ROUTER" coordinate --help > "$help_out" 2>&1 &
+  ROUTER_PID=$!
+
+  local waited=0
+  while kill -0 "$ROUTER_PID" 2>/dev/null; do
+    sleep 0.05
+    waited=$((waited + 1))
+    [[ "$waited" -lt 200 ]] || break
+  done
+  if kill -0 "$ROUTER_PID" 2>/dev/null; then
+    kill "$ROUTER_PID" 2>/dev/null || true
+    ROUTER_PID=""
+    false
+  fi
+  wait "$ROUTER_PID" || true
+  ROUTER_PID=""
+
+  local output verb
+  output="$(<"$help_out")"
+  for verb in status reconcile watch arm disarm worktree pin report spend; do
+    [[ "$output" == *"  $verb "* ]]
+  done
 }
 
 @test "session wait execs the leaf before a mid-wait router edit" {

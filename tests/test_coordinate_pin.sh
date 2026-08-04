@@ -127,6 +127,50 @@ OUT=$(bash "$PIN" demo alice-tui --clear --kdir "$KDIR" 2>&1); RC=$?
 assert_eq "conflicting args exit non-zero" "1" "$RC"
 assert_contains "conflict message shown" "$OUT" "takes no <instance>"
 
+echo "== preflight refuses at the call site instead of reporting =="
+KDIR=$(new_store)
+# No pin at all: exit 4, and the message names both corrections.
+OUT=$(bash "$PIN" demo --preflight --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "unpinned preflight exits 4" "4" "$RC"
+assert_contains "unpinned refusal names the project" "$OUT" "'demo'"
+assert_contains "unpinned refusal offers a pin" "$OUT" "lore coordinate pin demo <instance>"
+# A pin with no registry row is dead: exit 3, distinct from unpinned.
+bash "$PIN" demo gone-tui --kdir "$KDIR" >/dev/null
+OUT=$(bash "$PIN" demo --preflight --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "dead pin preflight exits 3" "3" "$RC"
+assert_contains "dead refusal names the instance" "$OUT" "gone-tui"
+assert_contains "dead refusal offers a re-pin" "$OUT" "lore coordinate pin demo <instance>"
+assert_contains "dead refusal offers a clear" "$OUT" "lore coordinate pin demo --clear"
+# A fresh registry row: exit 0, and stdout is the bare instance and nothing else.
+echo '{"name":"gone-tui"}' > "$KDIR/_sessions/instances/gone-tui.json"
+OUT=$(bash "$PIN" demo --preflight --kdir "$KDIR" 2>/dev/null); RC=$?
+assert_eq "live pin preflight exits 0" "0" "$RC"
+assert_eq "live preflight prints only the instance" "gone-tui" "$OUT"
+# An aged row is a refusal again, and the whole mode never writes.
+BEFORE=$(cat "$KDIR/_work/_projects/demo/_coordination.json")
+touch -t 202001010000 "$KDIR/_sessions/instances/gone-tui.json"
+bash "$PIN" demo --preflight --kdir "$KDIR" >/dev/null 2>&1; RC=$?
+assert_eq "aged instance preflight exits 3" "3" "$RC"
+assert_eq "preflight never rewrote the sidecar" "$BEFORE" "$(cat "$KDIR/_work/_projects/demo/_coordination.json")"
+
+echo "== preflight is the only refusing read; the plain read still reports =="
+KDIR=$(new_store)
+bash "$PIN" demo idle-tui --kdir "$KDIR" >/dev/null
+bash "$PIN" demo --kdir "$KDIR" >/dev/null 2>&1
+assert_eq "plain read of a dead pin still exits 0" "0" "$?"
+bash "$PIN" demo --json --kdir "$KDIR" >/dev/null 2>&1
+assert_eq "json read of a dead pin still exits 0" "0" "$?"
+
+echo "== preflight refuses the combinations that would break its stdout contract =="
+KDIR=$(new_store)
+OUT=$(bash "$PIN" demo --preflight --json --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "--preflight with --json exits 1" "1" "$RC"
+assert_contains "mutual exclusion explained" "$OUT" "mutually exclusive"
+OUT=$(bash "$PIN" demo some-tui --preflight --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "--preflight with a set exits 1" "1" "$RC"
+OUT=$(bash "$PIN" demo --clear --preflight --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "--preflight with --clear exits 1" "1" "$RC"
+
 echo "== round-trip property: decode(write(x)) == x over generated inputs =="
 ROUNDTRIP_OK=1
 for i in $(seq 1 40); do

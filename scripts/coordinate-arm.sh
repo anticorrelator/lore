@@ -15,8 +15,9 @@
 #   lore coordinate arm run  (--owner-pid <pid> | --owner-tmux <session>)
 #                        [--tmux-server <name>] [--slug <s>]... [--arc <slug>]...
 #                        [--window <sec>] [--kdir <path>]
+#   lore coordinate disarm --settings <settings.json> [--kdir <path>] [--json]
 #
-# Two surfaces, one script:
+# Three surfaces, one script:
 #
 #   (no subcommand)  The arming surface a coordinator runs. Prints the hook
 #                    entry to install and the exact watcher command line it
@@ -24,6 +25,8 @@
 #                    settings file through the harness hook adapter.
 #   run              The watcher window the hook itself runs. Not a human
 #                    surface — every terminal state it can reach becomes a wake.
+#   disarm           Removes the installed hook entry again. Same script as arm
+#                    so the two cannot disagree about what an armed entry is.
 #
 # Options (arming surface):
 #   --owner-pid <pid>     The long-lived harness process that owns the seat.
@@ -44,7 +47,28 @@
 #   --kdir <path>         Knowledge-store override (test isolation).
 #   --json                Emit one machine-readable object instead of prose.
 #
-# The owner handle is required. A watcher with no provable owner is a runaway
+# Options (disarm surface):
+#   --settings <path>     The settings file to remove the entry from. Required,
+#                         and never defaulted, for the same reason --install is
+#                         not: the file decides which sessions are affected.
+#   --kdir <path>         Knowledge-store override (test isolation).
+#   --json                Emit one machine-readable object instead of prose.
+#
+# Disarming, and what it does not do:
+#   Disarm belongs in the arc-closure sequence. A watcher armed for an arc that
+#   has since closed keeps waking a seat about a board nobody is working, and
+#   nothing else in the closure path switches it off.
+#
+#   What disarm removes is the hook entry, so no future turn boundary starts a
+#   new window. It does not stop a window that is already running: that watcher
+#   is a live process holding a per-scope lock, and it ends at its own deadline
+#   with a final wake. Expect one more wake after disarming — a still-running
+#   watcher is the previous window finishing, not a failed disarm.
+#
+#   A settings file with no armed entry is reported as such and exits 0, so
+#   disarm is safe to run unconditionally at closure without checking first.
+#
+# The owner handle is required (arm and run surfaces only). A watcher with no provable owner is a runaway
 # waiting to happen: it would keep waking a seat that no longer exists, and
 # nothing in the chain would notice. Refusing here puts the failure in front of
 # the person arming it, with a fixable message, instead of leaving a stray
@@ -73,6 +97,8 @@
 #   1  usage error, including a missing owner handle
 #   2  (run) a wake was delivered on stderr — the harness's re-arm signal
 #   3  (run) the owner is provably gone; no wake, no re-arm
+#   0  (disarm) the entry was removed, or there was none to remove — both are
+#      the state the caller asked for, so neither is a refusal
 
 set -euo pipefail
 
@@ -91,6 +117,7 @@ ARCS=()
 WINDOW=3600
 HOOK_TIMEOUT=3900
 INSTALL_PATH=""
+SETTINGS_PATH=""
 KDIR_OVERRIDE=""
 JSON_MODE=0
 
@@ -106,13 +133,13 @@ WINDOW_OVERRUN_GRACE_SECONDS="${LORE_ARM_OVERRUN_GRACE_SECONDS:-60}"
 ERROR_WAKE_BACKOFF_SECONDS="${LORE_ARM_ERROR_BACKOFF_SECONDS:-60}"
 
 usage() {
-  sed -n '2,75p' "$0"
+  sed -n '2,101p' "$0"
 }
 
-if [[ "${1:-}" == "run" ]]; then
-  MODE="run"
-  shift
-fi
+case "${1:-}" in
+  run) MODE="run"; shift ;;
+  disarm) MODE="disarm"; shift ;;
+esac
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -124,12 +151,14 @@ while [[ $# -gt 0 ]]; do
     --window) WINDOW="${2:-}"; shift 2 ;;
     --hook-timeout) HOOK_TIMEOUT="${2:-}"; shift 2 ;;
     --install) INSTALL_PATH="${2:-}"; shift 2 ;;
+    --settings) SETTINGS_PATH="${2:-}"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="${2:-}"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
       echo "Usage: coordinate-arm.sh [run] (--owner-pid <pid> | --owner-tmux <session>) [--slug <s>]... [--arc <slug>]... [--window <sec>] [--hook-timeout <sec>] [--install <path>] [--kdir <path>] [--json]" >&2
+      echo "       coordinate-arm.sh disarm --settings <path> [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -144,6 +173,14 @@ fail() {
 }
 
 # --- Argument validation ------------------------------------------------------
+
+# Disarm takes no owner handle and no window: it removes an entry, it does not
+# start anything. Its own flags are validated below, in cmd_disarm.
+if [[ "$MODE" != "disarm" ]]; then
+
+if [[ -n "$SETTINGS_PATH" ]]; then
+  fail "--settings belongs to 'coordinate disarm'; the arming surface writes with --install <path>"
+fi
 
 if [[ -z "$OWNER_PID" && -z "$OWNER_TMUX" ]]; then
   fail 'arming the standing eye requires a liveness handle: pass --owner-pid or --owner-tmux.
@@ -166,6 +203,8 @@ fi
 if [[ "$HOOK_TIMEOUT" -le "$WINDOW" ]]; then
   fail "--hook-timeout ($HOOK_TIMEOUT s) must be strictly greater than --window ($WINDOW s): the harness kills the hook at its timeout with a signal, and a killed command cannot deliver the wake that re-arms the chain"
 fi
+
+fi  # end arm/run-only validation
 
 if [[ -n "$KDIR_OVERRIDE" ]]; then
   KNOWLEDGE_DIR="$KDIR_OVERRIDE"
@@ -331,6 +370,91 @@ cmd_arm() {
       echo "             Run the watcher command from the seat and re-arm it after each wake."
       ;;
   esac
+}
+
+# --- Disarming surface --------------------------------------------------------
+
+# How many Stop entries the settings file carries. Compared across the adapter
+# call to tell "removed one" from "there was none" — the adapter filters by its
+# own command marker and reports neither, and duplicating that marker here would
+# put the identity of an armed entry in a second place.
+stop_entry_count() {
+  local path="$1"
+  [[ -f "$path" ]] || { echo 0; return 0; }
+  python3 - "$path" <<'PYEOF'
+import json, sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        settings = json.load(f)
+except (OSError, ValueError):
+    print(0)
+    raise SystemExit(0)
+print(len((settings.get("hooks") or {}).get("Stop") or []))
+PYEOF
+}
+
+disarm_report() {
+  local framework="$1" support="$2" removed="$3" note="$4"
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_output "$(jq -n \
+      --arg fw "$framework" \
+      --arg support "$support" \
+      --arg settings "$SETTINGS_PATH" \
+      --arg note "$note" \
+      --argjson removed "$removed" \
+      '{framework: $fw, turn_boundary_rewake: $support, settings: $settings,
+        entries_removed: $removed, note: $note}')"
+  fi
+  echo "[coordinate] $note"
+}
+
+cmd_disarm() {
+  local framework support adapter before after removed
+
+  [[ -n "$SETTINGS_PATH" ]] || fail "disarming requires --settings <path>: the settings file decides which sessions are disarmed, and lore will not guess a scope that could switch off a board somebody else is still working"
+
+  framework="$(resolve_active_framework 2>/dev/null)" || framework=""
+  [[ -n "$framework" ]] || fail "could not resolve the active harness; set LORE_FRAMEWORK for this process"
+
+  support="$(framework_capability turn_boundary_rewake "$framework")"
+  adapter="$LORE_REPO_DIR/adapters/hooks/$framework.sh"
+
+  # On a degraded harness the arming surface refuses --install outright, so no
+  # entry was ever written and there is nothing here to remove. The watcher on
+  # such a harness is seat-run, and it stops when the seat stops re-running it.
+  if [[ "$support" != "full" ]]; then
+    disarm_report "$framework" "$support" 0 \
+      "nothing to disarm: turn_boundary_rewake is '$support' on $framework, so no hook entry was ever installed. A watcher here is seat-run — stop re-running it and it ends at its window deadline."
+    exit 0
+  fi
+
+  [[ -f "$adapter" ]] || fail "turn_boundary_rewake is '$support' on $framework but its hook adapter is missing at $adapter"
+
+  if [[ ! -f "$SETTINGS_PATH" ]]; then
+    disarm_report "$framework" "$support" 0 \
+      "nothing to disarm: no settings file at $SETTINGS_PATH."
+    exit 0
+  fi
+
+  before="$(stop_entry_count "$SETTINGS_PATH")"
+  "$adapter" rewake-uninstall \
+    --framework "$framework" \
+    --settings "$SETTINGS_PATH" || fail "hook adapter could not remove the rewake entry from $SETTINGS_PATH"
+  after="$(stop_entry_count "$SETTINGS_PATH")"
+  removed=$(( before - after ))
+
+  if [[ "$removed" -le 0 ]]; then
+    disarm_report "$framework" "$support" 0 \
+      "nothing to disarm: $SETTINGS_PATH carries no armed watcher entry."
+    exit 0
+  fi
+
+  local noun="entries"
+  [[ "$removed" -eq 1 ]] && noun="entry"
+  disarm_report "$framework" "$support" "$removed" \
+    "disarmed: removed $removed watcher $noun from $SETTINGS_PATH — no further turn boundary will start a window. A window already running holds its own lock and ends at its deadline, so one more wake is expected."
+  exit 0
 }
 
 # --- Watcher window (the polarity shim) ---------------------------------------
@@ -543,4 +667,5 @@ $body"
 case "$MODE" in
   arm) cmd_arm ;;
   run) cmd_run ;;
+  disarm) cmd_disarm ;;
 esac

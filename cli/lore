@@ -654,10 +654,23 @@ Verbs:
             turn. Requires an owner handle (--owner-pid / --owner-tmux); on a
             harness with no async continuation it prints the watcher command
             and says the seat re-arms it
+  disarm    Remove the installed turn-boundary entry again, so no further turn
+            starts a window. Belongs in the arc-closure sequence. Requires
+            --settings <path>; a window already running ends at its own
+            deadline, so expect one last wake
   worktree  Allocate, bind, renew, transition, clean, sweep, or inspect a
             manager-owned stream worktree
   pin       Set, clear, or read a project's sticky dispatch pin (sole writer
-            of the _coordination.json sidecar)
+            of the _coordination.json sidecar). --preflight turns the read into
+            a dispatch gate: the live instance on stdout, exit 3 on a dead pin,
+            exit 4 when none is set
+  report    Land a returned worker report at the path assigned to it. Body on
+            stdin, --report-id <id> decides the filename; validates the
+            schema-v1 identity header, writes once, and refuses an existing
+            path even for a byte-identical replay
+  spend     Roll up session spend from the journal by work item, optionally
+            scoped to an arc's members or bounded by a time window. Reports
+            token basis and orphaned-session cost separately; writes nothing
 
 Options:
   --help, -h    Show this help
@@ -1026,11 +1039,20 @@ cmd_coordinate() {
     arm)
       exec "$SCRIPTS_DIR/coordinate-arm.sh" "$@"
       ;;
+    disarm)
+      exec "$SCRIPTS_DIR/coordinate-arm.sh" disarm "$@"
+      ;;
     worktree)
       exec "$SCRIPTS_DIR/coordinate-worktree.sh" "$@"
       ;;
     pin)
       exec "$SCRIPTS_DIR/coordinate-pin.sh" "$@"
+      ;;
+    report)
+      exec "$SCRIPTS_DIR/coordinate-report.sh" "$@"
+      ;;
+    spend)
+      exec "$SCRIPTS_DIR/coordinate-spend.sh" "$@"
       ;;
     *)
       echo "Error: unknown coordinate verb '$subcmd'" >&2

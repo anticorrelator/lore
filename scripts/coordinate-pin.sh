@@ -10,6 +10,7 @@
 #   lore coordinate pin <project> <instance> [--pinned-by <actor>]   # set pin
 #   lore coordinate pin <project> --clear                            # clear pin
 #   lore coordinate pin <project> [--json]                           # read pin
+#   lore coordinate pin <project> --preflight                        # gate a dispatch
 #
 # Writes go through mktemp + atomic rename. The project home must already exist;
 # a missing home is refused and never created (that is describe-project.sh's job).
@@ -29,14 +30,42 @@ Usage:
   lore coordinate pin <project> <instance> [--pinned-by <actor>]   set the pin
   lore coordinate pin <project> --clear                            clear the pin
   lore coordinate pin <project> [--json]                           read the pin
+  lore coordinate pin <project> --preflight                        gate a dispatch
 
 Options:
   --pinned-by <actor>  Actor recorded on a set (default: $LORE_SESSION_INSTANCE,
                        else $USER). Omitted from the sidecar when empty.
   --clear              Remove the pin key, leaving a valid pin-less sidecar.
   --json               Read form emits a JSON projection instead of text.
+  --preflight          Read form refuses instead of reporting. Not combinable
+                       with --json (see below).
   --kdir <path>        Override the resolved knowledge dir (testing).
   --help, -h           Show this help.
+
+Preflight, and why it refuses:
+  The plain read form answers "what is the pin?", and "nothing" or "dead" are
+  legitimate answers to that question — so it always exits 0. Preflight asks a
+  different question: "is this project safe to dispatch against right now?" It
+  prints nothing but the bare instance name on stdout, so the answer drops
+  straight into a dispatch:
+
+    lore coordinate <verb> --target "$(lore coordinate pin myproject --preflight)"
+
+  A dead or missing pin stops the command substitution there, with a diagnostic
+  on stderr, instead of surfacing fifteen minutes later as a session that was
+  launched at nothing. That is the whole point of the mode: nothing here warns
+  and continues. Because the caller reads stdout, --preflight and --json are
+  mutually exclusive — a JSON object is not an instance name.
+
+  Exit codes (preflight only; every other form of this verb uses 0 and 1):
+    0  the pin is set and its instance is live — the name is on stdout
+    3  a pin is set but its instance is dead (its registry row has not been
+       touched inside the liveness TTL). Re-pin to a live instance, or clear
+       the pin if this project should dispatch unpinned.
+    4  no pin is set for this project. Set one, or dispatch without a target.
+
+  Liveness is derived on every read and never stored, so a pin that was live a
+  minute ago can be exit 3 now. That is the mode working, not a stale record.
 EOF
 }
 
@@ -46,6 +75,7 @@ PINNED_BY=""
 HAS_PINNED_BY=0
 CLEAR=0
 JSON_MODE=0
+PREFLIGHT=0
 KDIR_OVERRIDE=""
 POSITIONAL=()
 
@@ -54,6 +84,7 @@ while [[ $# -gt 0 ]]; do
     --clear) CLEAR=1; shift ;;
     --pinned-by) PINNED_BY="${2:-}"; HAS_PINNED_BY=1; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
+    --preflight) PREFLIGHT=1; shift ;;
     --kdir) KDIR_OVERRIDE="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     --*) echo "[coordinate] Error: unknown option '$1'" >&2; usage; exit 1 ;;
@@ -86,6 +117,17 @@ elif [[ $CLEAR -eq 1 ]]; then
   MODE="clear"
 else
   MODE="read"
+fi
+
+if [[ $PREFLIGHT -eq 1 ]]; then
+  if [[ "$MODE" != "read" ]]; then
+    echo "[coordinate] Error: --preflight reads a pin; it cannot be combined with a set or --clear" >&2
+    exit 1
+  fi
+  if [[ $JSON_MODE -eq 1 ]]; then
+    echo "[coordinate] Error: --preflight and --json are mutually exclusive — preflight's stdout is the bare instance name, for a caller substituting it into a dispatch" >&2
+    exit 1
+  fi
 fi
 
 INPUT_PROJECT="$PROJECT"
@@ -219,6 +261,28 @@ PYEOF
     LIVE=""
     if [[ -n "$PIN_INSTANCE" ]]; then
       if pin_live "$PIN_INSTANCE"; then LIVE="live"; else LIVE="dead"; fi
+    fi
+
+    # Preflight terminates the read here: stdout carries the instance name and
+    # nothing else, and the two refusals name both corrections rather than
+    # leaving the caller to re-read the sidecar to find out which one applies.
+    if [[ $PREFLIGHT -eq 1 ]]; then
+      if [[ -z "$PIN_INSTANCE" ]]; then
+        echo "[coordinate] Error: project '$SLUG' has no pin, so there is no instance to dispatch against." >&2
+        echo "             Pin one deliberately:  lore coordinate pin $SLUG <instance>" >&2
+        echo "             Or dispatch without a target if this project does not need a sticky seat." >&2
+        exit 4
+      fi
+      if [[ "$LIVE" != "live" ]]; then
+        echo "[coordinate] Error: project '$SLUG' is pinned to '$PIN_INSTANCE', which is not live." >&2
+        echo "             Its registry row at $INSTANCES_DIR/$PIN_INSTANCE.json has not been touched" >&2
+        echo "             within the ${LIVENESS_TTL_SECONDS}s liveness window (or is gone entirely)." >&2
+        echo "             Re-pin to a live instance:  lore coordinate pin $SLUG <instance>" >&2
+        echo "             Or clear the pin:           lore coordinate pin $SLUG --clear" >&2
+        exit 3
+      fi
+      printf '%s\n' "$PIN_INSTANCE"
+      exit 0
     fi
 
     if [[ $JSON_MODE -eq 1 ]]; then
