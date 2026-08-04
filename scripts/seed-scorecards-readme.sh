@@ -46,16 +46,35 @@ Every append is validated at write time for:
 - `schema_version` — present and non-null
 - `kind` — enum: `scored | telemetry`
 - `calibration_state` — enum: `calibrated | pre-calibration | unknown`
-- `event_type: ceremony-resolution` — must be `kind: telemetry`,
-  `tier: telemetry`, `calibration_state: unknown`,
-  `outcome: needs-decision`, and `disposition: unhandled`; ceremony,
-  advisor, harness, reason, corrective action, timestamp, and any work-item
-  source-artifact linkage are validated by the same physical appender
+- `event_type: ceremony-resolution` — two correlated shapes, discriminated
+  by `record_type`. A row without the field is an `outcome` row, so rows
+  written before the transition shape existed stay valid and read as
+  unhandled.
+  - `record_type: outcome` (default) — must be `kind: telemetry`,
+    `tier: telemetry`, `calibration_state: unknown`,
+    `outcome: needs-decision`, and `disposition: unhandled`; ceremony,
+    advisor, harness, reason, corrective action, timestamp, and any
+    work-item source-artifact linkage are validated by the same physical
+    appender
+  - `record_type: disposition` — the handled transition for one
+    `outcome_id`: `disposition: handled` plus `action`
+    (`adjudicated | deferred | skipped`), `handled_by`, and `handled_at`.
+    It restates only the outcome's identity (ceremony, advisor, work-item
+    linkage), never its evidence, and the appender rejects any restatement
+    that disagrees with the row it names. The appender also refuses a
+    transition whose `outcome_id` names no outcome row in this store.
 
 `scripts/ceremony-outcome-record.sh` is the thin operation-specific front for
-this event. It constructs the row and delegates the only physical write to
-`scripts/scorecard-append.sh`. Repeated resolution attempts are distinct
+the outcome row. It constructs the row and delegates the only physical write
+to `scripts/scorecard-append.sh`. Repeated resolution attempts are distinct
 point-in-time events and are not deduplicated.
+
+`scripts/ceremony-handle.sh` (surfaced as `lore ceremony handle`) is the front
+for the transition. Unlike resolution attempts, handling is a state change
+rather than an event: repeating the same transition is a no-op, and a
+different action or actor for the same `outcome_id` is refused rather than
+layered on top. The coordination board keys on the latest disposition per
+`outcome_id`, so a handled outcome leaves the needs-judgment bucket.
 
 See `architecture/scorecards/row-schema.md` for the full row schema.
 

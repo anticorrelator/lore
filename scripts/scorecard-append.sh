@@ -46,8 +46,14 @@
 #                         cutover_timestamp + template_id/template_version
 #                         so /retro and /evolve can partition rows into
 #                         pre-cutover / post-cutover windows.
-#   ceremony-resolution   unresolvable registered advisor; conditionally
-#                         validated as needs-decision/unhandled telemetry.
+#   ceremony-resolution   unresolvable registered advisor. Two correlated
+#                         shapes, discriminated by `record_type`: an `outcome`
+#                         row (needs-decision/unhandled, the default when the
+#                         field is absent) and a `disposition` row recording
+#                         the handled transition for one outcome_id. Repeating
+#                         a transition is a no-op; a different action or actor
+#                         for the same outcome_id is refused.
+#                         `lore ceremony handle` is the front for the latter.
 #
 # The row schema (see architecture/scorecards/row-schema.md) also defines:
 #   template_id, template_version, metric, value, sample_size,
@@ -285,34 +291,87 @@ fi
 # Registered ceremony obligations that cannot resolve are operational
 # telemetry, not advisor verdicts. Keep this conditional schema at the sole
 # physical appender so every producer path receives the same validation.
+#
+# A ceremony-resolution row takes one of two shapes, discriminated by
+# `record_type`:
+#   outcome      the needs-decision/unhandled row a ceremony files when the
+#                advisor cannot resolve it
+#   disposition  a correlated handled transition, keyed by outcome_id, that
+#                records who adjudicated the outcome and how
+# Rows written before the transition shape existed carry no record_type and
+# read as `outcome` — absence means unhandled, never a validation error.
 EVENT_TYPE=$(printf '%s' "$ROW" | jq -r '.event_type // ""')
+CEREMONY_RECORD_TYPE=""
 if [[ "$EVENT_TYPE" == "ceremony-resolution" ]]; then
-  CEREMONY_OUTCOME_OK=$(printf '%s' "$ROW" | jq -e '
-    (.kind == "telemetry")
-      and (.tier == "telemetry")
-      and (.calibration_state == "unknown")
-      and (.outcome == "needs-decision")
-      and (.disposition == "unhandled")
-      and ((.ceremony // "") != "")
-      and ((.advisor // "") != "")
-      and ((.harness // "") != "")
-      and ((.reason // "") != "")
-      and ((.corrective_action // "") != "")
-      and ((.timestamp // "") != "")
-      and ((.source_artifact_ids // null) | type == "array")
-      and (
-        if has("work_item") then
-          ((.work_item | type) == "string")
-            and (.work_item != "")
-            and (.source_artifact_ids == [.work_item])
-        else
-          (.source_artifact_ids == [])
-        end
-      )
-  ' >/dev/null 2>&1 && echo "true" || echo "false")
-  if [[ "$CEREMONY_OUTCOME_OK" != "true" ]]; then
-    fail "ceremony-resolution row rejected: kind=telemetry, tier=telemetry, calibration_state=unknown, outcome=needs-decision, disposition=unhandled, ceremony, advisor, harness, reason, corrective_action, timestamp, and work-item-aligned source_artifact_ids are required"
-  fi
+  CEREMONY_RECORD_TYPE=$(printf '%s' "$ROW" | jq -r '.record_type // "outcome"')
+  case "$CEREMONY_RECORD_TYPE" in
+    outcome)
+      CEREMONY_OUTCOME_OK=$(printf '%s' "$ROW" | jq -e '
+        (.kind == "telemetry")
+          and (.tier == "telemetry")
+          and (.calibration_state == "unknown")
+          and (.outcome == "needs-decision")
+          and (.disposition == "unhandled")
+          and ((.ceremony // "") != "")
+          and ((.advisor // "") != "")
+          and ((.harness // "") != "")
+          and ((.reason // "") != "")
+          and ((.corrective_action // "") != "")
+          and ((.timestamp // "") != "")
+          and ((.source_artifact_ids // null) | type == "array")
+          and (
+            if has("work_item") then
+              ((.work_item | type) == "string")
+                and (.work_item != "")
+                and (.source_artifact_ids == [.work_item])
+            else
+              (.source_artifact_ids == [])
+            end
+          )
+      ' >/dev/null 2>&1 && echo "true" || echo "false")
+      if [[ "$CEREMONY_OUTCOME_OK" != "true" ]]; then
+        fail "ceremony-resolution row rejected: kind=telemetry, tier=telemetry, calibration_state=unknown, outcome=needs-decision, disposition=unhandled, ceremony, advisor, harness, reason, corrective_action, timestamp, and work-item-aligned source_artifact_ids are required"
+      fi
+      ;;
+    disposition)
+      # A transition carries the correlation key and the handling facts. It
+      # carries none of the outcome's evidence fields — reason, corrective
+      # action, and harness belong to the row being handled, and restating
+      # them here would create a second, divergent copy of that evidence.
+      CEREMONY_TRANSITION_OK=$(printf '%s' "$ROW" | jq -e '
+        (.kind == "telemetry")
+          and (.tier == "telemetry")
+          and (.calibration_state == "unknown")
+          and (.metric == "ceremony_resolution_outcome")
+          and (.outcome == "needs-decision")
+          and (.disposition == "handled")
+          and ((.outcome_id // "") != "")
+          and ((.action // "") | test("^(adjudicated|deferred|skipped)$"))
+          and ((.handled_by // "") != "")
+          and ((.handled_at // "") != "")
+          and ((.timestamp // "") != "")
+          and ((.ceremony // "") != "")
+          and ((.advisor // "") != "")
+          and ((has("reason") or has("corrective_action") or has("harness")) | not)
+          and ((.source_artifact_ids // null) | type == "array")
+          and (
+            if has("work_item") then
+              ((.work_item | type) == "string")
+                and (.work_item != "")
+                and (.source_artifact_ids == [.work_item])
+            else
+              (.source_artifact_ids == [])
+            end
+          )
+      ' >/dev/null 2>&1 && echo "true" || echo "false")
+      if [[ "$CEREMONY_TRANSITION_OK" != "true" ]]; then
+        fail "ceremony-resolution transition rejected: kind=telemetry, tier=telemetry, calibration_state=unknown, metric=ceremony_resolution_outcome, outcome=needs-decision, disposition=handled, outcome_id, action (adjudicated|deferred|skipped), handled_by, handled_at, timestamp, ceremony, advisor, and work-item-aligned source_artifact_ids are required; reason, corrective_action, and harness belong to the outcome row and must be omitted"
+      fi
+      ;;
+    *)
+      fail "ceremony-resolution row rejected: record_type must be 'outcome' or 'disposition' (got '$CEREMONY_RECORD_TYPE')"
+      ;;
+  esac
 fi
 
 # --- Resolve knowledge directory ---
@@ -328,11 +387,110 @@ fi
 
 SCORECARDS_DIR="$KNOWLEDGE_DIR/_scorecards"
 ROWS_FILE="$SCORECARDS_DIR/rows.jsonl"
+RELPATH="${ROWS_FILE#$KNOWLEDGE_DIR/}"
 mkdir -p "$SCORECARDS_DIR"
 
 # Seed _scorecards/README.md on first use so the invariant travels with the store.
 if [[ ! -f "$SCORECARDS_DIR/README.md" ]]; then
   "$SCRIPT_DIR/seed-scorecards-readme.sh" "$SCORECARDS_DIR" 2>/dev/null || true
+fi
+
+# --- Correlated ceremony transition (sole-writer owned) ---
+# A handled transition must name an outcome row that already exists in this
+# store and must not contradict it. Repeating the same transition is a no-op;
+# a different action or actor for the same outcome_id is a conflict and fails
+# loudly rather than layering two answers on one obligation. This lives at the
+# physical appender so every front inherits the same idempotence.
+CEREMONY_TRANSITION_IDEMPOTENT=0
+if [[ "$CEREMONY_RECORD_TYPE" == "disposition" ]]; then
+  set +e
+  CORRELATION=$(python3 - "$ROWS_FILE" "$ROW" <<'PY'
+import json, os, sys
+
+rows_path, row_json = sys.argv[1:3]
+row = json.loads(row_json)
+outcome_id = row.get("outcome_id")
+
+source = None
+existing = []
+if os.path.isfile(rows_path):
+    with open(rows_path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                candidate = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("event_type") != "ceremony-resolution":
+                continue
+            if candidate.get("outcome_id") != outcome_id:
+                continue
+            if candidate.get("record_type") == "disposition":
+                existing.append(candidate)
+            else:
+                source = candidate
+
+if source is None:
+    print(f"no ceremony-resolution outcome row carries outcome_id '{outcome_id}'")
+    sys.exit(1)
+
+for field in ("ceremony", "advisor", "work_item", "source_artifact_ids"):
+    if row.get(field) != source.get(field):
+        print(
+            f"{field}={row.get(field)!r} contradicts the correlated outcome row "
+            f"({field}={source.get(field)!r})"
+        )
+        sys.exit(1)
+
+if existing:
+    if all(
+        prior.get("action") == row.get("action")
+        and prior.get("handled_by") == row.get("handled_by")
+        for prior in existing
+    ):
+        print("idempotent")
+        sys.exit(0)
+    recorded = "; ".join(
+        f"action={prior.get('action')} handled_by={prior.get('handled_by')}"
+        for prior in existing
+    )
+    print(
+        f"outcome_id '{outcome_id}' already carries a different handled transition "
+        f"({recorded}); requested action={row.get('action')} handled_by={row.get('handled_by')}"
+    )
+    sys.exit(1)
+
+print("append")
+PY
+  )
+  CORRELATION_RC=$?
+  set -e
+  if [[ $CORRELATION_RC -ne 0 ]]; then
+    fail "ceremony-resolution transition rejected: ${CORRELATION:-correlation check failed}"
+  fi
+  if [[ "$CORRELATION" == "idempotent" ]]; then
+    CEREMONY_TRANSITION_IDEMPOTENT=1
+  fi
+fi
+
+if [[ $CEREMONY_TRANSITION_IDEMPOTENT -eq 1 ]]; then
+  TRANSITION_OUTCOME_ID=$(printf '%s' "$ROW" | jq -r '.outcome_id')
+  if [[ $JSON_MODE -eq 1 ]]; then
+    RESULT=$(jq -n \
+      --arg path "$RELPATH" \
+      --arg kind "$KIND" \
+      --arg calibration_state "$CAL_STATE" \
+      --arg tier "$TIER" \
+      --arg outcome_id "$TRANSITION_OUTCOME_ID" \
+      '{path: $path, kind: $kind, tier: $tier, calibration_state: $calibration_state, outcome_id: $outcome_id, appended: false, idempotent: true}')
+    json_output "$RESULT"
+  fi
+  echo "[scorecard] Ceremony transition for outcome $TRANSITION_OUTCOME_ID is already recorded — no row appended"
+  exit 0
 fi
 
 # --- Model provenance stamp ---
@@ -351,8 +509,6 @@ fi
 # --- Compact to one line and append ---
 COMPACT=$(printf '%s' "$ROW" | jq -c '.')
 printf '%s\n' "$COMPACT" >> "$ROWS_FILE"
-
-RELPATH="${ROWS_FILE#$KNOWLEDGE_DIR/}"
 
 if [[ $JSON_MODE -eq 1 ]]; then
   RESULT=$(jq -n \

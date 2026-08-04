@@ -53,6 +53,12 @@ done
 TIMESTAMP=$(timestamp_iso)
 CORRECTIVE_ACTION="Run the advisor on a harness where it is registered before consuming the artifact, or update the ceremony binding."
 
+# Each attempt is its own point-in-time event, so the identity is fresh per
+# call rather than derived from the attempt's content. It exists so the
+# obligation can later be closed by `lore ceremony handle`, which correlates
+# the handled transition to this row by outcome_id.
+OUTCOME_ID=$(python3 -c 'import uuid; print("ceremony-" + uuid.uuid4().hex)')
+
 ROW=$(jq -cn \
   --arg ceremony "$CEREMONY" \
   --arg advisor "$ADVISOR" \
@@ -60,6 +66,7 @@ ROW=$(jq -cn \
   --arg reason "$REASON" \
   --arg work_item "$WORK_ITEM" \
   --arg timestamp "$TIMESTAMP" \
+  --arg outcome_id "$OUTCOME_ID" \
   --arg corrective_action "$CORRECTIVE_ACTION" '
   {
     schema_version: "1",
@@ -76,6 +83,7 @@ ROW=$(jq -cn \
     reason: $reason,
     corrective_action: $corrective_action,
     timestamp: $timestamp,
+    outcome_id: $outcome_id,
     source_artifact_ids: (if $work_item == "" then [] else [$work_item] end)
   }
   + if $work_item == "" then {} else {work_item: $work_item} end

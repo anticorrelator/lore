@@ -302,6 +302,35 @@ assert_eq "valid scorecard evidence survives an unknown-version sibling row" "1"
 assert_eq "valid evolve evidence survives a missing-version sibling row" "1" \
   "$(jq -r '[.buckets.act_now[] | select(.observed_facts.cluster_id?=="cluster-ready")] | length' "$UNKNOWN_JSON")"
 
+# A ceremony obligation leaves the board only when a correlated transition
+# records it as handled. The fixture's pre-transition row carries no
+# outcome_id, so it must stay visible either way — absence is unhandled, not
+# an error.
+CASE="$TEST_DIR/ceremony-handled"
+cp -R "$BASE" "$CASE"
+cat >> "$CASE/_scorecards/rows.jsonl" <<'JSONL'
+{"schema_version":"1","kind":"telemetry","tier":"telemetry","calibration_state":"unknown","event_type":"ceremony-resolution","metric":"ceremony_resolution_outcome","outcome":"needs-decision","disposition":"unhandled","ceremony":"spec-design","advisor":"codex-design-review","harness":"codex","reason":"two-round cap reached","corrective_action":"lead adjudication required","timestamp":"2026-07-09T01:00:00Z","outcome_id":"ceremony-handled-1","source_artifact_ids":[]}
+{"schema_version":"1","kind":"telemetry","tier":"telemetry","calibration_state":"unknown","event_type":"ceremony-resolution","metric":"ceremony_resolution_outcome","outcome":"needs-decision","disposition":"unhandled","ceremony":"spec-design","advisor":"codex-design-review","harness":"codex","reason":"two-round cap reached","corrective_action":"lead adjudication required","timestamp":"2026-07-09T02:00:00Z","outcome_id":"ceremony-open-1","source_artifact_ids":[]}
+JSONL
+CEREMONY_OPEN_JSON="$TEST_DIR/ceremony-open.json"
+bash "$COORDINATE" --kdir "$CASE" --json > "$CEREMONY_OPEN_JSON"
+assert_eq "an unhandled ceremony outcome is on the board" "3" \
+  "$(jq -r '[.buckets.needs_judgment[] | select(.kind=="unhandled-ceremony")] | length' "$CEREMONY_OPEN_JSON")"
+
+cat >> "$CASE/_scorecards/rows.jsonl" <<'JSONL'
+{"schema_version":"1","kind":"telemetry","tier":"telemetry","calibration_state":"unknown","event_type":"ceremony-resolution","metric":"ceremony_resolution_outcome","record_type":"disposition","outcome":"needs-decision","disposition":"handled","outcome_id":"ceremony-handled-1","ceremony":"spec-design","advisor":"codex-design-review","action":"adjudicated","handled_by":"coordinate","handled_at":"2026-07-09T03:00:00Z","timestamp":"2026-07-09T03:00:00Z","source_artifact_ids":[]}
+JSONL
+CEREMONY_HANDLED_JSON="$TEST_DIR/ceremony-handled.json"
+bash "$COORDINATE" --kdir "$CASE" --json > "$CEREMONY_HANDLED_JSON"
+assert_eq "a handled ceremony outcome leaves the board" "0" \
+  "$(jq -r '[.buckets.needs_judgment[] | select(.kind=="unhandled-ceremony" and .observed_facts.outcome_id?=="ceremony-handled-1")] | length' "$CEREMONY_HANDLED_JSON")"
+assert_eq "its uncorrelated siblings stay on the board" "2" \
+  "$(jq -r '[.buckets.needs_judgment[] | select(.kind=="unhandled-ceremony")] | length' "$CEREMONY_HANDLED_JSON")"
+assert_eq "the transition row is not itself an obligation" "0" \
+  "$(jq -r '[.buckets.needs_judgment[] | select(.observed_facts.record_type?=="disposition")] | length' "$CEREMONY_HANDLED_JSON")"
+assert_eq "the handled vocabulary is known, so the source stays ok" "ok" \
+  "$(jq -r '.source_manifest[] | select(.source_id=="scorecard-rows") | .read_status' "$CEREMONY_HANDLED_JSON")"
+
 CASE="$TEST_DIR/malformed-native-readers"
 cp -R "$BASE" "$CASE"
 printf '{torn' >> "$CASE/_sessions/events.jsonl"

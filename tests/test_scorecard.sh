@@ -220,6 +220,92 @@ done
 assert_eq "rejected ceremony rows did not append" "$(wc -l < "$KNOWLEDGE_DIR/_scorecards/rows.jsonl" | tr -d ' ')" "1"
 
 # =============================================
+# Test 4c: correlated ceremony handled transition
+# =============================================
+echo ""
+echo "Test 4c: Ceremony handled transitions are correlated, idempotent, and conflict-refusing"
+setup_store
+
+CEREMONY_OUTCOME_ID="ceremony-fixture-1"
+OUTCOME_ROW=$(jq -c --arg id "$CEREMONY_OUTCOME_ID" '. + {outcome_id: $id}' <<<"$BASE_CEREMONY_ROW")
+bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --row "$OUTCOME_ROW" >/dev/null
+BASE_TRANSITION_ROW=$(jq -cn --arg id "$CEREMONY_OUTCOME_ID" '{
+  schema_version:"1", kind:"telemetry", tier:"telemetry", calibration_state:"unknown",
+  event_type:"ceremony-resolution", metric:"ceremony_resolution_outcome",
+  record_type:"disposition", outcome:"needs-decision", disposition:"handled",
+  outcome_id:$id, ceremony:"spec-post-plan", advisor:"codex-plan-review",
+  action:"adjudicated", handled_by:"coordinate",
+  handled_at:"2026-07-09T13:00:00Z", timestamp:"2026-07-09T13:00:00Z",
+  source_artifact_ids:[]
+}')
+
+bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --row "$BASE_TRANSITION_ROW" >/dev/null
+assert_eq "valid transition appended" "$(wc -l < "$KNOWLEDGE_DIR/_scorecards/rows.jsonl" | tr -d ' ')" "2"
+TRANSITION_BACK=$(tail -n 1 "$KNOWLEDGE_DIR/_scorecards/rows.jsonl")
+assert_eq "transition record type round-tripped" "$(jq -r '.record_type' <<<"$TRANSITION_BACK")" "disposition"
+assert_eq "transition action round-tripped" "$(jq -r '.action' <<<"$TRANSITION_BACK")" "adjudicated"
+assert_eq "transition actor round-tripped" "$(jq -r '.handled_by' <<<"$TRANSITION_BACK")" "coordinate"
+
+# An identical retry is the same claim, not a second one.
+IDEMPOTENT_OUT=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --row "$BASE_TRANSITION_ROW" --json)
+assert_eq "identical retry appends nothing" "$(wc -l < "$KNOWLEDGE_DIR/_scorecards/rows.jsonl" | tr -d ' ')" "2"
+assert_eq "identical retry reports idempotence" "$(jq -r '.idempotent' <<<"$IDEMPOTENT_OUT")" "true"
+assert_eq "identical retry reports no append" "$(jq -r '.appended' <<<"$IDEMPOTENT_OUT")" "false"
+
+# A different answer to the same obligation is a conflict, never a second layer.
+for conflict in '.action = "skipped"' '.handled_by = "someone-else"'; do
+  CONFLICT_ROW=$(jq -c "$conflict" <<<"$BASE_TRANSITION_ROW")
+  EXIT_CODE=0
+  STDERR=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --row "$CONFLICT_ROW" 2>&1) || EXIT_CODE=$?
+  assert_eq "conflicting transition refused: $conflict" "$EXIT_CODE" "1"
+  assert_contains "conflict names the existing transition" "$STDERR" "already carries a different handled transition"
+done
+assert_eq "refused conflicts did not append" "$(wc -l < "$KNOWLEDGE_DIR/_scorecards/rows.jsonl" | tr -d ' ')" "2"
+
+# A transition that names no outcome, or contradicts the one it names, is refused.
+UNCORRELATED_ROW=$(jq -c '.outcome_id = "ceremony-does-not-exist"' <<<"$BASE_TRANSITION_ROW")
+EXIT_CODE=0
+STDERR=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --row "$UNCORRELATED_ROW" 2>&1) || EXIT_CODE=$?
+assert_eq "transition naming no outcome refused" "$EXIT_CODE" "1"
+assert_contains "uncorrelated transition names the missing outcome" "$STDERR" "no ceremony-resolution outcome row carries outcome_id"
+
+CONTRADICTING_ROW=$(jq -c '.advisor = "some-other-advisor"' <<<"$BASE_TRANSITION_ROW")
+EXIT_CODE=0
+STDERR=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --row "$CONTRADICTING_ROW" 2>&1) || EXIT_CODE=$?
+assert_eq "transition contradicting its outcome refused" "$EXIT_CODE" "1"
+assert_contains "contradiction names the disagreeing field" "$STDERR" "contradicts the correlated outcome row"
+
+# Structural validation runs before any correlation lookup.
+for mutation in \
+  '.action = "adjudicate"' \
+  '.disposition = "unhandled"' \
+  '.outcome_id = ""' \
+  'del(.handled_by)' \
+  'del(.handled_at)' \
+  '.reason = "restated evidence"' \
+  '.harness = "codex"'; do
+  BAD_ROW=$(jq -c "$mutation" <<<"$BASE_TRANSITION_ROW")
+  EXIT_CODE=0
+  STDERR=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --row "$BAD_ROW" 2>&1) || EXIT_CODE=$?
+  assert_eq "malformed transition rejected: $mutation" "$EXIT_CODE" "1"
+done
+assert_eq "malformed transitions did not append" "$(wc -l < "$KNOWLEDGE_DIR/_scorecards/rows.jsonl" | tr -d ' ')" "2"
+
+EXIT_CODE=0
+BAD_RECORD_TYPE=$(jq -c '.record_type = "adjudication"' <<<"$BASE_TRANSITION_ROW")
+STDERR=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --row "$BAD_RECORD_TYPE" 2>&1) || EXIT_CODE=$?
+assert_eq "unknown ceremony record_type rejected" "$EXIT_CODE" "1"
+assert_contains "unknown record_type names the enum" "$STDERR" "record_type must be 'outcome' or 'disposition'"
+
+# Rows written before the transition shape existed carry no record_type and
+# must keep validating as outcome rows.
+setup_store
+bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --row "$BASE_CEREMONY_ROW" >/dev/null
+assert_eq "record_type-less ceremony row still appends" "$(wc -l < "$KNOWLEDGE_DIR/_scorecards/rows.jsonl" | tr -d ' ')" "1"
+assert_eq "record_type stays absent rather than defaulted onto the row" \
+  "$(jq -r 'has("record_type")' "$KNOWLEDGE_DIR/_scorecards/rows.jsonl")" "false"
+
+# =============================================
 # Test 5: Reject missing schema_version
 # =============================================
 echo ""
@@ -526,6 +612,13 @@ if grep -qF 'event_type: ceremony-resolution' "$README" && grep -qF 'not dedupli
   PASS=$((PASS + 1))
 else
   echo "  FAIL: README missing ceremony outcome writer contract"
+  FAIL=$((FAIL + 1))
+fi
+if grep -qF 'record_type: disposition' "$README" && grep -qF 'lore ceremony handle' "$README"; then
+  echo "  PASS: README documents the handled-transition contract and its front"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: README missing ceremony handled-transition contract"
   FAIL=$((FAIL + 1))
 fi
 

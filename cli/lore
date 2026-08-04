@@ -110,7 +110,7 @@ Commands:
   analyze      Knowledge store analysis (see: lore analyze --help)
   drift-sweep  Re-enqueue committed entries whose cited code drifted (see: lore drift-sweep --help)
   bootstrap    Bootstrap knowledge store (see: lore bootstrap --help)
-  ceremony     Ceremony config management (see: lore ceremony --help)
+  ceremony     Ceremony bindings and outcome handling (see: lore ceremony --help)
   config       Read framework/role/capability config (see: lore config --help)
   framework    Diagnose the active harness profile (see: lore framework --help)
   harness      Per-harness integration toggle (see: lore harness --help)
@@ -323,7 +323,7 @@ EOF
 
 ceremony_usage() {
   cat >&2 <<EOF
-lore ceremony — ceremony config management
+lore ceremony — ceremony bindings and outcome handling
 
 Usage: lore ceremony [--harness <name>] <subcommand> [args...]
 
@@ -332,10 +332,22 @@ Subcommands:
   add <ceremony> <advisor>    Add an advisor to a ceremony on the target harness
   remove <ceremony> <advisor> Remove an advisor from a ceremony on the target harness
   list                        List ceremony bindings for the target harness
+  handle                      Record how a needs-decision outcome was handled
+
+Handle options:
+  --outcome-id <id>   The outcome_id of the ceremony-resolution row being handled
+  --action <action>   adjudicated | deferred | skipped
+  --handled-by <who>  The seat or actor that handled it
+  --json              Emit the append result as JSON
 
 Options:
   --harness <name>  Target a harness explicitly. Defaults to active harness.
   --help, -h    Show this help
+
+Notes:
+  'handle' clears the outcome from the coordination board's needs-judgment
+  bucket. Repeating the same call is a no-op; a different action or actor for
+  the same outcome is refused.
 EOF
 }
 
@@ -1425,6 +1437,15 @@ cmd_ceremony() {
   case "$subcmd" in
     get|add|remove|list)
       exec "$SCRIPTS_DIR/ceremony-config.sh" ${harness_args[@]+"${harness_args[@]}"} "$subcmd" "$@"
+      ;;
+    handle)
+      # Handling names an outcome that already records the harness it came
+      # from, so a --harness selector here would only be able to disagree.
+      if [[ ${#harness_args[@]} -gt 0 ]]; then
+        echo "Error: 'lore ceremony handle' takes no --harness; the outcome row already carries it" >&2
+        return 1
+      fi
+      exec "$SCRIPTS_DIR/ceremony-handle.sh" "$@"
       ;;
     *)
       echo "Error: unknown ceremony subcommand '$subcmd'" >&2

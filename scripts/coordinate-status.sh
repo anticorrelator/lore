@@ -15,7 +15,7 @@ source "$SCRIPT_DIR/lib.sh"
 SESSION_EVENT_VOCAB="requested claimed spawned needs_input quiescent resumed recovered closed orphaned step_completed terminus_reached harness_turn_ended spawn_failed request_reclaimed request_abandoned request_cancelled close_requested close_failed restore_refused worktree_quarantined send_requested sent send_refused answer_requested answered answer_refused modal_blocked review_flagged review_held review_notified review_released"
 RETRO_ACTION_VOCAB="dispatched deferred skipped"
 CEREMONY_OUTCOME_VOCAB="needs-decision"
-CEREMONY_DISPOSITION_VOCAB="unhandled"
+CEREMONY_DISPOSITION_VOCAB="unhandled handled"
 
 usage() {
   cat >&2 <<'EOF'
@@ -104,7 +104,7 @@ SOURCE_ORDER = [
 RULES = {
     "act.work.pending-unblocked": "An unchecked task whose explicit DAG has no pending blockers is actionable.",
     "act.evolve.unconsumed": "A versioned accepted cluster with consumed_at_run_id=null is staged and unconsumed.",
-    "needs.ceremony.unhandled": "A ceremony-resolution row explicitly says outcome=needs-decision and disposition=unhandled.",
+    "needs.ceremony.unhandled": "A ceremony-resolution outcome row explicitly says outcome=needs-decision and disposition=unhandled, and no later correlated transition row records its outcome_id as handled.",
     "needs.retro.unhandled-due": "The retro native fold reports a DUE outcome without a handling disposition.",
     "needs.session.unmatched-close-failed": "A close_failed event has no later closed event whose links.close_requests explicitly includes the failed request.",
     "waiting.session.live": "A session appears in the native live-instance fold.",
@@ -920,6 +920,21 @@ else:
                 continue
             score_rows.append((lineno, row))
 
+        # A ceremony outcome is handled by a later correlated transition row,
+        # never by rewriting the outcome. Fold the transitions first so the
+        # latest disposition per outcome_id decides; an outcome row that
+        # predates the transition shape has no outcome_id to correlate on and
+        # stays unhandled, which is the same answer as no transition at all.
+        ceremony_latest_disposition = {}
+        for _, row in score_rows:
+            if row.get("event_type") != "ceremony-resolution":
+                continue
+            if row.get("record_type") != "disposition":
+                continue
+            outcome_id = row.get("outcome_id")
+            if outcome_id:
+                ceremony_latest_disposition[outcome_id] = row.get("disposition")
+
         for lineno, row in score_rows:
             locator = f"{score_locator}#L{lineno}"
             if row.get("event_type") == "ceremony-resolution":
@@ -927,7 +942,12 @@ else:
                     score_errors.append(
                         f"line {lineno} unknown ceremony vocabulary outcome={row.get('outcome')!r} disposition={row.get('disposition')!r}"
                     )
-                elif row.get("outcome") == "needs-decision" and row.get("disposition") == "unhandled":
+                elif (
+                    row.get("record_type") != "disposition"
+                    and row.get("outcome") == "needs-decision"
+                    and row.get("disposition") == "unhandled"
+                    and ceremony_latest_disposition.get(row.get("outcome_id")) != "handled"
+                ):
                     identity = row.get("event_id") or [row.get("ceremony"), row.get("advisor"), row.get("timestamp")]
                     buckets["needs_judgment"].append(make_row(
                         "needs_judgment", "scorecard-rows", "unhandled-ceremony",
