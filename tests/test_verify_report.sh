@@ -84,6 +84,12 @@ setup_store() {
     > "$KNOWLEDGE_DIR/$ENTRY_B"
 }
 
+# Fixtures for the fields the writer checks by shape rather than by value.
+SHA_A=$(printf 'before' | shasum -a 256 | cut -d' ' -f1)
+SHA_B=$(printf 'after' | shasum -a 256 | cut -d' ' -f1)
+VERIFICATION_EVENT_ID=$(printf 'consumption-verification|%s|contradicted|researcher|/abs/src/bar.py|5' \
+  "$ENTRY_A" | shasum -a 256 | cut -d' ' -f1)
+
 seed_events() {
   bash "$APPEND" --event consumption-verification --entry-path "$ENTRY_A" \
     --source worker --disposition held \
@@ -94,7 +100,16 @@ seed_events() {
     --source researcher --disposition contradicted \
     --file /abs/src/bar.py --line-range 5 --exact-snippet 'return None' \
     --rationale 'code returns None, entry says it raises' \
+    --resolution corrected --resolution-ref corr-abc123456789 \
     --work-item wi-consumer --observed-at 2026-07-02T11:00:00Z \
+    --kdir "$KNOWLEDGE_DIR" --json > /dev/null
+  bash "$APPEND" --event correction --entry-path "$ENTRY_A" \
+    --source researcher --correction-id corr-abc123456789 \
+    --verification-event-id "$VERIFICATION_EVENT_ID" --claim-id ver-abc123 \
+    --correction-date 2026-07-02 --before-sha256 "$SHA_A" --after-sha256 "$SHA_B" \
+    --before-text 'it raises' --after-text 'it returns None' \
+    --prior-status current --result-status corrected \
+    --work-item wi-consumer --observed-at 2026-07-02T11:05:00Z \
     --kdir "$KNOWLEDGE_DIR" --json > /dev/null
   bash "$APPEND" --event mechanical-check --entry-path "$ENTRY_A" \
     --source drift-sweep --check-name drift-anchor --target 'conventions/entry-a.md#claim' \
@@ -157,6 +172,10 @@ assert_contains "held source attribution" "$OUT" "source=worker"
 assert_contains "held work item" "$OUT" "work-item=wi-consumer"
 assert_contains "held snippet shown" "$OUT" "set -euo pipefail"
 assert_contains "contradicted anchor" "$OUT" "/abs/src/bar.py:5"
+assert_contains "contradicted names its resolution" "$OUT" "resolution: corrected (corr-abc123456789)"
+assert_contains "correction section rendered" "$OUT" "corrections: 1 applied"
+assert_contains "correction shows the prior text" "$OUT" "was: it raises"
+assert_contains "correction shows the new text" "$OUT" "now: it returns None"
 assert_contains "contradiction rationale shown" "$OUT" "code returns None, entry says it raises"
 assert_contains "mechanical check itemized" "$OUT" "fail   drift-anchor target=conventions/entry-a.md#claim run=run-1"
 assert_contains "mechanical check summary" "$OUT" "mechanical checks: 1 fail"
@@ -167,7 +186,7 @@ echo ""
 echo "Test: --entry accepts a .md-less path"
 OUT=$(bash "$REPORT" --entry "conventions/entry-a" --kdir "$KNOWLEDGE_DIR" 2>/dev/null)
 assert_contains "resolves to the entry" "$OUT" "conventions/entry-a.md"
-assert_contains "events found" "$OUT" "4 ledger events"
+assert_contains "events found" "$OUT" "5 ledger events"
 
 echo ""
 echo "Test: --work-item scope resolves entries from capture footers"

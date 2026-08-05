@@ -1,8 +1,21 @@
 #!/usr/bin/env bash
-# apply-correction.sh — Apply a correction, add a new entry, or advance an
-# entry's confidence in the knowledge commons.
+# apply-correction.sh — Apply a correction, mark an entry disputed, add a new
+# entry, or advance an entry's confidence in the knowledge commons.
 #
-# Three modes, keyed on --add-entry / --advance-confidence (default: mutate):
+# Four modes, keyed on --add-entry / --advance-confidence / --dispute
+# (default: mutate):
+#
+# Dispute mode:
+#   apply-correction.sh --dispute
+#                        --entry <path>
+#                        --observation-id <id>
+#                        --verdict-source peer-verification
+#                        --allow-peer-verification
+#                        --evidence "<file:line quote>"
+#                        --dispute-note "<what was observed and why not corrected>"
+#                        [--reported-by <role>] [--work-item <slug>]
+#                        [--date <YYYY-MM-DD>]
+#                        [--dry-run]
 #
 # Advance-confidence mode:
 #   apply-correction.sh --advance-confidence
@@ -22,6 +35,7 @@
 #                        [--check-escalation]
 #                        [--backlink-threshold N]
 #                        [--allow-settlement-verdict]
+#                        [--allow-peer-verification --observation-id <id>]
 #                        [--dry-run]
 #
 # Add-entry mode:
@@ -50,6 +64,13 @@
 #   - Otherwise the H1 is left alone.
 # Authorization (default scorecard path): requires the verdict's
 # calibration_state in rows.jsonl to be 'calibrated'.
+# Authorization with --allow-peer-verification: the authority is the caller's
+# own grounded evidence, which `lore verify` validated before invoking this
+# script; no external run record is consulted. Peer edits stay checkable
+# because --observation-id ties the record written here to the trust-ledger
+# event that reports the same observation, and the next reader can compare the
+# two. Peer mutations set `status: corrected` and are idempotent on
+# --observation-id, so a partially-failed transaction converges on retry.
 # Authorization with --allow-settlement-verdict: validates against
 # _settlement/runs/<verdict-id>.json — verdict.verdict must be 'contradicted'
 # from a calibrated hard-cal gate (correctness-gate-assertion or
@@ -64,6 +85,13 @@
 #   (b) kind=omission with capture-gate-passed marker.
 # The capture-gate / curator markers land on the run record in Phase 2; for
 # now the gate accepts a non-empty 'verified' verdict with matching kind.
+#
+# Dispute mode: records that a reader found the entry contradicted but could
+# not carry the repair. It appends a dated marker to the entry body — so the
+# next reader sees it in ordinary retrieval — plus a disputes[] provenance item
+# in the META block. The entry's status is left alone: a disputed entry is
+# still live, and the marker is the context, not a demotion. Idempotent on
+# --observation-id.
 #
 # Advance-confidence mode: advances an existing entry's confidence from
 # 'unaudited' to 'high' in its META block and appends a confidence_advances[]
@@ -117,8 +145,14 @@ CHECK_ESCALATION=0
 BACKLINK_THRESHOLD=3
 DRY_RUN=0
 ALLOW_SETTLEMENT_VERDICT=0
+ALLOW_PEER_VERIFICATION=0
 ADD_ENTRY_MODE=0
 ADVANCE_CONFIDENCE_MODE=0
+DISPUTE_MODE=0
+OBSERVATION_ID=""
+DISPUTE_NOTE=""
+REPORTED_BY=""
+WORK_ITEM=""
 NEW_TITLE=""
 NEW_BODY=""
 NEW_SCALE=""
@@ -127,6 +161,17 @@ KDIR_OVERRIDE=""
 
 usage() {
   cat >&2 <<EOF
+Dispute mode:
+  apply-correction.sh --dispute --entry <path>
+                       --observation-id <id>
+                       --verdict-source peer-verification
+                       --allow-peer-verification
+                       --evidence "<file:line quote>"
+                       --dispute-note "<what was observed and why not corrected>"
+                       [--reported-by <role>] [--work-item <slug>]
+                       [--date <YYYY-MM-DD>]
+                       [--dry-run]
+
 Advance-confidence mode:
   apply-correction.sh --advance-confidence --entry <path>
                        --verdict-id <id> --verdict-source <source>
@@ -185,6 +230,17 @@ Optional:
                                against _settlement/runs/<verdict-id>.json instead.
                                Used by the autonomous settlement->commons loop.
                                Required in add-entry mode.
+  --allow-peer-verification    Authorize from the caller's own grounded evidence
+                               (the 'lore verify' path). Requires
+                               --verdict-source peer-verification and
+                               --observation-id. Required in --dispute mode.
+  --observation-id ID          Stable id of the observation this record answers;
+                               correction and dispute identities derive from it,
+                               which is what makes a retry converge.
+  --dispute-note TEXT          [dispute mode only] What was observed and why the
+                               reader did not correct the entry
+  --reported-by ROLE           [dispute mode only] Role that observed it
+  --work-item SLUG             [dispute mode only] Work item it was observed in
   --dry-run                    Print what would change without writing
 EOF
 }
@@ -243,6 +299,30 @@ while [[ $# -gt 0 ]]; do
       ALLOW_SETTLEMENT_VERDICT=1
       shift
       ;;
+    --allow-peer-verification)
+      ALLOW_PEER_VERIFICATION=1
+      shift
+      ;;
+    --observation-id)
+      OBSERVATION_ID="$2"
+      shift 2
+      ;;
+    --dispute)
+      DISPUTE_MODE=1
+      shift
+      ;;
+    --dispute-note)
+      DISPUTE_NOTE="$2"
+      shift 2
+      ;;
+    --reported-by)
+      REPORTED_BY="$2"
+      shift 2
+      ;;
+    --work-item)
+      WORK_ITEM="$2"
+      shift 2
+      ;;
     --add-entry)
       ADD_ENTRY_MODE=1
       shift
@@ -280,11 +360,50 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- Validate required args (per mode) ---
-if [[ $((ADD_ENTRY_MODE + ADVANCE_CONFIDENCE_MODE)) -gt 1 ]]; then
-  echo "Error: --add-entry and --advance-confidence are mutually exclusive" >&2
+if [[ $((ADD_ENTRY_MODE + ADVANCE_CONFIDENCE_MODE + DISPUTE_MODE)) -gt 1 ]]; then
+  echo "Error: --add-entry, --advance-confidence, and --dispute are mutually exclusive" >&2
   exit 1
 fi
-if [[ "$ADVANCE_CONFIDENCE_MODE" == "1" ]]; then
+if [[ "$ALLOW_PEER_VERIFICATION" == "1" && "$ALLOW_SETTLEMENT_VERDICT" == "1" ]]; then
+  echo "Error: --allow-peer-verification and --allow-settlement-verdict are mutually exclusive" >&2
+  exit 1
+fi
+if [[ "$ALLOW_PEER_VERIFICATION" == "1" ]]; then
+  if [[ -z "$OBSERVATION_ID" ]]; then
+    echo "Error: --allow-peer-verification requires --observation-id" >&2
+    exit 1
+  fi
+  if [[ "$VERDICT_SOURCE" != "peer-verification" ]]; then
+    echo "Error: --allow-peer-verification requires --verdict-source peer-verification (got '$VERDICT_SOURCE')" >&2
+    exit 1
+  fi
+elif [[ "$VERDICT_SOURCE" == "peer-verification" ]]; then
+  echo "Error: --verdict-source peer-verification requires --allow-peer-verification" >&2
+  exit 1
+fi
+if [[ "$DISPUTE_MODE" == "1" ]]; then
+  if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" || -n "$NEW_TITLE" || -n "$NEW_BODY" || -n "$NEW_SCALE" ]]; then
+    echo "Error: --dispute forbids --superseded-text, --replacement-text, --title, --body, --scale" >&2
+    usage
+    exit 1
+  fi
+  if [[ "$ALLOW_PEER_VERIFICATION" != "1" ]]; then
+    echo "Error: --dispute requires --allow-peer-verification" >&2
+    exit 1
+  fi
+  for flag_name in ENTRY_PATH EVIDENCE DISPUTE_NOTE; do
+    if [[ -z "${!flag_name}" ]]; then
+      case "$flag_name" in
+        ENTRY_PATH)   flag_label="--entry" ;;
+        EVIDENCE)     flag_label="--evidence" ;;
+        DISPUTE_NOTE) flag_label="--dispute-note" ;;
+      esac
+      echo "Error: $flag_label is required in --dispute mode" >&2
+      usage
+      exit 1
+    fi
+  done
+elif [[ "$ADVANCE_CONFIDENCE_MODE" == "1" ]]; then
   # Advance-confidence forbids the text flags (it edits no body, only the META
   # confidence field) and demands the settlement authorization.
   if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" || -n "$NEW_TITLE" || -n "$NEW_BODY" || -n "$NEW_SCALE" ]]; then
@@ -294,8 +413,8 @@ if [[ "$ADVANCE_CONFIDENCE_MODE" == "1" ]]; then
   fi
   for flag_name in ENTRY_PATH VERDICT_ID VERDICT_SOURCE EVIDENCE; do
     if [[ -z "${!flag_name}" ]]; then
-      flag_dashed="${flag_name//_/-}"
-      echo "Error: --${flag_dashed,,} is required in --advance-confidence mode" >&2
+      flag_dashed=$(printf '%s' "$flag_name" | tr '[:upper:]_' '[:lower:]-')
+      echo "Error: --$flag_dashed is required in --advance-confidence mode" >&2
       usage
       exit 1
     fi
@@ -315,12 +434,12 @@ elif [[ "$ADD_ENTRY_MODE" == "1" ]]; then
   fi
   for flag_name in ENTRY_PATH VERDICT_ID VERDICT_SOURCE EVIDENCE NEW_TITLE NEW_BODY NEW_SCALE; do
     if [[ -z "${!flag_name}" ]]; then
-      flag_dashed="${flag_name//_/-}"
+      flag_dashed=$(printf '%s' "$flag_name" | tr '[:upper:]_' '[:lower:]-')
       case "$flag_name" in
         NEW_TITLE) flag_label="--title" ;;
         NEW_BODY)  flag_label="--body" ;;
         NEW_SCALE) flag_label="--scale" ;;
-        *)         flag_label="--${flag_dashed,,}" ;;
+        *)         flag_label="--$flag_dashed" ;;
       esac
       echo "Error: $flag_label is required in --add-entry mode" >&2
       usage
@@ -339,10 +458,14 @@ elif [[ "$ADD_ENTRY_MODE" == "1" ]]; then
       ;;
   esac
 else
+  # A peer correction's provenance id is the observation it answers.
+  if [[ "$ALLOW_PEER_VERIFICATION" == "1" && -z "$VERDICT_ID" ]]; then
+    VERDICT_ID="$OBSERVATION_ID"
+  fi
   for flag_name in ENTRY_PATH VERDICT_ID VERDICT_SOURCE EVIDENCE SUPERSEDED_TEXT REPLACEMENT_TEXT; do
     if [[ -z "${!flag_name}" ]]; then
-      flag_dashed="${flag_name//_/-}"
-      echo "Error: --${flag_dashed,,} is required" >&2
+      flag_dashed=$(printf '%s' "$flag_name" | tr '[:upper:]_' '[:lower:]-')
+      echo "Error: --$flag_dashed is required" >&2
       usage
       exit 1
     fi
@@ -350,9 +473,9 @@ else
 fi
 
 case "$VERDICT_SOURCE" in
-  correctness-gate|reverse-auditor) ;;
+  correctness-gate|reverse-auditor|peer-verification) ;;
   *)
-    echo "Error: --verdict-source must be 'correctness-gate' or 'reverse-auditor', got: '$VERDICT_SOURCE'" >&2
+    echo "Error: --verdict-source must be 'correctness-gate', 'reverse-auditor', or 'peer-verification', got: '$VERDICT_SOURCE'" >&2
     exit 1
     ;;
 esac
@@ -383,7 +506,13 @@ else
   KDIR=$(resolve_knowledge_dir)
 fi
 
-if [[ "$ALLOW_SETTLEMENT_VERDICT" == "1" ]]; then
+if [[ "$ALLOW_PEER_VERIFICATION" == "1" ]]; then
+  # The grounded evidence the caller already validated is the authorization;
+  # there is no run record or scorecard row to consult. What keeps the edit
+  # accountable is provenance, not permission: --observation-id links this
+  # record to the ledger event reporting the same observation.
+  :
+elif [[ "$ALLOW_SETTLEMENT_VERDICT" == "1" ]]; then
   # A settled run may have been compacted out of the hot dir into the archive
   # (immutable terminal state, ≥7 days old). Resolve hot first, then archive.
   RUN_FILE="$KDIR/_settlement/runs/${VERDICT_ID}.json"
@@ -488,6 +617,111 @@ print("unknown")
     echo "Correction rejected: verdict $VERDICT_ID is in calibration_state=$CAL_STATE. Only calibrated verdicts may modify the commons." >&2
     exit 4
   fi
+fi
+
+# --- Dispute mode: mark the entry disputed and exit. ---
+# The marker goes in the body, above the META block, so ordinary retrieval
+# surfaces it to the next reader alongside the claim it qualifies. The entry
+# keeps its status: the claim is in question, not withdrawn.
+if [[ "$DISPUTE_MODE" == "1" ]]; then
+  DISPUTE_ENTRY_PATH="$ENTRY_PATH" \
+  DISPUTE_OBSERVATION_ID="$OBSERVATION_ID" \
+  DISPUTE_EVIDENCE="$EVIDENCE" \
+  DISPUTE_NOTE="$DISPUTE_NOTE" \
+  DISPUTE_REPORTED_BY="$REPORTED_BY" \
+  DISPUTE_WORK_ITEM="$WORK_ITEM" \
+  DISPUTE_DATE="$DATE_TODAY" \
+  DISPUTE_DRY_RUN="$DRY_RUN" \
+  DISPUTE_KDIR="$KDIR" \
+  python3 <<'DISPUTE_PY'
+import hashlib, json, os, re, sys
+
+entry_path  = os.environ["DISPUTE_ENTRY_PATH"]
+observation = os.environ["DISPUTE_OBSERVATION_ID"]
+evidence    = os.environ["DISPUTE_EVIDENCE"]
+note        = os.environ["DISPUTE_NOTE"]
+reported_by = os.environ.get("DISPUTE_REPORTED_BY", "")
+work_item   = os.environ.get("DISPUTE_WORK_ITEM", "")
+date_str    = os.environ["DISPUTE_DATE"]
+dry_run     = os.environ["DISPUTE_DRY_RUN"] == "1"
+kdir        = os.environ["DISPUTE_KDIR"]
+
+try:
+    original = open(entry_path, encoding="utf-8").read()
+except (OSError, UnicodeDecodeError) as e:
+    print(f"Error: cannot read entry: {e}", file=sys.stderr)
+    sys.exit(2)
+
+rel_path = os.path.relpath(entry_path, kdir) if kdir else entry_path
+basis = f"{rel_path}|{observation}"
+dispute_id = "disp-" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:12]
+
+META_RE = re.compile(r"(<!--)(.*?)(-->)", re.DOTALL)
+meta_matches = list(META_RE.finditer(original))
+if not meta_matches:
+    print(f"Error: no HTML META block found in entry: {entry_path!r}", file=sys.stderr)
+    sys.exit(3)
+meta_match = meta_matches[-1]
+meta_inner = meta_match.group(2)
+
+if dispute_id in meta_inner:
+    print(f"[dispute] result=noop dispute_id={dispute_id}")
+    print(f"[dispute] {rel_path}: already marked disputed for this observation")
+    sys.exit(0)
+
+provenance = f"Reported by {reported_by}" if reported_by else "Reported"
+if work_item:
+    provenance += f" while working on {work_item}"
+evidence_sentence = evidence.strip()
+if not evidence_sentence.endswith((".", "!", "?")):
+    evidence_sentence += "."
+marker = (
+    f"**Disputed {date_str}.** {note.strip()}\n\n"
+    f"{provenance}. Evidence: {evidence_sentence} "
+    f"A later agent whose context settles this can correct the entry, "
+    f"confirm the original claim, or remove this marker.\n"
+)
+
+dispute_item = json.dumps({
+    "date": date_str,
+    "dispute_id": dispute_id,
+    "observation_id": observation,
+    "reported_by": reported_by,
+    "work_item": work_item,
+    "evidence": evidence,
+    "note": note,
+}, ensure_ascii=False, separators=(", ", ": "))
+
+DISPUTES_RE = re.compile(r"\|\s*disputes:\s*\[.*?\]", re.DOTALL)
+existing = DISPUTES_RE.search(meta_inner)
+if existing:
+    block = existing.group(0)
+    new_inner = meta_inner.replace(block, block.rstrip("]") + ", " + dispute_item + "]")
+else:
+    new_inner = meta_inner.rstrip() + f" | disputes: [{dispute_item}]"
+
+body_before = original[:meta_match.start()]
+final = (
+    body_before.rstrip("\n")
+    + "\n\n"
+    + marker
+    + "\n"
+    + meta_match.group(1) + new_inner + meta_match.group(3)
+    + original[meta_match.end():]
+)
+
+if dry_run:
+    print(f"[dry-run][dispute] Would mark disputed: {rel_path}")
+    print(f"[dry-run][dispute]   dispute_id: {dispute_id}")
+    print(f"[dry-run][dispute]   marker: {marker.strip()}")
+    sys.exit(0)
+
+with open(entry_path, "w", encoding="utf-8") as f:
+    f.write(final)
+print(f"[dispute] result=applied dispute_id={dispute_id}")
+print(f"[dispute] {rel_path}: dispute marker added ({date_str})")
+DISPUTE_PY
+  exit 0
 fi
 
 # --- Add-entry mode: write the new commons entry and exit. ---
@@ -738,6 +972,8 @@ SUPERSEDED_DERIVED_TITLE=$(derive_entry_title "$SUPERSEDED_TEXT")
 REPLACEMENT_DERIVED_TITLE=$(derive_entry_title "$REPLACEMENT_TEXT")
 
 # --- Delegate to Python for safe multi-line text replacement and META editing ---
+PEER_MODE="$ALLOW_PEER_VERIFICATION" \
+PEER_OBSERVATION_ID="$OBSERVATION_ID" \
 python3 - "$ENTRY_PATH" "$VERDICT_ID" "$VERDICT_SOURCE" "$EVIDENCE" \
           "$SUPERSEDED_TEXT" "$REPLACEMENT_TEXT" "$DATE_TODAY" "$DRY_RUN" "$KDIR" \
           "$ESCALATE" "$ESCALATION_REASONS" \
@@ -746,6 +982,7 @@ import sys
 import os
 import re
 import json
+import hashlib
 
 entry_path        = sys.argv[1]
 verdict_id        = sys.argv[2]
@@ -766,6 +1003,63 @@ try:
 except (OSError, UnicodeDecodeError) as e:
     print(f"Error: cannot read entry: {e}", file=sys.stderr)
     sys.exit(2)
+
+
+def last_meta_inner(text):
+    blocks = list(re.finditer(r'<!--(.*?)-->', text, re.DOTALL))
+    return blocks[-1].group(1) if blocks else ''
+
+
+def read_status(meta_inner):
+    m = re.search(r'\|\s*status:\s*(\S+)', meta_inner)
+    return m.group(1) if m else 'current'
+
+
+def body_digest(text):
+    """sha256 over the entry's prose, excluding the trailing META block.
+
+    The META block is excluded because it will carry this digest: hashing the
+    claim text alone lets before/after attest to what actually changed, and
+    keeps the value computable before the provenance item is written.
+    """
+    blocks = list(re.finditer(r'<!--(.*?)-->', text, re.DOTALL))
+    body = text[:blocks[-1].start()] if blocks else text
+    return hashlib.sha256(body.rstrip().encode('utf-8')).hexdigest()
+
+
+peer           = os.environ.get('PEER_MODE') == '1'
+observation_id = os.environ.get('PEER_OBSERVATION_ID', '')
+rel_for_id     = os.path.relpath(entry_path, kdir) if kdir else entry_path
+correction_id  = None
+prior_status   = read_status(last_meta_inner(original))
+if peer:
+    correction_id = 'corr-' + hashlib.sha256(
+        f'{rel_for_id}|{observation_id}'.encode('utf-8')).hexdigest()[:12]
+
+    # A retry after a partially-failed transaction lands here: the body edit
+    # is already durable, so re-running the replacement would fail on missing
+    # superseded_text. Recognizing our own prior write is what lets the caller
+    # re-drive the whole sequence until every step has happened exactly once.
+    if correction_id in last_meta_inner(original):
+        recorded = {}
+        arr = re.search(r'\|\s*corrections:\s*(\[.*?\])\s*(\||-->|$)',
+                        last_meta_inner(original), re.DOTALL)
+        if arr:
+            try:
+                for item in json.loads(arr.group(1)):
+                    if item.get('correction_id') == correction_id:
+                        recorded = item
+                        break
+            except (json.JSONDecodeError, AttributeError, TypeError):
+                recorded = {}
+        current_sha = body_digest(original)
+        print("[peer-correction] result=noop"
+              f" correction_id={correction_id}"
+              f" before_sha256={recorded.get('before_sha256', current_sha)}"
+              f" after_sha256={recorded.get('after_sha256', current_sha)}"
+              f" prior_status={recorded.get('prior_status', prior_status)}")
+        print(f"[peer-correction] {rel_for_id}: correction already recorded")
+        sys.exit(0)
 
 # --- Step 1: locate and replace superseded_text in body ---
 if superseded not in original:
@@ -832,6 +1126,13 @@ correction_fields = {
 if h1_action == 'regenerate':
     correction_fields["previous_title"] = previous_title
     correction_fields["new_title"] = new_title
+if peer:
+    correction_fields["correction_id"] = correction_id
+    correction_fields["observation_id"] = observation_id
+    correction_fields["before_sha256"] = body_digest(original)
+    correction_fields["after_sha256"] = body_digest(updated_body)
+    correction_fields["prior_status"] = prior_status
+    correction_fields["result_status"] = "corrected"
 correction_item = json.dumps(correction_fields, ensure_ascii=False, separators=(', ', ': '))
 
 # --- Step 3: locate the META block (last <!-- ... --> in the file) ---
@@ -861,6 +1162,14 @@ if existing_corrections:
         new_inner = meta_inner + f' | corrections: [{correction_item}]'
 else:
     new_inner = meta_inner.rstrip() + f' | corrections: [{correction_item}]'
+
+# A repaired entry stays in the default retrieval set — `corrected` marks that
+# the claim was rewritten against code, not that it was retired.
+if peer:
+    if re.search(r'\|\s*status:', new_inner):
+        new_inner = re.sub(r'(\|\s*status:\s*)\S+', r'\1corrected', new_inner, count=1)
+    else:
+        new_inner = new_inner.rstrip() + ' | status: corrected'
 
 # Flag a hand-authored title whose lead insight was just replaced. The flag is
 # durable and single-shot: an already-flagged entry keeps its original date.
@@ -947,6 +1256,12 @@ with open(entry_path, 'w', encoding='utf-8') as f:
     f.write(final)
 
 rel_path = os.path.relpath(entry_path, kdir) if kdir else entry_path
+if peer:
+    print("[peer-correction] result=applied"
+          f" correction_id={correction_id}"
+          f" before_sha256={correction_fields['before_sha256']}"
+          f" after_sha256={correction_fields['after_sha256']}"
+          f" prior_status={prior_status}")
 print(f"[correction] Applied to {rel_path}")
 print(f"  verdict_id={verdict_id}  verdict_source={verdict_source}")
 print(f"  evidence={evidence!r}")

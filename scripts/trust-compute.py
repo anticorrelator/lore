@@ -14,6 +14,11 @@ The fold:
                   + 1.0*adj_confirmed - 2.0*adj_rejected
     trust(entry)  = signal / (1 + |signal|)        # open interval (-1, 1)
 
+`correction` rows carry no weight. The contradiction that triggered a repair
+is already counted, and scoring the repair again would let one observation
+move an entry's trust twice. They are counted for legibility only, so a
+reader can see how many of an entry's contradictions were repaired.
+
 Negative outcomes weigh double their positive counterparts: acting on
 falsified knowledge costs more than re-verifying held knowledge. Cheap
 confirmations (a repo-state verdict without a code anchor) weigh half a
@@ -48,6 +53,7 @@ LEDGER_RELPATH = os.path.join("_trust", "trust-events.jsonl")
 
 EVENT_KINDS = (
     "consumption-verification",
+    "correction",
     "mechanical-check",
     "adjudication",
     "provenance-migration",
@@ -67,6 +73,7 @@ WEIGHT_ADJ_REJECTED = -2.0
 _COUNT_KEYS = (
     "held",
     "contradicted",
+    "corrections",
     "confirm_held",
     "confirm_contradicted",
     "check_pass",
@@ -98,6 +105,12 @@ def compute_event_id(row: dict) -> str | None:
                 row["source"],
                 payload["file"],
                 payload["line_range"],
+            ])
+        elif event == "correction":
+            basis = "|".join([
+                event,
+                row["entry_path"],
+                payload["verification_event_id"],
             ])
         elif event == "mechanical-check":
             basis = "|".join([
@@ -280,6 +293,9 @@ def fold_rows(rows: list[dict]) -> tuple[dict[str, dict], dict[str, str], list[s
                 entry_counts["contradicted"] += 1
             else:
                 warnings.append(f"unknown disposition {disposition!r}; row ignored")
+        elif event == "correction":
+            # Counted, never weighted — see the module docstring.
+            entry_counts["corrections"] += 1
         elif event == "mechanical-check":
             result = payload.get("result")
             if result == "pass":
@@ -354,6 +370,7 @@ def _format_entry(key: str, summary: dict) -> str:
     c = summary["counts"]
     return (
         f"{summary['score']:+.3f}  held={c['held']} contradicted={c['contradicted']} "
+        f"corrections={c['corrections']} "
         f"confirm=+{c['confirm_held']}/-{c['confirm_contradicted']} "
         f"checks=+{c['check_pass']}/-{c['check_fail']} "
         f"adj=+{c['adj_confirmed']}/-{c['adj_rejected']}  {key}"

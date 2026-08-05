@@ -156,10 +156,13 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
    call pattern. Do not batch Tier 2 rows into the completion report — they
    go into `task-claims.jsonl` at emission time; the report only references
    their `claim_id` values.
-7. **Report consumption verification as you go.** Each time you check a
-   `## Prior Knowledge` entry against the actual code — it survives contact
-   (the code confirms its claim) or it breaks (the code falsifies it) —
-   record the outcome:
+7. **Report consumption verification as you go, and resolve what you
+   contradict.** Each time you check a `## Prior Knowledge` entry against the
+   actual code — it survives contact (the code confirms its claim) or it
+   breaks (the code falsifies it) — record the outcome. An entry you find
+   wrong is yours to settle in the same session: repair it, or leave a dated
+   marker on it saying what you saw and why you stopped short. Both land
+   through the same call.
 
    ```bash
    # Entry held:
@@ -167,16 +170,70 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
      --source worker --protocol-slot implement-step-3 \
      --file <absolute-path> --line-range <N-M> --exact-snippet "<verbatim code>"
 
-   # Entry contradicted — also lands the judge-facing row in the work item's
-   # consumption-contradictions.jsonl:
-   lore verify <knowledge-path> contradicted \
+   # Entry contradicted, and you can repair it — the wrong span is replaced in
+   # place, the entry gains a dated correction note and `status: corrected`,
+   # and the ledger records both the falsification and the repair:
+   lore verify <knowledge-path> contradicted --resolution corrected \
      --source worker --protocol-slot implement-step-3 \
      --file <absolute-path> --line-range <N-M> --exact-snippet "<verbatim code>" \
      --work-item <slug> \
      --rationale "<why the code falsifies the entry>" \
      --claim-text "<the entry claim being contradicted>" \
-     --falsifier "<what evidence would disprove>"
+     --falsifier "<what evidence would disprove>" \
+     --superseded-text "<the exact wrong span in the entry>" \
+     --replacement-text "<what it should say instead>" \
+     --confidence <high|medium|low> \
+     --evidence-scope <single-callsite|multi-callsite|systemic> \
+     --claim-scale <implementation|subsystem|architecture|abstract>
+
+   # Entry contradicted, and repair is not yours to make — a dated marker
+   # lands on the entry recording what you observed and why you left it:
+   lore verify <knowledge-path> contradicted --resolution disputed \
+     --source worker --protocol-slot implement-step-3 \
+     --file <absolute-path> --line-range <N-M> --exact-snippet "<verbatim code>" \
+     --work-item <slug> \
+     --rationale "<why the code falsifies the entry>" \
+     --claim-text "<the entry claim being contradicted>" \
+     --falsifier "<what evidence would disprove>" \
+     --dispute-note "<what you observed and why you did not correct>"
    ```
+
+   Every contradicted call carries `--resolution`, and exactly one of
+   `corrected` or `disputed` is accepted. Filing the contradiction and moving
+   on is not one of the outcomes — a call without a resolution exits 1 and
+   writes nothing at all. Each branch's own flags are rejected on the other,
+   so the two forms cannot be mixed; `lore verify --help` carries the full
+   set.
+
+   **Picking the branch** turns on two questions, and only these two:
+
+   - *How confident are you in the replacement text?* `--confidence high`
+     is what the corrected branch takes; `medium` or `low` routes to the
+     marker. The entry is not a verdict you are overturning — it is a claim,
+     and so is your repair. A corrected entry stays live and keeps surfacing
+     in retrieval, carrying its correction history with it.
+   - *Does your evidence reach as far as the claim does?* One callsite
+     supports a claim about that callsite. It does not support rewriting a
+     claim pitched at a whole subsystem — the entry may be right everywhere
+     you did not look. Pass what you read (`--evidence-scope`) and the
+     altitude of what the entry asserts (`--claim-scale`, the same rubric
+     `--scale-set` and an entry's `scale:` field use).
+     `single-callsite` evidence against a claim above `implementation` scale
+     is the one combination the corrected branch refuses: it exits 3 with
+     `[verify] disputed-required: <reason>`, writes nothing, and the marker
+     is the resolution to leave instead. Exit 3 is distinct from ordinary
+     usage errors so you can branch on it. Single-callsite evidence against
+     an `implementation`-scale claim is exactly the case to correct.
+
+   Nothing else gates the fork. No entry is too highly trusted or too widely
+   cited to be corrected by the agent reading it against code — a repair is a
+   claim the next agent will check, which is exactly why you are the right one
+   to make it. Verification here is mutual and in-band: no one is reviewing
+   your resolution out of band, and there is no adjudicator waiting
+   downstream. The marker is a real resolution and not the failure branch —
+   dated, reasoned, visible in ordinary retrieval, and open to any later agent
+   with wider context to correct, confirm, or clear. Reaching for it means the
+   question needs evidence you don't have, not that you fell short.
 
    Recognition patterns: you opened the file an entry describes and confirmed
    its claim before building on it; you dropped a prefetch entry as wrong
@@ -186,11 +243,12 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
    Grounded-or-nothing applies to both dispositions (file + line-range +
    exact-snippet required), so report only entries you actually anchored
    against code, not entries you merely read. Re-running an identical
-   invocation is a silent no-op. Run these from the source repo's root, not
-   from inside the knowledge store — `lore` resolves the store and records
-   branch provenance from the current directory. Ledger rows carry
-   `source: worker` — that is how the system measures whether this step
-   moves behavior.
+   invocation is a silent no-op, and a re-run after a partial failure heals
+   the missing piece rather than duplicating what landed. Run these from the
+   source repo's root, not from inside the knowledge store — `lore` resolves
+   the store and records branch provenance from the current directory. Ledger
+   rows carry `source: worker` — that is how the system measures whether this
+   step moves behavior.
 8. Look for and run relevant tests:
    - Check for package.json scripts, Makefile targets, pytest, etc.
    - Run tests if found; skip silently if no test command exists

@@ -98,7 +98,7 @@ Exploration is read-only: no worktree lease, no messaging, self-contained briefs
 
 2. **Group by theme:** subsystem-internal map → `domains/<area>` or `architecture/`; cross-subsystem contracts → `architecture/` or `architectural-models/`; project-wide conventions → `cross-cutting-conventions/`.
 
-3. **Flag contradictions** between explorer reports; resolve by reading the file at issue before filing. When the check lands on an existing knowledge entry, record it: `lore verify <entry-path> held|contradicted --source researcher` with the grounding file, line range, and exact snippet.
+3. **Flag contradictions** between explorer reports; resolve by reading the file at issue before filing. When the check lands on an existing knowledge entry, record it: `lore verify <entry-path> held|contradicted --source researcher` with the grounding file, line range, and exact snippet. A contradicted outcome resolves in the same call via `--resolution corrected|disputed` — the fork is spelled out in Step 7.
 
 4. **Draft entries** — bootstrap drafts eagerly; Step 6 prunes.
 
@@ -136,8 +136,9 @@ Exploration is read-only: no worktree lease, no messaging, self-contained briefs
 
 Verify the **map matches the territory** — sample architectural claims, not file/line claims.
 
-1. Pick 3 random entries from the set just filed. Read their related files; verify the claimed boundaries, contracts, and shapes hold. Record each outcome with `lore verify <entry-path> held|contradicted --source researcher` plus the grounding file, line range, and exact snippet.
-2. Report held/contradicted per sampled entry; offer to correct or remove contradicted ones. Advisory — does not block completion.
+1. Pick 3 random entries from the set just filed. Read their related files; verify the claimed boundaries, contracts, and shapes hold. Record each outcome with `lore verify <entry-path> held --source researcher` plus the grounding file, line range, and exact snippet — or, when a claim breaks, `contradicted` with the same grounding and its resolution (next step).
+2. A contradicted outcome carries its resolution in the same call — the front rejects a contradicted report without one. `--resolution corrected` repairs the entry in place: it stays live with a dated correction and `status: corrected`, and the repair is itself a claim the next reader checks. `--resolution disputed` leaves a dated, reasoned marker on the entry instead — take this branch when your confidence is low or your evidence sits below the claim's altitude (single-callsite evidence must not narrow a scope-exceeding claim; the front refuses such a correction with `disputed-required`). With the entry just filed and its sources open in front of you, `corrected` is almost always the honest branch.
+3. Report held/corrected/disputed per sampled entry. Advisory — does not block completion.
 
 ### Step 8: Cleanup
 

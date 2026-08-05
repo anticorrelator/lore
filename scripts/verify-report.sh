@@ -257,6 +257,7 @@ def project_entry(path):
     checks = [r for r in rows if r["event"] == "mechanical-check"]
     adjudications = [r for r in rows if r["event"] == "adjudication"]
     migrations = [r for r in rows if r["event"] == "provenance-migration"]
+    corrections = [r for r in rows if r["event"] == "correction"]
 
     def pl(row):
         payload = row.get("payload")
@@ -276,9 +277,30 @@ def project_entry(path):
                 "source": r.get("source"),
                 "work_item": pl(r).get("work_item"),
                 "rationale": pl(r).get("rationale"),
+                "resolution": pl(r).get("resolution"),
+                "resolution_ref": pl(r).get("resolution_ref"),
                 "observed_at": r.get("observed_at"),
                 "event_id": r.get("event_id"),
             } for r in verifications],
+        },
+        "corrections": {
+            "count": len(corrections),
+            "events": [{
+                "correction_id": pl(r).get("correction_id"),
+                "verification_event_id": pl(r).get("verification_event_id"),
+                "claim_id": pl(r).get("claim_id"),
+                "date": pl(r).get("date"),
+                "prior_status": pl(r).get("prior_status"),
+                "result_status": pl(r).get("result_status"),
+                "before_sha256": pl(r).get("before_sha256"),
+                "after_sha256": pl(r).get("after_sha256"),
+                "before_text": pl(r).get("before_text"),
+                "after_text": pl(r).get("after_text"),
+                "work_item": pl(r).get("work_item"),
+                "source": r.get("source"),
+                "observed_at": r.get("observed_at"),
+                "event_id": r.get("event_id"),
+            } for r in corrections],
         },
         "mechanical_checks": {
             "by_result": {result: sum(1 for r in checks if pl(r).get("result") == result)
@@ -369,6 +391,18 @@ for entry in report["entries"]:
                 print(f"                 snippet: {snippet_line(ev['exact_snippet'])}")
             if ev["disposition"] == "contradicted" and ev["rationale"]:
                 print(f"                 rationale: {snippet_line(ev['rationale'])}")
+            if ev["resolution"]:
+                print(f"                 resolution: {ev['resolution']} ({ev['resolution_ref']})")
+    corr = entry["corrections"]
+    if corr["events"]:
+        print(f"  corrections: {corr['count']} applied")
+        for ev in corr["events"]:
+            print(f"    {ev['correction_id']} {ev['date']} "
+                  f"{ev['prior_status']} -> {ev['result_status']}  source={ev['source']}")
+            if ev["before_text"]:
+                print(f"                 was: {snippet_line(ev['before_text'])}")
+            if ev["after_text"]:
+                print(f"                 now: {snippet_line(ev['after_text'])}")
     checks = entry["mechanical_checks"]
     if checks["events"]:
         summary = ", ".join(f"{count} {result}"

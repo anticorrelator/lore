@@ -149,5 +149,58 @@ assert_eq "second replay has zero pending matches" "$(jq -r .matched <<<"$SECOND
 SCORE_HASH_AFTER=$(shasum -a 256 "$MKDIR/_scorecards/rows.jsonl" | awk '{print $1}')
 assert_eq "replay never appends scorecard rows" "$SCORE_HASH_AFTER" "$SCORE_HASH_BEFORE"
 
+echo "=== legacy-cohort closure ==="
+# The cohort migration closes rows through the sanctioned mutator without a
+# settlement run behind them. Two things must hold: the closed row leaves the
+# enqueue-eligible set, and the absence of settled_by_run_id stays readable —
+# it is how the cohort migration recognizes rows it already owns on a re-run.
+CDIR="$TEST_DIR/cohort"
+mkdir -p "$CDIR/_settlement/runs" "$CDIR/_scorecards" "$CDIR/conventions"
+touch "$CDIR/_scorecards/rows.jsonl"
+COHORT_SIDECAR="$CDIR/_work/cohort-item/consumption-contradictions.jsonl"
+write_row "$COHORT_SIDECAR" cohort-item ctr-cohort pending
+
+bash "$REPO_DIR/scripts/consumption-contradiction-update-status.sh" \
+  --work-item cohort-item --contradiction-id ctr-cohort \
+  --status contradicted --settled-at "2026-08-05T00:00:00Z" \
+  --kdir "$CDIR" >/dev/null
+assert_eq "cohort closure reaches a terminal status" "$(jq -r .status "$COHORT_SIDECAR")" "contradicted"
+assert_eq "cohort closure records no settlement run" "$(jq -r 'has("settled_by_run_id")' "$COHORT_SIDECAR")" "false"
+assert_eq "cohort closure records when it happened" "$(jq -r .settled_at "$COHORT_SIDECAR")" "2026-08-05T00:00:00Z"
+
+ELIGIBLE=$(python3 - "$PROCESSOR" "$CDIR" <<'PY'
+import importlib.util, json, sys
+from pathlib import Path
+
+processor, kdir = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("settlement_processor", processor)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+settlement = module.Settlement(Path(kdir))
+row = json.loads(Path(kdir, "_work/cohort-item/consumption-contradictions.jsonl").read_text())
+print("eligible" if row.get("status") == "pending" else "not-eligible")
+PY
+)
+assert_eq "a closed cohort row is not enqueue-eligible" "$ELIGIBLE" "not-eligible"
+
+# Re-closing to the same terminal stays a no-op; the opposite terminal is refused.
+bash "$REPO_DIR/scripts/consumption-contradiction-update-status.sh" \
+  --work-item cohort-item --contradiction-id ctr-cohort \
+  --status contradicted --settled-at "2026-08-06T00:00:00Z" \
+  --kdir "$CDIR" >/dev/null
+assert_eq "re-closing preserves the original settled_at" "$(jq -r .settled_at "$COHORT_SIDECAR")" "2026-08-05T00:00:00Z"
+
+set +e
+bash "$REPO_DIR/scripts/consumption-contradiction-update-status.sh" \
+  --work-item cohort-item --contradiction-id ctr-cohort \
+  --status verified --settled-at "2026-08-06T00:00:00Z" \
+  --kdir "$CDIR" >/dev/null 2>&1
+CONFLICT_RC=$?
+set -e
+assert_eq "flipping to the opposite terminal is refused" "$CONFLICT_RC" "1"
+assert_eq "refused transition leaves the row alone" "$(jq -r .status "$COHORT_SIDECAR")" "contradicted"
+
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

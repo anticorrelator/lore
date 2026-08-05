@@ -52,9 +52,13 @@ SOURCE_SKIP_DIRS = {"__pycache__", ".git", "node_modules", ".venv", "venv", ".to
 # Scale registry path (same directory as this script)
 _SCALE_REGISTRY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scale-registry.json")
 
-# Valid status values; entries without a status field are treated as "current"
-VALID_STATUS_VALUES = {"current", "superseded", "historical"}
-DEFAULT_STATUS_FILTER = ("current",)
+# Valid status values; entries without a status field are treated as "current".
+# `corrected` is in the default set: a corrected entry was rewritten to match
+# the code, which makes it more reliable than an unexamined one, not less.
+# `superseded`, `historical`, and `resolved` mark entries kept for the record
+# rather than for use, so reaching them takes an explicit include_status.
+VALID_STATUS_VALUES = {"current", "corrected", "superseded", "historical", "resolved"}
+DEFAULT_STATUS_FILTER = ("current", "corrected")
 
 
 def _load_scale_ordinals() -> dict[str, int]:
@@ -1251,7 +1255,7 @@ class Searcher:
             scale_set: Set-membership scale filter. Entries pass when their parsed scale set
                        intersects this set. None = no scale filter. Entries with
                        category=preferences or scale=abstract bypass this filter.
-            include_status: Status values to include (e.g. ["current", "superseded"]). None = only "current".
+            include_status: Status values to include (e.g. ["current", "superseded"]). None = DEFAULT_STATUS_FILTER.
                             Entries without a status field are treated as "current".
             and_mode: When True, multi-token queries are AND-joined (legacy behavior).
                       When False (default), multi-token queries are OR-joined (D2 default).
@@ -1297,12 +1301,12 @@ class Searcher:
             {s.strip().lower() for s in scale_set if s and s.strip()} if scale_set else set()
         )
 
-        # Resolve status filter: default is current-only; None include_status means same default
+        # Resolve status filter: None include_status means the default set
         effective_statuses: set[str] | None = None
         if include_status is not None:
             effective_statuses = set(include_status)
         else:
-            effective_statuses = {"current"}
+            effective_statuses = set(DEFAULT_STATUS_FILTER)
 
         params: list = [prepared] + filter_params + [limit * 3]
 
@@ -1452,7 +1456,7 @@ class Searcher:
             - category fixed to 'preferences'
             - basename == 'README.md' is dropped (D3)
             - score floor of -0.5 (D2)
-            - Searcher.include_status (default: current only)
+            - Searcher.include_status (default: DEFAULT_STATUS_FILTER)
 
         Filters NOT applied:
             - scale_set
@@ -1463,7 +1467,7 @@ class Searcher:
         Args:
             query: User query string (FTS5 OR-mode by default).
             caller: Identifier logged to retrieval log (e.g. "lead", "worker").
-            include_status: Status values to include. None = current only.
+            include_status: Status values to include. None = DEFAULT_STATUS_FILTER.
 
         Returns:
             Up to 3 result dicts in the same shape as Searcher.search().
@@ -1476,11 +1480,11 @@ class Searcher:
 
         prepared = self._prepare_or_query(query)
 
-        # Resolve status filter: default is current-only
+        # Resolve status filter: None include_status means the default set
         if include_status is not None:
             effective_statuses = set(include_status)
         else:
-            effective_statuses = {"current"}
+            effective_statuses = set(DEFAULT_STATUS_FILTER)
 
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row

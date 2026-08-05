@@ -65,6 +65,22 @@ require(
     "bootstrap",
 )
 
+# A contradicted verification carries its resolution in the same call; no
+# documented route leaves a contradiction without an owner. The branch flags
+# are pinned at the spellings verify-append.sh accepts.
+resolution_markers = (
+    "--resolution corrected|disputed",
+    "--confidence",
+    "--claim-scale",
+    "--dispute-note",
+)
+require(bootstrap, resolution_markers + ("disputed-required",), "bootstrap")
+require(renormalize, resolution_markers, "renormalize")
+for stale in ("--claim-scope", "--dispute-reason"):
+    assert stale not in bootstrap + renormalize, (
+        f"stale correction-flag spelling remains: {stale}"
+    )
+
 # Renormalize preserves trust identity through the sanctioned migration seam;
 # direct trust-ledger writes are intentionally not part of the skill contract.
 require(renormalize, ("trust-event-migrate.sh",), "renormalize")

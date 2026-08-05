@@ -277,7 +277,12 @@ Synthesis organizes the itemized findings; it does not narrate over them. Keep e
 
    Diagram types: call chain (invocation paths), state machine (state transitions), data flow (data transforms). Write a plain-text ASCII diagram inside a fenced code block using box-drawing characters. Do NOT use Mermaid or other diagram DSLs — the TUI renderer cannot interpret them.
 
-5. **Consumption-verification checkpoint** — before finalizing synthesis, report the outcome for each prefetched commons entry you actually checked against code during investigation. Held and contradicted both count — a confirmation is signal, not ceremony. Skip entries you never tested; grounded-or-nothing means every report needs the code anchor trio, so an entry you can't anchor is an entry you didn't verify:
+5. **Consumption-verification checkpoint** — before finalizing synthesis, report the outcome for each prefetched commons entry you actually checked against code during investigation. Held and contradicted both count — a confirmation is signal, not ceremony. Skip entries you never tested; grounded-or-nothing means every report needs the code anchor trio, so an entry you can't anchor is an entry you didn't verify.
+
+   A contradicted entry is yours to resolve in the same call — there is no queue to file it into and no one behind you to hand it to. `--resolution <corrected|disputed>` is required on every contradicted report; the front rejects a contradicted call that names no resolution, so a contradiction never lands without an owner. Two resolutions, and the fork turns on exactly two questions — how confident you are, and whether your evidence sits at the claim's altitude:
+
+   - `corrected` — repair the entry in place. Choose this when the code settled the question and your evidence covers the claim's scope. The entry stays live with a dated correction and `status: corrected`; the repair is itself a claim the next reader will check against the code, which is exactly what makes it yours to make.
+   - `disputed` — leave a dated, reasoned dispute marker on the entry: what you observed, why you didn't correct. Choose this when your confidence is low, or when your evidence is narrower than the claim — single-callsite evidence must not narrow a scope-exceeding claim, and the front refuses such a correction with `disputed-required`. The marker travels with the entry, visible in retrieval, until a later agent with the context to settle it does.
 
    ```bash
    # Entry confirmed by investigation:
@@ -288,9 +293,9 @@ Synthesis organizes the itemized findings; it does not narrate over them. Keep e
      --template-version "$LEAD_TEMPLATE_VERSION" \
      --file <absolute-path> --line-range <N-M> --exact-snippet "<verbatim code>"
 
-   # Entry falsified by investigation — additionally lands one pending row in
-   # $KDIR/_work/<slug>/consumption-contradictions.jsonl; lore audit consumes it as priority-input:
+   # Entry falsified by investigation — resolve it in the same call:
    lore verify <knowledge-path> contradicted \
+     --resolution <corrected|disputed> \
      --source spec-lead \
      --protocol-slot Synthesis \
      --cycle-id "spec-<topic>-$(date +%Y-%m-%d)" \
@@ -302,7 +307,9 @@ Synthesis organizes the itemized findings; it does not narrate over them. Keep e
      --falsifier "<what evidence would disprove>"
    ```
 
-   Events land in `$KDIR/_trust/trust-events.jsonl` (contract: `architecture/trust-ledger/README.md` in the knowledge store). Run these from the source repo's root, not from inside the knowledge store — `lore` resolves the store and records branch provenance from the current directory. Emission is non-blocking — synthesis continues immediately; re-running an identical invocation is a silent no-op (the writers dedupe).
+   The corrected branch additionally passes the repair itself — `--superseded-text` and `--replacement-text` — plus the inputs the front weighs: `--confidence <high|medium|low>` (only `high` corrects; anything less routes to the marker), `--evidence-scope <single-callsite|multi-callsite|systemic>`, and `--claim-scale <implementation|subsystem|architecture|abstract>` — the same scale rubric entries and `--scale-set` declarations already use, which makes the altitude test concrete: `single-callsite` evidence against a claim above `implementation` scale is the one combination the front refuses. The disputed branch passes `--dispute-note` — what you observed and why you did not correct. A refusal exits 3 with `[verify] disputed-required: <reason>` and writes nothing; re-run with `--resolution disputed`.
+
+   Events land in `$KDIR/_trust/trust-events.jsonl` (contract: `architecture/trust-ledger/README.md` in the knowledge store). Run these from the source repo's root, not from inside the knowledge store — `lore` resolves the store and records branch provenance from the current directory. Emission is non-blocking — synthesis continues immediately; re-running an identical invocation is a silent no-op (the writers dedupe and retries heal by stable IDs).
 
 6. Present the abstract plan (Goal, Design Decisions, Narrative, Architecture Diagram) to the user for review.
 
@@ -634,7 +641,7 @@ Before finalizing, present the plan phases as structured summaries. This is a se
 
 Invoke `/remember` scoped to the spec investigation. **Always invoke it — even when no observation appears to meet the gate.** The gate lives in `/remember`; rejecting candidates is `/remember`'s job, not the lead's. Pre-filtering observations because "nothing qualifies, so `/remember` would be a no-op" is the bypass shape named in the commitment protocol. A run that captures zero entries is a valid terminal so long as `/remember` actually evaluated the observations.
 
-**Capture posture: generous in, exacting in form.** Verification happens downstream, at consumption — every entry meets real code when a later agent reads it, and entries that fail that contact get pruned. So the expensive mistake is a malformed entry, not an extra one: don't spend effort predicting whether a future session will need an insight; spend it putting the insight in the form that lets that session retrieve and check it. Every capture written or promoted here takes the five-part form:
+**Capture posture: generous in, exacting in form.** Verification happens downstream, at consumption — every entry meets real code when a later agent reads it, and entries that fail that contact get corrected or disputed on the spot by the reader who caught them. So the expensive mistake is a malformed entry, not an extra one: don't spend effort predicting whether a future session will need an insight; spend it putting the insight in the form that lets that session retrieve and check it. Every capture written or promoted here takes the five-part form:
 
 1. **Contrastive pair** — what to do *and* what it replaces or avoids: "use X; the tempting Y fails because Z." The avoid-half carries the hard-won part.
 2. **The codebase's own vocabulary** — actual symbol names, actual error strings, never a paraphrase. Retrieval matches on similarity to a future agent's working context, and that context is made of real identifiers.

@@ -67,8 +67,9 @@ Commands:
   dispatch     Render dispatch-time guidance (see: lore dispatch --help)
   annotate     Record a retrieval friction annotation
   verify       Record a consumption-verification outcome (held|contradicted)
-               for a knowledge entry (see: lore verify --help), or report
-               per-entry ledger events (lore verify --report --help)
+               for a knowledge entry, resolving a contradiction by correcting
+               the entry or marking it disputed (see: lore verify --help), or
+               report per-entry ledger events (lore verify --report --help)
   audit        Route a producer artifact through the settlement judges
   trust        Trust-ledger verbs — cheaply confirm an entry's verdict
                (see: lore trust --help)
@@ -488,8 +489,9 @@ Options:
 Notes:
   'confirm' is lightweight testimony — a repo-state verdict (--sha) without a
   code anchor, weighing below a grounded 'lore verify' in the trust fold. A
-  contradicted verdict lands in the ledger only; escalate a real dispute into
-  the judge-facing channel with 'lore verify contradicted'.
+  contradicted verdict lands in the ledger only; when you have the code in
+  front of you, report it with 'lore verify contradicted', which also asks
+  what you did about it.
 EOF
 }
 

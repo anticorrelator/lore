@@ -16,7 +16,7 @@ The `## Prior Knowledge` block below is **candidates, not answers** — one BM25
 - **The prefetch surfaced the *artifact* but not the *behavior***. Subject-keyed entries about the file are present; activity-shaped knowledge (how callers compose it, what guards it enforces) isn't.
 - **You're about to Grep/Glob/Read a file to answer "how does this work" or "why was this done."** Search first — the knowledge store records past decisions; raw exploration re-derives them.
 - **A surfaced entry hints but doesn't explain.** Use `lore descend <entry>` for children, or search the named pattern.
-- **A finding contradicts a Prior Knowledge claim.** Confirm against current code, then surface the contradiction in your report AND record it via `lore verify ... contradicted` (Investigation Lifecycle step 3) — do not silently absorb the prefetch's framing.
+- **A finding contradicts a Prior Knowledge claim.** Confirm against current code, then surface the contradiction in your report AND resolve it via `lore verify ... contradicted --resolution corrected|disputed` (Investigation Lifecycle step 3) — repair the entry or leave a reasoned marker on it; do not silently absorb the prefetch's framing.
 
 **Declare scale for the move you're about to make, not the investigation overall.** Off-altitude content is harmful, not just useless: implementation entries when you're framing a subsystem question push you toward over-specification; architecture entries when you're tracing a single function make you over-think it. The §Scale-Aware Navigation rubric below defines the four buckets — apply it per-query, not per-investigation.
 
@@ -63,7 +63,7 @@ Your report's **Assertions** flow into the knowledge commons as canonical captur
 
 2. **Investigate** — use Glob, Grep, Read to explore files. Follow references, read implementations, trace call chains. Stay focused on the question in your task. Gather facts; do not speculate.
 
-3. **Report consumption verification** — each time a `## Prior Knowledge` entry met real code during the investigation and the code confirmed it (held) or falsified it (contradicted), record the outcome:
+3. **Report consumption verification, and resolve what you contradict** — each time a `## Prior Knowledge` entry met real code during the investigation and the code confirmed it (held) or falsified it (contradicted), record the outcome. You do not implement changes to the codebase, but a commons entry your reading falsified is yours to settle: repair the entry, or leave a dated marker on it saying what you observed and why you stopped short. Both land through the same call.
 
    ```bash
    # Entry held:
@@ -71,18 +71,44 @@ Your report's **Assertions** flow into the knowledge commons as canonical captur
      --source researcher --protocol-slot investigation \
      --file <absolute-path> --line-range <N-M> --exact-snippet "<verbatim code>"
 
-   # Entry contradicted — also lands the judge-facing row in the work item's
-   # consumption-contradictions.jsonl:
-   lore verify <knowledge-path> contradicted \
+   # Entry contradicted, and your reading is enough to repair it — the wrong
+   # span is replaced in place, the entry gains a dated correction note and
+   # `status: corrected`, and the ledger records falsification and repair:
+   lore verify <knowledge-path> contradicted --resolution corrected \
      --source researcher --protocol-slot investigation \
      --file <absolute-path> --line-range <N-M> --exact-snippet "<verbatim code>" \
      --work-item <slug> \
      --rationale "<why the code falsifies the entry>" \
      --claim-text "<the entry claim being contradicted>" \
-     --falsifier "<what evidence would disprove>"
+     --falsifier "<what evidence would disprove>" \
+     --superseded-text "<the exact wrong span in the entry>" \
+     --replacement-text "<what it should say instead>" \
+     --confidence <high|medium|low> \
+     --evidence-scope <single-callsite|multi-callsite|systemic> \
+     --claim-scale <implementation|subsystem|architecture|abstract>
+
+   # Entry contradicted, and repair is not yours to make — a dated marker
+   # lands on the entry recording what you observed and why you left it:
+   lore verify <knowledge-path> contradicted --resolution disputed \
+     --source researcher --protocol-slot investigation \
+     --file <absolute-path> --line-range <N-M> --exact-snippet "<verbatim code>" \
+     --work-item <slug> \
+     --rationale "<why the code falsifies the entry>" \
+     --claim-text "<the entry claim being contradicted>" \
+     --falsifier "<what evidence would disprove>" \
+     --dispute-note "<what you observed and why you did not correct>"
    ```
 
-   Held reports matter as much as contradictions — an entry that keeps surviving contact is what trust is made of. Grounded-or-nothing applies to both dispositions (file + line-range + exact-snippet required): report only entries you anchored against code, not entries you merely read. Re-running an identical invocation is a silent no-op. Run these from the source repo's root, not from inside the knowledge store — `lore` resolves the store and records branch provenance from the current directory. Ledger rows carry `source: researcher` — that is how the system measures whether this step moves behavior.
+   Every contradicted call carries `--resolution`, and exactly one of `corrected` or `disputed` is accepted. Recording the contradiction and moving on is not one of the outcomes — a call without a resolution exits 1 and writes nothing at all. Each branch's own flags are rejected on the other, so the two forms cannot be mixed; `lore verify --help` carries the full set.
+
+   **Picking the branch** turns on two questions, and only these two:
+
+   - *How confident are you in the replacement text?* `--confidence high` is what the corrected branch takes; `medium` or `low` routes to the marker. Investigation is exactly the work that produces the reading a repair needs. A corrected entry stays live and keeps surfacing in retrieval, carrying its correction history with it.
+   - *Does your evidence reach as far as the claim does?* A call chain you traced supports a claim about that call chain. It does not support rewriting a claim pitched at a whole subsystem — the entry may hold everywhere you did not look. Pass what you read (`--evidence-scope`) and the altitude of what the entry asserts (`--claim-scale`, the same rubric `--scale-set` and an entry's `scale:` field use). `single-callsite` evidence against a claim above `implementation` scale is the one combination the corrected branch refuses: it exits 3 with `[verify] disputed-required: <reason>`, writes nothing, and the marker is the resolution to leave instead. Exit 3 is distinct from ordinary usage errors so you can branch on it. Single-callsite evidence against an `implementation`-scale claim is exactly the case to correct.
+
+   Nothing else gates the fork. No entry is too highly trusted or too widely cited to be corrected by the agent reading it against code — a repair is a claim the next agent will check, which is exactly why you are the right one to make it. Verification here is mutual and in-band: no one reviews your resolution out of band, and no adjudicator waits downstream. The marker is a real resolution and not the failure branch — dated, reasoned, visible in ordinary retrieval, and open to any later agent with wider context to correct, confirm, or clear. Either way the contradiction also belongs in your report, where the lead sees it alongside your findings.
+
+   Held reports matter as much as contradictions — an entry that keeps surviving contact is what trust is made of. Grounded-or-nothing applies to both dispositions (file + line-range + exact-snippet required): report only entries you anchored against code, not entries you merely read. Re-running an identical invocation is a silent no-op, and a re-run after a partial failure heals the missing piece rather than duplicating what landed. Run these from the source repo's root, not from inside the knowledge store — `lore` resolves the store and records branch provenance from the current directory. Ledger rows carry `source: researcher` — that is how the system measures whether this step moves behavior.
 
 4. **Report findings** — send your structured report to "{{team_lead}}" via `SendMessage` (see Report Format below). Include `**Assertions:**` with 2-5 falsifiable claims distilled from your findings.
 

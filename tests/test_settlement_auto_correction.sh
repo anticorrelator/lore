@@ -468,6 +468,56 @@ print((d.get("correction_outcome") or {}).get("reason",""))
 ' "$RUN_FILES5")
 assert_eq "paraphrase: correction_outcome.reason is not_mechanically_applicable" "$RUN_OUTCOME5_REASON" "not_mechanically_applicable"
 
+# ---------------------------------------------------------------------------
+# The peer-verification authority added for `lore verify` must not become a
+# way around the settlement gate this loop depends on.
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 6: peer authority does not weaken the settlement gate"
+APPLY="$SCRIPTS_DIR/apply-correction.sh"
+PEER_ENTRY="$KDIR/conventions/example-routing-rule.md"
+ENTRY_BEFORE6=$(cat "$PEER_ENTRY")
+
+set +e
+OUT6=$(bash "$APPLY" --entry "$PEER_ENTRY" --verdict-source peer-verification \
+  --verdict-id v1 --evidence "e" --superseded-text "x" --replacement-text "y" \
+  --kdir "$KDIR" 2>&1)
+RC6=$?
+set -e
+assert_eq "peer verdict-source without the flag exits 1" "$RC6" "1"
+assert_contains "names the required flag" "$OUT6" "requires --allow-peer-verification"
+
+set +e
+OUT6=$(bash "$APPLY" --entry "$PEER_ENTRY" --verdict-source peer-verification \
+  --allow-peer-verification --allow-settlement-verdict --observation-id obs-1 \
+  --evidence "e" --superseded-text "x" --replacement-text "y" \
+  --kdir "$KDIR" 2>&1)
+RC6=$?
+set -e
+assert_eq "the two authorities are mutually exclusive" "$RC6" "1"
+assert_contains "names the conflict" "$OUT6" "mutually exclusive"
+
+set +e
+OUT6=$(bash "$APPLY" --entry "$PEER_ENTRY" --verdict-source peer-verification \
+  --allow-peer-verification --evidence "e" \
+  --superseded-text "x" --replacement-text "y" --kdir "$KDIR" 2>&1)
+RC6=$?
+set -e
+assert_eq "peer mode without an observation id exits 1" "$RC6" "1"
+assert_contains "names the missing id" "$OUT6" "requires --observation-id"
+
+assert_eq "no rejected peer call touched the entry" "$(cat "$PEER_ENTRY")" "$ENTRY_BEFORE6"
+
+# A settlement verdict still cannot claim peer authority's verdict-source.
+set +e
+OUT6=$(bash "$APPLY" --entry "$PEER_ENTRY" --verdict-source bogus-source \
+  --verdict-id v1 --evidence "e" --superseded-text "x" --replacement-text "y" \
+  --kdir "$KDIR" 2>&1)
+RC6=$?
+set -e
+assert_eq "unknown verdict-source still exits 1" "$RC6" "1"
+assert_contains "names the enum" "$OUT6" "--verdict-source must be"
+
 echo ""
 echo "================================"
 echo "Results: $PASS passed, $FAIL failed"

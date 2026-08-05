@@ -426,3 +426,48 @@ def test_verify_volume_counts_and_threshold(kdir, settlement, monkeypatch):
     assert volume["current_week_events"] == 1
     assert sum(w["events"] for w in volume["weeks"]) == 2
     assert volume["below_threshold"] is True  # avg 0.5 < 10
+
+
+# ---------------------------------------------------------------------------
+# The verify front no longer feeds this pipeline
+# ---------------------------------------------------------------------------
+
+def test_verify_front_has_no_producer_edge_into_settlement():
+    """`lore verify` resolves contradictions on the entry, not in the queue.
+
+    The detector and the queue are unchanged and still process what is already
+    in them; what changed is that nothing new arrives. Asserting the absent
+    edge at the source keeps a later refactor from quietly reconnecting it.
+    """
+    verify = os.path.join(_SCRIPTS_DIR, "verify-append.sh")
+    with open(verify, encoding="utf-8") as fh:
+        text = fh.read()
+
+    assert "consumption-contradiction-append.sh" not in text
+    assert "settlement-queue.sh" not in text
+    assert "settlement-processor.py" not in text
+    # The resolution goes through the body mutator and the ledger writer.
+    assert "apply-correction.sh" in text
+    assert "trust-event-append.sh" in text
+
+
+def test_contradicted_ledger_rows_carry_a_resolution(kdir, settlement, monkeypatch):
+    """Rows the new front writes name the repair that owns them."""
+    monkeypatch.setenv("LORE_SETTLEMENT_NOW", "2026-08-05T12:00:00Z")
+    write_ledger(kdir, [
+        ledger_row("c1", "contradicted", "conventions/e.md",
+                   observed_at="2026-08-04T00:00:00Z",
+                   resolution="corrected", resolution_ref="corr-abc123456789"),
+        ledger_row("c2", "contradicted", "conventions/f.md",
+                   observed_at="2026-08-04T00:00:00Z", file="/b.py",
+                   resolution="disputed", resolution_ref="disp-abc123456789"),
+    ])
+    rows = [
+        json.loads(line)
+        for line in (kdir / "_trust" / "trust-events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    contradicted = [r for r in rows if r["payload"].get("disposition") == "contradicted"]
+    assert len(contradicted) == 2
+    assert {r["payload"]["resolution"] for r in contradicted} == {"corrected", "disputed"}
+    for row in contradicted:
+        assert row["payload"]["resolution_ref"]

@@ -10,13 +10,28 @@
 # lazy "held" without a code anchor is rejected the same as an unanchored
 # contradiction.
 #
-# The ledger append is delegated to trust-event-append.sh (the sole physical
-# writer of `_trust/trust-events.jsonl`). A `contradicted` report is
-# additionally bridged into the existing consumption-contradiction channel
-# (`_work/<slug>/consumption-contradictions.jsonl`) through its sole writer,
-# which remains the judge-facing dispute payload. Both writers dedupe, so
-# re-running an identical invocation is a no-op on both files; the bridge is
-# always attempted on contradicted so a partial prior run heals on re-run.
+# Finding a contradiction carries responsibility for resolving it, so a
+# `contradicted` report must say which of two things the reporter did about it:
+#
+#   --resolution corrected  the reporter rewrote the entry against the code
+#   --resolution disputed   the reporter left a dated marker on the entry
+#                           saying what it observed and why it stopped short
+#
+# Correcting takes evidence that can carry the claim. Two conditions send a
+# would-be correction to the disputed branch instead, and the script exits 3
+# (`disputed-required`) having written nothing: the reporter's own confidence
+# is below `high`, or single-callsite evidence is being used against a claim
+# pitched above implementation scale. Neither is a demotion — a marker is a
+# real resolution, and the next agent with wider context settles it.
+#
+# The entry mutation always happens before the ledger append, so every durable
+# negative event points at a repair or a marker that already exists. Both
+# writes are keyed by stable ids, so a run interrupted between them converges
+# when the same invocation is repeated rather than duplicating anything.
+#
+# The entry edit is delegated to apply-correction.sh (the sole body mutator)
+# and the ledger append to trust-event-append.sh (the sole physical writer of
+# `_trust/trust-events.jsonl`).
 #
 # Usage:
 #   verify-append.sh <knowledge-path> <held|contradicted>
@@ -24,11 +39,20 @@
 #       --file <absolute-path>
 #       --line-range <N-M>
 #       --exact-snippet <verbatim>
-#       # required when disposition is contradicted (the CC bridge needs them):
+#       # required when disposition is contradicted:
+#       [--resolution <corrected|disputed>]
 #       [--work-item <slug>]
 #       [--rationale <why the code confirms/falsifies the entry>]
 #       [--claim-text <the entry assertion being verified>]
 #       [--falsifier <what evidence would disprove>]
+#       # required when resolution is corrected:
+#       [--superseded-text <entry text being replaced>]
+#       [--replacement-text <what it becomes>]
+#       [--confidence <high|medium|low>]
+#       [--evidence-scope <single-callsite|multi-callsite|systemic>]
+#       [--claim-scale <implementation|subsystem|architecture|abstract>]
+#       # required when resolution is disputed:
+#       [--dispute-note <what you observed and why you did not correct>]
 #       # optional on both dispositions:
 #       [--producer-role <role>]        # default: --source value
 #       [--protocol-slot <slot>]        # default: lore-verify
@@ -46,6 +70,8 @@
 # Exit codes:
 #   0 — event recorded (or deduped no-op)
 #   1 — validation failure, unknown flag, or entry not found
+#   3 — disputed-required: the evidence cannot carry a correction; re-run with
+#       --resolution disputed. Nothing was written.
 
 set -euo pipefail
 
@@ -59,10 +85,17 @@ Usage: verify-append.sh <knowledge-path> <held|contradicted> \
            --file <absolute-path> \
            --line-range <N-M> \
            --exact-snippet <verbatim> \
+           [--resolution <corrected|disputed>]  # required for contradicted \
            [--work-item <slug>]          # required for contradicted \
            [--rationale <text>]          # required for contradicted \
            [--claim-text <text>]         # required for contradicted \
            [--falsifier <text>]          # required for contradicted \
+           [--superseded-text <text>]    # required for corrected \
+           [--replacement-text <text>]   # required for corrected \
+           [--confidence <high|medium|low>]                       # corrected \
+           [--evidence-scope <single-callsite|multi-callsite|systemic>]  # corrected \
+           [--claim-scale <implementation|subsystem|architecture|abstract>]  # corrected \
+           [--dispute-note <text>]       # required for disputed \
            [--producer-role <role>] [--protocol-slot <slot>] \
            [--cycle-id <id>] [--claim-id <id>] [--heading <text>] \
            [--template-version <hash>] [--normalized-snippet-hash <sha256>] \
@@ -70,9 +103,11 @@ Usage: verify-append.sh <knowledge-path> <held|contradicted> \
 
 Record that a knowledge entry was verified against code during task work.
 `held` and `contradicted` both require the grounded trio (--file,
---line-range, --exact-snippet). A contradicted report also lands one pending
-row in the work item's consumption-contradictions.jsonl through its existing
-writer. Re-running an identical invocation is a silent no-op on both files.
+--line-range, --exact-snippet). A contradicted report must also resolve what
+it found: `--resolution corrected` rewrites the entry, `--resolution disputed`
+leaves a dated marker on it. Exit 3 means the evidence cannot carry a
+correction — re-run with `--resolution disputed`. Re-running an identical
+invocation converges without duplicating anything.
 EOF
 }
 
@@ -97,6 +132,13 @@ TEMPLATE_VERSION=""
 NORMALIZED_SNIPPET_HASH=""
 KDIR_OVERRIDE=""
 JSON_MODE=0
+RESOLUTION=""
+SUPERSEDED_TEXT=""
+REPLACEMENT_TEXT=""
+CONFIDENCE=""
+EVIDENCE_SCOPE=""
+CLAIM_SCALE=""
+DISPUTE_NOTE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -108,6 +150,13 @@ while [[ $# -gt 0 ]]; do
     --rationale)                RATIONALE="$2";                shift 2 ;;
     --claim-text)               CLAIM_TEXT="$2";               shift 2 ;;
     --falsifier)                FALSIFIER="$2";                shift 2 ;;
+    --resolution)               RESOLUTION="$2";               shift 2 ;;
+    --superseded-text)          SUPERSEDED_TEXT="$2";          shift 2 ;;
+    --replacement-text)         REPLACEMENT_TEXT="$2";         shift 2 ;;
+    --confidence)               CONFIDENCE="$2";               shift 2 ;;
+    --evidence-scope)           EVIDENCE_SCOPE="$2";           shift 2 ;;
+    --claim-scale)              CLAIM_SCALE="$2";              shift 2 ;;
+    --dispute-note)             DISPUTE_NOTE="$2";             shift 2 ;;
     --producer-role)            PRODUCER_ROLE="$2";            shift 2 ;;
     --protocol-slot)            PROTOCOL_SLOT="$2";            shift 2 ;;
     --cycle-id)                 CYCLE_ID="$2";                 shift 2 ;;
@@ -172,7 +221,9 @@ if ! printf '%s' "$LINE_RANGE" | grep -Eq '^[0-9]+(-[0-9]+)?$'; then
   fail "--line-range must match 'N' or 'N-M' (got '$LINE_RANGE')"
 fi
 
-# --- Contradicted requires the CC-bridge payload ---
+# --- Contradicted requires the observation payload and a resolution ---
+# Every branch field is checked here, before the first write, so a call that
+# cannot complete leaves the ledger and the entry exactly as it found them.
 if [[ "$DISPOSITION" == "contradicted" ]]; then
   for _pair in \
     "work-item:$WORK_ITEM" \
@@ -181,9 +232,61 @@ if [[ "$DISPOSITION" == "contradicted" ]]; then
     "falsifier:$FALSIFIER"
   do
     if [[ -z "${_pair#*:}" ]]; then
-      fail "--${_pair%%:*} is required when disposition is 'contradicted' (the consumption-contradiction bridge needs it)"
+      fail "--${_pair%%:*} is required when disposition is 'contradicted'"
     fi
   done
+
+  case "$RESOLUTION" in
+    corrected|disputed) : ;;
+    "") fail "--resolution is required when disposition is 'contradicted': record what you did about the contradiction — 'corrected' (you rewrote the entry) or 'disputed' (you left a dated marker on it)" ;;
+    *)  fail "--resolution must be 'corrected' or 'disputed' (got '$RESOLUTION')" ;;
+  esac
+
+  if [[ "$RESOLUTION" == "corrected" ]]; then
+    for _pair in \
+      "superseded-text:$SUPERSEDED_TEXT" \
+      "replacement-text:$REPLACEMENT_TEXT" \
+      "confidence:$CONFIDENCE" \
+      "evidence-scope:$EVIDENCE_SCOPE" \
+      "claim-scale:$CLAIM_SCALE"
+    do
+      if [[ -z "${_pair#*:}" ]]; then
+        fail "--${_pair%%:*} is required when --resolution is 'corrected'"
+      fi
+    done
+    case "$CONFIDENCE" in
+      high|medium|low) : ;;
+      *) fail "--confidence must be 'high', 'medium', or 'low' (got '$CONFIDENCE')" ;;
+    esac
+    case "$EVIDENCE_SCOPE" in
+      single-callsite|multi-callsite|systemic) : ;;
+      *) fail "--evidence-scope must be 'single-callsite', 'multi-callsite', or 'systemic' (got '$EVIDENCE_SCOPE')" ;;
+    esac
+    case "$CLAIM_SCALE" in
+      implementation|subsystem|architecture|abstract) : ;;
+      *) fail "--claim-scale must be 'implementation', 'subsystem', 'architecture', or 'abstract' (got '$CLAIM_SCALE')" ;;
+    esac
+    if [[ -n "$DISPUTE_NOTE" ]]; then
+      fail "--dispute-note applies only to --resolution disputed"
+    fi
+  else
+    if [[ -z "$DISPUTE_NOTE" ]]; then
+      fail "--dispute-note is required when --resolution is 'disputed': say what you observed and why you did not correct the entry"
+    fi
+    for _pair in \
+      "superseded-text:$SUPERSEDED_TEXT" \
+      "replacement-text:$REPLACEMENT_TEXT" \
+      "confidence:$CONFIDENCE" \
+      "evidence-scope:$EVIDENCE_SCOPE" \
+      "claim-scale:$CLAIM_SCALE"
+    do
+      if [[ -n "${_pair#*:}" ]]; then
+        fail "--${_pair%%:*} applies only to --resolution corrected"
+      fi
+    done
+  fi
+elif [[ -n "$RESOLUTION" ]]; then
+  fail "--resolution applies only to disposition 'contradicted'"
 fi
 
 # --- Resolve knowledge directory ---
@@ -213,10 +316,9 @@ if [[ ! -f "$KNOWLEDGE_DIR/$ENTRY_PATH" ]]; then
   fi
 fi
 
-# --- Contradicted: verify the work item exists before touching the ledger ---
-# The bridge is the second write of a compound operation; validating its
-# preconditions up front keeps the ledger and sidecar from diverging on a
-# doomed invocation.
+# --- Contradicted: verify the work item exists before touching anything ---
+# It is provenance on both the ledger event and the entry record, so a bad
+# slug has to fail here rather than midway through the transaction.
 if [[ "$DISPOSITION" == "contradicted" && ! -d "$KNOWLEDGE_DIR/_work/$WORK_ITEM" ]]; then
   fail "work item not found: $WORK_ITEM (expected $KNOWLEDGE_DIR/_work/$WORK_ITEM)"
 fi
@@ -233,6 +335,99 @@ if [[ -z "$CYCLE_ID" ]]; then
 fi
 if [[ -z "$CLAIM_ID" ]]; then
   CLAIM_ID="ver-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+fi
+
+CORRECTION_DATE=$(date +%Y-%m-%d)
+
+# --- Corrected: does the evidence carry the claim? ---
+# Two conditions route a would-be correction to the disputed branch. Both are
+# about whether this reporter's evidence can support this rewrite; neither
+# looks at how well-established the entry is. Nothing has been written yet.
+if [[ "$DISPOSITION" == "contradicted" && "$RESOLUTION" == "corrected" ]]; then
+  DISPUTED_REASON=""
+  if [[ "$CONFIDENCE" != "high" ]]; then
+    DISPUTED_REASON="your confidence in the correction is '$CONFIDENCE', not 'high'"
+  elif [[ "$EVIDENCE_SCOPE" == "single-callsite" && "$CLAIM_SCALE" != "implementation" ]]; then
+    DISPUTED_REASON="one callsite cannot settle a claim pitched at $CLAIM_SCALE scale"
+  fi
+  if [[ -n "$DISPUTED_REASON" ]]; then
+    if [[ $JSON_MODE -eq 1 ]]; then
+      jq -n --arg entry_path "$ENTRY_PATH" --arg reason "$DISPUTED_REASON" \
+        '{outcome: "disputed-required", entry_path: $entry_path, reason: $reason, appended: false}'
+    fi
+    echo "[verify] disputed-required: $DISPUTED_REASON" >&2
+    echo "[verify] Nothing was written. Re-run with --resolution disputed and a --dispute-note recording what you saw; the next agent with wider context can settle it." >&2
+    exit 3
+  fi
+fi
+
+# --- Precompute the verification event id ---
+# Must reproduce trust-event-append.sh's canonical basis for this event kind
+# byte-for-byte; the assertion after the append catches any drift. Knowing the
+# id up front is what lets the entry record name the event that reports it.
+EVENT_ID=$(printf '%s|%s|%s|%s|%s|%s' \
+  "consumption-verification" "$ENTRY_PATH" "$DISPOSITION" "$SOURCE_KIND" "$CLAIM_FILE" "$LINE_RANGE" \
+  | python3 -c '
+import hashlib, sys
+print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())
+')
+
+# --- Contradicted: put the owner on the entry before the negative event ---
+RESOLUTION_REF=""
+CORRECTION_BEFORE_SHA=""
+CORRECTION_AFTER_SHA=""
+CORRECTION_PRIOR_STATUS=""
+ENTRY_ACTION=""
+if [[ "$DISPOSITION" == "contradicted" ]]; then
+  ENTRY_ABS="$KNOWLEDGE_DIR/$ENTRY_PATH"
+  EVIDENCE_TEXT="$CLAIM_FILE:$LINE_RANGE — $RATIONALE"
+
+  if [[ "$RESOLUTION" == "corrected" ]]; then
+    CORRECTION_OUT=$(bash "$SCRIPT_DIR/apply-correction.sh" \
+      --entry "$ENTRY_ABS" \
+      --observation-id "$EVENT_ID" \
+      --verdict-source peer-verification \
+      --allow-peer-verification \
+      --evidence "$EVIDENCE_TEXT" \
+      --superseded-text "$SUPERSEDED_TEXT" \
+      --replacement-text "$REPLACEMENT_TEXT" \
+      --date "$CORRECTION_DATE" \
+      --kdir "$KNOWLEDGE_DIR")
+    RECORD=$(printf '%s\n' "$CORRECTION_OUT" | grep '^\[peer-correction\] result=' | head -1)
+    if [[ -z "$RECORD" ]]; then
+      fail "the correction mutator reported no result record; entry unchanged"
+    fi
+    ENTRY_ACTION=$(printf '%s' "$RECORD" | sed -n 's/.*result=\([^ ]*\).*/\1/p')
+    RESOLUTION_REF=$(printf '%s' "$RECORD" | sed -n 's/.*correction_id=\([^ ]*\).*/\1/p')
+    CORRECTION_BEFORE_SHA=$(printf '%s' "$RECORD" | sed -n 's/.*before_sha256=\([^ ]*\).*/\1/p')
+    CORRECTION_AFTER_SHA=$(printf '%s' "$RECORD" | sed -n 's/.*after_sha256=\([^ ]*\).*/\1/p')
+    CORRECTION_PRIOR_STATUS=$(printf '%s' "$RECORD" | sed -n 's/.*prior_status=\([^ ]*\).*/\1/p')
+    if [[ -z "$RESOLUTION_REF" || -z "$CORRECTION_BEFORE_SHA" || -z "$CORRECTION_AFTER_SHA" ]]; then
+      fail "could not read the correction record from the mutator output: $RECORD"
+    fi
+  else
+    DISPUTE_OUT=$(bash "$SCRIPT_DIR/apply-correction.sh" \
+      --dispute \
+      --entry "$ENTRY_ABS" \
+      --observation-id "$EVENT_ID" \
+      --verdict-source peer-verification \
+      --allow-peer-verification \
+      --evidence "$EVIDENCE_TEXT" \
+      --dispute-note "$DISPUTE_NOTE" \
+      --reported-by "$SOURCE_KIND" \
+      --work-item "$WORK_ITEM" \
+      --date "$CORRECTION_DATE" \
+      --kdir "$KNOWLEDGE_DIR")
+    RECORD=$(printf '%s\n' "$DISPUTE_OUT" | grep '^\[dispute\] result=' | head -1)
+    if [[ -z "$RECORD" ]]; then
+      fail "the dispute mutator reported no result record; entry unchanged"
+    fi
+    ENTRY_ACTION=$(printf '%s' "$RECORD" | sed -n 's/.*result=\([^ ]*\).*/\1/p')
+    RESOLUTION_REF=$(printf '%s' "$RECORD" | sed -n 's/.*dispute_id=\([^ ]*\).*/\1/p')
+    if [[ -z "$RESOLUTION_REF" ]]; then
+      fail "could not read the dispute record from the mutator output: $RECORD"
+    fi
+  fi
 fi
 
 # --- Append the trust-ledger event (sole physical writer) ---
@@ -258,46 +453,44 @@ TRUST_ARGS=(
 [[ -n "$HEADING" ]]                  && TRUST_ARGS+=(--heading "$HEADING")
 [[ -n "$TEMPLATE_VERSION" ]]         && TRUST_ARGS+=(--template-version "$TEMPLATE_VERSION")
 [[ -n "$NORMALIZED_SNIPPET_HASH" ]]  && TRUST_ARGS+=(--normalized-snippet-hash "$NORMALIZED_SNIPPET_HASH")
+if [[ "$DISPOSITION" == "contradicted" ]]; then
+  TRUST_ARGS+=(--resolution "$RESOLUTION" --resolution-ref "$RESOLUTION_REF")
+fi
 
 TRUST_OUT=$(bash "$SCRIPT_DIR/trust-event-append.sh" "${TRUST_ARGS[@]}")
-EVENT_ID=$(printf '%s' "$TRUST_OUT" | jq -r '.event_id')
+LEDGER_EVENT_ID=$(printf '%s' "$TRUST_OUT" | jq -r '.event_id')
 APPENDED=$(printf '%s' "$TRUST_OUT" | jq -r '.appended')
+if [[ "$LEDGER_EVENT_ID" != "$EVENT_ID" ]]; then
+  fail "verification event id mismatch (computed $EVENT_ID, ledger $LEDGER_EVENT_ID) — the canonical basis in trust-event-append.sh and the one recomputed here have diverged"
+fi
 
-# --- Contradicted: bridge one row into the consumption-contradiction channel ---
-# Always attempted (not gated on the ledger dedupe) so a partial prior run
-# heals; the CC writer's own dedupe makes this idempotent.
-BRIDGE_STATUS=""
-CONTRADICTION_ID=""
-if [[ "$DISPOSITION" == "contradicted" ]]; then
-  CC_ARGS=(
-    --work-item "$WORK_ITEM"
+# --- Corrected: record that the repair landed ---
+# The contradiction above is the negative evidence; this event carries no
+# weight of its own, and exists so a later reader can find the repaired text
+# and check it. Attempted on every run so a prior run that stopped after the
+# ledger append completes here.
+CORRECTION_APPENDED=""
+if [[ "$DISPOSITION" == "contradicted" && "$RESOLUTION" == "corrected" ]]; then
+  CORRECTION_ARGS=(
+    --event correction
+    --entry-path "$ENTRY_PATH"
     --source "$SOURCE_KIND"
-    --producer-role "$PRODUCER_ROLE"
-    --protocol-slot "$PROTOCOL_SLOT"
-    --cycle-id "$CYCLE_ID"
-    --knowledge-path "$ENTRY_PATH"
-    --contradiction-rationale "$RATIONALE"
+    --correction-id "$RESOLUTION_REF"
+    --verification-event-id "$EVENT_ID"
     --claim-id "$CLAIM_ID"
-    --claim-text "$CLAIM_TEXT"
-    --file "$CLAIM_FILE"
-    --line-range "$LINE_RANGE"
-    --exact-snippet "$EXACT_SNIPPET"
-    --falsifier "$FALSIFIER"
+    --correction-date "$CORRECTION_DATE"
+    --before-sha256 "$CORRECTION_BEFORE_SHA"
+    --after-sha256 "$CORRECTION_AFTER_SHA"
+    --before-text "$SUPERSEDED_TEXT"
+    --after-text "$REPLACEMENT_TEXT"
+    --prior-status "$CORRECTION_PRIOR_STATUS"
+    --result-status corrected
+    --work-item "$WORK_ITEM"
     --kdir "$KNOWLEDGE_DIR"
     --json
   )
-  [[ -n "$HEADING" ]]                 && CC_ARGS+=(--heading "$HEADING")
-  [[ -n "$TEMPLATE_VERSION" ]]        && CC_ARGS+=(--template-version "$TEMPLATE_VERSION")
-  [[ -n "$NORMALIZED_SNIPPET_HASH" ]] && CC_ARGS+=(--normalized-snippet-hash "$NORMALIZED_SNIPPET_HASH")
-
-  CC_OUT=$(bash "$SCRIPT_DIR/consumption-contradiction-append.sh" "${CC_ARGS[@]}")
-  if [[ -z "$CC_OUT" ]]; then
-    # The CC writer dedupes with a silent exit 0.
-    BRIDGE_STATUS="duplicate"
-  else
-    BRIDGE_STATUS="appended"
-    CONTRADICTION_ID=$(printf '%s' "$CC_OUT" | jq -r '.contradiction_id // empty')
-  fi
+  CORRECTION_OUT_JSON=$(bash "$SCRIPT_DIR/trust-event-append.sh" "${CORRECTION_ARGS[@]}")
+  CORRECTION_APPENDED=$(printf '%s' "$CORRECTION_OUT_JSON" | jq -r '.appended')
 fi
 
 if [[ $JSON_MODE -eq 1 ]]; then
@@ -306,12 +499,16 @@ if [[ $JSON_MODE -eq 1 ]]; then
     --arg disposition "$DISPOSITION" \
     --arg event_id "$EVENT_ID" \
     --argjson appended "$APPENDED" \
-    --arg bridge_status "$BRIDGE_STATUS" \
-    --arg contradiction_id "$CONTRADICTION_ID" \
+    --arg resolution "$RESOLUTION" \
+    --arg resolution_ref "$RESOLUTION_REF" \
+    --arg entry_action "$ENTRY_ACTION" \
+    --arg correction_appended "$CORRECTION_APPENDED" \
     '{entry_path: $entry_path, disposition: $disposition, event_id: $event_id, appended: $appended}
-     + (if $bridge_status != "" then
-          {contradiction_bridge: ({status: $bridge_status}
-            + (if $contradiction_id != "" then {contradiction_id: $contradiction_id} else {} end))}
+     + (if $resolution != "" then
+          {resolution: $resolution, resolution_ref: $resolution_ref, entry_action: $entry_action}
+        else {} end)
+     + (if $correction_appended != "" then
+          {correction_event_appended: ($correction_appended == "true")}
         else {} end)')"
 fi
 
@@ -320,10 +517,8 @@ if [[ "$APPENDED" == "true" ]]; then
 else
   echo "[verify] duplicate — $DISPOSITION event for $ENTRY_PATH already recorded ($EVENT_ID)"
 fi
-if [[ -n "$BRIDGE_STATUS" ]]; then
-  if [[ "$BRIDGE_STATUS" == "appended" ]]; then
-    echo "[verify] contradiction bridged to _work/$WORK_ITEM/consumption-contradictions.jsonl ($CONTRADICTION_ID)"
-  else
-    echo "[verify] contradiction already present in _work/$WORK_ITEM/consumption-contradictions.jsonl"
-  fi
+if [[ "$RESOLUTION" == "corrected" ]]; then
+  echo "[verify] resolution: corrected — $ENTRY_PATH rewritten ($RESOLUTION_REF, entry $ENTRY_ACTION)"
+elif [[ "$RESOLUTION" == "disputed" ]]; then
+  echo "[verify] resolution: disputed — dated marker on $ENTRY_PATH ($RESOLUTION_REF, entry $ENTRY_ACTION)"
 fi

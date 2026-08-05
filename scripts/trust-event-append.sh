@@ -13,10 +13,18 @@
 # Event kinds and their payload flags:
 #   consumption-verification  --disposition held|contradicted
 #                             --file <abs> --line-range <N-M> --exact-snippet <s>
+#                             # contradicted only, both required:
+#                             --resolution corrected|disputed
+#                             --resolution-ref <correction-id|dispute-id>
 #                             [--normalized-snippet-hash <sha256>]
 #                             [--work-item --producer-role --protocol-slot
 #                              --cycle-id --claim-id --claim-text --rationale
 #                              --falsifier --heading --template-version]
+#   correction                --correction-id <id> --verification-event-id <sha256>
+#                             --claim-id <id> --correction-date <YYYY-MM-DD>
+#                             --before-sha256 <sha256> --after-sha256 <sha256>
+#                             --prior-status <s> --result-status corrected
+#                             [--before-text --after-text --work-item]
 #   mechanical-check          --check-name <s> --target <s>
 #                             --result pass|fail|error|skip --run-id <id>
 #                             [--detail <s>]
@@ -43,6 +51,16 @@
 # and exact-snippet for BOTH dispositions — a held report without a code
 # anchor is rejected the same as an unanchored contradiction.
 #
+# Resolution-or-nothing: a `contradicted` row must name the repair that owns it
+# (--resolution plus --resolution-ref pointing at the correction or dispute
+# marker on the entry). A negative trust event with nobody accountable for the
+# entry it decrements is rejected here, so no caller can express one.
+#
+# The `correction` event records that a repair landed. It is deliberately
+# zero-weight in the trust fold (trust-compute.py): the contradiction that
+# triggered it is the negative evidence, and counting the repair again would
+# score the same observation twice.
+#
 # Dedupe: event_id = sha256 of a pipe-joined canonical basis per event kind
 # (see README). A row whose event_id already exists is a silent no-op, exit 0
 # (`"appended": false` under --json).
@@ -59,7 +77,7 @@ source "$SCRIPT_DIR/lib.sh"
 usage() {
   cat >&2 <<'EOF'
 Usage: trust-event-append.sh \
-           --event <mechanical-check|consumption-verification|adjudication|provenance-migration|trust-confirmation> \
+           --event <mechanical-check|consumption-verification|correction|adjudication|provenance-migration|trust-confirmation> \
            --entry-path <path-relative-to-KDIR> \
            --source <worker|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator> \
            [--observed-at <iso8601>] [--kdir <path>] [--json] \
@@ -69,10 +87,17 @@ Event-specific payload flags:
   consumption-verification:
       --disposition <held|contradicted> --file <abs> --line-range <N-M> \
       --exact-snippet <verbatim> [--normalized-snippet-hash <sha256>] \
+      --resolution <corrected|disputed>   # contradicted only, required \
+      --resolution-ref <id>               # contradicted only, required \
       [--work-item <slug>] [--producer-role <role>] [--protocol-slot <slot>] \
       [--cycle-id <id>] [--claim-id <id>] [--claim-text <text>] \
       [--rationale <text>] [--falsifier <text>] [--heading <text>] \
       [--template-version <hash>]
+  correction:
+      --correction-id <id> --verification-event-id <sha256> --claim-id <id> \
+      --correction-date <YYYY-MM-DD> --before-sha256 <sha256> \
+      --after-sha256 <sha256> --prior-status <status> --result-status corrected \
+      [--before-text <text>] [--after-text <text>] [--work-item <slug>]
   mechanical-check:
       --check-name <name> --target <s> --result <pass|fail|error|skip> \
       --run-id <id> [--detail <text>]
@@ -113,6 +138,18 @@ RATIONALE=""
 FALSIFIER=""
 HEADING=""
 TEMPLATE_VERSION=""
+RESOLUTION=""
+RESOLUTION_REF=""
+# correction payload
+CORRECTION_ID=""
+VERIFICATION_EVENT_ID=""
+CORRECTION_DATE=""
+BEFORE_SHA256=""
+AFTER_SHA256=""
+BEFORE_TEXT=""
+AFTER_TEXT=""
+PRIOR_STATUS=""
+RESULT_STATUS=""
 # mechanical-check payload
 CHECK_NAME=""
 TARGET=""
@@ -154,6 +191,17 @@ while [[ $# -gt 0 ]]; do
     --falsifier)                FALSIFIER="$2";                shift 2 ;;
     --heading)                  HEADING="$2";                  shift 2 ;;
     --template-version)         TEMPLATE_VERSION="$2";         shift 2 ;;
+    --resolution)               RESOLUTION="$2";               shift 2 ;;
+    --resolution-ref)           RESOLUTION_REF="$2";           shift 2 ;;
+    --correction-id)            CORRECTION_ID="$2";            shift 2 ;;
+    --verification-event-id)    VERIFICATION_EVENT_ID="$2";    shift 2 ;;
+    --correction-date)          CORRECTION_DATE="$2";          shift 2 ;;
+    --before-sha256)            BEFORE_SHA256="$2";            shift 2 ;;
+    --after-sha256)             AFTER_SHA256="$2";             shift 2 ;;
+    --before-text)              BEFORE_TEXT="$2";              shift 2 ;;
+    --after-text)               AFTER_TEXT="$2";               shift 2 ;;
+    --prior-status)             PRIOR_STATUS="$2";             shift 2 ;;
+    --result-status)            RESULT_STATUS="$2";            shift 2 ;;
     --check-name)               CHECK_NAME="$2";               shift 2 ;;
     --target)                   TARGET="$2";                   shift 2 ;;
     --result)                   RESULT="$2";                   shift 2 ;;
@@ -187,9 +235,9 @@ fail() {
 
 # --- Event-kind enum ---
 case "$EVENT" in
-  mechanical-check|consumption-verification|adjudication|provenance-migration|trust-confirmation) : ;;
+  mechanical-check|consumption-verification|correction|adjudication|provenance-migration|trust-confirmation) : ;;
   "") fail "--event is required" ;;
-  *)  fail "--event must be 'mechanical-check', 'consumption-verification', 'adjudication', 'provenance-migration', or 'trust-confirmation' (got '$EVENT')" ;;
+  *)  fail "--event must be 'mechanical-check', 'consumption-verification', 'correction', 'adjudication', 'provenance-migration', or 'trust-confirmation' (got '$EVENT')" ;;
 esac
 
 # --- Source enum ---
@@ -227,6 +275,53 @@ case "$EVENT" in
     fi
     if ! printf '%s' "$LINE_RANGE" | grep -Eq '^[0-9]+(-[0-9]+)?$'; then
       fail "--line-range must match 'N' or 'N-M' (got '$LINE_RANGE')"
+    fi
+    # Resolution-or-nothing: a contradicted row must name its owning repair.
+    if [[ "$DISPOSITION" == "contradicted" ]]; then
+      case "$RESOLUTION" in
+        corrected|disputed) : ;;
+        "") fail "--resolution is required when --disposition is 'contradicted': every negative event must name the repair that owns it ('corrected' or 'disputed')" ;;
+        *)  fail "--resolution must be 'corrected' or 'disputed' (got '$RESOLUTION')" ;;
+      esac
+      if [[ -z "$RESOLUTION_REF" ]]; then
+        fail "--resolution-ref is required when --disposition is 'contradicted' (the correction or dispute-marker id recorded on the entry)"
+      fi
+    else
+      if [[ -n "$RESOLUTION" || -n "$RESOLUTION_REF" ]]; then
+        fail "--resolution and --resolution-ref apply only to --disposition contradicted"
+      fi
+    fi
+    validate_rel_path "--entry-path" "$ENTRY_PATH"
+    ;;
+  correction)
+    for _pair in \
+      "correction-id:$CORRECTION_ID" \
+      "verification-event-id:$VERIFICATION_EVENT_ID" \
+      "claim-id:$CLAIM_ID" \
+      "correction-date:$CORRECTION_DATE" \
+      "before-sha256:$BEFORE_SHA256" \
+      "after-sha256:$AFTER_SHA256" \
+      "prior-status:$PRIOR_STATUS" \
+      "result-status:$RESULT_STATUS"
+    do
+      if [[ -z "${_pair#*:}" ]]; then
+        fail "--${_pair%%:*} is required for correction"
+      fi
+    done
+    for _pair in \
+      "verification-event-id:$VERIFICATION_EVENT_ID" \
+      "before-sha256:$BEFORE_SHA256" \
+      "after-sha256:$AFTER_SHA256"
+    do
+      if ! printf '%s' "${_pair#*:}" | grep -Eq '^[0-9a-f]{64}$'; then
+        fail "--${_pair%%:*} must be a lowercase 64-char sha256 hex digest (got '${_pair#*:}')"
+      fi
+    done
+    if ! printf '%s' "$CORRECTION_DATE" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+      fail "--correction-date must match YYYY-MM-DD (got '$CORRECTION_DATE')"
+    fi
+    if [[ "$RESULT_STATUS" != "corrected" ]]; then
+      fail "--result-status must be 'corrected' (got '$RESULT_STATUS')"
     fi
     validate_rel_path "--entry-path" "$ENTRY_PATH"
     ;;
@@ -331,8 +426,14 @@ CAPTURED_AT_MERGE_BASE_SHA=$(captured_at_merge_base_sha)
 # single-valued; a future multi-valued component must be sorted before joining.
 case "$EVENT" in
   consumption-verification)
+    # The basis excludes resolution: an upgraded row for an observation already
+    # in the ledger must dedupe against it rather than decrementing twice.
     KEY_BASIS=$(printf '%s|%s|%s|%s|%s|%s' \
       "$EVENT" "$ENTRY_PATH" "$DISPOSITION" "$SOURCE_KIND" "$CLAIM_FILE" "$LINE_RANGE")
+    ;;
+  correction)
+    KEY_BASIS=$(printf '%s|%s|%s' \
+      "$EVENT" "$ENTRY_PATH" "$VERIFICATION_EVENT_ID")
     ;;
   mechanical-check)
     KEY_BASIS=$(printf '%s|%s|%s|%s|%s|%s' \
@@ -395,7 +496,10 @@ export EVENT ENTRY_PATH SOURCE_KIND OBSERVED_AT EVENT_ID \
        CAPTURED_AT_BRANCH CAPTURED_AT_SHA CAPTURED_AT_MERGE_BASE_SHA \
        DISPOSITION CLAIM_FILE LINE_RANGE EXACT_SNIPPET NORMALIZED_SNIPPET_HASH \
        WORK_ITEM PRODUCER_ROLE PROTOCOL_SLOT CYCLE_ID CLAIM_ID CLAIM_TEXT \
-       RATIONALE FALSIFIER HEADING TEMPLATE_VERSION \
+       RATIONALE FALSIFIER HEADING TEMPLATE_VERSION RESOLUTION RESOLUTION_REF \
+       CORRECTION_ID VERIFICATION_EVENT_ID CORRECTION_DATE \
+       BEFORE_SHA256 AFTER_SHA256 BEFORE_TEXT AFTER_TEXT \
+       PRIOR_STATUS RESULT_STATUS \
        CHECK_NAME TARGET RESULT RUN_ID DETAIL \
        VERDICT TEMPLATE_ID \
        FROM_ENTRY_PATH TO_ENTRY_PATH REASON VERDICT_ID \
@@ -443,6 +547,27 @@ if event == "consumption-verification":
         ("falsifier", "FALSIFIER"),
         ("heading", "HEADING"),
         ("template_version", "TEMPLATE_VERSION"),
+        ("resolution", "RESOLUTION"),
+        ("resolution_ref", "RESOLUTION_REF"),
+    ):
+        val = env(var)
+        if val:
+            payload[key] = val
+elif event == "correction":
+    payload = {
+        "correction_id": env("CORRECTION_ID"),
+        "verification_event_id": env("VERIFICATION_EVENT_ID"),
+        "claim_id": env("CLAIM_ID"),
+        "date": env("CORRECTION_DATE"),
+        "before_sha256": env("BEFORE_SHA256"),
+        "after_sha256": env("AFTER_SHA256"),
+        "prior_status": env("PRIOR_STATUS"),
+        "result_status": env("RESULT_STATUS"),
+    }
+    for key, var in (
+        ("before_text", "BEFORE_TEXT"),
+        ("after_text", "AFTER_TEXT"),
+        ("work_item", "WORK_ITEM"),
     ):
         val = env(var)
         if val:

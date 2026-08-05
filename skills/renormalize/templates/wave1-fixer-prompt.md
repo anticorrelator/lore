@@ -14,8 +14,13 @@ For each entry:
    status-update candidate (current → superseded, with the successor path) and move on.
 3. Record each claim you check against code:
    lore verify <entry-path> held --source worker ...
-   or `contradicted` (adding --work-item, --rationale, --claim-text, --falsifier). Both
-   dispositions require the grounding file, line range, and exact snippet.
+   or `contradicted --resolution corrected|disputed` (adding --work-item, --rationale,
+   --claim-text, --falsifier, plus --superseded-text --replacement-text --confidence
+   --evidence-scope --claim-scale when correcting or --dispute-note when disputing).
+   Both dispositions require the grounding file, line range, and exact snippet. You are
+   rewriting the entry against the code in front of you, so `corrected` is almost always
+   the honest branch — pass --confidence high with evidence at the claim's scale; dispute
+   when your confidence is lower or your evidence is narrower than the claim.
 4. Rewrite the entry against current code, preserving format: keep the H1 title, rewrite prose
    to match current behavior, preserve or update See also: backlinks, and in the HTML metadata
    comment set `learned` to today and `source: renormalize-fix`.

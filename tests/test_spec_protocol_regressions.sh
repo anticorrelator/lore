@@ -72,6 +72,18 @@ else
 fi
 
 echo ""
+echo "Test 5: A contradicted verification resolves in the same call"
+assert_contains "contradicted example names the resolution flag" '--resolution <corrected|disputed> \'
+assert_contains "altitude refusal vocabulary is visible" '`disputed-required`'
+assert_contains "corrected branch names the confidence input" '`--confidence <high|medium|low>`'
+assert_contains "corrected branch names the evidence-scope enum" '`--evidence-scope <single-callsite|multi-callsite|systemic>`'
+assert_contains "corrected branch names the claim-scale enum" '`--claim-scale <implementation|subsystem|architecture|abstract>`'
+assert_contains "disputed branch names the dispute note" '--dispute-note'
+assert_not_contains "stale claim-scope spelling removed" '--claim-scope'
+assert_not_contains "stale dispute-reason spelling removed" '--dispute-reason'
+assert_not_contains "no unowned contradiction route remains" 'consumption-contradictions.jsonl'
+
+echo ""
 echo "=== Results ==="
 echo "  Passed: $PASS"
 echo "  Failed: $FAIL"

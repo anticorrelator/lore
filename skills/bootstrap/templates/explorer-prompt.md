@@ -31,7 +31,7 @@ Out of scope — do NOT report: function bodies, algorithm choices, or line-leve
 
 ## Evidence
 - Ground each load-bearing claim as it forms: one Tier-2 row per claim via `echo '<row-json>' | bash ~/.lore/scripts/evidence-append.sh --work-item <SLUG>` with `producer_role: "worker"`, `protocol_slot: "bootstrap-explore"`, `task_id: "explore-<subsystem-slug>"`, `phase_id: "bootstrap"`, an explicit `scale`, and the anchoring `file`, `line_range`, `exact_snippet`, and `normalized_snippet_hash` (via `python3 ~/.lore/scripts/snippet_normalize.py --hash`). One call per claim, never batched.
-- When you check a Prior Knowledge entry against code, record it: `lore verify <entry-path> held|contradicted --source worker --file <abs-path> --line-range <N-M> --exact-snippet "<verbatim>"` (contradicted additionally takes `--work-item <SLUG> --rationale --claim-text --falsifier`).
+- When you check a Prior Knowledge entry against code, record it: `lore verify <entry-path> held|contradicted --source worker --file <abs-path> --line-range <N-M> --exact-snippet "<verbatim>"` (contradicted additionally takes `--resolution corrected|disputed --work-item <SLUG> --rationale --claim-text --falsifier`, plus `--superseded-text --replacement-text --confidence --evidence-scope --claim-scale` when correcting or `--dispute-note` when disputing; only `--confidence high` corrects). A contradiction you find is yours to resolve in that call: correct the entry when the code in front of you settles its claim at full scope, or leave the dated dispute marker when your confidence is low or your evidence is narrower than the claim — one subsystem's code must not narrow a claim that spans more.
 - Do NOT run `lore capture` — the lead files everything.
 
 ## Report

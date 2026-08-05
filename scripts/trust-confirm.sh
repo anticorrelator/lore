@@ -12,10 +12,13 @@
 # The ledger append is delegated to trust-event-append.sh (the sole physical
 # writer of `_trust/trust-events.jsonl`); this front validates only its own
 # flag surface and maps the surface verdict vocabulary (holds|contradicted)
-# onto the ledger's disposition vocabulary (held|contradicted). A contradicted
-# verdict lands in the ledger only — it is NOT bridged into a work item's
-# consumption-contradiction channel. To escalate a real dispute into the
-# judge-facing channel, use `lore verify contradicted` with a code anchor.
+# onto the ledger's disposition vocabulary (held|contradicted).
+#
+# A contradicted verdict lands in the ledger only, and resolves nothing: it is
+# testimony that an entry looks wrong at a commit, not a report that anyone
+# acted on. When you have the code in front of you, report it with
+# `lore verify contradicted` instead — that path takes a code anchor and asks
+# what you did about it, recording the repair or a dated marker on the entry.
 #
 # Usage:
 #   trust-confirm.sh <knowledge-path> --sha <hex> --verdict <holds|contradicted>
@@ -52,9 +55,10 @@ repo commit (--sha), without a code anchor. Weighs below a grounded
 entry, verdict, source, and sha) is a silent no-op; a new sha appends a new
 row.
 
-A contradicted verdict lands in the ledger only. To escalate a dispute into
-the judge-facing consumption-contradiction channel, use
-`lore verify contradicted` with a grounded code anchor.
+A contradicted verdict lands in the ledger only and resolves nothing. When you
+have the code in front of you, use `lore verify contradicted` with a grounded
+code anchor — it asks what you did about the contradiction and records the
+repair, or a dated marker, on the entry itself.
 EOF
 }
 
