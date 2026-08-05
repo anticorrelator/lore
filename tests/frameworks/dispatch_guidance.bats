@@ -106,10 +106,49 @@ PY
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 
-  run bash -c "printf '%s' '{\"tool_name\":\"Agent\",\"tool_input\":{\"prompt\":\"Task only\"}}' | bash '$VALIDATOR' --hook claude-code"
+  altered=$(python3 - "${block/Binding: Treat/Binding: Ignore}" <<'PY'
+import json, sys
+print(json.dumps({"tool_name":"Agent", "tool_input":{"prompt":sys.argv[1] + "\nTask"}}))
+PY
+)
+  run bash -c "printf '%s' \"\$1\" | bash '$VALIDATOR' --hook claude-code" _ "$altered"
   [ "$status" -eq 0 ]
   [[ "$output" == *'"permissionDecision":"deny"'* ]]
   [[ "$output" == *"lore dispatch guidance"* ]]
+}
+
+@test "claude-code hook injects fresh guidance into block-free launch prompts" {
+  payload='{"tool_name":"Agent","tool_input":{"prompt":"Task only","subagent_type":"Explore"}}'
+  run bash -c "printf '%s' \"\$1\" | bash '$VALIDATOR' --hook claude-code" _ "$payload"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"permissionDecision":"allow"'* ]]
+  [[ "$output" == *'"updatedInput"'* ]]
+
+  updated_prompt=$(printf '%s' "$output" | jq -r '.hookSpecificOutput.updatedInput.prompt')
+  [[ "$updated_prompt" == "<!-- lore-dispatch-guidance:v1:begin -->"* ]]
+  [[ "$updated_prompt" == *"<!-- lore-dispatch-guidance:v1:end -->"$'\n'"Task only" ]]
+
+  # Untouched tool_input fields survive the rewrite.
+  [ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.updatedInput.subagent_type')" = "Explore" ]
+
+  # The injected prompt passes the strict validator it just bypassed.
+  printf '%s' "$output" | jq -r '.hookSpecificOutput.updatedInput.prompt' | bash "$VALIDATOR"
+}
+
+@test "claude-code hook still denies marker-bearing prompts instead of injecting" {
+  # A stale block (settings changed after render) carries markers, so the
+  # injection path must not rescue it — protocol seats own their freshness.
+  block="$(render_prompt)"
+  write_settings gamma
+  stale=$(python3 - "$block" <<'PY'
+import json, sys
+print(json.dumps({"tool_name":"Agent", "tool_input":{"prompt":sys.argv[1] + "\nTask"}}))
+PY
+)
+  run bash -c "printf '%s' \"\$1\" | bash '$VALIDATOR' --hook claude-code" _ "$stale"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"permissionDecision":"deny"'* ]]
+  [[ "$output" == *"digest is stale"* ]]
 }
 
 @test "codex hook validates spawn_agent tool_input.message and fails closed" {

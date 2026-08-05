@@ -102,6 +102,47 @@ else
 fi
 
 FAILURE_REASON="${FAILURE_REASON:-}"
+
+# Injection path (claude-code hook mode only): a launch prompt that carries no
+# trace of a guidance block is a non-protocol dispatch — the launching agent
+# never had a delivery mechanism for the guidance floor. Render it fresh at
+# this seam and inject it via updatedInput instead of teaching by denial.
+# Any marker presence means a protocol seat attempted the form; those prompts
+# fall through to strict validation so tampering and staleness still surface.
+if [[ "$HOOK_FRAMEWORK" == "claude-code" && -z "$FAILURE_REASON" ]] \
+  && ! grep -qF 'lore-dispatch-guidance:v1:' "$PROMPT_PATH"; then
+  GUIDANCE_PATH="$TMP_DIR/guidance.txt"
+  if "$SCRIPT_DIR/render-dispatch-guidance.sh" > "$GUIDANCE_PATH" 2>"$ERROR_PATH"; then
+    python3 - "$PAYLOAD_PATH" "$GUIDANCE_PATH" <<'PY'
+import json, sys
+
+payload_path, guidance_path = sys.argv[1:]
+with open(payload_path, encoding="utf-8") as fh:
+    payload = json.load(fh)
+with open(guidance_path, encoding="utf-8") as fh:
+    guidance = fh.read()
+if not guidance.endswith("\n"):
+    guidance += "\n"
+
+tool_input = dict(payload["tool_input"])
+tool_input["prompt"] = guidance + tool_input["prompt"]
+print(json.dumps({"hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow",
+    "permissionDecisionReason": (
+        "Dispatch guidance was absent from this launch prompt; a fresh "
+        "schema-v1 guidance block was rendered and prepended at the "
+        "admission gate."
+    ),
+    "updatedInput": tool_input,
+}}, separators=(",", ":")))
+PY
+    exit 0
+  else
+    FAILURE_REASON="guidance rendering failed at the admission gate: $(tr '\n' ' ' < "$ERROR_PATH" | sed 's/[[:space:]]*$//')"
+  fi
+fi
+
 if [[ -z "$FAILURE_REASON" ]]; then
   "$SCRIPT_DIR/render-standing-defaults.sh" > "$DEFAULTS_PATH"
   if ! python3 - "$PROMPT_PATH" "$DEFAULTS_PATH" >"$ERROR_PATH" 2>&1 <<'PY'; then

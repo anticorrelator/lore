@@ -70,6 +70,8 @@ For skills that create teams and spawn worker agents (implement, spec, bootstrap
 
 Immediately before each ordinary agent launch attempt, run `lore dispatch guidance`. If rendering fails, stop before launch. Prepend that invocation's complete output verbatim to the prompt, ahead of prior knowledge and task-specific context, and render again for every retry. A canonical generated directive is the sole exception: when its publisher already rendered and validated the block, recorded its stable identity, and placed it in the directive payload, each launch consumes that payload block verbatim instead of rendering a second source. Never cache guidance ad hoc or batch-wide, and never copy its generated contents into skill prose. The block supplies standing guidance without changing the selected model, role, concurrency, or report contract.
 
+The claude-code admission gate is a self-healing backstop for launches outside any protocol: when a launch prompt carries no trace of a guidance block, the hook renders a fresh block and injects it before the tool runs, so ad-hoc dispatch proceeds without ritual. This does not loosen the convention for protocol seats — a prompt that carries guidance markers is validated strictly, and a tampered, duplicated, truncated, or stale block still denies the launch. Protocols keep rendering at their own seams; the gate only supplies the floor where no seam exists.
+
 ### Knowledge in Worker Prompts
 Embed pre-fetched knowledge under a `## Prior Knowledge` header. This applies to both:
 - **Prefetch-based** (spec, bootstrap): output of `lore prefetch` embedded in the Task prompt
