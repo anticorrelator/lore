@@ -3,9 +3,16 @@
 # Usage: lore capture --insight "..." --scale "<bucket>" [--context "..."] [--category "..."] [--confidence "..."] [--related-files "..."] [--source "..."] [--example "..."]
 #        [--producer-role "..."] [--protocol-slot "..."] [--template-version "..."] [--capturer-role "..."] [--source-artifact-ids "..."]
 #        [--captured-at-branch "..."] [--captured-at-sha "..."] [--captured-at-merge-base-sha "..."] [--work-item "..."]
-#        [--executable-falsifier '<json>']
+#        [--executable-falsifier '<json>'] [--kdir "<path>"]
 #
 # Writes an individual entry file to the category directory (e.g., conventions/<slug>.md).
+#
+# Store selection:
+#   --kdir <path>  Write to this knowledge store, skipping resolution. Normally the store is
+#     resolved from the current checkout's git remote. When that answer disagrees with the store
+#     the current directory sits inside, capture refuses and names both candidates rather than
+#     picking one — a wrong pick files the entry into an unrelated store and still reports
+#     success. --kdir is how the caller settles it.
 #
 # Provenance flags (omitted-field convention):
 #   --producer-role         Role of the agent that produced the insight (e.g., researcher, worker, lead).
@@ -66,6 +73,7 @@ SCALE=""
 EXECUTABLE_FALSIFIER=""
 JSON_MODE=0
 SKIP_MANIFEST=0
+KDIR_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -145,6 +153,10 @@ while [[ $# -gt 0 ]]; do
       EXECUTABLE_FALSIFIER="$2"
       shift 2
       ;;
+    --kdir)
+      KDIR_OVERRIDE="$2"
+      shift 2
+      ;;
     --json)
       JSON_MODE=1
       shift
@@ -155,7 +167,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: capture.sh --insight \"...\" [--context \"...\"] [--category \"...\"] [--confidence \"...\"] [--related-files \"...\"] [--source \"...\"] [--example \"...\"] [--producer-role \"...\"] [--protocol-slot \"...\"] [--template-version \"...\"] [--capturer-role \"...\"] [--source-artifact-ids \"...\"] [--captured-at-branch \"...\"] [--captured-at-sha \"...\"] [--captured-at-merge-base-sha \"...\"] [--work-item \"...\"] [--executable-falsifier '<json>'] [--json] [--skip-manifest]" >&2
+      echo "Usage: capture.sh --insight \"...\" [--context \"...\"] [--category \"...\"] [--confidence \"...\"] [--related-files \"...\"] [--source \"...\"] [--example \"...\"] [--producer-role \"...\"] [--protocol-slot \"...\"] [--template-version \"...\"] [--capturer-role \"...\"] [--source-artifact-ids \"...\"] [--captured-at-branch \"...\"] [--captured-at-sha \"...\"] [--captured-at-merge-base-sha \"...\"] [--work-item \"...\"] [--executable-falsifier '<json>'] [--kdir <path>] [--json] [--skip-manifest]" >&2
       exit 1
       ;;
   esac
@@ -287,7 +299,49 @@ if [[ -z "$PRODUCER_ROLE" || -z "$PROTOCOL_SLOT" ]]; then
 fi
 
 # --- Resolve knowledge directory ---
-KNOWLEDGE_DIR=$(resolve_knowledge_dir)
+# --kdir names the store outright and skips resolution entirely, so it is also
+# the way past the ambiguity refusal below.
+if [[ -n "$KDIR_OVERRIDE" ]]; then
+  KNOWLEDGE_DIR="$KDIR_OVERRIDE"
+else
+  KNOWLEDGE_DIR=$(resolve_knowledge_dir)
+
+  # Two ways to name a store can disagree: resolve_knowledge_dir maps the
+  # current checkout to a store via its git remote, while the cwd may already
+  # sit inside a store of its own. When they name different stores, either could
+  # be the one meant and writing to the resolved one files the entry into the
+  # wrong store while reporting success. Refuse and let the caller say which.
+  #
+  # This lives here rather than in resolve-repo.sh on purpose: that script is a
+  # pure path resolver whose callers include the SessionStart hooks, and a hard
+  # refusal there would take them down too. Capture is the writer, so capture is
+  # where the wrong answer becomes durable.
+  #
+  # LORE_KNOWLEDGE_DIR is the env-var form of --kdir: resolve-repo.sh returns it
+  # verbatim without inferring anything, so there is no second candidate and
+  # nothing to be ambiguous about.
+  _cwd_store=""
+  if [[ -z "${LORE_KNOWLEDGE_DIR:-}" ]]; then
+    _cwd_store=$(knowledge_store_containing "$PWD" 2>/dev/null) || _cwd_store=""
+  fi
+  if [[ -n "$_cwd_store" ]]; then
+    # Compare symlink-resolved forms — the resolved path is assembled from
+    # $LORE_DATA_DIR while knowledge_store_containing returns a realpath, and on
+    # macOS those differ textually for the same directory (/var vs /private/var).
+    _resolved_real=$(cd "$KNOWLEDGE_DIR" 2>/dev/null && pwd -P) || _resolved_real="$KNOWLEDGE_DIR"
+    if [[ "$_cwd_store" != "$_resolved_real" ]]; then
+      _msg="ambiguous knowledge store — refusing to choose. Resolved from this checkout: $KNOWLEDGE_DIR. Store containing the current directory: $_cwd_store. Re-run with --kdir <path> naming the store this insight belongs to."
+      if [[ $JSON_MODE -eq 1 ]]; then
+        json_error "$_msg"
+      fi
+      echo "[capture] Two knowledge stores are in play here and capture cannot tell which one you mean:" >&2
+      echo "[capture]   resolved from this checkout:       $KNOWLEDGE_DIR" >&2
+      echo "[capture]   store containing this directory:   $_cwd_store" >&2
+      echo "[capture] Filing into the wrong one is silent, so capture stops rather than guessing." >&2
+      die "Name the store you mean: --kdir <path>"
+    fi
+  fi
+fi
 
 # --- Verify knowledge store exists ---
 if [[ ! -f "$KNOWLEDGE_DIR/_manifest.json" ]]; then

@@ -140,6 +140,12 @@ slugify() {
 # Usage: title=$(derive_entry_title "some insight text")
 derive_entry_title() {
   local text="$1"
+  # An H1 is one line. awk below is line-oriented, so a multi-line insight used
+  # to yield a multi-line "title" — every line's first eight words, title-cased,
+  # stacked above the entry body (which capture.sh then wrote again in full).
+  # Flatten first so later lines are normalized into the title instead of
+  # promoted alongside it. Single-line input is unaffected.
+  text=$(printf '%s' "$text" | tr '\n\t' '  ' | tr -s ' ')
   # LC_ALL=C: BSD awk's substr() is byte-oriented under a UTF-8 locale and
   # errors ("illegal byte sequence") when a word starts with a multibyte
   # character (e.g. a standalone em-dash in the first 8 words). Under the C
@@ -153,6 +159,38 @@ derive_entry_title() {
 # Usage: KDIR=$(resolve_knowledge_dir)
 resolve_knowledge_dir() {
   "$LORE_LIB_DIR/resolve-repo.sh"
+}
+
+# --- knowledge_store_containing ---
+# Find the knowledge store a directory sits inside, by walking up to
+# $LORE_DATA_DIR/repos. A store is a directory beneath repos/ that holds a
+# _manifest.json; the search is anchored there so an unrelated project with its
+# own _manifest.json can never be mistaken for one.
+#
+# This answers a different question from resolve_knowledge_dir(): that one maps
+# a *project checkout* to its store via git remote, this one names the store you
+# are physically standing in. They usually agree. When they disagree — cwd
+# inside store A while resolution names store B — a caller writing to the
+# resolved store files into the wrong one silently, which is why capture.sh
+# compares the two and refuses rather than picking.
+#
+# Echoes the store root (symlink-resolved) and returns 0 when found; returns 1
+# when the directory is outside every store.
+# Usage: store=$(knowledge_store_containing "$PWD") || store=""
+knowledge_store_containing() {
+  local dir="${1:-$(pwd)}"
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+  local repos_root
+  repos_root="$(cd "$data_dir/repos" 2>/dev/null && pwd -P)" || return 1
+  dir="$(cd "$dir" 2>/dev/null && pwd -P)" || return 1
+  while [[ "$dir" == "$repos_root/"* ]]; do
+    if [[ -f "$dir/_manifest.json" ]]; then
+      echo "$dir"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
 }
 
 # --- resolve_followup_dir ---
