@@ -13,12 +13,23 @@
 # what changed on the coordination board since the last wake — so the caller can
 # decide what to do without a round of manual re-reading.
 #
+# A wake does not have to start with a row. Rows only report what a session says
+# about itself, and a session that hangs mid-turn says nothing — so does a machine
+# that suspends with a window open. Both look exactly like a healthy quiet board.
+# Two timers cover that: a liveness probe that reads the screen of scoped live
+# sessions whose last journal row has gone old, and a clock comparison that ends
+# the window when this machine has plainly been asleep. See "Stall detection" and
+# "Suspension skew".
+#
 # Usage:
 #   lore coordinate watch [--slug <s>]... [--arc <slug>]...
 #                         [--until <events>] [--since <cursor>]
 #                         [--timeout <sec>] [--pending-stale <sec>]
 #                         [--peek-timeout <sec>] [--advisory-age <sec>]
 #                         [--spawn-gap <sec>]
+#                         [--probe-every <sec>] [--stall-after <sec>]
+#                         [--stall-aged-after <sec>] [--probe-ttl <sec>]
+#                         [--suspend-skew <sec>]
 #                         [--owner-pid <pid>] [--owner-tmux <name>]
 #                         [--tmux-server <name>] [--no-board-delta]
 #                         [--wake-shaped] [--kdir <path>] [--json]
@@ -44,9 +55,9 @@
 #   the evidence it carries, and dropping it would turn a real event into
 #   silence.
 #
-#   Each distinct scope keeps its own cursor, baseline, and advisory ledger, so
-#   two seats watching different scopes on one store do not overwrite each
-#   other's position.
+#   Each distinct scope keeps its own cursor, board baseline, advisory ledger,
+#   probe cadence, and stall ledger, so two seats watching different scopes on one
+#   store do not overwrite each other's position.
 #
 # Options:
 #   --until <events>  Comma-separated event names to wake on. Default is the
@@ -82,6 +93,30 @@
 #   --spawn-gap <sec> How young a session may be before a screen-confirmed park is
 #                     demoted to a `spawn-gap` advisory (default: 90; 0 disables
 #                     the age gate). See "Classification".
+#   --probe-every <sec>
+#                     How often the liveness probe runs (default: 120; 0 disables
+#                     probing). The cadence is persisted per scope, so a window
+#                     re-armed at every turn boundary keeps the same rhythm
+#                     instead of probing every scoped session on every turn.
+#   --stall-after <sec>
+#                     How old a session's last journal row must be before the
+#                     probe reads its screen (default: 900; 0 disables probing,
+#                     the same as --probe-every 0). Detection latency is roughly
+#                     this plus one cadence interval.
+#   --stall-aged-after <sec>
+#                     How old that row must be before a screen still generating
+#                     output is itself reported, as `aged_advisory` (default:
+#                     2700; 0 means a long turn is never reported). Must not be
+#                     below --stall-after when both are set — an inverted pair
+#                     looks configured and reaches nothing.
+#   --probe-ttl <sec> How recently an instance must have touched its registry row
+#                     to count as hosting its sessions (default: 30, matching
+#                     `lore session peek`). The probe only ever addresses sessions
+#                     inside this set. See "Stall detection".
+#   --suspend-skew <sec>
+#                     How far this window's wall clock may drift from its
+#                     monotonic clock before the window ends (default: 120; 0
+#                     disables the check). See "Suspension skew".
 #   --owner-pid <pid> / --owner-tmux <name> / --tmux-server <name>
 #                     Liveness handles for the seat this watcher reports to; the
 #                     same two handles a coordination worktree lease records
@@ -112,7 +147,9 @@
 #                       the version travels in the wake, so a matcher-contract
 #                       change is visible instead of silently reclassifying parks.
 #     owner-handle      The wake came from the owner-liveness check.
-#     none              Nothing to classify (a quiet timeout).
+#     none              Nothing to classify — a quiet timeout, an unclaimed spawn
+#                       request, or the clock comparison, none of which read a
+#                       session's state at all.
 #
 #   A screen signature that fires is then age-gated. Between a pane being spawned
 #   and its first prompt being submitted, a session renders a genuinely ready
@@ -132,6 +169,97 @@
 #   advisory that keeps repeating past --advisory-age escalates to
 #   `aged_advisory`. The seat is asleep and the watcher is its only observer, so
 #   there is no state in which staying quiet is the safe answer.
+#
+# Stall detection:
+#   Everything above starts with a row. A session that hangs mid-turn writes no
+#   row, so nothing above ever fires for it and the board reads as quiet. Every
+#   --probe-every seconds the watcher therefore asks the opposite question of the
+#   sessions the registry claims are live: nothing has said anything about this
+#   one for --stall-after seconds — is it alive?
+#
+#   Row age comes from the rows the watcher is already reading. Every row updates
+#   a per-session "last heard from" map, including the ones no --until set wants
+#   (step_completed, harness_turn_ended, quiescent, resumed) — those are precisely
+#   the rows that prove a session is working. The map is seeded once at window
+#   start from a single journal read bounded by --stall-aged-after; a session with
+#   no row in that window has been silent for at least that long by construction.
+#
+#   A due probe reads the screen of each eligible session, stalest first, through
+#   the same `lore session peek` the row-driven path uses, and hands the result to
+#   the same signature table. What the screen shows decides:
+#
+#     a composer waiting, or a modal    a confirmed stall — wakes on sight
+#     still generating, under
+#       --stall-aged-after              a long turn, which is a session working.
+#                                       No wake at all. This is the one place the
+#                                       watcher deliberately says nothing about
+#                                       something it observed: nothing is waiting
+#                                       on the seat, and a wake for every long
+#                                       turn is how a seat learns to ignore wakes.
+#                                       The observation is not thrown away — it is
+#                                       still counted in the `probe` block that
+#                                       rides the next wake.
+#     still generating, past
+#       --stall-aged-after              the length of the turn is now the finding:
+#                                       an `aged_advisory`.
+#     nothing the matcher knows         an `advisory` naming what it saw, which
+#                                       ages like any other.
+#     the instance does not answer      a confirmed stall. The registry says an
+#                                       instance is live and hosting this session,
+#                                       so silence here means the thing that does
+#                                       the observing has itself stopped serving.
+#                                       (On the row-driven path an unanswered peek
+#                                       is only an advisory, because a park row can
+#                                       name a session no instance hosts at all.)
+#
+#   One wake per session per escalation step. A stall ledger beside the cursor
+#   records the tier each session was last woken for; a later probe wakes again
+#   only if it computes a strictly louder tier, so a session that degrades from a
+#   long turn to a hung composer still gets its louder wake while one that just
+#   keeps hanging does not repeat every cadence interval. That session's next
+#   journal row clears the record outright — a row is exactly the evidence that
+#   the silence ended.
+#
+#   The probe is bound by --slug/--arc scope, with no unattributed bypass. This is
+#   the deliberate opposite of the rule for actionable rows above: a row carrying
+#   neither identity key wakes a scoped watch anyway, because such a row cannot be
+#   scoped on its own evidence and dropping it would turn a real event into
+#   silence. The probe has no undecidable case — every registry session carries its
+#   own slug — and a probe is an active interrogation of another seat's session
+#   through that seat's instance, not a passive read of a row that already exists.
+#   So an out-of-scope stalled session produces no wake here, and belongs to
+#   whoever scoped it. A board-wide watch probes everything.
+#
+#   Sessions with no slug (chat sessions) cannot be probed at all, because peek
+#   addresses sessions by slug. They are counted in `probe.skipped_slugless` so
+#   the gap is visible rather than invisible.
+#
+# Suspension skew:
+#   A laptop that sleeps with a window open freezes that window the same silent
+#   way a hung session does. Wall time keeps moving across a suspension and
+#   monotonic time does not, so the difference between how much of each has
+#   elapsed since the window opened is the suspension and nothing else, to within
+#   scheduling jitter of well under a second against a one-second poll. When that
+#   difference reaches --suspend-skew the window ends
+#   immediately, with outcome `clock_skew` and a body saying to re-join the board
+#   before trusting quiet.
+#
+#   It ends the window rather than merely waking, because every piece of state
+#   this window owns — cursor baseline, probe cadence, stall ledger, advisory ages
+#   — was computed against a clock that stopped. A fresh window recomputes all of
+#   them.
+#
+#   On each tick the check runs directly after the journal read, ahead of the
+#   pending-staleness check and the probe. After a nap every pending request looks
+#   stale and every session looks silent, so a skew check running later would emit
+#   a burst of wakes about the frozen interval before reporting the freeze that
+#   caused them. A real journal row still wins: it is an event that happened, not
+#   an age computed against a stopped clock.
+#
+#   A supervisor that forks this watcher repeatedly across one logical window can
+#   export LORE_WATCH_CLOCK_BASELINE as "<wall> <monotonic>" — the pair its own
+#   span started from — and the skew is then measured from there rather than from
+#   this child's start, so a suspension spanning a re-arm boundary is still seen.
 #
 # Owner liveness:
 #   With a handle passed, each poll checks whether the seat this watcher reports
@@ -184,9 +312,25 @@
 #   `session wait`'s matched shape:
 #     {schema_version, outcome, tier, authority, signature_version,
 #      classification: {state, label, reason, advisory_age_seconds, peek,
-#                       spawn_gap}, matched, pending,
+#                       spawn_gap},
+#      probe: {consulted, reason, cadence_seconds, stall_after_seconds,
+#              aged_after_seconds, live_sessions, in_scope, skipped_slugless,
+#              eligible, examined,
+#              session: {slug, row_age_seconds, last_row_event, last_row_ts,
+#                        band, peek, suppressed_from} | null},
+#      clock_skew: {wall_elapsed_seconds, monotonic_elapsed_seconds,
+#                   skew_seconds, threshold_seconds} | null,
+#      matched, pending,
 #      scope: {mode, slugs, arcs, cursor_file}, board_delta, next_cursor, until}
-#   There is no top-level `slug`: session identity lives on the matched row.
+#   There is no top-level `slug`: session identity lives on the matched row, or on
+#   `probe.session` for a stall wake. `probe` carries the last pass the window ran
+#   even on a wake the probe did not cause, which is what makes a quiet wake
+#   auditable: four sessions live, three in scope, two eligible, two examined, and
+#   neither over a threshold is a different quiet from nothing having been looked
+#   at. `probe.session` is filled only on the wake the probe itself caused.
+#
+#   `outcome` is one of: matched, pending_stale, session_stalled, clock_skew,
+#   owner_gone, timeout, internal_error.
 #
 # Exit codes (local to this verb):
 #   0  a matching row landed, or a stale pending request was found
@@ -204,9 +348,9 @@
 #
 # This verb only reads the journal. It never appends to it — the journal keeps
 # exactly one writer (session-event-append.sh), so every signal this watcher
-# originates, including its classifications and the pending-staleness advisory,
-# is printed to the caller rather than written where somebody could read it back
-# as a lifecycle event.
+# originates, including its classifications, the pending-staleness advisory, and
+# everything the liveness probe concludes, is printed to the caller rather than
+# written where somebody could read it back as a lifecycle event.
 
 set -euo pipefail
 
@@ -231,6 +375,19 @@ ADVISORY_AGE=900
 # `aged_advisory`, while a promoted spawn gap sends the seat to steer a session
 # that is still booting, which is the failure this gate exists to stop.
 SPAWN_GAP=90
+# The stall thresholds, sized against the miss that motivated them: a research
+# session silent for two hours with nobody watching. A healthy session emits a
+# turn-boundary row every turn and a long single turn runs minutes, so 900s is
+# about an order of magnitude above ordinary turn length and well under that
+# miss. 2700s is three times that and still well under two hours, leaving a
+# genuinely long turn room before it is called anomalous. A 120s cadence bounds
+# detection latency to roughly --stall-after plus one interval, at a handful of
+# screen reads per hour-long window.
+PROBE_EVERY=120
+STALL_AFTER=900
+STALL_AGED_AFTER=2700
+PROBE_TTL=30
+SUSPEND_SKEW=120
 OWNER_PID=""
 OWNER_TMUX=""
 TMUX_SERVER="lore-tui"
@@ -256,6 +413,11 @@ while [[ $# -gt 0 ]]; do
     --peek-timeout) PEEK_TIMEOUT="${2:-}"; shift 2 ;;
     --advisory-age) ADVISORY_AGE="${2:-}"; shift 2 ;;
     --spawn-gap) SPAWN_GAP="${2:-}"; shift 2 ;;
+    --probe-every) PROBE_EVERY="${2:-}"; shift 2 ;;
+    --stall-after) STALL_AFTER="${2:-}"; shift 2 ;;
+    --stall-aged-after) STALL_AGED_AFTER="${2:-}"; shift 2 ;;
+    --probe-ttl) PROBE_TTL="${2:-}"; shift 2 ;;
+    --suspend-skew) SUSPEND_SKEW="${2:-}"; shift 2 ;;
     --owner-pid) OWNER_PID="${2:-}"; shift 2 ;;
     --owner-tmux) OWNER_TMUX="${2:-}"; shift 2 ;;
     --tmux-server) TMUX_SERVER="${2:-}"; shift 2 ;;
@@ -263,10 +425,13 @@ while [[ $# -gt 0 ]]; do
     --wake-shaped) WAKE_SHAPED=1; shift ;;
     --kdir) KDIR_OVERRIDE="${2:-}"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,209p' "$0"; exit 0 ;;
+    # The header comment above is the help text. This range ends on its last
+    # line; a header that grows past it prints truncated, which --help itself
+    # cannot notice.
+    -h|--help) sed -n '2,353p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: coordinate-watch.sh [--slug <s>]... [--arc <slug>]... [--until <events>] [--since <cursor>] [--timeout <sec>] [--pending-stale <sec>] [--peek-timeout <sec>] [--advisory-age <sec>] [--spawn-gap <sec>] [--owner-pid <pid>] [--owner-tmux <name>] [--tmux-server <name>] [--no-board-delta] [--wake-shaped] [--kdir <path>] [--json]" >&2
+      echo "Usage: coordinate-watch.sh [--slug <s>]... [--arc <slug>]... [--until <events>] [--since <cursor>] [--timeout <sec>] [--pending-stale <sec>] [--peek-timeout <sec>] [--advisory-age <sec>] [--spawn-gap <sec>] [--probe-every <sec>] [--stall-after <sec>] [--stall-aged-after <sec>] [--probe-ttl <sec>] [--suspend-skew <sec>] [--owner-pid <pid>] [--owner-tmux <name>] [--tmux-server <name>] [--no-board-delta] [--wake-shaped] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -294,6 +459,32 @@ check_non_negative --pending-stale "$PENDING_STALE" "0 disables"
 check_non_negative --peek-timeout "$PEEK_TIMEOUT" "0 disables"
 check_non_negative --advisory-age "$ADVISORY_AGE" "0 disables"
 check_non_negative --spawn-gap "$SPAWN_GAP" "0 disables the age gate"
+check_non_negative --probe-every "$PROBE_EVERY" "0 disables stall probing"
+check_non_negative --stall-after "$STALL_AFTER" "0 disables stall probing"
+check_non_negative --stall-aged-after "$STALL_AGED_AFTER" "0 disables the escalation"
+check_non_negative --probe-ttl "$PROBE_TTL"
+check_non_negative --suspend-skew "$SUSPEND_SKEW" "0 disables"
+
+# An inverted pair reads as configured and reaches nothing: no row age can be at
+# once past --stall-after and past a smaller --stall-aged-after in the order the
+# bands are tested, so the escalation cell is unreachable. Refuse where the
+# message can name the fix rather than leave a watcher that silently never
+# escalates.
+if [[ "$STALL_AFTER" -gt 0 && "$STALL_AGED_AFTER" -gt 0 && "$STALL_AGED_AFTER" -lt "$STALL_AFTER" ]]; then
+  fail "invalid --stall-aged-after: ${STALL_AGED_AFTER}s is below --stall-after (${STALL_AFTER}s); raise it above --stall-after, or pass 0 to turn the escalation off"
+fi
+
+# The probe reads screens, so a run that cannot read a screen has no instrument.
+PROBE_ENABLED=1
+PROBE_OFF_REASON=""
+if [[ "$PROBE_EVERY" -eq 0 ]]; then
+  PROBE_ENABLED=0; PROBE_OFF_REASON="disabled by --probe-every 0"
+elif [[ "$STALL_AFTER" -eq 0 ]]; then
+  PROBE_ENABLED=0; PROBE_OFF_REASON="disabled by --stall-after 0"
+elif [[ "$PEEK_TIMEOUT" -eq 0 ]]; then
+  PROBE_ENABLED=0; PROBE_OFF_REASON="disabled by --peek-timeout 0: the probe has no instrument without a screen read"
+fi
+
 if [[ -n "$OWNER_PID" ]] && ! [[ "$OWNER_PID" =~ ^[1-9][0-9]*$ ]]; then
   fail "invalid --owner-pid: '$OWNER_PID' (must be a positive integer)"
 fi
@@ -391,6 +582,8 @@ fi
 CURSOR_FILE="$COORD_DIR/watch-cursor${SCOPE_SUFFIX}.json"
 BASELINE_FILE="$COORD_DIR/watch-board-baseline${SCOPE_SUFFIX}.json"
 ADVISORY_FILE="$COORD_DIR/watch-advisories${SCOPE_SUFFIX}.json"
+PROBE_FILE="$COORD_DIR/watch-probe${SCOPE_SUFFIX}.json"
+STALL_FILE="$COORD_DIR/watch-stalls${SCOPE_SUFFIX}.json"
 
 if [[ $SCOPED -eq 1 ]]; then
   SCOPE_SLUGS_JSON="$(printf '%s\n' "${SCOPE_SLUGS[@]}" | LC_ALL=C sort -u | jq -R . | jq -s -c .)"
@@ -675,6 +868,12 @@ WAKE_MATCHED="null"         # JSON
 WAKE_PENDING="[]"           # JSON
 WAKE_ADVISORY_AGE="null"    # JSON
 WAKE_SPAWN_GAP="null"       # JSON
+WAKE_PROBE="null"           # JSON
+WAKE_CLOCK_SKEW="null"      # JSON
+
+if [[ $PROBE_ENABLED -eq 0 ]]; then
+  WAKE_PROBE="$(jq -cn --arg r "$PROBE_OFF_REASON" '{consulted: false, reason: $r}')"
+fi
 
 # emit_wake <cursor> <exit-code> <message>
 # The single terminal. Non-zero terminals print their JSON by hand: json_output
@@ -697,6 +896,8 @@ emit_wake() {
     --argjson peek "$WAKE_PEEK" \
     --argjson advisory_age "$WAKE_ADVISORY_AGE" \
     --argjson spawn_gap "$WAKE_SPAWN_GAP" \
+    --argjson probe "$WAKE_PROBE" \
+    --argjson clock_skew "$WAKE_CLOCK_SKEW" \
     --argjson matched "$WAKE_MATCHED" \
     --argjson pending "$WAKE_PENDING" \
     --arg mode "$SCOPE_MODE" \
@@ -711,6 +912,7 @@ emit_wake() {
       classification: {state: $state, label: $label, reason: $reason,
                        advisory_age_seconds: $advisory_age, peek: $peek,
                        spawn_gap: $spawn_gap},
+      probe: $probe, clock_skew: $clock_skew,
       matched: $matched, pending: $pending,
       scope: {mode: $mode, slugs: $slugs, arcs: $arcs, cursor_file: $cursor_file},
       board_delta: $delta, next_cursor: $nc, until: $until}')"
@@ -994,6 +1196,403 @@ classify_match() {
   apply_advisory_tier "park:$slug:$event:$label"
 }
 
+# --- Stall detection ---------------------------------------------------------
+
+# slug -> {ts, event} for the most recent journal row seen about each session.
+LAST_ROW_MAP='{}'
+
+# absorb_rows <reader-payload> — fold every row of one read into the last-row map.
+#
+# Every row, not only the ones the until-set wants: a step_completed or a
+# harness_turn_ended is worthless as a wake and is exactly what proves a session
+# is still working. Rows carrying no timestamp are left out, since there is
+# nothing to measure staleness from; the sole writer stamps every row it appends.
+absorb_rows() {
+  local payload="$1" folded=""
+  folded="$(printf '%s' "$payload" | jq -c --argjson map "$LAST_ROW_MAP" '
+    reduce (.events[]? | select(type == "object")) as $row ($map;
+      ($row.slug // "") as $s
+      | ($row.ts // "") as $t
+      | if $s == "" or $t == "" then .
+        else .[$s] = {ts: $t, event: ($row.event // null)}
+        end)' 2>/dev/null)" || folded=""
+  if [[ -n "$folded" ]]; then
+    LAST_ROW_MAP="$folded"
+  fi
+  return 0
+}
+
+# seed_last_rows — one bounded backward read so the map starts the window with
+# what the board has been saying, rather than knowing nothing until the first row
+# of this window arrives. The window is --stall-aged-after wide because that is
+# the oldest age the bands distinguish: a session with no row in it is silent by
+# at least that much, whatever happened before.
+seed_last_rows() {
+  local lookback="$1" bounds window_start="" window_end="" payload
+  bounds="$(python3 -c '
+import sys
+from datetime import datetime, timedelta, timezone
+
+lookback = float(sys.argv[1])
+now = datetime.now(timezone.utc)
+fmt = "%Y-%m-%dT%H:%M:%SZ"
+print((now - timedelta(seconds=lookback)).strftime(fmt))
+print((now + timedelta(seconds=1)).strftime(fmt))
+' "$lookback" 2>/dev/null)" || return 0
+  { IFS= read -r window_start; IFS= read -r window_end; } <<< "$bounds"
+  [[ -n "$window_start" && -n "$window_end" ]] || return 0
+  payload="$(session_events_run "$EVENTS_SH" --json \
+    --window-start "$window_start" --window-end "$window_end" --kdir "$KNOWLEDGE_DIR")" || return 0
+  absorb_rows "$payload"
+}
+
+# clock_pair — "<wall><TAB><monotonic>", the two clocks read together.
+# Wall time advances across a system suspension and monotonic time does not, so a
+# pair taken now and a pair taken later bound how long this machine was asleep.
+clock_pair() {
+  python3 -c 'import time; print("%.3f\t%.3f" % (time.time(), time.monotonic()))'
+}
+
+# clock_elapsed <wall-baseline> <monotonic-baseline>
+# "<wall_elapsed><TAB><monotonic_elapsed><TAB><skew>", whole seconds.
+clock_elapsed() {
+  python3 -c '
+import sys, time
+
+w0, m0 = float(sys.argv[1]), float(sys.argv[2])
+wall = time.time() - w0
+mono = time.monotonic() - m0
+print("%d\t%d\t%d" % (int(wall), int(mono), int(wall - mono)))
+' "$1" "$2"
+}
+
+# probe_due — 0 when a probe pass is owed, recording the pass as run.
+# The cadence is persisted per scope because the window re-opens at every turn
+# boundary: without it an active seat would probe every scoped session every turn.
+# No file means due now, so a fresh scope gets its first pass immediately.
+probe_due() {
+  mkdir -p "$COORD_DIR"
+  python3 - "$PROBE_FILE" "$PROBE_EVERY" <<'PYEOF'
+import json, os, sys, tempfile, time
+from datetime import datetime, timezone
+
+path, cadence = sys.argv[1], float(sys.argv[2])
+now = time.time()
+
+last = None
+try:
+    with open(path, encoding="utf-8") as handle:
+        loaded = json.load(handle)
+    if isinstance(loaded, dict) and isinstance(loaded.get("last_probe_at"), (int, float)):
+        last = float(loaded["last_probe_at"])
+except (OSError, ValueError):
+    last = None
+
+if last is not None and (now - last) < cadence:
+    raise SystemExit(1)
+
+stamp = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+try:
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp.watch-probe.")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump({"schema_version": 1, "last_probe_at": now, "updated_at": stamp}, handle)
+    os.replace(tmp, path)
+except OSError:
+    pass
+PYEOF
+}
+
+# probe_set <live-tsv> — echo one JSON object describing this pass's candidates:
+# {live_sessions, in_scope, skipped_slugless, eligible, candidates: [...]},
+# stalest first.
+#
+# Scope admits a worker session by its work item, the same join the journal
+# predicate makes through links.work_item, so a seat scoped to a work item sees
+# its workers stall. Out-of-scope sessions are dropped outright: unlike a journal
+# row carrying no identity key, a registry session is always decidable, so
+# dropping one silences nothing that this seat could have been expected to act on.
+probe_set() {
+  local live="$1"
+  PROBE_LIVE="$live" PROBE_MAP="$LAST_ROW_MAP" PROBE_SCOPE="$SCOPE_SLUGS_JSON" \
+    python3 - "$SCOPED" "$STALL_AFTER" "$STALL_AGED_AFTER" <<'PYEOF'
+import json, os, re, sys
+from datetime import datetime, timezone
+
+scoped = sys.argv[1] == "1"
+stall_after, aged_after = float(sys.argv[2]), float(sys.argv[3])
+
+try:
+    scope = set(json.loads(os.environ.get("PROBE_SCOPE") or "[]"))
+except ValueError:
+    scope = set()
+try:
+    last_rows = json.loads(os.environ.get("PROBE_MAP") or "{}")
+except ValueError:
+    last_rows = {}
+if not isinstance(last_rows, dict):
+    last_rows = {}
+
+WORKER_SLUG = re.compile(r"^(.+)--w[0-9]+$")
+now = datetime.now(timezone.utc)
+
+
+def parse(value):
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    stamp = datetime.fromisoformat(text)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
+
+
+live_sessions, slugless, in_scope = 0, 0, []
+for line in (os.environ.get("PROBE_LIVE") or "").splitlines():
+    state, _, slug = line.partition("\t")
+    if state == "slugless":
+        live_sessions += 1
+        slugless += 1
+        continue
+    if state != "named" or not slug:
+        continue
+    live_sessions += 1
+    if scoped:
+        match = WORKER_SLUG.match(slug)
+        owner = match.group(1) if match else slug
+        if slug not in scope and owner not in scope:
+            continue
+    in_scope.append(slug)
+
+candidates = []
+for slug in in_scope:
+    row = last_rows.get(slug)
+    age, last_ts, last_event = None, None, None
+    if isinstance(row, dict):
+        last_event = row.get("event")
+        raw = row.get("ts")
+        if isinstance(raw, str) and raw:
+            last_ts = raw
+            try:
+                age = int((now - parse(raw)).total_seconds())
+            except ValueError:
+                age = None
+    if age is None:
+        # Nothing about this session inside the seed window, so it has been
+        # silent for at least the whole window.
+        band = "aged" if aged_after > 0 else "stalled"
+    elif age < stall_after:
+        band = "fresh"
+    elif aged_after > 0 and age >= aged_after:
+        band = "aged"
+    else:
+        band = "stalled"
+    if band == "fresh":
+        continue
+    candidates.append({
+        "slug": slug,
+        "row_age_seconds": age,
+        "last_row_event": last_event,
+        "last_row_ts": last_ts,
+        "band": band,
+    })
+
+# Stalest first: the longest silence is the likeliest real stall, and the window
+# ends on the first session that warrants a wake.
+candidates.sort(key=lambda c: (
+    0 if c["row_age_seconds"] is None else 1,
+    -(c["row_age_seconds"] or 0),
+    c["slug"],
+))
+
+print(json.dumps({
+    "live_sessions": live_sessions,
+    "in_scope": len(in_scope),
+    "skipped_slugless": slugless,
+    "eligible": len(candidates),
+    "candidates": candidates,
+}, separators=(",", ":")))
+PYEOF
+}
+
+# stall_ledger_admits <slug> <tier> <last-row-ts> <live-tsv>
+# "<wake|suppressed><TAB><tier previously woken for, or empty>".
+#
+# Without this a confirmed stall would wake once per cadence interval for as long
+# as the session stays hung — thirty wakes an hour for one problem. Ranking rather
+# than equality means a session degrading from a long turn to a hung composer
+# still gets its louder wake, while one whose screen read goes flaky and reports
+# something weaker does not wake again. A record is dropped when that session
+# speaks (a new row is exactly the evidence the silence ended) or when its slug
+# leaves the registry, so a recovered session starts clean at every tier.
+stall_ledger_admits() {
+  local slug="$1" tier="$2" last_ts="$3" live="$4"
+  mkdir -p "$COORD_DIR"
+  PROBE_LIVE="$live" python3 - "$STALL_FILE" "$slug" "$tier" "$last_ts" <<'PYEOF'
+import json, os, sys, tempfile, time
+from datetime import datetime, timezone
+
+path, slug, tier, last_ts = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+RANK = {"advisory": 1, "aged_advisory": 2, "confirmed": 3}
+PRUNE_AFTER = 7 * 24 * 3600
+now = time.time()
+
+live = set()
+for line in (os.environ.get("PROBE_LIVE") or "").splitlines():
+    state, _, name = line.partition("\t")
+    if state == "named" and name:
+        live.add(name)
+
+ledger = {}
+try:
+    with open(path, encoding="utf-8") as handle:
+        loaded = json.load(handle)
+    if isinstance(loaded, dict) and isinstance(loaded.get("woken"), dict):
+        ledger = loaded["woken"]
+except (OSError, ValueError):
+    ledger = {}
+
+kept = {}
+for name, row in ledger.items():
+    if not isinstance(row, dict) or name not in live:
+        continue
+    stamp = row.get("woken_at")
+    if not isinstance(stamp, (int, float)) or (now - stamp) > PRUNE_AFTER:
+        continue
+    kept[name] = row
+
+entry = kept.get(slug)
+if isinstance(entry, dict) and (entry.get("last_row_ts") or "") != last_ts:
+    entry = None
+    kept.pop(slug, None)
+
+previous = ""
+wake = True
+if isinstance(entry, dict):
+    previous = entry.get("tier") or ""
+    if RANK.get(tier, 0) <= RANK.get(previous, 0):
+        wake = False
+
+if wake:
+    kept[slug] = {"tier": tier, "last_row_ts": last_ts, "woken_at": now}
+
+stamp = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+try:
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp.watch-stalls.")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump({"schema_version": 1, "updated_at": stamp, "woken": kept}, handle)
+    os.replace(tmp, path)
+except OSError:
+    pass
+
+print("%s\t%s" % ("wake" if wake else "suppressed", previous))
+PYEOF
+}
+
+# probe_record <set-json> <examined> <session-json>
+probe_record() {
+  jq -cn --argjson counts "$1" --argjson examined "$2" --argjson session "$3" \
+    --argjson cadence "$PROBE_EVERY" --argjson stall "$STALL_AFTER" \
+    --argjson aged "$STALL_AGED_AFTER" \
+    '{consulted: true, reason: null, cadence_seconds: $cadence,
+      stall_after_seconds: $stall, aged_after_seconds: $aged,
+      live_sessions: $counts.live_sessions, in_scope: $counts.in_scope,
+      skipped_slugless: $counts.skipped_slugless, eligible: $counts.eligible,
+      examined: $examined, session: $session}'
+}
+
+# run_probe — one due pass. Terminates the window through emit_wake on the first
+# session that warrants one; returns having recorded the pass otherwise.
+run_probe() {
+  local live set_json total="" examined=0 index=0 entry slug band last_ts
+  local peek_out peek_status ready blocked peek_json verdict label tier
+  local decision admits suppressed_from
+  # A pass that examines sessions without waking must leave the wake fields as it
+  # found them, or a later quiet timeout would inherit a tier nothing set for it.
+  local held_tier="$WAKE_TIER" held_state="$WAKE_STATE" held_age="$WAKE_ADVISORY_AGE"
+
+  live="$(session_live_slugs "$KNOWLEDGE_DIR/_sessions/instances" "$PROBE_TTL")" || live=""
+  set_json="$(probe_set "$live")" || return 0
+  [[ -n "$set_json" ]] || return 0
+  total="$(printf '%s' "$set_json" | jq -r '.candidates | length')" || total=""
+  [[ "$total" =~ ^[0-9]+$ ]] || total=0
+
+  while [[ $index -lt $total ]]; do
+    entry="$(printf '%s' "$set_json" | jq -c --argjson i "$index" '.candidates[$i]')"
+    index=$(( index + 1 ))
+    slug="$(printf '%s' "$entry" | jq -r '.slug')"
+    band="$(printf '%s' "$entry" | jq -r '.band')"
+    last_ts="$(printf '%s' "$entry" | jq -r '.last_row_ts // ""')"
+    examined=$(( examined + 1 ))
+
+    # Contained per candidate: one session whose instance will not answer must not
+    # end the pass before the others have been looked at.
+    peek_status=0
+    peek_out="$(bash "$PEEK_SH" "$slug" --json --timeout "$PEEK_TIMEOUT" \
+      --ttl "$PROBE_TTL" --kdir "$KNOWLEDGE_DIR" 2>/dev/null)" || peek_status=$?
+
+    if [[ $peek_status -ne 0 ]]; then
+      tier="confirmed"
+      label="probe-unanswered-by-live-instance"
+      WAKE_STATE="stall_confirmed"
+      peek_json="$(jq -n --arg e "$(printf '%s' "$peek_out" | jq -r '.error // "peek did not answer"' 2>/dev/null || echo 'peek did not answer')" \
+        '{consulted: true, ready: null, blocked_reason: null, error: $e}')"
+    else
+      ready="$(printf '%s' "$peek_out" | jq -r 'if (.ready | type) == "boolean" then (.ready | tostring) else "" end' 2>/dev/null || echo "")"
+      blocked="$(printf '%s' "$peek_out" | jq -r '.blocked_reason // ""' 2>/dev/null || echo "")"
+      peek_json="$(jq -n --arg r "$ready" --arg b "$blocked" \
+        '{consulted: true,
+          ready: (if $r == "" then null else ($r == "true") end),
+          blocked_reason: (if $b == "" then null else $b end),
+          error: null}')"
+      IFS=$'\t' read -r verdict label <<< "$(session_park_classify "probe:$band" "$ready" "$blocked")"
+      if [[ "$verdict" == "confirmed" ]]; then
+        tier="confirmed"
+        WAKE_STATE="stall_confirmed"
+      elif [[ "$label" == "long-turn-below-aged-threshold" ]]; then
+        # The one observation this watcher deliberately does not deliver. The
+        # session is working and nobody is waiting on the seat, so there is no
+        # actionable event here to go silent on — the probe asked the question and
+        # the answer is that there is nothing to say yet.
+        continue
+      elif [[ "$label" == "long-turn-past-aged-threshold" ]]; then
+        tier="aged_advisory"
+        WAKE_STATE="stall_unconfirmed"
+      else
+        apply_advisory_tier "stall:$slug:$label"
+        tier="$WAKE_TIER"
+        WAKE_STATE="stall_unconfirmed"
+      fi
+    fi
+
+    decision="$(stall_ledger_admits "$slug" "$tier" "$last_ts" "$live")" || decision=""
+    admits="wake"
+    suppressed_from=""
+    if [[ -n "$decision" ]]; then
+      IFS=$'\t' read -r admits suppressed_from <<< "$decision"
+    fi
+    if [[ "$admits" == "suppressed" ]]; then
+      continue
+    fi
+
+    WAKE_OUTCOME="session_stalled"
+    WAKE_TIER="$tier"
+    WAKE_AUTHORITY="screen-signature"
+    WAKE_LABEL="$label"
+    WAKE_PEEK="$peek_json"
+    WAKE_PROBE="$(probe_record "$set_json" "$examined" \
+      "$(printf '%s' "$entry" | jq -c --argjson peek "$peek_json" --arg from "$suppressed_from" \
+        '. + {peek: $peek, suppressed_from: (if $from == "" then null else $from end)}')")"
+    emit_wake "$CURSOR" 0 \
+      "[coordinate] wake: '$slug' has been silent since $(printf '%s' "$entry" | jq -r '.last_row_ts // "before this window opened"') and its screen says $label — tier=$WAKE_TIER"
+  done
+
+  # Nothing crossed a threshold. The counts still ride the next wake, so a quiet
+  # window can be told from one where nothing was looked at.
+  WAKE_PROBE="$(probe_record "$set_json" "$examined" null)"
+  WAKE_TIER="$held_tier"
+  WAKE_STATE="$held_state"
+  WAKE_ADVISORY_AGE="$held_age"
+  return 0
+}
+
 # --- Baseline: explicit --since, else the persisted cursor, else journal end ---
 if [[ $SINCE_SET -eq 1 ]]; then
   CURSOR="$SINCE"
@@ -1035,6 +1634,22 @@ emit_matched_from_record() {
     "[coordinate] wake: $(printf '%s' "$row" | jq -r '.event') on '$(printf '%s' "$row" | jq -r '.slug // "(no slug)"')' — tier=$WAKE_TIER authority=$WAKE_AUTHORITY state=$WAKE_STATE label=$WAKE_LABEL"
 }
 
+CLOCK_WALL0=""
+CLOCK_MONO0=""
+if [[ "$SUSPEND_SKEW" -gt 0 ]]; then
+  CLOCK_BASELINE="${LORE_WATCH_CLOCK_BASELINE:-}"
+  if [[ -z "$CLOCK_BASELINE" ]]; then
+    CLOCK_BASELINE="$(clock_pair)" || CLOCK_BASELINE=""
+  fi
+  IFS=$' \t' read -r CLOCK_WALL0 CLOCK_MONO0 <<< "$CLOCK_BASELINE"
+fi
+
+if [[ $PROBE_ENABLED -eq 1 ]]; then
+  SEED_LOOKBACK="$STALL_AGED_AFTER"
+  [[ "$SEED_LOOKBACK" -ge "$STALL_AFTER" ]] || SEED_LOOKBACK="$STALL_AFTER"
+  seed_last_rows "$SEED_LOOKBACK"
+fi
+
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
 while :; do
   RESULT="$(session_events_read "$EVENTS_SH" "$KNOWLEDGE_DIR" "$CURSOR")" || emit_internal_error "$CURSOR"
@@ -1046,6 +1661,33 @@ while :; do
   # No match: nothing was withheld from the caller, so the batch cursor is the
   # row after the last row this read consumed, and advancing to it is correct.
   CURSOR="$NEXT"
+  if [[ $PROBE_ENABLED -eq 1 ]]; then
+    absorb_rows "$RESULT"
+  fi
+
+  # Before anything that reads a clock-derived threshold. After a suspension every
+  # pending request looks stale and every session looks silent, so this check
+  # running later would emit a burst of wakes about the frozen interval before
+  # reporting the freeze that produced them.
+  if [[ -n "$CLOCK_WALL0" && -n "$CLOCK_MONO0" ]]; then
+    SKEW_LINE="$(clock_elapsed "$CLOCK_WALL0" "$CLOCK_MONO0")" || SKEW_LINE=""
+    if [[ -n "$SKEW_LINE" ]]; then
+      IFS=$'\t' read -r WALL_ELAPSED MONO_ELAPSED SKEW <<< "$SKEW_LINE"
+      if [[ "$SKEW" -ge "$SUSPEND_SKEW" ]]; then
+        WAKE_CLOCK_SKEW="$(jq -cn --argjson wall "$WALL_ELAPSED" --argjson mono "$MONO_ELAPSED" \
+          --argjson skew "$SKEW" --argjson threshold "$SUSPEND_SKEW" \
+          '{wall_elapsed_seconds: $wall, monotonic_elapsed_seconds: $mono,
+            skew_seconds: $skew, threshold_seconds: $threshold}')"
+        WAKE_OUTCOME="clock_skew"
+        WAKE_TIER="confirmed"
+        WAKE_AUTHORITY="none"
+        WAKE_STATE="clock_skew"
+        WAKE_LABEL="window-slept-through-suspension"
+        emit_wake "$CURSOR" 0 \
+          "[coordinate] this machine was asleep for about ${SKEW}s with the window open; every age this window computed is measured against a stopped clock. Re-join the board and re-arm before trusting quiet"
+      fi
+    fi
+  fi
 
   # A journal row always wins: it is the real event, and the pending check is
   # only there for the case where no row will ever come.
@@ -1061,6 +1703,12 @@ while :; do
       emit_wake "$CURSOR" 0 \
         "[coordinate] $(printf '%s' "$PENDING" | jq -r 'length') pending spawn request(s) unclaimed past ${PENDING_STALE}s; an unclaimed request never reaches the journal, so nothing else will report it (tier=$WAKE_TIER)"
     fi
+  fi
+
+  # Rows first, silence second: a session that spoke is not a session to go
+  # reading screens about.
+  if [[ $PROBE_ENABLED -eq 1 ]] && probe_due; then
+    run_probe
   fi
 
   if [[ $OWNER_CHECK_ENABLED -eq 1 ]] \
