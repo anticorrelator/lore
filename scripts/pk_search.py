@@ -68,10 +68,35 @@ _SCALE_REGISTRY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 # Valid status values; entries without a status field are treated as "current".
 # `corrected` is in the default set: a corrected entry was rewritten to match
 # the code, which makes it more reliable than an unexamined one, not less.
-# `superseded`, `historical`, and `resolved` mark entries kept for the record
-# rather than for use, so reaching them takes an explicit include_status.
-VALID_STATUS_VALUES = {"current", "corrected", "superseded", "historical", "resolved"}
+# `superseded`, `historical`, `resolved`, and `retired` mark entries kept for
+# the record rather than for use, so reaching them takes an explicit
+# include_status. `retired` differs from the other three in that it names no
+# successor, carries a written falsifier, and reverses with `lore retire
+# --restore`.
+VALID_STATUS_VALUES = {"current", "corrected", "superseded", "historical", "resolved", "retired"}
 DEFAULT_STATUS_FILTER = ("current", "corrected")
+
+# Matches the status filter dropped, totalled over every Searcher in this
+# process. Each Searcher also records its own last search on
+# `last_status_excluded`; the process total is what CLI paths read when the
+# Searcher is built out of their reach (`pk_prefetch.run_prefetch` builds its
+# own and returns only an exit code).
+_STATUS_EXCLUDED_TOTALS: dict[str, int] = {}
+
+
+def status_excluded_totals() -> dict[str, int]:
+    """Status -> matches the status filter has dropped so far in this process."""
+    return dict(_STATUS_EXCLUDED_TOTALS)
+
+
+def withheld_retired_notice(count: int) -> str:
+    """One line telling a searcher what retirement kept out of their results."""
+    subject = "entry is" if count == 1 else "entries are"
+    return (
+        f"{count} matching {subject} retired, so this search left them out. "
+        "If one of them is what you were looking for, add "
+        "--include-status retired to see it."
+    )
 
 
 def _load_scale_ordinals() -> dict[str, int]:
@@ -1322,6 +1347,10 @@ class Searcher:
         # Reason the most recent search could not use a current index, or None.
         # budget_search reports it so an empty payload can say why it is empty.
         self.degraded: str | None = None
+        # Status -> matches the last search() dropped for carrying that status.
+        # Reported rather than returned: search() returns a list of dicts that
+        # composite_search, budget_search, and prefetch all consume as-is.
+        self.last_status_excluded: dict[str, int] = {}
 
     def _index_queryable(self) -> bool:
         """True when the index on disk can answer a search right now."""
@@ -1490,6 +1519,10 @@ class Searcher:
         if self._ensure_index() == DEGRADED_UNAVAILABLE:
             # Not logged: a search that never reached an index is not a miss,
             # and recording it as one would misreport retrieval coverage.
+            # A search that never ran also dropped nothing — reset the
+            # per-search exclusion record so a caller reading it after this
+            # return does not report a previous search's withheld matches.
+            self.last_status_excluded = {}
             return []
 
         prepared = (
@@ -1585,6 +1618,7 @@ class Searcher:
                 raise
 
         results = []
+        status_excluded: dict[str, int] = {}
         for row in rows:
             score = row["rank"]
             # FTS5 rank: more negative = better match. Threshold filters out
@@ -1595,11 +1629,6 @@ class Searcher:
             entry_scale = row["scale"]  # may be None or "unknown"
             entry_status_val = row["entry_status"]  # may be None (treat as "current")
             entry_category = row["category"]  # may be None
-
-            # Status filter: entries without a status field are treated as "current"
-            effective_entry_status = entry_status_val if entry_status_val else "current"
-            if effective_statuses and effective_entry_status not in effective_statuses:
-                continue
 
             # Scale filter: set-membership matching with bypass for horizontal entries.
             # An entry bypasses the scale filter when category=preferences (horizontal
@@ -1615,6 +1644,18 @@ class Searcher:
                         continue
                     if not (entry_scale_set & query_scale_set):
                         continue
+
+            # Status filter: entries without a status field are treated as
+            # "current". It runs last so status_excluded counts only entries
+            # that every other filter would have let through — the count is
+            # reported to searchers as "what your status filter cost you", so
+            # an entry the scale filter also drops must not inflate it.
+            effective_entry_status = entry_status_val if entry_status_val else "current"
+            if effective_statuses and effective_entry_status not in effective_statuses:
+                status_excluded[effective_entry_status] = (
+                    status_excluded.get(effective_entry_status, 0) + 1
+                )
+                continue
 
             content = row["content"]
             snippet = content[:SNIPPET_MAX_CHARS]
@@ -1650,6 +1691,12 @@ class Searcher:
                 break
 
         conn.close()
+
+        self.last_status_excluded = status_excluded
+        for status_value, dropped in status_excluded.items():
+            _STATUS_EXCLUDED_TOTALS[status_value] = (
+                _STATUS_EXCLUDED_TOTALS.get(status_value, 0) + dropped
+            )
 
         elapsed_ms = (time.time() - search_start) * 1000
         self._log_search(
@@ -1768,10 +1815,15 @@ class Searcher:
             if os.path.basename(row["file_path"]) == "README.md":
                 continue
 
-            # Status filter (D6: applied inside the primitive)
+            # Status filter (applied inside the primitive). Drops feed the same
+            # process total as search(), so a retired preference is reported to
+            # the searcher rather than disappearing from the side channel.
             entry_status_val = row["entry_status"]
             effective_entry_status = entry_status_val if entry_status_val else "current"
             if effective_statuses and effective_entry_status not in effective_statuses:
+                _STATUS_EXCLUDED_TOTALS[effective_entry_status] = (
+                    _STATUS_EXCLUDED_TOTALS.get(effective_entry_status, 0) + 1
+                )
                 continue
 
             content = row["content"]

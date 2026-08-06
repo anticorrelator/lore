@@ -70,6 +70,9 @@ Commands:
                for a knowledge entry, resolving a contradiction by correcting
                the entry or marking it disputed (see: lore verify --help), or
                report per-entry ledger events (lore verify --report --help)
+  retire       Retire a knowledge entry that no longer earns its place, with a
+               reason and a falsifier, or restore one with 'lore retire <path>
+               --restore --note ...' (see: lore retire --help)
   audit        Route a producer artifact through the judge templates
   trust        Trust-ledger verbs — cheaply confirm an entry's verdict
                (see: lore trust --help)
@@ -2209,6 +2212,10 @@ case "$1" in
     else
       exec "$SCRIPTS_DIR/verify-append.sh" "$@"
     fi
+    ;;
+  retire)
+    shift
+    exec "$SCRIPTS_DIR/retire-append.sh" "$@"
     ;;
   audit)
     shift

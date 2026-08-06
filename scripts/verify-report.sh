@@ -5,8 +5,8 @@
 # Read-only aggregation over `$KDIR/_trust/trust-events.jsonl`: for an
 # explicit scope of knowledge entries, project every ledger event recorded
 # against each entry — per-event disposition, code anchor (file:line-range),
-# source, work item, and timestamp — alongside held/contradicted,
-# mechanical-check, and adjudication counts. Counts are always paired with
+# source, work item, and timestamp — alongside held/contradicted, correction,
+# retirement, mechanical-check, and adjudication counts. Counts are always paired with
 # the per-event evidence lines: the report answers "WHAT was verified and
 # WHERE", not "how many times was the verb invoked".
 #
@@ -258,6 +258,7 @@ def project_entry(path):
     adjudications = [r for r in rows if r["event"] == "adjudication"]
     migrations = [r for r in rows if r["event"] == "provenance-migration"]
     corrections = [r for r in rows if r["event"] == "correction"]
+    retirements = [r for r in rows if r["event"] == "retirement"]
 
     def pl(row):
         payload = row.get("payload")
@@ -301,6 +302,25 @@ def project_entry(path):
                 "observed_at": r.get("observed_at"),
                 "event_id": r.get("event_id"),
             } for r in corrections],
+        },
+        "retirements": {
+            "retired": sum(1 for r in retirements if pl(r).get("action") == "retired"),
+            "restored": sum(1 for r in retirements if pl(r).get("action") == "restored"),
+            "events": [{
+                "action": pl(r).get("action"),
+                "retirement_id": pl(r).get("retirement_id"),
+                "restores_retirement_id": pl(r).get("restores_retirement_id"),
+                "reason": pl(r).get("reason"),
+                "falsifier": pl(r).get("falsifier"),
+                "note": pl(r).get("note"),
+                "prior_status": pl(r).get("prior_status"),
+                "result_status": pl(r).get("result_status"),
+                "inbound_backlinks": pl(r).get("inbound_backlinks"),
+                "work_item": pl(r).get("work_item"),
+                "source": r.get("source"),
+                "observed_at": r.get("observed_at"),
+                "event_id": r.get("event_id"),
+            } for r in retirements],
         },
         "mechanical_checks": {
             "by_result": {result: sum(1 for r in checks if pl(r).get("result") == result)
@@ -403,6 +423,21 @@ for entry in report["entries"]:
                 print(f"                 was: {snippet_line(ev['before_text'])}")
             if ev["after_text"]:
                 print(f"                 now: {snippet_line(ev['after_text'])}")
+    ret = entry["retirements"]
+    if ret["events"]:
+        print(f"  retirements: {ret['retired']} retired, {ret['restored']} restored")
+        for ev in ret["events"]:
+            print(f"    {ev['action']:<10} {ev['retirement_id']} "
+                  f"{ev['prior_status']} -> {ev['result_status']}  "
+                  f"source={ev['source']}  {ev['observed_at']}")
+            if ev["reason"]:
+                print(f"                 reason: {snippet_line(ev['reason'])}")
+            if ev["falsifier"]:
+                print(f"                 overturned if: {snippet_line(ev['falsifier'])}")
+            if ev["note"]:
+                print(f"                 note: {snippet_line(ev['note'])}")
+            if ev["restores_retirement_id"]:
+                print(f"                 reverses: {ev['restores_retirement_id']}")
     checks = entry["mechanical_checks"]
     if checks["events"]:
         summary = ", ".join(f"{count} {result}"

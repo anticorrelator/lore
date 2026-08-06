@@ -36,6 +36,8 @@ from pk_search import (  # noqa: E402
     SOURCE_TYPES,
     attach_similar_entries,
     render_trust_stamp,
+    status_excluded_totals,
+    withheld_retired_notice,
 )
 from pk_resolve import Resolver, resolve_read_path  # noqa: E402
 import pk_retrieval  # noqa: E402
@@ -70,6 +72,17 @@ def cmd_index(args: argparse.Namespace) -> None:
         sys.exit(1)
     print(f"Indexed {result['files_indexed']} files, {result['total_entries']} entries in {result['elapsed_seconds']}s")
     print(f"Database: {result['db_path']}")
+
+
+def _report_withheld_retired(count: int, stream) -> None:
+    """Tell the caller how many matches retirement kept out, if any.
+
+    Fires on the default status filter with no flag and no threshold: the
+    agent who notices a retirement was wrong is the one searching for the
+    entry later, and without this line they never learn it exists.
+    """
+    if count > 0:
+        print(withheld_retired_notice(count), file=stream)
 
 
 def cmd_search(args: argparse.Namespace) -> None:
@@ -118,6 +131,9 @@ def cmd_search(args: argparse.Namespace) -> None:
             exclude_paths=exclude_paths,
         )
         print(json.dumps(pk_retrieval.budget_json_payload(result), indent=2))
+        _report_withheld_retired(
+            searcher.last_status_excluded.get("retired", 0), sys.stderr
+        )
         return
 
     if mode == "composite":
@@ -204,12 +220,17 @@ def cmd_search(args: argparse.Namespace) -> None:
     if getattr(args, "expand", False):
         attach_similar_entries(searcher, results)
 
+    withheld_retired = searcher.last_status_excluded.get("retired", 0)
+
     if args.json:
         print(json.dumps(results, indent=2))
+        # stderr, so --json consumers keep a parseable stdout.
+        _report_withheld_retired(withheld_retired, sys.stderr)
         return
 
     if not results:
         print(f'No results for "{args.query}"')
+        _report_withheld_retired(withheld_retired, sys.stdout)
         return
 
     for i, r in enumerate(results, 1):
@@ -235,6 +256,10 @@ def cmd_search(args: argparse.Namespace) -> None:
             print("  See also:")
             for s in r["similar_entries"]:
                 print(f"    - {s['heading']} ({s['file_path']}, sim: {s['similarity']})")
+
+    if withheld_retired > 0:
+        print("")
+        _report_withheld_retired(withheld_retired, sys.stdout)
 
 
 def cmd_search_preferences(args: argparse.Namespace) -> None:
@@ -857,6 +882,11 @@ def cmd_prefetch(args: argparse.Namespace) -> None:
         no_preferences=args.no_preferences,
         caller=getattr(args, "caller", None),
     )
+    # run_prefetch owns its Searcher and hands back only an exit code, so the
+    # count comes from the process-wide total. Printed to stdout: this block is
+    # read as prompt context, and the zero-result case — everything that
+    # matched was retired — is the one where the line matters most.
+    _report_withheld_retired(status_excluded_totals().get("retired", 0), sys.stdout)
     sys.exit(rc)
 
 

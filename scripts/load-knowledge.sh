@@ -394,10 +394,29 @@ for e in data.get('titles_only', []):
     done < <(find "$CAT_DIR" -type f -name '*.md' -print0 2>/dev/null)
   done
 
+  RETIRED_FILES=()
+
   if [[ ${#ALL_ENTRY_FILES[@]} -gt 0 ]]; then
+    # A retired entry has already had the review this list is asking for, so it
+    # stays off the list; leaving it on trains everyone to ignore the list.
+    # Same batched grep shape as the low-confidence pass below — one more grep
+    # over the array already collected.
+    while IFS= read -r file; do
+      [[ -n "$file" ]] || continue
+      RETIRED_FILES+=("$file")
+    done < <(grep -l 'status: retired' "${ALL_ENTRY_FILES[@]}" 2>/dev/null || true)
+
     # Batched mtime check (>90 days)
     while IFS=' ' read -r FILE_MTIME file; do
       [[ -n "$FILE_MTIME" && -n "$file" ]] || continue
+      RETIRED=0
+      for retired_file in ${RETIRED_FILES[@]+"${RETIRED_FILES[@]}"}; do
+        if [[ "$retired_file" == "$file" ]]; then
+          RETIRED=1
+          break
+        fi
+      done
+      [[ $RETIRED -eq 1 ]] && continue
       [[ "$FILE_MTIME" -eq 0 ]] && FILE_MTIME="$NOW"
       AGE=$((NOW - FILE_MTIME))
       if [[ $AGE -gt $NINETY_DAYS ]]; then
@@ -416,6 +435,14 @@ for e in data.get('titles_only', []):
     # Batched low-confidence check
     while IFS= read -r file; do
       [[ -n "$file" ]] || continue
+      RETIRED=0
+      for retired_file in ${RETIRED_FILES[@]+"${RETIRED_FILES[@]}"}; do
+        if [[ "$retired_file" == "$file" ]]; then
+          RETIRED=1
+          break
+        fi
+      done
+      [[ $RETIRED -eq 1 ]] && continue
       REL_PATH="${file#"$KNOWLEDGE_DIR/"}"
       ALREADY=0
       for entry in ${STALE_ENTRIES[@]+"${STALE_ENTRIES[@]}"}; do

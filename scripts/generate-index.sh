@@ -112,10 +112,29 @@ for category in "${CATEGORIES[@]}"; do
       summary="${summary:0:117}..."
     fi
 
+    # Retired entries stay listed, annotated. Browsing is where an agent goes
+    # looking for what search would not return, so dropping them here would
+    # make retirement read as deletion. The date is the most recent
+    # retirements[] item's; entries retired before that array existed, or whose
+    # reason text confuses the scan, degrade to a bare "[retired]".
+    retired_tag=""
+    if [[ "$meta" == *"status: retired"* ]]; then
+      retired_tag=" [retired]"
+      if [[ "$meta" == *"retirements: ["* ]]; then
+        retirements="${meta#*retirements: [}"
+        retirements="${retirements%%]*}"
+        if [[ "$retirements" == *'"date": "'* ]]; then
+          retired_date="${retirements##*'"date": "'}"
+          retired_date="${retired_date%%\"*}"
+          [[ -n "$retired_date" ]] && retired_tag=" [retired $retired_date]"
+        fi
+      fi
+    fi
+
     if [[ -n "$summary" ]]; then
-      echo "- **$title** — $summary"
+      echo "- **$title**$retired_tag — $summary"
     else
-      echo "- **$title**"
+      echo "- **$title**$retired_tag"
     fi
 
     # Extract and render parent edges distinctly (explicit vs inferred)

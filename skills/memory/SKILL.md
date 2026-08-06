@@ -71,12 +71,12 @@ lore curate
 This lists inbox remnants, medium-confidence entries, and entries missing backlinks. Then apply judgment:
 
 1. **Refile inbox remnants:** If `$KDIR/_inbox/` has `.md` files (from interrupted captures), review each and either file to the correct category or drop.
-2. **Quality gate for medium-confidence entries (per-entry agent-evaluator):** Scan entry files for `confidence: medium` in their HTML comment metadata (typically from agent captures). For each entry, the evaluator (you, the agent running `/memory curate`) records a one-line verdict naming the gate-leg decision, then aggregates the verdicts into the summary report at step 7 below. The evaluator IS the quality-gate; the drop authority at step 8's "Drop authority" note still applies.
+2. **Quality gate for medium-confidence entries (per-entry agent-evaluator):** Scan entry files for `confidence: medium` in their HTML comment metadata (typically from agent captures). For each entry, the evaluator (you, the agent running `/memory curate`) records a one-line verdict naming the gate-leg decision, then aggregates the verdicts into the summary report at step 7 below. The evaluator IS the quality-gate; the retirement authority at step 8's "Retirement authority" note still applies.
 
    **Per-entry verdict vocabulary** — emit exactly one of:
    - `keep <path> (4-cond | orientation)` — the entry passes one of the two gates below; cite which gate. If both pass, prefer `4-cond` (the 4-condition gate is the canonical entry shape; orientation is the cross-boundary specialization).
-   - `drop <path> (<trivial-reason>)` — the entry fails BOTH gates; cite one of the four trivial-reason codes from `agents/curator.md` (the same closed vocabulary the curator-agent uses on candidate-set survivors): `low-significance | duplicate-of-survivor | high-cost-to-verify | low-surface-area`. Do not invent a fifth code — force-fit the closest and note the awkward fit in the verdict line.
-   - `escalate <path> (<abstain-reason>)` — the evaluator cannot confidently apply either gate; emit a short prose reason and route through `AskUserQuestion` for user adjudication. **Calibration:** lean toward `escalate` rather than `drop` when (a) the entry is tagged `confidence: high` but the agent's read finds it failing both gates (the discrepancy itself is signal worth surfacing), or (b) dropping would orphan backlinks pointing TO this entry from other entries (the consequences extend beyond this entry).
+   - `retire <path> (<trivial-reason>)` — the entry fails BOTH gates; cite one of the four trivial-reason codes from `agents/curator.md` (the same closed vocabulary the curator-agent uses on candidate-set survivors): `low-significance | duplicate-of-survivor | high-cost-to-verify | low-surface-area`. Do not invent a fifth code — force-fit the closest and note the awkward fit in the verdict line.
+   - `escalate <path> (<abstain-reason>)` — the evaluator cannot confidently apply either gate; emit a short prose reason and route through `AskUserQuestion` for user adjudication. **Calibration:** lean toward `escalate` rather than `retire` when the entry is tagged `confidence: high` but the agent's read finds it failing both gates — the discrepancy itself is signal worth surfacing. Inbound backlinks are no reason to escalate: a retired entry stays on disk with its links intact, so retirement orphans nothing.
 
    The escalation path is the single canonical trigger for `AskUserQuestion` in the curate flow: the evaluator decides per-entry; only abstain/ambiguous verdicts surface for human adjudication. After-the-fact human-objection on the rollup (step 7) remains the secondary review surface.
 
@@ -88,7 +88,7 @@ This lists inbox remnants, medium-confidence entries, and entries missing backli
    - **Stable** — still accurate?
    - **High confidence** — can you verify it now?
 
-   *Whose perspective:* condition 2 is agent-centric, not reader-centric — ask "would a future agent re-derive this from sources they already read, or would they have to dig?" rather than treating the agent's knowledge state as identical to a human reader skimming the repo. The commons is curated by agents for agents; the drop-gate evaluates against that audience.
+   *Whose perspective:* condition 2 is agent-centric, not reader-centric — ask "would a future agent re-derive this from sources they already read, or would they have to dig?" rather than treating the agent's knowledge state as identical to a human reader skimming the repo. The commons is curated by agents for agents; the gate evaluates against that audience.
 
    **Orientation gate** (all five must be true — for system maps, lifecycle overviews, cross-boundary assembly):
    1. **Reusable** — likely needed by future agents on more than one task. (Recurrence is required, not "could be useful someday.")
@@ -97,16 +97,16 @@ This lists inbox remnants, medium-confidence entries, and entries missing backli
    4. **Anchored** — names the specific files, commands, tests, or directories that verify the claim (`--related-files`). Unanchored orientation goes stale invisibly.
    5. **Stable at architecture or subsystem altitude** — tag the entry `architecture`, `subsystem`, or `architecture,subsystem`. Implementation-scale orientation is malformed — route to the 4-condition gate as a fact, or drop.
 
-   Drop entries that fail BOTH gates. Upgrade passing entries to `confidence: high`. If an orientation-shaped entry passes the orientation gate but its current `--scale` is `implementation`, fix the scale tag — do not silently downgrade by dropping it as a fact.
+   Retire entries that fail BOTH gates. Upgrade passing entries to `confidence: high`. If an orientation-shaped entry passes the orientation gate but its current `--scale` is `implementation`, fix the scale tag — do not silently downgrade by retiring it as a fact.
 3. **Deduplicate:** Merge entries that describe the same insight from different contexts.
 4. **Backlinks:** Add missing `[[backlinks]]` cross-references between related entries.
 5. **Title quality:** Improve vague or generic titles to be specific and scannable.
-6. **Stale entries:** Flag or remove entries that contradict current code.
-7. Report what was found and fixed. Include the per-entry evaluator rollup from step 2 so the user can object to specific drops or escalations:
+6. **Stale entries:** An entry that contradicts current code is wrong, not merely unneeded — resolve it through `lore verify contradicted` (repair or dispute) rather than retiring it.
+7. Report what was found and fixed. Include the per-entry evaluator rollup from step 2 so the user can object to specific retirements or escalations:
    ```
    [curate] Done.
-     Evaluated: N (kept K, dropped D, escalated E)
-     Dropped: D entries
+     Evaluated: N (kept K, retired R, escalated E)
+     Retired: R entries
        low-significance: <count>
        duplicate-of-survivor: <count>
        high-cost-to-verify: <count>
@@ -116,10 +116,10 @@ This lists inbox remnants, medium-confidence entries, and entries missing backli
      Upgraded: N to high confidence
      Backlinks added: N
    ```
-   Omit drop-reason or escalation rows whose count is zero.
+   Omit retirement-reason or escalation rows whose count is zero.
 8. Run `lore heal`
 
-**Drop authority:** Curate has explicit authority to remove entries without user confirmation when they fail **both** the 4-condition gate and the orientation gate (i.e., neither gate passes). An entry that would pass the orientation gate but is mis-tagged at `implementation` scale is not a drop — fix the scale tag instead. Report what was dropped in the summary so the user can object.
+**Retirement authority:** Curate has explicit authority to retire entries without user confirmation when they fail **both** the 4-condition gate and the orientation gate (i.e., neither gate passes). A retirement is a claim, not a deletion: the entry stays on disk with its backlinks intact, leaves default retrieval, and carries a dated marker with the reason and the falsifier — the fact that would show the retirement was wrong. Retire with `lore retire`; it asks for both. An entry that would pass the orientation gate but is mis-tagged at `implementation` scale is not a retirement — fix the scale tag instead. Report what was retired in the summary so the user can object — and objecting costs one command: `lore retire <path> --restore --note "<why>"`.
 
 ---
 

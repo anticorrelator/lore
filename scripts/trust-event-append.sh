@@ -25,6 +25,13 @@
 #                             --before-sha256 <sha256> --after-sha256 <sha256>
 #                             --prior-status <s> --result-status corrected
 #                             [--before-text --after-text --work-item]
+#   retirement                --action retired|restored --retirement-id <id>
+#                             --prior-status <s> --result-status <s>
+#                             # --action retired:
+#                             --reason <s> --falsifier <s>
+#                             # --action restored:
+#                             --note <s> --restores-retirement-id <id>
+#                             [--inbound-backlinks N] [--work-item <slug>]
 #   mechanical-check          --check-name <s> --target <s>
 #                             --result pass|fail|error|skip --run-id <id>
 #                             [--detail <s>]
@@ -61,6 +68,12 @@
 # triggered it is the negative evidence, and counting the repair again would
 # score the same observation twice.
 #
+# The `retirement` event records that an entry left the default result set, or
+# came back. It is zero-weight for a different reason: a retirement is a claim
+# about relevance, not about truth, and scoring it would conflate "no longer
+# needed" with "wrong". `action` is part of the dedupe basis, so a
+# retire -> restore -> retire cycle appends three distinct rows.
+#
 # Dedupe: event_id = sha256 of a pipe-joined canonical basis per event kind
 # (see README). A row whose event_id already exists is a silent no-op, exit 0
 # (`"appended": false` under --json).
@@ -77,7 +90,7 @@ source "$SCRIPT_DIR/lib.sh"
 usage() {
   cat >&2 <<'EOF'
 Usage: trust-event-append.sh \
-           --event <mechanical-check|consumption-verification|correction|adjudication|provenance-migration|trust-confirmation> \
+           --event <mechanical-check|consumption-verification|correction|retirement|adjudication|provenance-migration|trust-confirmation> \
            --entry-path <path-relative-to-KDIR> \
            --source <worker|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator> \
            [--observed-at <iso8601>] [--kdir <path>] [--json] \
@@ -98,6 +111,12 @@ Event-specific payload flags:
       --correction-date <YYYY-MM-DD> --before-sha256 <sha256> \
       --after-sha256 <sha256> --prior-status <status> --result-status corrected \
       [--before-text <text>] [--after-text <text>] [--work-item <slug>]
+  retirement:
+      --action <retired|restored> --retirement-id <id> \
+      --prior-status <status> --result-status <status> \
+      --reason <text> --falsifier <text>          # --action retired \
+      --note <text> --restores-retirement-id <id> # --action restored \
+      [--inbound-backlinks <N>] [--work-item <slug>]
   mechanical-check:
       --check-name <name> --target <s> --result <pass|fail|error|skip> \
       --run-id <id> [--detail <text>]
@@ -150,6 +169,11 @@ BEFORE_TEXT=""
 AFTER_TEXT=""
 PRIOR_STATUS=""
 RESULT_STATUS=""
+# retirement payload
+ACTION=""
+RETIREMENT_ID=""
+RESTORES_RETIREMENT_ID=""
+INBOUND_BACKLINKS=""
 # mechanical-check payload
 CHECK_NAME=""
 TARGET=""
@@ -202,6 +226,10 @@ while [[ $# -gt 0 ]]; do
     --after-text)               AFTER_TEXT="$2";               shift 2 ;;
     --prior-status)             PRIOR_STATUS="$2";             shift 2 ;;
     --result-status)            RESULT_STATUS="$2";            shift 2 ;;
+    --action)                   ACTION="$2";                   shift 2 ;;
+    --retirement-id)            RETIREMENT_ID="$2";            shift 2 ;;
+    --restores-retirement-id)   RESTORES_RETIREMENT_ID="$2";   shift 2 ;;
+    --inbound-backlinks)        INBOUND_BACKLINKS="$2";        shift 2 ;;
     --check-name)               CHECK_NAME="$2";               shift 2 ;;
     --target)                   TARGET="$2";                   shift 2 ;;
     --result)                   RESULT="$2";                   shift 2 ;;
@@ -235,9 +263,9 @@ fail() {
 
 # --- Event-kind enum ---
 case "$EVENT" in
-  mechanical-check|consumption-verification|correction|adjudication|provenance-migration|trust-confirmation) : ;;
+  mechanical-check|consumption-verification|correction|retirement|adjudication|provenance-migration|trust-confirmation) : ;;
   "") fail "--event is required" ;;
-  *)  fail "--event must be 'mechanical-check', 'consumption-verification', 'correction', 'adjudication', 'provenance-migration', or 'trust-confirmation' (got '$EVENT')" ;;
+  *)  fail "--event must be 'mechanical-check', 'consumption-verification', 'correction', 'retirement', 'adjudication', 'provenance-migration', or 'trust-confirmation' (got '$EVENT')" ;;
 esac
 
 # --- Source enum ---
@@ -322,6 +350,52 @@ case "$EVENT" in
     fi
     if [[ "$RESULT_STATUS" != "corrected" ]]; then
       fail "--result-status must be 'corrected' (got '$RESULT_STATUS')"
+    fi
+    validate_rel_path "--entry-path" "$ENTRY_PATH"
+    ;;
+  retirement)
+    case "$ACTION" in
+      retired|restored) : ;;
+      "") fail "--action is required for retirement" ;;
+      *)  fail "--action must be 'retired' or 'restored' (got '$ACTION')" ;;
+    esac
+    for _pair in \
+      "retirement-id:$RETIREMENT_ID" \
+      "prior-status:$PRIOR_STATUS" \
+      "result-status:$RESULT_STATUS"
+    do
+      if [[ -z "${_pair#*:}" ]]; then
+        fail "--${_pair%%:*} is required for retirement"
+      fi
+    done
+    if [[ "$ACTION" == "retired" ]]; then
+      # The falsifier is what a retirement grounds on, the way an anchor
+      # grounds a consumption-verification: without it the next reader has to
+      # reconstruct the retiring agent's reasoning instead of checking one fact.
+      for _pair in "reason:$REASON" "falsifier:$FALSIFIER"; do
+        if [[ -z "${_pair#*:}" ]]; then
+          fail "--${_pair%%:*} is required when --action is 'retired'"
+        fi
+      done
+      for _pair in "note:$NOTE" "restores-retirement-id:$RESTORES_RETIREMENT_ID"; do
+        if [[ -n "${_pair#*:}" ]]; then
+          fail "--${_pair%%:*} applies only to --action restored"
+        fi
+      done
+    else
+      for _pair in "note:$NOTE" "restores-retirement-id:$RESTORES_RETIREMENT_ID"; do
+        if [[ -z "${_pair#*:}" ]]; then
+          fail "--${_pair%%:*} is required when --action is 'restored'"
+        fi
+      done
+      for _pair in "reason:$REASON" "falsifier:$FALSIFIER"; do
+        if [[ -n "${_pair#*:}" ]]; then
+          fail "--${_pair%%:*} applies only to --action retired"
+        fi
+      done
+    fi
+    if [[ -n "$INBOUND_BACKLINKS" ]] && ! printf '%s' "$INBOUND_BACKLINKS" | grep -Eq '^[0-9]+$'; then
+      fail "--inbound-backlinks must be a non-negative integer (got '$INBOUND_BACKLINKS')"
     fi
     validate_rel_path "--entry-path" "$ENTRY_PATH"
     ;;
@@ -435,6 +509,12 @@ case "$EVENT" in
     KEY_BASIS=$(printf '%s|%s|%s' \
       "$EVENT" "$ENTRY_PATH" "$VERIFICATION_EVENT_ID")
     ;;
+  retirement)
+    # `action` is in the basis so the two directions never collapse into one
+    # row, and a later retirement of the same entry carries a fresh id.
+    KEY_BASIS=$(printf '%s|%s|%s|%s' \
+      "$EVENT" "$ENTRY_PATH" "$ACTION" "$RETIREMENT_ID")
+    ;;
   mechanical-check)
     KEY_BASIS=$(printf '%s|%s|%s|%s|%s|%s' \
       "$EVENT" "$ENTRY_PATH" "$CHECK_NAME" "$TARGET" "$RESULT" "$RUN_ID")
@@ -500,6 +580,7 @@ export EVENT ENTRY_PATH SOURCE_KIND OBSERVED_AT EVENT_ID \
        CORRECTION_ID VERIFICATION_EVENT_ID CORRECTION_DATE \
        BEFORE_SHA256 AFTER_SHA256 BEFORE_TEXT AFTER_TEXT \
        PRIOR_STATUS RESULT_STATUS \
+       ACTION RETIREMENT_ID RESTORES_RETIREMENT_ID INBOUND_BACKLINKS \
        CHECK_NAME TARGET RESULT RUN_ID DETAIL \
        VERDICT TEMPLATE_ID \
        FROM_ENTRY_PATH TO_ENTRY_PATH REASON VERDICT_ID \
@@ -572,6 +653,25 @@ elif event == "correction":
         val = env(var)
         if val:
             payload[key] = val
+elif event == "retirement":
+    payload = {
+        "action": env("ACTION"),
+        "retirement_id": env("RETIREMENT_ID"),
+        "prior_status": env("PRIOR_STATUS"),
+        "result_status": env("RESULT_STATUS"),
+    }
+    for key, var in (
+        ("reason", "REASON"),
+        ("falsifier", "FALSIFIER"),
+        ("note", "NOTE"),
+        ("restores_retirement_id", "RESTORES_RETIREMENT_ID"),
+        ("work_item", "WORK_ITEM"),
+    ):
+        val = env(var)
+        if val:
+            payload[key] = val
+    if env("INBOUND_BACKLINKS"):
+        payload["inbound_backlinks"] = int(env("INBOUND_BACKLINKS"))
 elif event == "mechanical-check":
     payload = {
         "check_name": env("CHECK_NAME"),

@@ -19,6 +19,12 @@ is already counted, and scoring the repair again would let one observation
 move an entry's trust twice. They are counted for legibility only, so a
 reader can see how many of an entry's contradictions were repaired.
 
+`retirement` rows carry no weight either, for a different reason: retiring an
+entry claims it is no longer needed, not that it is wrong, and the two axes
+are independent — an entry can be true and irrelevant, or false and
+load-bearing. Both directions are counted so a reader can see an entry's
+retirement history without it moving the entry's trust.
+
 Negative outcomes weigh double their positive counterparts: acting on
 falsified knowledge costs more than re-verifying held knowledge. Cheap
 confirmations (a repo-state verdict without a code anchor) weigh half a
@@ -54,6 +60,7 @@ LEDGER_RELPATH = os.path.join("_trust", "trust-events.jsonl")
 EVENT_KINDS = (
     "consumption-verification",
     "correction",
+    "retirement",
     "mechanical-check",
     "adjudication",
     "provenance-migration",
@@ -74,6 +81,8 @@ _COUNT_KEYS = (
     "held",
     "contradicted",
     "corrections",
+    "retired",
+    "restored",
     "confirm_held",
     "confirm_contradicted",
     "check_pass",
@@ -111,6 +120,13 @@ def compute_event_id(row: dict) -> str | None:
                 event,
                 row["entry_path"],
                 payload["verification_event_id"],
+            ])
+        elif event == "retirement":
+            basis = "|".join([
+                event,
+                row["entry_path"],
+                payload["action"],
+                payload["retirement_id"],
             ])
         elif event == "mechanical-check":
             basis = "|".join([
@@ -296,6 +312,15 @@ def fold_rows(rows: list[dict]) -> tuple[dict[str, dict], dict[str, str], list[s
         elif event == "correction":
             # Counted, never weighted — see the module docstring.
             entry_counts["corrections"] += 1
+        elif event == "retirement":
+            # Counted, never weighted — see the module docstring.
+            action = payload.get("action")
+            if action == "retired":
+                entry_counts["retired"] += 1
+            elif action == "restored":
+                entry_counts["restored"] += 1
+            else:
+                warnings.append(f"unknown retirement action {action!r}; row ignored")
         elif event == "mechanical-check":
             result = payload.get("result")
             if result == "pass":
@@ -371,6 +396,7 @@ def _format_entry(key: str, summary: dict) -> str:
     return (
         f"{summary['score']:+.3f}  held={c['held']} contradicted={c['contradicted']} "
         f"corrections={c['corrections']} "
+        f"retired={c['retired']} restored={c['restored']} "
         f"confirm=+{c['confirm_held']}/-{c['confirm_contradicted']} "
         f"checks=+{c['check_pass']}/-{c['check_fail']} "
         f"adj=+{c['adj_confirmed']}/-{c['adj_rejected']}  {key}"

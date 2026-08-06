@@ -1,9 +1,32 @@
 #!/usr/bin/env bash
-# apply-correction.sh — Apply a correction, mark an entry disputed, add a new
-# entry, or advance an entry's confidence in the knowledge commons.
+# apply-correction.sh — Apply a correction, mark an entry disputed, retire or
+# restore an entry, add a new entry, or advance an entry's confidence in the
+# knowledge commons.
 #
-# Four modes, keyed on --add-entry / --advance-confidence / --dispute
-# (default: mutate):
+# Six modes, keyed on --add-entry / --advance-confidence / --dispute /
+# --retire / --restore (default: mutate):
+#
+# Retire mode:
+#   apply-correction.sh --retire
+#                        --entry <path>
+#                        --verdict-source peer-verification
+#                        --allow-peer-verification
+#                        --reason "<why it no longer earns its place>"
+#                        --falsifier "<what would show this was wrong>"
+#                        [--superseded-by <path>]
+#                        [--reported-by <role>] [--work-item <slug>]
+#                        [--date <YYYY-MM-DD>]
+#                        [--dry-run]
+#
+# Restore mode:
+#   apply-correction.sh --restore
+#                        --entry <path>
+#                        --verdict-source peer-verification
+#                        --allow-peer-verification
+#                        --note "<what the entry is needed for>"
+#                        [--reported-by <role>] [--work-item <slug>]
+#                        [--date <YYYY-MM-DD>]
+#                        [--dry-run]
 #
 # Dispute mode:
 #   apply-correction.sh --dispute
@@ -86,6 +109,24 @@
 # The capture-gate / curator markers land on the run record in Phase 2; for
 # now the gate accepts a non-empty 'verified' verdict with matching kind.
 #
+# Retire mode: records that a reader judged the entry no longer worth carrying
+# in default retrieval. It writes a dated marker into the entry body naming the
+# reason and the falsifier — the fact that would show the retirement was wrong
+# — sets `status: retired`, and appends a retirements[] provenance item
+# recording the status the entry held before. The file, its backlinks, and its
+# ledger history all stay where they are. Idempotent: an entry already carrying
+# `status: retired` is a no-op that reports the recorded retirement id.
+#
+# Restore mode: reverses a retirement. It writes a dated marker naming why the
+# entry is wanted again and returns `status:` to the prior_status recorded on
+# the retirement — a corrected entry comes back as corrected, not as current.
+# Restoration takes a note and nothing else: no confidence, no evidence scope,
+# no check on who retired it. Idempotent the same way retirement is.
+#
+# Retirement ids derive from <rel_path>|<action>|<index-in-that-array>, so a
+# repeated invocation converges on the record it already wrote and a
+# retire -> restore -> retire cycle produces distinct ids.
+#
 # Dispute mode: records that a reader found the entry contradicted but could
 # not carry the repair. It appends a dated marker to the entry body — so the
 # next reader sees it in ordinary retrieval — plus a disputes[] provenance item
@@ -125,7 +166,10 @@
 # Exit codes:
 #   0 — success
 #   1 — usage error
-#   2 — entry not found or superseded_text not found in body, or add-entry path conflict
+#   2 — entry not found, superseded_text not found in body, add-entry path
+#       conflict, or a retire/restore the entry's recorded state cannot carry
+#       (restoring an entry that is not retired; a retired entry whose
+#       retirements[] record is missing)
 #   3 — META block not found (unexpected entry format)
 #   4 — verdict not authorized (write gate rejected)
 
@@ -149,6 +193,12 @@ ALLOW_PEER_VERIFICATION=0
 ADD_ENTRY_MODE=0
 ADVANCE_CONFIDENCE_MODE=0
 DISPUTE_MODE=0
+RETIRE_MODE=0
+RESTORE_MODE=0
+RETIRE_REASON=""
+RETIRE_FALSIFIER=""
+RESTORE_NOTE=""
+SUPERSEDED_BY=""
 OBSERVATION_ID=""
 DISPUTE_NOTE=""
 REPORTED_BY=""
@@ -161,6 +211,26 @@ KDIR_OVERRIDE=""
 
 usage() {
   cat >&2 <<EOF
+Retire mode:
+  apply-correction.sh --retire --entry <path>
+                       --verdict-source peer-verification
+                       --allow-peer-verification
+                       --reason "<why it no longer earns its place>"
+                       --falsifier "<what would show this was wrong>"
+                       [--superseded-by <path>]
+                       [--reported-by <role>] [--work-item <slug>]
+                       [--date <YYYY-MM-DD>]
+                       [--dry-run]
+
+Restore mode:
+  apply-correction.sh --restore --entry <path>
+                       --verdict-source peer-verification
+                       --allow-peer-verification
+                       --note "<what the entry is needed for>"
+                       [--reported-by <role>] [--work-item <slug>]
+                       [--date <YYYY-MM-DD>]
+                       [--dry-run]
+
 Dispute mode:
   apply-correction.sh --dispute --entry <path>
                        --observation-id <id>
@@ -239,8 +309,15 @@ Optional:
                                which is what makes a retry converge.
   --dispute-note TEXT          [dispute mode only] What was observed and why the
                                reader did not correct the entry
-  --reported-by ROLE           [dispute mode only] Role that observed it
-  --work-item SLUG             [dispute mode only] Work item it was observed in
+  --reason TEXT                [retire mode only] Why the entry no longer earns
+                               its place in default retrieval
+  --falsifier TEXT             [retire mode only] What would show the retirement
+                               was wrong
+  --superseded-by PATH         [retire mode only] Entry that now says it better
+  --note TEXT                  [restore mode only] What the entry is needed for
+  --reported-by ROLE           [dispute/retire/restore modes] Role that observed it
+  --work-item SLUG             [dispute/retire/restore modes] Work item it was
+                               observed in
   --dry-run                    Print what would change without writing
 EOF
 }
@@ -315,6 +392,30 @@ while [[ $# -gt 0 ]]; do
       DISPUTE_NOTE="$2"
       shift 2
       ;;
+    --retire)
+      RETIRE_MODE=1
+      shift
+      ;;
+    --restore)
+      RESTORE_MODE=1
+      shift
+      ;;
+    --reason)
+      RETIRE_REASON="$2"
+      shift 2
+      ;;
+    --falsifier)
+      RETIRE_FALSIFIER="$2"
+      shift 2
+      ;;
+    --note)
+      RESTORE_NOTE="$2"
+      shift 2
+      ;;
+    --superseded-by)
+      SUPERSEDED_BY="$2"
+      shift 2
+      ;;
     --reported-by)
       REPORTED_BY="$2"
       shift 2
@@ -360,16 +461,25 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- Validate required args (per mode) ---
-if [[ $((ADD_ENTRY_MODE + ADVANCE_CONFIDENCE_MODE + DISPUTE_MODE)) -gt 1 ]]; then
-  echo "Error: --add-entry, --advance-confidence, and --dispute are mutually exclusive" >&2
+if [[ $((ADD_ENTRY_MODE + ADVANCE_CONFIDENCE_MODE + DISPUTE_MODE + RETIRE_MODE + RESTORE_MODE)) -gt 1 ]]; then
+  echo "Error: --add-entry, --advance-confidence, --dispute, --retire, and --restore are mutually exclusive" >&2
   exit 1
 fi
+
+# Text that is only whitespace is empty for the purposes of every "required
+# and non-empty" check below.
+is_blank() {
+  [[ -z "$(printf '%s' "$1" | tr -d '[:space:]')" ]]
+}
 if [[ "$ALLOW_PEER_VERIFICATION" == "1" && "$ALLOW_SETTLEMENT_VERDICT" == "1" ]]; then
   echo "Error: --allow-peer-verification and --allow-settlement-verdict are mutually exclusive" >&2
   exit 1
 fi
 if [[ "$ALLOW_PEER_VERIFICATION" == "1" ]]; then
-  if [[ -z "$OBSERVATION_ID" ]]; then
+  # Retirement records key to the entry's own retirement history rather than to
+  # an observation, so they are the one peer-authorized path with no
+  # observation to name.
+  if [[ -z "$OBSERVATION_ID" && "$RETIRE_MODE" != "1" && "$RESTORE_MODE" != "1" ]]; then
     echo "Error: --allow-peer-verification requires --observation-id" >&2
     exit 1
   fi
@@ -381,7 +491,47 @@ elif [[ "$VERDICT_SOURCE" == "peer-verification" ]]; then
   echo "Error: --verdict-source peer-verification requires --allow-peer-verification" >&2
   exit 1
 fi
-if [[ "$DISPUTE_MODE" == "1" ]]; then
+if [[ "$RETIRE_MODE" == "1" || "$RESTORE_MODE" == "1" ]]; then
+  if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" || -n "$NEW_TITLE" || -n "$NEW_BODY" || -n "$NEW_SCALE" ]]; then
+    echo "Error: --retire and --restore forbid --superseded-text, --replacement-text, --title, --body, --scale" >&2
+    usage
+    exit 1
+  fi
+  if [[ "$ALLOW_PEER_VERIFICATION" != "1" ]]; then
+    echo "Error: --retire and --restore require --allow-peer-verification" >&2
+    exit 1
+  fi
+  if [[ -z "$ENTRY_PATH" ]]; then
+    echo "Error: --entry is required in --retire and --restore mode" >&2
+    usage
+    exit 1
+  fi
+  if [[ "$RETIRE_MODE" == "1" ]]; then
+    if is_blank "$RETIRE_REASON"; then
+      echo "Error: --reason is required in --retire mode: say why the entry no longer earns its place" >&2
+      exit 1
+    fi
+    if is_blank "$RETIRE_FALSIFIER"; then
+      echo "Error: --falsifier is required in --retire mode: name what would show the retirement was wrong" >&2
+      exit 1
+    fi
+    if [[ -n "$RESTORE_NOTE" ]]; then
+      echo "Error: --note applies only to --restore mode" >&2
+      exit 1
+    fi
+  else
+    if is_blank "$RESTORE_NOTE"; then
+      echo "Error: --note is required in --restore mode: say what the entry is needed for" >&2
+      exit 1
+    fi
+    for _pair in "reason:$RETIRE_REASON" "falsifier:$RETIRE_FALSIFIER" "superseded-by:$SUPERSEDED_BY"; do
+      if [[ -n "${_pair#*:}" ]]; then
+        echo "Error: --${_pair%%:*} applies only to --retire mode" >&2
+        exit 1
+      fi
+    done
+  fi
+elif [[ "$DISPUTE_MODE" == "1" ]]; then
   if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" || -n "$NEW_TITLE" || -n "$NEW_BODY" || -n "$NEW_SCALE" ]]; then
     echo "Error: --dispute forbids --superseded-text, --replacement-text, --title, --body, --scale" >&2
     usage
@@ -617,6 +767,257 @@ print("unknown")
     echo "Correction rejected: verdict $VERDICT_ID is in calibration_state=$CAL_STATE. Only calibrated verdicts may modify the commons." >&2
     exit 4
   fi
+fi
+
+# --- Retire / restore mode: move the entry out of or back into default
+# retrieval and exit. ---
+# The marker goes in the body above the META block, the same place dispute mode
+# puts its own, so the next reader meets the claim and its disposition
+# together. Both directions are idempotent on the record they write.
+if [[ "$RETIRE_MODE" == "1" || "$RESTORE_MODE" == "1" ]]; then
+  RETIRE_ACTION="retired"
+  if [[ "$RESTORE_MODE" == "1" ]]; then
+    RETIRE_ACTION="restored"
+  fi
+  RETIRE_ENTRY_PATH="$ENTRY_PATH" \
+  RETIRE_ACTION="$RETIRE_ACTION" \
+  RETIRE_REASON="$RETIRE_REASON" \
+  RETIRE_FALSIFIER="$RETIRE_FALSIFIER" \
+  RETIRE_NOTE="$RESTORE_NOTE" \
+  RETIRE_SUPERSEDED_BY="$SUPERSEDED_BY" \
+  RETIRE_REPORTED_BY="$REPORTED_BY" \
+  RETIRE_WORK_ITEM="$WORK_ITEM" \
+  RETIRE_DATE="$DATE_TODAY" \
+  RETIRE_DRY_RUN="$DRY_RUN" \
+  RETIRE_KDIR="$KDIR" \
+  python3 <<'RETIRE_PY'
+import hashlib, json, os, re, sys
+
+entry_path    = os.environ["RETIRE_ENTRY_PATH"]
+action        = os.environ["RETIRE_ACTION"]
+reason        = os.environ.get("RETIRE_REASON", "").strip()
+falsifier     = os.environ.get("RETIRE_FALSIFIER", "").strip()
+note          = os.environ.get("RETIRE_NOTE", "").strip()
+superseded_by = os.environ.get("RETIRE_SUPERSEDED_BY", "").strip()
+reported_by   = os.environ.get("RETIRE_REPORTED_BY", "").strip()
+work_item     = os.environ.get("RETIRE_WORK_ITEM", "").strip()
+date_str      = os.environ["RETIRE_DATE"]
+dry_run       = os.environ["RETIRE_DRY_RUN"] == "1"
+kdir          = os.environ["RETIRE_KDIR"]
+
+try:
+    original = open(entry_path, encoding="utf-8").read()
+except (OSError, UnicodeDecodeError) as e:
+    print(f"Error: cannot read entry: {e}", file=sys.stderr)
+    sys.exit(2)
+
+META_RE = re.compile(r"(<!--)(.*?)(-->)", re.DOTALL)
+meta_matches = list(META_RE.finditer(original))
+if not meta_matches:
+    print(f"Error: no HTML META block found in entry: {entry_path!r}", file=sys.stderr)
+    sys.exit(3)
+meta_match = meta_matches[-1]
+meta_inner = meta_match.group(2)
+rel_path = os.path.relpath(entry_path, kdir) if kdir else entry_path
+
+
+def read_status(inner):
+    m = re.search(r"\|\s*status:\s*(\S+)", inner)
+    return m.group(1) if m else "current"
+
+
+def read_array(inner, field):
+    """(span, items) for a JSON array META field, or (None, []) when absent.
+
+    Decoded with raw_decode rather than a bracket regex so a reason or note
+    containing ']' cannot truncate the array.
+    """
+    m = re.search(r"\|\s*" + field + r":\s*\[", inner)
+    if not m:
+        return None, []
+    start = m.end() - 1
+    try:
+        items, length = json.JSONDecoder().raw_decode(inner[start:])
+    except ValueError:
+        return None, []
+    if not isinstance(items, list):
+        return None, []
+    return (start, start + length), items
+
+
+def append_item(inner, field, span, item_json):
+    if span is None:
+        return inner.rstrip() + f" | {field}: [{item_json}]"
+    close = span[1] - 1
+    return inner[:close] + ", " + item_json + inner[close:]
+
+
+def set_status(inner, value):
+    if re.search(r"\|\s*status:", inner):
+        return re.sub(r"(\|\s*status:\s*)\S+", r"\g<1>" + value, inner, count=1)
+    return inner.rstrip() + f" | status: {value}"
+
+
+def stable_id(prefix, kind, index):
+    basis = f"{rel_path}|{kind}|{index}"
+    return prefix + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:12]
+
+
+def provenance_sentence(verb):
+    if reported_by and work_item:
+        return f"{verb} by {reported_by} while working on {work_item}."
+    if reported_by:
+        return f"{verb} by {reported_by}."
+    if work_item:
+        return f"{verb} while working on {work_item}."
+    return ""
+
+
+def record_line(result, fields):
+    parts = [f"[retire] result={result}", f"action={action}"]
+    parts += [f"{k}={v}" for k, v in fields]
+    print(" ".join(parts))
+
+
+status = read_status(meta_inner)
+ret_span, retirements = read_array(meta_inner, "retirements")
+res_span, restorations = read_array(meta_inner, "restorations")
+
+if action == "retired":
+    if status == "retired":
+        recorded = retirements[-1] if retirements else None
+        if not recorded or not recorded.get("retirement_id"):
+            print(f"Error: {rel_path} carries status: retired with no retirements[] record — "
+                  "nothing to key this retirement to, and no prior status a restore could "
+                  "return it to", file=sys.stderr)
+            sys.exit(2)
+        record_line("noop", [
+            ("retirement_id", recorded["retirement_id"]),
+            ("prior_status", recorded.get("prior_status", "current")),
+            ("result_status", "retired"),
+        ])
+        print(f"[retire] {rel_path}: already retired ({recorded.get('date', 'undated')})")
+        sys.exit(0)
+
+    retirement_id = stable_id("ret-", "retired", len(retirements))
+    marker = f"**Retired {date_str}.** {reason}\n\n" f"Overturned if: {falsifier}\n"
+    tail = provenance_sentence("Retired")
+    if superseded_by:
+        tail = (tail + " " if tail else "") + f"Said better now by {superseded_by}."
+    restore_hint = (
+        f"The entry stays on disk with its backlinks intact — "
+        f"`lore retire {rel_path} --restore --note \"<what you needed it for>\"` "
+        f"returns it to the default result set."
+    )
+    marker += "\n" + (tail + " " if tail else "") + restore_hint + "\n"
+
+    item = {
+        "date": date_str,
+        "retirement_id": retirement_id,
+        "reason": reason,
+        "falsifier": falsifier,
+        "prior_status": status,
+        "result_status": "retired",
+    }
+    if superseded_by:
+        item["superseded_by"] = superseded_by
+    if reported_by:
+        item["reported_by"] = reported_by
+    if work_item:
+        item["work_item"] = work_item
+
+    new_inner = append_item(meta_inner, "retirements", ret_span,
+                            json.dumps(item, ensure_ascii=False, separators=(", ", ": ")))
+    new_inner = set_status(new_inner, "retired")
+    result_fields = [
+        ("retirement_id", retirement_id),
+        ("prior_status", status),
+        ("result_status", "retired"),
+    ]
+    applied_line = f"[retire] {rel_path}: retired ({date_str}), was status {status}"
+else:
+    if status != "retired":
+        recorded = restorations[-1] if restorations else None
+        already = (
+            recorded is not None
+            and retirements
+            and recorded.get("retirement_id") == retirements[-1].get("retirement_id")
+        )
+        if already:
+            record_line("noop", [
+                ("retirement_id", recorded.get("restoration_id", "")),
+                ("restores_retirement_id", recorded.get("retirement_id", "")),
+                ("prior_status", "retired"),
+                ("result_status", recorded.get("restored_status", status)),
+            ])
+            print(f"[retire] {rel_path}: already restored ({recorded.get('date', 'undated')})")
+            sys.exit(0)
+        print(f"Error: {rel_path} is not retired (status: {status}) — nothing to restore",
+              file=sys.stderr)
+        sys.exit(2)
+
+    retired_record = retirements[-1] if retirements else None
+    if not retired_record or not retired_record.get("retirement_id"):
+        print(f"Error: {rel_path} carries status: retired with no retirements[] record — "
+              "there is no recorded prior status to restore it to", file=sys.stderr)
+        sys.exit(2)
+    restores_id = retired_record["retirement_id"]
+    restored_status = retired_record.get("prior_status") or "current"
+    restoration_id = stable_id("res-", "restored", len(restorations))
+
+    marker = f"**Restored {date_str}.** {note}\n"
+    tail = provenance_sentence("Restored")
+    marker += "\n" + (tail + " " if tail else "") + (
+        f"Back in the default result set at status: {restored_status}; this reverses the "
+        f"retirement of {retired_record.get('date', 'an earlier date')} ({restores_id}).\n"
+    )
+
+    item = {
+        "date": date_str,
+        "restoration_id": restoration_id,
+        "retirement_id": restores_id,
+        "note": note,
+        "prior_status": "retired",
+        "restored_status": restored_status,
+    }
+    if reported_by:
+        item["reported_by"] = reported_by
+    if work_item:
+        item["work_item"] = work_item
+
+    new_inner = append_item(meta_inner, "restorations", res_span,
+                            json.dumps(item, ensure_ascii=False, separators=(", ", ": ")))
+    new_inner = set_status(new_inner, restored_status)
+    result_fields = [
+        ("retirement_id", restoration_id),
+        ("restores_retirement_id", restores_id),
+        ("prior_status", "retired"),
+        ("result_status", restored_status),
+    ]
+    applied_line = f"[retire] {rel_path}: restored ({date_str}) to status {restored_status}"
+
+final = (
+    original[:meta_match.start()].rstrip("\n")
+    + "\n\n"
+    + marker
+    + "\n"
+    + meta_match.group(1) + new_inner + meta_match.group(3)
+    + original[meta_match.end():]
+)
+
+if dry_run:
+    print(f"[dry-run][retire] Would record {action}: {rel_path}")
+    for key, value in result_fields:
+        print(f"[dry-run][retire]   {key}: {value}")
+    print(f"[dry-run][retire]   marker: {marker.strip()}")
+    sys.exit(0)
+
+with open(entry_path, "w", encoding="utf-8") as f:
+    f.write(final)
+record_line("applied", result_fields)
+print(applied_line)
+RETIRE_PY
+  exit 0
 fi
 
 # --- Dispute mode: mark the entry disputed and exit. ---
