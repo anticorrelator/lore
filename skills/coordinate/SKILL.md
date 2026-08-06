@@ -163,7 +163,7 @@ The appender records the correlated `disposition=handled` transition with action
 
 Decision rights divide the way any pair of colleagues with different vantage points divide them — most calls are yours, four forks are the human's; name them when you route them over: **(a)** intent-anchor or user-visible capability-scope changes; **(b)** budget or routing beyond standing directives; **(c)** review-gate holds; **(d)** contradictions between directives. Everything else you settle and ledger. The hedging shapes are defects — tier-ranked options in place of a decision, "for user pickup later" markers, silent step-skips under principled-sounding rationales.
 
-Walkthroughs come from the ledger and artifacts, re-read — never conversational memory. Review packets order by tweak-likelihood: lead with what the human is most likely to alter; mechanical work goes last.
+Walkthroughs come from the ledger and artifacts, re-read — never conversational memory. Review packets order by tweak-likelihood: lead with what the human is most likely to alter; mechanical work goes last. And they land where the human reads: material awaiting an owner decision goes verbatim into the message that requests the read when it fits a screen or two, with its durable copy beside the ledger in the arc directory — never only on a work item. Items are agent-side surfaces; at the volume a seat creates them, the owner does not browse them, and a gate packet filed only there is invisible to the person whose decision it awaits.
 
 ## Close the arc
 
