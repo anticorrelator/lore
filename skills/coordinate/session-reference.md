@@ -253,6 +253,13 @@ entirely — a skipped peek still wakes, at `advisory` tier with the skip as its
 label, because no classification outcome may end in silence. When the matched row itself carries authoritative lifecycle state,
 that state is final and the screen is not consulted for that session — authority
 `hook-row`, suppression, never blending; otherwise authority `screen-signature`.
+`modal_blocked` is the sole exception, and it is a handover rather than a blend:
+some harnesses clear their own modals within a second, so the screen classifies
+every modal row whatever the emitter said. A modal on the screen confirms; any
+other screen demotes to an advisory labelled `modal-not-on-screen`, which ages
+normally. A screen that cannot answer leaves the row's claim confirmed on
+`hook-row` authority — absence of evidence never demotes. `classification.modal_gate`
+reports what the gate found on every modal row, including the ones it left standing.
 Every wake body names its authority and the signature-set version consulted, so
 matcher-contract drift (the codex composer-badge class — see Calibrations below)
 is detectable rather than silent; signatures are versioned and refreshable.

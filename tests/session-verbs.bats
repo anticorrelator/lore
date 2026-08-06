@@ -2439,11 +2439,13 @@ watch_json() {
 
   # An emitter that recorded why the session parked is the authority for it; the
   # screen is not consulted alongside a row that already answers the question.
-  echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  # (`modal_blocked` is the one park event whose emitter state is peek-conditional
+  # — see "Transient modal flashes" below.)
+  echo '{"event":"needs_input","slug":"feature-x","reason":"awaiting-review"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
   local out; out="$(watch_json --no-board-delta --timeout 0)"
   echo "$out" | jq -e '.tier=="confirmed" and .authority=="hook-row"'
-  echo "$out" | jq -e '.classification.state=="confirmed_park" and .classification.reason=="modal"'
-  echo "$out" | jq -e '.classification.peek==null'
+  echo "$out" | jq -e '.classification.state=="confirmed_park" and .classification.reason=="awaiting-review"'
+  echo "$out" | jq -e '.classification.peek==null and .classification.modal_gate==null'
   echo "$out" | jq -e '(.signature_version|type)=="number"'
 }
 
@@ -2609,6 +2611,93 @@ answer_peek_ready() {
   echo "$out" | jq -e '.tier=="confirmed" and .classification.state=="confirmed_park"'
   echo "$out" | jq -e '.classification.spawn_gap.resolution=="row-has-no-timestamp"'
   echo "$out" | jq -e '.classification.spawn_gap.age_seconds==null'
+}
+
+# --- Transient modal flashes -----------------------------------------------
+#
+# Some harnesses raise a modal and clear it themselves inside a second — under
+# bypass-permissions the seat never had a decision to make. The emitter's row was
+# true when it was written and is stale by the time anyone reads it, so the row
+# alone cannot say whether a modal is still waiting. These pin the peek gate that
+# tells a live modal from a flash, and pin that it only ever moves the tier.
+
+@test "watch: a modal_blocked row whose modal cleared before the peek is demoted" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  write_instance inst-a feature-x
+  echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  answer_peek_with feature-x false generating
+  local out; out="$(watch_json --since 0 --no-board-delta --peek-timeout 10 --timeout 0)"
+  wait
+
+  # The wake still happens and still carries the emitter's claim: the row is the
+  # reason the seat is awake, and a seat that cannot see the claim cannot audit
+  # the demotion.
+  echo "$out" | jq -e '.outcome=="matched" and .matched.event=="modal_blocked"'
+  echo "$out" | jq -e '.classification.reason=="modal"'
+
+  # What moves is the tier. The screen is generating with no modal on it, so
+  # nothing is waiting on the seat right now.
+  echo "$out" | jq -e '.tier=="advisory" and .authority=="screen-signature"'
+  echo "$out" | jq -e '.classification.state=="park_unconfirmed"'
+  echo "$out" | jq -e '.classification.label=="modal-not-on-screen"'
+  echo "$out" | jq -e '.classification.modal_gate.resolution=="demoted"'
+  echo "$out" | jq -e '.classification.modal_gate.screen_reason=="generating"'
+  echo "$out" | jq -e '.classification.modal_gate.signature=="screen-reports-generating"'
+  echo "$out" | jq -e '.classification.peek.consulted==true and .classification.peek.ready==false'
+}
+
+@test "watch: a modal still on the screen keeps the row's confirmed tier" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  write_instance inst-a feature-x
+  echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  answer_peek_with feature-x false modal
+  local out; out="$(watch_json --since 0 --no-board-delta --peek-timeout 10 --timeout 0)"
+  wait
+
+  # A modal the seat can still answer is exactly the wake this gate protects.
+  echo "$out" | jq -e '.tier=="confirmed" and .authority=="screen-signature"'
+  echo "$out" | jq -e '.classification.state=="confirmed_park" and .classification.label=="modal-signature"'
+  echo "$out" | jq -e '.classification.modal_gate.resolution=="modal-on-screen"'
+  echo "$out" | jq -e '.classification.reason=="modal"'
+}
+
+@test "watch: a demoted transient-modal advisory ages and escalates like any other" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  write_instance inst-a feature-x
+  echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  answer_peek_with feature-x false generating
+  local out; out="$(watch_json --since 0 --no-board-delta --peek-timeout 10 --timeout 0)"
+  wait
+  echo "$out" | jq -e '.tier=="advisory" and .classification.label=="modal-not-on-screen"'
+
+  # A modal that keeps re-appearing without ever surviving a peek is a session in
+  # trouble, not a flash — the ledger turns that repetition into a louder tier, so
+  # the demotion delays the wake by a tier rather than silencing it.
+  sleep 1
+  answer_peek_with feature-x false generating
+  out="$(watch_json --since 0 --no-board-delta --peek-timeout 10 --advisory-age 1 --timeout 0)"
+  wait
+  echo "$out" | jq -e '.tier=="aged_advisory" and .classification.label=="modal-not-on-screen"'
+  echo "$out" | jq -e '(.classification.advisory_age_seconds|type)=="number"'
+}
+
+@test "watch: a modal row no screen can answer keeps its confirmation" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  # No instance hosts this session, so the peek cannot answer. Absence of evidence
+  # must not demote — the gate corrects one observed misreading, it does not make
+  # every emitter claim suspect.
+  echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  local out; out="$(watch_json --since 0 --no-board-delta --peek-timeout 1 --timeout 0)"
+  echo "$out" | jq -e '.tier=="confirmed" and .authority=="hook-row"'
+  echo "$out" | jq -e '.classification.label=="row-carries-emitter-state"'
+  echo "$out" | jq -e '.classification.modal_gate.resolution=="peek-unavailable"'
+  echo "$out" | jq -e '.classification.peek.consulted==true'
+
+  # Turning the screen off entirely lands in the same place, by the same rule.
+  out="$(watch_json --since 0 --no-board-delta --peek-timeout 0 --timeout 0)"
+  echo "$out" | jq -e '.tier=="confirmed" and .authority=="hook-row"'
+  echo "$out" | jq -e '.classification.modal_gate.resolution=="screen-classification-disabled"'
+  echo "$out" | jq -e '.classification.peek==null'
 }
 
 @test "watch: the wake carries a board delta and the advisory slot the board cannot express" {

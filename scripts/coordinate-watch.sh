@@ -139,7 +139,9 @@
 #                       authoritative the screen is not consulted for that
 #                       session at all. Two authorities that can disagree are
 #                       where disagreement bugs live, so one is suppressed rather
-#                       than blended with the other.
+#                       than blended with the other. `modal_blocked` is the one
+#                       exception, and it is not a blend — the screen takes the
+#                       classification over entirely. See "Transient modals".
 #     screen-signature  The row was park-shaped and carried no state of its own,
 #                       so the watcher peeked the session and matched the result
 #                       against the strict signature set (see lib.sh's
@@ -163,6 +165,28 @@
 #   parked, not an inference from screen shape, so the same ambiguity does not
 #   reach it. Every wake reports what the gate did in
 #   `classification.spawn_gap`, including when it left the confirmation standing.
+#
+# Transient modals:
+#   A `modal_blocked` row is the one emitter claim that routinely stops being true
+#   before anyone can act on it. Some harnesses raise a modal and clear it
+#   themselves within a second — under bypass-permissions the seat never had a
+#   decision to make — so the row is true when written and stale when read, and
+#   promoting it on the row alone costs the seat a full turn per flash.
+#
+#   So on a `modal_blocked` row the screen decides the tier, whether or not the
+#   row carries emitter state. A modal on the screen confirms; a screen showing
+#   anything else demotes to an advisory labeled `modal-not-on-screen`, which ages
+#   and escalates like any other — a modal that keeps re-presenting and never
+#   survives a peek is a session in trouble, and the demotion delays that wake by
+#   a tier rather than silencing it. Nothing debounces on the emitter side: the
+#   row lands the moment the modal appears, and only the wake tier softens.
+#
+#   Absence of evidence never demotes. A peek that cannot answer — no instance
+#   hosts the session, the round trip fails, `--peek-timeout 0` — leaves the row's
+#   claim standing at `confirmed` on `hook-row` authority. Every wake on a modal
+#   row reports what the gate did in `classification.modal_gate`, including when
+#   it left the confirmation standing. Other park events are untouched: their
+#   emitter state is a claim about a condition that does not clear itself.
 #
 #   Strictness governs the wake's tier, never whether it wakes. A park nothing
 #   confirmed wakes as a labeled `advisory` naming why no signature fired; an
@@ -312,7 +336,7 @@
 #   `session wait`'s matched shape:
 #     {schema_version, outcome, tier, authority, signature_version,
 #      classification: {state, label, reason, advisory_age_seconds, peek,
-#                       spawn_gap},
+#                       spawn_gap, modal_gate},
 #      probe: {consulted, reason, cadence_seconds, stall_after_seconds,
 #              aged_after_seconds, live_sessions, in_scope, skipped_slugless,
 #              eligible, examined,
@@ -428,7 +452,7 @@ while [[ $# -gt 0 ]]; do
     # The header comment above is the help text. This range ends on its last
     # line; a header that grows past it prints truncated, which --help itself
     # cannot notice.
-    -h|--help) sed -n '2,353p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,377p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
       echo "Usage: coordinate-watch.sh [--slug <s>]... [--arc <slug>]... [--until <events>] [--since <cursor>] [--timeout <sec>] [--pending-stale <sec>] [--peek-timeout <sec>] [--advisory-age <sec>] [--spawn-gap <sec>] [--probe-every <sec>] [--stall-after <sec>] [--stall-aged-after <sec>] [--probe-ttl <sec>] [--suspend-skew <sec>] [--owner-pid <pid>] [--owner-tmux <name>] [--tmux-server <name>] [--no-board-delta] [--wake-shaped] [--kdir <path>] [--json]" >&2
@@ -868,6 +892,7 @@ WAKE_MATCHED="null"         # JSON
 WAKE_PENDING="[]"           # JSON
 WAKE_ADVISORY_AGE="null"    # JSON
 WAKE_SPAWN_GAP="null"       # JSON
+WAKE_MODAL_GATE="null"      # JSON
 WAKE_PROBE="null"           # JSON
 WAKE_CLOCK_SKEW="null"      # JSON
 
@@ -896,6 +921,7 @@ emit_wake() {
     --argjson peek "$WAKE_PEEK" \
     --argjson advisory_age "$WAKE_ADVISORY_AGE" \
     --argjson spawn_gap "$WAKE_SPAWN_GAP" \
+    --argjson modal_gate "$WAKE_MODAL_GATE" \
     --argjson probe "$WAKE_PROBE" \
     --argjson clock_skew "$WAKE_CLOCK_SKEW" \
     --argjson matched "$WAKE_MATCHED" \
@@ -911,7 +937,7 @@ emit_wake() {
       signature_version: $signature_version,
       classification: {state: $state, label: $label, reason: $reason,
                        advisory_age_seconds: $advisory_age, peek: $peek,
-                       spawn_gap: $spawn_gap},
+                       spawn_gap: $spawn_gap, modal_gate: $modal_gate},
       probe: $probe, clock_skew: $clock_skew,
       matched: $matched, pending: $pending,
       scope: {mode: $mode, slugs: $slugs, arcs: $arcs, cursor_file: $cursor_file},
@@ -1105,10 +1131,100 @@ spawn_gap_demotes() {
   return 0
 }
 
+# What the last peek_session call read off the screen, as the response reported
+# them: either may be empty when the response omitted the field.
+PEEK_READY=""
+PEEK_BLOCKED=""
+
+# peek_session <slug>
+# Ask the owning instance's readiness gate about <slug>, fill WAKE_PEEK with what
+# came back, and leave the two fields a classifier needs in PEEK_READY and
+# PEEK_BLOCKED.
+#
+# Returns non-zero when the peek did not answer at all; WAKE_PEEK then carries the
+# error and the two fields are empty. What an unanswered screen means for the tier
+# is the caller's to decide — it is not the same answer on every path.
+#
+# The results travel in globals rather than on stdout because WAKE_PEEK has to
+# survive the call: a command substitution would run this in a subshell and the
+# peek evidence would never reach the wake body.
+peek_session() {
+  local slug="$1" out status=0
+
+  PEEK_READY=""
+  PEEK_BLOCKED=""
+  out="$(bash "$PEEK_SH" "$slug" --json --timeout "$PEEK_TIMEOUT" --kdir "$KNOWLEDGE_DIR" 2>/dev/null)" \
+    || status=$?
+  if [[ $status -ne 0 ]]; then
+    WAKE_PEEK="$(jq -n --arg e "$(printf '%s' "$out" | jq -r '.error // "peek did not answer"' 2>/dev/null || echo 'peek did not answer')" \
+      '{consulted: true, ready: null, blocked_reason: null, error: $e}')"
+    return 1
+  fi
+
+  PEEK_READY="$(printf '%s' "$out" | jq -r 'if (.ready | type) == "boolean" then (.ready | tostring) else "" end' 2>/dev/null || echo "")"
+  PEEK_BLOCKED="$(printf '%s' "$out" | jq -r '.blocked_reason // ""' 2>/dev/null || echo "")"
+  WAKE_PEEK="$(jq -n --arg r "$PEEK_READY" --arg b "$PEEK_BLOCKED" \
+    '{consulted: true,
+      ready: (if $r == "" then null else ($r == "true") end),
+      blocked_reason: (if $b == "" then null else $b end),
+      error: null}')"
+}
+
+# modal_gate_record <resolution> <screen-reason-json> <signature>
+# Compose the wake's `classification.modal_gate`. It is filled on every
+# `modal_blocked` row the gate reaches, including the ones it leaves confirmed: a
+# seat that can see the gate ran and what the screen held can tell a modal still
+# waiting from one nobody checked.
+modal_gate_record() {
+  jq -cn --arg resolution "$1" --argjson screen_reason "$2" --arg signature "$3" \
+    '{resolution: $resolution, screen_reason: $screen_reason,
+      signature: (if $signature == "" then null else $signature end)}'
+}
+
+# modal_gate <event> <slug>
+# Decide, for a `modal_blocked` row, whether a modal is still on the screen.
+#
+# Exit: 0 the screen holds no modal — the tier belongs at advisory;
+#       1 the modal is on the screen — confirm it, on the screen's authority;
+#       2 nothing could answer, or the row is not a modal row at all — whatever
+#         the caller already concluded stands.
+#
+# Absence of evidence never demotes, which is why 1 and 2 are distinct: 1 is the
+# screen upholding the row, 2 is nobody having looked. The gate corrects one
+# specific, observed misreading — a modal the harness cleared itself before anyone
+# read the row — and turning it into a general distrust of emitter state would
+# cost `confirmed` its meaning.
+modal_gate() {
+  local event="$1" slug="$2" verdict label reason_json
+
+  [[ "$event" == "modal_blocked" ]] || return 2
+  if [[ "$PEEK_TIMEOUT" -eq 0 ]]; then
+    WAKE_MODAL_GATE="$(modal_gate_record "screen-classification-disabled" null "")"
+    return 2
+  fi
+  if [[ -z "$slug" ]]; then
+    WAKE_MODAL_GATE="$(modal_gate_record "row-has-no-slug-to-peek" null "")"
+    return 2
+  fi
+  if ! peek_session "$slug"; then
+    WAKE_MODAL_GATE="$(modal_gate_record "peek-unavailable" null "")"
+    return 2
+  fi
+
+  IFS=$'\t' read -r verdict label <<< "$(session_park_classify modal_blocked "$PEEK_READY" "$PEEK_BLOCKED")"
+  reason_json="$(jq -n --arg b "$PEEK_BLOCKED" 'if $b == "" then null else $b end')"
+  if [[ "$verdict" == "confirmed" ]]; then
+    WAKE_MODAL_GATE="$(modal_gate_record "modal-on-screen" "$reason_json" "$label")"
+    return 1
+  fi
+  WAKE_MODAL_GATE="$(modal_gate_record "demoted" "$reason_json" "$label")"
+  return 0
+}
+
 # classify_match <row-json> <unattributed>
 # Fill the WAKE_* classification fields for one matched journal row.
 classify_match() {
-  local row="$1" unattributed="$2" event slug row_ts row_reason peek_out peek_status verdict label ready blocked
+  local row="$1" unattributed="$2" event slug row_ts row_reason gate verdict label
 
   event="$(printf '%s' "$row" | jq -r '.event')"
   slug="$(printf '%s' "$row" | jq -r '.slug // ""')"
@@ -1136,12 +1252,34 @@ classify_match() {
   # An emitter that recorded why the session parked is the authority for that
   # session; the screen is not consulted alongside it. Suppressed, not blended —
   # two authorities that can disagree produce wakes nobody can act on.
+  #
+  # The exception is a modal, and it is a handover rather than a blend: a modal
+  # the harness clears itself outlives the row that reported it, so the screen
+  # takes the classification over entirely and the row keeps only its reason.
   if [[ -n "$row_reason" ]]; then
+    WAKE_REASON="$(jq -n --arg r "$row_reason" '$r')"
+    gate=0
+    modal_gate "$event" "$slug" || gate=$?
+    case "$gate" in
+      0)
+        WAKE_AUTHORITY="screen-signature"
+        WAKE_STATE="park_unconfirmed"
+        WAKE_LABEL="modal-not-on-screen"
+        apply_advisory_tier "park:$slug:$event:modal-not-on-screen"
+        return 0
+        ;;
+      1)
+        WAKE_TIER="confirmed"
+        WAKE_AUTHORITY="screen-signature"
+        WAKE_STATE="confirmed_park"
+        WAKE_LABEL="modal-signature"
+        return 0
+        ;;
+    esac
     WAKE_TIER="confirmed"
     WAKE_AUTHORITY="hook-row"
     WAKE_STATE="confirmed_park"
     WAKE_LABEL="row-carries-emitter-state"
-    WAKE_REASON="$(jq -n --arg r "$row_reason" '$r')"
     return 0
   fi
 
@@ -1159,26 +1297,13 @@ classify_match() {
 
   WAKE_AUTHORITY="screen-signature"
   WAKE_STATE="park_unconfirmed"
-  peek_status=0
-  peek_out="$(bash "$PEEK_SH" "$slug" --json --timeout "$PEEK_TIMEOUT" --kdir "$KNOWLEDGE_DIR" 2>/dev/null)" \
-    || peek_status=$?
-  if [[ $peek_status -ne 0 ]]; then
+  if ! peek_session "$slug"; then
     WAKE_LABEL="peek-unavailable"
-    WAKE_PEEK="$(jq -n --arg e "$(printf '%s' "$peek_out" | jq -r '.error // "peek did not answer"' 2>/dev/null || echo 'peek did not answer')" \
-      '{consulted: true, ready: null, blocked_reason: null, error: $e}')"
     apply_advisory_tier "park:$slug:$event:peek-unavailable"
     return 0
   fi
 
-  ready="$(printf '%s' "$peek_out" | jq -r 'if (.ready | type) == "boolean" then (.ready | tostring) else "" end' 2>/dev/null || echo "")"
-  blocked="$(printf '%s' "$peek_out" | jq -r '.blocked_reason // ""' 2>/dev/null || echo "")"
-  WAKE_PEEK="$(jq -n --arg r "$ready" --arg b "$blocked" \
-    '{consulted: true,
-      ready: (if $r == "" then null else ($r == "true") end),
-      blocked_reason: (if $b == "" then null else $b end),
-      error: null}')"
-
-  IFS=$'\t' read -r verdict label <<< "$(session_park_classify "$event" "$ready" "$blocked")"
+  IFS=$'\t' read -r verdict label <<< "$(session_park_classify "$event" "$PEEK_READY" "$PEEK_BLOCKED")"
   WAKE_LABEL="$label"
   if [[ "$verdict" == "confirmed" ]]; then
     # The screen agrees the session is parked. Whether that means "stopped and
