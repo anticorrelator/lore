@@ -15,7 +15,6 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
-	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
@@ -50,7 +49,6 @@ func newModel(cfg config.Config, prefs config.Prefs, startState appState) model 
 		config:             cfg,
 		layoutMode:         prefs.Layout,
 		indexPath:          filepath.Join(cfg.WorkDir, "_index.json"),
-		settlement:         settlement.NewModel(),
 		list:               work.NewListModel(nil),
 		followupList:       followup.NewListModel(nil),
 		sessionsList:       sessionview.NewListModel(),

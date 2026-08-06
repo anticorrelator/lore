@@ -1,7 +1,7 @@
 // Package style is the dependency-free leaf package owning the TUI's shared
 // presentation primitives: the canonical lipgloss styles every surface
-// (package main chrome, followup, work, knowledge, search, settlement,
-// settings) renders with, plus the single rune-aware Truncate helper.
+// (package main chrome, followup, work, knowledge, search, settings)
+// renders with, plus the single rune-aware Truncate helper.
 //
 // This is the promotion that tui/internal/settings/theme.go documented as
 // pending: the values previously mirrored there (and inlined at the
@@ -244,8 +244,7 @@ var (
 // must cut. It is rune-aware and measures with lipgloss.Width so wide
 // characters count correctly. This is the TUI's single truncation
 // convention — it consolidates the former per-package copies in
-// work/list.go, followup/list.go, knowledge/browser.go, settlement/model.go,
-// and tui/view.go.
+// work/list.go, followup/list.go, knowledge/browser.go, and tui/view.go.
 func Truncate(s string, maxW int) string {
 	if maxW <= 0 {
 		return ""

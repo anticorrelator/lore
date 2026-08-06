@@ -108,26 +108,6 @@ func TestStatusHints_OpenKeysetKVModes(t *testing.T) {
 	)
 }
 
-func TestStatusHints_ActiveHoursRangesModes(t *testing.T) {
-	w := NewActiveHoursRangesEditor("settlement.active_hours.ranges", "ranges", []ActiveHoursRange{
-		{Days: []string{"mon"}, Start: "09:00", End: "17:00"},
-	}, true)
-	w.Focus()
-
-	assertStatusHints(t, w.StatusHints(), StatusHint{Key: "enter", Label: "open"})
-
-	_, _ = dispatch(w, "enter")
-	assertStatusHints(t, w.StatusHints(),
-		StatusHint{Key: "↕", Label: "field"},
-		StatusHint{Key: "h/l", Label: "field"},
-		StatusHint{Key: "+/-", Label: "time"},
-		StatusHint{Key: "1-7", Label: "days"},
-		StatusHint{Key: "a", Label: "add"},
-		StatusHint{Key: "d", Label: "delete"},
-		StatusHint{Key: "esc", Label: "done"},
-	)
-}
-
 func TestStatusHints_ContainerDelegationAndEscBack(t *testing.T) {
 	togglePanel := NewClosedObjectSubPanel("panel", "panel", []FieldWidget{
 		NewToggleRow("panel.enabled", "enabled", true, true, false),

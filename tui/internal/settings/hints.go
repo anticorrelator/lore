@@ -114,21 +114,6 @@ func (l *ListEditor) StatusHints() []StatusHint {
 	}
 }
 
-func (a *ActiveHoursRangesEditor) StatusHints() []StatusHint {
-	if !a.editing {
-		return []StatusHint{{Key: "enter", Label: "open"}}
-	}
-	return []StatusHint{
-		{Key: "↕", Label: "field"},
-		{Key: "h/l", Label: "field"},
-		{Key: "+/-", Label: "time"},
-		{Key: "1-7", Label: "days"},
-		{Key: "a", Label: "add"},
-		{Key: "d", Label: "delete"},
-		{Key: "esc", Label: "done"},
-	}
-}
-
 func (p *ClosedObjectSubPanel) StatusHints() []StatusHint {
 	return containerStatusHints(&p.containerBase, p.children)
 }

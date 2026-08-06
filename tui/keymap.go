@@ -7,7 +7,6 @@ import (
 
 	"github.com/anticorrelator/lore/tui/internal/coordination"
 	"github.com/anticorrelator/lore/tui/internal/followup"
-	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
@@ -72,7 +71,7 @@ type keymapEntry struct {
 	helpKey   string
 	helpLabel string
 	// labelFn overrides label at render time for state-dependent hints
-	// (settlement enable/disable).
+	// (e.g. "detail" vs "attach session" on the list views).
 	labelFn func(m model) string
 	// annot links a surfAnnot entry to the annotation spec the compositor
 	// renders into the panel border.
@@ -102,11 +101,6 @@ const (
 	kmCoordinationDetail
 	kmCoordinationItems
 	kmCoordinationSessions
-	kmSettlementQueue
-	// kmSettlementClaimDetail / kmSettlementVerdictDetail cover the panel's
-	// one-level drill-ins (Enter on a queue row / v on the verdict log).
-	kmSettlementClaimDetail
-	kmSettlementVerdictDetail
 	kmKnowledge
 	kmTerminal
 	// kmSettingsModal is the settings-configurator overlay pseudo-state; its
@@ -147,8 +141,6 @@ var keymapRegistry = []keymapSection{
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestFollowupListStatusBarKeybindContract/w (work list)"},
 		{key: "v", label: "sessions", surfaces: surfStatusBar | surfHelp, helpLabel: "sessions view",
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSessionsEntryKeybindContract/v (sessions)"},
-		{key: "t", label: "settlement", surfaces: surfStatusBar | surfHelp, helpLabel: "settlement panel",
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestFollowupListStatusBarKeybindContract/t (settlement)"},
 		{key: "ctrl+a", label: "open · closed", surfaces: surfHelp | surfAnnot, role: roleAnnot, helpLabel: "toggle open / closed",
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestFollowupListStatusBarKeybindContract/ctrl+a (open · closed)",
 			annot: &annotFollowupFilter},
@@ -251,8 +243,6 @@ var keymapRegistry = []keymapSection{
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestWorkListStatusBarKeybindContract/f (follow-ups)"},
 		{key: "v", label: "sessions", surfaces: surfStatusBar | surfHelp, helpLabel: "sessions view",
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSessionsEntryKeybindContract/v (sessions)"},
-		{key: "t", label: "settlement", surfaces: surfStatusBar | surfHelp, helpLabel: "settlement panel",
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestWorkListStatusBarKeybindContract/t (settlement)"},
 		{key: "S", label: "settings", surfaces: surfStatusBar,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSettingsModalStatusBarKeybindContract/S / Ctrl+, (open)"},
 		{key: "q", label: "quit", surfaces: surfStatusBar,
@@ -329,8 +319,6 @@ var keymapRegistry = []keymapSection{
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestCoordinationListStatusBarKeybindContract/f (follow-ups)"},
 		{key: "v", label: "sessions", surfaces: surfStatusBar | surfHelp, helpLabel: "sessions view",
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestCoordinationListStatusBarKeybindContract/v (sessions)"},
-		{key: "t", label: "settlement", surfaces: surfStatusBar | surfHelp, helpLabel: "settlement panel",
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestCoordinationListStatusBarKeybindContract/t (settlement)"},
 		{key: "ctrl+a", label: "live · +archived", surfaces: surfHelp | surfAnnot, role: roleAnnot, helpLabel: "reveal archived arcs",
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestCoordinationListStatusBarKeybindContract/ctrl+a (live · +archived)",
 			annot: &annotArcFilter},
@@ -381,57 +369,6 @@ var keymapRegistry = []keymapSection{
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestCoordinationDetailKeybindContract/x (close)"},
 		{key: "h/Esc", label: "back to list", surfaces: surfStatusBar,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestCoordinationDetailKeybindContract/h (back to list)"},
-		{key: "?", label: "help", surfaces: surfStatusBar,
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestHelpModalKeybindContract"},
-	}},
-	{ctx: kmSettlementQueue, helpTitle: "Settlement", entries: []keymapEntry{
-		{key: "j/k", label: "queue", surfaces: surfStatusBar | surfHelp | surfAnnot, helpKey: "j / k", helpLabel: "navigate queue",
-			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestSettlementStatusBarKeybindContract/j/k (queue)",
-			annot: &annotSettlementFocus},
-		{key: "Enter", label: "claim", surfaces: surfStatusBar | surfHelp, helpLabel: "open claim drill-in",
-			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestSettlementStatusBarKeybindContract/Enter (claim)"},
-		{key: "v", label: "verdicts", surfaces: surfStatusBar | surfHelp, helpLabel: "open verdict drill-in",
-			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestSettlementStatusBarKeybindContract/v (verdicts)"},
-		{key: "p", label: "pause", surfaces: surfStatusBar | surfHelp, helpLabel: "pause / resume (settlement.enabled)",
-			labelFn: func(m model) string {
-				if m.settlement.Status().Enabled {
-					return "pause"
-				}
-				return "resume"
-			},
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSettlementPostureKeybindContract/p (pause), …/p (resume)"},
-		{key: "s", label: "schedule", surfaces: surfStatusBar | surfHelp, helpLabel: "toggle active-hours schedule",
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSettlementPostureKeybindContract/s (schedule)"},
-		{key: "m", label: "model tier", surfaces: surfStatusBar | surfHelp, helpLabel: "cycle auditor model tier",
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSettlementPostureKeybindContract/m (model tier), …/m (no tiers)"},
-		{key: "x", label: "process once", surfaces: surfStatusBar | surfHelp, helpLabel: "process one batch",
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSettlementPostureKeybindContract/x (process once)"},
-		{key: "S", label: "settings", surfaces: surfStatusBar | surfHelp, helpLabel: "settings modal at settlement",
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSettlementStatusBarKeybindContract/S (settings)"},
-		{key: "w", label: "work", surfaces: surfStatusBar | surfHelp,
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSettlementStatusBarKeybindContract/w (work)"},
-		{key: "f", label: "follow-ups", surfaces: surfStatusBar | surfHelp,
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSettlementStatusBarKeybindContract/f (follow-ups)"},
-		{key: "o", label: "coordination", surfaces: surfStatusBar | surfHelp, helpLabel: "coordination view",
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestCoordinationEntryKeybindContract/o (coordination)"},
-		{key: "?", label: "help", surfaces: surfStatusBar,
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSettlementStatusBarKeybindContract/? (help)"},
-	}},
-	{ctx: kmSettlementClaimDetail, helpTitle: "Settlement Claim", entries: []keymapEntry{
-		{key: "j/k", label: "next/prev claim", surfaces: surfStatusBar | surfHelp | surfAnnot, helpKey: "j / k",
-			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestSettlementClaimDrillInKeybindContract/j/k (next/prev claim)",
-			annot: &annotSettlementFocus},
-		{key: "Esc", label: "back", surfaces: surfStatusBar | surfHelp, helpLabel: "back to queue",
-			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestSettlementClaimDrillInKeybindContract/Esc (back)"},
-		{key: "?", label: "help", surfaces: surfStatusBar,
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestHelpModalKeybindContract"},
-	}},
-	{ctx: kmSettlementVerdictDetail, helpTitle: "Settlement Verdict", entries: []keymapEntry{
-		{key: "j/k", label: "next/prev verdict", surfaces: surfStatusBar | surfHelp | surfAnnot, helpKey: "j / k",
-			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestSettlementVerdictDrillInKeybindContract/j/k (next/prev verdict)",
-			annot: &annotSettlementFocus},
-		{key: "Esc", label: "back", surfaces: surfStatusBar | surfHelp, helpLabel: "back to queue",
-			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestSettlementVerdictDrillInKeybindContract/Esc (back)"},
 		{key: "?", label: "help", surfaces: surfStatusBar,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestHelpModalKeybindContract"},
 	}},
@@ -516,8 +453,6 @@ var keymapRegistry = []keymapSection{
 	{ctx: kmGlobal, helpTitle: "Global", entries: []keymapEntry{
 		{key: "?", label: "this help", surfaces: surfHelp,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestHelpModalKeybindContract"},
-		{key: "t", label: "settlement panel", surfaces: surfHelp,
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSettlementRootNavigationFromListViews"},
 		{key: "S / Ctrl+,", label: "settings configurator", surfaces: surfHelp,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSettingsModalStatusBarKeybindContract/S / Ctrl+, (open)"},
 		{key: "q / Ctrl+C / Ctrl+D", label: "quit", surfaces: surfHelp,
@@ -579,14 +514,6 @@ func (m model) keymapContext() keymapContext {
 		}
 	case stateKnowledge:
 		return kmKnowledge
-	case stateSettlement:
-		switch m.settlement.Drill() {
-		case settlement.DrillClaim:
-			return kmSettlementClaimDetail
-		case settlement.DrillVerdict:
-			return kmSettlementVerdictDetail
-		}
-		return kmSettlementQueue
 	case stateFollowUps:
 		switch {
 		case m.focusedPanel == panelLeft:
@@ -645,9 +572,6 @@ var (
 	// and complete arcs are always listed; the toggle only adds the archived
 	// tail, so the states name what is shown, not a swap between two sets.
 	annotArcFilter = annotSpec{key: "ctrl+a", states: []string{"live", "+archived"}}
-	// annotSettlementFocus tracks what j/k walks: the queue at the root, or
-	// claims/verdicts inside the panel's drill-ins.
-	annotSettlementFocus = annotSpec{key: "j/k", states: []string{"queue", "claim", "verdict"}}
 )
 
 // annotPanelMode is the right-panel detail/terminal mode annotation; the
@@ -683,12 +607,5 @@ func (a annotSpec) render(selected int) (string, int) {
 		}
 	}
 	out := b.String()
-	return out, lipgloss.Width(out)
-}
-
-// renderSelected is the compact variant showing only the selected state
-// (settlement's "j/k  queue" / "j/k  settings" border annotation).
-func (a annotSpec) renderSelected(selected int) (string, int) {
-	out := annotDimS.Render(a.key+"  ") + style.TitleFilter.Render(a.states[selected])
 	return out, lipgloss.Width(out)
 }

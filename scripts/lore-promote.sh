@@ -252,11 +252,9 @@ if [[ -z "$ENTRY_PATH" ]]; then
   die "could not resolve promoted entry path from capture.sh output; commons-audit row not written"
 fi
 
-# (a) Durably append the producer row. FAIL-CLOSED: the row is the sole carrier
+# Durably append the producer row. FAIL-CLOSED: the row is the sole carrier
 # of the falsifier (capture.sh does not persist it into the entry .md), so a
 # missing row is unrecoverable — let the failure fail the promotion visibly.
-# entry_path is stamped on so the enqueue below sees the same shape the writer
-# persists (the writer also stamps it from --entry-path).
 # executable_falsifier rides along when the Tier-3 row carries one — the
 # producer row is its durable home (validate-tier3.sh already type-checked it).
 COMMONS_ROW=$(printf '%s' "$ROW" | jq -c --arg ep "$ENTRY_PATH" --arg wi "$WORK_ITEM" '{
@@ -269,15 +267,6 @@ COMMONS_ROW=$(printf '%s' "$ROW" | jq -c --arg ep "$ENTRY_PATH" --arg wi "$WORK_
 if ! printf '%s' "$COMMONS_ROW" \
   | "$SCRIPT_DIR/promote-commons-append.sh" --work-item "$WORK_ITEM" --entry-path "$ENTRY_PATH"; then
   die "promote-commons-append.sh rejected the producer row — promotion failed (the falsifier is unrecoverable without it)"
-fi
-
-# (b) Enqueue a commons settlement item. FAIL-OPEN: scan() recovers a missing
-# queue item from the durably-written row, so a queue failure only warns.
-if [[ -x "$SCRIPT_DIR/settlement-queue.sh" ]]; then
-  if ! printf '%s' "$COMMONS_ROW" \
-    | "$SCRIPT_DIR/settlement-queue.sh" enqueue --work-item "$WORK_ITEM" --kind commons --kdir "$KNOWLEDGE_DIR" --json >/dev/null 2>&1; then
-    echo "[promote] warning: settlement enqueue failed; producer row preserved (scan will recover the queue item)" >&2
-  fi
 fi
 
 exit 0

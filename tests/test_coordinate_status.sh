@@ -9,6 +9,15 @@ CLI="$REPO_ROOT/cli/lore"
 TEST_DIR=$(mktemp -d)
 BASE="$TEST_DIR/base"
 
+# The composer reads its seat ceiling from settings.json. Left unpinned, that is
+# whatever the developer's machine happens to hold, and the ready-stream cases
+# below are decided by it. Pin a data dir so the ceiling is a fixture.
+export LORE_DATA_DIR="$TEST_DIR/data"
+mkdir -p "$LORE_DATA_DIR/config"
+cat >"$LORE_DATA_DIR/config/settings.json" <<'JSON'
+{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]}},"coordination":{"max_concurrency":10}}
+JSON
+
 PASS=0
 FAIL=0
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }

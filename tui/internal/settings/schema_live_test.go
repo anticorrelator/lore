@@ -170,7 +170,11 @@ func TestLiveRender_CapabilityOverridesMatrixHasLabelsAndDescriptions(t *testing
 	t.Logf("\n--- live advanced capability_overrides render (96-col body) ---\n%s\n--- end ---", rendered)
 }
 
-func TestLiveRender_SettlementEligibleFrameworksSelectableFromSchemaEnum(t *testing.T) {
+// TestLiveRender_NoSettlementSection pins the settlement block's removal from
+// the live schema. A stale settlement block left in a user's settings.json must
+// not resurrect the panel: the schema keyset is what the renderer builds rows
+// from, so an unknown top-level key contributes no widget.
+func TestLiveRender_NoSettlementSection(t *testing.T) {
 	_, here, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Skip("cannot resolve caller path")
@@ -179,19 +183,26 @@ func TestLiveRender_SettlementEligibleFrameworksSelectableFromSchemaEnum(t *test
 	schemaPath := filepath.Join(repoRoot, "adapters", "settings.schema.json")
 	capsPath := filepath.Join(repoRoot, "adapters", "capabilities.json")
 
+	schema, err := LoadSchema(schemaPath)
+	if err != nil {
+		t.Fatalf("LoadSchema: %v", err)
+	}
+	if _, ok := schema.Root.Properties["settlement"]; ok {
+		t.Fatal("live schema still declares a settlement property")
+	}
+
 	store := newFakeStore(map[string]any{
 		"version":              float64(1),
 		"tui_launch_framework": "claude-code",
 		"harnesses":            map[string]any{"claude-code": map[string]any{"args": []any{}}},
 		"settlement": map[string]any{
+			"enabled": true,
 			"active_hours": map[string]any{
 				"ranges": []any{
 					map[string]any{"start": "07:30", "end": "11:00", "days": []any{"tue", "thu"}},
 				},
 			},
-			"harness_selection": map[string]any{
-				"eligible_frameworks": []any{},
-			},
+			"harness_selection": map[string]any{"eligible_frameworks": []any{"codex"}},
 		},
 	})
 	m, err := NewSettingsModel(SettingsModelOptions{
@@ -207,28 +218,13 @@ func TestLiveRender_SettlementEligibleFrameworksSelectableFromSchemaEnum(t *test
 		t.Fatalf("NewSettingsModel: %v", err)
 	}
 
-	var settlement *ClosedObjectSubPanel
 	for _, w := range m.widgets {
-		if p, ok := w.(*ClosedObjectSubPanel); ok && p.DotPath() == "settlement" {
-			settlement = p
-			break
+		if strings.HasPrefix(w.DotPath(), "settlement") {
+			t.Fatalf("settlement widget still rendered at %q", w.DotPath())
 		}
 	}
-	if settlement == nil {
-		t.Fatalf("settlement settings panel not found")
-	}
-	rendered := stripANSI(settlement.View())
-	for _, want := range []string{
-		"eligible_frameworks",
-		"[x] claude-code",
-		"[x] opencode",
-		"[x] codex",
-		"ranges",
-		"tue,thu  07:30-11:00",
-	} {
-		if !strings.Contains(rendered, want) {
-			t.Fatalf("settlement eligible frameworks should render schema enum choices; missing %q in:\n%s", want, rendered)
-		}
+	if rendered := stripANSI(m.View()); strings.Contains(rendered, "settlement") {
+		t.Fatalf("settings panel still mentions settlement:\n%s", rendered)
 	}
 }
 

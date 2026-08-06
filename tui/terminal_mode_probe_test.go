@@ -95,13 +95,10 @@ func TestActiveUnfocusedWorkListKeybindContract(t *testing.T) {
 			t.Errorf("f should switch to follow-ups, state = %v", nm.state)
 		}
 	})
-	t.Run("t (settlement)", func(t *testing.T) {
+	t.Run("t (no longer a state switch)", func(t *testing.T) {
 		nm, _ := updateModel(t, activeUnfocusedModel(), press('t'))
-		if nm.state != stateSettlement {
-			t.Errorf("t should switch to settlement, state = %v", nm.state)
-		}
-		if nm.terminalMode {
-			t.Error("terminalMode should reset when leaving the work view")
+		if nm.state != stateWork {
+			t.Errorf("t should no longer switch views, state = %v", nm.state)
 		}
 	})
 	t.Run("ctrl+t (detail · terminal)", func(t *testing.T) {

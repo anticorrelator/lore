@@ -146,6 +146,10 @@ warn_corrupt() {
 validate_row() {
   # Emits "ok" on success or a short reason string on failure.
   # Expects a single JSON object on stdin.
+  #
+  # `consumption-contradiction` is accepted for read but is no longer an
+  # appendable kind: scorecard-append.sh rejects it. Rows carrying it are
+  # historical, and dropping the kind here would report them corrupt.
   jq -r '
     if (type != "object") then "row is not a JSON object"
     elif (has("schema_version") | not) or (.schema_version == null) then "missing required field: schema_version"

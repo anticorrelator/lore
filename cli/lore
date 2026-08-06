@@ -70,10 +70,9 @@ Commands:
                for a knowledge entry, resolving a contradiction by correcting
                the entry or marking it disputed (see: lore verify --help), or
                report per-entry ledger events (lore verify --report --help)
-  audit        Route a producer artifact through the settlement judges
+  audit        Route a producer artifact through the judge templates
   trust        Trust-ledger verbs — cheaply confirm an entry's verdict
                (see: lore trust --help)
-  settlement   Durable settlement queue, processor, and status
   resolve      Resolve repo path or [[backlink]] references
   prefetch     Prefetch knowledge for agent prompts
   init         Initialize a knowledge store
@@ -109,7 +108,6 @@ Commands:
   migrate      Format migration (see: lore migrate --help)
   manifest     Manifest management (see: lore manifest --help)
   analyze      Knowledge store analysis (see: lore analyze --help)
-  drift-sweep  Re-enqueue committed entries whose cited code drifted (see: lore drift-sweep --help)
   bootstrap    Bootstrap knowledge store (see: lore bootstrap --help)
   ceremony     Ceremony bindings and outcome handling (see: lore ceremony --help)
   config       Read framework/role/capability config (see: lore config --help)
@@ -126,8 +124,6 @@ Commands:
   retro        Federated retro pooling (see: lore retro --help)
   correction   Verdict-driven correction management (see: lore correction --help)
   off-scale    Off-scale route management (see: lore off-scale --help)
-  consumption-contradiction
-               Append a consumption-contradiction signal-capture row
   synopsis     Edge-keyed synopsis sidecar management (see: lore synopsis --help)
   resynth      Invalidate and re-synthesize edge synopses for a knowledge entry
   history      Show correction history and supersession chain for a knowledge entry
@@ -721,62 +717,6 @@ Options:
 EOF
 }
 
-settlement_usage() {
-  cat >&2 <<EOF
-lore settlement — durable settlement queue and processor
-
-Usage: lore settlement <subcommand> [args...]
-
-Subcommands:
-  status --json                       Show queue, lease, terminal item, and budget state
-  triggers --json                     Run event-driven enqueue triggers (disputes, spot-sample, rollups)
-  scan --json                         Manual census walk (dormant automatic driver; still invocable)
-  enqueue --work-item S               Enqueue one Tier 2 row from stdin
-  process --once --json               Process one pending item
-  drain --json                        Loop process_once until queue empty or blocked
-  enqueue-rollup-backfill --weeks N   Enqueue per-judge weekly rollup items (1-104 weeks)
-  enable --json                       Set settlement.enabled=true
-  disable --json                      Set settlement.enabled=false
-  schedule on|off --json              Toggle settlement.active_hours.enabled
-  model <alias> --json                Set settlement.auditor_model (judge model
-                                      for settlement-executed audits)
-  model --unset --json                Remove settlement.auditor_model
-  retry-errors --json                 Requeue audit errors and timeout-blocked attempts
-    --limit N                         Requeue at most N items, oldest failure first
-    --stderr-match TEXT               Only items whose last failure's stderr
-                                      contains TEXT (not valid with --stranded)
-    --stranded                        Requeue items a previous retry wave
-                                      invalidated but never re-audited
-    --dry-run                         List what would be requeued, change nothing
-
-Options:
-  --help, -h                          Show this help
-EOF
-}
-
-cmd_settlement() {
-  if [[ $# -eq 0 ]]; then
-    settlement_usage
-    return 1
-  fi
-
-  case "$1" in
-    --help|-h)
-      settlement_usage
-      return 0
-      ;;
-    status|triggers|scan|enqueue|process|enable|disable|schedule|model|retry-errors|queue|drain|enqueue-rollup-backfill)
-      exec "$SCRIPTS_DIR/settlement-queue.sh" "$@"
-      ;;
-    *)
-      echo "Error: unknown settlement subcommand '$1'" >&2
-      echo "" >&2
-      settlement_usage
-      return 1
-      ;;
-  esac
-}
-
 retro_usage() {
   # Role-aware help: maintainer verbs are omitted from the contributor view
   # (task-54) so the contributor surface stays minimal and discovery-safe.
@@ -784,7 +724,7 @@ retro_usage() {
   local role
   role=$(resolve_role)
   cat >&2 <<EOF
-lore retro — federated retro pooling (Phase 9 of the settlement architecture)
+lore retro — federated retro pooling
 
 Usage: lore retro <subcommand> [args...]
 
@@ -1284,19 +1224,6 @@ cmd_analyze_staleness() {
   fi
 
   exec python3 "$script" "$kdir" "$@"
-}
-
-cmd_drift_sweep() {
-  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    echo "Usage: lore drift-sweep [--dry-run] [--json] [--include-unaudited] [--unaudited-only] [--category NAME]... [--repo-root PATH]" >&2
-    echo "  Detect committed-entry drift against each entry's captured_at_sha and" >&2
-    echo "  re-enqueue drifted entries through the commons settlement path." >&2
-    echo "  --dry-run reports without writing producer rows or enqueuing." >&2
-    echo "  --include-unaudited also enqueues never-audited current entries" >&2
-    echo "  (confidence: unaudited); --unaudited-only skips purely-drifted entries." >&2
-    return 0
-  fi
-  exec "$SCRIPTS_DIR/drift-sweep.sh" "$@"
 }
 
 cmd_analyze_usage() {
@@ -2287,10 +2214,6 @@ case "$1" in
     shift
     exec "$SCRIPTS_DIR/audit-artifact.sh" "$@"
     ;;
-  settlement)
-    shift
-    cmd_settlement "$@"
-    ;;
   resolve)
     shift
     if [[ $# -eq 0 ]]; then
@@ -2356,10 +2279,6 @@ case "$1" in
   analyze)
     shift
     cmd_analyze "$@"
-    ;;
-  drift-sweep)
-    shift
-    cmd_drift_sweep "$@"
     ;;
   followup)
     shift
@@ -2456,18 +2375,6 @@ case "$1" in
   off-scale)
     shift
     cmd_off_scale "$@"
-    ;;
-  consumption-contradiction)
-    shift
-    if [[ "${1:-}" == "read" ]]; then
-      shift
-      exec "$SCRIPTS_DIR/consumption-contradiction-read.sh" "$@"
-    elif [[ "${1:-}" == "append" ]]; then
-      shift
-      exec "$SCRIPTS_DIR/consumption-contradiction-append.sh" "$@"
-    else
-      exec "$SCRIPTS_DIR/consumption-contradiction-append.sh" "$@"
-    fi
     ;;
   synopsis)
     shift

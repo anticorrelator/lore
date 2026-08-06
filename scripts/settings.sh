@@ -42,9 +42,11 @@
 #   fallbacks         Compatibility subcommand. Always emits nothing because
 #                     runtime settings no longer read legacy fragmented files.
 #
-# Settlement readers use `get settlement.*` / `section settlement` directly.
-# Missing keys intentionally fail closed in scripts/settlement-processor.py
-# (enabled=false, max_concurrency=1).
+# Readers address keys directly — `get <block>.<key>` for a scalar, `section
+# <block>` for a whole block. A missing key returns empty rather than failing,
+# so callers that need a value are expected to fail closed on their own:
+# scripts/coordinate-status.sh reads `get coordination.max_concurrency` and
+# falls back to a single seat when it is absent or not a positive integer.
 
 set -euo pipefail
 

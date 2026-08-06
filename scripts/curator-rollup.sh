@@ -16,9 +16,9 @@
 #       [--kdir <path>] \
 #       [--verdicts <jsonl-path>]   # default: read JSONL on stdin
 #
-# Input: JSONL of curator verdicts, one per line, per the audit contract
-# (architecture/audit-pipeline/contract.md). Each line is a
-# settlement-record-append.sh row:
+# Input: JSONL of curator verdicts on stdin, or from the file named by
+# --verdicts. One verdict per line, per the audit contract
+# (architecture/audit-pipeline/contract.md):
 #   {"judge":"curator","claim_id":"<id>","verdict":"selected|dropped",
 #    "rationale":"..."}
 #

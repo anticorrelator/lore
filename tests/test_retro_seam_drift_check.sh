@@ -13,8 +13,7 @@ new_repo() {
   cp "$CHECKER" "$repo/scripts/check-retro-seam-drift.sh"
   printf 'registry baseline\n' > "$repo/scripts/retro-prepare.sh"
   printf 'reader test baseline\n' > "$repo/tests/frameworks/retro_prepare.bats"
-  printf 'settlement reader baseline\n' > "$repo/scripts/settlement-processor.py"
-  printf 'settlement contract baseline\n' > "$repo/tests/test_settlement_queue.sh"
+  printf 'session reader baseline\n' > "$repo/scripts/session-events.sh"
   printf 'retro skill baseline\n' > "$repo/skills/retro/SKILL.md"
   printf 'other skill baseline\n' > "$repo/skills/other/SKILL.md"
   printf 'protocol baseline\n' > "$repo/tests/test_retro_evidence_pack_protocol.sh"
@@ -83,40 +82,53 @@ printf 'owner calibration\n' >> "$repo/skills/other/SKILL.md"
 commit_all "$repo" "other skill prose"
 expect_pass "$repo" "$base"
 
-# scripts/settlement-processor.py serves the retro projection and the settlement
-# queue commands from one file. Which contract test discharges a change depends
-# on whether the diff names the retro surface.
+# The pairing must keep firing for every reader still on the protected list,
+# not just the one the checker is named after.
 
-repo="$TMP/settlement-non-retro-paired"
+repo="$TMP/session-reader-unpaired"
 new_repo "$repo"
 base="$(git -C "$repo" rev-parse HEAD)"
-printf 'def retry_error_audits(self, limit=None):\n    return []\n' >> "$repo/scripts/settlement-processor.py"
-printf 'retry-errors bounds case\n' >> "$repo/tests/test_settlement_queue.sh"
-commit_all "$repo" "settlement queue change with its own contract test"
-expect_pass "$repo" "$base"
-
-repo="$TMP/settlement-non-retro-unpaired"
-new_repo "$repo"
-base="$(git -C "$repo" rev-parse HEAD)"
-printf 'def retry_error_audits(self, limit=None):\n    return []\n' >> "$repo/scripts/settlement-processor.py"
-commit_all "$repo" "settlement queue change with no contract test"
+printf 'window projection change\n' >> "$repo/scripts/session-events.sh"
+commit_all "$repo" "session reader change with no contract test"
 expect_fail "$repo" "$base"
 
-repo="$TMP/settlement-retro-surface-unpaired"
+repo="$TMP/session-reader-paired"
 new_repo "$repo"
 base="$(git -C "$repo" rev-parse HEAD)"
-printf 'def retro_status_projection(self, queue, start, end):\n    return {}\n' >> "$repo/scripts/settlement-processor.py"
-printf 'queue-side case\n' >> "$repo/tests/test_settlement_queue.sh"
-commit_all "$repo" "retro projection change paired only with the queue suite"
-expect_fail "$repo" "$base"
-
-repo="$TMP/settlement-retro-surface-paired"
-new_repo "$repo"
-base="$(git -C "$repo" rev-parse HEAD)"
-printf 'def retro_status_projection(self, queue, start, end):\n    return {}\n' >> "$repo/scripts/settlement-processor.py"
-printf 'projection contract case\n' >> "$repo/tests/frameworks/retro_prepare.bats"
-commit_all "$repo" "retro projection change paired with the reader contract"
+printf 'window projection change\n' >> "$repo/scripts/session-events.sh"
+printf 'session projection case\n' >> "$repo/tests/frameworks/retro_prepare.bats"
+commit_all "$repo" "session reader change paired with the reader contract"
 expect_pass "$repo" "$base"
+
+# A protected path that no longer exists protects nothing: the pattern stops
+# matching and the pairing silently stops being enforced. Both the checker and
+# the pre-push hook must name only live files.
+python3 - "$REPO_ROOT" <<'PY'
+import re, sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+checker = (root / "scripts/check-retro-seam-drift.sh").read_text()
+hook = (root / "githooks/pre-push").read_text()
+
+named = set(re.findall(r"^\s+(scripts/[\w./-]+)$",
+                       checker.split("PROTECTED_READERS=(", 1)[1].split(")", 1)[0], re.M))
+for extra in ("CONTRACT_TEST", "RETRO_SKILL"):
+    named.add(re.search(rf'{extra}="([^"]+)"', checker).group(1))
+
+pattern = re.search(r"PROTECTED_PATTERN='\^\((.*)\)\$'", hook).group(1)
+for alternative in pattern.split("|"):
+    literal = alternative.replace("\\.", ".")
+    if ".*" in literal:
+        stem, suffix = literal.split(".*", 1)
+        assert list(root.glob(f"{stem}*{suffix}")), f"pre-push pattern matches nothing: {alternative}"
+        continue
+    named.add(literal)
+
+missing = sorted(path for path in named if not (root / path).exists())
+assert not missing, f"protected paths that no longer exist: {missing}"
+print(f"protected-path liveness: {len(named)} paths checked")
+PY
 
 repo="$TMP/rollout-boundary"
 mkdir -p "$repo/scripts" "$repo/tests/frameworks"

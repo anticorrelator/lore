@@ -19,7 +19,6 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
-	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/work"
 	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
@@ -481,7 +480,6 @@ func minimalModel(state appState, workItems []work.WorkItem, fuItems []followup.
 		detail:             work.NewDetailModel("", ""),
 		followupList:       followup.NewListModel(fuItems),
 		followupDetail:     followup.NewDetailModel(""),
-		settlement:         settlement.NewModel(),
 		sessionPanels:      make(map[string]work.SessionPanelModel),
 		sessionsList:       sessionview.NewListModel(),
 		sessionsDetail:     sessionview.NewDetailModel(),
@@ -666,529 +664,6 @@ func TestBuildPaneConfigStatesDontCrossContaminate(t *testing.T) {
 	}
 	if cfgFU.fuItemCount != 2 {
 		t.Errorf("stateFollowUps: fuItemCount = %d, want 2", cfgFU.fuItemCount)
-	}
-}
-
-func TestBuildPaneConfigIncludesSettlementCount(t *testing.T) {
-	m := minimalModel(stateWork, nil, nil)
-	st, err := settlement.ParseStatus([]byte(`{
-		"enabled": true,
-		"queue": {"ready": 2, "pending": 3, "running": 1}
-	}`))
-	if err != nil {
-		t.Fatalf("ParseStatus: %v", err)
-	}
-	m.settlement = m.settlement.ReplaceStatus(st)
-
-	cfg := m.buildPaneConfig()
-	// The tab badge renders what's waiting: queue.pending.
-	if cfg.settlementCount != 3 {
-		t.Errorf("settlementCount = %d, want 3", cfg.settlementCount)
-	}
-}
-
-func TestSettlementRootNavigationFromListViews(t *testing.T) {
-	tests := []struct {
-		name  string
-		state appState
-	}{
-		{name: "work", state: stateWork},
-		{name: "followups", state: stateFollowUps},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			m := minimalModel(tc.state, []work.WorkItem{{Slug: "work-1", Title: "Work 1"}}, nil)
-			m.focusedPanel = panelLeft
-
-			next, cmd := m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
-			nm := next.(model)
-			if nm.state != stateSettlement {
-				t.Fatalf("state = %v, want stateSettlement", nm.state)
-			}
-			if nm.terminalMode {
-				t.Fatal("terminalMode should remain disabled when entering settlement")
-			}
-			if nm.focusedPanel != panelLeft {
-				t.Fatalf("focusedPanel = %v, want panelLeft", nm.focusedPanel)
-			}
-			if cmd == nil {
-				t.Fatal("expected settlement status reload command")
-			}
-		})
-	}
-}
-
-func TestSettlementRootNavigationIgnoredInTerminalMode(t *testing.T) {
-	m := minimalModel(stateWork, []work.WorkItem{{Slug: "work-1", Title: "Work 1"}}, nil)
-	m.terminalMode = true
-	m.focusedPanel = panelRight
-	m.setSessionPanel("work-1", work.NewSessionPanelModel("work-1"))
-
-	next, _ := m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
-	nm := next.(model)
-	if nm.state != stateWork {
-		t.Fatalf("state = %v, want stateWork", nm.state)
-	}
-	if !nm.terminalMode {
-		t.Fatal("terminalMode should stay enabled so t can route to the terminal")
-	}
-	if nm.focusedPanel != panelRight {
-		t.Fatalf("focusedPanel = %v, want panelRight", nm.focusedPanel)
-	}
-}
-
-func TestSettlementRootNavigationAllowedWhenTerminalNotFocused(t *testing.T) {
-	m := minimalModel(stateWork, []work.WorkItem{{Slug: "work-1", Title: "Work 1"}}, nil)
-	m.terminalMode = true
-	m.focusedPanel = panelLeft
-	m.setSessionPanel("work-1", work.NewSessionPanelModel("work-1"))
-
-	next, cmd := m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
-	nm := next.(model)
-	if nm.state != stateSettlement {
-		t.Fatalf("state = %v, want stateSettlement", nm.state)
-	}
-	if nm.terminalMode {
-		t.Fatal("terminalMode should be disabled after leaving the work view")
-	}
-	if nm.focusedPanel != panelLeft {
-		t.Fatalf("focusedPanel = %v, want panelLeft", nm.focusedPanel)
-	}
-	if cmd == nil {
-		t.Fatal("expected settlement status reload command")
-	}
-}
-
-// setupFakeLoreDataWithCaps builds a fake lore repo (adapters/capabilities.json
-// + scripts dir) and points LORE_DATA_DIR at it, so tests can control the
-// model_routing.tiers data the m-key reads without touching the real repo.
-func setupFakeLoreDataWithCaps(t *testing.T, settingsJSON, capsJSON string) {
-	t.Helper()
-	repoDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(repoDir, "adapters"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(repoDir, "scripts"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repoDir, "adapters", "capabilities.json"), []byte(capsJSON), 0644); err != nil {
-		t.Fatal(err)
-	}
-	dataDir := t.TempDir()
-	if err := os.Symlink(filepath.Join(repoDir, "scripts"), filepath.Join(dataDir, "scripts")); err != nil {
-		t.Fatal(err)
-	}
-	configDir := filepath.Join(dataDir, "config")
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(settingsJSON), 0644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("LORE_DATA_DIR", dataDir)
-	t.Setenv("LORE_FRAMEWORK", "")
-}
-
-// TestSettlementPostureKeybindContract verifies the settlement posture keys —
-// p pause/resume, s schedule, m model tier, x process once — dispatch
-// commands through the host router as the status-bar hints advertise.
-func TestSettlementPostureKeybindContract(t *testing.T) {
-	tieredCaps := `{"frameworks": {"claude-code": {"binary": "claude", "model_routing": {"tiers": ["haiku", "sonnet", "opus"]}}}}`
-	tierlessCaps := `{"frameworks": {"claude-code": {"binary": "claude"}}}`
-	statusWith := func(t *testing.T, raw string) model {
-		t.Helper()
-		m := minimalModel(stateSettlement, nil, nil)
-		st, err := settlement.ParseStatus([]byte(raw))
-		if err != nil {
-			t.Fatalf("ParseStatus: %v", err)
-		}
-		m.settlement = m.settlement.ReplaceStatus(st)
-		return m
-	}
-
-	t.Run("p (pause)", func(t *testing.T) {
-		m := statusWith(t, `{"enabled": true}`)
-		if got := m.statusBarHints(m.keymapContext()); !strings.Contains(strings.Join(got, " "), "pause") {
-			t.Fatalf("enabled settlement should advertise p pause, got %v", got)
-		}
-		nm, cmd := updateModel(t, m, press('p'))
-		if nm.state != stateSettlement || cmd == nil {
-			t.Fatal("p should dispatch the disable (pause) command")
-		}
-	})
-	t.Run("p (resume)", func(t *testing.T) {
-		m := statusWith(t, `{"enabled": false}`)
-		if got := m.statusBarHints(m.keymapContext()); !strings.Contains(strings.Join(got, " "), "resume") {
-			t.Fatalf("paused settlement should advertise p resume, got %v", got)
-		}
-		_, cmd := updateModel(t, m, press('p'))
-		if cmd == nil {
-			t.Fatal("p should dispatch the enable (resume) command")
-		}
-	})
-	t.Run("s (schedule)", func(t *testing.T) {
-		m := statusWith(t, `{"enabled": true, "active_hours": {"enabled": false, "allowed": true, "ranges": []}}`)
-		_, cmd := updateModel(t, m, press('s'))
-		if cmd == nil {
-			t.Fatal("s should dispatch the schedule verb")
-		}
-	})
-	t.Run("x (process once)", func(t *testing.T) {
-		m := statusWith(t, `{"enabled": true}`)
-		nm, cmd := updateModel(t, m, press('x'))
-		if cmd == nil {
-			t.Fatal("x should dispatch the process-once command")
-		}
-		if !nm.settlementProcessInFlight {
-			t.Fatal("x should mark the process subprocess in flight")
-		}
-	})
-	t.Run("m (model tier)", func(t *testing.T) {
-		setupFakeLoreDataWithCaps(t, `{"version": 1}`, tieredCaps)
-		m := statusWith(t, `{"enabled": true, "auditor_model": "sonnet", "harness": {"selected": "claude-code"}}`)
-		nm, cmd := updateModel(t, m, press('m'))
-		if cmd == nil {
-			t.Fatalf("m should dispatch the model verb when tiers exist, flashErr=%q", nm.flashErr)
-		}
-		if nm.flashErr != "" {
-			t.Fatalf("m with tiers should not flash an error, got %q", nm.flashErr)
-		}
-	})
-	t.Run("m (no tiers)", func(t *testing.T) {
-		setupFakeLoreDataWithCaps(t, `{"version": 1}`, tierlessCaps)
-		m := statusWith(t, `{"enabled": true, "harness": {"selected": "claude-code"}}`)
-		nm, cmd := updateModel(t, m, press('m'))
-		if cmd != nil {
-			t.Fatal("m without tiers must not dispatch a settings write")
-		}
-		if nm.flashErr != "no tiers for claude-code" {
-			t.Fatalf("m without tiers should surface a visible status, got %q", nm.flashErr)
-		}
-	})
-}
-
-func TestNextTierCyclesOrderedAliases(t *testing.T) {
-	tiers := []string{"haiku", "sonnet", "opus"}
-	if got := nextTier(tiers, "sonnet"); got != "opus" {
-		t.Fatalf("nextTier(sonnet) = %q, want opus", got)
-	}
-	if got := nextTier(tiers, "opus"); got != "haiku" {
-		t.Fatalf("nextTier should wrap at the end, got %q", got)
-	}
-	if got := nextTier(tiers, ""); got != "haiku" {
-		t.Fatalf("unset current should start the cycle, got %q", got)
-	}
-	if got := nextTier(tiers, "custom-model"); got != "haiku" {
-		t.Fatalf("unknown current should start the cycle, got %q", got)
-	}
-}
-
-func TestSettlementBodyHasNoSettingsDock(t *testing.T) {
-	m := minimalModel(stateSettlement, nil, nil)
-	m.width = 140
-	m.height = 36
-	st, err := settlement.ParseStatus([]byte(`{
-		"enabled": true,
-		"queue": {"pending": 5, "total": 5},
-		"items": [
-			{"id": "item-1", "status": "pending", "work_item": "settlement-operational-closure"},
-			{"id": "item-2", "status": "pending", "work_item": "settlement-operational-closure"}
-		],
-		"harness": {"mode": "random", "selected": "claude-code", "concurrency": 1}
-	}`))
-	if err != nil {
-		t.Fatalf("ParseStatus: %v", err)
-	}
-	m.settlement = m.settlement.ReplaceStatus(st)
-
-	for _, height := range []int{6, 12, 24, 40} {
-		lines := m.renderSettlementBodyLines(120, height)
-		joined := stripANSI(strings.Join(lines, "\n"))
-		if strings.Contains(joined, "─ Settings ─") {
-			t.Fatalf("settlement body must not contain a settings dock at height %d:\n%s", height, joined)
-		}
-		if len(lines) != height {
-			t.Fatalf("settlement body should fill the full panel height %d, len=%d:\n%s", height, len(lines), joined)
-		}
-	}
-}
-
-func TestSettlementActionCompleteShowsNoDispatchReason(t *testing.T) {
-	m := minimalModel(stateSettlement, nil, nil)
-	result, err := settlement.ParseActionResult("process", []byte(`{"dispatched": false, "ok": true, "reason": "disabled"}`))
-	if err != nil {
-		t.Fatalf("ParseActionResult: %v", err)
-	}
-
-	next, cmd := m.Update(settlementActionCompleteMsg{action: "process", result: result})
-	nm := next.(model)
-
-	if nm.flashErr != "[settlement] not dispatched: disabled" {
-		t.Fatalf("flashErr = %q", nm.flashErr)
-	}
-	if cmd == nil {
-		t.Fatal("expected status reload command after settlement action")
-	}
-}
-
-func TestSettlementStatusLoadedAutoProcessesReadyQueue(t *testing.T) {
-	m := minimalModel(stateSettlement, nil, nil)
-	status := settlement.Status{
-		Available: true,
-		Enabled:   true,
-		Queue:     settlement.Queue{Pending: 3, Total: 3},
-		Harness:   settlement.Harness{Concurrency: 1, ActiveLeases: 0},
-	}
-
-	next, cmd := m.Update(settlementStatusLoadedMsg{status: status})
-	nm := next.(model)
-
-	if !nm.settlementProcessInFlight {
-		t.Fatal("ready settlement queue should start an automatic process command")
-	}
-	if cmd == nil {
-		t.Fatal("expected automatic process command")
-	}
-}
-
-func TestSettlementStatusLoadedAutoProcessesDrainedBatchBacklog(t *testing.T) {
-	// The backlog arm only drives auto-process under the dormant census
-	// posture; in the event-driven posture the backlog does not auto-refill.
-	m := minimalModel(stateSettlement, nil, nil)
-	status := settlement.Status{
-		Available: true,
-		Enabled:   true,
-		Dispatch:  settlement.Dispatch{Mode: "census", CensusEnabled: true},
-		Queue:     settlement.Queue{Pending: 0, Running: 0, Total: 0},
-		Batch:     settlement.Batch{BacklogSize: 76},
-		Harness:   settlement.Harness{Concurrency: 1, ActiveLeases: 0},
-	}
-
-	next, cmd := m.Update(settlementStatusLoadedMsg{status: status})
-	nm := next.(model)
-
-	if !nm.settlementProcessInFlight {
-		t.Fatal("drained active batch with backlog should start an automatic process command under the census posture")
-	}
-	if cmd == nil {
-		t.Fatal("expected automatic process command")
-	}
-}
-
-func TestSettlementStatusLoadedEventDrivenBacklogDoesNotAutoProcess(t *testing.T) {
-	m := minimalModel(stateSettlement, nil, nil)
-	status := settlement.Status{
-		Available: true,
-		Enabled:   true,
-		Queue:     settlement.Queue{Pending: 0, Running: 0, Total: 0},
-		Batch:     settlement.Batch{BacklogSize: 76},
-		Harness:   settlement.Harness{Concurrency: 1, ActiveLeases: 0},
-	}
-
-	next, _ := m.Update(settlementStatusLoadedMsg{status: status})
-	nm := next.(model)
-
-	if nm.settlementProcessInFlight {
-		t.Fatal("event-driven posture must not auto-process from a batch backlog (census-wide enqueue retired)")
-	}
-}
-
-func TestSettlementStatusLoadedEventDrivenPendingStillAutoProcesses(t *testing.T) {
-	m := minimalModel(stateSettlement, nil, nil)
-	status := settlement.Status{
-		Available: true,
-		Enabled:   true,
-		Queue:     settlement.Queue{Pending: 2, Running: 0, Total: 2},
-		Harness:   settlement.Harness{Concurrency: 1, ActiveLeases: 0},
-	}
-
-	next, cmd := m.Update(settlementStatusLoadedMsg{status: status})
-	nm := next.(model)
-
-	if !nm.settlementProcessInFlight || cmd == nil {
-		t.Fatal("pending trigger-enqueued items are the event-driven dispatch signal and must auto-process")
-	}
-}
-
-func TestSettlementStatusLoadedDoesNotAutoProcessWhileLeaseActive(t *testing.T) {
-	m := minimalModel(stateSettlement, nil, nil)
-	status := settlement.Status{
-		Available: true,
-		Enabled:   true,
-		Queue:     settlement.Queue{Pending: 3, Running: 1, Total: 4},
-		Harness:   settlement.Harness{Concurrency: 1, ActiveLeases: 1},
-	}
-
-	next, cmd := m.Update(settlementStatusLoadedMsg{status: status})
-	nm := next.(model)
-
-	if nm.settlementProcessInFlight {
-		t.Fatal("active lease at concurrency should not start another process command")
-	}
-	if cmd != nil {
-		t.Fatal("did not expect automatic process command")
-	}
-}
-
-func TestSettlementStatusLoadedAutoProcessesWhenStaleLeaseInflatesActiveCount(t *testing.T) {
-	// A dead holder's expired-but-unreaped lease raises the active count to
-	// concurrency, but process_once reaps it before re-checking concurrency and
-	// is the only path that reaps it. The gate must defer to process_once rather
-	// than deadlock on the corpse. Inverse of the genuinely-active case above:
-	// same counts, StaleActiveLeases flipped from 0 to 1.
-	m := minimalModel(stateSettlement, nil, nil)
-	status := settlement.Status{
-		Available:         true,
-		Enabled:           true,
-		Queue:             settlement.Queue{Pending: 3, Running: 1, Total: 4},
-		Harness:           settlement.Harness{Concurrency: 1, ActiveLeases: 1},
-		StaleActiveLeases: 1,
-	}
-
-	next, cmd := m.Update(settlementStatusLoadedMsg{status: status})
-	nm := next.(model)
-
-	if !nm.settlementProcessInFlight || cmd == nil {
-		t.Fatal("a stale lease inflating the active count must not deadlock auto-process; process_once reaps then decides")
-	}
-}
-
-func TestSettlementStatusLoadedAutoProcessesThroughMaxConcurrencyBlockWhenStale(t *testing.T) {
-	// The live-incident shape: 584 pending behind one corpse lease, the
-	// processor reporting max_concurrency_reached. The gate must bypass the
-	// concurrency-derived block (only) when stale leases exist.
-	m := minimalModel(stateSettlement, nil, nil)
-	status := settlement.Status{
-		Available:         true,
-		Enabled:           true,
-		Queue:             settlement.Queue{Pending: 584, Running: 1, Total: 585},
-		Harness:           settlement.Harness{Concurrency: 1, ActiveLeases: 1},
-		BlockedReason:     "max_concurrency_reached",
-		StaleActiveLeases: 1,
-	}
-
-	next, cmd := m.Update(settlementStatusLoadedMsg{status: status})
-	nm := next.(model)
-
-	if !nm.settlementProcessInFlight || cmd == nil {
-		t.Fatal("max_concurrency_reached raised by a corpse lease must not permanently suppress the reaping process_once")
-	}
-}
-
-func TestSettlementStaleLeasesDoNotBypassNonConcurrencyBlock(t *testing.T) {
-	// Narrow scope: the stale-lease bypass bends only the concurrency refusals.
-	// A no-eligible-harness block (carried on Harness.BlockedReason) is not
-	// something process_once can clear by reaping, so it must still refuse even
-	// when stale leases exist.
-	m := minimalModel(stateSettlement, nil, nil)
-	status := settlement.Status{
-		Available:         true,
-		Enabled:           true,
-		Queue:             settlement.Queue{Pending: 3, Running: 1, Total: 4},
-		Harness:           settlement.Harness{Concurrency: 1, ActiveLeases: 1, BlockedReason: "no_eligible_harnesses"},
-		StaleActiveLeases: 1,
-	}
-
-	next, cmd := m.Update(settlementStatusLoadedMsg{status: status})
-	nm := next.(model)
-
-	if nm.settlementProcessInFlight || cmd != nil {
-		t.Fatal("stale leases must not bypass a non-concurrency block (no_eligible_harnesses)")
-	}
-}
-
-func TestAutomaticSettlementProcessCompletionDoesNotTightLoop(t *testing.T) {
-	m := minimalModel(stateSettlement, nil, nil)
-	m.settlementProcessInFlight = true
-	result, err := settlement.ParseActionResult("process", []byte(`{"dispatched": true, "ok": true}`))
-	if err != nil {
-		t.Fatalf("ParseActionResult: %v", err)
-	}
-
-	next, cmd := m.Update(settlementActionCompleteMsg{action: "process", automatic: true, result: result})
-	nm := next.(model)
-
-	if nm.settlementProcessInFlight {
-		t.Fatal("automatic process completion should clear in-flight flag")
-	}
-	if cmd != nil {
-		t.Fatal("automatic completion should wait for the next status poll, not immediately reload and relaunch")
-	}
-	if nm.flashErr != "" {
-		t.Fatalf("automatic completion should not spam the status bar, got %q", nm.flashErr)
-	}
-}
-
-func TestSettlementInFlightFailsafeClearsStuckFlag(t *testing.T) {
-	// Regression: a subprocess goroutine that never returned would leave
-	// settlementProcessInFlight=true forever, gating every subsequent
-	// auto-process tick. The failsafe must clear it after the ceiling.
-	m := minimalModel(stateSettlement, nil, nil)
-	m.settlementProcessInFlight = true
-	m.settlementProcessStartedAt = time.Now().Add(-(settlementInFlightCeiling + time.Minute))
-
-	nm, recovered := m.settlementInFlightFailsafe()
-	if !recovered {
-		t.Fatal("expected failsafe to fire on a flag stuck past the ceiling")
-	}
-	if nm.settlementProcessInFlight {
-		t.Fatal("failsafe should clear settlementProcessInFlight")
-	}
-	if !nm.settlementProcessStartedAt.IsZero() {
-		t.Fatal("failsafe should reset the started-at timestamp")
-	}
-	if nm.flashErr == "" {
-		t.Fatal("failsafe should surface a flash error so the user sees recovery")
-	}
-}
-
-func TestSettlementInFlightFailsafeLeavesRecentInFlightAlone(t *testing.T) {
-	// The failsafe must NOT fire while a subprocess is still legitimately
-	// running — otherwise we'd dispatch a second process that races the
-	// first for the queue lock.
-	m := minimalModel(stateSettlement, nil, nil)
-	m.settlementProcessInFlight = true
-	m.settlementProcessStartedAt = time.Now().Add(-30 * time.Second) // well within ceiling
-
-	nm, recovered := m.settlementInFlightFailsafe()
-	if recovered {
-		t.Fatal("failsafe should not fire for a recently-started subprocess")
-	}
-	if !nm.settlementProcessInFlight {
-		t.Fatal("failsafe should leave the in-flight flag set")
-	}
-	if nm.flashErr != "" {
-		t.Fatalf("failsafe should not flash for healthy in-flight, got %q", nm.flashErr)
-	}
-}
-
-func TestSettlementInFlightFailsafeRecoversFromMissingTimestamp(t *testing.T) {
-	// Defensive: if InFlight is true but the timestamp was never set
-	// (e.g. older state from a code path we missed), the failsafe must
-	// still recover rather than leaving the loop permanently gated.
-	m := minimalModel(stateSettlement, nil, nil)
-	m.settlementProcessInFlight = true
-	// settlementProcessStartedAt is intentionally left zero.
-
-	nm, recovered := m.settlementInFlightFailsafe()
-	if !recovered {
-		t.Fatal("expected failsafe to fire when timestamp was never set")
-	}
-	if nm.settlementProcessInFlight {
-		t.Fatal("failsafe should clear the flag when timestamp is zero")
-	}
-}
-
-func TestSettlementInFlightFailsafeNoOpWhenNotInFlight(t *testing.T) {
-	m := minimalModel(stateSettlement, nil, nil)
-	// settlementProcessInFlight intentionally false.
-
-	nm, recovered := m.settlementInFlightFailsafe()
-	if recovered {
-		t.Fatal("failsafe should never fire when no subprocess is in flight")
-	}
-	if nm.flashErr != "" {
-		t.Fatalf("failsafe should not flash when not in flight, got %q", nm.flashErr)
 	}
 }
 
@@ -1442,32 +917,9 @@ func TestHandleIndexPollTickIncludesCheckFollowupDetailMtimeInStateFollowUps(t *
 	}
 }
 
-func TestShouldPollSettlementCadence(t *testing.T) {
-	cases := []struct {
-		name     string
-		state    appState
-		lastPoll time.Time
-		wantPoll bool
-	}{
-		{"visible always polls despite a fresh last poll", stateSettlement, time.Now(), true},
-		{"hidden first tick polls (zero timestamp)", stateWork, time.Time{}, true},
-		{"hidden recent poll skips", stateWork, time.Now(), false},
-		{"hidden stale poll polls on the heartbeat", stateWork, time.Now().Add(-settlementHiddenPollInterval - time.Second), true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			m := minimalModel(tc.state, nil, nil)
-			m.lastSettlementPoll = tc.lastPoll
-			if got := m.shouldPollSettlement(); got != tc.wantPoll {
-				t.Errorf("shouldPollSettlement() = %v, want %v", got, tc.wantPoll)
-			}
-		})
-	}
-}
-
 // pollTickBatchLen runs one poll tick and returns the count of non-nil Cmds in
 // the resulting batch. Only the outer tea.Batch Cmd is invoked, which yields the
-// child slice without executing any child — so no settlement subprocess spawns.
+// child slice without executing any child — so no subprocess spawns.
 func pollTickBatchLen(t *testing.T, m model) int {
 	t.Helper()
 	_, cmd := m.handleIndexPollTick()
@@ -1485,56 +937,6 @@ func pollTickBatchLen(t *testing.T, m model) int {
 		}
 	}
 	return n
-}
-
-func TestHandleIndexPollTickSettlementCadenceWiring(t *testing.T) {
-	// Baseline: hidden panel that polled just now — the settlement load is
-	// excluded, so this is the batch size without it.
-	base := minimalModel(stateWork, nil, nil)
-	base.lastSettlementPoll = time.Now()
-	baseLen := pollTickBatchLen(t, base)
-
-	// Every other cadence that must poll adds exactly one Cmd (the settlement
-	// load) to that same batch. State and all other fields are held constant so
-	// the size delta isolates the settlement load.
-	visible := minimalModel(stateSettlement, nil, nil)
-	visible.lastSettlementPoll = time.Now()
-	if got := pollTickBatchLen(t, visible); got != baseLen+1 {
-		t.Errorf("visible panel: batch len = %d, want %d (baseline + settlement load)", got, baseLen+1)
-	}
-
-	firstTick := minimalModel(stateWork, nil, nil) // zero lastSettlementPoll
-	if got := pollTickBatchLen(t, firstTick); got != baseLen+1 {
-		t.Errorf("hidden first tick: batch len = %d, want %d (never zero on first tick)", got, baseLen+1)
-	}
-
-	stale := minimalModel(stateWork, nil, nil)
-	stale.lastSettlementPoll = time.Now().Add(-settlementHiddenPollInterval - time.Second)
-	if got := pollTickBatchLen(t, stale); got != baseLen+1 {
-		t.Errorf("hidden stale poll: batch len = %d, want %d (heartbeat fires)", got, baseLen+1)
-	}
-}
-
-func TestHandleIndexPollTickStampsSettlementPollOnlyWhenPolling(t *testing.T) {
-	// A skipped hidden tick leaves the timestamp untouched so the heartbeat
-	// keeps counting from the last real poll.
-	recent := time.Now().Add(-time.Second)
-	skip := minimalModel(stateWork, nil, nil)
-	skip.lastSettlementPoll = recent
-	after, _ := skip.handleIndexPollTick()
-	if !after.lastSettlementPoll.Equal(recent) {
-		t.Errorf("skipped tick moved lastSettlementPoll: got %v, want unchanged %v", after.lastSettlementPoll, recent)
-	}
-
-	// A polling tick stamps the timestamp forward so the next hidden tick
-	// measures the heartbeat from now.
-	stale := minimalModel(stateWork, nil, nil)
-	stale.lastSettlementPoll = time.Now().Add(-settlementHiddenPollInterval - time.Second)
-	before := time.Now()
-	after, _ = stale.handleIndexPollTick()
-	if after.lastSettlementPoll.Before(before) {
-		t.Errorf("polling tick did not stamp lastSettlementPoll forward: got %v, want >= %v", after.lastSettlementPoll, before)
-	}
 }
 
 func TestListDismissedMsgTransitionsToStateWork(t *testing.T) {
@@ -2845,7 +2247,6 @@ func TestHelpModalKeybindContract(t *testing.T) {
 	}{
 		{"work", stateWork},
 		{"followups", stateFollowUps},
-		{"settlement", stateSettlement},
 		{"knowledge", stateKnowledge},
 	}
 	for _, tc := range states {
@@ -3003,9 +2404,9 @@ func TestHelpModalKeybindContract(t *testing.T) {
 
 // TestWorkListStatusBarKeybindContract verifies the stateWork panelLeft
 // status-bar hint set: "j/k navigate · Enter open · s spec · c chat ·
-// f follow-ups · t settlement · K knowledge · S settings · q quit · ? help"
+// f follow-ups · K knowledge · S settings · q quit · ? help"
 // plus the help-modal-only Work List rows (N, L, ctrl+a) and the
-// "ctrl+a active · archived" border annotation. f and t are also advertised
+// "ctrl+a active · archived" border annotation. f is also advertised
 // per-section in the tab indicator (TestTabIndicatorAdvertisesSectionKeys).
 func TestWorkListStatusBarKeybindContract(t *testing.T) {
 	t.Run("j/k (navigate)", func(t *testing.T) {
@@ -3118,10 +2519,10 @@ func TestWorkListStatusBarKeybindContract(t *testing.T) {
 			t.Error("f should dispatch the follow-up index load")
 		}
 	})
-	t.Run("t (settlement)", func(t *testing.T) {
+	t.Run("t (no longer a state switch)", func(t *testing.T) {
 		nm, _ := updateModel(t, workContractModel(), press('t'))
-		if nm.state != stateSettlement {
-			t.Error("t should switch to the settlement panel")
+		if nm.state != stateWork {
+			t.Errorf("t should no longer switch views, got state %d", nm.state)
 		}
 	})
 	t.Run("l (open)", func(t *testing.T) {
@@ -3161,7 +2562,7 @@ func TestWorkListStatusBarKeybindContract(t *testing.T) {
 func TestAssignModalKeybindContract(t *testing.T) {
 	assignModel := func(t *testing.T) model {
 		items := []work.WorkItem{
-			{Slug: "item-1", Title: "One", Status: "active", Project: "settlement-trust"},
+			{Slug: "item-1", Title: "One", Status: "active", Project: "coordination-trust"},
 			{Slug: "item-2", Title: "Two", Status: "active", Project: "tui-rework"},
 			{Slug: "item-3", Title: "Three", Status: "active"},
 		}
@@ -3183,7 +2584,7 @@ func TestAssignModalKeybindContract(t *testing.T) {
 
 	t.Run("a (offers existing labels + free text)", func(t *testing.T) {
 		nm := assignModel(t)
-		if len(nm.assignLabels) != 2 || nm.assignLabels[0] != "settlement-trust" || nm.assignLabels[1] != "tui-rework" {
+		if len(nm.assignLabels) != 2 || nm.assignLabels[0] != "coordination-trust" || nm.assignLabels[1] != "tui-rework" {
 			t.Fatalf("prompt should offer the existing labels, got %v", nm.assignLabels)
 		}
 		nm = typed(t, nm, "xy")
@@ -3193,7 +2594,7 @@ func TestAssignModalKeybindContract(t *testing.T) {
 	})
 	t.Run("down/up (pick existing label)", func(t *testing.T) {
 		nm, _ := updateModel(t, assignModel(t), press(tea.KeyDown))
-		if nm.assignInput.Value() != "settlement-trust" {
+		if nm.assignInput.Value() != "coordination-trust" {
 			t.Fatalf("down should fill the input with the first label, got %q", nm.assignInput.Value())
 		}
 		nm, _ = updateModel(t, nm, press(tea.KeyUp))
@@ -3608,10 +3009,10 @@ func TestFollowupListStatusBarKeybindContract(t *testing.T) {
 			t.Error("ctrl+a should switch the follow-up list to the closed filter")
 		}
 	})
-	t.Run("t (settlement)", func(t *testing.T) {
+	t.Run("t (no longer a state switch)", func(t *testing.T) {
 		nm, _ := updateModel(t, followupContractModel(), press('t'))
-		if nm.state != stateSettlement {
-			t.Error("t should switch to the settlement panel")
+		if nm.state != stateFollowUps {
+			t.Errorf("t should no longer switch views, got state %d", nm.state)
 		}
 	})
 	t.Run("l (detail)", func(t *testing.T) {
@@ -3683,190 +3084,8 @@ func TestFollowupDetailStatusBarKeybindContract(t *testing.T) {
 	})
 }
 
-// settlementContractModel builds a stateSettlement model with two queue items
-// and two recent verdicts.
-func settlementContractModel(t *testing.T) model {
-	t.Helper()
-	m := minimalModel(stateSettlement, nil, nil)
-	m.width = 120
-	m.height = 40
-	st, err := settlement.ParseStatus([]byte(`{
-		"enabled": true,
-		"queue": {"pending": 2, "total": 2},
-		"items": [
-			{"id": "claim-aaa", "claim_id": "claim-aaa", "status": "pending", "work_item": "wi", "claim": "first claim text"},
-			{"id": "claim-bbb", "claim_id": "claim-bbb", "status": "pending", "work_item": "wi", "claim": "second claim text"}
-		],
-		"terminal_items": [
-			{"id": "t1", "claim_id": "verdict-one", "claim": "contradicted claim body", "status": "completed", "verdict": {"verdict": "contradicted", "evidence": "drift"}},
-			{"id": "t2", "claim_id": "verdict-two", "claim": "verified claim body", "status": "completed", "verdict": {"verdict": "verified", "evidence": "matched"}}
-		],
-		"harness": {"mode": "random", "selected": "claude-code", "concurrency": 1}
-	}`))
-	if err != nil {
-		t.Fatalf("ParseStatus: %v", err)
-	}
-	m.settlement = m.settlement.ReplaceStatus(st).SetSize(110, 30)
-	return m
-}
-
-// TestSettlementStatusBarKeybindContract verifies the settlement root hint
-// set: "j/k queue · Enter claim · v verdicts · p pause · s schedule ·
-// m model tier · x process once · S settings · w work · f follow-ups ·
-// ? help" (posture command dispatch is pinned by
-// TestSettlementPostureKeybindContract).
-func TestSettlementStatusBarKeybindContract(t *testing.T) {
-	t.Run("j/k (queue)", func(t *testing.T) {
-		m := settlementContractModel(t)
-		if !strings.Contains(stripANSI(m.settlement.View()), "> [pending]  claim-aaa") {
-			t.Fatalf("precondition: cursor should start on the first queue item:\n%s", stripANSI(m.settlement.View()))
-		}
-		nm, _ := updateModel(t, m, press('j'))
-		if !strings.Contains(stripANSI(nm.settlement.View()), "> [pending]  claim-bbb") {
-			t.Fatalf("j should move the queue cursor to the second item:\n%s", stripANSI(nm.settlement.View()))
-		}
-		nm, _ = updateModel(t, nm, press('k'))
-		if !strings.Contains(stripANSI(nm.settlement.View()), "> [pending]  claim-aaa") {
-			t.Error("k should move the queue cursor back to the first item")
-		}
-	})
-	t.Run("Enter (claim)", func(t *testing.T) {
-		nm, _ := updateModel(t, settlementContractModel(t), press(tea.KeyEnter))
-		if nm.settlement.Drill() != settlement.DrillClaim {
-			t.Error("Enter should open the claim drill-in")
-		}
-	})
-	t.Run("v (verdicts)", func(t *testing.T) {
-		nm, _ := updateModel(t, settlementContractModel(t), press('v'))
-		if nm.settlement.Drill() != settlement.DrillVerdict {
-			t.Error("v should open the verdict drill-in")
-		}
-		if nm.settingsActive {
-			t.Error("v must not open a settings overlay")
-		}
-	})
-	t.Run("S (settings)", func(t *testing.T) {
-		setupFakeLoreData(t, `{"version": 1, "tui_launch_framework": "claude-code"}`)
-		nm, _ := updateModel(t, settlementContractModel(t), press('S'))
-		if !nm.settingsActive || nm.settingsPanel == nil {
-			t.Error("S should open the global settings modal focused at the settlement subtree")
-		}
-	})
-	t.Run("w (work)", func(t *testing.T) {
-		nm, cmd := updateModel(t, settlementContractModel(t), press('w'))
-		if nm.state != stateWork {
-			t.Error("w should return to the work view")
-		}
-		if cmd == nil {
-			t.Error("w should reload work items")
-		}
-	})
-	t.Run("f (follow-ups)", func(t *testing.T) {
-		nm, _ := updateModel(t, settlementContractModel(t), press('f'))
-		if nm.state != stateFollowUps {
-			t.Error("f should switch to the follow-ups view")
-		}
-	})
-	t.Run("? (help)", func(t *testing.T) {
-		nm, _ := updateModel(t, settlementContractModel(t), press('?'))
-		if !nm.showHelp {
-			t.Error("? should open the help modal")
-		}
-	})
-}
-
-// TestSettlementClaimDrillInKeybindContract pins the claim drill-in hint set
-// ("j/k next/prev claim · Esc back") through the host Update path.
-func TestSettlementClaimDrillInKeybindContract(t *testing.T) {
-	t.Run("j/k (next/prev claim)", func(t *testing.T) {
-		m, _ := updateModel(t, settlementContractModel(t), press(tea.KeyEnter))
-		if !strings.Contains(stripANSI(m.settlement.View()), "Claim 1 of 2 — claim-aaa") {
-			t.Fatalf("drill-in should open on the selected claim:\n%s", stripANSI(m.settlement.View()))
-		}
-		m, _ = updateModel(t, m, press('j'))
-		if !strings.Contains(stripANSI(m.settlement.View()), "Claim 2 of 2 — claim-bbb") {
-			t.Fatalf("j should walk to the next claim:\n%s", stripANSI(m.settlement.View()))
-		}
-		m, _ = updateModel(t, m, press('k'))
-		if !strings.Contains(stripANSI(m.settlement.View()), "Claim 1 of 2 — claim-aaa") {
-			t.Error("k should walk back to the previous claim")
-		}
-	})
-	t.Run("Esc (back)", func(t *testing.T) {
-		m, _ := updateModel(t, settlementContractModel(t), press(tea.KeyEnter))
-		m, _ = updateModel(t, m, press(tea.KeyEscape))
-		if m.settlement.Drill() != settlement.DrillNone {
-			t.Error("Esc should return to the queue in one press")
-		}
-	})
-	t.Run("status bar advertises the drill-in hints", func(t *testing.T) {
-		m, _ := updateModel(t, settlementContractModel(t), press(tea.KeyEnter))
-		bar := stripANSI(m.renderStatusBar(m.width))
-		for _, want := range []string{"j/k next/prev claim", "Esc back"} {
-			if !strings.Contains(bar, want) {
-				t.Errorf("claim drill-in status bar missing %q:\n%s", want, bar)
-			}
-		}
-	})
-}
-
-// TestSettlementVerdictDrillInKeybindContract pins the verdict drill-in hint
-// set ("j/k next/prev verdict · Esc back") through the host Update path.
-func TestSettlementVerdictDrillInKeybindContract(t *testing.T) {
-	t.Run("j/k (next/prev verdict)", func(t *testing.T) {
-		m, _ := updateModel(t, settlementContractModel(t), press('v'))
-		if !strings.Contains(stripANSI(m.settlement.View()), "Verdict 1 of 2 — verdict-one") {
-			t.Fatalf("verdict drill-in should open contradictions-first:\n%s", stripANSI(m.settlement.View()))
-		}
-		m, _ = updateModel(t, m, press('j'))
-		if !strings.Contains(stripANSI(m.settlement.View()), "Verdict 2 of 2 — verdict-two") {
-			t.Fatalf("j should walk to the next verdict:\n%s", stripANSI(m.settlement.View()))
-		}
-		m, _ = updateModel(t, m, press('k'))
-		if !strings.Contains(stripANSI(m.settlement.View()), "Verdict 1 of 2 — verdict-one") {
-			t.Error("k should walk back to the previous verdict")
-		}
-	})
-	t.Run("Esc (back)", func(t *testing.T) {
-		m, _ := updateModel(t, settlementContractModel(t), press('v'))
-		m, _ = updateModel(t, m, press(tea.KeyEscape))
-		if m.settlement.Drill() != settlement.DrillNone {
-			t.Error("Esc should return to the queue in one press")
-		}
-	})
-	t.Run("status bar advertises the drill-in hints", func(t *testing.T) {
-		m, _ := updateModel(t, settlementContractModel(t), press('v'))
-		bar := stripANSI(m.renderStatusBar(m.width))
-		for _, want := range []string{"j/k next/prev verdict", "Esc back"} {
-			if !strings.Contains(bar, want) {
-				t.Errorf("verdict drill-in status bar missing %q:\n%s", want, bar)
-			}
-		}
-	})
-}
-
-// TestSettlementBorderAnnotationAdvertisesJK verifies the settlement panel
-// title annotation tracks what j/k walks: the queue at the root, claims or
-// verdicts inside the drill-ins (third hint surface beside the status bar
-// and the help modal).
-func TestSettlementBorderAnnotationAdvertisesJK(t *testing.T) {
-	m := settlementContractModel(t)
-	if out := stripANSI(m.viewSettlement()); !strings.Contains(out, "j/k  queue") {
-		t.Errorf("root border annotation should advertise j/k queue:\n%s", out)
-	}
-	m, _ = updateModel(t, m, press(tea.KeyEnter))
-	if out := stripANSI(m.viewSettlement()); !strings.Contains(out, "j/k  claim") {
-		t.Errorf("claim drill-in border annotation should advertise j/k claim:\n%s", out)
-	}
-	m, _ = updateModel(t, m, press(tea.KeyEscape))
-	m, _ = updateModel(t, m, press('v'))
-	if out := stripANSI(m.viewSettlement()); !strings.Contains(out, "j/k  verdict") {
-		t.Errorf("verdict drill-in border annotation should advertise j/k verdict:\n%s", out)
-	}
-}
-
 // TestTabIndicatorAdvertisesSectionKeys verifies the tab row prefixes every
-// inactive section with its switch key (w / f / t) and shows no key on the
+// inactive section with its switch key (w / f / v / o) and shows no key on the
 // active section. Key dispatch is pinned by the status-bar contract tests;
 // this pins the display side of the three-surface sync.
 func TestTabIndicatorAdvertisesSectionKeys(t *testing.T) {
@@ -3876,15 +3095,14 @@ func TestTabIndicatorAdvertisesSectionKeys(t *testing.T) {
 		want    []string
 		notWant []string
 	}{
-		{"work", stateWork, []string{"work (1)", "f follow-ups (2)", "v sessions (4)", "t settlement (3)", "o coordination (5)"}, []string{"w work"}},
-		{"followups", stateFollowUps, []string{"w work (1)", "v sessions (4)", "t settlement (3)", "o coordination (5)"}, []string{"f follow-ups"}},
-		{"sessions", stateSessions, []string{"w work (1)", "f follow-ups (2)", "t settlement (3)", "o coordination (5)"}, []string{"v sessions"}},
-		{"settlement", stateSettlement, []string{"w work (1)", "f follow-ups (2)", "v sessions (4)", "o coordination (5)"}, []string{"t settlement"}},
-		{"coordination", stateCoordination, []string{"w work (1)", "f follow-ups (2)", "v sessions (4)", "t settlement (3)"}, []string{"o coordination"}},
+		{"work", stateWork, []string{"work (1)", "f follow-ups (2)", "v sessions (4)", "o coordination (5)"}, []string{"w work"}},
+		{"followups", stateFollowUps, []string{"w work (1)", "v sessions (4)", "o coordination (5)"}, []string{"f follow-ups"}},
+		{"sessions", stateSessions, []string{"w work (1)", "f follow-ups (2)", "o coordination (5)"}, []string{"v sessions"}},
+		{"coordination", stateCoordination, []string{"w work (1)", "f follow-ups (2)", "v sessions (4)"}, []string{"o coordination"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := stripANSI(renderTabIndicator(tc.state, 1, 2, 3, 4, 0, 5, 100, ""))
+			out := stripANSI(renderTabIndicator(tc.state, 1, 2, 4, 0, 5, 100, ""))
 			for _, want := range tc.want {
 				if !strings.Contains(out, want) {
 					t.Errorf("tab indicator missing %q:\n%s", want, out)
@@ -3924,9 +3142,6 @@ func TestRoundedBordersEverywhere(t *testing.T) {
 		m.layoutMode = config.LayoutTopBottom
 		assertRounded(t, stripANSI(m.viewContent()))
 	})
-	t.Run("settlement", func(t *testing.T) {
-		assertRounded(t, stripANSI(settlementContractModel(t).viewSettlement()))
-	})
 	t.Run("spec confirm modal nested input", func(t *testing.T) {
 		assertRounded(t, stripANSI(specConfirmModel().renderSessionConfirmModal()))
 	})
@@ -3946,16 +3161,6 @@ func TestRoundedBordersEverywhere(t *testing.T) {
 		m.sizeHelpViewport()
 		assertRounded(t, stripANSI(m.renderHelpModal()))
 	})
-}
-
-// TestSettlementSelectedClaimBlockRetired pins the drill-in replacement for
-// the old capped selected-claim block: the root dashboard carries no
-// selected-claim region at all — Enter opens the full claim instead.
-func TestSettlementSelectedClaimBlockRetired(t *testing.T) {
-	view := stripANSI(settlementContractModel(t).settlement.View())
-	if strings.Contains(view, "Selected claim") {
-		t.Fatalf("root dashboard must not render the capped selected-claim block:\n%s", view)
-	}
 }
 
 // TestSettingsModalStatusBarKeybindContract verifies the settings modal keys
@@ -4044,11 +3249,8 @@ func TestSettingsModalStatusBarModeHints(t *testing.T) {
 		}
 	}
 
-	m.settingsPanel.FocusDotPath("settlement")
+	m.settingsPanel.FocusDotPath("coordination")
 	m, _ = updateModel(t, m, press(tea.KeyEnter))
-	for i := 0; i < 8; i++ {
-		m, _ = updateModel(t, m, press('j'))
-	}
 	m, _ = updateModel(t, m, press(tea.KeyEnter))
 
 	bar = stripANSI(m.renderStatusBar(m.width))
@@ -4189,7 +3391,7 @@ func TestHelpContentProjectsKeymapRegistry(t *testing.T) {
 	out := stripANSI(helpContent())
 	wants := []string{
 		"Follow-Ups", "Triage Tab", "Comments Tab", "Follow-Up Detail",
-		"Work List", "Work Detail", "Sessions", "Settlement", "Settlement Claim", "Settlement Verdict",
+		"Work List", "Work Detail", "Sessions",
 		"Knowledge Browser", "Session Panel (terminal mode)", "Global",
 		"l / Enter", "create work items with AI",
 	}

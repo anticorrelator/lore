@@ -79,7 +79,7 @@ The queue may contain source-authored suggestion text. It must never contain `re
 
 ### Step 3: Read eligibility as evidence state
 
-Preparation reads the raw/full journal range, scorecard rows, template registry, schema-v1 accepted clusters, active and archived consumption-contradiction sidecars, degradation rows, and completed prior evolve filings. It does not use the display-limited `journal show` surface.
+Preparation reads the raw/full journal range, scorecard rows, template registry, schema-v1 accepted clusters, degradation rows, and completed prior evolve filings. It does not use the display-limited `journal show` surface.
 
 Eligibility has exactly four states:
 
@@ -98,12 +98,11 @@ Gate paths remain distinct:
 |---|---|---|
 | Default template-behavior change | Primary | registered `tier=template`, `kind=scored`, calibrated, non-degraded row with cited metric/sample |
 | `doctrine-correction` | Correction | `tier=correction`, `kind=scored`, permitted calibration, non-degraded row with half-floor arithmetic |
-| `claim-retraction` / `falsified-doctrine` | Claim retraction | verified active-or-archived `consumption-contradictions.jsonl` row; no synthetic `kind` projection |
 | `recurring-failure` | Recurring failure | prior unconsumed accepted-cluster evidence over `(target, change_type)` with distinct-work-item union at K≥3 |
 
-Never fall back from one gate path to another. Stable no-op reasons include `no_eligible_template_row`, `telemetry_only`, `pre_calibration_only`, `unregistered_template_only`, `pipeline_degraded_window_only`, `wrong_tier`, `no_eligible_correction_row`, `no_verified_contradiction`, and `no_accepted_cluster`. Below-floor evidence is `abstained`; unavailable or invalid sources are `not_computable`.
+Never fall back from one gate path to another. Stable no-op reasons include `no_eligible_template_row`, `telemetry_only`, `pre_calibration_only`, `unregistered_template_only`, `pipeline_degraded_window_only`, `wrong_tier`, `no_eligible_correction_row`, and `no_accepted_cluster`. Below-floor evidence is `abstained`; unavailable or invalid sources are `not_computable`.
 
-Claim retraction reads the real lifecycle shape: `contradiction_id`, `status=verified`, `prefetched_commons_entry.knowledge_path`, and lifecycle timestamps across active and archived sidecars. Do not require a nonexistent `kind` field and do not project contradiction evidence into scorecard rows.
+A falsified knowledge claim is not evidence for a protocol-template edit. Corrections to knowledge entries are owned in-band by the agent reading them, and `/evolve` has no gate that consumes them: a template change motivated by one still needs its own scored row on the correction gate. Do not route a knowledge correction into this queue, and do not project it into scorecard rows.
 
 Recurring-failure arithmetic groups strictly by `(target, change_type)` and unions distinct `work_items`; raw row count cannot inflate K. Accepted clusters are one-shot evidence.
 
@@ -135,8 +134,6 @@ Before deciding a proposal, classify its proposed effect:
 An addition or strengthening edit needs a sentence naming the motivating metric, rollback threshold, and time or sample horizon. That clause is what `/evolve --shrink` reads at its trial-window check; an addition without one accumulates silently and is never subtracted. If the lead would otherwise apply it but cannot author a defensible sunset, use `reject` or `escalate`; do not change the machine eligibility state.
 
 When in doubt, require one.
-
-A verified consumption contradiction against a prior evolve addition triggers immediate sunset review. Present it before the regular queue, cite the contradiction ID and knowledge path, and treat an approved removal as a normal lead-authored removal.
 
 ### Step 6: Decide and author edits
 
@@ -287,7 +284,7 @@ List each applied change and each missing sink. Never print a success-shaped `Do
 
 ## Staged suggestion boundary
 
-The staged rows in `_evolve/accepted-clusters.jsonl` and the effectiveness journal are evidence inputs, not an implementation backlog to mutate during this ceremony. The active+archived claim-retraction reader semantically moots exactly the 2026-07-09T23:07:07Z suggestion targeting `skills/evolve/SKILL.md`; leave that row untouched. The other 14 staged suggestions remain live and unconsumed because they concern retro, implement, settlement, rubric, or source-contract behavior outside this queue ceremony.
+The staged rows in `_evolve/accepted-clusters.jsonl` and the effectiveness journal are evidence inputs, not an implementation backlog to mutate during this ceremony. Staged suggestions concerning retro, implement, rubric, or source-contract behavior sit outside this queue ceremony; leave them live and unconsumed rather than reaching for them here.
 
 ## Maintainer path (role=maintainer only)
 

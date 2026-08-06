@@ -17,7 +17,7 @@ import (
 // unless LORE_PARITY_DUMP_OUT names the output path.
 //
 // The model is fed the same local-disk load messages the live app receives at
-// startup (work index, follow-up index, settlement status, active sessions);
+// startup (work index, follow-up index, active sessions);
 // PR status and doctor results are deliberately omitted (network/subprocess
 // nondeterminism), so those status-bar regions may differ from the live pane.
 func TestParityDumpWorkList(t *testing.T) {
@@ -36,7 +36,6 @@ func TestParityDumpWorkList(t *testing.T) {
 	for _, cmd := range []tea.Cmd{
 		loadWorkItems(cfg.WorkDir),
 		followup.LoadIndexCmd(cfg.KnowledgeDir),
-		loadSettlementStatus(),
 		readInstancesCmd(filepath.Join(cfg.KnowledgeDir, "_sessions")),
 	} {
 		m, _ = updateModel(t, m, cmd())

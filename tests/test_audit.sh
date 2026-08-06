@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # test_audit.sh — Tests for scripts/audit-artifact.sh
 #
-# Covers the three live source streams (task-claims, omission, consumption-
-# contradiction) and the per-kind --kind/--id dispatch flag pair introduced
+# Covers the two live source streams (task-claims, omission) and the per-kind
+# --kind/--id dispatch flag pair introduced
 # alongside the kind-aware substrate. Each stream gets:
 #   - happy-path resolution via positional artifact-id
 #   - happy-path resolution via --kind/--id
@@ -88,15 +88,6 @@ setup_audit_candidates_fixture() {
 JSONLEOF
 }
 
-setup_consumption_contradictions_fixture() {
-  # setup_consumption_contradictions_fixture <kdir> <slug>
-  local kdir="$1" slug="$2"
-  mkdir -p "$kdir/_work/$slug"
-  cat > "$kdir/_work/$slug/consumption-contradictions.jsonl" <<'JSONLEOF'
-{"contradiction_id":"ctr-aaaaaaaaaaaa","verdict_source":"consumer-contradiction-channel","work_item":"cc-fixture-slug","source":"worker","producer_role":"worker","protocol_slot":"implementation","cycle_id":"cycle-1","prefetched_commons_entry":{"knowledge_path":"conventions/foo.md","heading":""},"contradiction_rationale":"The code at this line falsifies the commons claim","claim_payload":{"claim_id":"contradict-1","claim_text":"The function never returns null","file":"scripts/audit-artifact.sh","line_range":"50-50","exact_snippet":"return None","falsifier":"Trace the return paths and confirm None can be returned"},"status":"pending","created_at":"2026-05-16T00:00:00Z","dedupe_key":"d","captured_at_branch":null,"captured_at_sha":null,"captured_at_merge_base_sha":null}
-JSONLEOF
-}
-
 gate_fixture() {
   # gate_fixture <path> <json-body>
   local path="$1" body="$2"
@@ -173,27 +164,6 @@ OUT3=$(bash "$AUDIT" --kdir "$KDIR3" --work-item "wi-omission" \
   --gate-output-file "$TEST_DIR/gate3.json" 2>&1)
 assert_contains "omission: gate completes" "$OUT3" "correctness-gate-omission complete"
 assert_contains "omission: verdict totals reflect one verified claim" "$OUT3" "total=1 verified=1 unverified=0 contradicted=0"
-
-# =============================================
-# Test 4: Consumption-contradiction via --kind consumption-contradiction --id <contradiction_id>
-# =============================================
-echo ""
-echo "Test 4: consumption-contradiction via --kind/--id"
-KDIR4="$TEST_DIR/kdir4"
-setup_consumption_contradictions_fixture "$KDIR4" "wi-cc"
-gate_fixture "$TEST_DIR/gate4.json" '{
-  "judge":"correctness-gate",
-  "judge_template_version":"cc444",
-  "verdicts":[
-    {"claim_id":"contradict-1","verdict":"contradicted","evidence":"the claim is wrong","correction":"the function can return None"}
-  ]
-}'
-
-OUT4=$(bash "$AUDIT" --kdir "$KDIR4" --work-item "wi-cc" \
-  --kind consumption-contradiction --id ctr-aaaaaaaaaaaa \
-  --gate-output-file "$TEST_DIR/gate4.json" 2>&1)
-assert_contains "cc: contradiction gate completes" "$OUT4" "correctness-gate-contradiction complete"
-assert_contains "cc: verdict totals reflect one contradicted claim" "$OUT4" "total=1 verified=0 unverified=0 contradicted=1"
 
 # =============================================
 # Test 5: --kind/--id error: missing source file
@@ -762,38 +732,6 @@ OUT28=$(bash "$SCRIPT_DIR/audit-queue-route.sh" \
 assert_eq "queue-route: archive-only invocation exits 0" "$EXIT28" "0"
 assert_file_exists "queue-route: attempts row lands under archive dir" \
   "$KDIR28/_work/_archive/wi-route-arch/audit-attempts.jsonl"
-
-# =============================================
-# Test 29: settlement-record-append.sh — archived item resolves to the archive
-# copy, and a stale stub whose only content is a verdicts/ envelope file never
-# satisfies the artifact probe (envelope files reuse source-artifact names).
-# =============================================
-echo ""
-echo "Test 29: settlement-record-append.sh archive resolution + envelope-shape probe"
-KDIR29="$TEST_DIR/kdir29"
-setup_archived_task_claims_fixture "$KDIR29" "wi-rec"
-# Stale stub containing ONLY a verdicts/ envelope file named like the source
-# artifact — must not win resolution.
-mkdir -p "$KDIR29/_work/wi-rec/verdicts"
-printf '%s\n' '{"artifact_id":"task-claims","judge":"curator","judge_run_at":"2026-07-01T00:00:00Z"}' \
-  > "$KDIR29/_work/wi-rec/verdicts/task-claims.jsonl"
-
-EXIT29=0
-OUT29=$(printf '%s' '{"artifact_id":"task-claims","judge":"curator","claim_id":"c1","verdict":"selected"}' \
-  | bash "$SCRIPT_DIR/settlement-record-append.sh" \
-      --work-item "wi-rec" --artifact-id "task-claims" --kdir "$KDIR29" 2>&1) || EXIT29=$?
-assert_eq "record-append: archived-item append exits 0" "$EXIT29" "0"
-assert_file_exists "record-append: verdict envelope lands under archive dir" \
-  "$KDIR29/_work/_archive/wi-rec/verdicts/task-claims.jsonl"
-STUB29_LINES=$(wc -l < "$KDIR29/_work/wi-rec/verdicts/task-claims.jsonl" | tr -d ' ')
-assert_eq "record-append: stub envelope file untouched (still 1 row)" "$STUB29_LINES" "1"
-
-# Missing everywhere still hard-fails.
-EXIT29B=0
-printf '%s' '{"artifact_id":"a","judge":"curator","claim_id":"c1","verdict":"selected"}' \
-  | bash "$SCRIPT_DIR/settlement-record-append.sh" \
-      --work-item "wi-nowhere" --artifact-id "a" --kdir "$KDIR29" >/dev/null 2>&1 || EXIT29B=$?
-assert_eq "record-append: item missing everywhere exits 1" "$EXIT29B" "1"
 
 # =============================================
 # Test 30: promote-commons-append.sh — a stale active stub loses to the

@@ -17,8 +17,11 @@ mkdir -p "$KDIR/_work/coordinated" "$KDIR/_coordination/worktrees/registry" \
   "$KDIR/_coordination/worktrees/archive" "$KDIR/_sessions/instances" \
   "$KDIR/_scorecards" "$KDIR/_evolve" "$DATA_DIR/config"
 
+# The settlement ceiling is a decoy: it is the key the board used to read, and
+# it disagrees with the coordination key on purpose. A board that reports 9
+# seats below is still reading the retired path.
 cat >"$DATA_DIR/config/settings.json" <<'JSON'
-{"version":1,"tui_launch_framework":"codex","harnesses":{"codex":{"args":[]}},"settlement":{"max_concurrency":2}}
+{"version":1,"tui_launch_framework":"codex","harnesses":{"codex":{"args":[]}},"coordination":{"max_concurrency":2},"settlement":{"max_concurrency":9}}
 JSON
 cat >"$KDIR/_work/_index.json" <<'JSON'
 {"version":1,"plans":[{"slug":"coordinated","title":"Coordinated","status":"active","blocked_by":[],"has_plan_doc":true,"has_execution_log":false}],"archived":[]}

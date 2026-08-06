@@ -66,9 +66,9 @@
         }
       }
     },
-    "settlement": {
-      "$ref": "#/$defs/settlement_config",
-      "description": "Durable settlement queue/processor controls. Defaults are fail-closed in readers when absent: enabled=false, max_concurrency=1, finite daily job/runtime caps. Harness selection is per job via LORE_FRAMEWORK and must not mutate tui_launch_framework."
+    "coordination": {
+      "$ref": "#/$defs/coordination_config",
+      "description": "Coordination board controls, read by scripts/coordinate-status.sh when it renders the dispatch projection."
     },
     "retro_sampling": {
       "$ref": "#/$defs/retro_sampling_config",
@@ -299,147 +299,19 @@
       }
     },
 
-    "settlement_config": {
+    "coordination_config": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "Global dispatch gate. Readers default to false when absent."
-        },
         "max_concurrency": {
           "type": "integer",
           "minimum": 1,
           "default": 1,
-          "description": "Repository-global active lease cap."
-        },
-        "batch_size": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 12,
-          "description": "Maximum pending items in the recomputed active batch, and the maximum number of backlog rows scored per recompute."
-        },
-        "batch_recompute_min_interval_seconds": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 60,
-          "description": "Minimum seconds between automatic process-once/manual queue recomputes; zero disables throttling."
-        },
-        "concordance_window_size": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 8,
-          "description": "Requested relevance concordance window. Readers cap the effective window to the active batch size."
-        },
-        "max_auto_retry_attempts": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 3,
-          "description": "Attempts bound for auto-retrying infrastructure-failure audit runs (judge non-JSON, executor timeout, unresolved artifact), counted as non-invalidated infra-failure run records per item. Below the cap an item auto-readmits to recompute; at the cap it becomes exhausted and is excluded until `lore settlement retry-errors` resets it. Zero reproduces the pre-auto-retry behavior: any single infra failure excludes the item."
-        },
-        "lease_ttl_seconds": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 900,
-          "description": "Expired active leases are reclaimed to pending once under the settlement lock."
-        },
-        "executor_timeout_seconds": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 300,
-          "description": "Maximum duration for an external settlement executor."
-        },
-        "auditor_model": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Judge model for settlement-executed audits, passed verbatim to the harness (exported as LORE_MODEL_JUDGE by settlement-audit-executor.sh). Free text so dated model ids work; per-harness tier aliases live in capabilities.json model_routing.tiers. Unset means the judge role's normal resolution applies — express unset by omitting the key, never by an empty string."
-        },
-        "active_hours": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "enabled": {
-              "type": "boolean",
-              "default": false,
-              "description": "When enabled, settlement dispatches only during the configured local time window."
-            },
-            "timezone": {
-              "type": "string",
-              "minLength": 1,
-              "default": "local",
-              "description": "IANA timezone name such as America/New_York, or local for the machine timezone."
-            },
-            "ranges": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["days", "start", "end"],
-                "properties": {
-                  "days": {
-                    "type": "array",
-                    "items": {"type": "string", "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]},
-                    "minItems": 1,
-                    "uniqueItems": true
-                  },
-                  "start": {
-                    "type": "string",
-                    "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
-                  },
-                  "end": {
-                    "type": "string",
-                    "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
-                  }
-                }
-              },
-              "minItems": 1,
-              "description": "Active dispatch windows. Each range has selected days plus local start/end times; overnight ranges are allowed. When unset, settlement may dispatch at all times."
-            }
-          }
-        },
-        "dispatch": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "census_enabled": {
-              "type": "boolean",
-              "default": false,
-              "description": "Dispatch posture. False (default) is event-driven: enqueue happens only via `lore settlement triggers` (dispute detector, spot-sample budget, rollup steady-state) and explicit enqueue; batch recompute never refills from the source-stream backlog. True re-enables the dormant census wholesale (scan-era recompute refill and the TUI auto-process backlog arm)."
-            },
-            "spot_sample_weekly_budget": {
-              "type": "integer",
-              "minimum": 0,
-              "default": 12,
-              "description": "Spot-sample audits enqueued per ISO week. Starts high per the settlement disposition memo — a throttled census while peer-verification volume is unproven; ratchet down as lore-verify volume proves out, hold or raise if thin."
-            }
-          }
-        },
-        "harness_selection": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "mode": {
-              "type": "string",
-              "enum": ["first_eligible", "random", "active"],
-              "default": "first_eligible",
-              "description": "Per-job harness selection. random samples only from eligible frameworks; active uses the process-local LORE_FRAMEWORK value (defaulting to claude-code) and rejects when that framework is ineligible."
-            },
-            "eligible_frameworks": {
-              "type": "array",
-              "items": {"$ref": "#/$defs/framework_id"},
-              "uniqueItems": true,
-              "default": [],
-              "description": "Empty means all registered frameworks are candidates before global harness enablement, support, and evidence gates."
-            },
-            "random_seed": {
-              "type": "integer",
-              "default": 0
-            }
-          }
+          "description": "Cap on concurrently dispatchable coordination streams. scripts/coordinate-status.sh reads this key and falls back to one seat when it is absent or not a positive integer."
         }
       }
     },
+
 
     "retro_sampling_config": {
       "type": "object",

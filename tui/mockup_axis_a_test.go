@@ -58,8 +58,8 @@ var (
 func axisAWorkItems() []work.WorkItem {
 	return []work.WorkItem{
 		{
-			Slug: "settlement-verdict-drill-in", Title: "Settlement verdict drill-in",
-			Status: "active", Project: "settlement-trust",
+			Slug: "coordination-arc-drill-in", Title: "Coordination arc drill-in",
+			Status: "active", Project: "coordination-trust",
 			PR:         "https://github.com/example/repo/pull/148",
 			Updated:    mockupTimeAgo(36 * time.Hour),
 			HasPlanDoc: true, HasTasks: true,
@@ -73,7 +73,7 @@ func axisAWorkItems() []work.WorkItem {
 		},
 		{
 			Slug: "auditor-cost-tier-toggle", Title: "Auditor cost tier toggle",
-			Status: "active", Project: "settlement-trust",
+			Status: "active", Project: "coordination-trust",
 			Updated:    mockupTimeAgo(60 * time.Hour),
 			HasPlanDoc: true,
 		},
@@ -97,7 +97,7 @@ func axisAWorkItems() []work.WorkItem {
 		},
 		{
 			Slug: "claim-lease-expiry-sweep", Title: "Claim lease expiry sweep",
-			Status: "active", Project: "settlement-trust",
+			Status: "active", Project: "coordination-trust",
 			Updated: mockupTimeAgo(108 * time.Hour),
 		},
 		{
@@ -129,23 +129,23 @@ func axisAWorkItems() []work.WorkItem {
 // axisADetail is the detail document for the item under the cursor in every
 // axis A capture, so the bottom pane stays consistent across variants.
 func axisADetail() *work.WorkItemDetail {
-	plan := `# Settlement verdict drill-in
+	plan := `# Coordination arc drill-in
 
 ## Intent
 
-Verdicts render as capped one-line summaries; sometimes the operator needs
-the full verdict body to sense what the audit pipeline is doing.
+Arc rows render as capped one-line summaries; sometimes the operator needs
+the full arc body to sense what the coordination board is doing.
 
 ## Narrative
 
-Enter on a verdict row opens the full verdict document in the detail region,
+Enter on an arc row opens the full arc document in the detail region,
 replacing the 4-line cap with a scrollable view.
 `
 	return &work.WorkItemDetail{
-		Slug:        "settlement-verdict-drill-in",
-		Title:       "Settlement verdict drill-in",
+		Slug:        "coordination-arc-drill-in",
+		Title:       "Coordination arc drill-in",
 		Status:      "active",
-		Project:     "settlement-trust",
+		Project:     "coordination-trust",
 		PR:          "https://github.com/example/repo/pull/148",
 		Created:     mockupTimeAgo(156 * time.Hour),
 		Updated:     mockupTimeAgo(36 * time.Hour),
@@ -397,7 +397,7 @@ func TestMockupDumpAxisARollup(t *testing.T) {
 
 			rollups := make(map[string]string)
 			rows := axisAGroupedRows(axisAWorkItems(), collapsed, rollups)
-			cl := axisAList(axisAColumns(), rows, width, height, "settlement-verdict-drill-in")
+			cl := axisAList(axisAColumns(), rows, width, height, "coordination-arc-drill-in")
 			cl.SetDecorator(axisARollupDecorator(width, rollups))
 			return axisAFrame(t, cl.View())
 		})
@@ -424,7 +424,7 @@ func TestMockupDumpAxisARail(t *testing.T) {
 		for _, it := range axisAWorkItems() {
 			rows = append(rows, collection.Row{ID: it.Slug, Cells: axisARailCells(it)})
 		}
-		cl := axisAList(axisARailColumns(), rows, width, height, "settlement-verdict-drill-in")
+		cl := axisAList(axisARailColumns(), rows, width, height, "coordination-arc-drill-in")
 		return axisAFrame(t, cl.View())
 	})
 }
@@ -442,7 +442,7 @@ func TestMockupDumpAxisASwitcher(t *testing.T) {
 			for _, it := range axisAWorkItems() {
 				rows = append(rows, collection.Row{ID: it.Slug, Cells: axisARailCells(it)})
 			}
-			cl := axisAList(axisARailColumns(), rows, width, height-1, "settlement-verdict-drill-in")
+			cl := axisAList(axisARailColumns(), rows, width, height-1, "coordination-arc-drill-in")
 			strip := axisAStripLine(width, axisAWorkItems(), "all")
 			return axisAFrame(t, strip+"\n"+cl.View())
 		})
@@ -456,13 +456,13 @@ func TestMockupDumpAxisASwitcher(t *testing.T) {
 
 			var rows []collection.Row
 			for _, it := range axisAWorkItems() {
-				if it.Project != "settlement-trust" {
+				if it.Project != "coordination-trust" {
 					continue
 				}
 				rows = append(rows, collection.Row{ID: it.Slug, Cells: axisABaseCells(it)})
 			}
-			cl := axisAList(axisAColumns(), rows, width, height-1, "settlement-verdict-drill-in")
-			strip := axisAStripLine(width, axisAWorkItems(), "settlement-trust")
+			cl := axisAList(axisAColumns(), rows, width, height-1, "coordination-arc-drill-in")
+			strip := axisAStripLine(width, axisAWorkItems(), "coordination-trust")
 			return axisAFrame(t, strip+"\n"+cl.View())
 		})
 	})

@@ -49,9 +49,9 @@ fi
 export SESSION_EVENT_VOCAB RETRO_ACTION_VOCAB CEREMONY_OUTCOME_VOCAB \
   CEREMONY_DISPOSITION_VOCAB
 
-# Coordination shares the repository-global lease ceiling already rendered by
-# `lore defaults`. Missing or malformed settings fail closed to one seat.
-COORDINATION_MAX_CONCURRENCY=$(bash "$SCRIPT_DIR/settings.sh" get settlement.max_concurrency 2>/dev/null || true)
+# The board's own seat ceiling. Missing or malformed settings fail closed to
+# one seat.
+COORDINATION_MAX_CONCURRENCY=$(bash "$SCRIPT_DIR/settings.sh" get coordination.max_concurrency 2>/dev/null || true)
 if [[ ! "$COORDINATION_MAX_CONCURRENCY" =~ ^[1-9][0-9]*$ ]]; then
   COORDINATION_MAX_CONCURRENCY=1
 fi

@@ -10,7 +10,6 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
-	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/style"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
@@ -70,7 +69,7 @@ func (m model) View() tea.View {
 
 func (m model) embeddedTerminalCursor() *tea.Cursor {
 	if !m.terminalMode || m.err != nil || m.state == stateNoRepo || m.state == stateOnboarding ||
-		m.state == stateKnowledge || m.state == stateSettlement || m.popupActive ||
+		m.state == stateKnowledge || m.popupActive ||
 		m.sessionConfirmActive || m.aiInputActive || m.assignActive || m.confirmAction != "" ||
 		m.showHelp || (m.settingsActive && m.settingsPanel != nil) {
 		return nil
@@ -154,8 +153,6 @@ func (m model) viewContent() string {
 	var base string
 	if m.state == stateKnowledge {
 		base = m.browser.View()
-	} else if m.state == stateSettlement {
-		base = m.viewSettlement()
 	} else {
 		cfg := m.buildPaneConfig()
 		if m.layoutMode == config.LayoutTopBottom {
@@ -225,9 +222,9 @@ func (m model) viewNoRepo() string {
 }
 
 // renderTabIndicator renders a full-width section row showing
-// "work (N) · follow-ups (N) · sessions (N) · settlement (N) · coordination (N)".
+// "work (N) · follow-ups (N) · sessions (N) · coordination (N)".
 // The active section is highlighted; every other section is prefixed with the
-// key that switches to it (w / f / v / t / c). The keys are routed in update.go
+// key that switches to it (w / f / v / o). The keys are routed in update.go
 // and mirrored in the status bar and help modal — do not display a key here
 // without all three. The sessions section carries a needs-input marker (●) when
 // any session awaits input — the persistent announcement channel for agent
@@ -235,7 +232,7 @@ func (m model) viewNoRepo() string {
 // right-aligned into the same row as the instance's "<repo> · <name>" chrome,
 // followed by a small right gutter; it is dropped rather than wrapped when the
 // row is too narrow.
-func renderTabIndicator(activeTab appState, workCount, followupCount, settlementCount, sessionsCount, sessionsNeedsInput, coordinationCount, width int, identity string) string {
+func renderTabIndicator(activeTab appState, workCount, followupCount, sessionsCount, sessionsNeedsInput, coordinationCount, width int, identity string) string {
 	section := func(key, label string, count int, active bool) string {
 		text := fmt.Sprintf("%s (%d)", label, count)
 		if active {
@@ -254,7 +251,6 @@ func renderTabIndicator(activeTab appState, workCount, followupCount, settlement
 		section("w", "work", workCount, activeTab == stateWork) + sep +
 		section("f", "follow-ups", followupCount, activeTab == stateFollowUps) + sep +
 		sessionsSection + sep +
-		section("t", "settlement", settlementCount, activeTab == stateSettlement) + sep +
 		section("o", "coordination", coordinationCount, activeTab == stateCoordination)
 	lineW := lipgloss.Width(line)
 	if identity != "" {
@@ -281,86 +277,6 @@ func (m model) tabIdentity() string {
 		return tabInactiveS.Render(m.instanceName)
 	}
 	return tabKeyS.Render(m.config.RepoIdentifier) + tabSepS.Render(" · ") + tabInactiveS.Render(m.instanceName)
-}
-
-func (m model) viewSettlement() string {
-	w := m.width
-	if w <= 0 {
-		w = 80
-	}
-	contentH := m.innerHeight() - 1
-	if contentH < 1 {
-		contentH = 1
-	}
-	innerW := w - 2
-	if innerW < 24 {
-		innerW = 24
-	}
-	borderS := borderFocusedS
-	bodyW := innerW - 1 // outer row renderer adds one leading space
-	if bodyW < 1 {
-		bodyW = 1
-	}
-	lines := m.renderSettlementBodyLines(bodyW, contentH)
-
-	var b strings.Builder
-	b.WriteString(renderTabIndicator(stateSettlement, len(m.list.Items()), m.followupList.FollowUpCount(), m.settlement.Count(), m.sessionsCount, m.sessionsNeedsInput, m.coordinationList.Count(), w, m.tabIdentity()))
-	b.WriteString("\n")
-	// Border annotation: advertise what j/k currently walks — the queue at
-	// the root, claims or verdicts inside a drill-in.
-	annotSel := 0
-	switch m.settlement.Drill() {
-	case settlement.DrillClaim:
-		annotSel = 1
-	case settlement.DrillVerdict:
-		annotSel = 2
-	}
-	annot, annotW := annotSettlementFocus.renderSelected(annotSel)
-	b.WriteString(borderS.Render(style.DockBorder.TopLeft))
-	b.WriteString(renderBorderTitleWithAnnot(style.TitleName.Render("Settlement"), innerW, borderS, annot, annotW))
-	b.WriteString(borderS.Render(style.DockBorder.TopRight))
-	b.WriteString("\n")
-	for i := 0; i < contentH; i++ {
-		line := ""
-		if i < len(lines) {
-			line = " " + lines[i]
-		}
-		lineW := lipgloss.Width(line)
-		if lineW > innerW {
-			line = style.Truncate(line, innerW)
-		} else if lineW < innerW {
-			line += strings.Repeat(" ", innerW-lineW)
-		}
-		b.WriteString(borderS.Render(style.DockBorder.Left))
-		b.WriteString(line)
-		b.WriteString(borderS.Render(style.DockBorder.Right))
-		b.WriteString("\n")
-	}
-	b.WriteString(borderS.Render(style.DockBorder.BottomLeft))
-	b.WriteString(borderS.Render(strings.Repeat(style.DockBorder.Bottom, innerW)))
-	b.WriteString(borderS.Render(style.DockBorder.BottomRight))
-	b.WriteString("\n")
-	b.WriteString(m.renderStatusBar(w))
-	return b.String()
-}
-
-// renderSettlementBodyLines renders the settlement sub-model at the full
-// panel height, padding short content with blank rows so the outer panel
-// stays full-height. The sub-model self-budgets its regions and scrolls
-// overflow; the host clips blindly at height.
-func (m model) renderSettlementBodyLines(width, height int) []string {
-	if height <= 0 {
-		return nil
-	}
-	statusLines := strings.Split(m.settlement.SetSize(width, height).View(), "\n")
-	out := make([]string, 0, height)
-	for i := 0; i < len(statusLines) && i < height; i++ {
-		out = append(out, fitLine(statusLines[i], width))
-	}
-	for len(out) < height {
-		out = append(out, strings.Repeat(" ", width))
-	}
-	return out
 }
 
 func fitLine(line string, width int) string {
@@ -470,7 +386,7 @@ func (m model) viewSideBySide(cfg paneConfig) string {
 	rightBorderChar := rightBS.Render(style.DockBorder.Right)
 
 	var b strings.Builder
-	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.settlementCount, cfg.sessionsCount, cfg.sessionsNeedsInput, cfg.coordinationCount, m.width, m.tabIdentity()))
+	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.sessionsCount, cfg.sessionsNeedsInput, cfg.coordinationCount, m.width, m.tabIdentity()))
 	b.WriteString("\n")
 	b.WriteString(topRow)
 	b.WriteString("\n")
@@ -583,7 +499,7 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.settlementCount, cfg.sessionsCount, cfg.sessionsNeedsInput, cfg.coordinationCount, m.width, m.tabIdentity()))
+	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.sessionsCount, cfg.sessionsNeedsInput, cfg.coordinationCount, m.width, m.tabIdentity()))
 	b.WriteString("\n")
 
 	// === Top panel (list) ===

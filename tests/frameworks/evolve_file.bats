@@ -74,9 +74,8 @@ write_default_manifest() {
   TARGET="$TEST_KDIR/target-skill.md"
   printf 'new bytes\n' > "$TARGET"
   POST=$(shasum -a 256 "$TARGET" | awk '{print substr($1,1,12)}')
-  mkdir -p "$TEST_KDIR/_work/a"
-  printf '%s\n' '{"contradiction_id":"c1","status":"verified","prefetched_commons_entry":{"knowledge_path":"k/a"}}' > "$TEST_KDIR/_work/a/consumption-contradictions.jsonl"
-  obs=$(proposal "$TARGET" claim-retraction 'apply edit' 'contradiction_id=c1 knowledge_path=k/a')
+  printf '%s\n' '{"schema_version":"1","kind":"scored","tier":"correction","calibration_state":"pre-calibration","metric":"m","sample_size":4}' > "$TEST_KDIR/_scorecards/rows.jsonl"
+  obs=$(proposal "$TARGET" doctrine-correction 'apply edit' 'metric=m sample_size=4')
   write_journal "retro-evolution~2026-07-10T01:00:00Z~a~$obs"
   prepare_queue; write_default_manifest
   jq --arg target "$TARGET" --arg post "$POST" '
@@ -91,8 +90,8 @@ write_default_manifest() {
 
 @test "authority-first partial is visible and exact replay repairs only the missing registry and cutoff sinks" {
   TARGET="$TEST_KDIR/target-skill.md"; printf 'new bytes\n' > "$TARGET"; POST=$(shasum -a 256 "$TARGET" | awk '{print substr($1,1,12)}')
-  printf '%s\n' '{"contradiction_id":"c1","status":"verified","prefetched_commons_entry":{"knowledge_path":"k/a"}}' > "$TEST_KDIR/_work/a/consumption-contradictions.jsonl"
-  obs=$(proposal "$TARGET" claim-retraction 'apply edit' 'contradiction_id=c1 knowledge_path=k/a'); write_journal "retro-evolution~2026-07-10T01:00:00Z~a~$obs"
+  printf '%s\n' '{"schema_version":"1","kind":"scored","tier":"correction","calibration_state":"pre-calibration","metric":"m","sample_size":4}' > "$TEST_KDIR/_scorecards/rows.jsonl"
+  obs=$(proposal "$TARGET" doctrine-correction 'apply edit' 'metric=m sample_size=4'); write_journal "retro-evolution~2026-07-10T01:00:00Z~a~$obs"
   prepare_queue; write_default_manifest
   jq --arg target "$TARGET" --arg post "$POST" '.decisions[0]={item_id:.decisions[0].item_id,verdict:"apply",rationale:"Apply.",escalation:null,application:{outcome:"applied",target:$target,pre_version:"000000000000",post_version:$post}}|.version_registrations=[{item_id:.decisions[0].item_id,target:$target,template_id:"fixture",template_path:$target,pre_version:"000000000000",post_version:$post,description:null}]' "$DECISIONS" > "$DECISIONS.tmp"; mv "$DECISIONS.tmp" "$DECISIONS"
   export LORE_EVOLVE_FILE_FAIL_SINK="template-registry:fixture@$POST"
@@ -137,8 +136,8 @@ write_default_manifest() {
 }
 
 @test "missing or extra lead verdicts refuse before authoritative publication" {
-  printf '%s\n' '{"contradiction_id":"c1","status":"verified","prefetched_commons_entry":{"knowledge_path":"k/a"}}' > "$TEST_KDIR/_work/a/consumption-contradictions.jsonl"
-  obs=$(proposal 'skills/a/SKILL.md' claim-retraction 'change' 'contradiction_id=c1 knowledge_path=k/a'); write_journal "retro-evolution~2026-07-10T01:00:00Z~a~$obs"
+  printf '%s\n' '{"schema_version":"1","kind":"scored","tier":"correction","calibration_state":"pre-calibration","metric":"m","sample_size":4}' > "$TEST_KDIR/_scorecards/rows.jsonl"
+  obs=$(proposal 'skills/a/SKILL.md' doctrine-correction 'change' 'metric=m sample_size=4'); write_journal "retro-evolution~2026-07-10T01:00:00Z~a~$obs"
   prepare_queue; write_default_manifest
   jq '.decisions=[]' "$DECISIONS" > "$DECISIONS.tmp"; mv "$DECISIONS.tmp" "$DECISIONS"
   run bash "$FILE_VERB" --queue "$QUEUE" --decisions "$DECISIONS" --json

@@ -19,7 +19,6 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
 	"github.com/anticorrelator/lore/tui/internal/settings"
-	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/style"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
@@ -32,7 +31,6 @@ const (
 	stateKnowledge
 	stateFollowUps
 	stateSessions
-	stateSettlement
 	stateCoordination
 	stateOnboarding
 	stateNoRepo
@@ -159,7 +157,6 @@ type model struct {
 	browser        knowledge.BrowserModel
 	followupList   followup.ListModel
 	followupDetail followup.DetailModel
-	settlement     settlement.Model
 	config         config.Config
 	width          int
 	height         int
@@ -373,22 +370,6 @@ type model struct {
 	settingsActive     bool
 	settingsPanel      *settings.SettingsModel
 	settingsPriorFocus panelFocus
-
-	settlementProcessInFlight bool
-	// settlementProcessStartedAt is set when settlementProcessInFlight flips
-	// true and cleared when it flips back. The failsafe in
-	// settlementInFlightFailsafe (called from handleIndexPollTick) uses this
-	// to detect a stuck flag — i.e. a subprocess goroutine that never
-	// returned, despite the CommandContext timeout in commands.go — and
-	// reset the flag so auto-process can resume. Zero value means not in flight.
-	settlementProcessStartedAt time.Time
-
-	// lastSettlementPoll is the wall-clock time of the most recent settlement
-	// status poll dispatched from handleIndexPollTick. While the panel is
-	// hidden the poll drops to a slow heartbeat gated on this timestamp so the
-	// trigger pump and auto-process dispatch keep firing without spawning the
-	// subprocess pair every tick. Zero value forces the first tick to poll.
-	lastSettlementPoll time.Time
 
 	// Confirm modal for archive/delete actions.
 	confirmAction string // "archive", "unarchive", "delete", "post_review", etc.; empty = inactive
@@ -834,8 +815,6 @@ type paneConfig struct {
 	listItemCount int
 	// fuItemCount is the count passed to renderTabIndicator for the follow-ups tab.
 	fuItemCount int
-	// settlementCount is the pending/ready count passed to renderTabIndicator.
-	settlementCount int
 	// sessionsCount / sessionsNeedsInput feed the sessions tab section: the live
 	// count and whether any session awaits input (the needs-input marker).
 	sessionsCount      int
@@ -850,7 +829,6 @@ type paneConfig struct {
 func (m model) buildPaneConfig() paneConfig {
 	listItemCount := len(m.list.Items())
 	fuItemCount := m.followupList.FollowUpCount()
-	settlementCount := m.settlement.Count()
 	coordinationCount := m.coordinationList.Count()
 
 	switch m.state {
@@ -876,7 +854,6 @@ func (m model) buildPaneConfig() paneConfig {
 			state:              stateCoordination,
 			listItemCount:      listItemCount,
 			fuItemCount:        fuItemCount,
-			settlementCount:    settlementCount,
 			sessionsCount:      m.sessionsCount,
 			sessionsNeedsInput: m.sessionsNeedsInput,
 			coordinationCount:  coordinationCount,
@@ -898,7 +875,6 @@ func (m model) buildPaneConfig() paneConfig {
 			state:              stateSessions,
 			listItemCount:      listItemCount,
 			fuItemCount:        fuItemCount,
-			settlementCount:    settlementCount,
 			sessionsCount:      m.sessionsCount,
 			sessionsNeedsInput: m.sessionsNeedsInput,
 			coordinationCount:  coordinationCount,
@@ -936,7 +912,6 @@ func (m model) buildPaneConfig() paneConfig {
 			state:              stateFollowUps,
 			listItemCount:      listItemCount,
 			fuItemCount:        fuItemCount,
-			settlementCount:    settlementCount,
 			sessionsCount:      m.sessionsCount,
 			sessionsNeedsInput: m.sessionsNeedsInput,
 			coordinationCount:  coordinationCount,
@@ -981,7 +956,6 @@ func (m model) buildPaneConfig() paneConfig {
 			state:              stateWork,
 			listItemCount:      listItemCount,
 			fuItemCount:        fuItemCount,
-			settlementCount:    settlementCount,
 			sessionsCount:      m.sessionsCount,
 			sessionsNeedsInput: m.sessionsNeedsInput,
 			coordinationCount:  coordinationCount,

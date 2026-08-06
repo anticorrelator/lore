@@ -52,7 +52,6 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/gh"
-	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
@@ -143,13 +142,6 @@ func withWorkDetail(t *testing.T, m model, detail *work.WorkItemDetail) model {
 	return m
 }
 
-// withSettlementStatus injects a fixture settlement status. Call after
-// newMockupModel so the panel is already sized.
-func withSettlementStatus(m model, st settlement.Status) model {
-	m.settlement = m.settlement.ReplaceStatus(st)
-	return m
-}
-
 // withPRStatuses marks the PR loader as completed with fixture statuses so
 // PR badges render their real states instead of the "..." loading badge.
 func withPRStatuses(m model, statuses map[string]gh.PRStatus) model {
@@ -237,7 +229,7 @@ func mockupFollowupItems() []followup.FollowUpItem {
 			},
 		},
 		{
-			ID: "fu-keybind-help-drift", Title: "Help modal omits settlement keybinds",
+			ID: "fu-keybind-help-drift", Title: "Help modal omits coordination keybinds",
 			Status: "open", Source: "retro",
 			Created: mockupTimeAgo(108 * time.Hour), Updated: mockupTimeAgo(84 * time.Hour),
 		},
@@ -331,64 +323,6 @@ refresh instead.
 	}
 }
 
-// mockupSettlementStatus populates every region of the settlement panel:
-// header, queue (with a running and a blocked row), selected claim,
-// verdicts across the outcome spectrum, and an active lease.
-func mockupSettlementStatus() settlement.Status {
-	return settlement.Status{
-		Available: true,
-		Enabled:   true,
-		Queue:     settlement.Queue{Total: 7, Ready: 2, Pending: 3, Running: 1, Complete: 1},
-		Items: []settlement.Item{
-			{
-				ID: "cl-meta-single-block", WorkItem: "capture-metadata",
-				ClaimID:    "meta-single-block",
-				Claim:      "All capture metadata flows through a single META string accumulated in one HTML comment block",
-				SourceFile: "scripts/capture.sh", LineRange: "147-166",
-				Falsifier: "A second independent metadata block elsewhere in the script",
-				Status:    "running", Harness: "claude-code",
-			},
-			{
-				ID: "cl-resolve-pure", WorkItem: "fixture-injection",
-				ClaimID:    "resolve-repo-pure",
-				Claim:      "resolve-repo.sh is a pure path resolver with no agent-disable gate",
-				SourceFile: "scripts/resolve-repo.sh", LineRange: "21-26",
-				Status: "ready",
-			},
-			{
-				ID: "cl-stale-index", WorkItem: "index-refresh",
-				ClaimID: "index-regen-on-missing",
-				Claim:   "Missing _index.md is regenerated on first read rather than erroring",
-				Status:  "blocked", BlockedReason: "evidence file moved",
-			},
-		},
-		Leases: []settlement.Lease{
-			{ID: "lease-01", ItemID: "cl-meta-single-block", WorkerID: "settle-1",
-				Harness: "claude-code", PID: 4242, ExpiresAt: "in 12m"},
-		},
-		Harness: settlement.Harness{
-			Mode: "auto", Selected: "claude-code", Concurrency: 2,
-			CapTotal: 3600, CapRemaining: 2400, ActiveLeases: 1,
-		},
-		Usage: settlement.Usage{BudgetState: "ok", CapTotal: 20, CapRemaining: 14},
-		RecentSettled: []settlement.LastSettled{
-			{ClaimID: "lib-sourcing-standard", Claim: "All scripts source lib.sh via SCRIPT_DIR resolution",
-				VerdictLabel:      "verified",
-				CorrectionOutcome: settlement.CorrectionOutcome{Status: "applied"}},
-			{ClaimID: "hooks-parallel-load", Claim: "SessionStart hooks load knowledge and work items in parallel",
-				VerdictLabel: "unverified"},
-			{ClaimID: "single-writer-scorecard", Claim: "Scorecard rows are written only through scorecard-append.sh",
-				VerdictLabel:      "contradicted",
-				CorrectionOutcome: settlement.CorrectionOutcome{Status: "skipped", Reason: "entry archived"}},
-		},
-		NextAction: "process_next_ready",
-		UpdatedAt:  "2026-07-01T09:00:00Z",
-	}
-}
-
-// TestMockupDump renders the baseline set: one dump per reworked surface in
-// the top-bottom design center, plus a side-by-side compatibility frame.
-// These double as the worked examples for the extension contract above.
 func TestMockupDump(t *testing.T) {
 	requireMockupDump(t)
 
@@ -417,15 +351,6 @@ func TestMockupDump(t *testing.T) {
 		dumpMockup(t, "mock-base-followups-topbottom", func(t *testing.T) string {
 			m := newMockupModel(t, stateFollowUps, config.LayoutTopBottom,
 				mockupWidth, mockupHeight, mockupWorkItems(), mockupFollowupItems())
-			return m.viewContent()
-		})
-	})
-
-	t.Run("mock-base-settlement", func(t *testing.T) {
-		dumpMockup(t, "mock-base-settlement", func(t *testing.T) string {
-			m := newMockupModel(t, stateSettlement, config.LayoutTopBottom,
-				mockupWidth, mockupHeight, mockupWorkItems(), mockupFollowupItems())
-			m = withSettlementStatus(m, mockupSettlementStatus())
 			return m.viewContent()
 		})
 	})

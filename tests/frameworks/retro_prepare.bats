@@ -46,31 +46,6 @@ PY
     --work-item cycle-a --role retro
   [ "$status" -eq 0 ]
 
-  SNIPPET="$(sed -n '1p' "$REPO_DIR/README.md")"
-  SNIPPET_HASH="$(printf '%s' "$SNIPPET" | python3 "$HOME/.lore/scripts/snippet_normalize.py" --hash)"
-  REPO_SHA="$(git -C "$REPO_DIR" rev-parse HEAD)"
-  CLAIM_ROW="$(jq -cn \
-    --arg snippet "$SNIPPET" --arg hash "$SNIPPET_HASH" --arg sha "$REPO_SHA" \
-    --arg file "$REPO_DIR/README.md" \
-    '{claim_id:"contract-claim",tier:"task-evidence",claim:"Reader contract evidence",producer_role:"implement-lead",protocol_slot:"test",task_id:"task-1",phase_id:"phase-1",scale:"implementation",file:$file,line_range:"1-1",exact_snippet:$snippet,normalized_snippet_hash:$hash,falsifier:"Reader contract disappears",why_this_work_needs_it:"Exercise the settlement writer and reader pair.",captured_at_sha:$sha,change_context:{diff_ref:$sha,changed_files:[$file],summary:"Writer-reader contract test."}}')"
-  run bash "$REPO_DIR/scripts/evidence-append.sh" --work-item cycle-a <<<"$CLAIM_ROW"
-  [ "$status" -eq 0 ]
-  run "$LORE" settlement enqueue --work-item cycle-a --kind task-claim \
-    --row-file "$TEST_KDIR/_work/cycle-a/task-claims.jsonl" --kdir "$TEST_KDIR" --json
-  [ "$status" -eq 0 ]
-
-  run "$LORE" consumption-contradiction \
-    --work-item cycle-a --source implement-lead --producer-role implement-lead \
-    --protocol-slot test --cycle-id cycle-a --knowledge-path conventions/example.md \
-    --contradiction-rationale "Reader contract exercise" --claim-id contract-claim \
-    --claim-text "Reader contract evidence" --file "$REPO_DIR/README.md" --line-range 1 \
-    --exact-snippet "$SNIPPET" --falsifier "Reader contract disappears" \
-    --contradiction-id ctr-contract --created-at "$NOW" --kdir "$TEST_KDIR" --json
-  [ "$status" -eq 0 ]
-  run bash "$REPO_DIR/scripts/consumption-contradiction-update-status.sh" \
-    --work-item cycle-a --contradiction-id ctr-contract --status verified \
-    --settled-at "$NOW" --settled-by-run-id run-contract --kdir "$TEST_KDIR" --json
-  [ "$status" -eq 0 ]
 }
 
 teardown() {
@@ -81,7 +56,7 @@ teardown() {
 run_prepare() {
   run "$LORE" retro prepare cycle-a --window-start "$WINDOW_START" --window-end "$WINDOW_END" --json
   [ "$status" -eq 0 ]
-  jq -e '([.source_manifest[] | select(.coverage == "read")] | length) == 8' \
+  jq -e '([.source_manifest[] | select(.coverage == "read")] | length) == 6' \
     "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json" >/dev/null
 }
 
@@ -112,21 +87,6 @@ manifest_row() {
     .reader_contract_version == "1" and .projection_mode == "half-open-window" and
     (.reader | contains("lore retro queue --cycle-id cycle-a")) and .content_identity != null
   '
-}
-
-@test "settlement publishes writer-created enqueue transitions without opening storage" {
-  run "$LORE" settlement status --window-start "$WINDOW_START" --window-end "$WINDOW_END" --kdir "$TEST_KDIR" --json
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '
-    .retro_projection.reader_contract_version == "1" and
-    (.retro_projection.queue_transitions | length) == 1 and
-    .retro_projection.queue_transitions[0].kind == "task-claim"
-  '
-  run_prepare
-  manifest_row settlement | jq -e '.reader == ("lore settlement status --window-start " + $start + " --window-end " + $end + " --json")' \
-    --arg start "$WINDOW_START" --arg end "$WINDOW_END"
-  jq -e '.facts.settlement_health_inputs.values.queue_transitions | length == 1' \
-    "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
 }
 
 @test "scorecard_rows returns the bounded row written by scorecard append" {
@@ -173,17 +133,17 @@ manifest_row() {
     "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
 }
 
-@test "consumer contradiction lifecycle reads writer-created terminal state" {
-  run "$LORE" consumption-contradiction read --window-start "$WINDOW_START" --window-end "$WINDOW_END" --kdir "$TEST_KDIR" --json
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e 'length == 1 and .[0].contradiction_id == "ctr-contract" and .[0].status == "verified"'
+@test "the retired settlement and contradiction surface is absent from the pack" {
   run_prepare
-  manifest_row consumer_contradiction_lifecycle | jq -e '
-    .reader_contract_version == "1" and .projection_mode == "half-open-window" and .content_identity != null
-  '
   jq -e '
-    .facts.concerns_contradictions.values == {produced:1, terminal:1} and
-    ([.calculations[] | select(.calculation_id == "consumer_contradiction_routing")][0].disposition == "abstained")
+    ([.source_manifest[].source_id] | inside([
+      "cycle_work","due_queue","scorecard_rows","scorecard_current","session_events","journal"
+    ])) and
+    ([.facts | keys[]] | any(. == "settlement_health_inputs" or . == "concerns_contradictions") | not) and
+    ([.calculations[].calculation_id] | inside([
+      "channel_contract_drift","scorecard_delta_readiness","template_headline_readiness"
+    ])) and
+    ([.calculations[].source_ids[]] | any(. == "settlement" or . == "consumer_contradiction_lifecycle") | not)
   ' "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
 }
 
@@ -200,14 +160,11 @@ manifest_row() {
   run "$LORE" journal read --since "$FUTURE_START" --until "$FUTURE_END" --json
   [ "$status" -eq 0 ]
   [ "$output" = "[]" ]
-  run "$LORE" consumption-contradiction read --window-start "$FUTURE_START" --window-end "$FUTURE_END" --kdir "$TEST_KDIR" --json
-  [ "$status" -eq 0 ]
-  [ "$output" = "[]" ]
   run "$LORE" retro prepare cycle-a --window-start "$FUTURE_START" --window-end "$FUTURE_END" --json
   [ "$status" -eq 0 ]
   jq -e '
     .fixed_health.state != "normal" and
-    ([.calculations[] | select(.calculation_id == "consumer_contradiction_routing")][0].disposition == "abstained")
+    ([.calculations[] | select(.calculation_id == "template_headline_readiness")][0].disposition == "abstained")
   ' "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
 }
 

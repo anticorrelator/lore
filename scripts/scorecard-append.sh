@@ -41,11 +41,6 @@
 #
 # Recognized free-form event_type values under kind=telemetry (not enforced;
 # readers consume for window filtering):
-#   calibration-cutover   marker row emitted by `settlement-queue.sh drain`
-#                         after a successful real-data cutover; carries
-#                         cutover_timestamp + template_id/template_version
-#                         so /retro and /evolve can partition rows into
-#                         pre-cutover / post-cutover windows.
 #   ceremony-resolution   unresolvable registered advisor. Two correlated
 #                         shapes, discriminated by `record_type`: an `outcome`
 #                         row (needs-decision/unhandled, the default when the
@@ -68,9 +63,9 @@
 #   rows without grounded anchors are rejected. Telemetry-kind rows
 #   (e.g., grounding_failure_rate) do not require the anchor — ungrounded
 #   diagnostic telemetry is explicit and permitted.
-#   Rationale: the reverse-auditor's scorecard weight is "grounded-or-
-#   nothing" per the settlement plan — ungrounded concerns may surface in
-#   /retro narrative but cannot drive producer-evaluation scoring. This is
+#   Rationale: the reverse-auditor's scorecard weight is grounded-or-nothing
+#   — ungrounded concerns may surface in /retro narrative but cannot drive
+#   producer-evaluation scoring. This is
 #   enforced at the writer (not the agent prompt) because the writer is
 #   the last line of defense: any path that reaches rows.jsonl without
 #   this check corrupts the signal irreversibly.
@@ -152,12 +147,12 @@ fi
 
 KIND=$(printf '%s' "$ROW" | jq -r '.kind // ""')
 case "$KIND" in
-  scored|telemetry|consumption-contradiction) ;;
+  scored|telemetry) ;;
   "")
-    fail "missing required field: kind (must be 'scored', 'telemetry', or 'consumption-contradiction')"
+    fail "missing required field: kind (must be 'scored' or 'telemetry')"
     ;;
   *)
-    fail "invalid kind: '$KIND' (must be 'scored', 'telemetry', or 'consumption-contradiction')"
+    fail "invalid kind: '$KIND' (must be 'scored' or 'telemetry')"
     ;;
 esac
 

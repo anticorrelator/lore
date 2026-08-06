@@ -38,8 +38,8 @@ func coordinationContractModel(t *testing.T) model {
 }
 
 // TestCoordinationEntryKeybindContract pins the `o` entry key advertised in
-// the tab indicator and the work/sessions/settlement status bars, and that
-// chat keeps `c` in its two contexts (work-detail focus, follow-ups).
+// the tab indicator and the work/sessions status bars, and that chat keeps `c`
+// in its two contexts (work-detail focus, follow-ups).
 func TestCoordinationEntryKeybindContract(t *testing.T) {
 	t.Run("o (coordination)", func(t *testing.T) {
 		nm, cmd := updateModel(t, workContractModel(), press('o'))
@@ -57,13 +57,6 @@ func TestCoordinationEntryKeybindContract(t *testing.T) {
 		nsm, _ := updateModel(t, sm, press('o'))
 		if nsm.state != stateCoordination {
 			t.Error("o from the sessions list should enter coordination")
-		}
-
-		stm := minimalModel(stateSettlement, nil, nil)
-		stm.width, stm.height = 120, 40
-		nstm, _ := updateModel(t, stm, press('o'))
-		if nstm.state != stateCoordination {
-			t.Error("o from settlement should enter coordination")
 		}
 	})
 	t.Run("c stays chat in the work detail focus", func(t *testing.T) {
@@ -91,7 +84,7 @@ func TestCoordinationEntryKeybindContract(t *testing.T) {
 
 // TestCoordinationListStatusBarKeybindContract verifies the coordination list
 // hint set: "j/k navigate · l/Enter detail · w work list · f follow-ups ·
-// v sessions · t settlement · h/Esc back · q quit · ? help".
+// v sessions · h/Esc back · q quit · ? help".
 func TestCoordinationListStatusBarKeybindContract(t *testing.T) {
 	t.Run("j/k (navigate)", func(t *testing.T) {
 		m := coordinationContractModel(t)
@@ -147,10 +140,10 @@ func TestCoordinationListStatusBarKeybindContract(t *testing.T) {
 			t.Error("v should enter the sessions view")
 		}
 	})
-	t.Run("t (settlement)", func(t *testing.T) {
+	t.Run("t (no longer a state switch)", func(t *testing.T) {
 		nm, _ := updateModel(t, coordinationContractModel(t), press('t'))
-		if nm.state != stateSettlement {
-			t.Error("t should enter settlement")
+		if nm.state != stateCoordination {
+			t.Errorf("t should no longer switch views, got state %d", nm.state)
 		}
 	})
 	t.Run("h (back)", func(t *testing.T) {

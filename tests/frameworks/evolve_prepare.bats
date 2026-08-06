@@ -55,7 +55,7 @@ import hashlib,json,sys
 raw=open(sys.argv[1],"rb").read(); q=json.loads(raw)
 assert not raw.endswith(b"\n")
 assert set(q)=={"schema_version","queue_id","input_fingerprint","source_fingerprint","artifact_sha256","run","cutoff","due_claim","source_manifest","items","groups","recurring_clusters","summary","provenance"}
-assert [r["source_id"] for r in q["source_manifest"]]==["journal","scorecard_rows","template_registry","accepted_clusters","consumption_contradictions","prior_filings"]
+assert [r["source_id"] for r in q["source_manifest"]]==["journal","scorecard_rows","template_registry","accepted_clusters","prior_filings"]
 assert q["due_claim"]=={"attempted":False,"outcome_ids":[],"disposition":"not-applicable","warning":None}
 assert q["items"][0]["eligibility"]["status"]=="eligible"
 assert set(q["summary"]["eligibility"])=={"eligible","no_op","abstained","not_computable"}
@@ -98,25 +98,31 @@ PY
   [ "$status" -eq 0 ]
 }
 
-@test "active and archived verified contradiction rows satisfy claim retraction without a kind projection" {
+@test "the contradiction sidecar is no longer a source and retraction has no gate of its own" {
   obs=$(proposal 'knowledge/foo.md' 'claim-retraction' 'remove claim' 'contradiction_id=contra-arch knowledge_path=knowledge/foo.md')
   write_journal "retro-evolution~2026-07-10T01:00:00Z~wi-a~$obs"
+  # A sidecar left on disk from before the channel was retired must not be read.
   printf '%s\n' '{"contradiction_id":"contra-arch","status":"verified","prefetched_commons_entry":{"knowledge_path":"knowledge/foo.md"},"settled_at":"2026-07-09T00:00:00Z"}' > "$TEST_KDIR/_work/_archive/archived-a/consumption-contradictions.jsonl"
   run bash "$PREPARE" --json
   [ "$status" -eq 0 ]
-  run jq -e '.items[0].gate_path=="claim-retraction" and .items[0].eligibility.status=="eligible" and (.items[0].eligibility.evidence_refs[0].source_path|contains("_archive"))' "$(artifact)"
+  run jq -e '
+    ([.source_manifest[].source_id]|index("consumption_contradictions"))==null and
+    ([.items[].gate_path]|index("claim-retraction"))==null and
+    .items[0].gate_path=="primary" and .items[0].eligibility.status=="no_op"
+  ' "$(artifact)"
   [ "$status" -eq 0 ]
 }
 
 @test "definitive failure low sample and unavailable sources remain distinct states" {
   no=$(proposal 'skills/no/SKILL.md' 'ceiling' 'change' 'metric=absent sample_size=9')
   low=$(proposal 'skills/low/SKILL.md' 'ceiling' 'change' 'metric=quality sample_size=2')
-  missing=$(proposal 'knowledge/missing.md' 'claim-retraction' 'remove' 'contradiction_id=none')
+  missing=$(proposal 'skills/missing/SKILL.md' 'recurring-failure' 'change' 'cluster evidence')
   write_journal "retro-evolution~2026-07-10T01:00:00Z~wi-no~$no" \
     "retro-evolution~2026-07-10T02:00:00Z~wi-low~$low" \
     "retro-evolution~2026-07-10T03:00:00Z~wi-missing~$missing"
   printf '%s\n' '{"schema_version":"1","kind":"scored","tier":"template","calibration_state":"calibrated","template_id":"a","template_version":"v1","sample_size":2,"metric":"quality"}' > "$TEST_KDIR/_scorecards/rows.jsonl"
   printf '%s\n' '{"schema_version":"1","entries":[{"template_id":"a","template_version":"v1"}]}' > "$TEST_KDIR/_scorecards/template-registry.json"
+  rm -f "$TEST_KDIR/_evolve/accepted-clusters.jsonl"
   run bash "$PREPARE" --json
   [ "$status" -eq 0 ]
   run jq -e '[.items[].eligibility.status]==["no_op","abstained","not_computable"]' "$(artifact)"

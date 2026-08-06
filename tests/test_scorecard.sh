@@ -157,10 +157,9 @@ STDERR=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
   --row '{"schema_version":"1","kind":"bogus","calibration_state":"calibrated"}' 2>&1) || EXIT_CODE=$?
 assert_eq "invalid kind exits non-zero" "$EXIT_CODE" "1"
 assert_contains "stderr names 'invalid kind'" "$STDERR" "invalid kind"
-# Error message MUST enumerate all three valid kinds (D4: three-kind enum is public contract).
+# The error message enumerates every appendable kind — the enum is public contract.
 assert_contains "stderr lists 'scored'" "$STDERR" "scored"
 assert_contains "stderr lists 'telemetry'" "$STDERR" "telemetry"
-assert_contains "stderr lists 'consumption-contradiction'" "$STDERR" "consumption-contradiction"
 
 # File must not exist (first-use rejection leaves no partial state)
 if [[ ! -f "$KNOWLEDGE_DIR/_scorecards/rows.jsonl" ]]; then
@@ -172,27 +171,26 @@ else
 fi
 
 # =============================================
-# Test 4a: Round-trip a `kind: consumption-contradiction` row (D4)
+# Test 4a: `consumption-contradiction` is no longer an appendable kind
 # =============================================
-# Positive append-side test for the third kind. Mirrors Test 1/Test 2 shape.
-# Includes `tier: telemetry` because the tier validator requires it for all rows.
+# The channel that produced these rows is gone. The writer refuses new ones;
+# the rollup still reads the rows already on disk (Test 12a).
 echo ""
-echo "Test 4a: Round-trip consumption-contradiction row"
+echo "Test 4a: consumption-contradiction is refused at append"
 setup_store
 
 ROW='{"schema_version":"1","kind":"consumption-contradiction","tier":"telemetry","calibration_state":"pre-calibration","template_id":"consumer-channel","template_version":"ccc111222333","metric":"remediation_rate","value":0.42,"sample_size":7}'
-OUTPUT=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --row "$ROW" 2>&1)
-assert_contains "consumption-contradiction append confirmation" "$OUTPUT" "[scorecard] Appended row"
-assert_contains "kind reported as consumption-contradiction" "$OUTPUT" "kind=consumption-contradiction"
-assert_contains "calibration_state reported" "$OUTPUT" "calibration_state=pre-calibration"
-assert_file_exists "rows.jsonl created for new kind" "$KNOWLEDGE_DIR/_scorecards/rows.jsonl"
-
-ROW_BACK=$(cat "$KNOWLEDGE_DIR/_scorecards/rows.jsonl")
-assert_eq "kind consumption-contradiction round-tripped" "$(echo "$ROW_BACK" | jq -r '.kind')" "consumption-contradiction"
-assert_eq "calibration_state round-tripped" "$(echo "$ROW_BACK" | jq -r '.calibration_state')" "pre-calibration"
-assert_eq "metric round-tripped" "$(echo "$ROW_BACK" | jq -r '.metric')" "remediation_rate"
-assert_eq "value round-tripped" "$(echo "$ROW_BACK" | jq -r '.value')" "0.42"
-assert_eq "tier round-tripped" "$(echo "$ROW_BACK" | jq -r '.tier')" "telemetry"
+EXIT_CODE=0
+STDERR=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --row "$ROW" 2>&1) || EXIT_CODE=$?
+assert_eq "retired kind exits non-zero" "$EXIT_CODE" "1"
+assert_contains "stderr names 'invalid kind'" "$STDERR" "invalid kind"
+if [[ ! -f "$KNOWLEDGE_DIR/_scorecards/rows.jsonl" ]]; then
+  echo "  PASS: rows.jsonl not created on rejection"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: rows.jsonl was created despite rejection"
+  FAIL=$((FAIL + 1))
+fi
 
 # =============================================
 # Test 4b: ceremony-resolution conditional schema is writer-enforced
@@ -459,17 +457,20 @@ assert_eq "mixed kind labelled" "$(echo "$GROUP" | jq -r '.kind')" "mixed"
 assert_eq "calibration_states unique count" "$(echo "$GROUP" | jq -r '.calibration_states | length')" "2"
 
 # =============================================
-# Test 12a: consumption-contradiction single-kind group rolls up correctly (D4)
+# Test 12a: recorded consumption-contradiction rows still roll up
 # =============================================
 echo ""
-echo "Test 12a: consumption-contradiction single-kind group rolls up correctly"
+echo "Test 12a: recorded consumption-contradiction rows still roll up"
 setup_store
 
-# Two rows sharing (template_id, template_version, metric) — must aggregate into ONE summary
-# with kind=consumption-contradiction (not silently excluded, not relabelled as 'mixed').
+# The kind is no longer appendable, so these rows are seeded directly — the
+# shape a store carries from before the channel was retired. Two rows sharing
+# (template_id, template_version, metric) must aggregate into ONE summary
+# labelled with their kind, not be dropped as corrupt.
+mkdir -p "$KNOWLEDGE_DIR/_scorecards"
 for v in 0.4 0.8; do
-  bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
-    --row "{\"schema_version\":\"1\",\"kind\":\"consumption-contradiction\",\"calibration_state\":\"pre-calibration\",\"tier\":\"telemetry\",\"template_id\":\"cc\",\"template_version\":\"v1\",\"metric\":\"remediation_rate\",\"value\":$v,\"sample_size\":5}" > /dev/null
+  printf '%s\n' "{\"schema_version\":\"1\",\"kind\":\"consumption-contradiction\",\"calibration_state\":\"pre-calibration\",\"tier\":\"telemetry\",\"template_id\":\"cc\",\"template_version\":\"v1\",\"metric\":\"remediation_rate\",\"value\":$v,\"sample_size\":5}" \
+    >> "$KNOWLEDGE_DIR/_scorecards/rows.jsonl"
 done
 
 bash "$SCRIPT_DIR/scorecard-rollup.sh" --kdir "$KNOWLEDGE_DIR" > /dev/null 2>&1
@@ -487,19 +488,18 @@ assert_eq "cc group value_mean ≈ 0.6" "$MEAN_CC_OK" "yes"
 assert_eq "cc group calibration_states = [pre-calibration]" "$(echo "$CC_GROUP" | jq -rc '.calibration_states')" '["pre-calibration"]'
 
 # =============================================
-# Test 12b: Mixed group including consumption-contradiction still labelled 'mixed' (D4 regression)
+# Test 12b: a mixed group spanning a recorded and an appendable kind
 # =============================================
 echo ""
-echo "Test 12b: Mixed-kind group including consumption-contradiction labelled 'mixed'"
+echo "Test 12b: mixed group including a recorded consumption-contradiction row"
 setup_store
 
-# Same grouping key; two different kinds including consumption-contradiction.
-# Rollup MUST still emit kind=mixed (existing unique-then-length==1-else-mixed logic
-# handles the third kind without modification — regression check for D4).
+# Same grouping key, two different kinds. The rollup must still emit
+# kind=mixed rather than picking one side.
 bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
   --row '{"schema_version":"1","kind":"scored","calibration_state":"calibrated","tier":"telemetry","template_id":"mix","template_version":"v1","metric":"m","value":1.0}' > /dev/null
-bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
-  --row '{"schema_version":"1","kind":"consumption-contradiction","calibration_state":"pre-calibration","tier":"telemetry","template_id":"mix","template_version":"v1","metric":"m","value":2.0}' > /dev/null
+printf '%s\n' '{"schema_version":"1","kind":"consumption-contradiction","calibration_state":"pre-calibration","tier":"telemetry","template_id":"mix","template_version":"v1","metric":"m","value":2.0}' \
+  >> "$KNOWLEDGE_DIR/_scorecards/rows.jsonl"
 
 bash "$SCRIPT_DIR/scorecard-rollup.sh" --kdir "$KNOWLEDGE_DIR" > /dev/null 2>&1
 CURRENT=$(cat "$KNOWLEDGE_DIR/_scorecards/_current.json")

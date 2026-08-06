@@ -489,16 +489,32 @@ PYEOF
   fi
 fi
 
+# Coordination seat ceiling: copy a live ceiling out of the retired settlement
+# block onto coordination.max_concurrency. Must run BEFORE the prune below — the
+# prune derives its retired set from the schema, and the schema no longer
+# declares `settlement`, so the prune deletes the value this pass exists to read.
+# Idempotent: a settings file that already carries the coordination key is left
+# alone. Removable once no live install still carries a settlement block.
+if [ -f "$SETTINGS_FILE" ]; then
+  if ! $DRY_RUN; then
+    if ! LORE_DATA_DIR="$LORE_DATA_DIR" \
+      python3 "$LORE_REPO_DIR/scripts/migrations/rehome-coordination-max-concurrency.py"; then
+      echo "  [warning] skipped coordination ceiling rehome — settings left unchanged"
+    fi
+  fi
+fi
+
 # Retired-key pruning: strip top-level keys from existing settings.json that
 # the schema no longer accepts. Without this pass, doctor's schema check flags
 # a stale block on every run (the schema is additionalProperties:false at root).
 #
 # The retired set is DERIVED from adapters/settings.schema.json, never listed
-# here. This block used to carry a hand-maintained tuple, and it drifted: it
-# named "settlement", which 884c20b put back into the schema in 2026-05, so
-# every install deleted live settlement configuration -- on a fresh install,
-# the very block seeded from the template ~250 lines above. A list kept next to
-# the schema is a list that can disagree with it; a derivation cannot.
+# here. A hand-maintained tuple lived here once and drifted out of step with the
+# schema, so installs deleted live configuration for a block the schema still
+# declared. A list kept next to the schema is a list that can disagree with it;
+# a derivation cannot. Retiring a key is therefore a single edit to the schema --
+# and anything that must survive it has to be rehomed first, as the pass above
+# does for the coordination seat ceiling.
 #
 # The prune refuses rather than guesses. If the schema is missing or cannot
 # support the derivation, prune-retired-settings.py exits non-zero and the file

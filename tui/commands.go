@@ -16,7 +16,6 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/gh"
 	"github.com/anticorrelator/lore/tui/internal/search"
-	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
@@ -116,20 +115,6 @@ type prStatusLoadedMsg struct {
 	err      error
 }
 
-type settlementStatusLoadedMsg struct {
-	status settlement.Status
-	err    error
-	output string
-}
-
-type settlementActionCompleteMsg struct {
-	action    string
-	automatic bool
-	result    settlement.ActionResult
-	err       error
-	output    string
-}
-
 func loadWorkItems(workDir string) tea.Cmd {
 	return func() tea.Msg {
 		items, err := work.LoadIndex(workDir)
@@ -141,86 +126,6 @@ func loadPRStatus() tea.Cmd {
 	return func() tea.Msg {
 		statuses, err := gh.LoadPRStatus(context.Background())
 		return prStatusLoadedMsg{statuses: statuses, err: err}
-	}
-}
-
-func loadSettlementStatus() tea.Cmd {
-	return func() tea.Msg {
-		// Trigger pump: the event-driven enqueue surface (dispute detector,
-		// spot-sample budget, rollup steady-state) runs on this status tick —
-		// enqueue-only, self-throttled processor-side, best-effort here. This
-		// replaces the retired census drivers as the thing that keeps the
-		// queue fed; dispatch still goes through shouldAutoProcessSettlement
-		// or manual process/drain.
-		pumpCtx, pumpCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		pump := exec.CommandContext(pumpCtx, "lore", "settlement", "triggers", "--json")
-		pump.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		_ = pump.Run()
-		pumpCancel()
-
-		cmd := exec.Command("lore", "settlement", "status", "--json")
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return settlementStatusLoadedMsg{err: fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out))), output: string(out)}
-		}
-		status, err := settlement.ParseStatus(out)
-		return settlementStatusLoadedMsg{status: status, err: err, output: string(out)}
-	}
-}
-
-func runSettlementAction(action string) tea.Cmd {
-	return runSettlementActionWithMode(action, false)
-}
-
-// runSettlementVerb dispatches a posture verb that carries arguments
-// (`schedule on|off`, `model <alias>`) through the same subprocess path as
-// the one-word actions, so the embedded status return updates the panel
-// without waiting for the next poll tick.
-func runSettlementVerb(action string, extra ...string) tea.Cmd {
-	return runSettlementActionWithMode(action, false, extra...)
-}
-
-func runAutomaticSettlementProcess() tea.Cmd {
-	return runSettlementActionWithMode("process", true)
-}
-
-// settlementSubprocessTimeout caps how long the TUI will wait for a
-// `lore settlement <action>` subprocess to return. It must comfortably
-// exceed the executor budget (default executor_timeout_seconds=300 inside
-// settlement-audit-executor.sh) plus typical setup/teardown overhead.
-// If the subprocess hangs past this ceiling — e.g. a wedged `claude -p`
-// invocation or a held flock — CommandContext cancels and kills it so
-// the TUI's settlementProcessInFlight flag can be cleared and auto-process
-// can resume. A separate model-level failsafe (settlementInFlightFailsafe
-// in update.go) catches the rarer case where even the cancel can't free
-// the goroutine.
-const settlementSubprocessTimeout = 10 * time.Minute
-
-func runSettlementActionWithMode(action string, automatic bool, extra ...string) tea.Cmd {
-	return func() tea.Msg {
-		args := append(append([]string{"settlement", action}, extra...), "--json")
-		if action == "process" {
-			args = []string{"settlement", "process", "--once", "--json"}
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), settlementSubprocessTimeout)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "lore", args...)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		out, err := cmd.CombinedOutput()
-		if ctx.Err() == context.DeadlineExceeded {
-			return settlementActionCompleteMsg{
-				action:    action,
-				automatic: automatic,
-				err:       fmt.Errorf("subprocess exceeded %s ceiling and was killed (output: %s)", settlementSubprocessTimeout, strings.TrimSpace(string(out))),
-				output:    string(out),
-			}
-		}
-		if err != nil {
-			return settlementActionCompleteMsg{action: action, automatic: automatic, err: fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out))), output: string(out)}
-		}
-		result, parseErr := settlement.ParseActionResult(action, out)
-		return settlementActionCompleteMsg{action: action, automatic: automatic, result: result, err: parseErr, output: string(out)}
 	}
 }
 

@@ -306,7 +306,7 @@ func longMetaRow(id string) Row {
 // selection background's trailing reset, bleeding it across the panel.
 func TestStackedRowLineNeverExceedsWidth(t *testing.T) {
 	l := NewList(testColumns())
-	l.SetRows([]Row{longMetaRow("pr-review-correctness-gate"), longMetaRow("settlement-archived")})
+	l.SetRows([]Row{longMetaRow("pr-review-correctness-gate"), longMetaRow("coordination-archived")})
 	for _, w := range []int{20, 30, 40, 55} {
 		l.SetSize(w, 20)
 		for _, line := range strings.Split(strings.TrimRight(stripANSI(l.View()), "\n"), "\n") {

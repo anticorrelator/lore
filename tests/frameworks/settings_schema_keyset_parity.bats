@@ -356,42 +356,67 @@ PY
   fi
 }
 
-@test "settlement schema defaults fail closed with built-in executor" {
+@test "settlement is absent from the schema and the template" {
+  # The settlement pipeline is retired. Absence is the assertion: a schema that
+  # merely stopped shipping the block would pass a presence-only test just as
+  # well with the block put back, which is the reintroduction this pins against.
+  SCHEMA="$SCHEMA" TEMPLATE="$REPO_DIR/adapters/settings.template.json" python3 - <<'PYEOF'
+import json, os
+with open(os.environ["SCHEMA"]) as f:
+    s = json.load(f)
+with open(os.environ["TEMPLATE"]) as f:
+    t = json.load(f)
+assert "settlement" not in s["properties"], "schema still declares a settlement property"
+assert "settlement_config" not in s["$defs"], "schema still defines settlement_config"
+assert "settlement" not in t, "template still ships a settlement block"
+PYEOF
+}
+
+@test "coordination seat ceiling is declared by the schema and shipped by the template" {
+  # The board's ceiling is configuration, not a constant the reader guesses:
+  # the schema types it and the template ships it, so a fresh install comes up
+  # with a real key rather than nothing plus the reader's fail-closed guard.
   SCHEMA="$SCHEMA" TEMPLATE="$REPO_DIR/adapters/settings.template.json" python3 - <<'PY'
 import json, os
 with open(os.environ["SCHEMA"]) as f:
     s = json.load(f)
 with open(os.environ["TEMPLATE"]) as f:
     t = json.load(f)
-cfg = t["settlement"]
-assert cfg["enabled"] is False
-assert cfg["max_concurrency"] == 1
-assert cfg["batch_size"] == 12
-assert cfg["batch_recompute_min_interval_seconds"] == 60
-assert cfg["concordance_window_size"] == 8
-assert cfg["concordance_window_size"] <= cfg["batch_size"]
-assert "budgets" not in cfg
-assert cfg["active_hours"]["enabled"] is False
-assert cfg["active_hours"]["timezone"] == "local"
-defs = s["$defs"]["settlement_config"]["properties"]
-assert defs["enabled"]["default"] is False
-assert "executor" not in defs
-assert "paused" not in defs
-assert defs["max_concurrency"]["minimum"] == 1
-assert defs["batch_size"]["minimum"] == 1
-assert defs["batch_size"]["default"] == 12
-assert defs["batch_recompute_min_interval_seconds"]["minimum"] == 0
-assert defs["batch_recompute_min_interval_seconds"]["default"] == 60
-assert defs["concordance_window_size"]["minimum"] == 0
-assert defs["concordance_window_size"]["default"] == 8
-assert "days" not in defs["active_hours"]["properties"]
-assert "start" not in defs["active_hours"]["properties"]
-assert "end" not in defs["active_hours"]["properties"]
-assert defs["active_hours"]["properties"]["ranges"]["items"]["properties"]["days"]["items"]["enum"] == ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-assert defs["active_hours"]["properties"]["ranges"]["minItems"] == 1
-assert defs["active_hours"]["properties"]["ranges"]["items"]["required"] == ["days", "start", "end"]
-assert defs["harness_selection"]["properties"]["mode"]["enum"] == ["first_eligible", "random", "active"]
+assert s["properties"]["coordination"]["$ref"] == "#/$defs/coordination_config"
+defs = s["$defs"]["coordination_config"]
+assert defs["additionalProperties"] is False
+ceiling = defs["properties"]["max_concurrency"]
+assert ceiling["type"] == "integer"
+assert ceiling["minimum"] == 1
+assert ceiling["default"] == 1
+assert t["coordination"]["max_concurrency"] == ceiling["default"]
 PY
+}
+
+@test "the coordination board reads its own ceiling key, not the settlement one" {
+  # Absence is the assertion that matters. The board read
+  # settlement.max_concurrency until the ceiling was rehomed; a positive-only
+  # check on the new key passes with both reads present, which is exactly the
+  # state the rehome exists to end.
+  STATUS="$REPO_DIR/scripts/coordinate-status.sh"
+  [ -f "$STATUS" ] || skip "scripts/coordinate-status.sh missing"
+
+  run grep -c 'coordination\.max_concurrency' "$STATUS"
+  [ "$status" -eq 0 ]
+
+  run grep -n 'settlement\.max_concurrency' "$STATUS"
+  [ "$status" -ne 0 ]
+}
+
+@test "only the rehome migration still names settlement.max_concurrency" {
+  # The migration's source-side lookup is the one legitimate remaining mention;
+  # anything else is a reader that survived the rehome.
+  cd "$REPO_DIR"
+  run grep -rl 'settlement\.max_concurrency' scripts cli adapters install.sh
+  # grep exits 1 when nothing matches, which is also a pass.
+  [ "$status" -eq 0 ] || { [ "$status" -eq 1 ]; return; }
+  stragglers="$(echo "$output" | grep -v '^scripts/migrations/' || true)"
+  [ -z "$stragglers" ]
 }
 
 @test "schema rejects _deprecated_legacy_source at root" {

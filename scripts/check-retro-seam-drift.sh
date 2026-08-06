@@ -19,15 +19,9 @@ RETRO_SKILL="skills/retro/SKILL.md"
 PROTECTED_READERS=(
   scripts/retro-prepare.sh
   scripts/retro-queue.sh
-  scripts/settlement-queue.sh
   scripts/scorecard-read.sh
   scripts/session-events.sh
-  scripts/consumption-contradiction-read.sh
 )
-
-# Handled apart from PROTECTED_READERS: see settlement_retro_surface_changed.
-SETTLEMENT_READER="scripts/settlement-processor.py"
-SETTLEMENT_CONTRACT_TEST="tests/test_settlement_queue.sh"
 
 contains_path() {
   local needle="$1" path
@@ -41,28 +35,7 @@ contains_path() {
 cli_reader_changed() {
   local commit="$1"
   git show --format= --unified=0 "$commit" -- cli/lore \
-    | grep -Eq '^[+-].*(scorecard-read\.sh|consumption-contradiction-read\.sh|current\|rows|consumption-contradiction\))'
-}
-
-# scripts/settlement-processor.py runs thirteen commands across ~4200 lines; the
-# retro evidence pack consumes about ninety of them — retro_status_projection and
-# the status window response that carries it (scripts/retro-prepare.sh reads only
-# `settlement status --json` and only its retro_projection object). Whole-file
-# protection therefore charged every retry-errors, archive, or GC edit with a
-# retro contract it never touched. Discriminate on diff content instead, the way
-# cli_reader_changed already does for cli/lore: name the retro surface and the
-# retro contract test is required; edit anywhere else in the file and the
-# settlement queue's own contract suite discharges the pairing.
-#
-# Known limitation: census_runs feeds the projection its rows, and a change to
-# that row set does not have to name any token below. That gap is covered rather
-# than ignored — githooks/pre-push runs the full reader contract suite for every
-# range touching this file, so a change that actually moves the projection fails
-# there instead of passing unnoticed.
-settlement_retro_surface_changed() {
-  local commit="$1"
-  git show --format= --unified=0 "$commit" -- "$SETTLEMENT_READER" \
-    | grep -Eq '^[+-].*(retro_status_projection|retro_projection|reader_contract_version|queue_transitions|completed_envelopes|grounding_outcomes|def status\()'
+    | grep -Eq '^[+-].*(scorecard-read\.sh|current\|rows)'
 }
 
 skill_has_companion() {
@@ -71,7 +44,7 @@ skill_has_companion() {
   local path
   for path in "$@"; do
     case "$path" in
-      scripts/retro-*.sh|scripts/settlement-queue.sh|scripts/settlement-processor.py|scripts/scorecard-read.sh|scripts/session-events.sh|scripts/consumption-contradiction-read.sh|tests/frameworks/retro_prepare.bats|scripts/check-retro-seam-drift.sh|tests/test_retro_seam_drift_check.sh|tests/test_retro_evidence_pack_protocol.sh)
+      scripts/retro-*.sh|scripts/scorecard-read.sh|scripts/session-events.sh|tests/frameworks/retro_prepare.bats|scripts/check-retro-seam-drift.sh|tests/test_retro_seam_drift_check.sh|tests/test_retro_evidence_pack_protocol.sh)
         return 0
         ;;
     esac
@@ -105,24 +78,8 @@ while IFS= read -r commit; do
     reader_change=1
   fi
 
-  # A settlement-processor edit that names the retro surface is a protected
-  # reader change; one that does not answers to the settlement contract suite.
-  settlement_change=0
-  if contains_path "$SETTLEMENT_READER" "${paths[@]}"; then
-    if settlement_retro_surface_changed "$commit"; then
-      reader_change=1
-    else
-      settlement_change=1
-    fi
-  fi
-
   if [[ $reader_change -eq 1 ]] && ! contains_path "$CONTRACT_TEST" "${paths[@]}"; then
     echo "retro seam drift: $commit changes a protected reader without $CONTRACT_TEST" >&2
-    failures=$((failures + 1))
-  elif [[ $settlement_change -eq 1 ]] \
-    && ! contains_path "$CONTRACT_TEST" "${paths[@]}" \
-    && ! contains_path "$SETTLEMENT_CONTRACT_TEST" "${paths[@]}"; then
-    echo "retro seam drift: $commit changes $SETTLEMENT_READER without $CONTRACT_TEST or $SETTLEMENT_CONTRACT_TEST" >&2
     failures=$((failures + 1))
   fi
 

@@ -510,8 +510,8 @@ if bad:
 }
 
 @test "codex declares --ask-for-approval rejected at arity 1 for headless use" {
-  # The flag that took the settlement executor path down: it exists on the
-  # codex root parser but not on `codex exec`. Both spellings must be declared
+  # This flag exists on the codex root parser but not on `codex exec`, so a
+  # headless invocation that forwards it fails. Both spellings must be declared
   # rejected AND carry arity 1 — arity is what lets the filter drop the value
   # with the flag instead of leaving it to bind as the subcommand positional.
   run python3 -c '

@@ -33,8 +33,8 @@ for token in ["causal interpretation", "D1–D5", "Check 7", "suggestion selecti
 absence = text.split("#### Absence is never green", 1)[1].split("#### Tier-aware evidence", 1)[0]
 for token in [
     "not-computable",
-    "dormant-census",
-    "abstains below its registered sample floor",
+    "below its declared floor",
+    "never green",
 ]:
     assert token in absence, f"absence doctrine missing: {token}"
 
@@ -59,14 +59,6 @@ for token in [
 ]:
     assert token in pack_contract, f"reader seam doctrine missing: {token}"
 
-vocabulary = text.split("#### Consumer-contradiction vocabulary", 1)[1].split("### Step 3", 1)[0]
-for token in [
-    "pending | verified | contradicted",
-    "lore consumption-contradiction read",
-    "settled_at",
-]:
-    assert token in vocabulary, f"contradiction lifecycle doctrine missing: {token}"
-
 assert "no-published-reader" not in text, "stale pre-reader doctrine resurfaced"
 assert "not-computable:dormant-census" not in text, "dormant census is an abstention, not not-computable"
 
@@ -74,12 +66,30 @@ for token in [
     '"reader_contract_version":"1"',
     '"projection_mode":projection_mode',
     '"stable_empty_shape":empty_shape',
-    "consumer_contradiction_lifecycle",
-    "queue_transitions",
-    "completed_envelopes",
-    "grounding_outcomes",
 ]:
     assert token in prepare, f"published reader contract missing: {token}"
+
+# The settlement pipeline and the consumption-contradiction channel are gone.
+# Assert their absence: a reader, fact, or calculator that reappears here has
+# no writer left to feed it and would report not-computable forever.
+RETIRED = [
+    "settlement",
+    "consumption-contradiction",
+    "consumer_contradiction_lifecycle",
+    "settlement_health_inputs",
+    "concerns_contradictions",
+    "audit_lag",
+    "audit_realization",
+    "grounding_failure_rate",
+    "trigger_realization",
+    "candidate_queue_backlog",
+    "judge_liveness",
+    "consumer_contradiction_routing",
+]
+for token in RETIRED:
+    assert token not in prepare, f"retired evidence-pack surface reintroduced in prepare: {token}"
+    assert token not in text, f"retired evidence-pack surface reintroduced in the retro skill: {token}"
+    assert token not in drift_check, f"retired path reintroduced in the seam-drift checker: {token}"
 
 for token in [
     "tests/frameworks/retro_prepare.bats",

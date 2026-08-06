@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# audit-artifact.sh — Route a producer artifact through the settlement judges.
+# audit-artifact.sh — Route a producer artifact through the judges by hand.
 #
 # All three judges are wired: correctness-gate (task #12), curator (task #17),
 # and reverse-auditor (task #22). The reverse-auditor emission is routed
@@ -512,9 +512,9 @@ Arguments:
 
 Options:
   --kind K --id ID           Dispatch the per-kind, per-source-row audit path.
-                             K ∈ {task-claim, omission, consumption-contradiction}.
+                             K ∈ {task-claim, omission, commons}.
                              ID is the natural id of the source row
-                             (claim_id | candidate_id | contradiction_id).
+                             (claim_id | candidate_id).
                              The wrapper resolves exactly one row from the
                              matching file under _work/<slug>/ and routes
                              only that row through the judge pipeline.
@@ -650,9 +650,9 @@ if [[ -n "$KIND_FLAG" || -n "$ID_FLAG" ]]; then
     exit 1
   fi
   case "$KIND_FLAG" in
-    task-claim|omission|consumption-contradiction|commons) : ;;
+    task-claim|omission|commons) : ;;
     *)
-      echo "[audit] Error: --kind must be 'task-claim', 'omission', 'consumption-contradiction', or 'commons' (got '$KIND_FLAG')" >&2
+      echo "[audit] Error: --kind must be 'task-claim', 'omission', or 'commons' (got '$KIND_FLAG')" >&2
       exit 1
       ;;
   esac
@@ -831,11 +831,10 @@ fi
 #   1. absolute path that exists
 #   2. $KDIR/_work/<slug>/ directory
 #   3. $KDIR/_followups/<slug>/ directory
-# Wired artifact types: task-claims (from _work/<slug>/task-claims.jsonl),
-# omission (from _work/<slug>/audit-candidates.jsonl), consumption-contradiction
-# (from _work/<slug>/consumption-contradictions.jsonl). Other producer
-# surfaces (e.g. /pr-review followups) keep their artifacts local without
-# routing them through this pipeline.
+# Wired artifact types: task-claims (from _work/<slug>/task-claims.jsonl) and
+# omission (from _work/<slug>/audit-candidates.jsonl). Other producer surfaces
+# (e.g. /pr-review followups) keep their artifacts local without routing them
+# through this pipeline.
 
 ARTIFACT_PATH=""
 ARTIFACT_TYPE=""
@@ -861,10 +860,9 @@ fi
 # --- Artifact-type refinement ---
 # Path-provided arguments must point at a per-kind source file; directory
 # inputs resolve to the first per-kind file present. The dispatch is closed:
-# only the three live streams are recognized.
+# only the live streams are recognized.
 TASK_CLAIMS_PATH=""
 AUDIT_CANDIDATES_PATH=""
-CONSUMPTION_CONTRADICTIONS_PATH=""
 
 if [[ "$ARTIFACT_TYPE" == "path-provided" ]]; then
   if [[ "$ARTIFACT_PATH" == *"/task-claims.jsonl" && -f "$ARTIFACT_PATH" ]]; then
@@ -873,34 +871,26 @@ if [[ "$ARTIFACT_TYPE" == "path-provided" ]]; then
   elif [[ "$ARTIFACT_PATH" == *"/audit-candidates.jsonl" && -f "$ARTIFACT_PATH" ]]; then
     AUDIT_CANDIDATES_PATH="$ARTIFACT_PATH"
     ARTIFACT_TYPE="omission"
-  elif [[ "$ARTIFACT_PATH" == *"/consumption-contradictions.jsonl" && -f "$ARTIFACT_PATH" ]]; then
-    CONSUMPTION_CONTRADICTIONS_PATH="$ARTIFACT_PATH"
-    ARTIFACT_TYPE="consumption-contradiction"
   elif [[ -d "$ARTIFACT_PATH" && -f "$ARTIFACT_PATH/task-claims.jsonl" ]]; then
     TASK_CLAIMS_PATH="$ARTIFACT_PATH/task-claims.jsonl"
     ARTIFACT_TYPE="task-claims"
   elif [[ -d "$ARTIFACT_PATH" && -f "$ARTIFACT_PATH/audit-candidates.jsonl" ]]; then
     AUDIT_CANDIDATES_PATH="$ARTIFACT_PATH/audit-candidates.jsonl"
     ARTIFACT_TYPE="omission"
-  elif [[ -d "$ARTIFACT_PATH" && -f "$ARTIFACT_PATH/consumption-contradictions.jsonl" ]]; then
-    CONSUMPTION_CONTRADICTIONS_PATH="$ARTIFACT_PATH/consumption-contradictions.jsonl"
-    ARTIFACT_TYPE="consumption-contradiction"
   fi
 elif [[ "$ARTIFACT_TYPE" == "work-item" || "$ARTIFACT_TYPE" == "work-item-archived" ]]; then
   # Artifact presence, not directory presence, decides the owning dir: an
   # active stub dir can coexist with the archive copy that actually holds the
   # source files (e.g. after `lore work archive` leaves a stub behind). When
-  # the active dir holds none of the three auto-discoverable files but the
-  # archive sibling holds at least one, re-pin to the archive copy so the
-  # source resolves and verdicts land beside it.
+  # the active dir holds none of the auto-discoverable files but the archive
+  # sibling holds at least one, re-pin to the archive copy so the source
+  # resolves and verdicts land beside it.
   if [[ "$ARTIFACT_TYPE" == "work-item" \
         && ! -f "$ARTIFACT_PATH/task-claims.jsonl" \
-        && ! -f "$ARTIFACT_PATH/audit-candidates.jsonl" \
-        && ! -f "$ARTIFACT_PATH/consumption-contradictions.jsonl" ]]; then
+        && ! -f "$ARTIFACT_PATH/audit-candidates.jsonl" ]]; then
     _archive_sibling="$KDIR/_work/_archive/$ARTIFACT_ID"
     if [[ -f "$_archive_sibling/task-claims.jsonl" \
-          || -f "$_archive_sibling/audit-candidates.jsonl" \
-          || -f "$_archive_sibling/consumption-contradictions.jsonl" ]]; then
+          || -f "$_archive_sibling/audit-candidates.jsonl" ]]; then
       echo "[audit] Active work-item dir holds no source artifact; using archive copy: $_archive_sibling" >&2
       ARTIFACT_PATH="$_archive_sibling"
       ARTIFACT_TYPE="work-item-archived"
@@ -912,9 +902,6 @@ elif [[ "$ARTIFACT_TYPE" == "work-item" || "$ARTIFACT_TYPE" == "work-item-archiv
   elif [[ -f "$ARTIFACT_PATH/audit-candidates.jsonl" ]]; then
     AUDIT_CANDIDATES_PATH="$ARTIFACT_PATH/audit-candidates.jsonl"
     ARTIFACT_TYPE="omission"
-  elif [[ -f "$ARTIFACT_PATH/consumption-contradictions.jsonl" ]]; then
-    CONSUMPTION_CONTRADICTIONS_PATH="$ARTIFACT_PATH/consumption-contradictions.jsonl"
-    ARTIFACT_TYPE="consumption-contradiction"
   fi
 fi
 
@@ -939,10 +926,6 @@ if [[ -n "$KIND_FLAG" && -n "$ID_FLAG" ]]; then
     omission)
       kind_basename="audit-candidates.jsonl"
       kind_id_field="candidate_id"
-      ;;
-    consumption-contradiction)
-      kind_basename="consumption-contradictions.jsonl"
-      kind_id_field="contradiction_id"
       ;;
     commons)
       kind_basename="promoted-commons.jsonl"
@@ -1004,20 +987,12 @@ PYEOF
     task-claim)
       TASK_CLAIMS_PATH="$kind_source_file"
       AUDIT_CANDIDATES_PATH=""
-      CONSUMPTION_CONTRADICTIONS_PATH=""
       ARTIFACT_TYPE="task-claims"
       ;;
     omission)
       TASK_CLAIMS_PATH=""
       AUDIT_CANDIDATES_PATH="$kind_source_file"
-      CONSUMPTION_CONTRADICTIONS_PATH=""
       ARTIFACT_TYPE="omission"
-      ;;
-    consumption-contradiction)
-      TASK_CLAIMS_PATH=""
-      AUDIT_CANDIDATES_PATH=""
-      CONSUMPTION_CONTRADICTIONS_PATH="$kind_source_file"
-      ARTIFACT_TYPE="consumption-contradiction"
       ;;
     commons)
       # A promoted-commons.jsonl row carries claim_id + claim + falsifier, so the
@@ -1026,7 +1001,6 @@ PYEOF
       # assertion fork (no per-kind extractor or gate template needed).
       TASK_CLAIMS_PATH="$kind_source_file"
       AUDIT_CANDIDATES_PATH=""
-      CONSUMPTION_CONTRADICTIONS_PATH=""
       ARTIFACT_TYPE="commons"
       # The row's entry_path (flowback authority) keys the trust-ledger mirror
       # of this audit's deterministic check results.
@@ -1053,41 +1027,10 @@ PYEOF
   ARTIFACT_PATH="$kind_source_file"
   # Synthesize a priority-claims file from the single resolved id so the
   # downstream filter narrows claim_payload to that one row. The extractor
-  # surfaces `claim_id` on each claim — for task-claim/omission that's the
-  # natural row id (claim_id|candidate_id), so the dispatch id flows through
-  # directly. For consumption-contradiction the row's natural id is
-  # `contradiction_id` but the extractor's per-claim id is the wrapped
-  # `claim_payload.claim_id`; pull that value out so the priority filter
-  # matches what the extractor emits.
+  # surfaces `claim_id` on each claim, which is the natural row id
+  # (claim_id|candidate_id), so the dispatch id flows through directly.
   KIND_PRIORITY_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-kind-priority.XXXXXX")
-  if [[ "$KIND_FLAG" == "consumption-contradiction" ]]; then
-    priority_id=$(KIND_FILE="$kind_source_file" KIND_ID="$ID_FLAG" python3 - <<'PYEOF'
-import json, os
-want = os.environ["KIND_ID"]
-with open(os.environ["KIND_FILE"], encoding="utf-8") as fh:
-    for line in fh:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("contradiction_id") or "") == want:
-            payload = row.get("claim_payload") if isinstance(row.get("claim_payload"), dict) else {}
-            inner = payload.get("claim_id")
-            print(str(inner) if inner else want)
-            break
-    else:
-        print(want)
-PYEOF
-)
-    printf '["%s"]\n' "$priority_id" > "$KIND_PRIORITY_TMP"
-  else
-    printf '["%s"]\n' "$ID_FLAG" > "$KIND_PRIORITY_TMP"
-  fi
+  printf '["%s"]\n' "$ID_FLAG" > "$KIND_PRIORITY_TMP"
   PRIORITY_CLAIMS_FILE="$KIND_PRIORITY_TMP"
 fi
 
@@ -1101,9 +1044,9 @@ fi
 # error. Branch-aware reconciliation per Appendix B of the plan is future work.
 build_resolved_input() {
   local dry_run_flag="$1"  # "true" or "false"
-  python3 - "$ARTIFACT_ID" "$ARTIFACT_PATH" "$ARTIFACT_TYPE" "$KDIR" "$TASK_CLAIMS_PATH" "$AUDIT_CANDIDATES_PATH" "$CONSUMPTION_CONTRADICTIONS_PATH" "$dry_run_flag" << 'PYEOF'
+  python3 - "$ARTIFACT_ID" "$ARTIFACT_PATH" "$ARTIFACT_TYPE" "$KDIR" "$TASK_CLAIMS_PATH" "$AUDIT_CANDIDATES_PATH" "$dry_run_flag" << 'PYEOF'
 import json, re, sys
-artifact_id, artifact_path, artifact_type, kdir, task_claims_path, audit_candidates_path, consumption_contradictions_path, dry_run_flag = sys.argv[1:9]
+artifact_id, artifact_path, artifact_type, kdir, task_claims_path, audit_candidates_path, dry_run_flag = sys.argv[1:8]
 
 out = {
     "artifact_id": artifact_id,
@@ -1321,62 +1264,6 @@ elif audit_candidates_path:
     if skipped:
         out["audit_candidates_skipped"] = skipped
 
-elif consumption_contradictions_path:
-    # Consumption-contradiction rows already carry a fully-grounded
-    # claim_payload (architecture/consumption-contradictions/sidecar-schema.md).
-    # We unwrap that payload as the per-claim input the gate adjudicates.
-    claims = []
-    skipped = []
-    try:
-        with open(consumption_contradictions_path, encoding="utf-8") as fh:
-            for line_no, line in enumerate(fh, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError as e:
-                    skipped.append(f"line {line_no}: JSONDecodeError: {e}")
-                    continue
-                if not isinstance(row, dict):
-                    skipped.append(f"line {line_no}: row is not an object")
-                    continue
-                contradiction_id = str(row.get("contradiction_id") or "")
-                if not contradiction_id:
-                    skipped.append(f"line {line_no}: missing contradiction_id")
-                    continue
-                payload = row.get("claim_payload") if isinstance(row.get("claim_payload"), dict) else {}
-                if not (payload.get("file") and payload.get("line_range") and payload.get("falsifier")):
-                    skipped.append(f"{contradiction_id}: missing one of claim_payload.file/line_range/falsifier")
-                    continue
-                claim = {
-                    "claim_id": payload.get("claim_id") or contradiction_id,
-                    "claim_text": payload.get("claim_text") or row.get("contradiction_rationale") or "",
-                    "file": payload.get("file"),
-                    "line_range": payload.get("line_range"),
-                    "exact_snippet": payload.get("exact_snippet") or None,
-                    "normalized_snippet_hash": payload.get("normalized_snippet_hash") or None,
-                    "falsifier": payload.get("falsifier"),
-                    "evidence_ref": {"path": consumption_contradictions_path, "line": line_no, "contradiction_id": contradiction_id},
-                }
-                claims.append(claim)
-    except OSError as e:
-        print(f"[audit] extractor: could not read consumption-contradictions.jsonl — {e}", file=sys.stderr)
-        sys.exit(1)
-
-    if not claims:
-        reason = "; ".join(skipped) if skipped else "no rows found in consumption-contradictions.jsonl"
-        print(f"[audit] extractor: {reason}", file=sys.stderr)
-        sys.exit(1)
-
-    out["consumption_contradictions_path"] = consumption_contradictions_path
-    out["claim_payload"] = claims
-    out["claim_count"] = len(claims)
-    out["producer_role"] = "consumer-contradiction-channel"
-    out["producer_template_version"] = "consumption-contradictions-jsonl"
-    if skipped:
-        out["consumption_contradictions_skipped"] = skipped
-
 print(json.dumps(out, indent=2))
 PYEOF
 }
@@ -1429,25 +1316,6 @@ print(n)
 ' "$AUDIT_CANDIDATES_PATH" 2>/dev/null || echo "?")
       echo "[audit]   claim_count:   $_claim_count (per-omission → claim_id=candidate_id from row)"
     fi
-    if [[ -n "$CONSUMPTION_CONTRADICTIONS_PATH" ]]; then
-      echo "[audit]   consumption_contradictions: $CONSUMPTION_CONTRADICTIONS_PATH"
-      _claim_count=$(python3 -c '
-import json, sys
-n = 0
-for line in open(sys.argv[1], encoding="utf-8"):
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        row = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    if isinstance(row, dict) and row.get("contradiction_id"):
-        n += 1
-print(n)
-' "$CONSUMPTION_CONTRADICTIONS_PATH" 2>/dev/null || echo "?")
-      echo "[audit]   claim_count:   $_claim_count (per-contradiction → claim_id from claim_payload)"
-    fi
     echo "[audit] Stub implementation — no judges spawned."
     echo "[audit] See $KDIR/architecture/evidence/audit-pipeline-contract.md for the full pipeline."
   fi
@@ -1463,7 +1331,6 @@ fi
 # fork. Each kind has its own agent template + calibration log:
 #   task-claims              → correctness-gate-assertion     (hard-cal)
 #   omission                 → correctness-gate-omission      (soft-cal-with-discrimination)
-#   consumption-contradiction→ correctness-gate-contradiction (hard-cal)
 # The marker file and per-gate logs are keyed by the kind-specialized template
 # name; the dispatcher resolves that name once and threads it through the
 # scorecard rows + the per-claim verdicts envelope.
@@ -1473,9 +1340,6 @@ case "$ARTIFACT_TYPE" in
     ;;
   omission)
     GATE_TEMPLATE_NAME="correctness-gate-omission"
-    ;;
-  consumption-contradiction)
-    GATE_TEMPLATE_NAME="correctness-gate-contradiction"
     ;;
   commons)
     # Commons-entry claims are assertion-style (claim + falsifier); reuse the
@@ -1488,7 +1352,7 @@ case "$ARTIFACT_TYPE" in
     # gate to adjudicate them; default to the assertion fork because its
     # adjudication discipline is the closest match for free-form task-claim
     # style claims. The dispatcher above narrows ARTIFACT_TYPE to one of the
-    # three live kinds whenever a per-kind file is present, so this branch is
+    # live kinds whenever a per-kind file is present, so this branch is
     # reached only for unrecognized path inputs (a rare legacy path).
     GATE_TEMPLATE_NAME="correctness-gate-assertion"
     ;;
@@ -1620,12 +1484,12 @@ Emit exactly one JSON object matching the Correctness-gate output shape. No mark
 fi
 
 # Validate correctness-gate output shape per contract.md. Required:
-#   judge ∈ {correctness-gate-assertion, correctness-gate-omission,
-#            correctness-gate-contradiction}; the per-claim verdicts shape is
-#            identical across the three forks (the kind specialization lives in
-#            the template prose + per-gate calibration fixture set, not in the
-#            output schema). Legacy "correctness-gate" is accepted as a
-#            transitional alias during the Phase 4 cutover.
+#   judge ∈ {correctness-gate-assertion, correctness-gate-omission}; the
+#            per-claim verdicts shape is identical across the forks (the kind
+#            specialization lives in the template prose + per-gate calibration
+#            fixture set, not in the output schema). "correctness-gate" and
+#            "correctness-gate-contradiction" are accepted so verdict files
+#            written by earlier forks stay readable.
 #   judge_template_version present (non-empty)
 #   verdicts is an array; every entry has claim_id, verdict ∈ {verified,
 #     unverified, contradicted}, evidence non-empty; contradicted ⇒
@@ -1722,8 +1586,6 @@ if [[ -n "$TASK_CLAIMS_PATH" ]]; then
   OWNING_SOURCE_BASENAME=$(basename "$TASK_CLAIMS_PATH")
 elif [[ -n "$AUDIT_CANDIDATES_PATH" ]]; then
   OWNING_SOURCE_BASENAME=$(basename "$AUDIT_CANDIDATES_PATH")
-elif [[ -n "$CONSUMPTION_CONTRADICTIONS_PATH" ]]; then
-  OWNING_SOURCE_BASENAME=$(basename "$CONSUMPTION_CONTRADICTIONS_PATH")
 fi
 
 # resolve_owning_dir — owning dir for a per-item write, probed against the

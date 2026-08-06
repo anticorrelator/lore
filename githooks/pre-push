@@ -17,7 +17,7 @@ cd "$REPO_ROOT"
 CHECKER="scripts/check-retro-seam-drift.sh"
 [[ -f "$CHECKER" ]] || exit 0   # pre-checker clone; nothing to enforce
 
-PROTECTED_PATTERN='^(scripts/retro-.*\.sh|scripts/settlement-queue\.sh|scripts/settlement-processor\.py|scripts/scorecard-read\.sh|scripts/session-events\.sh|scripts/consumption-contradiction-read\.sh|skills/retro/SKILL\.md|tests/frameworks/retro_prepare\.bats|scripts/check-retro-seam-drift\.sh|tests/test_retro_seam_drift_check\.sh|tests/test_retro_evidence_pack_protocol\.sh)$'
+PROTECTED_PATTERN='^(scripts/retro-.*\.sh|scripts/scorecard-read\.sh|scripts/session-events\.sh|skills/retro/SKILL\.md|tests/frameworks/retro_prepare\.bats|scripts/check-retro-seam-drift\.sh|tests/test_retro_seam_drift_check\.sh|tests/test_retro_evidence_pack_protocol\.sh)$'
 
 ZERO="0000000000000000000000000000000000000000"
 overall_rc=0

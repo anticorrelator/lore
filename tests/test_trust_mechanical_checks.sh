@@ -3,24 +3,16 @@
 # mechanical-check mirror into the trust ledger (_trust/trust-events.jsonl).
 #
 # Capabilities proven:
-#   1. A drift-sweep run appends one mechanical-check event per classified
-#      entry: result=fail for a drifted entry, pass for an unchanged one,
-#      with run_id = the sweep's HEAD sha.
-#   2. Re-running the sweep at the same HEAD appends nothing (event_id dedupe).
-#   3. --dry-run appends nothing.
-#   4. A failed ledger append warns and does NOT fail the sweep; enqueue
-#      behavior is unaffected.
-#   5. A commons-kind audit (injected judges) appends reanchor-omission-claim
+#   1. A commons-kind audit (injected judges) appends reanchor-omission-claim
 #      and grounding-preflight events attributed to the audited entry, without
 #      changing the audit's verdict behavior.
-#   6. A non-commons audit appends no trust events (the ledger keys on
+#   2. A non-commons audit appends no trust events (the ledger keys on
 #      knowledge-entry identity; task-claim artifacts have none).
 
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPTS_DIR="$REPO_DIR/scripts"
-SWEEP="$SCRIPTS_DIR/drift-sweep.sh"
 AUDIT="$SCRIPTS_DIR/audit-artifact.sh"
 PROMOTE="$SCRIPTS_DIR/lore-promote.sh"
 
@@ -59,78 +51,12 @@ PYEOF
 }
 
 # =============================================
-# Drift-sweep sandbox: one drifted entry, one unchanged entry
-# =============================================
-KDIR="$TEST_DIR/knowledge"
-SRC="$TEST_DIR/src"
-mkdir -p "$KDIR/conventions" "$KDIR/_work/proactive-drift-sweep-re-hash-commons-snippets-vs" "$SRC"
-git -C "$SRC" init -q
-git -C "$SRC" config user.email t@t
-git -C "$SRC" config user.name t
-echo "line one" > "$SRC/tracked.txt"
-git -C "$SRC" add -A && git -C "$SRC" commit -qm base
-BASE_SHA=$(git -C "$SRC" rev-parse HEAD)
-echo "line two" >> "$SRC/tracked.txt"
-git -C "$SRC" add -A && git -C "$SRC" commit -qm drift
-HEAD_SHA=$(git -C "$SRC" rev-parse HEAD)
-
-cat > "$KDIR/conventions/drifted-entry.md" <<EOF
-# Drifted Entry Claim
-Drifted entry claim about tracked file behavior.
-<!-- learned: 2026-07-01 | confidence: high | related_files: tracked.txt | scale: subsystem | captured_at_sha: $BASE_SHA | status: current -->
-EOF
-cat > "$KDIR/conventions/steady-entry.md" <<EOF
-# Steady Entry Claim
-Steady entry claim.
-<!-- learned: 2026-07-01 | confidence: high | related_files: tracked.txt | scale: subsystem | captured_at_sha: $HEAD_SHA | status: current -->
-EOF
-
-export LORE_KNOWLEDGE_DIR="$KDIR"
-LEDGER="$KDIR/_trust/trust-events.jsonl"
-
-echo "=== Trust-ledger mechanical-check emission tests ==="
-echo ""
-echo "Test 1: drift-sweep mirrors per-entry classifications"
-bash "$SWEEP" --json --repo-root "$SRC" >/dev/null 2>&1
-assert_eq "drifted entry emits result=fail" \
-  "$(ledger_rows "$KDIR" | grep -c $'conventions/drifted-entry.md\tdrift-sweep\tfail')" "1"
-assert_eq "unchanged entry emits result=pass" \
-  "$(ledger_rows "$KDIR" | grep -c $'conventions/steady-entry.md\tdrift-sweep\tpass')" "1"
-assert_eq "run_id is the sweep HEAD sha" \
-  "$(ledger_rows "$KDIR" | head -1 | cut -f4)" "$HEAD_SHA"
-
-echo ""
-echo "Test 2: re-run at the same HEAD dedupes to a no-op"
-BEFORE=$(ledger_rows "$KDIR" | wc -l | tr -d ' ')
-bash "$SWEEP" --json --repo-root "$SRC" >/dev/null 2>&1
-assert_eq "row count unchanged after same-HEAD re-run" \
-  "$(ledger_rows "$KDIR" | wc -l | tr -d ' ')" "$BEFORE"
-
-echo ""
-echo "Test 3: --dry-run appends nothing"
-bash "$SWEEP" --dry-run --json --repo-root "$SRC" >/dev/null 2>&1
-assert_eq "row count unchanged after dry-run" \
-  "$(ledger_rows "$KDIR" | wc -l | tr -d ' ')" "$BEFORE"
-
-echo ""
-echo "Test 4: a failed ledger append warns and never fails the sweep"
-echo "line three" >> "$SRC/tracked.txt"
-git -C "$SRC" add -A && git -C "$SRC" commit -qm more
-chmod 444 "$LEDGER"
-SWEEP_ERR=$(bash "$SWEEP" --json --repo-root "$SRC" 2>&1 >/dev/null)
-SWEEP_RC=$?
-chmod 644 "$LEDGER"
-assert_eq "sweep exits 0 despite append failures" "$SWEEP_RC" "0"
-assert_eq "each failed append warned (2 classified entries)" \
-  "$(printf '%s' "$SWEEP_ERR" | grep -c 'trust-event append failed')" "2"
-assert_eq "no rows appended through the read-only ledger" \
-  "$(ledger_rows "$KDIR" | wc -l | tr -d ' ')" "$BEFORE"
-
-# =============================================
 # Audit sandbox: commons-kind audit with injected judges
 # =============================================
 echo ""
-echo "Test 5: commons audit mirrors reanchor + grounding-preflight results"
+echo "=== Trust-ledger mechanical-check emission tests ==="
+echo ""
+echo "Test 1: commons audit mirrors reanchor + grounding-preflight results"
 AKDIR="$TEST_DIR/audit-kdir"
 SLUG="wi-mc-commons"
 mkdir -p "$AKDIR/conventions" "$AKDIR/_work/$SLUG"
@@ -198,7 +124,7 @@ assert_eq "grounding-preflight result mirrored for the audited entry" \
   "$(ledger_rows "$AKDIR" | grep -c $"$ENTRY_REL\tgrounding-preflight\tpass")" "1"
 
 echo ""
-echo "Test 6: non-commons audit appends no trust events"
+echo "Test 2: non-commons audit appends no trust events"
 NSLUG="wi-mc-taskclaims"
 mkdir -p "$AKDIR/_work/$NSLUG"
 printf '{"slug":"%s"}\n' "$NSLUG" > "$AKDIR/_work/$NSLUG/_meta.json"

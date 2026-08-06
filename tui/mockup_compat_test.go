@@ -28,7 +28,7 @@ func TestMockupDumpCompatSideBySide(t *testing.T) {
 		width, height := m.listDims()
 		rollups := make(map[string]string)
 		rows := axisAGroupedRows(axisAWorkItems(), map[string]bool{}, rollups)
-		cl := axisAList(axisAColumns(), rows, width, height, "settlement-verdict-drill-in")
+		cl := axisAList(axisAColumns(), rows, width, height, "coordination-arc-drill-in")
 		cl.SetDecorator(axisARollupDecorator(width, rollups))
 
 		cfg := m.buildPaneConfig()

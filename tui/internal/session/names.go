@@ -16,12 +16,12 @@ const nameMaxLen = 48
 
 // reservedWords are lore/harness/Claude built-in concept words. An instance name
 // must never be mistakable for one of these — a fresh agent typing
-// `--instance settlement` should never wonder whether it is addressing a
+// `--instance knowledge` should never wonder whether it is addressing a
 // concept. Both the generator word lists and the LORE_TUI_INSTANCE override are
 // screened against this set.
 var reservedWords = map[string]bool{
 	"work": true, "spec": true, "plan": true, "plans": true, "thread": true,
-	"threads": true, "settlement": true, "session": true, "sessions": true,
+	"threads": true, "session": true, "sessions": true,
 	"knowledge": true, "memory": true, "capture": true, "remember": true,
 	"retro": true, "evolve": true, "followup": true, "scorecard": true,
 	"lore": true, "agent": true, "task": true, "tasks": true, "implement": true,

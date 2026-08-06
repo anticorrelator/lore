@@ -708,11 +708,11 @@ func TestProjectLabelsSortedDistinctNonEmpty(t *testing.T) {
 }
 
 func TestNearestLabelGuard(t *testing.T) {
-	labels := []string{"settlement-trust", "tui-rework"}
-	if got := NearestLabel("settlement-trus", labels); got != "settlement-trust" {
+	labels := []string{"coordination-trust", "tui-rework"}
+	if got := NearestLabel("coordination-trus", labels); got != "coordination-trust" {
 		t.Errorf("near-typo should match, got %q", got)
 	}
-	if got := NearestLabel("settlement-trust", labels); got != "" {
+	if got := NearestLabel("coordination-trust", labels); got != "" {
 		t.Errorf("exact label must not trigger the guard, got %q", got)
 	}
 	if got := NearestLabel("brand-new-stream", labels); got != "" {

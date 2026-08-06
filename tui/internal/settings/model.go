@@ -491,13 +491,6 @@ func (m *SettingsModel) buildWidget(parentPath, fieldName string, schema *Schema
 		widget = NewEnumSelector(dotPath, schema.Enum, schema.Enum, s, allowUnset)
 	case KindString:
 		s, _ := current.(string)
-		if !present {
-			switch dotPath {
-			case "settlement.active_hours.timezone":
-				s = "local"
-				present = true
-			}
-		}
 		minLen, _ := schema.MinLengthConstraint()
 		widget = NewTextInput(dotPath, fieldName, s, schema.PatternCompiled, minLen, present, allowUnset)
 	case KindInteger:
@@ -514,17 +507,8 @@ func (m *SettingsModel) buildWidget(parentPath, fieldName string, schema *Schema
 		// Only string-arrays are in the verified-current taxonomy (D1).
 		items := stringSliceFromAny(current)
 		minItems, _ := schema.MinItemsConstraint()
-		if dotPath == "settlement.active_hours.ranges" {
-			ranges := activeHoursRangesFromAny(current)
-			widget = NewActiveHoursRangesEditor(dotPath, fieldName, ranges, present)
-			break
-		}
 		if schema.Items != nil && schema.Items.Kind == KindEnum && len(schema.Items.Enum) > 0 {
 			allowed := append([]string(nil), schema.Items.Enum...)
-			if dotPath == "settlement.harness_selection.eligible_frameworks" && len(items) == 0 {
-				items = append([]string(nil), allowed...)
-				present = true
-			}
 			widget = NewEnumListEditor(dotPath, fieldName, items, allowed, minItems, schema.UniqueItems, present, allowUnset)
 		} else {
 			var itemPattern *regexp.Regexp
@@ -716,36 +700,6 @@ func stringSliceFromAny(v any) []string {
 			return nil
 		}
 		out = append(out, s)
-	}
-	return out
-}
-
-func activeHoursRangesFromAny(v any) []ActiveHoursRange {
-	var arr []any
-	switch typed := v.(type) {
-	case []any:
-		arr = typed
-	case []map[string]any:
-		arr = make([]any, 0, len(typed))
-		for _, row := range typed {
-			arr = append(arr, row)
-		}
-	default:
-		return nil
-	}
-	out := make([]ActiveHoursRange, 0, len(arr))
-	for _, row := range arr {
-		obj, ok := row.(map[string]any)
-		if !ok {
-			continue
-		}
-		start, _ := obj["start"].(string)
-		end, _ := obj["end"].(string)
-		days := stringSliceFromAny(obj["days"])
-		if start == "" || end == "" || len(days) == 0 {
-			continue
-		}
-		out = append(out, ActiveHoursRange{Days: days, Start: start, End: end})
 	}
 	return out
 }
@@ -1343,9 +1297,8 @@ func (m *SettingsModel) limitedWidget() FieldWidget {
 	return nil
 }
 
-// FocusDotPath moves the initial modal focus to a rendered settings path.
-// Hosts use this for context-sensitive entry points such as opening Settings
-// from the settlement panel directly at the settlement section.
+// FocusDotPath moves the initial modal focus to a rendered settings path, for
+// hosts that open the modal at a context-specific section.
 func (m *SettingsModel) FocusDotPath(dotPath string) {
 	m.nav.focusByDotPath(dotPath)
 }

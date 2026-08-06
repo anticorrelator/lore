@@ -93,7 +93,7 @@ Identity layers answer different questions:
 
 Never substitute one identity for another.
 
-The required v1 sources are `cycle_work`, `due_queue`, `settlement`, `scorecard_rows`, `scorecard_current`, `session_events`, `journal`, and `consumer_contradiction_lifecycle`. Every source row carries `reader`, `resolved_source`, `reader_contract_version`, `projection_mode`, `stable_empty_shape`, `coverage`, `content_identity`, `cursor`, `window_field`, `warnings`, and `reason`. Coverage is exactly `read | absent | unreadable | stale | not-computable`.
+The required v1 sources are `cycle_work`, `due_queue`, `scorecard_rows`, `scorecard_current`, `session_events`, and `journal`. Every source row carries `reader`, `resolved_source`, `reader_contract_version`, `projection_mode`, `stable_empty_shape`, `coverage`, `content_identity`, `cursor`, `window_field`, `warnings`, and `reason`. Coverage is exactly `read | absent | unreadable | stale | not-computable`.
 
 The registered reader is the reader prepare executes — never a paraphrase or a sibling implementation path. History readers take the caller's half-open `[start,end)` window and return their declared stable empty shape; `cycle_work` and `scorecard_current` stay snapshots because filtering them by event time would misstate their meaning. Content identity hashes only the stable projection fields capable of changing pack facts.
 
@@ -101,7 +101,7 @@ Each reader seam is one versioned contract: command, window or snapshot semantic
 
 Style, compression, and reorganization of this skill travel with the semantic change they describe. A standalone prose pass after behavior or contract tests have moved leaves three descriptions of one seam; keep prose, reader, and test moving as one mutation chain.
 
-The required fact groups are `cycle_artifacts`, `task_context_backlinks`, `concerns_contradictions`, `session_retrieval_friction_packets`, `review_events`, `scale_signals`, `scorecard_eligibility_deltas`, `telemetry_attribution_rework`, and `settlement_health_inputs`. A fact group is `available | absent | not-computable`; non-available facts carry `values: null` and a reason.
+The required fact groups are `cycle_artifacts`, `task_context_backlinks`, `session_retrieval_friction_packets`, `review_events`, `scale_signals`, `scorecard_eligibility_deltas`, and `telemetry_attribution_rework`. A fact group is `available | absent | not-computable`; non-available facts carry `values: null` and a reason.
 
 Every calculation row names its calculation/version, source IDs, numerator, denominator, value, unit, sample floor, threshold, disposition, and reason. Disposition is exactly `green | tripped | abstained | not-computable`.
 
@@ -114,7 +114,7 @@ Treat each state literally:
 - `absent`, `unreadable`, and `stale` are evidence states, never favorable verdicts.
 - `fixed_health.state=not-computable` withholds `normal`; it does not imply `pipeline-degraded` and does not invite the lead to guess.
 
-The six load-bearing calculations consume only the versioned published projections. Missing, unreadable, stale, malformed, or below-floor evidence keeps the calculation's emitted `not-computable` or `abstained` disposition and its reason — never green. A disabled settlement census stays an explicit `abstained: dormant-census`; judge liveness abstains below its registered sample floor; an empty bounded contradiction lifecycle is below sample, not proof of healthy routing.
+The load-bearing calculations consume only the versioned published projections. Missing, unreadable, stale, malformed, or below-floor evidence keeps the calculation's emitted `not-computable` or `abstained` disposition and its reason — never green. An empty window is below sample, not proof of health.
 
 Do not consume or mutate `_evolve/accepted-clusters.jsonl` to fill any of these gaps.
 
@@ -132,11 +132,11 @@ Preserve the scorecard tier boundaries surfaced by the pack:
 
 Never mix tiers in one cell — the same metric measures different things at different tiers. Never let an improvement in one metric compensate for a regression in another; offsetting is exactly how a regression hides. When fixed health is `pipeline-degraded`, treat headline and delta cells as non-evidentiary. When it is `not-computable`, name the missing substrate rather than manufacturing a headline.
 
-#### Consumer-contradiction vocabulary
+#### Verification vocabulary
 
-The row schema names `status` — `pending | verified | contradicted`; the terminal pair is `verified | contradicted`. The published `lore consumption-contradiction read` projection exposes each row's `created_at`, terminal `settled_at`, status, work-item identity, and settling run identity, across active and archived cycles within the caller's half-open window. Consume that lifecycle array directly; do not inspect sidecar files or substitute scorecard verdicts.
+Verification is in-band and agent-owned. An agent that checks a knowledge entry against code reports `held` when the code confirms the entry and `contradicted` when it falsifies it, and every `contradicted` report names the resolution its reporter owned: `corrected` rewrote the entry in place, `disputed` left a dated marker for the next agent with wider context. Both are settled outcomes. Read a `disputed` marker as work completed and open to revision, never as queue depth.
 
-Compatibility guard: reject the retired lifecycle words `routed`, `rejected`, `accepted`, `declined`, `remediated` as status values. The narrative report shape is `Consumption contradictions: N total (P pending verdict, V verified, C contradicted)`; the routing denominator is every produced lifecycle row and the numerator is `status ∈ {verified, contradicted}`.
+Compatibility guard: there is no out-of-band queue, no backlog, and no sidecar lifecycle to fold, so there is no routing rate, no backlog depth, and no lag statistic to compute or report over verification. Reject the retired lifecycle words `pending`, `routed`, `verified`, `rejected`, `accepted`, `declined`, and `remediated` as verification statuses. The resolution vocabulary is exactly `corrected | disputed`, and a contradiction has no state between its report and its resolution.
 
 ### Step 3: Adjudicate the Cycle
 
@@ -204,9 +204,9 @@ Select three checks from Checks 1–6 at invocation time, without replacement, a
 
 If a check becomes formulaic across repeated selections, propose a change through the normal suggestion branch. Never tune Check 7 away.
 
-#### Settlement pipeline health checks
+#### Fixed health
 
-Read `fixed_health` and its referenced calculation rows before reading headline or delta facts. The script is the sole home for arithmetic, floors, and thresholds; this skill names meanings and judgment boundaries only.
+Read `fixed_health` and its referenced calculation rows before reading headline or delta facts. The script is the sole home for arithmetic, floors, thresholds, and which calculations are load-bearing; this skill names meanings and judgment boundaries only.
 
 - `normal`: all load-bearing calculations produced trustworthy non-tripped results.
 - `warmup`: at least one trustworthy calculation abstained below floor and none tripped.
@@ -215,21 +215,7 @@ Read `fixed_health` and its referenced calculation rows before reading headline 
 
 Healthy checks remain silent in the report — green narration turns to ritual and buries the one check that trips. This is load-bearing healthy silence, not permission to omit pack rows.
 
-##### Check: Judge liveness
-
-The calculation reads completed run envelopes from the published settlement projection; fixture-calibration logs are not liveness evidence — they record calibration ceremonies, not per-verdict activity, and sit legitimately empty over healthy windows. The zero-output signature is `completed_runs_in_window == 0 AND settlement_queue_items_routed > 0`, and it trips regardless of sample size. Otherwise the registered floor applies before rate classification; below-floor completions are `abstained`, never green or tripped.
-
-##### Check: Consumer-contradiction routing
-
-Read the bounded `consumer_contradiction_lifecycle` projection. Below the registered floor the calculation abstains — preserve that. At or above it, the fixed arithmetic compares terminal `verified | contradicted` rows against all produced lifecycle rows. Missing or unreadable lifecycle evidence is `not-computable`, never a zero-rate shortcut and never green.
-
-##### Check: Candidate backlog
-
-A disabled census is `abstained: dormant-census` — never read the dormant backlog count as healthy or as tripped. With census enabled, the fixed calculation classifies pending counts from the settlement projection; a missing projection stays `not-computable`.
-
-##### Check: Grounding, audit lag, and realization
-
-Respect each calculation's source-coverage and disposition fields. A missing enqueue timestamp, source drift, or unavailable run envelope cannot become a zero numerator.
+Respect each calculation's source-coverage and disposition fields. Source drift, a missing timestamp, or an unavailable projection cannot become a zero numerator.
 
 ### Step 4: Author the Judgment Manifest
 

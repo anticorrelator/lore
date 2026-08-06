@@ -24,7 +24,6 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
 	"github.com/anticorrelator/lore/tui/internal/search"
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
-	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
@@ -95,8 +94,8 @@ func handlePanelRouting(m *model, msg tea.Msg, cb panelCallbacks) (tea.Cmd, bool
 				return nil, true
 			}
 		case "tab", "l":
-			// Tab and l both move focus left→right, matching the settlement
-			// and knowledge panels' h/l vocabulary. When on the right panel
+			// Tab and l both move focus left→right, matching the knowledge
+			// panel's h/l vocabulary. When on the right panel
 			// neither is consumed: Tab falls through to the detail view so it
 			// can cycle tabs; l is ordinary input there (and reaches the PTY
 			// in terminal mode).
@@ -153,7 +152,6 @@ func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		loadWorkItems(m.config.WorkDir),
 		loadPRStatus(),
-		loadSettlementStatus(),
 		indexPollTick(),
 		followup.LoadIndexCmd(m.config.KnowledgeDir),
 		runDoctor(),
@@ -535,7 +533,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		return m, tea.Batch(
 			loadWorkItems(m.config.WorkDir),
 			loadPRStatus(),
-			loadSettlementStatus(),
 			indexPollTick(),
 		)
 
@@ -745,9 +742,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 		switch msg.String() {
 		case "v":
-			// Enter the sessions workspace. Available from work and follow-ups;
-			// settlement keeps its own `v` (verdict drill-in), so sessions is
-			// reached from settlement via w→work→v. Focus-conjunct guarded so a
+			// Enter the sessions workspace. Focus-conjunct guarded so a
 			// terminal-focused session still forwards `v` to its PTY.
 			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.state = stateSessions
@@ -755,14 +750,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.focusedPanel = panelLeft
 				m.returnToCoordination = false
 				return m, m.sessionsRefreshCmd()
-			}
-		case "t":
-			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
-				m.state = stateSettlement
-				m.terminalMode = false
-				m.focusedPanel = panelLeft
-				m.returnToCoordination = false
-				return m, loadSettlementStatus()
 			}
 		case "ctrl+c":
 			// With the terminal focused, ctrl+c terminates that session only
@@ -799,7 +786,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m, nil
 			}
 		case "q":
-			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateSettlement || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.cleanupAllSubprocesses()
 				return m, tea.Quit
 			}
@@ -966,7 +953,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 			// stateKnowledge / no match: no-op.
 		case "K":
-			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateSettlement || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.prevState = m.state
 				m.state = stateKnowledge
 				m.browser = knowledge.NewBrowserModel(m.config.KnowledgeDir)
@@ -981,18 +968,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			// rebuild a fresh panel each open so previously-discarded
 			// drafts cannot leak across sessions; if init fails, surface a
 			// flash error so the user sees something instead of silence.
-			// From the settlement panel the modal opens focused at the
-			// settlement subtree — the durable-config home now that the
-			// panel carries no inline settings.
-			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateKnowledge || m.state == stateSettlement || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
-				focus := ""
-				if m.state == stateSettlement {
-					focus = "settlement"
-				}
-				return m.openSettingsModal(focus)
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateKnowledge || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
+				return m.openSettingsModal()
 			}
 		case "f":
-			if (m.state == stateWork || m.state == stateSessions || m.state == stateSettlement || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
+			if (m.state == stateWork || m.state == stateSessions || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.state = stateFollowUps
 				// Preserve items already loaded by the background poll so the
 				// counter and list don't flicker to 0 while the reload is in flight.
@@ -1018,22 +998,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.returnToCoordination = false
 				return m, loadWorkItems(m.config.WorkDir)
 			}
-			if m.state == stateSettlement {
-				m.state = stateWork
-				return m, loadWorkItems(m.config.WorkDir)
-			}
 		case "s":
 			if m.state == stateWork && m.focusedPanel == panelRight && !m.terminalMode {
 				if slug := m.list.CurrentSlug(); slug != "" {
 					return m, func() tea.Msg { return work.SpecRequestMsg{Slug: slug} }
 				}
-			}
-			if m.state == stateSettlement {
-				arg := "on"
-				if m.settlement.Status().ActiveHours.Enabled {
-					arg = "off"
-				}
-				return m, runSettlementVerb("schedule", arg)
 			}
 		case "i":
 			// 'i' launches /implement — dispatched here for the work-detail focus,
@@ -1075,7 +1044,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			// other state-switch keys use — a terminal-focused session still
 			// forwards `o` to its PTY. With zero arcs the view opens to its
 			// explicit empty state.
-			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateSettlement) &&
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions) &&
 				!(m.terminalMode && m.focusedPanel == panelRight) {
 				m.state = stateCoordination
 				m.terminalMode = false
@@ -1102,15 +1071,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				}
 			}
 		case "p":
-			// Pause is the existing settlement.enabled gate re-keyed: no
-			// separate `paused` field exists (D1).
-			if m.state == stateSettlement {
-				action := "disable"
-				if !m.settlement.Status().Enabled {
-					action = "enable"
-				}
-				return m, runSettlementAction(action)
-			}
 			if m.state == stateFollowUps && m.focusedPanel == panelRight && !m.terminalMode {
 				id := m.followupDetail.CurrentID()
 				status := m.followupDetail.Status()
@@ -1142,11 +1102,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				}
 			}
 		case "x":
-			if m.state == stateSettlement {
-				m.settlementProcessInFlight = true
-				m.settlementProcessStartedAt = time.Now()
-				return m, runSettlementAction("process")
-			}
 			// Close the selected session (confirm-gated). Focus-conjunct guarded so
 			// an attached terminal session still forwards `x` to its PTY.
 			if m.state == stateSessions && !(m.terminalMode && m.focusedPanel == panelRight) {
@@ -1159,10 +1114,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				if row, ok := m.coordinationDetail.CurrentSession(); ok {
 					return m.openSessionCloseConfirmFor(row)
 				}
-			}
-		case "m":
-			if m.state == stateSettlement {
-				return m.cycleSettlementModelTier()
 			}
 		case "P":
 			if m.state == stateFollowUps && m.focusedPanel == panelRight && !m.terminalMode {
@@ -1221,7 +1172,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.coordinationPanelCallbacks().resize()
 		m.resizeSessionPanels()
 
-		m.settlement = m.settlement.SetSize(msg.Width-2, msg.Height-4)
 		m.popup.SetSize(msg.Width, msg.Height)
 
 		return m, tea.Batch(wcmd, fcmd, bcmd)
@@ -1302,19 +1252,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.list = lm
 		return m, cmd
 
-	case settlementStatusLoadedMsg:
-		if msg.err != nil {
-			m.settlement = m.settlement.ReplaceStatus(settlement.Unavailable(compactErr("settlement status", msg.err)))
-			return m, nil
-		}
-		m.settlement = m.settlement.ReplaceStatus(msg.status)
-		if m.shouldAutoProcessSettlement(msg.status) {
-			m.settlementProcessInFlight = true
-			m.settlementProcessStartedAt = time.Now()
-			return m, runAutomaticSettlementProcess()
-		}
-		return m, nil
-
 	case doctorResultMsg:
 		// Persist (or clear) the drift banner. The status bar renders it
 		// only when flashErr is empty so transient user-facing errors keep
@@ -1322,31 +1259,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		// because install drift is a standing condition, not a transient.
 		m.doctorBanner = msg.banner
 		return m, nil
-
-	case settlementActionCompleteMsg:
-		if msg.action == "process" {
-			m.settlementProcessInFlight = false
-			m.settlementProcessStartedAt = time.Time{}
-		}
-		if msg.err != nil {
-			if !msg.automatic {
-				m.flashErr = compactErr("settlement "+msg.action, msg.err)
-				return m, loadSettlementStatus()
-			}
-			return m, nil
-		}
-		if msg.result.Status != nil {
-			m.settlement = m.settlement.ReplaceStatus(*msg.result.Status)
-		}
-		if msg.automatic {
-			return m, nil
-		}
-		message := msg.result.Message
-		if message == "" {
-			message = msg.action + " complete"
-		}
-		m.flashErr = "[settlement] " + message
-		return m, loadSettlementStatus()
 
 	case work.SpecRequestMsg:
 		return m.handleSpecRequest(msg)
@@ -1502,7 +1414,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 	case knowledge.BrowserDismissedMsg:
 		m.state = m.prevState
-		if m.state != stateWork && m.state != stateFollowUps && m.state != stateSessions && m.state != stateSettlement {
+		if m.state != stateWork && m.state != stateFollowUps && m.state != stateSessions {
 			m.state = stateWork
 		}
 		return m, nil
@@ -1751,10 +1663,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		bm, cmd := m.browser.Update(msg)
 		m.browser = bm
 		return m, cmd
-	case stateSettlement:
-		sm, cmd := m.settlement.Update(msg)
-		m.settlement = sm
-		return m, cmd
 	}
 
 	return m, nil
@@ -1777,32 +1685,6 @@ func (m *model) resizeSessionPanels() {
 	}
 }
 
-// cycleSettlementModelTier advances settlement.auditor_model to the next
-// alias in the active framework's model_routing.tiers list, writing through
-// the `lore settlement model` verb. A framework without declared tiers
-// disables the key with a visible status and performs no write.
-func (m model) cycleSettlementModelTier() (model, tea.Cmd) {
-	fw := m.settlement.Status().Harness.Selected
-	if fw == "" {
-		active, err := config.ResolveActiveFramework()
-		if err != nil {
-			m.flashErr = compactErr("model tier", err)
-			return m, nil
-		}
-		fw = active
-	}
-	tiers, err := config.LoadModelRoutingTiers(fw)
-	if err != nil {
-		m.flashErr = compactErr("model tier", err)
-		return m, nil
-	}
-	if len(tiers) == 0 {
-		m.flashErr = fmt.Sprintf("no tiers for %s", fw)
-		return m, nil
-	}
-	return m, runSettlementVerb("model", nextTier(tiers, m.settlement.Status().AuditorModel))
-}
-
 // nextTier returns the tier after current in the ordered list, wrapping at
 // the end; an unset or unknown current starts the cycle at the first tier.
 func nextTier(tiers []string, current string) string {
@@ -1812,91 +1694,6 @@ func nextTier(tiers []string, current string) string {
 		}
 	}
 	return tiers[0]
-}
-
-// settlementInFlightCeiling is the model-level belt to commands.go's
-// CommandContext suspenders. If the subprocess goroutine never returns
-// settlementActionCompleteMsg (e.g. the kill itself wedges, or the
-// goroutine leaks for an unrelated reason), settlementProcessInFlight
-// would stay true forever and gate every subsequent auto-process tick.
-// This ceiling must comfortably exceed settlementSubprocessTimeout so
-// the normal cancel-and-kill path fires first under typical hangs.
-const settlementInFlightCeiling = 12 * time.Minute
-
-// settlementInFlightFailsafe clears a stuck settlementProcessInFlight
-// flag and surfaces a flash error so the user knows auto-process
-// recovered. Called from handleIndexPollTick so every 5s tick re-checks.
-// Returns the (possibly mutated) model and whether a recovery fired.
-func (m model) settlementInFlightFailsafe() (model, bool) {
-	if !m.settlementProcessInFlight {
-		return m, false
-	}
-	if m.settlementProcessStartedAt.IsZero() {
-		// Defensive: flag is true but timestamp was never set. Clear it
-		// so we don't deadlock the auto-process loop.
-		m.settlementProcessInFlight = false
-		m.flashErr = "[settlement] in-flight flag had no timestamp — cleared"
-		return m, true
-	}
-	if time.Since(m.settlementProcessStartedAt) <= settlementInFlightCeiling {
-		return m, false
-	}
-	m.settlementProcessInFlight = false
-	m.settlementProcessStartedAt = time.Time{}
-	m.flashErr = fmt.Sprintf("[settlement] subprocess flag stuck >%s — cleared (auto-process resuming)", settlementInFlightCeiling)
-	return m, true
-}
-
-func (m model) shouldAutoProcessSettlement(st settlement.Status) bool {
-	if m.settlementProcessInFlight {
-		return false
-	}
-	if !st.Available || !st.Enabled {
-		return false
-	}
-	// A dead holder's expired-but-unreaped lease inflates the active-lease
-	// count and can raise max_concurrency_reached — but process_once reaps
-	// stale leases (expire_stale_leases) *before* it re-checks concurrency, and
-	// process_once is the only path that reaps them. So when the processor
-	// reports stale active leases, defer the concurrency-derived refusals to
-	// process_once rather than replicating a guard we evaluate with less
-	// information than it does: it re-checks concurrency itself and returns
-	// cheaply (max_concurrency_reached) if genuinely saturated. Scope is narrow
-	// — only the concurrency refusals bend. Disabled, unavailable, in-flight,
-	// active-hours, and no-eligible-harness refusals keep their behavior
-	// (max_concurrency_reached is the processor's last blocked_reason arm, so
-	// those are already clear when it fires; harness_blocked_reason only ever
-	// carries no_eligible_harnesses, so a set harness reason is never ours).
-	staleReapPending := st.StaleActiveLeases > 0
-	concurrencyOnlyBlock := st.BlockedReason == "max_concurrency_reached" && st.Harness.BlockedReason == ""
-	if st.BlockedReason != "" || st.Harness.BlockedReason != "" {
-		if !(staleReapPending && concurrencyOnlyBlock) {
-			return false
-		}
-	}
-	// Event-driven posture (memo §5.2): the census recompute-refill is
-	// retired, so only real queued items — enqueued by the trigger pump or
-	// explicit enqueue — drive auto-process. The batch-backlog arm belongs
-	// to the dormant census posture and only applies when the processor
-	// reports census_enabled.
-	backlogArm := st.Dispatch.CensusEnabled && st.Queue.Running == 0 && st.Batch.BacklogSize > 0
-	if st.Queue.Ready+st.Queue.Pending <= 0 && !backlogArm {
-		return false
-	}
-	concurrency := st.Harness.Concurrency
-	if concurrency <= 0 {
-		concurrency = 1
-	}
-	active := st.Harness.ActiveLeases
-	if active == 0 {
-		active = len(st.Leases)
-	}
-	if active < concurrency {
-		return true
-	}
-	// Saturated by the count alone — permit only when a stale lease is the
-	// likely cause; process_once reaps it, then decides.
-	return staleReapPending
 }
 
 func batchCmd(a, b tea.Cmd) tea.Cmd {
@@ -1909,12 +1706,9 @@ func batchCmd(a, b tea.Cmd) tea.Cmd {
 	return tea.Batch(a, b)
 }
 
-func (m model) openSettingsModal(focusDotPath string) (model, tea.Cmd) {
+func (m model) openSettingsModal() (model, tea.Cmd) {
 	panel, err := initSettingsPanel()
 	if panel != nil {
-		if focusDotPath != "" {
-			panel.FocusDotPath(focusDotPath)
-		}
 		m.settingsPanel = panel
 		m.settingsActive = true
 		m.settingsPriorFocus = m.focusedPanel

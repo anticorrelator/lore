@@ -38,6 +38,10 @@ Parity vs the bash loader's missing-key surface:
 Environment:
     - LORE_DATA_DIR overrides ~/.lore (matches scripts/lib.sh).
 
+Coordination:
+    - The coordination board reads `coordination.max_concurrency` as its seat
+      ceiling (scripts/coordinate-status.sh). Absence fails closed to one seat.
+
 Settlement:
     - The settlement processor reads the `settlement` section through this
       unified file shape. Missing settlement keys fail closed in the processor:
@@ -57,6 +61,11 @@ from typing import Any
 
 class SettingsError(Exception):
     """Raised when settings.json is unreadable or malformed."""
+
+
+COORDINATION_DEFAULTS: dict[str, Any] = {
+    "max_concurrency": 1,
+}
 
 
 SETTLEMENT_DEFAULTS: dict[str, Any] = {

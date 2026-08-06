@@ -20,8 +20,8 @@
 #       [--kdir <path>] \
 #       [--verdicts <jsonl-path>]   # default: read JSONL on stdin
 #
-# Input: JSONL of verdicts from settlement-record-append.sh. Reverse-auditor
-# lines look like:
+# Input: JSONL of verdicts on stdin, or from the file named by --verdicts.
+# Reverse-auditor lines look like:
 #   {"judge":"reverse-auditor","claim_id":"<id>",
 #    "verdict":"omission-claim|silence|preflight-failed",
 #    ...artifact-scoped metadata}

@@ -84,7 +84,7 @@ func TestGenerateNameRejectsBadOverrides(t *testing.T) {
 		"path-like":     "../evil",
 		"slashes":       "a/b",
 		"empty-normal":  "!!!",
-		"reserved":      "settlement",
+		"reserved":      "knowledge",
 		"reserved-work": "work",
 	}
 	for name, override := range cases {

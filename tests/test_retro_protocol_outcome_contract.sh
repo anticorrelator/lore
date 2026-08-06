@@ -35,14 +35,31 @@ required_step1 = [
 for token in required_step1:
     assert token in step1, f"retro Step 1 missing semantic token/relationship: {token}"
 
-# The post-evolve Step 3.8/F1 liveness redirect remains present and untouched by
-# the Step 1 lifecycle adoption boundary.
+# Verification is in-band and agent-owned. Assert the out-of-band path's
+# distinguishing tokens are absent from every protocol surface this contract
+# covers — a positive-only check would pass with both forms present.
+removed = [
+    "settlement",
+    "Settlement",
+    "consumption-contradiction",
+    "consumer_contradiction_lifecycle",
+    "settlement_health_inputs",
+    "Judge liveness",
+    "audit_lag",
+    "dormant-census",
+]
+for name, text in (("retro", retro), ("coordinate", coordinate), ("coordination template", template)):
+    for token in removed:
+        assert token not in text, f"{name} still names the removed out-of-band path: {token}"
+
+# The surviving verification vocabulary is the in-band pair and its resolutions.
 for token in [
-    "### Check: Judge liveness (disposition: redirected per-gate to settlement run envelopes)",
-    "_settlement/runs/*.json",
-    "completed_runs_in_window == 0 AND settlement_queue_items_routed > 0",
+    "#### Verification vocabulary",
+    "`held`",
+    "`contradicted`",
+    "resolution vocabulary is exactly `corrected | disputed`",
 ]:
-    assert token in retro, f"settled Step 3.8 liveness contract missing: {token}"
+    assert token in retro, f"retro verification vocabulary missing: {token}"
 
 retro_checkpoint = coordinate.split("### Retro", 1)[1].split("## What escalates", 1)[0]
 for token in [

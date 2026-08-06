@@ -17,9 +17,8 @@ usage() {
 Usage: lore evolve prepare [--since <RFC3339>] [--json]
 
 Publish a content-addressed queue-v1 snapshot from the journal, scorecard,
-template registry, accepted clusters, contradiction sidecars, and prior evolve
-filings. Eligibility is evidence arithmetic only; the evolve lead owns verdicts
-and target-file edits.
+template registry, accepted clusters, and prior evolve filings. Eligibility is
+evidence arithmetic only; the evolve lead owns verdicts and target-file edits.
 EOF
 }
 
@@ -59,7 +58,7 @@ FILING_DIR = os.path.join(kdir, "_evolve", "review-filings")
 
 ELIGIBILITY = {"eligible", "no_op", "abstained", "not_computable"}
 SOURCE_COVERAGE = {"read", "absent", "unreadable", "stale", "not_computable"}
-GATE_PATHS = {"primary", "correction", "claim-retraction", "recurring-failure", "carry-forward"}
+GATE_PATHS = {"primary", "correction", "recurring-failure", "carry-forward"}
 FORBIDDEN_QUEUE_KEYS = {
     "recommended_verdict", "recommendation", "selected", "approved",
     "decision", "verdict", "edit", "edit_text", "application",
@@ -292,32 +291,7 @@ cluster_rows, cluster_bad = parse_jsonl_bytes(cluster_raw, "accepted_cluster") i
 if cluster_bad:
     cluster_coverage, cluster_reason = "unreadable", f"{len(cluster_bad)} invalid accepted-cluster row(s)"
 
-contradiction_paths = sorted(
-    glob.glob(os.path.join(kdir, "_work", "*", "consumption-contradictions.jsonl")) +
-    glob.glob(os.path.join(kdir, "_work", "_archive", "*", "consumption-contradictions.jsonl"))
-)
-contradictions = []
-contradiction_chunks = []
-contradiction_coverage = "absent" if not contradiction_paths else "read"
-contradiction_reason = "source_absent" if not contradiction_paths else None
-for path in contradiction_paths:
-    raw, coverage, reason = read_bytes(path)
-    contradiction_chunks.append(canonical({"path": os.path.relpath(path, kdir), "sha256": sha(raw)}))
-    if coverage != "read":
-        contradiction_coverage, contradiction_reason = "unreadable", reason
-        continue
-    parsed, bad = parse_jsonl_bytes(raw, "contradiction")
-    if bad:
-        contradiction_coverage = "unreadable"
-        contradiction_reason = f"invalid contradiction rows in {os.path.relpath(path, kdir)}"
-        continue
-    for row in parsed:
-        obj = row["object"]
-        obj["_source_path"] = os.path.relpath(path, kdir)
-        contradictions.append(obj)
-
 filing_identity = sha(b"".join(canonical({"path": os.path.relpath(r["path"], kdir), "sha256": sha(r["raw"])}) for r in filing_sources))
-contradiction_identity = sha(b"".join(contradiction_chunks))
 
 def manifest_row(source_id, reader, resolved, coverage, raw, reason=None, cursor=None, content_identity=None, row_warnings=None):
     if coverage not in SOURCE_COVERAGE:
@@ -342,8 +316,6 @@ source_manifest = [
                  registry_raw, registry_reason),
     manifest_row("accepted_clusters", "raw-jsonl", "_evolve/accepted-clusters.jsonl", cluster_coverage,
                  cluster_raw, cluster_reason),
-    manifest_row("consumption_contradictions", "active-and-archive-jsonl", "_work/{active,_archive}/**/consumption-contradictions.jsonl",
-                 contradiction_coverage, b"", contradiction_reason, content_identity=contradiction_identity),
     manifest_row("prior_filings", "completed-filings", "_evolve/review-filings/*.json",
                  "read" if filing_sources else "absent", b"", "source_absent" if not filing_sources else None,
                  content_identity=filing_identity),
@@ -474,28 +446,6 @@ def gate_correction(proposal):
         return eligibility("abstained", ["below_sample_floor"], refs, arithmetic(cited_n, 4))
     return eligibility("eligible", [], refs, arithmetic(cited_n, 4))
 
-def gate_retraction(proposal):
-    if contradiction_coverage == "unreadable":
-        return eligibility("not_computable", ["contradiction_source_unreadable"])
-    if contradiction_coverage == "absent":
-        return eligibility("not_computable", ["contradiction_source_absent"])
-    text = evidence_text(proposal)
-    id_match = re.search(r"contradiction_id\s*[=:]\s*([A-Za-z0-9_.:-]+)", text, re.I)
-    path_match = re.search(r"knowledge_path\s*[=:]\s*([^|,;]+)", text, re.I)
-    verified = [r for r in contradictions if r.get("status") == "verified"]
-    if id_match:
-        verified = [r for r in verified if r.get("contradiction_id") == id_match.group(1)]
-    if path_match:
-        wanted = path_match.group(1).strip()
-        verified = [r for r in verified if ((r.get("prefetched_commons_entry") or {}).get("knowledge_path") == wanted)]
-    if not verified:
-        return eligibility("no_op", ["no_verified_contradiction"])
-    row = sorted(verified, key=lambda r: (r.get("settled_at") or r.get("created_at") or "", r.get("contradiction_id") or ""))[-1]
-    ref = {"source_id": "consumption_contradictions", "contradiction_id": row.get("contradiction_id"),
-           "knowledge_path": (row.get("prefetched_commons_entry") or {}).get("knowledge_path"),
-           "source_path": row.get("_source_path")}
-    return eligibility("eligible", [], [ref], arithmetic(1, 1))
-
 accepted_by_pair = defaultdict(list)
 if cluster_coverage == "read":
     for record in cluster_rows:
@@ -528,8 +478,6 @@ def gate(proposal):
     change_type = proposal["change_type"]
     if change_type == "doctrine-correction":
         return "correction", gate_correction(proposal)
-    if change_type in {"claim-retraction", "falsified-doctrine"}:
-        return "claim-retraction", gate_retraction(proposal)
     if change_type == "recurring-failure":
         return "recurring-failure", gate_recurring(proposal)
     return "primary", gate_primary(proposal)
