@@ -19,11 +19,11 @@ Every entry in the knowledge store carries provenance and a falsifier you can ch
 - **Delivery check:** if session-start output has work items but NO `=== Project Knowledge ===` block, the knowledge hook failed or timed out — recover with `bash ~/.lore/scripts/load-knowledge.sh` before relying on session context
 - Domain files (`domains/`) are NOT loaded at startup — read them on-demand via the index
 - When starting work in a specific area, check the index for a relevant domain file and read it
-- **The test:** if you're about to Grep for how something works, a convention, or why a decision was made — search knowledge first
+- **The shortcut:** about to Grep for how something works, a convention, or why a decision was made? A past session has often recorded it — search knowledge first and spend the saved exploration on the task
 
 ### Work Retrieval (Before Manual Exploration)
 Before exploring manually (git log, grep, branch inspection), check for tracked work:
 - If the user asks about status, progress, remaining work, or "what's next" → invoke `/work` first
 - If starting a new session on a feature branch → check if a work item matches the branch
 - If the user references a past discussion or decision → `/work search` before raw search
-- **The test:** if you're about to grep/explore for something the work system already tracks, you've skipped a step
+- **The shortcut:** if the work system already tracks what you're about to grep for, the tracked record is faster and already synthesized — read it first
