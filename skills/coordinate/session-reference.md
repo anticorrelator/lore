@@ -214,11 +214,14 @@ Arming with `--install` also records what it installed — the settings path and
 any scope — in `$KNOWLEDGE_DIR/_coordination/armed-watchers.json`, and `lore
 coordinate disarm --settings <path>` removes both the hook entry and the record.
 The record is discovery metadata, never authority: the settings file remains the
-truth about what is armed; the record only lets `lore arc close` find watchers no
-live seat remembers. Close auto-disarms a recorded watcher scoped solely to the
-closing arc and prints a non-blocking callout for a wider or unscoped one, naming
-the disarm command — a watcher spanning arcs may still be another arc's eye, so
-that call stays with the seat. Disarm is idempotent — nothing to remove exits 0 —
+truth about what is armed; the record lets `lore arc close` find arc-scoped
+watchers no live seat remembers. Close selects only records whose arc scope
+includes the closing arc: one scoped solely to it is auto-disarmed; one also
+naming other arcs or item scopes earns a non-blocking callout naming the disarm
+command — a watcher spanning arcs may still be another arc's eye, so that call
+stays with the seat. An unscoped record is never selected: the bare board-wide
+eye is a seat-lifetime resource attributable to no arc, disarmed by its seat at
+wind-down, never by closure. Disarm is idempotent — nothing to remove exits 0 —
 and safe to run unconditionally. One residual wake after disarm is expected:
 removing the hook stops future windows from opening, but the window already
 running ends at its own deadline and delivers its wake.
