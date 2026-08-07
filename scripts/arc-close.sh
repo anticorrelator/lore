@@ -76,6 +76,98 @@ fi
 
 ENVELOPE=$("$SCRIPT_DIR/arc-write-meta.sh" --kdir "$KNOWLEDGE_DIR" --slug "$SLUG" --op close) || exit 1
 
+# --- The standing eye outlives the arc unless something switches it off -------
+#
+# `lore coordinate arm --install` installs a Stop-hook watcher that re-fires at
+# every turn boundary. Nothing else in the closure path removes it, so an armed
+# eye survives its arc and keeps waking a seat about a board nobody is working.
+# The record arm leaves behind is how a closing seat finds a watcher it never
+# armed itself — the seat that closes an arc is usually not the seat that opened
+# it.
+#
+# What gets switched off is only what this arc can be held solely responsible
+# for. A watcher scoped to other arcs or to individual items may still be
+# somebody's live eye, so it is named, not disarmed: blinding a board in
+# progress is the more expensive mistake, and the callout costs a line.
+#
+# Nothing here can fail the close. Closure is the coordinator's decision being
+# recorded; watcher hygiene does not get a veto over it. Everything the block
+# says goes to stderr, beside the missing-report warning above and clear of the
+# --json contract on stdout.
+ARMED_RECORD_FILE="$KNOWLEDGE_DIR/_coordination/armed-watchers.json"
+
+if [[ -f "$ARMED_RECORD_FILE" ]]; then
+  ARMED_MATCHES=$(python3 - "$ARMED_RECORD_FILE" "$SLUG" <<'PYEOF' || true
+import json, sys
+
+record_path, slug = sys.argv[1], sys.argv[2]
+try:
+    with open(record_path, encoding="utf-8") as f:
+        records = json.load(f)
+except (OSError, ValueError) as exc:
+    print("[arc] Warning: could not read %s (%s) — any armed watcher for this "
+          "arc is still armed; disarm it with 'lore coordinate disarm "
+          "--settings <path>'" % (record_path, exc), file=sys.stderr)
+    raise SystemExit(0)
+if not isinstance(records, dict):
+    print("[arc] Warning: %s is not an object; skipping the standing-eye check"
+          % record_path, file=sys.stderr)
+    raise SystemExit(0)
+
+for key, rec in sorted(records.items()):
+    if not isinstance(rec, dict):
+        continue
+    scopes = rec.get("scopes") or {}
+    arcs = [a for a in (scopes.get("arcs") or []) if a]
+    slugs = [s for s in (scopes.get("slugs") or []) if s]
+    # Only a watcher this arc's scope names is this arc's business. A board-wide
+    # eye names no arc, so closing one arc says nothing about whether it is
+    # still wanted.
+    if slug not in arcs:
+        continue
+    kind = "sole" if set(arcs) == {slug} and not slugs else "wide"
+    scope = ", ".join(["arc:%s" % a for a in arcs] + ["slug:%s" % s for s in slugs])
+    print("\t".join([kind, rec.get("settings_path") or key,
+                     rec.get("framework") or "", scope]))
+PYEOF
+  )
+
+  while IFS=$'\t' read -r EYE_KIND EYE_SETTINGS EYE_FRAMEWORK EYE_SCOPE; do
+    [[ -n "$EYE_KIND" && -n "$EYE_SETTINGS" ]] || continue
+
+    if [[ "$EYE_KIND" != "sole" ]]; then
+      echo "[arc] Warning: an armed standing eye covers '$SLUG' and more (scope: $EYE_SCOPE) — it is left armed, because switching it off could blind a board somebody is still working. Disarm it deliberately once it is no longer wanted:" >&2
+      echo "         lore coordinate disarm --settings $EYE_SETTINGS" >&2
+      continue
+    fi
+
+    # The framework the arm recorded, not the one closing: the adapter that
+    # installed the entry is the only one that can recognize and remove it.
+    DISARM_RC=0
+    DISARM_OUT=""
+    if [[ -n "$EYE_FRAMEWORK" ]]; then
+      DISARM_OUT=$(LORE_FRAMEWORK="$EYE_FRAMEWORK" bash "$SCRIPT_DIR/coordinate-arm.sh" \
+        disarm --settings "$EYE_SETTINGS" --kdir "$KNOWLEDGE_DIR" 2>&1) || DISARM_RC=$?
+    else
+      DISARM_OUT=$(bash "$SCRIPT_DIR/coordinate-arm.sh" \
+        disarm --settings "$EYE_SETTINGS" --kdir "$KNOWLEDGE_DIR" 2>&1) || DISARM_RC=$?
+    fi
+
+    # What the disarm found is the disarm surface's to report — an entry
+    # removed, or a settings file that is already gone. Saying it here too would
+    # put two voices on one outcome, and the second one would sometimes be wrong.
+    if [[ $DISARM_RC -eq 0 ]]; then
+      echo "[arc] Standing eye: '$SLUG' is the only scope on the watcher at $EYE_SETTINGS — disarming it." >&2
+    else
+      echo "[arc] Warning: could not disarm the standing eye at $EYE_SETTINGS (exit $DISARM_RC) — '$SLUG' is closed regardless, but the watcher is still armed. Run it by hand:" >&2
+      echo "         lore coordinate disarm --settings $EYE_SETTINGS" >&2
+    fi
+    if [[ -n "$DISARM_OUT" ]]; then
+      printf '%s\n' "$DISARM_OUT" >&2
+    fi
+  done <<< "$ARMED_MATCHES"
+fi
+
 if [[ $JSON_MODE -eq 1 ]]; then
   printf '%s' "$ENVELOPE" | python3 -c '
 import json, sys
