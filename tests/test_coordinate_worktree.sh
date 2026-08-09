@@ -26,7 +26,17 @@ assert_file() { if [[ -f "$2" ]]; then pass "$1"; else fail "$1" "missing $2"; f
 assert_dir() { if [[ -d "$2" ]]; then pass "$1"; else fail "$1" "missing $2"; fi; }
 assert_absent() { if [[ ! -e "$2" ]]; then pass "$1"; else fail "$1" "still exists: $2"; fi; }
 
+# A live owner that is not an ancestor of the manager. `$$` used to stand in for
+# this, but it is exactly the handle the verb now refuses: for a directly
+# invoked child it is the manager's own parent, and the whole point of the guard
+# is that a pid which dies with the caller is no handle at all. A backgrounded
+# sleep is alive, unrelated to the process tree the manager sits in, and ours to
+# kill at the end.
+sleep 3600 &
+LIVE_PID=$!
+
 cleanup() {
+  kill "$LIVE_PID" 2>/dev/null || true
   git -C "$SOURCE" worktree list --porcelain 2>/dev/null \
     | awk '/^worktree / {print substr($0,10)}' \
     | while IFS= read -r path; do
@@ -86,7 +96,7 @@ drive_cleanup_due() {
   local id="$1" owner="$2"
   bash "$MANAGER" bind --kdir "$KDIR" --worktree-id "$id" --owner-id "$owner" --json >/dev/null
   # A repeated bind is the post-spawn owner-probe attachment path.
-  bash "$MANAGER" bind --kdir "$KDIR" --worktree-id "$id" --owner-id "$owner" --owner-pid "$$" --json >/dev/null
+  bash "$MANAGER" bind --kdir "$KDIR" --worktree-id "$id" --owner-id "$owner" --owner-pid "$LIVE_PID" --json >/dev/null
   for state in active quiescent reconciling cleanup_due; do
     bash "$MANAGER" transition --kdir "$KDIR" --worktree-id "$id" --to "$state" --json >/dev/null
   done
@@ -175,7 +185,7 @@ assert_eq "next sweep resumes an interrupted atomic claim" "$CLAIMED_ID" \
   "$(jq -r '.swept[0]' <<<"$CLAIM_SWEEP")"
 assert_absent "resumed cleanup removes claimed path" "$CLAIMED_PATH"
 
-LIVE="$(allocate live-owner live-seat --owner-pid "$$")"
+LIVE="$(allocate live-owner live-seat --owner-pid "$LIVE_PID")"
 LIVE_ID="$(jq -r '.worktree_id' <<<"$LIVE")"
 LIVE_PATH="$(jq -r '.execution_dir' <<<"$LIVE")"
 expire_manifest "$KDIR/_coordination/worktrees/registry/$LIVE_ID.json"
@@ -201,7 +211,7 @@ assert_absent "cleanup retry removes path" "$BLOCKED_PATH"
 
 # Acceptance refs pinned at reconciliation survive the sweep that deletes the
 # temporary branch, keeping the accepted stream tip reachable afterward.
-ACCEPT="$(allocate accept-anchor accept-seat --owner-pid "$$")"
+ACCEPT="$(allocate accept-anchor accept-seat --owner-pid "$LIVE_PID")"
 ACCEPT_ID="$(jq -r '.worktree_id' <<<"$ACCEPT")"
 ACCEPT_PATH="$(jq -r '.execution_dir' <<<"$ACCEPT")"
 ACCEPT_BRANCH="$(jq -r '.temporary_branch' <<<"$ACCEPT")"
@@ -211,7 +221,7 @@ printf 'accepted\n' > "$ACCEPT_PATH/accepted.txt"
 git -C "$ACCEPT_PATH" add accepted.txt
 git -C "$ACCEPT_PATH" commit -qm accepted-tip
 TIP="$(git -C "$ACCEPT_PATH" rev-parse HEAD)"
-bash "$MANAGER" bind --kdir "$KDIR" --worktree-id "$ACCEPT_ID" --owner-id accept-seat --owner-pid "$$" --json >/dev/null
+bash "$MANAGER" bind --kdir "$KDIR" --worktree-id "$ACCEPT_ID" --owner-id accept-seat --owner-pid "$LIVE_PID" --json >/dev/null
 for state in active quiescent reconciling; do
   bash "$MANAGER" transition --kdir "$KDIR" --worktree-id "$ACCEPT_ID" --to "$state" --json >/dev/null
 done
@@ -290,7 +300,7 @@ assert_eq "plain allocate output carries the hint" "1" \
 # for the seat that has to drive the lifecycle by hand.
 SESSION_HINT="$(bash "$MANAGER" allocate --kdir "$KDIR" --work-item demo --stream stream-a \
   --attempt session-hint --owner-kind session --owner-id session-hint-owner \
-  --owner-pid "$$" --source-dir "$SOURCE" --json 2>/dev/null)"
+  --owner-pid "$LIVE_PID" --source-dir "$SOURCE" --json 2>/dev/null)"
 assert_eq "session allocation carries no seat lifecycle hint" "null" \
   "$(jq -r '.next // "null"' <<<"$SESSION_HINT")"
 
@@ -333,13 +343,142 @@ esac
 # bind is the repair path for a lease that was allocated without a handle.
 SESSION_ID="$(jq -r '.worktree_id' <<<"$SESSION_ALLOC")"
 BOUND="$(bash "$MANAGER" bind --kdir "$KDIR" --worktree-id "$SESSION_ID" \
-  --owner-id bare-session --owner-pid "$$" --json)"
-assert_eq "bind attaches a liveness handle after allocation" "$$" \
+  --owner-id bare-session --owner-pid "$LIVE_PID" --json)"
+assert_eq "bind attaches a liveness handle after allocation" "$LIVE_PID" \
   "$(jq -r '.owner.pid' <<<"$BOUND")"
 expire_manifest "$KDIR/_coordination/worktrees/registry/$SESSION_ID.json"
 REPAIRED_SWEEP="$(bash "$MANAGER" sweep --kdir "$KDIR" --json 2>/dev/null)"
 assert_eq "a bound live pid protects a previously handle-less lease" "$SESSION_ID" \
   "$(jq -r --arg id "$SESSION_ID" '.protected[] | select(. == $id)' <<<"$REPAIRED_SWEEP")"
+
+# --- A handle that dies with the command is refused, not recorded ------------
+# Every --owner-pid surface warned about `$$` and none of them checked it, so
+# the warning only ever reached the people who did not need it. The two shapes
+# below are how `$$` actually arrives: `lore` execs straight through, so a `$$`
+# on the command line lands on the manager's own process when the caller's shell
+# is replaced, and on its parent when it is not.
+registry_rows_for() {
+  grep -l "\"attempt_id\": \"$1\"" "$KDIR"/_coordination/worktrees/registry/*.json 2>/dev/null | wc -l | tr -d ' '
+}
+
+OWN_PID_OUT="$(bash -c 'exec bash "$1" allocate --kdir "$2" --work-item demo \
+  --stream stream-a --attempt own-pid --owner-kind seat --owner-id own-pid-seat \
+  --source-dir "$3" --owner-pid $$ --json' _ "$MANAGER" "$KDIR" "$SOURCE" 2>&1)"
+OWN_PID_RC=$?
+assert_eq "an --owner-pid naming the verb's own process is refused" "1" "$OWN_PID_RC"
+case "$OWN_PID_OUT" in
+  *"this command's own process"*) pass "the refusal says whose process that pid is" ;;
+  *) fail "the refusal says whose process that pid is" "$OWN_PID_OUT" ;;
+esac
+case "$OWN_PID_OUT" in
+  *"swept exactly like no handle at all"*) pass "the refusal names the failure it prevents" ;;
+  *) fail "the refusal names the failure it prevents" "$OWN_PID_OUT" ;;
+esac
+assert_eq "the refused allocation wrote no registry row" "0" "$(registry_rows_for own-pid)"
+
+# Not the last command in the -c script, so bash cannot exec-optimize it away
+# and the manager really does run as a child of the shell whose pid it is handed.
+PARENT_PID_OUT="$(bash -c 'bash "$1" allocate --kdir "$2" --work-item demo \
+  --stream stream-a --attempt parent-pid --owner-kind seat --owner-id parent-pid-seat \
+  --source-dir "$3" --owner-pid $$ --json; exit $?' _ "$MANAGER" "$KDIR" "$SOURCE" 2>&1)"
+PARENT_PID_RC=$?
+assert_eq "an --owner-pid naming the invoking shell is refused" "1" "$PARENT_PID_RC"
+case "$PARENT_PID_OUT" in
+  *"the shell that invoked this command"*) pass "the refusal names the caller's shell" ;;
+  *) fail "the refusal names the caller's shell" "$PARENT_PID_OUT" ;;
+esac
+assert_eq "the refused allocation wrote no registry row" "0" "$(registry_rows_for parent-pid)"
+
+# A pid that is already gone records a handle that is dead before it is written.
+sleep 0.1 &
+DEAD_PID=$!
+wait "$DEAD_PID" 2>/dev/null
+DEAD_OUT="$(bash "$MANAGER" allocate --kdir "$KDIR" --work-item demo --stream stream-a \
+  --attempt dead-pid --owner-kind seat --owner-id dead-pid-seat \
+  --source-dir "$SOURCE" --owner-pid "$DEAD_PID" --json 2>&1)"
+assert_eq "a dead --owner-pid is refused at allocate" "1" "$?"
+case "$DEAD_OUT" in
+  *"no such process"*) pass "the dead-handle refusal says the process is not there" ;;
+  *) fail "the dead-handle refusal says the process is not there" "$DEAD_OUT" ;;
+esac
+assert_eq "the refused allocation wrote no registry row" "0" "$(registry_rows_for dead-pid)"
+
+# bind is the repair path, so a handle it accepts has to clear the same bar: a
+# repair that installs a doomed handle is worse than the hole it closed.
+BIND_DEAD="$(bash "$MANAGER" bind --kdir "$KDIR" --worktree-id "$SESSION_ID" \
+  --owner-id bare-session --owner-pid "$DEAD_PID" --json 2>&1)"
+assert_eq "a dead --owner-pid is refused at bind too" "1" "$?"
+assert_eq "the refused bind left the working handle in place" "$LIVE_PID" \
+  "$(jq -r '.owner.pid' "$KDIR/_coordination/worktrees/registry/$SESSION_ID.json")"
+
+# --- Refusals teach the lifecycle at the point it went wrong -----------------
+# A seat can allocate, dispatch and integrate without the manifest leaving the
+# state it started in, and nothing says so until teardown. The refusal at
+# teardown used to name neither the state it found nor the way out of it.
+TEACH="$(allocate lifecycle-teaching teaching-seat)"
+TEACH_ID="$(jq -r '.worktree_id' <<<"$TEACH")"
+CLEANUP_REFUSAL="$(bash "$MANAGER" cleanup --kdir "$KDIR" --worktree-id "$TEACH_ID" --json 2>&1)"
+assert_eq "cleanup refuses a tree still at reserved" "1" "$?"
+case "$CLEANUP_REFUSAL" in
+  *"is at 'reserved'"*) pass "the cleanup refusal names the state it found" ;;
+  *) fail "the cleanup refusal names the state it found" "$CLEANUP_REFUSAL" ;;
+esac
+case "$CLEANUP_REFUSAL" in
+  *"worktree bind --worktree-id $TEACH_ID"*) pass "the cleanup refusal names bind as the first step out" ;;
+  *) fail "the cleanup refusal names bind as the first step out" "$CLEANUP_REFUSAL" ;;
+esac
+case "$CLEANUP_REFUSAL" in
+  *"--to active"*"--to quiescent"*"--to reconciling"*"--to cleanup_due"*)
+    pass "the cleanup refusal spells out every remaining transition" ;;
+  *) fail "the cleanup refusal spells out every remaining transition" "$CLEANUP_REFUSAL" ;;
+esac
+
+# The prose taught `bound -> quiescent`, an edge that has never existed. The
+# refusal now reads the legal set and the route out of the machine itself.
+bash "$MANAGER" bind --kdir "$KDIR" --worktree-id "$TEACH_ID" --owner-id teaching-seat \
+  --owner-pid "$LIVE_PID" --json >/dev/null
+SKIP_REFUSAL="$(bash "$MANAGER" transition --kdir "$KDIR" --worktree-id "$TEACH_ID" \
+  --to quiescent --json 2>&1)"
+assert_eq "a skipped transition is refused" "1" "$?"
+case "$SKIP_REFUSAL" in
+  *"legal next states are: active, recovered"*) pass "the transition refusal names the legal set" ;;
+  *) fail "the transition refusal names the legal set" "$SKIP_REFUSAL" ;;
+esac
+case "$SKIP_REFUSAL" in
+  *"active -> quiescent -> reconciling -> cleanup_due"*) pass "the transition refusal names the route out" ;;
+  *) fail "the transition refusal names the route out" "$SKIP_REFUSAL" ;;
+esac
+
+# --- A sweep says which of its two jobs it just did --------------------------
+# A tree at cleanup_due skips both the expiry test and the liveness probe on
+# purpose: its owner already released it. Recording that as an expired lease
+# reads as a reclaim from a live owner and contradicts the switch's contract in
+# the one place anybody looks afterwards — the archived history.
+RELEASED="$(allocate released-tree released-seat --owner-pid "$LIVE_PID")"
+RELEASED_ID="$(jq -r '.worktree_id' <<<"$RELEASED")"
+drive_cleanup_due "$RELEASED_ID" released-seat
+RELEASED_SWEEP="$(bash "$MANAGER" sweep --kdir "$KDIR" --json 2>/dev/null)"
+assert_eq "a released tree is swept even though its owner is alive" "$RELEASED_ID" \
+  "$(jq -r --arg id "$RELEASED_ID" '.swept[] | select(. == $id)' <<<"$RELEASED_SWEEP")"
+RELEASED_REASON="$(jq -r '[.history[] | select(.state=="swept")][0].reason' \
+  "$KDIR/_coordination/worktrees/archive/$RELEASED_ID.json")"
+case "$RELEASED_REASON" in
+  *"expired owner lease"*) fail "a live owner's released tree is not recorded as an expired lease" "$RELEASED_REASON" ;;
+  *"cleanup due"*) pass "a live owner's released tree is not recorded as an expired lease" ;;
+  *) fail "a live owner's released tree is not recorded as an expired lease" "$RELEASED_REASON" ;;
+esac
+
+# The dead-man's-switch branch still says so, and now says which half fired.
+STALE="$(allocate stale-owner stale-seat)"
+STALE_ID="$(jq -r '.worktree_id' <<<"$STALE")"
+expire_manifest "$KDIR/_coordination/worktrees/registry/$STALE_ID.json"
+bash "$MANAGER" sweep --kdir "$KDIR" --json >/dev/null 2>&1
+STALE_REASON="$(jq -r '[.history[] | select(.state=="swept")][0].reason' \
+  "$KDIR/_coordination/worktrees/archive/$STALE_ID.json")"
+case "$STALE_REASON" in
+  *"expired owner lease"*"not be proven alive"*) pass "a reclaimed tree records both halves of the switch" ;;
+  *) fail "a reclaimed tree records both halves of the switch" "$STALE_REASON" ;;
+esac
 
 # --- Reclamation reports where the work went ---------------------------------
 # cleanup_proof read as pure destruction and never mentioned the recovery

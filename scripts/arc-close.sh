@@ -155,9 +155,13 @@ PYEOF
 
     # What the disarm found is the disarm surface's to report — an entry
     # removed, or a settings file that is already gone. Saying it here too would
-    # put two voices on one outcome, and the second one would sometimes be wrong.
+    # put two voices on one outcome, and the second one would sometimes be
+    # wrong: this line used to announce "— disarming it." on every rc=0, which
+    # printed directly above the disarm's own "nothing to disarm". So it states
+    # the attribution, which is this script's to make, and hands the outcome to
+    # the surface that measured it.
     if [[ $DISARM_RC -eq 0 ]]; then
-      echo "[arc] Standing eye: '$SLUG' is the only scope on the watcher at $EYE_SETTINGS — disarming it." >&2
+      echo "[arc] Standing eye: '$SLUG' is the only scope on the watcher at $EYE_SETTINGS, so this close ran disarm on it:" >&2
     else
       echo "[arc] Warning: could not disarm the standing eye at $EYE_SETTINGS (exit $DISARM_RC) — '$SLUG' is closed regardless, but the watcher is still armed. Run it by hand:" >&2
       echo "         lore coordinate disarm --settings $EYE_SETTINGS" >&2

@@ -32,7 +32,9 @@
 #   --owner-pid <pid>     The long-lived harness process that owns the seat.
 #                         Never $$: a subshell's pid dies when the command
 #                         returns, recording a handle that looks live now and
-#                         fails identically later.
+#                         fails identically later. Refused, not merely warned
+#                         about: arming rejects its own pid, the pid of the
+#                         shell that invoked it, and any pid that is not alive.
 #   --owner-tmux <name>   tmux session name of the owner (same handle format as
 #                         `lore coordinate worktree allocate`).
 #   --tmux-server <name>  tmux server socket for --owner-tmux (default: lore-tui).
@@ -152,7 +154,7 @@ WINDOW_OVERRUN_GRACE_SECONDS="${LORE_ARM_OVERRUN_GRACE_SECONDS:-60}"
 ERROR_WAKE_BACKOFF_SECONDS="${LORE_ARM_ERROR_BACKOFF_SECONDS:-60}"
 
 usage() {
-  sed -n '2,120p' "$0"
+  sed -n '2,122p' "$0"
 }
 
 case "${1:-}" in
@@ -279,6 +281,39 @@ owner_may_continue() {
     [[ "$verdict" == "alive" ]] && saw_alive=1
   fi
   [[ $saw_alive -eq 1 ]]
+}
+
+# The arming surface's own check on the handle it is about to bake into a hook
+# entry. Every --owner-pid surface warns about `$$` and none of them checked it,
+# so the warning only reached the people who did not need it: a pid that dies
+# with the command arms a watcher that halts at its first window, which reads as
+# silence rather than as a refusal.
+#
+# The arm surface only. `run` receives the pid the hook entry was armed with, and
+# the harness runs that hook as a direct child of the process the pid names — so
+# owner == parent is the correct arrangement there, not the mistake. `run`
+# already answers a dead owner with exit 3.
+check_arm_owner_pid() {
+  [[ -n "$OWNER_PID" ]] || return 0
+  local expiry='  A handle that dies with the command arms a watcher that stops at its first window
+  and never re-arms, which reaches the seat as silence.
+  Pass the pid of the long-lived harness process that owns the seat.'
+  if [[ "$OWNER_PID" == "$$" ]]; then
+    fail "refusing --owner-pid $OWNER_PID: that is this command's own process. \`lore\` execs
+  straight through to this script, so a \`\$\$\` written on the command line lands here, and
+  it is gone the moment the command returns.
+$expiry"
+  fi
+  if [[ "$OWNER_PID" == "$PPID" ]]; then
+    fail "refusing --owner-pid $OWNER_PID: that is the shell that invoked this command, which
+  exits as soon as the command returns — the \`\$\$\` trap, one process further out.
+$expiry"
+  fi
+  if [[ "$(probe_pid "$OWNER_PID")" == "dead" ]]; then
+    fail "refusing --owner-pid $OWNER_PID: no such process. The handle is dead before the
+  watcher is even armed, so the first window would stop on a seat that was never there.
+  Pass the pid of a process that is alive now and outlives this command."
+  fi
 }
 
 owner_label() {
@@ -487,7 +522,13 @@ cmd_arm() {
       fi
     fi
   elif [[ -n "$INSTALL_PATH" ]]; then
-    fail "refusing --install: turn_boundary_rewake is '$support' on $framework, so an installed hook would not re-arm anything. Run the printed watcher command from the seat instead."
+    # The refusal carries the command itself. It used to send the caller to "the
+    # printed watcher command", which this branch exits before ever printing.
+    fail "refusing --install: turn_boundary_rewake is '$support' on $framework, so an installed
+  hook entry would never fire — this harness has no turn-boundary continuation to fire it, and
+  the entry would sit in $INSTALL_PATH looking armed. Nothing was written.
+  Run the watcher from the seat instead, re-running it after each wake:
+    $command"
   fi
 
   if [[ $JSON_MODE -eq 1 ]]; then
@@ -843,7 +884,7 @@ $body"
 }
 
 case "$MODE" in
-  arm) cmd_arm ;;
+  arm) check_arm_owner_pid; cmd_arm ;;
   run) cmd_run ;;
   disarm) cmd_disarm ;;
 esac

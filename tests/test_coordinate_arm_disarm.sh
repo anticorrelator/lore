@@ -202,6 +202,55 @@ assert_contains "the owner refusal still explains itself" "$OUT" "liveness handl
 OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --window 100 --hook-timeout 50 --kdir "$KDIR" 2>&1); RC=$?
 assert_eq "arming still refuses an inverted timeout pair" "1" "$RC"
 
+echo "== a handle that dies with the command is refused, not armed =="
+# The `$$` warning sat in this script's own refusal text and in its --help, and
+# nothing checked it. `lore` execs straight through to this script, so a `$$` on
+# the command line arrives as this process when the caller's shell is replaced
+# and as its parent when it is not.
+KDIR=$(new_store)
+OUT=$(LORE_FRAMEWORK=claude-code bash -c 'exec bash "$1" --owner-pid $$ --kdir "$2"' \
+  _ "$ARM" "$KDIR" 2>&1); RC=$?
+assert_eq "arming with the verb's own pid exits 1" "1" "$RC"
+assert_contains "the refusal says whose process that pid is" "$OUT" "this command's own process"
+assert_contains "the refusal names the failure it prevents" "$OUT" "never re-arms"
+
+OUT=$(LORE_FRAMEWORK=claude-code bash -c 'bash "$1" --owner-pid $$ --kdir "$2"; exit $?' \
+  _ "$ARM" "$KDIR" 2>&1); RC=$?
+assert_eq "arming with the invoking shell's pid exits 1" "1" "$RC"
+assert_contains "the refusal names the caller's shell" "$OUT" "the shell that invoked this command"
+
+sleep 0.1 &
+DEAD_PID=$!
+wait "$DEAD_PID" 2>/dev/null
+SETTINGS="$KDIR/settings.json"
+OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid "$DEAD_PID" --install "$SETTINGS" \
+  --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "arming with a dead pid exits 1" "1" "$RC"
+assert_contains "the dead-handle refusal says the process is not there" "$OUT" "no such process"
+assert_eq "the refused arm installed nothing" "0" "$([[ -f "$SETTINGS" ]] && echo 1 || echo 0)"
+assert_eq "the refused arm recorded nothing" "0" "$(record_has "$KDIR" "$SETTINGS")"
+
+# `run` is the other side of the same handle and must not inherit the guard: the
+# harness runs the armed hook as a direct child of the process the pid names, so
+# owner == parent is the correct arrangement there rather than the mistake.
+KDIR=$(new_store)
+OUT=$(LORE_FRAMEWORK=claude-code LORE_ARM_ERROR_BACKOFF_SECONDS=1 \
+  bash -c 'bash "$1" run --owner-pid $$ --window 1 --kdir "$2"; exit $?' \
+  _ "$ARM" "$KDIR" 2>&1); RC=$?
+assert_eq "the watcher window still accepts its parent as the owner" "2" "$RC"
+
+echo "== a degraded harness refuses --install with the command it wants run =="
+# The refusal used to send the caller to "the printed watcher command" and then
+# exit before printing one.
+KDIR=$(new_store)
+OUT=$(LORE_FRAMEWORK=codex bash "$ARM" --owner-pid 1 --arc some-arc \
+  --install "$KDIR/settings.json" --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "the refusal exits 1" "1" "$RC"
+assert_contains "it carries the watcher command itself" "$OUT" "coordinate-arm.sh run --owner-pid 1"
+assert_contains "the command it prints carries the scope that was asked for" "$OUT" "--arc some-arc"
+assert_contains "it says nothing was written" "$OUT" "Nothing was written"
+assert_eq "and nothing was" "0" "$([[ -f "$KDIR/settings.json" ]] && echo 1 || echo 0)"
+
 echo "== the help text carries the closure rule and the in-flight caveat =="
 OUT=$(bash "$ARM" --help 2>&1)
 assert_contains "help places disarm in arc closure" "$OUT" "Disarm belongs in the arc-closure sequence"
@@ -307,6 +356,15 @@ assert_eq "the close still exits 0" "0" "$RC"
 assert_contains "the close is still recorded" "$OUT" "[arc] Closed: vanished-arc"
 assert_contains "the disarm reports the missing file rather than claiming a removal" "$OUT" "nothing to disarm: no settings file"
 assert_eq "the stale record is cleared" "0" "$(record_has "$KDIR" "$SETTINGS")"
+# The close states the attribution, which is its own to make, and leaves the
+# outcome to the surface that measured it. It used to announce "— disarming it."
+# on every exit-0 disarm, printed directly above "nothing to disarm".
+assert_contains "the close states only that it ran disarm" "$OUT" "so this close ran disarm on it:"
+if [[ "$OUT" != *"disarming it."* ]]; then
+  pass "the close claims no removal the disarm did not report"
+else
+  fail "the close claims no removal the disarm did not report" "announced a disarm above 'nothing to disarm'"
+fi
 
 echo "== a closing arc no watcher names is silent about watchers =="
 KDIR=$(new_arc_store lonely-arc)
