@@ -23,6 +23,10 @@ For each substantive finding:
 
 3. **Check for staleness.** If a knowledge entry is marked STALE and the PR contradicts it, flag as "convention may need updating" — not "PR is wrong." Stale entries reflect past understanding, not current truth.
 
+#### Theory pages
+
+When the knowledge context handed to this review includes a theory page for the subsystem under review, hold each finding on that subsystem against it: the finding either survives what the theory says, or states plainly that it contests the theory — and names which of the two. Contesting is a first-class outcome that travels with the finding — not an escalation, not a failure to comply. The theory describes the code as someone last understood it; the code in front of you never answers to it, and a finding grounded in the diff that contradicts the page may simply be the page's next revision arriving. Survive-or-contest is a prompt to think the finding through against the documented picture, never a prompt to defer to it.
+
 #### Enrichment gate
 
 - **Mandatory:** suggestion, issue, question, thought labels — any finding that asserts something about the codebase or proposes a change.

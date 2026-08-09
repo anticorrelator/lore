@@ -311,11 +311,16 @@ raw exploration.">
 The Review Context above includes a **Prior Knowledge** sub-block prefetched
 from the project knowledge store. Read it BEFORE analyzing the diff — it
 documents conventions, gotchas, and past decisions for the touched area that
-the diff alone cannot surface. Use it two ways:
+the diff alone cannot surface. Use it three ways:
 - Before flagging a pattern as wrong, check whether Prior Knowledge documents
   it as an intentional convention or known trade-off.
 - A finding that contradicts a documented convention cites that entry in its
   `knowledge_context`.
+- When it includes a theory page for the subsystem under review, a finding on
+  that subsystem either survives what the theory says or states plainly that
+  it contests it — and names which. Contesting is a first-class outcome that
+  travels with the finding, not an escalation: the theory describes the code,
+  and the code does not answer to the theory.
 For topics it does not cover, query the store before raw code exploration:
 ```bash
 lore search "<topic>" --type knowledge --scale-set subsystem,implementation --json --limit 3
@@ -403,7 +408,12 @@ No prior knowledge surfaced at this altitude.
 
 Read this before assessing the PR: documented architecture, conventions, and
 design rationale are the baseline for your idiom-fit judgment — prefer citing
-a documented convention over re-inferring codebase idiom from the diff. For
+a documented convention over re-inferring codebase idiom from the diff. When
+this block carries a theory page for a subsystem the PR touches, an
+observation on that subsystem either survives what the theory says or states
+plainly that it contests it — and names which. Contest freely: the theory
+describes the code, the code does not answer to it, and an observation that
+overturns the page is the page's next revision, not a deviation. For
 topics it does not cover:
 ```bash
 lore search "<topic>" --type knowledge --scale-set architecture,subsystem --json --limit 3

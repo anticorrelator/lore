@@ -492,7 +492,7 @@ Contract (`scripts/impl-next-batch.sh`) — a prepare-and-return emitter; the le
 
 ### Step 5: Promote accepted Tier 3 candidates
 
-Step 5 is the sole Tier 3 promotion site for `/implement`. Do NOT delegate to `/remember`. Do NOT call `lore capture` directly for work-item-scoped observations — promotion goes through the verb, which delegates to `lore promote` (the canonical path: it forces `confidence=unaudited` and enforces Tier 3 schema via `validate-tier3.sh` before writing).
+Step 5 is the sole Tier 3 promotion site for `/implement`. Do NOT delegate to `/remember`. Do NOT call `lore capture` directly for work-item-scoped observations — promotion goes through the verb, which delegates to `lore promote` (the canonical path: it forces `confidence=unaudited` and enforces Tier 3 schema via `validate-tier3.sh` before writing). The one carve-out is the salvage pass at the end of this step: `--kind hypothesis` and `--kind question` entries go through `lore capture` directly, because the Tier 3 row schema has no way to carry an unverified belief or an open question.
 
 **Select the accepted set — the lead's judgment; the verb never selects candidates.** Inputs: the Tier 3 candidate list stashed in Step 4 §4, plus any lead-originated cross-task candidates the lead produces by reading the complete `execution-log.md` after the last batch. Review each candidate on its merits (reusability, grounding, falsifier quality) and write the accepted set to a file as a JSON array or JSONL (one Tier 3 row object per entry, `producer_role` and `source_artifact_ids` preserved from the worker's block).
 
@@ -513,6 +513,8 @@ Contract (`scripts/impl-promote-batch.sh`) — judgment in, filing out; per cand
 4. **Summary log** — one execution-log entry per invocation, always written, including `0 accepted, 0 rejected` on empty input.
 
 Role template versions default from the implement-skill/worker/advisor templates when the flags are omitted (warn-degrade to unstamped). Exit codes: `0` batch processed (accepted/rejected lists on stdout); `1` usage error / unreadable or malformed candidates file / no match / summary-log failure; `2` ambiguous reference.
+
+**The salvage pass — two retrospective questions before leaving this step.** Did this run leave you believing something you never got to check? File it as a hypothesis carrying its full shape — the claim, the test that would settle it, and where the belief came from: `lore capture --kind hypothesis --kind-status untested --insight "..." --scale "<bucket>"`. Did you carry a question you needed answered and couldn't answer? File it with where you already looked: `lore capture --kind question --kind-status open --where-looked "..." --insight "..." --scale "<bucket>"`. These are direct captures, deliberately outside the promotion path — a promotion row demands a grounded claim with source artifacts, which is exactly what an unchecked belief or an unanswered question does not yet have. Both questions are retrospective: they ask what the run already left behind, never for fresh speculation. "Nothing" is a complete answer to each — an empty salvage pass is the common case, not a shortfall.
 
 ### Step 6: Closure verdict
 

@@ -663,6 +663,18 @@ Apply the provenance flags above on every `lore capture`.
 
 ---
 
+### Step 5.4a: Theory of the touched subsystem
+
+Name the subsystem this plan touches, and put its theory page in order while the synthesis is still in one head — once the phases disperse it, nobody holds the full picture again until the next spec. If a theory page exists for the subsystem (the `### Theory` section of your session context or prefetch), read it against what investigation just taught you and revise whatever no longer describes the code; a theory describes the code, the code never answers to the theory, and whoever changes a subsystem changes its page in the same change — this step is that rule applied to the spec seat. If no page exists and the subsystem is coherent enough to deserve one, write it:
+
+```bash
+lore capture --kind theory --subsystem <name> --category architecture --scale architecture,subsystem --insight "<how the subsystem actually works>"
+```
+
+Put the subsystem's deliberate absences — what it deliberately does not do, and why — in the entry body alongside how it works; the absences are the part a later reader cannot recover from the code. Two outcomes complete this step with nothing written: the page is already current, and this plan touches no subsystem coherent enough to have one. The step blocks nothing — it holds no gate over the ceremony or finalization that follow.
+
+---
+
 ### Step 5.5: Post-plan ceremony evaluation
 
 **Ceremonies always run before terminal finalization.** No flag skips this step; no flag is required to run it. Judgment applies to acting on output, not to whether the registered obligation executes.

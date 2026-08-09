@@ -21,6 +21,9 @@ Every entry in the knowledge store carries provenance and a falsifier you can ch
 - When starting work in a specific area, check the index for a relevant domain file and read it
 - **The test:** if you're about to Grep for how something works, a convention, or why a decision was made — search knowledge first
 
+### Beyond Facts: Theory, Questions, Hypotheses
+Retrieval may hand you three sections beside plain facts, and each carries its own invitation. A `### Theory` entry describes how a subsystem works — it orients you, it never outranks the code, and updating it is part of changing the subsystem it describes. An `### Open questions` entry your session can actually answer is in-scope work, not a detour — answer it and settle the entry. And if your work walks past the settling test a `### Hypotheses` entry names, record what you saw as one corroborating observation via `lore claim corroborate`.
+
 ### Work Retrieval (Before Manual Exploration)
 Before exploring manually (git log, grep, branch inspection), check for tracked work:
 - If the user asks about status, progress, remaining work, or "what's next" → invoke `/work` first

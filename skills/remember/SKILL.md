@@ -199,6 +199,19 @@ lore capture --insight "..." --scale "<bucket>" --context "..." --category "..."
 
 Scale values: `abstract`, `architecture`, `subsystem`, `implementation` (single label or two adjacent labels comma-delimited, e.g. `subsystem,implementation`). See Step 5 for `--producer-role`, `--protocol-slot`, and `--template-version` provenance flags.
 
+#### Salvage: unchecked beliefs and unanswered questions
+
+Two retrospective questions close the scan. They ask about what this session already left behind — never for fresh material; a prompt that asks for insight gets manufactured insight, and "nothing" is a complete answer to both, not a failure to produce. Neither gate above applies here — an unchecked belief cannot clear "high confidence" by definition; the bar is the shape itself, and a candidate missing any part of it is dropped, not padded.
+
+1. **Did this session leave you believing something you never got to check?** A hypothesis carries three parts: the claim, the test that would settle it, and where the belief came from.
+   ```bash
+   lore capture --kind hypothesis --kind-status untested --insight "<the claim — with the test that would settle it and where the belief came from>" --scale "<bucket>"
+   ```
+2. **Did you carry a question you needed answered and couldn't answer?** File the question with where you already looked, so the next agent starts where you stopped rather than where you started.
+   ```bash
+   lore capture --kind question --kind-status open --where-looked "<files read, searches run, docs checked>" --insight "<the question>" --scale "<bucket>"
+   ```
+
 ### Step 3: Scan for thread updates and preference signals
 
 Review the conversation for thread-worthy content:
