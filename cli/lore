@@ -116,6 +116,8 @@ Commands:
   config       Read framework/role/capability config (see: lore config --help)
   framework    Diagnose the active harness profile (see: lore framework --help)
   harness      Per-harness integration toggle (see: lore harness --help)
+  claim        Lifecycle verbs for entries carrying an unsettled claim —
+               corroborate, settle, expire-sweep (see: lore claim --help)
   scale        Capture-scale helpers (see: lore scale --help)
   scorecard    Scorecard sidecar management (see: lore scorecard --help)
   impl         /implement bookkeeping verbs (see: lore impl --help)
@@ -442,6 +444,28 @@ Usage: lore scale <subcommand> [args...]
 Subcommands:
   compute   Compute clamped absolute capture scale from work-scope + role × slot
   registry  Query the scale registry (ids, labels, adjacency, version)
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+claim_usage() {
+  cat >&2 <<EOF
+lore claim — lifecycle verbs for entries that carry an unsettled claim
+
+An entry's epistemic kind says what sort of claim it makes. A hypothesis and a
+question start out unresolved and get settled, or eventually expire; a fact and
+a theory have no lifecycle and these verbs do not apply to them.
+
+Usage: lore claim <subcommand> [args...]
+
+Subcommands:
+  corroborate   Record one observation for or against an entry's claim
+  settle        Move an entry's kind_status (untested|supported|refuted for a
+                hypothesis, open|answered|dissolved for a question)
+  expire-sweep  Move entries that have sat unresolved too long out of the
+                default result set, keeping file, backlinks, and history
 
 Options:
   --help, -h    Show this help
@@ -784,6 +808,36 @@ cmd_scale() {
       echo "Error: unknown scale subcommand '$subcmd'" >&2
       echo "" >&2
       scale_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Claim subgroup (epistemic lifecycle verbs) ---
+cmd_claim() {
+  if [[ $# -eq 0 ]]; then
+    claim_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      claim_usage
+      return 0
+      ;;
+    corroborate|settle)
+      exec "$SCRIPTS_DIR/corroborate-append.sh" "$@"
+      ;;
+    expire-sweep)
+      exec "$SCRIPTS_DIR/expire-sweep.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown claim subcommand '$subcmd'" >&2
+      echo "" >&2
+      claim_usage
       return 1
       ;;
   esac
@@ -2334,6 +2388,10 @@ case "$1" in
   harness)
     shift
     cmd_harness "$@"
+    ;;
+  claim)
+    shift
+    cmd_claim "$@"
     ;;
   scale)
     shift

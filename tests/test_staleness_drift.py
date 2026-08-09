@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import subprocess
 
 import pytest
 
@@ -14,6 +15,9 @@ _spec.loader.exec_module(staleness_scan)
 compute_backlink_drift = staleness_scan.compute_backlink_drift
 compute_file_drift = staleness_scan.compute_file_drift
 score_entry = staleness_scan.score_entry
+parse_metadata = staleness_scan.parse_metadata
+unresolved_kind_hold = staleness_scan.unresolved_kind_hold
+load_kind_lifecycles = staleness_scan.load_kind_lifecycles
 
 
 # ---------------------------------------------------------------------------
@@ -878,3 +882,229 @@ class TestScoreEntryUsageFreshness:
         _, _, signals = score_entry(fd, bd, "high", usage_freshness=None)
         assert signals["usage_freshness"]["available"] is False
         assert signals["usage_freshness"]["weight"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Tests: parse_metadata footer parsing
+# ---------------------------------------------------------------------------
+
+
+def write_entry(tmp_path, footer):
+    """Write a one-entry knowledge file carrying the given metadata footer."""
+    path = tmp_path / "entry.md"
+    path.write_text(f"# Entry\n\nBody prose.\n{footer}\n", encoding="utf-8")
+    return str(path)
+
+
+class TestParseMetadataFooter:
+    """The footer is read as free-form `key: value` pairs, not in a fixed order."""
+
+    def test_modern_multi_field_footer_parses_fully(self, tmp_path):
+        """The field set captures write today is read completely.
+
+        A fixed-order pattern stops matching as soon as a field is appended after
+        the ones it names, and every consumer then reads a small fraction of the
+        store while still looking healthy — so this case is the one that has to
+        stay pinned.
+        """
+        path = write_entry(
+            tmp_path,
+            "<!-- learned: 2026-01-31 | confidence: high | source: worker "
+            "| related_files: scripts/lib.sh | scale: subsystem | producer_role: worker "
+            "| template_version: abc123abc123 | status: current -->",
+        )
+        meta = parse_metadata(path)
+        assert meta["learned"] == "2026-01-31"
+        assert meta["confidence"] == "high"
+        assert meta["source"] == "worker"
+        assert meta["related_files"] == ["scripts/lib.sh"]
+
+    def test_hyphenated_related_files_survive(self, tmp_path):
+        """A hyphen in a path neither truncates the value nor kills the whole footer.
+
+        The pattern this replaced excluded hyphens from related_files, so a footer
+        naming any hyphenated path failed to match at all and took learned and
+        confidence down with it.
+        """
+        path = write_entry(
+            tmp_path,
+            "<!-- learned: 2026-01-31 | confidence: high "
+            "| related_files: scripts/kind-registry.sh,scripts/usage-analyze.py -->",
+        )
+        meta = parse_metadata(path)
+        assert meta["related_files"] == [
+            "scripts/kind-registry.sh",
+            "scripts/usage-analyze.py",
+        ]
+        assert meta["learned"] == "2026-01-31"
+        assert meta["confidence"] == "high"
+
+    def test_json_array_field_keeps_its_keys_to_itself(self, tmp_path):
+        """A JSON provenance array in the footer stays a single value.
+
+        Corroboration and retirement history are written as JSON arrays whose
+        objects carry their own `key: value` pairs; reading those as footer fields
+        would invent metadata the writer never set.
+        """
+        path = write_entry(
+            tmp_path,
+            '<!-- learned: 2026-01-31 | confidence: high | kind: hypothesis '
+            '| kind_status: untested | corroborations: [{"date": "2026-08-09", '
+            '"source": "reader", "direction": "supports", "note": "Still held."}] -->',
+        )
+        meta = parse_metadata(path)
+        assert meta["kind"] == "hypothesis"
+        assert meta["kind_status"] == "untested"
+        assert meta["learned"] == "2026-01-31"
+        assert meta["source"] is None
+
+    def test_footer_found_past_an_unrelated_comment(self, tmp_path):
+        path = tmp_path / "entry.md"
+        path.write_text(
+            "# Entry\n\n<!-- an editing note, not the footer -->\n\nBody prose.\n"
+            "<!-- learned: 2026-01-31 | confidence: medium -->\n",
+            encoding="utf-8",
+        )
+        meta = parse_metadata(str(path))
+        assert meta["learned"] == "2026-01-31"
+        assert meta["confidence"] == "medium"
+
+    def test_no_footer_yields_empty_metadata(self, tmp_path):
+        path = tmp_path / "entry.md"
+        path.write_text("# Entry\n\nBody prose with no footer.\n", encoding="utf-8")
+        meta = parse_metadata(str(path))
+        assert meta == {
+            "learned": None,
+            "confidence": None,
+            "source": None,
+            "related_files": [],
+            "kind": None,
+            "kind_status": None,
+        }
+
+    def test_footer_without_kind_reports_none_for_both_kind_fields(self, tmp_path):
+        """Entries written before the kind field existed — every entry in the store today."""
+        path = write_entry(tmp_path, "<!-- learned: 2026-01-31 | confidence: high | scale: subsystem -->")
+        meta = parse_metadata(path)
+        assert meta["kind"] is None
+        assert meta["kind_status"] is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: epistemic-kind holds on cleanup candidacy
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def kind_lifecycles():
+    lifecycles = load_kind_lifecycles()
+    if lifecycles is None:
+        pytest.skip("kind registry reader unavailable")
+    return lifecycles
+
+
+class TestUnresolvedKindHold:
+    """Which kind/kind_status pairs are held back from cleanup candidacy."""
+
+    @pytest.mark.parametrize("kind,kind_status", [
+        ("hypothesis", "untested"),
+        ("question", "open"),
+        ("hypothesis", None),        # kind_status is required and missing
+        ("question", ""),
+        ("hypothesis", "wobbly"),    # value outside the kind's vocabulary
+        ("conjecture", None),        # kind not in the registry
+        ("HYPOTHESIS", "Untested"),  # casing is normalized
+    ])
+    def test_held(self, kind, kind_status, kind_lifecycles):
+        assert unresolved_kind_hold(kind, kind_status, kind_lifecycles)
+
+    @pytest.mark.parametrize("kind,kind_status", [
+        (None, None),                # no kind field at all
+        ("", None),
+        ("fact", None),
+        ("hypothesis", "refuted"),
+        ("question", "answered"),
+        ("question", "dissolved"),
+        ("theory", None),            # a kind with no lifecycle to be unresolved in
+    ])
+    def test_not_held(self, kind, kind_status, kind_lifecycles):
+        assert unresolved_kind_hold(kind, kind_status, kind_lifecycles) is None
+
+    def test_supported_hypothesis_is_resolved(self, kind_lifecycles):
+        """A tested hypothesis rejoins cleanup candidacy.
+
+        The hold corrects one thing: for an unsettled entry, going unread is the
+        healthy state, so a cold-and-drifted reading mistakes health for decay.
+        Once somebody has tested the hypothesis and recorded it, cold-and-drifted
+        means what it means for a fact and the signal is diagnostic again.
+        """
+        assert unresolved_kind_hold("hypothesis", "supported", kind_lifecycles) is None
+
+    def test_reason_names_what_would_release_the_hold(self, kind_lifecycles):
+        """Whoever reviews a cleanup plan can see why an entry is missing from it."""
+        reason = unresolved_kind_hold("hypothesis", "untested", kind_lifecycles)
+        assert "untested" in reason
+        assert "supported" in reason and "refuted" in reason
+
+    def test_nothing_is_held_when_the_registry_is_unreadable(self):
+        assert unresolved_kind_hold("hypothesis", "untested", None) is None
+
+
+_FIXTURE_SCRIPT = os.path.join(os.path.dirname(__file__), "fixtures", "make-epistemic-store.sh")
+
+
+@pytest.fixture
+def epistemic_store(tmp_path):
+    """Build the shared epistemic fixture store the lifecycle writers are tested against."""
+    if not os.path.isfile(_FIXTURE_SCRIPT):
+        pytest.skip("make-epistemic-store.sh not present")
+    store = tmp_path / "epistemic"
+    subprocess.run(
+        ["bash", _FIXTURE_SCRIPT, str(store)],
+        check=True, capture_output=True, text=True,
+    )
+    return str(store)
+
+
+class TestRunScanKindHolds:
+    """run_scan() over entries carrying the footers the lifecycle writers produce."""
+
+    def test_unresolved_entries_are_held(self, epistemic_store):
+        report = run_scan(epistemic_store, epistemic_store)
+        held = {e["file"] for e in report["entries"] if e["prune_hold"]}
+        assert "conventions/stale-untested-hypothesis.md" in held
+        assert "gotchas/stale-open-question.md" in held
+
+    def test_settled_and_kindless_entries_stay_candidates(self, epistemic_store):
+        report = run_scan(epistemic_store, epistemic_store)
+        candidates = {e["file"] for e in report["entries"] if not e["prune_hold"]}
+        assert "conventions/stale-supported-hypothesis.md" in candidates
+        assert "conventions/stale-plain-fact.md" in candidates
+        assert "conventions/legacy-no-kind.md" in candidates
+
+    def test_entry_without_a_kind_field_is_analyzed_as_a_fact(self, epistemic_store):
+        report = run_scan(epistemic_store, epistemic_store)
+        entry = next(e for e in report["entries"] if e["file"] == "conventions/legacy-no-kind.md")
+        assert entry["kind"] == "fact"
+        assert entry["prune_hold"] is None
+        assert "kind_status" not in entry
+        assert entry["status"] in {"fresh", "aging", "stale"}
+        assert isinstance(entry["drift_score"], float)
+        assert entry["confidence"] == "high"
+
+    def test_holds_do_not_drop_entries_from_the_scan(self, epistemic_store):
+        report = run_scan(epistemic_store, epistemic_store)
+        assert report["total_entries"] == len(report["entries"])
+        assert sum(report["counts"].values()) == report["total_entries"]
+        assert set(report["counts"]) == {"stale", "aging", "fresh"}
+
+    def test_report_carries_registry_availability_and_the_held_set(self, epistemic_store):
+        report = run_scan(epistemic_store, epistemic_store)
+        holds = report["prune_holds"]
+        assert holds["registry_available"] is True
+        assert {h["file"] for h in holds["held"]} == {
+            e["file"] for e in report["entries"] if e["prune_hold"]
+        }
+        for held in holds["held"]:
+            assert held["reason"]
+            assert held["kind"] != "fact"

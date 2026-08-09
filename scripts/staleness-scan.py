@@ -8,6 +8,10 @@ against the codebase. Scores staleness as:
   - aging:  >90 days OR medium confidence
   - fresh:  recent + high confidence
 
+Entries whose epistemic kind has an unresolved lifecycle (an untested hypothesis,
+an unanswered question) are scored like any other entry but marked as held: they
+are reported, and left out of the cleanup candidates the output lists.
+
 Output: _meta/staleness-report.json
 
 Usage:
@@ -35,16 +39,15 @@ SKIP_FILES = {"_inbox.md", "_index.md", "_meta.md", "_meta.json", "_index.json",
 STALE_DAYS = 180
 AGING_DAYS = 90
 
-# Metadata regex: <!-- learned: YYYY-MM-DD | confidence: high|medium|low | source: tag | related_files: path1,path2 -->
-_META_RE = re.compile(
-    r"<!--\s*"
-    r"learned:\s*(?P<learned>\S+)"
-    r"\s*\|\s*confidence:\s*(?P<confidence>\w+)"
-    r"(?:\s*\|\s*source:\s*(?P<source>[^|]+?))?"
-    r"(?:\s*\|\s*related_files:\s*(?P<related_files>[^-]+?))?"
-    r"\s*-->",
-    re.DOTALL,
-)
+DEFAULT_KIND = "fact"
+
+# Entry footer: one HTML comment of pipe-separated `key: value` pairs, e.g.
+#   <!-- learned: 2026-01-31 | confidence: high | scale: subsystem | kind: hypothesis | kind_status: untested -->
+# Fields get appended to that footer over time, so the pairs are read as free-form
+# key/value rather than in a fixed order — this matches the indexer's parser in
+# pk_markdown.py, and both ignore keys they don't recognize.
+_METADATA_COMMENT_RE = re.compile(r"<!--(.*?)-->", re.DOTALL)
+_METADATA_KV_RE = re.compile(r"(\w+):\s*([^|>]+?)(?=\s*\||\s*-->|\s*$)")
 
 
 # ---------------------------------------------------------------------------
@@ -69,38 +72,171 @@ def collect_entry_files(knowledge_dir: str) -> list[str]:
     return results
 
 
+def _parse_footer_fields(text: str) -> dict[str, str]:
+    """Return the key/value pairs of an entry's metadata footer, or {} if absent.
+
+    The footer is the first HTML comment containing `learned:` — the same comment
+    pk_markdown.py indexes from. Other comments in the file are skipped.
+    """
+    for match in _METADATA_COMMENT_RE.finditer(text):
+        inner = match.group(1)
+        if "learned:" not in inner:
+            continue
+        return {
+            kv.group(1).strip(): kv.group(2).strip()
+            for kv in _METADATA_KV_RE.finditer(inner)
+        }
+    return {}
+
+
 def parse_metadata(file_path: str) -> dict:
     """Extract metadata from HTML comment in a knowledge entry file.
 
     Returns dict with keys: learned (str|None), confidence (str|None),
-    source (str|None), related_files (list[str]).
+    source (str|None), related_files (list[str]), kind (str|None),
+    kind_status (str|None).
+
+    `kind` is the entry's epistemic kind (fact, hypothesis, question, theory) and
+    `kind_status` its own lifecycle value, distinct from the entry-lifecycle
+    `status` key. Entries written before those fields existed return None for
+    both; callers that filter on kind read a missing value as `fact`.
     """
+    empty = {
+        "learned": None,
+        "confidence": None,
+        "source": None,
+        "related_files": [],
+        "kind": None,
+        "kind_status": None,
+    }
+
     try:
         text = Path(file_path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        return {"learned": None, "confidence": None, "source": None, "related_files": []}
+        return empty
 
-    match = _META_RE.search(text)
-    if not match:
-        return {"learned": None, "confidence": None, "source": None, "related_files": []}
+    fields = _parse_footer_fields(text)
+    if not fields:
+        return empty
 
-    learned = match.group("learned").strip() if match.group("learned") else None
-    confidence = match.group("confidence").strip().lower() if match.group("confidence") else None
-    source = match.group("source").strip() if match.group("source") else None
+    def _lowered(key: str) -> str | None:
+        value = fields.get(key)
+        return value.lower() if value else None
 
     related_files: list[str] = []
-    rf_str = match.group("related_files")
+    rf_str = fields.get("related_files", "")
     if rf_str:
-        rf_str = rf_str.strip()
-        if rf_str:
-            related_files = [f.strip() for f in rf_str.split(",") if f.strip()]
+        related_files = [f.strip() for f in rf_str.split(",") if f.strip()]
 
     return {
-        "learned": learned,
-        "confidence": confidence,
-        "source": source,
+        "learned": fields.get("learned") or None,
+        "confidence": _lowered("confidence"),
+        "source": fields.get("source") or None,
         "related_files": related_files,
+        "kind": _lowered("kind"),
+        "kind_status": _lowered("kind_status"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Epistemic kinds
+# ---------------------------------------------------------------------------
+
+_KIND_LIFECYCLES: dict[str, list[str]] | None = None
+_KIND_LIFECYCLES_LOADED = False
+
+
+def load_kind_lifecycles() -> dict[str, list[str]] | None:
+    """Return {kind id: its kind_status vocabulary} read from the kind registry.
+
+    Read through kind-registry.sh rather than restated here, so the vocabulary
+    cannot fork from the writer's. Each kind's vocabulary is declared in
+    progression order: the first value is the state an entry is authored in, the
+    rest are the values it resolves to. Kinds with no lifecycle (fact, theory)
+    map to an empty list.
+
+    Returns None when the registry cannot be read, so callers can report that
+    kinds were not consulted instead of quietly analyzing as if none existed.
+    Cached — the registry is read at most once per process.
+    """
+    global _KIND_LIFECYCLES, _KIND_LIFECYCLES_LOADED
+    if _KIND_LIFECYCLES_LOADED:
+        return _KIND_LIFECYCLES
+    _KIND_LIFECYCLES_LOADED = True
+
+    reader = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kind-registry.sh")
+    if not os.path.isfile(reader):
+        return None
+
+    def _read(*args: str) -> list[str] | None:
+        try:
+            result = subprocess.run(
+                ["bash", reader, *args],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+    kind_ids = _read("get-ids")
+    if not kind_ids:
+        return None
+
+    lifecycles: dict[str, list[str]] = {}
+    for kind_id in kind_ids:
+        statuses = _read("get-statuses", kind_id)
+        if statuses is None:
+            return None
+        lifecycles[kind_id] = statuses
+
+    _KIND_LIFECYCLES = lifecycles
+    return _KIND_LIFECYCLES
+
+
+def unresolved_kind_hold(
+    kind: str | None,
+    kind_status: str | None,
+    lifecycles: dict[str, list[str]] | None,
+) -> str | None:
+    """Explain why an entry is held back from cleanup candidacy, or None if it isn't.
+
+    An entry whose kind is still working through its lifecycle is stale and unread
+    by construction — that is the healthy state of an untested hypothesis or an
+    unanswered question — so the drift signals read its health as decay. Such an
+    entry is held: still scored, still reported, but not offered for deletion.
+
+    Facts and theories carry no lifecycle and are never held. A missing kind is a
+    fact. An unrecognized kind or a missing lifecycle value is held, because
+    releasing a held entry later is cheap and undoing a deletion is not.
+
+    The returned string is written to be read by whoever reviews a cleanup plan:
+    it names the state the entry is in and what would move it out of the hold.
+    """
+    if lifecycles is None:
+        return None
+
+    kind = (kind or DEFAULT_KIND).strip().lower()
+    if kind == DEFAULT_KIND:
+        return None
+    if kind not in lifecycles:
+        return f"kind '{kind}' is not in the kind registry — held until it is registered or corrected"
+
+    statuses = lifecycles[kind]
+    if not statuses:
+        return None
+
+    opening, resolutions = statuses[0], statuses[1:]
+    settled = " or ".join(resolutions) if resolutions else "a resolved value"
+    status = (kind_status or "").strip().lower()
+    if not status:
+        return f"{kind} carries no kind_status — held until its lifecycle is recorded"
+    if status == opening or status not in statuses:
+        return f"{kind} is {status} — held until it is {settled}"
+    return None
 
 
 def compute_age_days(learned_date: str | None) -> int | None:
@@ -715,6 +851,15 @@ def run_scan(knowledge_dir: str, repo_root: str) -> dict:
     entry_files = collect_entry_files(knowledge_dir)
     entries: list[dict] = []
     counts = {"stale": 0, "aging": 0, "fresh": 0}
+    held: list[dict] = []
+
+    kind_lifecycles = load_kind_lifecycles()
+    if kind_lifecycles is None:
+        print(
+            "[staleness-scan] warning: kind registry unreadable — unresolved "
+            "hypotheses and open questions were not held back from cleanup candidacy",
+            file=sys.stderr,
+        )
 
     # Pre-compute usage freshness for all entries
     usage_freshness_data = compute_usage_freshness(knowledge_dir)
@@ -764,6 +909,9 @@ def run_scan(knowledge_dir: str, repo_root: str) -> dict:
             usage_freshness=entry_usage_freshness,
         )
 
+        kind = meta["kind"] or DEFAULT_KIND
+        hold_reason = unresolved_kind_hold(meta["kind"], meta["kind_status"], kind_lifecycles)
+
         entry = {
             "file": entry_rel_path,
             "status": status,
@@ -772,12 +920,23 @@ def run_scan(knowledge_dir: str, repo_root: str) -> dict:
             "learned": meta["learned"],
             "confidence": meta["confidence"],
             "age_days": age_days,
+            "kind": kind,
+            "prune_hold": hold_reason,
         }
+        if meta["kind_status"]:
+            entry["kind_status"] = meta["kind_status"]
         if meta["related_files"]:
             entry["related_files"] = file_check
 
         entries.append(entry)
         counts[status] += 1
+        if hold_reason:
+            held.append({
+                "file": entry_rel_path,
+                "kind": kind,
+                "kind_status": meta["kind_status"],
+                "reason": hold_reason,
+            })
 
     report = {
         "scan_time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -785,6 +944,10 @@ def run_scan(knowledge_dir: str, repo_root: str) -> dict:
         "repo_root": repo_root,
         "total_entries": len(entries),
         "counts": counts,
+        "prune_holds": {
+            "registry_available": kind_lifecycles is not None,
+            "held": held,
+        },
         "entries": entries,
     }
     return report
@@ -863,25 +1026,34 @@ def main() -> None:
         return
 
     # Human-readable output
+    held_entries = [e for e in report["entries"] if e["prune_hold"]]
+
     print(f"Staleness scan: {report['total_entries']} entries")
     print(f"  Fresh: {report['counts']['fresh']}")
     print(f"  Aging: {report['counts']['aging']}")
     print(f"  Stale: {report['counts']['stale']}")
+    if held_entries:
+        print(f"  Held from cleanup: {len(held_entries)}")
 
-    stale_entries = [e for e in report["entries"] if e["status"] == "stale"]
-    aging_entries = [e for e in report["entries"] if e["status"] == "aging"]
-
-    if stale_entries:
-        print(f"\nStale ({len(stale_entries)}):")
-        for e in stale_entries:
+    def _print_bucket(label: str, status: str) -> None:
+        """List a drift bucket's cleanup candidates, held entries counted but not listed."""
+        bucket = [e for e in report["entries"] if e["status"] == status]
+        candidates = [e for e in bucket if not e["prune_hold"]]
+        if not candidates:
+            return
+        suffix = f", plus {len(bucket) - len(candidates)} held" if len(bucket) > len(candidates) else ""
+        print(f"\n{label} ({len(candidates)}{suffix}):")
+        for e in candidates:
             top = _top_signal(e["signals"])
             print(f"  {e['file']}  (drift: {e['drift_score']:.2f}, top: {top})")
 
-    if aging_entries:
-        print(f"\nAging ({len(aging_entries)}):")
-        for e in aging_entries:
-            top = _top_signal(e["signals"])
-            print(f"  {e['file']}  (drift: {e['drift_score']:.2f}, top: {top})")
+    _print_bucket("Stale", "stale")
+    _print_bucket("Aging", "aging")
+
+    if held_entries:
+        print(f"\nHeld from cleanup ({len(held_entries)}) — not deletion candidates:")
+        for e in held_entries:
+            print(f"  {e['file']}  ({e['prune_hold']})")
 
     print(f"\nReport written to: {report_path}")
 

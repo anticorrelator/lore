@@ -4,6 +4,10 @@
 Reads _meta/retrieval-log.jsonl and cross-references with _manifest.json
 to produce per-entry access stats and identify cold entries.
 
+Entries whose epistemic kind has an unresolved lifecycle (an untested hypothesis,
+an unanswered question) keep their access counts but are reported separately from
+the cold list, which downstream cleanup reads as deletion candidates.
+
 Usage:
     python usage-analyze.py <knowledge_dir> [--sessions N] [--json] [--cold-threshold N]
 
@@ -11,6 +15,7 @@ Output: Writes _meta/usage-report.json and prints a human-readable summary.
 """
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -121,6 +126,62 @@ def collect_entry_files(knowledge_dir: str) -> list[str]:
                 continue
             entries.append(f"{cat_dir}/{fname}")
     return entries
+
+
+# ---------------------------------------------------------------------------
+# Epistemic kinds
+# ---------------------------------------------------------------------------
+
+def _load_kind_reader():
+    """Load the entry-footer reader and kind-hold rule from staleness-scan.py.
+
+    staleness-scan.py owns both the footer parser and the kind-registry lookup that
+    decide whether an entry's epistemic kind is still unresolved; reaching for them
+    here keeps one definition of that rule across the two maintenance analyses.
+    Returns None when the module cannot be loaded.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "staleness-scan.py")
+    if not os.path.isfile(path):
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("staleness_scan", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except Exception:
+        return None
+    return module
+
+
+def compute_kind_holds(
+    knowledge_dir: str,
+    entry_paths: list[str],
+) -> tuple[dict[str, dict], bool]:
+    """Find which of these entries are held back from cleanup candidacy by their kind.
+
+    Returns ({relative path: {path, kind, kind_status, reason}}, registry_available).
+    An empty result with registry_available False means kinds could not be read at
+    all, which is reported rather than treated as "nothing is held".
+    """
+    module = _load_kind_reader()
+    if module is None:
+        return {}, False
+
+    lifecycles = module.load_kind_lifecycles()
+    if lifecycles is None:
+        return {}, False
+
+    holds: dict[str, dict] = {}
+    for rel_path in entry_paths:
+        meta = module.parse_metadata(os.path.join(knowledge_dir, rel_path))
+        reason = module.unresolved_kind_hold(meta["kind"], meta["kind_status"], lifecycles)
+        if reason:
+            holds[rel_path] = {
+                "path": rel_path,
+                "kind": meta["kind"] or module.DEFAULT_KIND,
+                "kind_status": meta["kind_status"],
+                "reason": reason,
+            }
+    return holds, True
 
 
 # ---------------------------------------------------------------------------
@@ -266,10 +327,24 @@ def analyze_usage(
             entry_stats[path]["retrieval_count"] = 1 if path in accessed_entries else 0
 
     # Cold entries: retrieval_count at or below threshold
-    cold_entries = [
+    cold_paths = [
         path for path, stats in entry_stats.items()
         if stats["retrieval_count"] <= cold_threshold
     ]
+
+    # The cold list feeds cleanup candidacy, so entries whose epistemic kind is
+    # still unresolved are held out of it: an untested hypothesis or an unanswered
+    # question goes unread by design, and a low retrieval count says nothing about
+    # whether it has served its purpose yet. Their access counts stay in
+    # entry_access, so staleness scoring still sees them.
+    kind_holds, kind_registry_available = compute_kind_holds(knowledge_dir, cold_paths)
+    if not kind_registry_available:
+        print(
+            "[usage-analyze] warning: kind registry unreadable — unresolved "
+            "hypotheses and open questions were not held out of the cold list",
+            file=sys.stderr,
+        )
+    cold_entries = [path for path in cold_paths if path not in kind_holds]
 
     declaration_coverage = (
         round(sessions_with_scale_declared / total_sessions, 4)
@@ -292,12 +367,17 @@ def analyze_usage(
             "zero_result_searches": zero_result_searches,
             "cold_entry_count": len(cold_entries),
             "cold_threshold": cold_threshold,
+            "kind_held_count": len(kind_holds),
         },
         "top_queries": [
             {"query": q, "count": c, "last_seen": query_timestamps.get(q, "")}
             for q, c in top_queries
         ],
         "cold_entries": sorted(cold_entries),
+        "prune_holds": {
+            "registry_available": kind_registry_available,
+            "held": [kind_holds[path] for path in sorted(kind_holds)],
+        },
         "entry_access": {
             path: {
                 "retrieval_count": stats["retrieval_count"],
@@ -373,6 +453,8 @@ def main() -> None:
     print(f"  Zero results:   {s['zero_result_searches']}")
     print(f"  Avg latency:    {s['avg_search_latency_ms']}ms")
     print(f"Cold entries:     {s['cold_entry_count']} / {s['total_entries']}")
+    if s["kind_held_count"]:
+        print(f"  Held by kind:   {s['kind_held_count']}")
     print()
 
     if report["top_queries"]:
@@ -386,6 +468,16 @@ def main() -> None:
         for entry in report["cold_entries"][:20]:
             print(f"  - {entry}")
         remaining = len(report["cold_entries"]) - 20
+        if remaining > 0:
+            print(f"  ... and {remaining} more")
+        print()
+
+    held = report["prune_holds"]["held"]
+    if held:
+        print(f"Held from cleanup ({len(held)}) — unretrieved but not cleanup candidates:")
+        for entry in held[:20]:
+            print(f"  - {entry['path']}  ({entry['reason']})")
+        remaining = len(held) - 20
         if remaining > 0:
             print(f"  ... and {remaining} more")
         print()

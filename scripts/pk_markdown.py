@@ -52,8 +52,15 @@ class MarkdownParser:
         Parses lore metadata comments of the form:
             <!-- learned: DATE | confidence: high | source: ... | scale: val | status: current -->
 
-        Returns dict with keys: learned, confidence, source, scale, entry_status (None if not found).
+        Returns dict with keys: learned, confidence, source, scale, entry_status,
+        template_version, kind, kind_status (None if not found).
         Unrecognized fields are silently ignored.
+
+        `kind` is the epistemic kind of the claim (fact, hypothesis, question,
+        theory) and `kind_status` its own lifecycle value; `kind_status` is
+        separate from `status`, which carries entry lifecycle. Entries written
+        before the kind field existed return None for both — consumers that
+        filter on kind resolve a missing value to `fact`.
         """
         # Find the first HTML comment that contains "learned:"
         for m in MarkdownParser._METADATA_COMMENT_RE.finditer(text):
@@ -73,8 +80,10 @@ class MarkdownParser:
                 "scale": kv.get("scale"),
                 "entry_status": kv.get("status"),
                 "template_version": kv.get("template_version"),
+                "kind": kv.get("kind"),
+                "kind_status": kv.get("kind_status"),
             }
-        return {"learned": None, "confidence": None, "source": None, "scale": None, "entry_status": None, "template_version": None}
+        return {"learned": None, "confidence": None, "source": None, "scale": None, "entry_status": None, "template_version": None, "kind": None, "kind_status": None}
 
     @staticmethod
     def parse_entry_file(file_path: str) -> list[dict]:
