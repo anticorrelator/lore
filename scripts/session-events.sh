@@ -13,7 +13,9 @@
 #                     hand-rolled `| tail -N`. Plain mode only.
 #   --cursor-only     Print just the current end-of-journal byte offset and exit —
 #                     an O(1) stat, no rows replayed. Use it to capture a baseline
-#                     cursor before acting (e.g. close-then-wait teardown).
+#                     cursor before acting (e.g. close-then-wait teardown). The
+#                     answer does not depend on --since, so this mode consumes no
+#                     cursor and runs none of the cursor checks below.
 #   --kdir <path>     Knowledge-store override (test isolation).
 #   --json            Emit {events: [...], records: [...], next_cursor: N} on
 #                     stdout. Each records entry pairs an event with the cursor
@@ -28,8 +30,13 @@
 #   - A torn/malformed trailing row stops the read at the last newline-terminated
 #     valid row; the reported cursor points there.
 #   - A malformed interior row is excluded with a stderr warning, never repaired.
-#   - A cursor exceeding the file size (only possible via external tampering)
-#     resets to a full re-read with a warning.
+#   - A cursor is a row boundary, not an arbitrary byte offset. An interior offset
+#     is refused (`cursor-not-row-aligned`) rather than read as a row suffix, so
+#     the caller's bad input is never reported as journal damage.
+#   - A cursor exceeding the file size is refused (`cursor-past-eof`). The journal
+#     is append-only with no rotation, so such a cursor was computed rather than
+#     echoed, or was persisted against a different journal; replaying from byte
+#     zero would hand back the whole journal as if it were new.
 #
 # The cursor is data, so it rides stdout with the rows it belongs to: a consumer
 # reads the whole stream and never has to merge stderr back in to stay caught up.
@@ -59,7 +66,7 @@ while [[ $# -gt 0 ]]; do
     --cursor-only) CURSOR_ONLY=1; shift ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,41p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
       echo "Usage: session-events.sh [--since <cursor>] [--tail <N>] [--cursor-only] [--kdir <path>] [--json]" >&2
@@ -114,8 +121,16 @@ if [[ $CURSOR_ONLY -eq 1 ]]; then
   exit 0
 fi
 
+# The reader validates the cursor it is about to consume and reports the verdict
+# as an exit code, so the two refusals cost no extra process in a poll loop —
+# `lore coordinate watch` calls this script once a second for hours, and the
+# checks need the same open file the read already needs.
+CURSOR_PAST_EOF=11
+CURSOR_NOT_ROW_ALIGNED=12
+
 # The cursor reader is pure: it emits {events, next_cursor} on stdout and any
-# exclusion/reset warnings on stderr. Byte-offset arithmetic lives entirely here.
+# exclusion warnings on stderr. Byte-offset arithmetic lives entirely here.
+READER_STATUS=0
 RESULT="$(python3 - "$EVENTS_FILE" "$SINCE" "$WINDOW_START" "$WINDOW_END" <<'PYEOF'
 import json, os, sys
 from datetime import datetime, timezone
@@ -141,14 +156,19 @@ if start_raw or end_raw:
 
 size = os.path.getsize(events_file) if os.path.exists(events_file) else 0
 
-# A cursor past EOF is impossible without external tampering; reset to a full
-# re-read rather than silently returning nothing.
+# The reader is deliberately tolerant of a damaged journal, which is exactly why
+# it must not be tolerant of a bad cursor: once the read starts, a caller's bad
+# offset is indistinguishable from a journal fact. A mid-row offset reads a valid
+# row's suffix and reports it as corrupt JSON; a past-EOF offset replays the
+# whole journal as if none of it had been seen. Both are refused here, at the
+# only point that holds the file and the offset together.
 if since > size:
-    sys.stderr.write(
-        f"[session] warning: cursor {since} exceeds events.jsonl size {size} — "
-        f"resetting to full re-read\n"
-    )
-    since = 0
+    raise SystemExit(11)          # CURSOR_PAST_EOF
+if since > 0:
+    with open(events_file, "rb") as f:
+        f.seek(since - 1)
+        if f.read(1) != b"\n":
+            raise SystemExit(12)  # CURSOR_NOT_ROW_ALIGNED
 
 events = []
 records = []
@@ -217,7 +237,26 @@ print(json.dumps({
     "next_cursor": next_cursor,
 }))
 PYEOF
-)"
+)" || READER_STATUS=$?
+
+# The refusal messages are composed here so --json still gets the family's error
+# shape. The journal length is read only on this cold path.
+case "$READER_STATUS" in
+  0) ;;
+  "$CURSOR_PAST_EOF")
+    JOURNAL_SIZE=0
+    if [[ -f "$EVENTS_FILE" ]]; then
+      JOURNAL_SIZE="$(wc -c < "$EVENTS_FILE" | tr -d '[:space:]')"
+    fi
+    fail "invalid --since cursor $SINCE: cursor-past-eof — events.jsonl is $JOURNAL_SIZE bytes, so this cursor points past the end of the journal.
+  The journal is append-only and is never compacted, truncated, or rotated, so a cursor lands here only if it was computed rather than echoed back, or if it was persisted against a different journal (a store that was reset, restored, or replaced).
+  Reading from it would replay the journal from byte zero and hand back rows already seen, so it is refused rather than answered. Start again from a cursor this journal emitted: 'lore session events --cursor-only' for the current end, or --since 0 to replay it whole."
+    ;;
+  "$CURSOR_NOT_ROW_ALIGNED")
+    fail "invalid --since cursor $SINCE: cursor-not-row-aligned (the preceding byte is not a newline, so this offset points into the middle of a row); reuse a next_cursor emitted by lore session events, lore session wait, or lore coordinate watch"
+    ;;
+  *) exit "$READER_STATUS" ;;
+esac
 
 if [[ $JSON_MODE -eq 1 ]]; then
   json_output "$RESULT"

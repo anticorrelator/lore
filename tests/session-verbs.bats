@@ -679,23 +679,73 @@ EOF
   done
 }
 
-@test "events: any past-EOF cursor resets to a full re-read with a warning" {
+@test "events: any past-EOF cursor is refused, naming the journal length and the recovery" {
   write_journal >/dev/null
   local -a bounds=(); local _b
   while IFS= read -r _b; do bounds+=("$_b"); done < <(journal_boundaries)
   local size="${bounds[${#bounds[@]}-1]}"
-  local total="${#JOURNAL_ROWS[@]}"
 
   local delta
   for delta in 1 50 9999; do
     local cursor=$(( size + delta ))
-    local err="$TEST_KDIR/err.$delta"
-    local out; out="$(bash "$EVENTS" --kdir "$TEST_KDIR" --since "$cursor" --json 2>"$err")"
-    local n; n="$(echo "$out" | jq -r '.events | length')"
-    local nc; nc="$(echo "$out" | jq -r '.next_cursor')"
-    [ "$n" -eq "$total" ] || { echo "delta=$delta n=$n expected=$total"; false; }
-    [ "$nc" -eq "$size" ] || { echo "delta=$delta next_cursor=$nc size=$size"; false; }
-    grep -q "resetting to full re-read" "$err" || { echo "delta=$delta: missing reset warning"; false; }
+    run bash "$EVENTS" --kdir "$TEST_KDIR" --since "$cursor" --json
+    [ "$status" -eq 1 ] || { echo "delta=$delta status=$status"; false; }
+    [[ "$output" == *"cursor-past-eof"* ]] || { echo "delta=$delta: $output"; false; }
+    # The journal length, the likely cause, and the way back.
+    [[ "$output" == *"events.jsonl is $size bytes"* ]] || { echo "delta=$delta: $output"; false; }
+    [[ "$output" == *"never compacted, truncated, or rotated"* ]] || { echo "delta=$delta: $output"; false; }
+    [[ "$output" == *"--cursor-only"* ]] || { echo "delta=$delta: $output"; false; }
+    # The refusal replaces the replay: no rows come back, and the old silent
+    # reset-to-zero is gone rather than merely quieter.
+    [[ "$output" != *"resetting to full re-read"* ]] || { echo "delta=$delta: $output"; false; }
+    [[ "$output" != *'"event":"requested"'* ]] || { echo "delta=$delta: $output"; false; }
+  done
+}
+
+@test "events: --cursor-only consumes no cursor, so it answers rather than refusing" {
+  write_journal >/dev/null
+  local -a bounds=(); local _b
+  while IFS= read -r _b; do bounds+=("$_b"); done < <(journal_boundaries)
+  local size="${bounds[${#bounds[@]}-1]}"
+
+  # The end offset does not depend on --since. Validating a cursor this mode
+  # never reads would cost the family's cheapest call an extra process.
+  run bash "$EVENTS" --kdir "$TEST_KDIR" --cursor-only --since 999999
+  [ "$status" -eq 0 ]
+  [ "$output" = "$size" ]
+}
+
+@test "events: a mid-row --since is refused as the caller's error, not as journal corruption" {
+  write_journal >/dev/null
+  local -a bounds=(); local _b
+  while IFS= read -r _b; do bounds+=("$_b"); done < <(journal_boundaries)
+
+  # One byte inside each row, including the last: every interior offset refuses.
+  local idx
+  for idx in "${!bounds[@]}"; do
+    [ "$idx" -eq 0 ] && continue
+    local cursor=$(( ${bounds[$idx]} - 1 ))
+    run bash "$EVENTS" --kdir "$TEST_KDIR" --since "$cursor" --json
+    [ "$status" -eq 1 ] || { echo "cursor=$cursor status=$status"; false; }
+    [[ "$output" == *"cursor-not-row-aligned"* ]] || { echo "cursor=$cursor: $output"; false; }
+    [[ "$output" == *"reuse a next_cursor"* ]] || { echo "cursor=$cursor: $output"; false; }
+    # The defect this closes: the reader used to parse the row's suffix and
+    # report the caller's bad offset as a damaged journal.
+    [[ "$output" != *"corrupt"* ]] || { echo "cursor=$cursor: $output"; false; }
+  done
+}
+
+@test "events: every row-boundary cursor is still accepted after the guards" {
+  write_journal >/dev/null
+  local -a bounds=(); local _b
+  while IFS= read -r _b; do bounds+=("$_b"); done < <(journal_boundaries)
+  local total="${#JOURNAL_ROWS[@]}"
+
+  local idx
+  for idx in "${!bounds[@]}"; do
+    run bash "$EVENTS" --kdir "$TEST_KDIR" --since "${bounds[$idx]}" --json
+    [ "$status" -eq 0 ] || { echo "cursor=${bounds[$idx]} status=$status output=$output"; false; }
+    [ "$(echo "$output" | jq -r '.events | length')" -eq $(( total - idx )) ]
   done
 }
 
@@ -1951,6 +2001,37 @@ EOF
   [ "$status" -eq 1 ]
   [[ "$output" == *"invalid --since cursor 7: cursor-not-row-aligned (preceding byte is not newline); reuse a next_cursor emitted by lore session events or lore session wait"* ]]
   [[ "$output" != *"corrupt"* ]]
+}
+
+@test "wait: a past-EOF --since is refused instead of waking on the oldest row in the journal" {
+  # The oldest row already satisfies the default until-set, so replaying from
+  # byte zero would return it as a fresh wake for something that happened long
+  # before the cursor was taken.
+  printf '%s\n' '{"event":"needs_input","request_id":"r0","slug":"feature-x"}' \
+                '{"event":"spawned","request_id":"r1","slug":"feature-x"}' \
+    > "$TEST_KDIR/_sessions/events.jsonl"
+  local size; size="$(wc -c < "$TEST_KDIR/_sessions/events.jsonl" | tr -d '[:space:]')"
+
+  run bash "$WAIT" feature-x --since 999 --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cursor-past-eof"* ]]
+  [[ "$output" == *"events.jsonl is $size bytes"* ]]
+  [[ "$output" == *"never compacted, truncated, or rotated"* ]]
+  [[ "$output" == *"Re-arm from a cursor this journal emitted"* ]]
+  # A refusal, not a match: the stale cursor never produces a wake row.
+  [[ "$output" != *"needs_input"* ]]
+}
+
+@test "wait: a cursor exactly at end-of-journal is a boundary, not past-EOF" {
+  printf '%s\n' '{"event":"closed","request_id":"r1","slug":"feature-x"}' \
+    > "$TEST_KDIR/_sessions/events.jsonl"
+  local size; size="$(wc -c < "$TEST_KDIR/_sessions/events.jsonl" | tr -d '[:space:]')"
+
+  # No live instance hosts the slug, so this reaches the session-gone exit —
+  # which is the point: the cursor itself was accepted.
+  run bash "$WAIT" feature-x --since "$size" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"cursor-past-eof"* ]]
 }
 
 @test "wait: no live instance and no matching row exits 3 (session gone) with a resume cursor" {

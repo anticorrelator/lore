@@ -242,10 +242,25 @@ SESSIONS_DIR="$KNOWLEDGE_DIR/_sessions"
 EVENTS_SH="$SCRIPT_DIR/session-events.sh"
 EVENTS_FILE="$SESSIONS_DIR/events.jsonl"
 
-# A supplied cursor is a row boundary, not an arbitrary byte offset. Reject an
-# interior offset here so the tolerant reference reader never mistakes a valid
-# row suffix for corrupt JSON. Past-EOF retains the reader's reset behavior.
+# A supplied cursor is a row boundary inside this journal, not an arbitrary byte
+# offset. Both ways of failing that are caller errors the reader cannot tell from
+# journal facts once a read has started: an interior offset would be parsed as a
+# row suffix and reported as corrupt JSON, and a past-EOF offset would start the
+# wait at byte zero, where the oldest matching row in the journal satisfies it
+# immediately — a confident wake on an event that happened long ago. Refuse both
+# here, before the first read, so a stale cursor costs a re-arm and not a wrong
+# answer.
 if [[ $SINCE_SET -eq 1 && "$SINCE" -gt 0 ]]; then
+  JOURNAL_SIZE=0
+  if [[ -f "$EVENTS_FILE" ]]; then
+    JOURNAL_SIZE="$(wc -c < "$EVENTS_FILE" | tr -d '[:space:]')"
+  fi
+  if [[ "$SINCE" -gt "$JOURNAL_SIZE" ]]; then
+    fail "invalid --since cursor $SINCE: cursor-past-eof — events.jsonl is $JOURNAL_SIZE bytes, so this cursor points past the end of the journal.
+  The journal is append-only and is never compacted, truncated, or rotated, so a cursor lands here only if it was computed rather than echoed back, or if it was persisted against a different journal (a store that was reset, restored, or replaced).
+  Waiting from this cursor would start the read at byte zero and match the oldest qualifying row in the journal, so it is refused rather than answered. Re-arm from a cursor this journal emitted, or drop --since to wait on what happens next."
+  fi
+
   ALIGNMENT_STATUS=0
   session_cursor_row_aligned "$EVENTS_FILE" "$SINCE" || ALIGNMENT_STATUS=$?
   case "$ALIGNMENT_STATUS" in
