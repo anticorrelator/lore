@@ -261,7 +261,7 @@ Classification: on a park-shaped row the watcher peek-confirms through the ownin
 instance's shared readiness gate before waking. A strict match against the
 versioned per-harness signature set wakes `confirmed`; no strict match wakes
 `advisory` carrying the labeled reason no signature fired; an advisory repeating
-past its age threshold wakes `aged`; a window reaching its deadline with nothing
+past its age threshold wakes `aged_advisory`; a window reaching its deadline with nothing
 actionable wakes `quiet` with the cursor position. Strictness selects tier, never
 existence. `--advisory-age <sec>` sets the escalation threshold; `--peek-timeout
 <sec>` bounds the round-trip through the owning instance, and `0` skips the peek
@@ -276,7 +276,7 @@ other screen demotes to an advisory labelled `modal-not-on-screen`, which ages
 normally. A screen that cannot answer leaves the row's claim confirmed on
 `hook-row` authority — absence of evidence never demotes. `classification.modal_gate`
 reports what the gate found on every modal row, including the ones it left standing.
-Every wake body names its authority and the signature-set version consulted, so
+Every wake body names its authority (`hook-row`, `screen-signature`, `owner-handle` on an owner-gone exit, or `none` on a quiet window) and the signature-set version consulted, so
 matcher-contract drift (the codex composer-badge class — see Calibrations below)
 is detectable rather than silent; signatures are versioned and refreshable.
 
