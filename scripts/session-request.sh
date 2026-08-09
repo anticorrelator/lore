@@ -8,8 +8,10 @@
 # Options:
 #   --type <t>         Required. Session type: spec | implement | chat | worker.
 #   --slug <s>         Work-item slug the request targets (default: null / no work
-#                      item). REQUIRED for --type worker: a worker's slug is the
-#                      derived <work-item-slug>--w<n> that is its session identity.
+#                      item). REQUIRED for --type worker, and its shape is checked:
+#                      a worker's slug is the derived <work-item-slug>--w<n> that is
+#                      its session identity, and the suffix is what the journal,
+#                      scoped watches, and the TUI parse to find the work item.
 #   --target <name>    Placement stance: address the request to one instance (the
 #                      named instance alone may claim). Every request MUST carry
 #                      exactly one placement stance — --target, --prefer-dir,
@@ -177,6 +179,29 @@ esac
 # has no session identity, so require one at enqueue.
 if [[ "$TYPE" == "worker" && -z "$SLUG" ]]; then
   fail "--slug is required for --type worker (the derived slug is the session identity)"
+fi
+
+# The `--w<n>` suffix is not decoration: three sole-writer consumers parse it and
+# each degrades silently when it is absent. session-event-append.sh derives
+# links.work_item from this shape, so a mis-shaped worker slug leaves every
+# lifecycle row of that session unattributed — and the scope predicate in lib.sh
+# matches worker rows only through links.work_item, so a watch scoped to the item
+# never sees the worker at all. The TUI groups workers under their base item from
+# the same parse. None of those failures announce themselves.
+#
+# Refusal rather than advisory, matching --worktree-id's shape check two blocks
+# down: the value is fully determined at enqueue, and the cost of getting it wrong
+# is invisible downstream loss. The advisories in this script are the other
+# situation — a correct value an older reader may ignore.
+#
+# The base must be a slugify() output, which collapses every `--` run to a single
+# `-`; that is what makes the suffix an unambiguous marker rather than a guess.
+if [[ "$TYPE" == "worker" ]] && ! [[ "$SLUG" =~ ^[a-z0-9]+(-[a-z0-9]+)*--w[0-9]+$ ]]; then
+  fail "invalid --slug for --type worker: '$SLUG' (expected the derived <work-item-slug>--w<n> form, e.g. my-work-item--w1).
+  The '--w<n>' suffix is how the journal stamps links.work_item, how a scoped watch
+  finds this session's rows, and how the TUI groups it under its work item. A slug
+  without it enqueues cleanly and then goes missing from all three, with no error.
+  Pass the work item's own slug with the worker number appended."
 fi
 
 case "$INITIATOR" in
@@ -420,22 +445,85 @@ fi
 # The manager registry is the authority for coordinated placement. Validate the
 # exact live row after resolving --kdir so a caller cannot pair a real checkout
 # with a different stream's id or a stale/truncated identity.
+#
+# Six independent conditions decide this, and they fail for unrelated reasons: a
+# seat-owned tree is a routing mistake (the tree is fine, a session request is the
+# wrong way to reach it), a non-reserved/bound state is a lifecycle mistake, a
+# guard-identity mismatch is a stale capture. One predicate collapsing all six
+# into "does not match registry row" tells a caller only that something is wrong,
+# so each condition is checked and reported by name below.
 if [[ $WORKTREE_ID_PROVIDED -eq 1 ]]; then
   MANAGER_ROW="$KNOWLEDGE_DIR/_coordination/worktrees/registry/$WORKTREE_ID.json"
-  [[ -f "$MANAGER_ROW" ]] || fail "managed worktree registry row not found for --worktree-id '$WORKTREE_ID'"
-  if ! jq -e \
-    --arg id "$WORKTREE_ID" \
-    --arg dir "$EXECUTION_DIR_RESOLVED" \
-    --argjson identity "$WORKTREE_IDENTITY_JSON" '
-      .schema_version == 1 and
-      .worktree_id == $id and
-      .execution_dir == $dir and
-      (.state == "reserved" or .state == "bound") and
-      (.owner.kind == "session" and (.owner.id | type == "string" and length > 0)) and
-      .guard_identity == $identity
-    ' "$MANAGER_ROW" >/dev/null 2>&1; then
-    fail "managed worktree placement does not match registry row for '$WORKTREE_ID'"
+  [[ -f "$MANAGER_ROW" ]] || fail "managed worktree registry row not found for --worktree-id '$WORKTREE_ID' (looked in $KNOWLEDGE_DIR/_coordination/worktrees/registry/).
+  The manager writes this row at allocation; nothing here creates it. Allocate the
+  tree first, or list what exists with 'lore coordinate worktree show'."
+
+  jq -e 'type == "object"' "$MANAGER_ROW" >/dev/null 2>&1 || \
+    fail "managed worktree registry row for '$WORKTREE_ID' is not a readable JSON object: $MANAGER_ROW.
+  The manager is the sole writer of this row, so a torn or empty one means the
+  allocation did not complete. Re-allocate the tree rather than repairing the file."
+
+  ROW_SCHEMA="$(jq -r 'if has("schema_version") then (.schema_version | tostring) else "absent" end' "$MANAGER_ROW")"
+  ROW_STATE="$(jq -r '.state // "absent"' "$MANAGER_ROW")"
+  ROW_OWNER_KIND="$(jq -r '.owner.kind // "absent"' "$MANAGER_ROW")"
+
+  [[ "$ROW_SCHEMA" == "1" ]] || \
+    fail "managed worktree registry row for '$WORKTREE_ID' declares schema_version=$ROW_SCHEMA, and this verb reads schema 1 only.
+  A row from a newer manager cannot be validated here without guessing at fields
+  this build does not know about. Update the lore install that is enqueueing."
+
+  jq -e --arg id "$WORKTREE_ID" '.worktree_id == $id' "$MANAGER_ROW" >/dev/null 2>&1 || \
+    fail "managed worktree registry row at $MANAGER_ROW carries worktree_id '$(jq -r '.worktree_id // "absent"' "$MANAGER_ROW")', not '$WORKTREE_ID'.
+  The file name and the id inside it disagree, so one of them belongs to another
+  stream. Read the row you meant with 'lore coordinate worktree show --worktree-id <id>'
+  and pass that id."
+
+  jq -e --arg dir "$EXECUTION_DIR_RESOLVED" '.execution_dir == $dir' "$MANAGER_ROW" >/dev/null 2>&1 || \
+    fail "--execution-dir resolves to '$EXECUTION_DIR_RESOLVED', but worktree '$WORKTREE_ID' is registered at '$(jq -r '.execution_dir // "absent"' "$MANAGER_ROW")'.
+  execution_dir is hard placement — the child's working directory — so it is taken
+  from the manager's record, never from where you happen to be standing. Pass the
+  registered path, or allocate a tree for this directory."
+
+  case "$ROW_STATE" in
+    reserved|bound) ;;
+    *)
+      fail "worktree '$WORKTREE_ID' is at state '$ROW_STATE'; a session request can be pinned to one only at reserved or bound.
+  Those two are the states in which no session is running in the tree yet. Anything
+  further along (active, recovered, quiescent, reconciling, cleanup_due, ...) is a
+  tree already in use or on its way out, and dispatching a second session into it
+  would put two writers in one checkout. Allocate a fresh tree for this request."
+      ;;
+  esac
+
+  if [[ "$ROW_OWNER_KIND" != "session" ]]; then
+    if [[ "$ROW_OWNER_KIND" == "seat" ]]; then
+      fail "worktree '$WORKTREE_ID' is a seat-owned allocation (owner.kind=seat), and a session request can only be pinned to a session-owned tree.
+  A seat-owned tree hosts harness-native subagents under the seat's own lease, which
+  the seat renews; a session request would hand it to a session whose lifecycle does
+  not renew that lease. Either dispatch this work as a subagent in that tree, or drop
+  the manager tuple (--worktree-id/--execution-dir/--worktree-identity) and let the
+  claiming TUI allocate the worker its own session-owned tree."
+    else
+      fail "worktree '$WORKTREE_ID' declares owner.kind='$ROW_OWNER_KIND'; a session request requires owner.kind=session.
+  Ownership decides which lease renewal keeps the tree alive, so it is never inferred.
+  Allocate with --owner-kind session, or drop the manager tuple and let the claiming
+  TUI allocate the worker its own tree."
+    fi
   fi
+
+  jq -e '.owner.id | type == "string" and length > 0' "$MANAGER_ROW" >/dev/null 2>&1 || \
+    fail "worktree '$WORKTREE_ID' is session-owned but carries no owner.id.
+  The owner id is what the lease is renewed against, so an empty one means the tree
+  is swept on the lease timer no matter who is working in it. Re-allocate with a
+  non-empty --owner-id."
+
+  jq -e --argjson identity "$WORKTREE_IDENTITY_JSON" '.guard_identity == $identity' "$MANAGER_ROW" >/dev/null 2>&1 || \
+    fail "--worktree-identity does not equal the guard_identity recorded for worktree '$WORKTREE_ID'.
+  The guard identity is the repository-identity proof captured at allocation; a
+  mismatch means the identity you passed came from a different tree or from before
+  a re-capture, and it is what the claiming TUI re-checks immediately before spawn.
+  Read the current one from the registry row and pass it unchanged:
+  'lore coordinate worktree show --worktree-id $WORKTREE_ID'."
 fi
 
 PENDING_DIR="$KNOWLEDGE_DIR/_sessions/requests/pending"

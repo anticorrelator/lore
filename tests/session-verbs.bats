@@ -91,6 +91,79 @@ write_instance_session() {
 EOF
 }
 
+# --- Binding assertions after `run` ----------------------------------------
+# bats suspends errexit for the remainder of a test once `run` has executed, so a
+# bare `[[ ... ]]` written after one is only binding when it happens to be the
+# last statement — any earlier failing check is skipped in silence. These helpers
+# fold a whole expectation into one call, used as the test's final statement (or
+# with an explicit `|| return 1` inside a loop), so every check actually decides
+# the test and a miss reports what it wanted against what it got.
+
+# outcome_is <expected status> <needle>... — the last `run` exited with that
+# status and its output contains every needle.
+outcome_is() {
+  local want="$1"; shift
+  if [ "$status" -ne "$want" ]; then
+    echo "expected exit $want, got $status" >&2
+    echo "output: $output" >&2
+    return 1
+  fi
+  local needle
+  for needle in "$@"; do
+    if [[ "$output" != *"$needle"* ]]; then
+      echo "expected output to contain: $needle" >&2
+      echo "output: $output" >&2
+      return 1
+    fi
+  done
+}
+
+# out_lacks <needle>... — the last `run` output contains none of these.
+out_lacks() {
+  local needle
+  for needle in "$@"; do
+    if [[ "$output" == *"$needle"* ]]; then
+      echo "expected output NOT to contain: $needle" >&2
+      echo "output: $output" >&2
+      return 1
+    fi
+  done
+}
+
+# --- Managed-placement fixtures --------------------------------------------
+# The manager-registry validation in session-request.sh checks six independent
+# conditions and reports each by name, so the tests below share one row that
+# satisfies all six and break exactly one per case with a jq patch. That keeps
+# each test's subject the single condition it names.
+
+managed_execution_dir() {
+  mkdir -p "$TEST_KDIR/managed-tree"
+  (cd "$TEST_KDIR/managed-tree" && pwd -P)
+}
+
+managed_identity() {
+  jq -cn --arg dir "$1" '{version:1,canonical_path:$dir,git_common_dir:"/tmp/repo/.git",git_dir:"/tmp/repo/.git/worktrees/session-tree",epoch:"epoch-1",captured:{canonical_path:"/tmp/repo",git_common_dir:"/tmp/repo/.git",git_dir:"/tmp/repo/.git",head_oid:"abc",index_digest:"index",worktree_digest:"tree"},target_ref:"refs/heads/main",target_oid:"abc",state:"captured"}'
+}
+
+# write_manager_row <execution_dir> <identity-json> [jq-patch]
+write_manager_row() {
+  local dir="$1" identity="$2" patch="${3:-.}"
+  mkdir -p "$TEST_KDIR/_coordination/worktrees/registry"
+  jq -n --arg dir "$dir" --argjson identity "$identity" \
+    '{schema_version:1,worktree_id:"tree-1",execution_dir:$dir,state:"reserved",owner:{kind:"session",id:"worker-1"},guard_identity:$identity}' \
+    | jq "$patch" > "$TEST_KDIR/_coordination/worktrees/registry/tree-1.json"
+}
+
+# run_managed_request <execution_dir> <identity-json>
+# The worker arm carries --context because the dispatch-guidance requirement is
+# checked before the registry is read; without it every one of these cases would
+# refuse for that reason instead and prove nothing about the registry checks.
+run_managed_request() {
+  run bash "$REQUEST" --type worker --slug impl-demo--w1 --worktree-id tree-1 \
+    --execution-dir "$1" --worktree-identity "$2" \
+    --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR"
+}
+
 # Build events.jsonl directly from explicit compact rows so byte offsets are
 # fully controlled by the test (the reader validates JSON only, not schema).
 JOURNAL_ROWS=(
@@ -190,6 +263,28 @@ journal_boundaries() {
   [[ "$output" == *"--slug is required for --type worker"* ]]
 }
 
+@test "request --type worker refuses a slug missing the --w<n> suffix" {
+  run bash "$REQUEST" --type worker --slug "impl-foo" --initiator agent --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR"
+  outcome_is 1 "invalid --slug for --type worker" "<work-item-slug>--w<n>" "links.work_item" \
+    && [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+@test "request --type worker refuses a slug whose base is not a slugify output" {
+  # slugify lowercases and collapses every `--` run to one `-`, so a base that
+  # carries `--` or uppercase could not have come from it, and the worker-marker
+  # parse downstream would be a guess.
+  local bad
+  for bad in "impl--foo--w1" "Impl-Foo--w1" "impl-foo--wN" "impl-foo--w" "--w1"; do
+    run bash "$REQUEST" --type worker --slug "$bad" --initiator agent --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR"
+    outcome_is 1 "invalid --slug for --type worker" || return 1
+  done
+}
+
+@test "request slug shape check applies only to --type worker" {
+  run bash "$REQUEST" --type spec --slug "impl-foo" --anywhere --kdir "$TEST_KDIR"
+  outcome_is 0
+}
+
 @test "request --type worker with --track refuses (track is spec-only)" {
   run bash "$REQUEST" --type worker --slug "impl-foo--w1" --track short --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
@@ -271,20 +366,113 @@ journal_boundaries() {
   [ ! -e "$TEST_KDIR/_sessions/requests" ]
 }
 
-@test "request refuses managed placement that disagrees with the registry" {
-  mkdir -p "$TEST_KDIR/managed-tree" "$TEST_KDIR/_coordination/worktrees/registry"
-  local execution_dir; execution_dir="$(cd "$TEST_KDIR/managed-tree" && pwd -P)"
-  local identity
-  identity="$(jq -cn --arg dir "$execution_dir" '{version:1,canonical_path:$dir,git_common_dir:"/tmp/repo/.git",git_dir:"/tmp/repo/.git/worktrees/session-tree",epoch:"epoch-1",captured:{canonical_path:"/tmp/repo",git_common_dir:"/tmp/repo/.git",git_dir:"/tmp/repo/.git",head_oid:"abc",index_digest:"index",worktree_digest:"tree"},target_ref:"refs/heads/main",target_oid:"abc",state:"captured"}')"
-  jq -n --arg dir "$execution_dir" --argjson identity "$identity" \
-    '{schema_version:1,worktree_id:"different",execution_dir:$dir,state:"reserved",owner:{kind:"session",id:"worker-1"},guard_identity:$identity}' \
-    > "$TEST_KDIR/_coordination/worktrees/registry/tree-1.json"
+@test "request names the id disagreement when the registry row is another stream's" {
+  local execution_dir; execution_dir="$(managed_execution_dir)"
+  local identity; identity="$(managed_identity "$execution_dir")"
+  write_manager_row "$execution_dir" "$identity" '.worktree_id = "different"'
+
+  run_managed_request "$execution_dir" "$identity"
+  outcome_is 1 "carries worktree_id 'different', not 'tree-1'" "lore coordinate worktree show" \
+    && [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+@test "request explains a seat-owned tree as a routing mistake, naming both remedies" {
+  local execution_dir; execution_dir="$(managed_execution_dir)"
+  local identity; identity="$(managed_identity "$execution_dir")"
+  write_manager_row "$execution_dir" "$identity" '.owner.kind = "seat"'
+
+  run_managed_request "$execution_dir" "$identity"
+  # Both remedies: dispatch a subagent in that tree, or drop the tuple and let the
+  # claiming TUI allocate a session-owned one.
+  outcome_is 1 "seat-owned allocation (owner.kind=seat)" "subagent in that tree" \
+    "the manager tuple (--worktree-id/--execution-dir/--worktree-identity)" \
+    && [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+@test "request names an unexpected owner kind separately from the seat case" {
+  local execution_dir; execution_dir="$(managed_execution_dir)"
+  local identity; identity="$(managed_identity "$execution_dir")"
+  write_manager_row "$execution_dir" "$identity" '.owner.kind = "sweeper"'
+
+  run_managed_request "$execution_dir" "$identity"
+  outcome_is 1 "owner.kind='sweeper'" "requires owner.kind=session" \
+    && out_lacks "seat-owned allocation"
+}
+
+@test "request names the lifecycle state when the tree is past bound" {
+  local execution_dir; execution_dir="$(managed_execution_dir)"
+  local identity; identity="$(managed_identity "$execution_dir")"
+  write_manager_row "$execution_dir" "$identity" '.state = "active"'
+
+  run_managed_request "$execution_dir" "$identity"
+  outcome_is 1 "at state 'active'" "reserved or bound" \
+    && [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+@test "request names a stale guard identity as its own condition" {
+  local execution_dir; execution_dir="$(managed_execution_dir)"
+  local identity; identity="$(managed_identity "$execution_dir")"
+  write_manager_row "$execution_dir" "$identity" '.guard_identity.captured.head_oid = "def"'
+
+  run_managed_request "$execution_dir" "$identity"
+  outcome_is 1 "does not equal the guard_identity recorded" \
+    && [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+@test "request names an empty owner.id on an otherwise session-owned tree" {
+  local execution_dir; execution_dir="$(managed_execution_dir)"
+  local identity; identity="$(managed_identity "$execution_dir")"
+  write_manager_row "$execution_dir" "$identity" '.owner.id = ""'
+
+  run_managed_request "$execution_dir" "$identity"
+  outcome_is 1 "no owner.id"
+}
+
+@test "request names the registered execution_dir when placement disagrees" {
+  local execution_dir; execution_dir="$(managed_execution_dir)"
+  local identity; identity="$(managed_identity "$execution_dir")"
+  write_manager_row "$execution_dir" "$identity" '.execution_dir = "/elsewhere"'
+
+  run_managed_request "$execution_dir" "$identity"
+  outcome_is 1 "registered at '/elsewhere'"
+}
+
+@test "request names an unreadable registry row rather than reporting a mismatch" {
+  local execution_dir; execution_dir="$(managed_execution_dir)"
+  local identity; identity="$(managed_identity "$execution_dir")"
+  mkdir -p "$TEST_KDIR/_coordination/worktrees/registry"
+  printf '%s' '{"schema_version":1,' > "$TEST_KDIR/_coordination/worktrees/registry/tree-1.json"
+
+  run_managed_request "$execution_dir" "$identity"
+  outcome_is 1 "not a readable JSON object"
+}
+
+@test "request names a missing registry row as one the manager never wrote" {
+  local execution_dir; execution_dir="$(managed_execution_dir)"
+  local identity; identity="$(managed_identity "$execution_dir")"
+
+  run_managed_request "$execution_dir" "$identity"
+  outcome_is 1 "registry row not found for --worktree-id 'tree-1'"
+}
+
+@test "request names a future schema_version as unreadable-by-this-build" {
+  local execution_dir; execution_dir="$(managed_execution_dir)"
+  local identity; identity="$(managed_identity "$execution_dir")"
+  write_manager_row "$execution_dir" "$identity" '.schema_version = 2'
+
+  run_managed_request "$execution_dir" "$identity"
+  outcome_is 1 "schema_version=2"
+}
+
+@test "request accepts a bound tree, not only a reserved one" {
+  local execution_dir; execution_dir="$(managed_execution_dir)"
+  local identity; identity="$(managed_identity "$execution_dir")"
+  write_manager_row "$execution_dir" "$identity" '.state = "bound"'
 
   run bash "$REQUEST" --type worker --slug impl-demo--w1 --worktree-id tree-1 \
-    --execution-dir "$execution_dir" --worktree-identity "$identity" --anywhere --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"does not match registry row"* ]]
-  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+    --execution-dir "$execution_dir" --worktree-identity "$identity" \
+    --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
 }
 
 @test "request with invalid --framework refuses before enqueue" {
@@ -1308,6 +1496,83 @@ PY
   [[ "$output" == *'"reason": "modal"'* ]]
 }
 
+@test "send without --wait says the outcome is unconfirmed and how to read it" {
+  write_instance inst-a feature-x
+  local err="$TEST_KDIR/send.err"
+  local out; out="$(bash "$SEND" feature-x "hi" --kdir "$TEST_KDIR" 2>"$err")"
+  local rid; rid="$(jq -r .request_id "$(ls "$TEST_KDIR"/_sessions/send-requests/*.json)")"
+  # The refusal cannot exist yet at return time — the gate runs on the owning
+  # instance's later poll tick — so the honesty has to land in the output rather
+  # than the exit code: name what is unconfirmed, and the two ways to learn it.
+  [[ "$out" == *"Enqueued send to 'feature-x'"* ]]
+  grep -q "enqueued is not delivered" "$err"
+  grep -q -- "--wait" "$err"
+  grep -q "lore session events" "$err"
+  grep -q "$rid" "$err"
+}
+
+@test "send without --wait reports outcome_confirmed=false in --json" {
+  write_instance inst-a feature-x
+  run bash "$SEND" feature-x "hi" --kdir "$TEST_KDIR" --json
+  outcome_is 0 && echo "$output" | jq -e '.enqueued==true and .outcome_confirmed==false'
+}
+
+@test "send --wait refusal for reason=modal names peek and answer with the expect form" {
+  write_instance inst-a feature-x
+  ( rid="$(wait_request_id send-requests)"
+    echo '{"event":"send_refused","request_id":"'"$rid"'","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  run bash "$SEND" feature-x "hi" --wait --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  outcome_is 3 \
+    "lore session peek feature-x" \
+    'lore session answer feature-x --option <N> --expect' \
+    "gate declining, not the session"
+}
+
+@test "send --wait refusal for reason=generating names the gate and the retry boundary" {
+  write_instance inst-a feature-x
+  ( rid="$(wait_request_id send-requests)"
+    echo '{"event":"send_refused","request_id":"'"$rid"'","slug":"feature-x","reason":"generating"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  run bash "$SEND" feature-x "hi" --wait --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  outcome_is 3 "readiness gate declined, not the harness" "lore session wait feature-x"
+}
+
+@test "send --wait gives every gate-emittable reason its own diagnosis" {
+  # The full set tui/gate.go can put on a send_refused row. A reason with no
+  # branch of its own would fall through to the unrecognized tail, which this
+  # asserts against.
+  local reason
+  for reason in generating modal no-signature no-contract unsafe-payload error unsubmitted; do
+    rm -rf "$TEST_KDIR"; TEST_KDIR="$(mktemp -d)"; mkdir -p "$TEST_KDIR/_sessions"
+    write_instance inst-a feature-x
+    ( rid="$(wait_request_id send-requests)"
+      echo '{"event":"send_refused","request_id":"'"$rid"'","slug":"feature-x","reason":"'"$reason"'"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+    run bash "$SEND" feature-x "hi" --wait --timeout 10 --kdir "$TEST_KDIR"
+    wait
+    outcome_is 3 "reason=$reason" || return 1
+    out_lacks "does not recognize the refusal reason" || return 1
+  done
+}
+
+@test "send --wait reports an unknown reason as a build skew rather than guessing" {
+  write_instance inst-a feature-x
+  ( rid="$(wait_request_id send-requests)"
+    echo '{"event":"send_refused","request_id":"'"$rid"'","slug":"feature-x","reason":"quarantined"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  run bash "$SEND" feature-x "hi" --wait --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  outcome_is 3 "does not recognize the refusal reason 'quarantined'" "newer build"
+}
+
+@test "send --wait refusal carries the diagnosis in --json too" {
+  write_instance inst-a feature-x
+  ( rid="$(wait_request_id send-requests)"
+    echo '{"event":"send_refused","request_id":"'"$rid"'","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  run bash "$SEND" feature-x "hi" --wait --timeout 10 --json --kdir "$TEST_KDIR"
+  wait
+  outcome_is 3 '"detail"' "lore session answer"
+}
+
 @test "send --wait times out to exit 1 when no outcome lands" {
   write_instance inst-a feature-x
   run bash "$SEND" feature-x "hi" --wait --timeout 1 --kdir "$TEST_KDIR"
@@ -1417,6 +1682,58 @@ PY
   [ -z "$(ls "$TEST_KDIR"/_sessions/peek-responses/ 2>/dev/null)" ]
   # Peek is a read: it emits no journal events.
   [ ! -f "$TEST_KDIR/_sessions/events.jsonl" ]
+}
+
+@test "peek explains a not-ready classification instead of printing the bare token" {
+  write_instance inst-a feature-x
+  ( rid="$(wait_request_id peek-requests)"
+    mkdir -p "$TEST_KDIR/_sessions/peek-responses"
+    printf '%s\n' '{"request_id":"'"$rid"'","slug":"feature-x","captured_at":"t","ready":false,"blocked_reason":"modal","rows":["1. Yes","2. No"]}' \
+      > "$TEST_KDIR/_sessions/peek-responses/$rid.json" ) &
+  run bash "$PEEK" feature-x --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  outcome_is 0 "blocked_reason=modal" 'lore session answer feature-x --option <N> --expect'
+}
+
+@test "peek says nothing extra when the session is ready" {
+  write_instance inst-a feature-x
+  ( rid="$(wait_request_id peek-requests)"
+    mkdir -p "$TEST_KDIR/_sessions/peek-responses"
+    printf '%s\n' '{"request_id":"'"$rid"'","slug":"feature-x","captured_at":"t","ready":true,"blocked_reason":"","rows":["> "]}' \
+      > "$TEST_KDIR/_sessions/peek-responses/$rid.json" ) &
+  run bash "$PEEK" feature-x --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  outcome_is 0 "ready=true" && out_lacks "would be refused" "lore session answer"
+}
+
+@test "peek gives every reason the gate can classify its own diagnosis" {
+  # tui/peek.go sets blocked_reason from sendReadiness (no-contract | generating
+  # | modal | no-signature) or `error` on a screen-read failure. The inject-time
+  # reasons cannot reach a peek response, so they are not covered here.
+  local reason
+  for reason in generating modal no-signature no-contract error; do
+    rm -rf "$TEST_KDIR"; TEST_KDIR="$(mktemp -d)"; mkdir -p "$TEST_KDIR/_sessions"
+    write_instance inst-a feature-x
+    ( rid="$(wait_request_id peek-requests)"
+      mkdir -p "$TEST_KDIR/_sessions/peek-responses"
+      printf '%s\n' '{"request_id":"'"$rid"'","slug":"feature-x","captured_at":"t","ready":false,"blocked_reason":"'"$reason"'","rows":["x"]}' \
+        > "$TEST_KDIR/_sessions/peek-responses/$rid.json" ) &
+    run bash "$PEEK" feature-x --timeout 10 --kdir "$TEST_KDIR"
+    wait
+    outcome_is 0 "blocked_reason=$reason" || return 1
+    out_lacks "does not recognize the blocked_reason" || return 1
+  done
+}
+
+@test "peek reports an unknown blocked_reason as a build skew" {
+  write_instance inst-a feature-x
+  ( rid="$(wait_request_id peek-requests)"
+    mkdir -p "$TEST_KDIR/_sessions/peek-responses"
+    printf '%s\n' '{"request_id":"'"$rid"'","slug":"feature-x","captured_at":"t","ready":false,"blocked_reason":"hibernating","rows":["x"]}' \
+      > "$TEST_KDIR/_sessions/peek-responses/$rid.json" ) &
+  run bash "$PEEK" feature-x --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  outcome_is 0 "does not recognize the blocked_reason 'hibernating'"
 }
 
 @test "peek refuses when no live instance runs the slug" {
@@ -3090,3 +3407,4 @@ answer_peek_with() {
   [ "$status" -eq 0 ]
   [ "$(shasum -a 256 "$TEST_KDIR/_sessions/events.jsonl" | awk '{print $1}')" = "$before" ]
 }
+
