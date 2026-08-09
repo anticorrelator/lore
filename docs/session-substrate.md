@@ -833,8 +833,12 @@ archetype.
 Reader tolerance: a malformed or torn trailing row stops the read at the last
 newline-terminated valid row, and the reported cursor points there. A malformed
 *interior* row is excluded with a stderr warning and the read continues past it. A
-cursor that exceeds the file size (impossible without external tampering) resets to
-a full re-read with a warning.
+cursor that exceeds the file size is refused rather than answered: the reader names
+the journal's length, the two ways a cursor gets there — computed rather than echoed
+back, or persisted against a journal that was since reset, restored, or replaced —
+and the way back, a cursor this journal emitted. Tolerance covers a damaged journal,
+never a cursor the journal cannot honour: reading from a past-EOF offset would start
+at byte zero and hand back rows the consumer has already seen as if they were new.
 
 `session events` reports that cursor as `next_cursor`. Under `--json` it wraps
 `{events: [...], records: [{event: <row>, next_cursor: N}, ...], next_cursor: N}`:
@@ -953,9 +957,10 @@ rather than growing this contract.**
   into timeout 2. Every non-error exit hands back a resume cursor so a woken
   consumer re-arms with `--since` instead of replaying. A supplied `--since`
   cursor at or before EOF must point immediately after a newline (or be 0); an
-  interior offset fails with `cursor-not-row-aligned` and a remediation hint,
-  while past-EOF reset and the reference reader's interior-malformed/torn-tail
-  tolerance remain unchanged. Instance liveness is only a session-gone hint
+  interior offset fails with `cursor-not-row-aligned` and a remediation hint, a
+  past-EOF offset fails with `cursor-past-eof` naming the journal's length and the
+  way back, and the reference reader's interior-malformed/torn-tail tolerance
+  remains unchanged. Instance liveness is only a session-gone hint
   because registry removal can precede the terminal journal append: after liveness disappears,
   `wait` gives the journal a two-second grace and reads once more before returning
   3. The journal row wins if it lands in that window. Session-gone is suppressed

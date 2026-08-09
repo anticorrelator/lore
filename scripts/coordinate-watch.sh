@@ -1729,10 +1729,28 @@ else
   CURSOR="$(session_events_cursor "$EVENTS_SH" "$KNOWLEDGE_DIR")" || emit_internal_error null
 fi
 
-# A cursor is a row boundary. An interior offset would make the tolerant
-# reference reader parse a row's suffix and call the caller's bad input corrupt
-# journal, so refuse it here and name the fix.
+# A cursor is a row boundary inside this journal, and the reader refuses both
+# ways of missing it. Refuse them here first: the reader's refusal reaches the
+# loop as a read that failed, which retries twice more and exits as an internal
+# error telling the seat to fix a dependency that is working correctly. The
+# baseline is set once, so reading the journal's length here costs nothing on the
+# poll path.
 if [[ "$CURSOR" -gt 0 ]]; then
+  JOURNAL_SIZE=0
+  if [[ -f "$EVENTS_FILE" ]]; then
+    JOURNAL_SIZE="$(wc -c < "$EVENTS_FILE" | tr -d '[:space:]')"
+  fi
+  if [[ "$CURSOR" -gt "$JOURNAL_SIZE" ]]; then
+    if [[ $SINCE_SET -eq 1 ]]; then
+      CURSOR_FIX="re-arm from a cursor this journal emitted, or drop --since to watch from the journal's end"
+    else
+      CURSOR_FIX="this cursor was persisted by an earlier watch — remove $CURSOR_FILE and the next watch re-baselines at the journal's end"
+    fi
+    fail "invalid cursor $CURSOR: cursor-past-eof — events.jsonl is $JOURNAL_SIZE bytes, so this cursor points past the end of the journal.
+  The journal is append-only and is never compacted, truncated, or rotated, so a cursor lands here only if it was computed rather than echoed back, or if it was taken against a different journal (a store that was reset, restored, or replaced).
+  Watching from it would replay the journal from byte zero and wake on rows the board worked through long ago, so it is refused rather than answered: $CURSOR_FIX"
+  fi
+
   ALIGNMENT_STATUS=0
   session_cursor_row_aligned "$EVENTS_FILE" "$CURSOR" || ALIGNMENT_STATUS=$?
   case "$ALIGNMENT_STATUS" in

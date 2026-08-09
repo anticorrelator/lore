@@ -2690,6 +2690,49 @@ EOF
   [[ "$output" == *"cursor-not-row-aligned"* ]]
 }
 
+@test "watch: a past-EOF --since is refused before the reader turns it into an internal error" {
+  printf '%s\n' '{"event":"closed","request_id":"r1","slug":"feature-x"}' > "$TEST_KDIR/_sessions/events.jsonl"
+  local size; size="$(wc -c < "$TEST_KDIR/_sessions/events.jsonl" | tr -d '[:space:]')"
+
+  run bash "$WATCH" --since 999 --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid cursor 999: cursor-past-eof"* ]]
+  [[ "$output" == *"events.jsonl is $size bytes"* ]]
+  [[ "$output" == *"drop --since to watch from the journal's end"* ]]
+  # The reader refuses this cursor too, but through the watch loop that refusal
+  # is three failed reads and an exit-4 internal error blaming the dependency.
+  [[ "$output" != *"fix the reader dependency"* ]]
+}
+
+@test "watch: a past-EOF persisted cursor names the cursor file as the thing to clear" {
+  # How this happens without anyone computing a cursor: the watcher persists a
+  # position, and the store it was taken against is later reset or replaced.
+  printf '%s\n' '{"event":"closed","request_id":"r1","slug":"feature-x"}' > "$TEST_KDIR/_sessions/events.jsonl"
+  mkdir -p "$TEST_KDIR/_coordination"
+  jq -n '{schema_version:1,cursor:4096,updated_at:"2026-01-01T00:00:00Z"}' \
+    > "$TEST_KDIR/$WATCH_CURSOR"
+
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid cursor 4096: cursor-past-eof"* ]]
+  [[ "$output" == *"remove $TEST_KDIR/$WATCH_CURSOR"* ]]
+  [[ "$output" != *"--since"* ]]              # no --since was given to re-arm from
+  # The refusal leaves the cursor where it was: clearing it is the seat's call.
+  [ "$(watch_cursor)" = "4096" ]
+}
+
+@test "watch: a persisted cursor exactly at end-of-journal is a boundary, not past-EOF" {
+  printf '%s\n' '{"event":"closed","request_id":"r1","slug":"feature-x"}' > "$TEST_KDIR/_sessions/events.jsonl"
+  local size; size="$(wc -c < "$TEST_KDIR/_sessions/events.jsonl" | tr -d '[:space:]')"
+  mkdir -p "$TEST_KDIR/_coordination"
+  jq -n --argjson c "$size" '{schema_version:1,cursor:$c,updated_at:"2026-01-01T00:00:00Z"}' \
+    > "$TEST_KDIR/$WATCH_CURSOR"
+
+  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]                          # quiet window, cursor accepted
+  [[ "$output" != *"cursor-past-eof"* ]]
+}
+
 @test "watch: refuses a non-numeric --timeout and --pending-stale" {
   run bash "$WATCH" --timeout soon --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]

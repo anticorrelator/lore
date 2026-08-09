@@ -1253,9 +1253,9 @@ session_events_run() {
 
 # session_events_read <events_sh> <kdir> <cursor>
 # One incremental journal read from <cursor>, echoing the reference reader's
-# {events, records, next_cursor} object. Composing the reader means torn-row,
-# interior-malformed, and past-EOF-reset tolerance are inherited, not re-derived
-# per caller.
+# {events, records, next_cursor} object. Composing the reader means torn-row and
+# interior-malformed tolerance — and the refusal of a cursor the journal cannot
+# honour — are inherited, not re-derived per caller.
 session_events_read() {
   local events_sh="$1" kdir="$2" cursor="$3"
   session_events_run "$events_sh" --json --since "$cursor" --kdir "$kdir"
@@ -1274,8 +1274,10 @@ session_events_cursor() {
 # row, 1 when the check itself could not run. A cursor is a row boundary, not an
 # arbitrary byte offset: rejecting an interior offset here stops the tolerant
 # reference reader from reading a valid row's suffix as corrupt JSON and
-# reporting the caller's own bad input as journal damage. Past-EOF is left to the
-# reader's reset behavior.
+# reporting the caller's own bad input as journal damage. Past-EOF is the other
+# way to miss a boundary and this check does not cover it: a cursor beyond the
+# journal's end passes here and is refused by the reader itself, which holds the
+# file length the refusal has to name.
 session_cursor_row_aligned() {
   local events_file="$1" cursor="$2" status=0
   python3 - "$events_file" "$cursor" <<'PYEOF' || status=$?
