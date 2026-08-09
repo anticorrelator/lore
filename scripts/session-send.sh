@@ -23,7 +23,11 @@
 # paste, never written raw. See docs/session-substrate.md.
 #
 # Exit codes:
-#   0  message sent (or, without --wait, request enqueued)
+#   0  with --wait: the message was sent. Without --wait: the request was enqueued
+#      and NOTHING about its delivery is confirmed — the gate runs on the owning
+#      instance's later poll tick, so a refusal cannot exist yet at return time and
+#      lands in the journal after this command is gone. The no-wait success line
+#      says so, and says how to read the outcome.
 #   1  error (bad args, no live instance, enqueue failure, or --wait timeout)
 #   2  reserved (session verb family / composed-terminal-verb namespace)
 #   3  send refused by the readiness gate (--wait only; reason on stderr/JSON)
@@ -111,6 +115,104 @@ emit_event() {
   fi
 }
 
+# --- Refusal diagnosis -----------------------------------------------------
+# The reason on a send_refused row is a bare enum token decided on the Go side
+# (tui/gate.go: sendReason*). This verb relays it, and a relayed token is not a
+# diagnosis: it does not say that the gate declined rather than the harness, and
+# it does not name the recovery — which for `modal` is a different verb entirely.
+#
+# The full set the Go side can emit on a send_refused row, all seven, taken from
+# the sendReason* constants in tui/gate.go and their three writers:
+#   sendReadiness()            → no-contract | generating | modal | no-signature
+#   handleSendRequestScan()    → unsafe-payload | error  (inject and screen-read)
+#   the deferred verify loop   → unsubmitted
+# A token this build does not know is relayed with a message saying so, rather
+# than silently dropping to a generic tail — an unknown reason means the instance
+# is newer than this CLI, which is itself the useful thing to report.
+refusal_detail() {
+  case "$1" in
+    modal)
+      cat <<EOF
+  A harness modal is holding the composer, so no send can reach it — this is the
+  readiness gate declining, not the session refusing your message. Modals are
+  answered by a different verb. Read the screen, then answer what is on it:
+    lore session peek $SLUG
+    lore session answer $SLUG --option <N> --expect "<literal from that screen>"
+  The --expect literal is checked against the live screen at answer time, so copy
+  it from the rows peek just printed rather than from memory.
+EOF
+      ;;
+    generating)
+      cat <<EOF
+  The readiness gate declined, not the harness: the session was mid-generation
+  rather than idle at its composer, so no bytes reached the PTY and nothing was
+  queued for later. Retry after the next observation boundary — the gate re-runs
+  on the owning instance's poll tick, and the session becomes eligible the moment
+  it goes quiescent:
+    lore session wait $SLUG      # blocks until the next boundary
+    lore session peek $SLUG      # reports readiness right now
+EOF
+      ;;
+    no-signature)
+      cat <<EOF
+  The gate found no idle-composer signature on the screen. The session is not
+  generating, so this is usually a composer already holding unsent input, or a
+  screen the harness contract does not recognize. Read it before re-sending:
+    lore session peek $SLUG
+  Held input has to be cleared in the panel itself; a send cannot clear it.
+EOF
+      ;;
+    no-contract)
+      cat <<EOF
+  The gate has no screen-signature contract for this session's harness framework,
+  so it refuses rather than guessing where the composer is. Every send, peek, and
+  answer to this session refuses the same way until a contract exists for that
+  framework — this is not about your message or this moment. Drive this session in
+  its own panel.
+EOF
+      ;;
+    unsafe-payload)
+      cat <<EOF
+  The gate passed, and then the message body was rejected at the injection write
+  as unsafe to paste. Nothing reached the PTY. Control characters and escape
+  sequences in the body are the usual cause; re-send with a clean payload.
+EOF
+      ;;
+    error)
+      cat <<EOF
+  The owning instance could not read the session's screen or write to its PTY.
+  This is not a gate decision about your message — the send was consumed without
+  one being made. Retry; if it repeats, check the instance is still healthy:
+    lore session list
+EOF
+      ;;
+    unsubmitted)
+      cat <<EOF
+  The gate passed and the paste reached the composer, but the instance never
+  observed the submit take, and its one replay of the submit sequence is spent.
+  Nothing is confirmed delivered and the composer may still be holding the text,
+  so re-sending blind can double it. Read the screen first:
+    lore session peek $SLUG
+EOF
+      ;;
+    "")
+      cat <<EOF
+  The refusal row carried no reason. That is a defect at the writing instance —
+  every send_refused is written with one. The row itself is in the journal:
+    lore session events
+EOF
+      ;;
+    *)
+      cat <<EOF
+  This CLI does not recognize the refusal reason '$1', which means the instance
+  that refused is running a newer build than this command. The journal row is
+  authoritative:
+    lore session events
+EOF
+      ;;
+  esac
+}
+
 # --- Resolve the owning live instance ---
 SLUG="$SLUG_ARG"
 TARGET_INSTANCE="$(resolve_session_owner "$SESSIONS_DIR/instances" "$SLUG" "$TTL")"
@@ -149,13 +251,31 @@ emit_event "$EVENT_ROW"
 RELPATH="${DEST#"$KNOWLEDGE_DIR"/}"
 
 # --- Without --wait: enqueue-and-exit-0 ---
+# The outcome is not knowable here. The readiness gate runs in the owning
+# instance's Update loop when it next polls send-requests/ — after this process
+# has exited — so at return time no `sent` or `send_refused` row can exist yet,
+# and there is nothing to check. Exit 0 is therefore correct and stays: the
+# enqueue is what succeeded, and the exit code has no honest way to carry a
+# decision that has not been made. What was wrong is the output implying more
+# than that, so the success line now states exactly what is unconfirmed and how
+# to learn the outcome. outcome_confirmed rides the JSON for the same reason
+# (additive; enqueued keeps its meaning).
 if [[ $WAIT -eq 0 ]]; then
   if [[ $JSON_MODE -eq 1 ]]; then
     json_output "$(jq -n \
       --arg request_id "$REQUEST_ID" --arg slug "$SLUG" --arg target "$TARGET_INSTANCE" --arg path "$RELPATH" \
-      '{request_id: $request_id, slug: $slug, target_instance: $target, path: $path, enqueued: true}')"
+      '{request_id: $request_id, slug: $slug, target_instance: $target, path: $path, enqueued: true, outcome_confirmed: false}')"
   fi
   echo "[session] Enqueued send to '$SLUG' on instance $TARGET_INSTANCE → $RELPATH"
+  cat >&2 <<EOF
+[session] advisory: enqueued is not delivered, and this exit 0 says nothing about
+  whether the message lands. Instance $TARGET_INSTANCE runs the readiness gate on its
+  next poll tick and may refuse it (a modal holding the composer, mid-generation, no
+  composer signature); that refusal is written to the journal after this command has
+  exited, so nothing here will report it. Either pass --wait to have the outcome
+  decide the exit code, or read the outcome row for request $REQUEST_ID later:
+    lore session events        # a 'sent' or 'send_refused' row carrying that request_id
+EOF
   exit 0
 fi
 
@@ -182,11 +302,13 @@ while :; do
         echo "[session] Sent to '$SLUG' (request $REQUEST_ID)"
         exit 0
       else
+        DETAIL="$(refusal_detail "$RSN")"
         if [[ $JSON_MODE -eq 1 ]]; then
-          printf '%s\n' "$(jq -n --arg request_id "$REQUEST_ID" --arg slug "$SLUG" --arg reason "$RSN" \
-            '{request_id: $request_id, slug: $slug, sent: false, refused: true, reason: $reason}')"
+          printf '%s\n' "$(jq -n --arg request_id "$REQUEST_ID" --arg slug "$SLUG" --arg reason "$RSN" --arg detail "$DETAIL" \
+            '{request_id: $request_id, slug: $slug, sent: false, refused: true, reason: $reason, detail: $detail}')"
         fi
         echo "[session] Refused send to '$SLUG' (reason=${RSN:-unspecified}, request $REQUEST_ID)" >&2
+        printf '%s\n' "$DETAIL" >&2
         exit 3
       fi
     fi

@@ -77,6 +77,75 @@ fail() {
 command -v jq &>/dev/null || fail "jq is required but not found on PATH"
 command -v python3 &>/dev/null || fail "python3 is required but not found on PATH"
 
+# --- Readiness diagnosis ---------------------------------------------------
+# blocked_reason is the same bare enum token `session send` relays, decided on
+# the Go side (tui/gate.go: sendReason*), and printing it alone leaves the reader
+# to work out what it means for the send they were about to make. The peek itself
+# succeeded — this tail describes what a send to this session would hit, and
+# names the verb that clears it.
+#
+# The set peek can carry is narrower than send's, because peek never injects:
+# handlePeekRequestScan() in tui/peek.go sets it from sendReadiness (no-contract |
+# generating | modal | no-signature) or from `error` on a screen-read failure.
+# `unsafe-payload` and `unsubmitted` are inject-time and post-inject outcomes and
+# cannot appear here; a token outside the five is reported as unrecognized rather
+# than guessed at.
+blocked_detail() {
+  case "$1" in
+    modal)
+      cat <<EOF
+  A modal is holding the composer, so a send to this session would be refused by
+  the readiness gate before any bytes reached it. Modals are cleared by answering
+  them, using a literal copied from the rows above:
+    lore session answer $SLUG --option <N> --expect "<literal from that screen>"
+EOF
+      ;;
+    generating)
+      cat <<EOF
+  The session is mid-generation, so a send now would be refused by the readiness
+  gate — nothing is wrong with it. It becomes eligible at the next quiescent
+  boundary, which 'lore session wait $SLUG' blocks until.
+EOF
+      ;;
+    no-signature)
+      cat <<EOF
+  The session is not generating, but the gate found no idle-composer signature on
+  the screen above — usually a composer already holding unsent input, or a screen
+  the harness contract does not recognize. A send would be refused. Held input has
+  to be cleared in the panel itself.
+EOF
+      ;;
+    no-contract)
+      cat <<EOF
+  There is no screen-signature contract for this session's harness framework, so
+  readiness cannot be classified for it at all — ready=false here means unknown,
+  not busy. Send and answer refuse this session for the same reason. Drive it in
+  its own panel.
+EOF
+      ;;
+    error)
+      cat <<EOF
+  The owning instance could not read this session's screen, so the rows above are
+  empty or stale and readiness was never classified. Retry the peek; if it repeats,
+  check the instance is still healthy with 'lore session list'.
+EOF
+      ;;
+    "")
+      cat <<EOF
+  The response reported ready=false with no blocked_reason. That is a defect at
+  the responding instance — a not-ready classification is always written with one.
+EOF
+      ;;
+    *)
+      cat <<EOF
+  This CLI does not recognize the blocked_reason '$1', which means the responding
+  instance is running a newer build than this command. The response object carries
+  it verbatim; re-run with --json to read it unabridged.
+EOF
+      ;;
+  esac
+}
+
 [[ -n "$SLUG_ARG" ]] || fail "no target: pass a <slug>"
 
 if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]]; then
@@ -146,6 +215,7 @@ while :; do
       echo "[session] peek '$SLUG': ready=true"
     else
       echo "[session] peek '$SLUG': ready=false blocked_reason=${REASON:-unspecified}"
+      blocked_detail "$REASON"
     fi
     exit 0
   fi
