@@ -537,5 +537,75 @@ bash "$COORDINATE" --kdir "$BAD_LEDGER" --json > "$BAD_LEDGER_JSON"
 assert_eq "a malformed ledger becomes a Reconcile row at the arc locator" "1" \
   "$(jq -r '[.buckets.reconcile[] | select(.kind=="coordination-ledger-invalid" and (.evidence.locator=="_work/_arcs/broken-ledger/coordination.md"))] | length' "$BAD_LEDGER_JSON")"
 
+# --- The ledger's hand-authored vocabulary is checked, not just branched on ---
+# The board reads Tree, Status, and Verdict off a table a human types. Before
+# this, a value outside the vocabulary took the row off the board with no error
+# anywhere, so a typo read as a stream nobody was dispatching.
+
+VOCAB="$TEST_DIR/arc-vocab"
+setup_store "$VOCAB"
+write_arc "$VOCAB" vocab-arc active
+cat > "$VOCAB/_work/_arcs/vocab-arc/coordination.md" <<'EOF'
+| # | Step | Depends on | Tree | Status | Verdict |
+|---|---|---|---|---|---|
+| s-bad-status | Status typo'd | — | writer | in flight | — |
+| s-bad-verdict | Verdict typo'd | — | writer | done | Full |
+| s-bad-tree | Tree typo'd | — | worktree | pending | — |
+| s-blocked-ref | Blocked on a named ref | — | writer | blocked-on:s-ready | — |
+| s-blocked-input | Blocked on the human | — | writer | blocked-on-input | — |
+| s-dropped | Dropped stream | — | read-only | dropped | none |
+| s-ready | Plain pending stream | — | writer | pending | — |
+EOF
+VOCAB_JSON="$TEST_DIR/arc-vocab.json"
+bash "$COORDINATE" --kdir "$VOCAB" --json > "$VOCAB_JSON"
+
+assert_eq "a typo'd Status becomes a Reconcile row instead of vanishing" "1" \
+  "$(jq -r '[.buckets.reconcile[] | select(.kind=="coordination-status-invalid" and .observed_facts.stream_id=="s-bad-status")] | length' "$VOCAB_JSON")"
+STATUS_TITLE="$(jq -r '[.buckets.reconcile[] | select(.kind=="coordination-status-invalid")][0].title' "$VOCAB_JSON")"
+assert_contains "the Status refusal names the offending value" "$STATUS_TITLE" "'in flight'"
+assert_contains "the Status refusal names the expected set" "$STATUS_TITLE" \
+  "expected pending, in-flight, blocked-on:<ref>, blocked-on-input, done, or dropped"
+assert_contains "the Status refusal names the consequence" "$STATUS_TITLE" \
+  "not being joined into the board"
+
+assert_eq "a typo'd Verdict becomes a Reconcile row" "1" \
+  "$(jq -r '[.buckets.reconcile[] | select(.kind=="coordination-verdict-invalid" and .observed_facts.stream_id=="s-bad-verdict")] | length' "$VOCAB_JSON")"
+VERDICT_TITLE="$(jq -r '[.buckets.reconcile[] | select(.kind=="coordination-verdict-invalid")][0].title' "$VOCAB_JSON")"
+assert_contains "the Verdict refusal names the offending value" "$VERDICT_TITLE" "'Full'"
+assert_contains "the Verdict refusal names the expected set" "$VERDICT_TITLE" \
+  "expected full, partial, none"
+assert_contains "the Verdict refusal names what dependents lose" "$VERDICT_TITLE" \
+  "no stream depending on it can be cleared by it"
+
+assert_eq "a typo'd Tree still becomes a Reconcile row" "1" \
+  "$(jq -r '[.buckets.reconcile[] | select(.kind=="coordination-tree-invalid" and .observed_facts.stream_id=="s-bad-tree")] | length' "$VOCAB_JSON")"
+assert_contains "the Tree refusal now names its expected set too" \
+  "$(jq -r '[.buckets.reconcile[] | select(.kind=="coordination-tree-invalid")][0].title' "$VOCAB_JSON")" \
+  "expected writer or read-only"
+
+assert_eq "a stream with an unreadable vocabulary is never dispatched" "0" \
+  "$(jq -r '[.buckets.act_now[] | select(.observed_facts.stream_id? | . == "s-bad-status" or . == "s-bad-verdict" or . == "s-bad-tree")] | length' "$VOCAB_JSON")"
+
+# The declared tokens the corpus happens not to exercise are the ones a naive
+# set membership test would reject, so they are asserted explicitly.
+assert_eq "blocked-on:<ref>, blocked-on-input, dropped, and an em-dash Verdict are all vocabulary" "0" \
+  "$(jq -r '[.buckets.reconcile[] | select((.kind=="coordination-status-invalid" or .kind=="coordination-verdict-invalid") and (.observed_facts.stream_id? | . == "s-blocked-ref" or . == "s-blocked-input" or . == "s-dropped" or . == "s-ready"))] | length' "$VOCAB_JSON")"
+assert_eq "a well-formed pending row is still dispatchable alongside the bad ones" "1" \
+  "$(jq -r '[.buckets.act_now[] | select(.kind=="ready-stream" and .observed_facts.stream_id=="s-ready")] | length' "$VOCAB_JSON")"
+
+# `blocked-on:` with nothing after it names no ref, so it is not the token.
+BARE_BLOCK="$TEST_DIR/arc-bare-block"
+setup_store "$BARE_BLOCK"
+write_arc "$BARE_BLOCK" bare-arc active
+cat > "$BARE_BLOCK/_work/_arcs/bare-arc/coordination.md" <<'EOF'
+| # | Step | Depends on | Tree | Status | Verdict |
+|---|---|---|---|---|---|
+| s-bare | Blocked on nothing named | — | writer | blocked-on: | — |
+EOF
+BARE_JSON="$TEST_DIR/arc-bare-block.json"
+bash "$COORDINATE" --kdir "$BARE_BLOCK" --json > "$BARE_JSON"
+assert_eq "a refless blocked-on: is not the blocked-on:<ref> token" "1" \
+  "$(jq -r '[.buckets.reconcile[] | select(.kind=="coordination-status-invalid" and .observed_facts.stream_id=="s-bare")] | length' "$BARE_JSON")"
+
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]

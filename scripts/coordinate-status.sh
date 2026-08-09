@@ -306,6 +306,33 @@ def attempt_liveness(attempt, tree):
             "attempt_status_recorded": True, "holds_stream": not released}
 
 
+# --- The ledger's hand-authored vocabulary ---------------------------------
+# The coordination ledger is written by hand, and this reader branches on three
+# of its columns: Tree decides whether a stream needs a worktree, Status decides
+# whether a row is dispatchable, Verdict decides whether a predecessor clears its
+# dependents. A value outside the vocabulary therefore does not degrade the row —
+# it removes the row from the board, silently, which the seat reads as a stream
+# nobody is dispatching. Each column is checked against its declared set and a
+# stray value becomes a Reconcile row naming the value, the set, and what the
+# board is not doing with it. Canonical sets: the ledger vocabulary block in
+# skills/coordinate/SKILL.md; amend both together.
+LEDGER_TREES = {"writer", "read-only"}
+LEDGER_STATUSES = {"pending", "in-flight", "blocked-on-input", "done", "dropped"}
+LEDGER_VERDICTS = {"full", "partial", "none"}
+# A verdict is judged at terminus, so an unjudged row leaves the cell empty or
+# em-dashed. Status has no such blank form: every row has one from the moment it
+# is written.
+LEDGER_VERDICT_UNJUDGED = {"", "—", "-"}
+
+
+def ledger_status_valid(status):
+    """`blocked-on:<ref>` carries a free-text ref; the rest are fixed tokens."""
+    if status in LEDGER_STATUSES:
+        return True
+    prefix = "blocked-on:"
+    return status.startswith(prefix) and len(status) > len(prefix)
+
+
 def dependency_cycles(rows):
     graph = {row["stream_id"]: [dep for dep in row["depends_on"]
                                 if dep in {item["stream_id"] for item in rows}]
@@ -440,11 +467,33 @@ def project_arc_coordination(record):
                 "reconcile.work.action-evidence-gap",
             ))
             continue
-        if tree not in {"writer", "read-only"}:
+        if tree not in LEDGER_TREES:
             buckets["reconcile"].append(make_row(
                 "reconcile", "work-index", "coordination-tree-invalid",
-                f"{arc}/{stream_id}: unknown Tree value {tree!r}", facts, locator,
+                f"{arc}/{stream_id}: unknown Tree value {tree!r} "
+                f"(expected writer or read-only) — this row is not being joined "
+                f"into the board", facts, locator,
                 [arc, stream_id, tree], "reconcile.work.action-evidence-gap",
+            ))
+            continue
+        if not ledger_status_valid(status):
+            buckets["reconcile"].append(make_row(
+                "reconcile", "work-index", "coordination-status-invalid",
+                f"{arc}/{stream_id}: unknown Status value {status!r} "
+                f"(expected pending, in-flight, blocked-on:<ref>, "
+                f"blocked-on-input, done, or dropped) — this row is not being "
+                f"joined into the board", facts, locator,
+                [arc, stream_id, status], "reconcile.work.action-evidence-gap",
+            ))
+            continue
+        if verdict not in LEDGER_VERDICTS and verdict not in LEDGER_VERDICT_UNJUDGED:
+            buckets["reconcile"].append(make_row(
+                "reconcile", "work-index", "coordination-verdict-invalid",
+                f"{arc}/{stream_id}: unknown Verdict value {verdict!r} "
+                f"(expected full, partial, none, or — while unjudged) — this row "
+                f"is not being joined into the board, and no stream depending on "
+                f"it can be cleared by it", facts, locator,
+                [arc, stream_id, verdict], "reconcile.work.action-evidence-gap",
             ))
             continue
         if attempt and attempt.get("status") == "needs_judgment":
