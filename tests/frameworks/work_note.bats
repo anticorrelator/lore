@@ -138,6 +138,41 @@ EOF' _ "$LORE_CLI"
   echo "$output" | grep -qi "empty note"
 }
 
+# --- note: a real-sized body ---------------------------------------------
+
+@test "a real-sized multibyte stdin body appends promptly" {
+  # Session notes arrive on stdin and run to tens of KB, full of em-dashes and
+  # arrows. A non-emptiness check that rewrites the whole body to test it costs
+  # seconds at 4KB and minutes at 40KB, so this case asserts a wall-clock bound,
+  # not just an append. The watchdog is what keeps a regression a failure
+  # instead of a hang.
+  local big_body="$TEST_KDIR/big-body.md"
+  python3 -c 'print("**Progress:** a finding — with an arrow → and an ellipsis … in it.\n" * 800, end="")' \
+    > "$big_body"
+
+  local start=$SECONDS rc
+  bash "$WORK_NOTE_SH" sample-work-item < "$big_body" >/dev/null 2>&1 &
+  local big_pid=$!
+  (
+    waited=0
+    while [ $waited -lt 30 ]; do
+      kill -0 "$big_pid" 2>/dev/null || exit 0
+      sleep 1
+      waited=$((waited + 1))
+    done
+    kill -9 "$big_pid" 2>/dev/null
+  ) >/dev/null 2>&1 &
+  if wait "$big_pid" 2>/dev/null; then rc=0; else rc=$?; fi
+  local elapsed=$((SECONDS - start))
+
+  [ "$rc" -eq 0 ]
+  [ "$elapsed" -lt 10 ]
+  # Every line landed, multibyte intact — a truncated append fails this count.
+  [ "$(grep -c 'an ellipsis …' "$WORK_DIR/sample-work-item/notes.md")" -eq 800 ]
+}
+
+# --- note: error paths, continued ----------------------------------------
+
 @test "missing slug argument returns exit 1" {
   run bash -c 'printf "body\n" | bash "$1" work note' _ "$LORE_CLI"
   [ "$status" -eq 1 ]

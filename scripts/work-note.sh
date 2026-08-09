@@ -83,7 +83,9 @@ else
 fi
 
 # An entry with a heading and no content is noise — refuse a whitespace-only body.
-if [[ -z "${BODY//[$' \t\r\n']/}" ]]; then
+# Glob-match rather than ${BODY//[[:space:]]/}: pattern substitution over a large
+# multibyte body is super-linear in bash, and stdin note bodies run to tens of KB.
+if [[ "$BODY" != *[![:space:]]* ]]; then
   echo "[work note] Error: refusing to append an empty note to '$SLUG'." >&2
   exit 1
 fi
