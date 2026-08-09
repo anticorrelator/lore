@@ -2,7 +2,13 @@
 # make-epistemic-store.sh — Build a throwaway knowledge store for exercising the
 # epistemic lifecycle writers (corroboration, kind_status, expiry).
 #
-# Usage: make-epistemic-store.sh <dir>
+# Usage: make-epistemic-store.sh <dir> [--scaled]
+#
+# --scaled adds a second arm of entries all matching the token "quillon": more
+# facts than a default result page holds, four theories across two subsystems,
+# and questions and hypotheses in each kind_status. It exists so the delivery
+# tests can watch an unsectioned ranked list actually starve the non-fact kinds
+# rather than assert that it would. The base arm is unchanged without it.
 #
 # The eight entries are chosen so one covers each branch the expiry sweep can
 # take, and they are dated against a fixed reference day rather than "now", so
@@ -24,7 +30,8 @@
 
 set -euo pipefail
 
-FIX="${1:?usage: make-epistemic-store.sh <dir>}"
+FIX="${1:?usage: make-epistemic-store.sh <dir> [--scaled]}"
+SCALED="${2:-}"
 
 # The reference "today" the dated entries below are positioned against.
 REFERENCE_TODAY="2026-08-09"
@@ -36,6 +43,13 @@ mk() {
   local path="$1" title="$2" footer="$3"
   mkdir -p "$(dirname "$FIX/$path")"
   printf '# %s\n%s\n%s\n' "$title" "Body prose for $title." "$footer" > "$FIX/$path"
+}
+
+# Same as mk, with the body supplied instead of generated.
+mk_body() {
+  local path="$1" title="$2" body="$3" footer="$4"
+  mkdir -p "$(dirname "$FIX/$path")"
+  printf '# %s\n%s\n%s\n' "$title" "$body" "$footer" > "$FIX/$path"
 }
 
 mk conventions/stale-untested-hypothesis.md "Stale Untested Hypothesis" \
@@ -64,6 +78,64 @@ mk conventions/already-retired-hypothesis.md "Already Retired Hypothesis" \
 # sweep would propose this entry; a correct one leaves it alone.
 mk conventions/recently-corroborated-hypothesis.md "Recently Corroborated Hypothesis" \
   "<!-- learned: 2025-03-01 | confidence: medium | source: manual | scale: implementation | kind: hypothesis | kind_status: untested | status: current | corroborations: [{\"date\": \"$REFERENCE_TODAY\", \"corroboration_id\": \"corr-bbbbbbbbbbbb\", \"observed_at\": \"$REFERENCE_TODAY\", \"source\": \"worker\", \"direction\": \"supports\", \"note\": \"Held when I read it again.\"}] -->"
+
+if [[ "$SCALED" == "--scaled" ]]; then
+  # Twelve facts, each repeating the query token in a short body, so BM25 ranks
+  # every one of them above the longer single-mention non-fact entries below.
+  # A default page of ten results is all fact — which is the starvation the
+  # sections exist to answer, observed rather than assumed.
+  for n in $(seq -w 1 12); do
+    mk_body "conventions/quillon/quillon-fact-$n.md" "Quillon Fact $n" \
+      "The quillon drains the quillon buffer, so quillon batch $n leaves the quillon queue empty." \
+      '<!-- learned: 2026-07-01 | confidence: high | source: manual | scale: subsystem | kind: fact | status: current -->'
+  done
+
+  # Three theories about one subsystem and one about another. All four match;
+  # the theory section may deliver at most one per distinct subsystem.
+  # Bodies run well past the snippet cap so a section budget exists at which a
+  # snippet fits and a full block does not — the middle rung of the full ->
+  # snippet -> backlink ladder is only reachable on entries this long.
+  LONG_PROSE="It covers the path end to end, naming the components, the order they run in, and the reason the design settled where it did rather than on the alternatives considered and set aside. Each component is described by what it is responsible for, what it hands to the next one, and the failure it is positioned to prevent."
+  THEORY_BODY="An account of what this area is and how its parts fit together, written to orient a reader arriving with no context at all. $LONG_PROSE $LONG_PROSE $LONG_PROSE"
+  mk_body conventions/quillon/quillon-router-theory-a.md "Quillon Router Theory A" \
+    "$THEORY_BODY" \
+    '<!-- learned: 2026-07-02 | confidence: high | source: manual | scale: subsystem | kind: theory | subsystem: quillon-router | status: current -->'
+  mk_body conventions/quillon/quillon-router-theory-b.md "Quillon Router Theory B" \
+    "$THEORY_BODY" \
+    '<!-- learned: 2026-07-03 | confidence: high | source: manual | scale: subsystem | kind: theory | subsystem: quillon-router | status: current -->'
+  mk_body conventions/quillon/quillon-router-theory-c.md "Quillon Router Theory C" \
+    "$THEORY_BODY" \
+    '<!-- learned: 2026-07-04 | confidence: high | source: manual | scale: subsystem | kind: theory | subsystem: quillon-router | status: current -->'
+  mk_body conventions/quillon/quillon-cache-theory.md "Quillon Cache Theory" \
+    "$THEORY_BODY" \
+    '<!-- learned: 2026-07-05 | confidence: high | source: manual | scale: subsystem | kind: theory | subsystem: quillon-cache | status: current -->'
+
+  # One question per kind_status the registry allows. Only the open one is
+  # deliverable; the other two stay findable by a kind-filtered search.
+  QUESTION_BODY="A question left open by a reader of the quillon path, recorded with where it was already looked for so the next reader does not repeat that ground. $LONG_PROSE $LONG_PROSE"
+  mk_body gotchas/quillon/quillon-question-open.md "Quillon Question Open" \
+    "$QUESTION_BODY" \
+    '<!-- learned: 2026-07-06 | confidence: medium | source: manual | scale: subsystem | kind: question | kind_status: open | where_looked: scripts/quillon.sh | status: current -->'
+  mk_body gotchas/quillon/quillon-question-answered.md "Quillon Question Answered" \
+    "$QUESTION_BODY" \
+    '<!-- learned: 2026-07-07 | confidence: medium | source: manual | scale: subsystem | kind: question | kind_status: answered | answered_by: conventions/quillon/quillon-fact-01.md | status: current -->'
+  mk_body gotchas/quillon/quillon-question-dissolved.md "Quillon Question Dissolved" \
+    "$QUESTION_BODY" \
+    '<!-- learned: 2026-07-08 | confidence: medium | source: manual | scale: subsystem | kind: question | kind_status: dissolved | status: current -->'
+
+  # One hypothesis per kind_status. The refuted one is a kept negative result:
+  # undelivered by the section, still returned by a direct kind-filtered search.
+  HYPOTHESIS_BODY="A claim about the quillon path that has not been settled, phrased so a later reader can tell what evidence would settle it. $LONG_PROSE $LONG_PROSE"
+  mk_body conventions/quillon/quillon-hypothesis-untested.md "Quillon Hypothesis Untested" \
+    "$HYPOTHESIS_BODY" \
+    '<!-- learned: 2026-07-09 | confidence: medium | source: manual | scale: subsystem | kind: hypothesis | kind_status: untested | status: current -->'
+  mk_body conventions/quillon/quillon-hypothesis-supported.md "Quillon Hypothesis Supported" \
+    "$HYPOTHESIS_BODY" \
+    '<!-- learned: 2026-07-10 | confidence: medium | source: manual | scale: subsystem | kind: hypothesis | kind_status: supported | status: current -->'
+  mk_body conventions/quillon/quillon-hypothesis-refuted.md "Quillon Hypothesis Refuted" \
+    "$HYPOTHESIS_BODY" \
+    '<!-- learned: 2026-07-11 | confidence: medium | source: manual | scale: subsystem | kind: hypothesis | kind_status: refuted | status: current -->'
+fi
 
 python3 - "$FIX" <<'MANIFEST_PY'
 import json, os, sys

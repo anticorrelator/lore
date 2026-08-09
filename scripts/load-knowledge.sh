@@ -195,6 +195,27 @@ echo ""
   RELEVANCE_LOADED_PATHS=()   # track paths loaded via relevance search
   SEARCH_DEGRADED=""          # `degraded` token from budget_search, "" when the index was healthy
 
+  # --- Kind sections (theory / open questions / hypotheses) ---
+  # Rendered by pk_kinds and appended after the fact entries. The slice is
+  # computed before the relevance search so only the chars it actually spends
+  # come out of that search's budget; everything it does not spend stays with
+  # the fact list.
+  SECTION_TEXT=""
+  SECTION_CHARS=0
+  SECTION_DEGRADED=""         # `degraded` after the last section query, same vocabulary as SEARCH_DEGRADED
+  SECTION_PACKET_ENTRIES=()
+  SECTION_FULL=0
+  SECTION_SUMMARY=0
+  # Share of the ceiling the sections may reserve. Whatever they leave unspent
+  # returns to the fact list, so this is a cap and not an allocation.
+  SECTION_BUDGET_PCT=25
+  # The sections gate on their own allowance against the hook timeout (15s for
+  # claude-code), NOT on TIME_BUDGET_SECS below: that one is the content
+  # degradation guard, which the load itself routinely spends on a large store.
+  # Inheriting it would silence the sections on exactly the stores that have
+  # something to put in them, while the rest of the payload still ships.
+  SECTION_TIME_BUDGET_SECS="${LORE_KIND_SECTIONS_TIME_BUDGET:-12}"
+
   # Degradation guard: the relevance search is optional enrichment. If the
   # mandatory phases (signal + index + direct-resolve) already consumed most
   # of the hook's time allowance — e.g. cold FS cache, store growth — skip it
@@ -249,6 +270,75 @@ print(' OR '.join(terms))
 
     if [[ -n "$FTS5_QUERY" ]]; then
       REMAINING_BUDGET=$((BUDGET - CHARS_USED))
+
+      # Kind sections, computed before the relevance search so their real size
+      # is known in time to come out of its budget. pk_kinds probes the index
+      # for a non-fact entry first: on a store that has none it returns an
+      # empty slice having issued no search, and everything below is a no-op.
+      SECTION_RESERVE=$((BUDGET * SECTION_BUDGET_PCT / 100))
+      if [[ $SECTION_RESERVE -gt $REMAINING_BUDGET ]]; then
+        SECTION_RESERVE=$REMAINING_BUDGET
+      fi
+      if [[ $SECONDS -lt $SECTION_TIME_BUDGET_SECS && $SECTION_RESERVE -gt 0 ]]; then
+        # Never block on the index write lock here. The sections run ahead of
+        # the fact search but are the optional half of the payload, so any wait
+        # they took would come out of the mandatory half's allowance. A rebuild
+        # in another process degrades the sections and leaves the fact search
+        # the whole lock-wait envelope it has today.
+        #
+        # Payload shape: `meta`/`entry` records, a marker line, then the
+        # rendered text — the same delimiter form extract_context_signal uses,
+        # so bash splits it without a second python process.
+        SECTION_PAYLOAD=$(
+          LORE_INDEX_LOCK_WAIT_SECS=0 \
+          python3 - "$SCRIPT_DIR" "$KNOWLEDGE_DIR" "$FTS5_QUERY" "$SECTION_RESERVE" \
+          ${DIRECT_LOADED_PATHS[@]+"${DIRECT_LOADED_PATHS[@]}"} 2>/dev/null <<'PYTHON_SCRIPT'
+import sys
+
+script_dir, kdir, query, reserve = sys.argv[1:5]
+served_paths = list(sys.argv[5:])
+sys.path.insert(0, script_dir)
+import pk_kinds
+from pk_search import Searcher
+
+result = pk_kinds.build_sections(
+    Searcher(kdir), query, int(reserve),
+    served_paths=served_paths, caller="session-start")
+
+# Nothing is written until build_sections has returned, so a raising call
+# leaves an empty payload rather than a truncated one.
+lines = ["meta\t%d\t%s" % (result["chars_used"], result["degraded"] or "")]
+for section in result["sections"]:
+    for entry in section["served_entries"]:
+        if entry["path"]:
+            lines.append("entry\t%s\t%s" % (entry["render_mode"], entry["path"]))
+lines.append("---SECTION_TEXT---")
+sys.stdout.write("\n".join(lines) + "\n")
+sys.stdout.write(result["text"])
+PYTHON_SCRIPT
+        ) || SECTION_PAYLOAD=""
+
+        if [[ -n "$SECTION_PAYLOAD" ]]; then
+          IFS=$'\t' read -r _ SECTION_CHARS SECTION_DEGRADED \
+            <<< "$(echo "$SECTION_PAYLOAD" | head -1)"
+          SECTION_CHARS=${SECTION_CHARS:-0}
+          while IFS=$'\t' read -r record mode section_path; do
+            [[ "$record" == "entry" && -n "$section_path" ]] || continue
+            SECTION_PACKET_ENTRIES+=("$mode"$'\t'"$section_path")
+            if [[ "$mode" == "full" ]]; then
+              SECTION_FULL=$((SECTION_FULL + 1))
+            else
+              # snippet and backlink are both reduced renders — the budget line
+              # counts them where it counts every other reduced delivery.
+              SECTION_SUMMARY=$((SECTION_SUMMARY + 1))
+            fi
+          done < <(echo "$SECTION_PAYLOAD" | sed -n '/^---SECTION_TEXT---$/q;p')
+          SECTION_TEXT=$(echo "$SECTION_PAYLOAD" | sed '1,/^---SECTION_TEXT---$/d')
+        fi
+      fi
+
+      CHARS_USED=$((CHARS_USED + SECTION_CHARS))
+      REMAINING_BUDGET=$((REMAINING_BUDGET - SECTION_CHARS))
 
       # Call budget_search via pk_cli.py — returns two-tier JSON.
       # Exclude domains/ (lazy-loaded on demand, never at startup) and the
@@ -340,6 +430,16 @@ for e in data.get('titles_only', []):
 
       if [[ $FIRST_TITLE -eq 0 ]]; then
         echo ""
+      fi
+
+      # Sections last, so adding them did not move anything above them. The
+      # packet rows are spliced here for the same reason: it keeps the packet's
+      # order the order the session actually read.
+      if [[ -n "$SECTION_TEXT" ]]; then
+        echo "$SECTION_TEXT"
+        PACKET_ENTRIES+=(${SECTION_PACKET_ENTRIES[@]+"${SECTION_PACKET_ENTRIES[@]}"})
+        FILES_FULL=$((FILES_FULL + SECTION_FULL))
+        FILES_SUMMARY=$((FILES_SUMMARY + SECTION_SUMMARY))
       fi
     fi
   fi
@@ -504,15 +604,19 @@ for e in data.get('titles_only', []):
 # sessions that need it.
 EMPTY_REASON_TIME_BUDGET_SECS="${LORE_EMPTY_REASON_TIME_BUDGET:-12}"
 EMPTY_REASON=""
+# Either query path can be the one that hit a sick index, and both report it in
+# the same vocabulary. Reading only whether the result lists came back empty
+# would collapse "the store has nothing" into "the index could not answer".
+DELIVERY_DEGRADED="${SEARCH_DEGRADED:-$SECTION_DEGRADED}"
 if [[ ${#PACKET_ENTRIES[@]} -eq 0 && $SECONDS -lt $EMPTY_REASON_TIME_BUDGET_SECS ]]; then
-  if [[ -n "$SEARCH_DEGRADED" ]]; then
-    case "$SEARCH_DEGRADED" in
+  if [[ -n "$DELIVERY_DEGRADED" ]]; then
+    case "$DELIVERY_DEGRADED" in
       index-rebuilding)
         EMPTY_REASON="search index is being rebuilt by another process; wait budget expired" ;;
       index-unavailable)
         EMPTY_REASON="no usable search index was available" ;;
       *)
-        EMPTY_REASON="search index degraded ($SEARCH_DEGRADED)" ;;
+        EMPTY_REASON="search index degraded ($DELIVERY_DEGRADED)" ;;
     esac
   elif [[ -z "$CONTEXT_SIGNAL" ]]; then
     EMPTY_REASON="no context signal — compact index only, no entries resolved"

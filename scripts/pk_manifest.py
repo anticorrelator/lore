@@ -19,6 +19,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pk_kinds  # noqa: E402
 import pk_search  # noqa: E402
 from pk_search import Searcher  # noqa: E402
 import pk_retrieval  # noqa: E402
@@ -29,6 +30,11 @@ ACTIVITY_RESERVED_FOCAL = 2
 ACTIVITY_RESERVED_ADJACENT = 1
 MANIFEST_VERSION = 2
 SNIPPET_CHAR_LIMIT = pk_retrieval.SNIPPET_CHAR_LIMIT
+
+# Share of the ceiling the kind sections may reserve ahead of the topic
+# sections. Whatever they leave unspent goes back to the topic sections, so
+# this caps them rather than allocating to them.
+KIND_SECTION_BUDGET_FRACTION = 0.25
 
 _KNOWLEDGE_BL_RE = re.compile(r"\[\[knowledge:([^\]#]+)(#[^\]]+)?\]\]")
 _WORK_BL_RE = re.compile(r"\[\[work:([^\]#]+)(#[^\]]+)?\]\]")
@@ -238,13 +244,42 @@ def resolve_v2(
                 seen=seen_global,
             )
 
+    # --- Step 1b: Kind sections ---
+    # Focal/adjacent is the topic axis and kind is the epistemic one; they are
+    # orthogonal, so the kind sections are built here and placed after every
+    # topic section rather than merged into one of them. Rendering them now is
+    # what lets their actual size come out of the topic ceiling below; whatever
+    # they leave unspent stays with the topics, so a store with no non-fact
+    # entry allocates exactly the budget it allocates today.
+    kind_topic = next(
+        (t for t, s in zip(topics, resolved_topics) if s["role"] == "focal"), topics[0]
+    )
+    try:
+        kind_sections = pk_kinds.build_sections(
+            searcher,
+            _build_query(kind_topic),
+            int(GLOBAL_CHAR_CEILING * KIND_SECTION_BUDGET_FRACTION),
+            scale_set=kind_topic.get("scale_set") or None,
+            served_paths=[
+                pk_retrieval.entry_path(c["entry"])
+                for sec in resolved_topics
+                for c in sec["candidates"]
+            ],
+            caller="resolve-manifest",
+        )
+    except (Exception, SystemExit):
+        # Same contract as a failed topic query: the bundle, the _RM_PATHS
+        # marker, and the telemetry record still have to be emitted.
+        kind_sections = {"text": "", "sections": [], "chars_used": 0, "chars_reserved": 0}
+    topic_ceiling = GLOBAL_CHAR_CEILING - kind_sections["chars_used"]
+
     # --- Step 2: Per-section budget allocation ---
-    # Focal gets ~40% of the global ceiling; adjacent sections split the rest.
+    # Focal gets ~40% of the topic ceiling; adjacent sections split the rest.
     focal_sections = [s for s in resolved_topics if s["role"] == "focal"]
     adjacent_sections = [s for s in resolved_topics if s["role"] == "adjacent"]
 
-    focal_budget = int(GLOBAL_CHAR_CEILING * 0.40) if focal_sections else 0
-    adjacent_per = (GLOBAL_CHAR_CEILING - focal_budget) // len(adjacent_sections) if adjacent_sections else 0
+    focal_budget = int(topic_ceiling * 0.40) if focal_sections else 0
+    adjacent_per = (topic_ceiling - focal_budget) // len(adjacent_sections) if adjacent_sections else 0
 
     for sec in resolved_topics:
         sec["chars_budget"] = focal_budget if sec["role"] == "focal" else adjacent_per
@@ -300,27 +335,27 @@ def resolve_v2(
     for sec in resolved_topics:
         sec["render_result"] = _render_section(sec)
 
-    # If combined output exceeds the global ceiling, shrink adjacent sections
+    # If combined output exceeds the topic ceiling, shrink adjacent sections
     # first, then focal — but focal never drops below its floor.
     combined_chars = total_chars + sum(s["render_result"]["chars_used"] for s in resolved_topics)
-    if combined_chars > GLOBAL_CHAR_CEILING:
-        overflow = combined_chars - GLOBAL_CHAR_CEILING
+    if combined_chars > topic_ceiling:
+        overflow = combined_chars - topic_ceiling
         for sec in resolved_topics:
             if sec["role"] != "adjacent":
                 continue
             sec["chars_budget"] = max(sec["chars_budget"] - overflow, 200)
             sec["render_result"] = _render_section(sec)
             combined_chars = total_chars + sum(s["render_result"]["chars_used"] for s in resolved_topics)
-            if combined_chars <= GLOBAL_CHAR_CEILING:
+            if combined_chars <= topic_ceiling:
                 break
 
-    if total_chars + sum(s["render_result"]["chars_used"] for s in resolved_topics) > GLOBAL_CHAR_CEILING:
+    if total_chars + sum(s["render_result"]["chars_used"] for s in resolved_topics) > topic_ceiling:
         for sec in resolved_topics:
             if sec["role"] != "focal":
                 continue
             sec["chars_budget"] = int(sec["chars_budget"] * 0.7)
             sec["render_result"] = _render_section(sec)
-            if total_chars + sum(s["render_result"]["chars_used"] for s in resolved_topics) <= GLOBAL_CHAR_CEILING:
+            if total_chars + sum(s["render_result"]["chars_used"] for s in resolved_topics) <= topic_ceiling:
                 break
 
     for sec in resolved_topics:
@@ -340,6 +375,27 @@ def resolve_v2(
             "content_degraded": sec["render_result"]["content_degraded"],
             "shrunk_for_budget": sec["render_result"]["shrunk_for_budget"],
             "entry_count_before_budget": sec["render_result"]["entry_count_before_budget"],
+        })
+
+    # The kind sections close the bundle, after every topic section.
+    output_parts.append(kind_sections["text"])
+    for sec in kind_sections["sections"]:
+        # requested_k / raw_count / deduped_count are topic-fan-out counts with
+        # no counterpart here, so they are absent rather than invented; the
+        # fields a consumer needs to read a section's delivery are all present.
+        section_records.append({
+            "manifest_version": MANIFEST_VERSION,
+            "topic": sec["title"],
+            "section_role": "kind",
+            "kind": sec["kind"],
+            "served_count": sec["served_count"],
+            "served_paths": sec["served_paths"],
+            "chars_used": sec["chars_used"],
+            "chars_budget": kind_sections["chars_reserved"],
+            "render_mode_counts": sec["render_mode_counts"],
+            "content_degraded": sec["content_degraded"],
+            "shrunk_for_budget": sec["shrunk_for_budget"],
+            "entry_count_before_budget": sec["entry_count_before_budget"],
         })
 
     print("".join(output_parts), end="")
@@ -393,6 +449,16 @@ def resolve_v2(
                         "ranking_path": "search-order",
                         "trust": _trust_snapshot(knowledge_dir, served["entry"]),
                     })
+            for sec in kind_sections["sections"]:
+                for served in sec["served_entries"]:
+                    entries.append({
+                        "path": served["path"],
+                        "render_mode": served["render_mode"],
+                        "section_role": "kind",
+                        "topic": sec["title"],
+                        "ranking_path": "search-order",
+                        "trust": _trust_snapshot(knowledge_dir, served["entry"]),
+                    })
             tc_path = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "trust-compute.py")
             with open(tc_path, "rb") as fh:
@@ -405,7 +471,8 @@ def resolve_v2(
                 "trust_compute_sha": trust_compute_sha,
                 "budget": {
                     "chars_used": total_chars + sum(
-                        s["render_result"]["chars_used"] for s in resolved_topics),
+                        s["render_result"]["chars_used"] for s in resolved_topics
+                    ) + kind_sections["chars_used"],
                     "chars_budget": GLOBAL_CHAR_CEILING,
                 },
                 "entries": entries,

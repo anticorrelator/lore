@@ -5,7 +5,7 @@ pk_search.py is now a pure library (Indexer, Searcher, Stats, LinkChecker).
 
 Usage:
     python pk_cli.py index <knowledge_dir> [--force]
-    python pk_cli.py search <knowledge_dir> <query> [--limit N] [--threshold F] [--json] [--budget N]
+    python pk_cli.py search <knowledge_dir> <query> [--limit N] [--threshold F] [--json] [--kind-sections] [--budget N]
     python pk_cli.py prefetch <knowledge_dir> <query> --scale-set <csv> [--format prompt|summary]
     python pk_cli.py query <knowledge_dir> <seeds> --scale-set <csv> [--format json|prompt]
     python pk_cli.py resolve-manifest <knowledge_dir> --directive <json> --slug <slug> --phase <n>
@@ -41,6 +41,13 @@ from pk_search import (  # noqa: E402
 )
 from pk_resolve import Resolver, resolve_read_path  # noqa: E402
 import pk_retrieval  # noqa: E402
+
+
+# Char slice the kind sections may spend on the search surface. Nothing else on
+# this surface is budgeted, so this bounds the sections alone and keeps them
+# comparable in size to the ranked list they follow. Unspent characters are not
+# returned to anything here — the ranked list has already been sized by --limit.
+KIND_SECTION_CHARS = 6000
 
 
 def ensure_index_or_exit(searcher: Searcher) -> None:
@@ -85,6 +92,38 @@ def _report_withheld_retired(count: int, stream) -> None:
         print(withheld_retired_notice(count), file=stream)
 
 
+def _search_kind_sections(
+    args: argparse.Namespace,
+    searcher: Searcher,
+    results: list,
+    source_type,
+    caller,
+    include_archived: bool,
+    include_status,
+    scale_set,
+) -> dict:
+    """Kind sections for this search, deduped against the ranked results.
+
+    The section queries inherit the search's own filters and declared scale, so
+    a section never reaches outside the slice of the store the caller asked for.
+    On a store with no non-fact entry this costs one indexed lookup and returns
+    empty text.
+    """
+    import pk_kinds
+
+    return pk_kinds.build_sections(
+        searcher,
+        args.query,
+        KIND_SECTION_CHARS,
+        scale_set=scale_set,
+        served_paths=[r.get("file_path", "") for r in results],
+        caller=caller,
+        source_type=source_type,
+        include_archived=include_archived,
+        include_status=include_status,
+    )
+
+
 def cmd_search(args: argparse.Namespace) -> None:
     mode = "bm25"
     if getattr(args, "composite", False):
@@ -107,10 +146,24 @@ def cmd_search(args: argparse.Namespace) -> None:
     else:
         scale_set = scale_set_arg
     include_status = getattr(args, "include_status", None)
+    kind_sections_json = getattr(args, "kind_sections", False)
 
     # --budget: budget-aware search with two-tier JSON output
     budget = getattr(args, "budget", None)
     if budget is not None:
+        if kind_sections_json:
+            # The two-tier payload has a fixed shape the SessionStart hook
+            # reads key by key, so it cannot carry sections. Refuse rather
+            # than return a payload silently short of what was asked for.
+            print(
+                json.dumps({
+                    "error": "--kind-sections is not supported with --budget; "
+                             "the two-tier payload shape is fixed. Run the "
+                             "search without --budget to get sections."
+                }),
+                file=sys.stderr,
+            )
+            sys.exit(1)
         exclude_paths_arg = getattr(args, "exclude_paths", None)
         exclude_paths = (
             [p.strip() for p in exclude_paths_arg.split(",") if p.strip()]
@@ -222,14 +275,34 @@ def cmd_search(args: argparse.Namespace) -> None:
 
     withheld_retired = searcher.last_status_excluded.get("retired", 0)
 
+    # `--json` alone stays the flat list `tui/internal/knowledge/search.go`
+    # decodes, and pays nothing for the section path it does not use.
+    sections = None
+    if kind_sections_json or not args.json:
+        sections = _search_kind_sections(
+            args, searcher, results, source_type, caller,
+            include_archived, include_status, scale_set,
+        )
+
     if args.json:
-        print(json.dumps(results, indent=2))
+        if kind_sections_json:
+            print(json.dumps({
+                "results": results,
+                "sections": sections["sections"],
+                # Distinguishes "no section had anything to say" from "the
+                # index could not answer" — both arrive as an empty list.
+                "degraded": sections["degraded"],
+            }, indent=2))
+        else:
+            print(json.dumps(results, indent=2))
         # stderr, so --json consumers keep a parseable stdout.
         _report_withheld_retired(withheld_retired, sys.stderr)
         return
 
     if not results:
         print(f'No results for "{args.query}"')
+        if sections["text"]:
+            print(sections["text"], end="")
         _report_withheld_retired(withheld_retired, sys.stdout)
         return
 
@@ -256,6 +329,9 @@ def cmd_search(args: argparse.Namespace) -> None:
             print("  See also:")
             for s in r["similar_entries"]:
                 print(f"    - {s['heading']} ({s['file_path']}, sim: {s['similarity']})")
+
+    if sections["text"]:
+        print(sections["text"], end="")
 
     if withheld_retired > 0:
         print("")
@@ -970,6 +1046,7 @@ def main() -> None:
     p_search.add_argument("--exclude-paths", default=None, metavar="CSV", help="With --budget: store-relative paths to drop before partitioning (matched with or without .md)")
     p_search.add_argument("--scale-set", default=None, metavar="BUCKETS", help="Declared retrieval scale bucket(s), comma-separated (e.g. 'implementation' or 'subsystem,implementation'). Set-membership filter against entry META scale field.")
     p_search.add_argument("--include-status", nargs="+", default=None, metavar="STATUS", help="Status values to include (current, superseded, historical). Default: current only.")
+    p_search.add_argument("--kind-sections", action="store_true", help="With --json: emit an object with `results` and a `sections` array instead of a flat list. The human-readable render always appends sections; not available with --budget.")
     p_search.set_defaults(func=cmd_search)
 
     # search-preferences
