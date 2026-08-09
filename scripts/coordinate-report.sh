@@ -149,7 +149,9 @@ ITEM_DIR="$KNOWLEDGE_DIR/_work/$WORK_ITEM"
 [[ -d "$ITEM_DIR" ]] || fail "work item '$WORK_ITEM' has no directory at $ITEM_DIR — reports land beside the item they belong to, so the item must exist first"
 
 BODY="$(cat)"
-[[ -n "${BODY//[[:space:]]/}" ]] || fail "the report body arrives on stdin and it was empty — pipe the returned report in, e.g. printf '%s' \"\$REPORT\" | lore coordinate report $WORK_ITEM --report-id $REPORT_ID"
+# Glob-match rather than ${BODY//[[:space:]]/}: pattern substitution over a large
+# multibyte body is super-linear in bash, and report bodies run to tens of KB.
+[[ "$BODY" == *[![:space:]]* ]] || fail "the report body arrives on stdin and it was empty — pipe the returned report in, e.g. printf '%s' \"\$REPORT\" | lore coordinate report $WORK_ITEM --report-id $REPORT_ID"
 
 # --- Identity header validation ----------------------------------------------
 

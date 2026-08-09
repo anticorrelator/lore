@@ -129,6 +129,42 @@ assert_eq "an empty body exits 1" "1" "$RC"
 OUT=$(printf '   \n\n' | bash "$REPORT" demo-item --report-id task-1-r1 --kdir "$KDIR" 2>&1); RC=$?
 assert_eq "a whitespace-only body exits 1" "1" "$RC"
 
+echo "== a real-sized multibyte body lands promptly =="
+# Worker reports run to tens of KB and are full of em-dashes and arrows. A
+# non-emptiness check that rewrites the whole body to test it costs seconds at
+# 4KB and minutes at 40KB, so this case asserts a wall-clock bound, not just a
+# landing. The watchdog is what keeps a regression a failure instead of a hang.
+KDIR=$(new_store)
+BIG_BODY="$TEST_DIR/big-body.md"
+{
+  report_body big-r1 demo-item
+  python3 -c 'print("A finding — with an arrow → and an ellipsis … in it.\n" * 800, end="")'
+} > "$BIG_BODY"
+BIG_BYTES=$(wc -c < "$BIG_BODY" | tr -d '[:space:]')
+
+START=$SECONDS
+bash "$REPORT" demo-item --report-id big-r1 --kdir "$KDIR" < "$BIG_BODY" >/dev/null 2>&1 &
+BIG_PID=$!
+(
+  waited=0
+  while [[ $waited -lt 30 ]]; do
+    kill -0 "$BIG_PID" 2>/dev/null || exit 0
+    sleep 1
+    waited=$((waited + 1))
+  done
+  kill -9 "$BIG_PID" 2>/dev/null
+) >/dev/null 2>&1 &
+wait "$BIG_PID" 2>/dev/null; RC=$?
+ELAPSED=$((SECONDS - START))
+assert_eq "a ${BIG_BYTES}-byte body lands" "0" "$RC"
+if [[ $ELAPSED -lt 10 ]]; then
+  pass "it lands in under 10s (took ${ELAPSED}s)"
+else
+  fail "it lands in under 10s" "took ${ELAPSED}s"
+fi
+assert_eq "the landed body is byte-complete" "$BIG_BYTES" \
+  "$({ wc -c < "$KDIR/_work/demo-item/worker-reports/big-r1.md"; } 2>/dev/null | tr -d '[:space:]')"
+
 echo "== --json carries the same verdicts =="
 KDIR=$(new_store)
 OUT=$(report_body | bash "$REPORT" demo-item --report-id task-1-r1 --json --kdir "$KDIR" 2>/dev/null)
