@@ -359,7 +359,10 @@ assert "--window 600" in cmd, cmd
 JSON
   run bash "$ARM_SH" --owner-pid 1 --window 600 --hook-timeout 900 --install "$settings"
   [ "$status" -eq 0 ]
-  run bash "$ARM_SH" --owner-pid 2 --window 700 --hook-timeout 1000 --install "$settings"
+  # pid 1 again rather than a second made-up number: arming now refuses a pid
+  # that is not alive, and what this case is about is the second arm replacing
+  # the first entry in place rather than stacking beside it.
+  run bash "$ARM_SH" --owner-pid 1 --window 700 --hook-timeout 1000 --install "$settings"
   [ "$status" -eq 0 ]
   run python3 - "$settings" <<'PY'
 import json, sys

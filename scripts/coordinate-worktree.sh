@@ -43,6 +43,18 @@ TRANSITIONS = {
     "reconciling": {"cleanup_due"},
     "cleanup_blocked": {"cleanup_due"},
 }
+# Which legal edge the ordinary accept-and-integrate route takes where a state
+# offers more than one. TRANSITIONS stays the only statement of what is legal;
+# this says only which of those edges is the normal one, so no hint can name a
+# transition the machine would refuse.
+ROUTE_PREFERENCE = {"bound": "active", "active": "quiescent"}
+# Why a sweep took a tree, keyed on the state it was in when the sweep found it.
+# Anything not listed here reached the sweep through the dead-man's switch.
+SWEEP_REASONS = {
+    "cleanup_due": "cleanup due — the owner released this tree, so the sweep finished "
+                   "the teardown cleanup would have done",
+    "cleanup_blocked": "retrying a cleanup that was blocked",
+}
 
 
 def now():
@@ -214,6 +226,56 @@ class Manager:
         row["updated_at"] = iso(now())
         row["history"].append({"state": state, "at": row["updated_at"], "reason": reason})
 
+    def check_owner_pid(self, pid, verb):
+        """Refuse a handle that cannot outlive the command recording it.
+
+        Every --owner-pid surface warns about `$$` and none of them checked it,
+        so the warning only ever reached people who did not need it. Both
+        refusals below describe the same silent failure: a pid that is dead by
+        the time the sweep reads it is indistinguishable from no handle at all,
+        and the tree goes fifteen minutes later with the work still in it.
+
+        `lore` execs straight through to this process, so a `$$` typed on the
+        command line arrives as this pid or its parent depending on how many
+        subshells the caller's line went through. Deeper ancestors are not
+        checked: a long-lived harness process is also an ancestor, and there is
+        nothing in a pid that separates the two.
+        """
+        if pid is None:
+            return
+        expiry = (
+            f"  A handle that dies with the command is swept exactly like no handle at "
+            f"all — {LEASE_SECONDS}s from now, with the work still running in the tree.\n"
+            "  Pass the pid of the long-lived harness process that owns the seat."
+        )
+        if pid == os.getpid():
+            fail(
+                f"refusing --owner-pid {pid}: that is this command's own process. `lore` "
+                "execs straight through to the manager, so a `$$` written on the command "
+                f"line lands here, and it is gone the moment {verb} returns.\n"
+                + expiry
+            )
+        if pid == os.getppid():
+            fail(
+                f"refusing --owner-pid {pid}: that is the shell that invoked this command, "
+                f"which exits as soon as {verb} returns — the `$$` trap, one process "
+                "further out.\n" + expiry
+            )
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            fail(
+                f"refusing --owner-pid {pid}: no such process. The handle is dead before "
+                "it is even recorded.\n"
+                f"  A dead handle is swept exactly like no handle at all, {LEASE_SECONDS}s "
+                "from now, with the work still running in the tree.\n"
+                "  Pass the pid of a process that is alive now and outlives this command."
+            )
+        except PermissionError:
+            # Another user's process: it exists, which is the whole claim a
+            # handle makes. owner_live() reads this case the same way.
+            pass
+
     def allocate(self, args):
         sweep_result = self.sweep_all()
         if sweep_result["failed"]:
@@ -222,6 +284,7 @@ class Manager:
             safe_id(value, label)
         if args.owner_kind not in ("session", "seat"):
             fail("owner kind must be session or seat")
+        self.check_owner_pid(args.owner_pid, "allocate")
         # The lease is a dead-man's switch, not a timer: sweep_all reclaims an
         # expired tree only when owner_live() cannot prove the owner is still
         # there. owner_live() knows exactly two proofs — owner.pid and
@@ -250,9 +313,13 @@ class Manager:
             # tightening this path. Warn instead of refusing, so the hole is
             # visible without breaking the documented flow.
             warn(
-                f"session lease allocated with no liveness handle; this tree will be swept "
-                f"{LEASE_SECONDS}s after allocation even if the session is alive. "
-                "Pass --owner-pid (the long-lived harness process, never $$) or --owner-tmux."
+                "session-owned trees are normally allocated by the claiming TUI, which owns "
+                "the lease through its registry identity and renews it on its own sync loop; "
+                "a seat dispatching an item-backed worker session allocates nothing extra. "
+                "This call is a hand-allocation and it carries no liveness handle, so the "
+                f"tree is swept {LEASE_SECONDS}s from now even if the session is alive. "
+                "If you are hand-allocating one, pass --owner-pid (the long-lived harness "
+                "process, never $$) or --owner-tmux."
             )
         item_dir = self.kdir / "_work" / args.work_item
         if not item_dir.is_dir():
@@ -313,10 +380,18 @@ class Manager:
 
     def bind(self, args):
         path, row = self.load(args.worktree_id)
-        if path.parent != self.registry or row["state"] not in ("reserved", "bound", "active", "recovered"):
-            fail("bind requires a reserved or owner-retaining live manifest")
+        if path.parent != self.registry:
+            fail(claimed_or_terminal(row, "bind"))
+        if row["state"] not in ("reserved", "bound", "active", "recovered"):
+            fail(
+                f"worktree {args.worktree_id} is at '{row['state']}'; bind attaches or repairs "
+                "the owner handle on a lease that is still being worked, and quiescent onward "
+                "is the teardown half of the lifecycle — the owner has already released it.\n"
+                + remaining_steps(row)
+            )
         if row["owner"]["id"] != args.owner_id:
-            fail("owner id does not match the allocation lease")
+            fail(owner_mismatch(row, args.owner_id))
+        self.check_owner_pid(args.owner_pid, "bind")
         self.validate_identity(row)
         if row["state"] == "reserved":
             row["guard_identity"] = guard("transition", identity=row["guard_identity"], state="active")
@@ -335,9 +410,9 @@ class Manager:
     def transition(self, args):
         path, row = self.load(args.worktree_id)
         if path.parent != self.registry:
-            fail("claimed or terminal worktree cannot transition")
+            fail(claimed_or_terminal(row, "transition"))
         if args.to not in TRANSITIONS.get(row["state"], set()):
-            fail(f"invalid coordination lifecycle transition {row['state']!r} -> {args.to!r}")
+            fail(transition_refusal(row, args.to))
         self.validate_identity(row)
         self.add_history(row, args.to, args.reason or "manager transition")
         atomic_json(path, row)
@@ -345,10 +420,18 @@ class Manager:
 
     def renew(self, args):
         path, row = self.load(args.worktree_id)
-        if path.parent != self.registry or row["state"] in ("cleanup_due", "cleanup_blocked"):
-            fail("lease cannot be renewed after cleanup becomes due")
+        if path.parent != self.registry:
+            fail(claimed_or_terminal(row, "renew"))
+        if row["state"] in ("cleanup_due", "cleanup_blocked"):
+            fail(
+                f"worktree {args.worktree_id} is at '{row['state']}'; the lease stops being "
+                "renewable once cleanup is due, because renewing it would only postpone a "
+                "teardown its owner already asked for.\n"
+                "  Finish it instead: lore coordinate worktree cleanup --worktree-id "
+                f"{args.worktree_id}"
+            )
         if row["owner"]["id"] != args.owner_id:
-            fail("owner id does not match the allocation lease")
+            fail(owner_mismatch(row, args.owner_id))
         self.validate_identity(row)
         stamp = now()
         row["lease"]["renewed_at"] = iso(stamp)
@@ -667,8 +750,16 @@ class Manager:
 
     def cleanup(self, args):
         path, row = self.load(args.worktree_id)
-        if path.parent != self.registry or row["state"] not in ("cleanup_due", "cleanup_blocked"):
-            fail("normal cleanup requires cleanup_due or cleanup_blocked")
+        if path.parent != self.registry:
+            fail(claimed_or_terminal(row, "cleanup"))
+        if row["state"] not in ("cleanup_due", "cleanup_blocked"):
+            fail(
+                f"worktree {args.worktree_id} is at '{row['state']}'; cleanup removes a tree "
+                "only from cleanup_due or cleanup_blocked.\n"
+                "  Cleanup is the last beat of a lifecycle its owner drives: a tree is removed "
+                "because its owner released it, not because teardown came around and found it "
+                "sitting there.\n" + remaining_steps(row)
+            )
         self.validate_identity(row)
         self.claim(row)
         return self.finish_claim(row, False, args.reason or "normal cleanup")
@@ -703,7 +794,16 @@ class Manager:
                     continue
                 self.validate_identity(row)
                 self.claim(row)
-                row = self.finish_claim(row, True, "expired owner lease")
+                # Two different things reach this line and they are not the same
+                # event. A cleanup_due or cleanup_blocked tree skips both the
+                # expiry test and owner_live() above, deliberately: its owner
+                # already released it, so there is no live worker to protect and
+                # nothing to wait fifteen minutes for. Recording that as an
+                # "expired owner lease" reads as a reclaim from a live owner and
+                # contradicts the dead-man's-switch contract in the archived
+                # history — which is exactly how it was first read.
+                row = self.finish_claim(row, True, SWEEP_REASONS.get(
+                    row["state"], "expired owner lease — owner could not be proven alive"))
                 result["swept"].append(row["worktree_id"])
                 self.note_recovery(result, row)
                 self.note_projection(result, row)
@@ -768,7 +868,9 @@ def parser():
         "PID of the LONG-LIVED harness process that owns the seat or session. "
         "Never pass $$: a bash subshell's pid dies the moment the command "
         "returns, recording a handle that looks live at allocate time and fails "
-        "identically to no handle at all later. " + handle_help
+        "identically to no handle at all later. Refused, not merely warned "
+        "about: this verb rejects its own pid, the pid of the shell that "
+        "invoked it, and any pid that is not alive right now. " + handle_help
     )
 
     allocate = sub.add_parser(
@@ -825,6 +927,96 @@ def parser():
     return root
 
 
+def cleanup_route(state):
+    """The states still to be driven from `state` before cleanup will accept.
+
+    Read out of TRANSITIONS rather than restated beside it. A second copy of
+    the machine is how the protocol prose came to teach `bound -> quiescent`,
+    an edge that has never existed; a hint derived from the machine cannot
+    drift away from it.
+    """
+    route = []
+    cursor = state
+    while cursor in TRANSITIONS and len(route) < len(STATES):
+        options = TRANSITIONS[cursor]
+        nxt = ROUTE_PREFERENCE.get(cursor)
+        if nxt not in options:
+            nxt = sorted(options)[0]
+        route.append(nxt)
+        if nxt in ("cleanup_due", "cleanup_blocked"):
+            break
+        cursor = nxt
+    return route
+
+
+def remaining_steps(row, indent="    "):
+    """The commands, in order, that carry this tree from here to cleanup.
+
+    Every refusal that turns a seat away from a lifecycle verb ends in this, so
+    the seat learns the lifecycle at the point it got it wrong rather than from
+    prose it read before it had a tree to apply it to.
+    """
+    state = row["state"]
+    steps = []
+    if state == "reserved":
+        # reserved -> bound is bind's, not transition's: bind is the step that
+        # advances the guard identity and checks the owner handle.
+        steps.append(
+            f"lore coordinate worktree bind --worktree-id {row['worktree_id']} "
+            f"--owner-id {row['owner']['id']} --owner-pid <long-lived harness pid>"
+        )
+        state = "bound"
+    for nxt in cleanup_route(state):
+        steps.append(
+            f"lore coordinate worktree transition --worktree-id {row['worktree_id']} --to {nxt}"
+        )
+    if not steps:
+        return ""
+    body = "\n".join(indent + step for step in steps)
+    return "  Drive it there first, one command per state:\n" + body
+
+
+def claimed_or_terminal(row, verb):
+    """Why a record outside the live registry answers no verb at all."""
+    return (
+        f"worktree {row['worktree_id']} is at '{row['state']}' and its record has left the "
+        f"live registry, so {verb} has nothing to act on: cleanup has already claimed or "
+        "finished this tree.\n"
+        f"  Its cleanup proof and recovery pointers are still readable: "
+        f"lore coordinate worktree show --worktree-id {row['worktree_id']}"
+    )
+
+
+def owner_mismatch(row, offered):
+    return (
+        f"owner id {offered!r} does not own worktree {row['worktree_id']}; the lease belongs "
+        f"to {row['owner']['id']!r}.\n"
+        "  A lease answers only to the owner that allocated it, so that a second seat cannot "
+        "renew or re-bind a tree it is not working in."
+    )
+
+
+def transition_refusal(row, target):
+    legal = sorted(TRANSITIONS.get(row["state"], set()))
+    lines = [f"invalid coordination lifecycle transition {row['state']!r} -> {target!r}."]
+    if legal:
+        lines.append(f"  From '{row['state']}' the only legal next states are: {', '.join(legal)}.")
+    else:
+        lines.append(
+            f"  '{row['state']}' has no outgoing transition. cleanup_due and cleanup_blocked "
+            "are handed to `lore coordinate worktree cleanup`; sweep_claimed, removed and "
+            "swept are terminal."
+        )
+    route = cleanup_route(row["state"])
+    if route:
+        lines.append(
+            "  The accept-and-integrate route from here is "
+            + " -> ".join(route)
+            + " — one transition per state, and none of them can be skipped."
+        )
+    return "\n".join(lines)
+
+
 def next_hint(row):
     """One line naming the lifecycle verb the owner has to drive next.
 
@@ -841,7 +1033,7 @@ def next_hint(row):
         "bind this tree before you dispatch into it "
         f"(lore coordinate worktree bind --worktree-id {row['worktree_id']} "
         f"--owner-id {row['owner']['id']} --owner-pid <long-lived harness pid>), "
-        "then walk it through quiescent -> reconciling -> cleanup_due as you "
+        "then walk it through " + " -> ".join(cleanup_route("bound")) + " as you "
         "accept and integrate; a tree left at reserved is still leased at "
         "teardown and nothing before then will say so."
     )
