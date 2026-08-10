@@ -26,7 +26,7 @@
 #                         [--spawn-gap <sec>]
 #                         [--suspend-skew <sec>]
 #                         [--owner-pid <pid>] [--owner-tmux <name>]
-#                         [--tmux-server <name>] [--no-board-delta]
+#                         [--tmux-server <name>]
 #                         [--wake-shaped] [--kdir <path>] [--json]
 #
 # Scoping:
@@ -50,9 +50,9 @@
 #   the evidence it carries, and dropping it would turn a real event into
 #   silence.
 #
-#   Each distinct scope keeps its own cursor, board baseline, and advisory ledger,
-#   so two seats watching different scopes on one store do not overwrite each
-#   other's position.
+#   Each distinct scope keeps its own cursor and advisory ledger, so two seats
+#   watching different scopes on one store do not overwrite each other's
+#   position.
 #
 # Options:
 #   --until <events>  Comma-separated event names to wake on. Default is the
@@ -96,8 +96,6 @@
 #                     Liveness handles for the seat this watcher reports to; the
 #                     same two handles a coordination worktree lease records
 #                     (--tmux-server defaults to lore-tui). See "Owner liveness".
-#   --no-board-delta  Skip the board projection and report no delta. The wake is
-#                     cheaper and less useful; the classification is unaffected.
 #   --wake-shaped     Exit 2 at every terminal that could be re-armed from, and
 #                     write the wake body to stderr. See "Exit codes".
 #   --kdir <path>     Knowledge-store override (test isolation).
@@ -222,19 +220,6 @@
 #   would drop the rest permanently. The no-match exits (advisory, timeout,
 #   reader failure) withhold nothing, so they carry the read's end cursor.
 #
-# The board delta:
-#   Every wake also carries what changed on the coordination board since the last
-#   wake, computed by diffing `coordinate-status.sh --json` row ids against a
-#   baseline persisted beside the cursor. Board row ids are content hashes, so a
-#   row whose content changed leaves under one id and returns under another; rows
-#   pairing up by locator across the two sides are reported as changed rather than
-#   as an unrelated removal and addition.
-#
-#   The delta is board-wide even under a scoped watch: scoping governs what wakes
-#   you, the delta is what you are told once awake. It reserves a slot for
-#   advisories the board projection cannot express, which is where the stale
-#   pending requests are carried.
-#
 # Output (plain): the matched event row, then the wake body as {"wake": {...}},
 #   then a final {"next_cursor": N} row. A pending-staleness wake emits an
 #   advisory row in place of the event row. Timeout emits no event row. Every row
@@ -249,7 +234,7 @@
 #      clock_skew: {wall_elapsed_seconds, monotonic_elapsed_seconds,
 #                   skew_seconds, threshold_seconds} | null,
 #      matched, pending,
-#      scope: {mode, slugs, arcs, cursor_file}, board_delta, next_cursor, until}
+#      scope: {mode, slugs, arcs, cursor_file}, next_cursor, until}
 #   There is no top-level `slug`: session identity lives on the matched row.
 #
 #   `outcome` is one of: matched, pending_stale, clock_skew, owner_gone, timeout,
@@ -302,7 +287,6 @@ SUSPEND_SKEW=120
 OWNER_PID=""
 OWNER_TMUX=""
 TMUX_SERVER="lore-tui"
-BOARD_DELTA=1
 WAKE_SHAPED=0
 KDIR_OVERRIDE=""
 JSON_MODE=0
@@ -328,17 +312,16 @@ while [[ $# -gt 0 ]]; do
     --owner-pid) OWNER_PID="${2:-}"; shift 2 ;;
     --owner-tmux) OWNER_TMUX="${2:-}"; shift 2 ;;
     --tmux-server) TMUX_SERVER="${2:-}"; shift 2 ;;
-    --no-board-delta) BOARD_DELTA=0; shift ;;
     --wake-shaped) WAKE_SHAPED=1; shift ;;
     --kdir) KDIR_OVERRIDE="${2:-}"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
     # The header comment above is the help text. This range ends on its last
     # line; a header that grows past it prints truncated, which --help itself
     # cannot notice.
-    -h|--help) sed -n '2,276p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,261p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: coordinate-watch.sh [--slug <s>]... [--arc <slug>]... [--until <events>] [--since <cursor>] [--timeout <sec>] [--pending-stale <sec>] [--peek-timeout <sec>] [--advisory-age <sec>] [--spawn-gap <sec>] [--suspend-skew <sec>] [--owner-pid <pid>] [--owner-tmux <name>] [--tmux-server <name>] [--no-board-delta] [--wake-shaped] [--kdir <path>] [--json]" >&2
+      echo "Usage: coordinate-watch.sh [--slug <s>]... [--arc <slug>]... [--until <events>] [--since <cursor>] [--timeout <sec>] [--pending-stale <sec>] [--peek-timeout <sec>] [--advisory-age <sec>] [--spawn-gap <sec>] [--suspend-skew <sec>] [--owner-pid <pid>] [--owner-tmux <name>] [--tmux-server <name>] [--wake-shaped] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -400,7 +383,6 @@ fi
 
 EVENTS_SH="$SCRIPT_DIR/session-events.sh"
 PEEK_SH="$SCRIPT_DIR/session-peek.sh"
-STATUS_SH="$SCRIPT_DIR/coordinate-status.sh"
 EVENTS_FILE="$KNOWLEDGE_DIR/_sessions/events.jsonl"
 PENDING_DIR="$KNOWLEDGE_DIR/_sessions/requests/pending"
 # The watcher's sidecars sit at the top of _coordination/, deliberately outside
@@ -463,7 +445,6 @@ if [[ ${#SCOPE_SLUGS[@]} -gt 0 ]]; then
 fi
 
 CURSOR_FILE="$COORD_DIR/watch-cursor${SCOPE_SUFFIX}.json"
-BASELINE_FILE="$COORD_DIR/watch-board-baseline${SCOPE_SUFFIX}.json"
 ADVISORY_FILE="$COORD_DIR/watch-advisories${SCOPE_SUFFIX}.json"
 
 if [[ $SCOPED -eq 1 ]]; then
@@ -570,172 +551,6 @@ print("%s\t%d\t%s" % (tier, int(elapsed), iso(float(entry["first_seen"]))))
 PYEOF
 }
 
-# --- Board delta -------------------------------------------------------------
-
-# board_delta <pending-json> — echo the wake's board_delta object.
-#
-# Composed from the published read-only projection: the delta adds a set
-# difference over row ids, no new join. Never fatal — a projection this watcher
-# could not read degrades the delta to an error field, because the wake it rides
-# on is about the journal, not about the board.
-# The python below writes to a file rather than being captured in a command
-# substitution: bash 3.2 scans a heredoc nested inside $( ) for quotes, so an
-# apostrophe in a Python comment there is a parse error rather than a comment.
-board_delta() {
-  local pending="$1" status=0 projection computed out
-  if [[ $BOARD_DELTA -eq 0 ]]; then
-    jq -cn --argjson pending "$pending" \
-      '{consulted: false, reason: "disabled by --no-board-delta", advisories: {pending_stale: $pending}}'
-    return 0
-  fi
-  mkdir -p "$COORD_DIR"
-  projection="$(mktemp "$COORD_DIR/.tmp.watch-board.XXXXXX")" || {
-    jq -cn --argjson pending "$pending" \
-      '{consulted: false, error: "could not create a temporary file for the board projection", advisories: {pending_stale: $pending}}'
-    return 0
-  }
-  computed="$(mktemp "$COORD_DIR/.tmp.watch-delta.XXXXXX")" || {
-    rm -f "$projection"
-    jq -cn --argjson pending "$pending" \
-      '{consulted: false, error: "could not create a temporary file for the board delta", advisories: {pending_stale: $pending}}'
-    return 0
-  }
-  if ! bash "$STATUS_SH" --kdir "$KNOWLEDGE_DIR" --json > "$projection" 2>/dev/null; then
-    rm -f "$projection" "$computed"
-    jq -cn --argjson pending "$pending" \
-      '{consulted: false, error: "coordinate status projection failed", advisories: {pending_stale: $pending}}'
-    return 0
-  fi
-  python3 - "$BASELINE_FILE" "$projection" > "$computed" 2>/dev/null <<'PYEOF' || status=$?
-import json, os, sys, tempfile, time
-from datetime import datetime, timezone
-
-baseline_path, projection_path = sys.argv[1], sys.argv[2]
-
-
-def digest(row):
-    return {
-        "id": row.get("id"),
-        "source_id": row.get("source_id"),
-        "kind": row.get("kind"),
-        "title": row.get("title"),
-        "locator": (row.get("evidence") or {}).get("locator"),
-        "rule_id": (row.get("classification") or {}).get("rule_id"),
-    }
-
-
-with open(projection_path, encoding="utf-8") as handle:
-    projection = json.load(handle)
-
-current = {}
-for name, rows in (projection.get("buckets") or {}).items():
-    if not isinstance(rows, list):
-        continue
-    current[name] = {
-        row["id"]: digest(row)
-        for row in rows
-        if isinstance(row, dict) and row.get("id")
-    }
-
-prior = None
-try:
-    with open(baseline_path, encoding="utf-8") as handle:
-        loaded = json.load(handle)
-    if isinstance(loaded, dict) and isinstance(loaded.get("buckets"), dict):
-        prior = loaded
-except (OSError, ValueError):
-    prior = None
-
-delta_buckets = {}
-counts = {"added": 0, "removed": 0, "changed": 0}
-for name in sorted(current):
-    now_rows = current[name]
-    was_rows = ((prior or {}).get("buckets") or {}).get(name) or {}
-    if not isinstance(was_rows, dict):
-        was_rows = {}
-
-    # Row ids are content hashes, so an edited row leaves under one id and
-    # returns under another. Pairing the two sides by locator recovers that as
-    # one change instead of an unrelated removal plus addition.
-    unmatched_added = {}
-    for row_id in sorted(now_rows):
-        if row_id in was_rows:
-            continue
-        unmatched_added.setdefault(now_rows[row_id].get("locator"), []).append(row_id)
-
-    changed, removed = [], []
-    for row_id in sorted(was_rows):
-        if row_id in now_rows:
-            continue
-        was = was_rows[row_id] if isinstance(was_rows[row_id], dict) else {}
-        locator = was.get("locator")
-        candidates = unmatched_added.get(locator) if locator else None
-        if candidates:
-            new_id = candidates.pop(0)
-            changed.append({
-                "locator": locator,
-                "from_id": row_id,
-                "to_id": new_id,
-                "title": now_rows[new_id].get("title"),
-                "rule_id": now_rows[new_id].get("rule_id"),
-            })
-        else:
-            removed.append(was)
-
-    added = [now_rows[row_id] for ids in unmatched_added.values() for row_id in ids]
-    added.sort(key=lambda row: row.get("id") or "")
-
-    if added or removed or changed:
-        delta_buckets[name] = {"added": added, "removed": removed, "changed": changed}
-    counts["added"] += len(added)
-    counts["removed"] += len(removed)
-    counts["changed"] += len(changed)
-
-# With no baseline there is nothing to have changed since. Reporting the whole
-# board as newly added would bury the first wake of every scope under rows that
-# were already there; the bucket counts still say how big the board is.
-if prior is None:
-    delta_buckets = {}
-    counts = {"added": 0, "removed": 0, "changed": 0}
-
-now = time.time()
-stamp = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-try:
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(baseline_path), prefix=".tmp.watch-board-baseline.")
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump({
-            "schema_version": 1,
-            "updated_at": stamp,
-            "observed_at": projection.get("observed_at"),
-            "buckets": current,
-        }, handle)
-    os.replace(tmp, baseline_path)
-except OSError:
-    pass
-
-print(json.dumps({
-    "consulted": True,
-    "first_observation": prior is None,
-    "observed_at": projection.get("observed_at"),
-    "baseline_observed_at": (prior or {}).get("observed_at"),
-    "bucket_counts": {name: len(rows) for name, rows in sorted(current.items())},
-    "counts": counts,
-    "buckets": delta_buckets,
-}, separators=(",", ":")))
-PYEOF
-  out="$(cat "$computed")"
-  rm -f "$projection" "$computed"
-  if [[ $status -ne 0 || -z "$out" ]]; then
-    jq -cn --argjson pending "$pending" \
-      '{consulted: false, error: "board delta could not be computed from the projection", advisories: {pending_stale: $pending}}'
-    return 0
-  fi
-  # The advisory slot carries what the board projection has no row for: an
-  # unclaimed spawn request never becomes a journal row, so nothing in the
-  # projection can represent it.
-  printf '%s' "$out" | jq -c --argjson pending "$pending" '. + {advisories: {pending_stale: $pending}}'
-}
-
 # --- Wake payload and terminals ----------------------------------------------
 
 WAKE_OUTCOME=""
@@ -756,10 +571,9 @@ WAKE_CLOCK_SKEW="null"      # JSON
 # The single terminal. Non-zero terminals print their JSON by hand: json_output
 # hard-exits 0, which would erase the composed exit code.
 emit_wake() {
-  local cursor="$1" code="$2" message="$3" payload delta
+  local cursor="$1" code="$2" message="$3" payload
 
   [[ "$cursor" == "null" ]] || write_cursor_file "$cursor"
-  delta="$(board_delta "$WAKE_PENDING")"
 
   payload="$(jq -cn \
     --argjson schema "$WAKE_SCHEMA_VERSION" \
@@ -781,7 +595,6 @@ emit_wake() {
     --argjson slugs "$SCOPE_SLUGS_JSON" \
     --argjson arcs "$SCOPE_ARCS_JSON" \
     --arg cursor_file "$(basename "$CURSOR_FILE")" \
-    --argjson delta "$delta" \
     --argjson nc "$cursor" \
     --argjson until "$UNTIL_JSON" \
     '{schema_version: $schema, outcome: $outcome, tier: $tier, authority: $authority,
@@ -792,7 +605,7 @@ emit_wake() {
       clock_skew: $clock_skew,
       matched: $matched, pending: $pending,
       scope: {mode: $mode, slugs: $slugs, arcs: $arcs, cursor_file: $cursor_file},
-      board_delta: $delta, next_cursor: $nc, until: $until}')"
+      next_cursor: $nc, until: $until}')"
 
   if [[ $JSON_MODE -eq 1 ]]; then
     printf '%s\n' "$payload"

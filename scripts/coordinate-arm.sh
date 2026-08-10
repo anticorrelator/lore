@@ -933,11 +933,10 @@ cmd_run() {
     owner_may_continue || emit_owner_gone
   fi
 
-  local out_file err_file watch_status=0 overran=0 hard_deadline now
-  out_file="$(mktemp)"
+  local err_file watch_status=0 overran=0 hard_deadline now
   err_file="$(mktemp)"
   # shellcheck disable=SC2064
-  trap "rm -f '$out_file' '$err_file'" EXIT
+  trap "rm -f '$err_file'" EXIT
 
   WINDOW_STARTED_AT="$(date +%s)"
   # The watcher does not inherit the lock descriptor. The lock names the wrapper
@@ -947,7 +946,7 @@ cmd_run() {
   "$WATCH_SH" --wake-shaped --timeout "$WINDOW" \
     ${KDIR_OVERRIDE:+--kdir "$KDIR_OVERRIDE"} \
     ${SCOPE_ARGS+"${SCOPE_ARGS[@]}"} \
-    >"$out_file" 2>"$err_file" 9>&- &
+    >/dev/null 2>"$err_file" 9>&- &
   WATCH_PID=$!
 
   # The watcher owns its own deadline; this only catches the case where it does
@@ -966,8 +965,12 @@ cmd_run() {
   wait "$WATCH_PID" || watch_status=$?
   WATCH_PID=""
 
+  # Only stderr. Under --wake-shaped the watcher writes its wake body to both
+  # streams, and stderr's copy is the superset — it carries the matched row and
+  # the next cursor that stdout reports separately. Concatenating the two sent
+  # the seat every wake twice.
   local body
-  body="$(cat "$out_file"; cat "$err_file")"
+  body="$(cat "$err_file")"
 
   if [[ $overran -eq 1 ]]; then
     emit_wake "overran" "The watcher did not return at its ${WINDOW}s deadline and was stopped ${WINDOW_OVERRUN_GRACE_SECONDS}s past it. Nothing was read after that point.
