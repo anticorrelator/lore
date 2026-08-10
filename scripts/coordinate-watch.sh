@@ -10,8 +10,7 @@
 #
 # A wake is not just "something happened". It carries the matched row, what the
 # watcher concluded about it, which authority it consulted to conclude that, and
-# what changed on the coordination board since the last wake — so the caller can
-# decide what to do without a round of manual re-reading.
+# so the caller can decide what to do without a round of manual re-reading.
 #
 # A wake does not have to start with a row. A machine that suspends with a window
 # open freezes that window silently, and a frozen window looks exactly like a
@@ -22,7 +21,7 @@
 #   lore coordinate watch [--slug <s>]... [--arc <slug>]...
 #                         [--until <events>] [--since <cursor>]
 #                         [--timeout <sec>] [--pending-stale <sec>]
-#                         [--peek-timeout <sec>] [--advisory-age <sec>]
+#                         [--peek-timeout <sec>]
 #                         [--spawn-gap <sec>]
 #                         [--suspend-skew <sec>]
 #                         [--owner-pid <pid>] [--owner-tmux <name>]
@@ -50,9 +49,8 @@
 #   the evidence it carries, and dropping it would turn a real event into
 #   silence.
 #
-#   Each distinct scope keeps its own cursor and advisory ledger, so two seats
-#   watching different scopes on one store do not overwrite each other's
-#   position.
+#   Each distinct scope keeps its own cursor, so two seats watching different
+#   scopes on one store do not overwrite each other's position.
 #
 # Options:
 #   --until <events>  Comma-separated event names to wake on. Default is the
@@ -81,10 +79,6 @@
 #                     Budget for the screen read that confirms a parked session
 #                     is still parked (default: 10; 0 skips the read). See
 #                     "Classification" below.
-#   --advisory-age <sec>
-#                     How long an unresolved advisory may repeat before it
-#                     escalates from `advisory` to `aged_advisory` (default: 900;
-#                     0 disables escalation).
 #   --spawn-gap <sec> How young a session may be before a screen-confirmed park is
 #                     demoted to a `spawn-gap` advisory (default: 90; 0 disables
 #                     the age gate). See "Classification".
@@ -162,10 +156,9 @@
 #   emitter state is a claim about a condition that does not clear itself.
 #
 #   Strictness governs the wake's tier, never whether it wakes. A park nothing
-#   confirmed wakes as a labeled `advisory` naming why no signature fired; an
-#   advisory that keeps repeating past --advisory-age escalates to
-#   `aged_advisory`. The seat is asleep and the watcher is its only observer, so
-#   there is no state in which staying quiet is the safe answer.
+#   confirmed wakes as a labeled `advisory` naming why no signature fired. The
+#   seat is asleep and the watcher is its only observer, so there is no state in
+#   which staying quiet is the safe answer.
 #
 # Suspension skew:
 #   A laptop that sleeps with a window open freezes that window the same silent
@@ -178,8 +171,8 @@
 #   before trusting quiet.
 #
 #   It ends the window rather than merely waking, because every piece of state
-#   this window owns — cursor baseline, advisory ages — was computed against a
-#   clock that stopped. A fresh window recomputes all of them.
+#   this window owns was computed against a clock that stopped. A fresh window
+#   recomputes all of it.
 #
 #   On each tick the check runs directly after the journal read, ahead of the
 #   pending-staleness check. After a nap every pending request looks stale, so a
@@ -229,8 +222,7 @@
 # Output (--json): one object — the wake body, which is a superset of
 #   `session wait`'s matched shape:
 #     {schema_version, outcome, tier, authority, signature_version,
-#      classification: {state, label, reason, advisory_age_seconds, peek,
-#                       spawn_gap, modal_gate},
+#      classification: {state, label, reason, peek, spawn_gap, modal_gate},
 #      clock_skew: {wall_elapsed_seconds, monotonic_elapsed_seconds,
 #                   skew_seconds, threshold_seconds} | null,
 #      matched, pending,
@@ -271,7 +263,6 @@ SINCE_SET=0
 TIMEOUT=3600
 PENDING_STALE=300
 PEEK_TIMEOUT=10
-ADVISORY_AGE=900
 # The spawn-paste gap, measured rather than guessed. Live wakes on 2026-08-03 put
 # false confirmations — a ready composer on a session that had not taken its first
 # turn — at 11s and 13s past the session's start row, and true parks (a real
@@ -279,9 +270,9 @@ ADVISORY_AGE=900
 # geometric middle of that separation: ~7x the widest observed spawn gap and ~7x
 # under the earliest observed true park, so both ends have an order of magnitude
 # to drift into before the gate starts being wrong. It errs generous on purpose —
-# a demoted true park still wakes the seat as an advisory that ages into
-# `aged_advisory`, while a promoted spawn gap sends the seat to steer a session
-# that is still booting, which is the failure this gate exists to stop.
+# a demoted true park still wakes the seat as an advisory, while a promoted spawn
+# gap sends the seat to steer a session that is still booting, which is the
+# failure this gate exists to stop.
 SPAWN_GAP=90
 SUSPEND_SKEW=120
 OWNER_PID=""
@@ -306,7 +297,6 @@ while [[ $# -gt 0 ]]; do
     --timeout) TIMEOUT="${2:-}"; shift 2 ;;
     --pending-stale) PENDING_STALE="${2:-}"; shift 2 ;;
     --peek-timeout) PEEK_TIMEOUT="${2:-}"; shift 2 ;;
-    --advisory-age) ADVISORY_AGE="${2:-}"; shift 2 ;;
     --spawn-gap) SPAWN_GAP="${2:-}"; shift 2 ;;
     --suspend-skew) SUSPEND_SKEW="${2:-}"; shift 2 ;;
     --owner-pid) OWNER_PID="${2:-}"; shift 2 ;;
@@ -318,10 +308,10 @@ while [[ $# -gt 0 ]]; do
     # The header comment above is the help text. This range ends on its last
     # line; a header that grows past it prints truncated, which --help itself
     # cannot notice.
-    -h|--help) sed -n '2,261p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,253p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: coordinate-watch.sh [--slug <s>]... [--arc <slug>]... [--until <events>] [--since <cursor>] [--timeout <sec>] [--pending-stale <sec>] [--peek-timeout <sec>] [--advisory-age <sec>] [--spawn-gap <sec>] [--suspend-skew <sec>] [--owner-pid <pid>] [--owner-tmux <name>] [--tmux-server <name>] [--wake-shaped] [--kdir <path>] [--json]" >&2
+      echo "Usage: coordinate-watch.sh [--slug <s>]... [--arc <slug>]... [--until <events>] [--since <cursor>] [--timeout <sec>] [--pending-stale <sec>] [--peek-timeout <sec>] [--spawn-gap <sec>] [--suspend-skew <sec>] [--owner-pid <pid>] [--owner-tmux <name>] [--tmux-server <name>] [--wake-shaped] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -347,7 +337,6 @@ check_non_negative() {
 check_non_negative --timeout "$TIMEOUT"
 check_non_negative --pending-stale "$PENDING_STALE" "0 disables"
 check_non_negative --peek-timeout "$PEEK_TIMEOUT" "0 disables"
-check_non_negative --advisory-age "$ADVISORY_AGE" "0 disables"
 check_non_negative --spawn-gap "$SPAWN_GAP" "0 disables the age gate"
 check_non_negative --suspend-skew "$SUSPEND_SKEW" "0 disables"
 
@@ -445,7 +434,6 @@ if [[ ${#SCOPE_SLUGS[@]} -gt 0 ]]; then
 fi
 
 CURSOR_FILE="$COORD_DIR/watch-cursor${SCOPE_SUFFIX}.json"
-ADVISORY_FILE="$COORD_DIR/watch-advisories${SCOPE_SUFFIX}.json"
 
 if [[ $SCOPED -eq 1 ]]; then
   SCOPE_SLUGS_JSON="$(printf '%s\n' "${SCOPE_SLUGS[@]}" | LC_ALL=C sort -u | jq -R . | jq -s -c .)"
@@ -485,72 +473,6 @@ write_cursor_file() {
   fi
 }
 
-# --- Advisory aging ----------------------------------------------------------
-
-# advisory_tier <key> — echo "<tier>\t<age_seconds>\t<first_seen_iso>" for a
-# recurring advisory, recording the first sighting of <key> if it is new.
-# An advisory the coordinator has not resolved is a different problem the tenth
-# time it fires than the first, so the ledger is what turns repetition into a
-# louder tier rather than identical noise.
-advisory_tier() {
-  local key="$1"
-  mkdir -p "$COORD_DIR"
-  python3 - "$ADVISORY_FILE" "$key" "$ADVISORY_AGE" <<'PYEOF'
-import json, os, sys, tempfile, time
-from datetime import datetime, timezone
-
-path, key, threshold = sys.argv[1], sys.argv[2], float(sys.argv[3])
-now = time.time()
-PRUNE_AFTER = 7 * 24 * 3600
-
-
-def iso(stamp):
-    return datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-ledger = {}
-try:
-    with open(path, encoding="utf-8") as handle:
-        loaded = json.load(handle)
-    if isinstance(loaded, dict) and isinstance(loaded.get("seen"), dict):
-        ledger = loaded["seen"]
-except (OSError, ValueError):
-    ledger = {}
-
-entry = ledger.get(key)
-if not isinstance(entry, dict) or not isinstance(entry.get("first_seen"), (int, float)):
-    entry = {"first_seen": now}
-entry["last_seen"] = now
-ledger[key] = entry
-
-kept = {}
-for name, row in ledger.items():
-    if not isinstance(row, dict):
-        continue
-    first = row.get("first_seen")
-    if not isinstance(first, (int, float)):
-        continue
-    last = row.get("last_seen")
-    if not isinstance(last, (int, float)):
-        last = first
-    if (now - last) > PRUNE_AFTER:
-        continue
-    kept[name] = {"first_seen": first, "last_seen": last, "first_seen_at": iso(first)}
-
-try:
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp.watch-advisories.")
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump({"schema_version": 1, "updated_at": iso(now), "seen": kept}, handle)
-    os.replace(tmp, path)
-except OSError:
-    pass
-
-elapsed = now - float(entry["first_seen"])
-tier = "aged_advisory" if (threshold > 0 and elapsed >= threshold) else "advisory"
-print("%s\t%d\t%s" % (tier, int(elapsed), iso(float(entry["first_seen"]))))
-PYEOF
-}
-
 # --- Wake payload and terminals ----------------------------------------------
 
 WAKE_OUTCOME=""
@@ -562,7 +484,6 @@ WAKE_REASON="null"          # JSON
 WAKE_PEEK="null"            # JSON
 WAKE_MATCHED="null"         # JSON
 WAKE_PENDING="[]"           # JSON
-WAKE_ADVISORY_AGE="null"    # JSON
 WAKE_SPAWN_GAP="null"       # JSON
 WAKE_MODAL_GATE="null"      # JSON
 WAKE_CLOCK_SKEW="null"      # JSON
@@ -585,7 +506,6 @@ emit_wake() {
     --arg label "$WAKE_LABEL" \
     --argjson reason "$WAKE_REASON" \
     --argjson peek "$WAKE_PEEK" \
-    --argjson advisory_age "$WAKE_ADVISORY_AGE" \
     --argjson spawn_gap "$WAKE_SPAWN_GAP" \
     --argjson modal_gate "$WAKE_MODAL_GATE" \
     --argjson clock_skew "$WAKE_CLOCK_SKEW" \
@@ -600,8 +520,8 @@ emit_wake() {
     '{schema_version: $schema, outcome: $outcome, tier: $tier, authority: $authority,
       signature_version: $signature_version,
       classification: {state: $state, label: $label, reason: $reason,
-                       advisory_age_seconds: $advisory_age, peek: $peek,
-                       spawn_gap: $spawn_gap, modal_gate: $modal_gate},
+                       peek: $peek, spawn_gap: $spawn_gap,
+                       modal_gate: $modal_gate},
       clock_skew: $clock_skew,
       matched: $matched, pending: $pending,
       scope: {mode: $mode, slugs: $slugs, arcs: $arcs, cursor_file: $cursor_file},
@@ -728,19 +648,6 @@ park_shaped() {
     [[ "$event" == "$known" ]] && return 0
   done
   return 1
-}
-
-# Set the advisory tier and its age from the recurrence ledger.
-apply_advisory_tier() {
-  local key="$1" line
-  line="$(advisory_tier "$key")" || line=""
-  if [[ -n "$line" ]]; then
-    WAKE_TIER="$(printf '%s' "$line" | cut -f1)"
-    WAKE_ADVISORY_AGE="$(printf '%s' "$line" | cut -f2)"
-  else
-    WAKE_TIER="advisory"
-    WAKE_ADVISORY_AGE="null"
-  fi
 }
 
 # spawn_gap_record <signature> <age-json> <resolution>
@@ -900,7 +807,7 @@ classify_match() {
     WAKE_STATE="unattributed_row"
     WAKE_LABEL="row-carries-neither-slug-nor-work-item"
     WAKE_REASON="$(jq -n --arg r "$row_reason" 'if $r == "" then null else $r end')"
-    apply_advisory_tier "unattributed:$event"
+    WAKE_TIER="advisory"
     return 0
   fi
 
@@ -929,7 +836,7 @@ classify_match() {
         WAKE_AUTHORITY="screen-signature"
         WAKE_STATE="park_unconfirmed"
         WAKE_LABEL="modal-not-on-screen"
-        apply_advisory_tier "park:$slug:$event:modal-not-on-screen"
+        WAKE_TIER="advisory"
         return 0
         ;;
       1)
@@ -955,7 +862,7 @@ classify_match() {
     else
       WAKE_LABEL="screen-classification-disabled"
     fi
-    apply_advisory_tier "park:$slug:$event:$WAKE_LABEL"
+    WAKE_TIER="advisory"
     return 0
   fi
 
@@ -963,7 +870,7 @@ classify_match() {
   WAKE_STATE="park_unconfirmed"
   if ! peek_session "$slug"; then
     WAKE_LABEL="peek-unavailable"
-    apply_advisory_tier "park:$slug:$event:peek-unavailable"
+    WAKE_TIER="advisory"
     return 0
   fi
 
@@ -975,14 +882,14 @@ classify_match() {
     # two are indistinguishable on the screen alone.
     if spawn_gap_demotes "$slug" "$row_ts" "$label"; then
       WAKE_LABEL="spawn-gap"
-      apply_advisory_tier "park:$slug:$event:spawn-gap"
+      WAKE_TIER="advisory"
       return 0
     fi
     WAKE_TIER="confirmed"
     WAKE_STATE="confirmed_park"
     return 0
   fi
-  apply_advisory_tier "park:$slug:$event:$label"
+  WAKE_TIER="advisory"
 }
 
 # clock_pair — "<wall><TAB><monotonic>", the two clocks read together.
@@ -1119,7 +1026,7 @@ while :; do
       WAKE_AUTHORITY="none"
       WAKE_STATE="pending_stale"
       WAKE_LABEL="unclaimed-spawn-request-never-reaches-the-journal"
-      apply_advisory_tier "pending_stale:$(printf '%s' "$PENDING" | jq -r '.[0].request_id')"
+      WAKE_TIER="advisory"
       emit_wake "$CURSOR" 0 \
         "[coordinate] $(printf '%s' "$PENDING" | jq -r 'length') pending spawn request(s) unclaimed past ${PENDING_STALE}s; an unclaimed request never reaches the journal, so nothing else will report it (tier=$WAKE_TIER)"
     fi

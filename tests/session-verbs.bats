@@ -2950,11 +2950,6 @@ watch_json() {
   echo "$out" | jq -e '.tier=="advisory" and .authority=="screen-signature"'
   echo "$out" | jq -e '.classification.state=="park_unconfirmed" and .classification.label=="peek-unavailable"'
   echo "$out" | jq -e '.classification.peek.consulted==true and (.classification.peek.error|test("no live instance"))'
-
-  # The same unresolved advisory escalates once it has been repeating too long.
-  sleep 1
-  out="$(watch_json --peek-timeout 1 --advisory-age 1 --since 0 --timeout 0)"
-  echo "$out" | jq -e '.tier=="aged_advisory" and (.classification.advisory_age_seconds|type)=="number"'
 }
 
 @test "watch: --peek-timeout 0 keeps the row as the only authority and still wakes" {
@@ -3061,15 +3056,13 @@ answer_peek_ready() {
   wait
   echo "$out" | jq -e '.tier=="advisory" and .classification.label=="spawn-gap"'
 
-  # A session that never starts keeps re-presenting this row, and the ledger turns
-  # that repetition into a louder tier — so a stillborn session is not silenced by
-  # the demotion, it just arrives one tier down.
+  # A session that never starts keeps re-presenting this row, and it keeps
+  # arriving — the demotion moves the tier, it never silences the wake.
   sleep 1
   answer_peek_ready feature-x
-  out="$(watch_json --since 0 --peek-timeout 10 --advisory-age 1 --timeout 0)"
+  out="$(watch_json --since 0 --peek-timeout 10 --timeout 0)"
   wait
-  echo "$out" | jq -e '.tier=="aged_advisory" and .classification.label=="spawn-gap"'
-  echo "$out" | jq -e '(.classification.advisory_age_seconds|type)=="number"'
+  echo "$out" | jq -e '.tier=="advisory" and .classification.label=="spawn-gap"'
 }
 
 @test "watch: --spawn-gap 0 turns the age gate off and the screen confirms alone" {
@@ -3178,15 +3171,13 @@ answer_peek_with() {
   wait
   echo "$out" | jq -e '.tier=="advisory" and .classification.label=="modal-not-on-screen"'
 
-  # A modal that keeps re-appearing without ever surviving a peek is a session in
-  # trouble, not a flash — the ledger turns that repetition into a louder tier, so
-  # the demotion delays the wake by a tier rather than silencing it.
+  # A modal that keeps re-appearing without ever surviving a peek keeps waking the
+  # seat: the demotion moves the tier, it never silences the row.
   sleep 1
   answer_peek_with feature-x false generating
-  out="$(watch_json --since 0 --peek-timeout 10 --advisory-age 1 --timeout 0)"
+  out="$(watch_json --since 0 --peek-timeout 10 --timeout 0)"
   wait
-  echo "$out" | jq -e '.tier=="aged_advisory" and .classification.label=="modal-not-on-screen"'
-  echo "$out" | jq -e '(.classification.advisory_age_seconds|type)=="number"'
+  echo "$out" | jq -e '.tier=="advisory" and .classification.label=="modal-not-on-screen"'
 }
 
 @test "watch: a modal row no screen can answer keeps its confirmation" {
@@ -3279,14 +3270,10 @@ answer_peek_with() {
   echo "$out" | jq -e '.outcome=="matched" and .matched.event=="closed"'
 }
 
-@test "watch: refuses a non-numeric --peek-timeout, --advisory-age, --spawn-gap, and --owner-pid" {
+@test "watch: refuses a non-numeric --peek-timeout, --spawn-gap, and --owner-pid" {
   run bash "$WATCH" --peek-timeout soon --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
   [[ "$output" == *"invalid --peek-timeout"* ]]
-
-  run bash "$WATCH" --advisory-age later --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"invalid --advisory-age"* ]]
 
   run bash "$WATCH" --spawn-gap briefly --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
