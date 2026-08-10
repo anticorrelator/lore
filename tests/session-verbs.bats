@@ -619,18 +619,35 @@ journal_boundaries() {
   [ "$status" -eq 0 ]
 }
 
-@test "worker request refuses a missing or altered canonical guidance floor before enqueue" {
+@test "worker request renders the guidance floor and prepends it to a bare brief" {
   run bash "$REQUEST" --type worker --slug "impl-foo--w1" --context "brief body" --anywhere --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"Run 'lore dispatch guidance'"* ]]
-  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+  outcome_is 0 "Enqueued worker request" || return 1
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  local guidance; guidance="$(jq -r '.extra_context.dispatch_guidance' "$pending")"
+  # The composed brief opens with a complete block and closes with the caller's
+  # task content — a floor nobody had to remember, ahead of the work itself.
+  [[ "$guidance" == "<!-- lore-dispatch-guidance:v1:begin -->"* ]] || return 1
+  [[ "$guidance" == *"<!-- lore-dispatch-guidance:v1:end -->"$'\n'"brief body" ]] || return 1
+  # What the verb renders is what the floor's own validator accepts.
+  run bash -c "printf '%s' \"\$1\" | bash '$REPO_DIR/scripts/validate-dispatch-guidance.sh'" _ "$guidance"
+  outcome_is 0
+}
 
-  local altered="$TEST_KDIR/altered-guidance.txt"
-  sed 's/Binding: Treat/Binding: Ignore/' "$(worker_guidance_file)" > "$altered"
-  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --context "$altered" --anywhere --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"guidance binding declaration"* ]]
-  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+@test "worker request leaves a brief that already carries a block at one floor" {
+  local brief="$TEST_KDIR/composed.md"
+  cat "$(worker_guidance_file)" > "$brief"
+  printf 'brief body\n' >> "$brief"
+  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --context "$brief" --anywhere --kdir "$TEST_KDIR"
+  outcome_is 0 "Enqueued worker request" || return 1
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  local guidance; guidance="$(jq -r '.extra_context.dispatch_guidance' "$pending")"
+  [ "$(grep -cF '<!-- lore-dispatch-guidance:v1:begin -->' <<<"$guidance")" -eq 1 ]
+}
+
+@test "worker request still refuses an absent brief" {
+  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --anywhere --kdir "$TEST_KDIR"
+  [ ! -e "$TEST_KDIR/_sessions/requests" ] || return 1
+  outcome_is 1 "--context is required for --type worker"
 }
 
 @test "request stores a JSON-object --context verbatim" {

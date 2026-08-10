@@ -21,12 +21,13 @@
 #                      Omitted (default) defers to --initiator (agent auto-closes,
 #                      human holds open); true forces auto-close, false holds open.
 #   --requested-by <w> Who enqueued it (default: $LORE_SESSION_INSTANCE, else $USER).
-#   --context <t|file> Dispatch guidance handed to prompt composition. Value is read
-#                      from a file when it names one, else treated as literal text. A
-#                      JSON object is stored verbatim as extra_context; any other text
-#                      is wrapped as {"dispatch_guidance": <text>}. Worker requests
-#                      require dispatch_guidance to contain the current canonical
-#                      block rendered by `lore dispatch guidance`.
+#   --context <t|file> Task content handed to prompt composition — the brief alone,
+#                      with no guidance floor of your own. Value is read from a file
+#                      when it names one, else treated as literal text. A JSON object
+#                      is stored verbatim as extra_context; any other text is wrapped
+#                      as {"dispatch_guidance": <text>}. For --type worker this verb
+#                      renders the canonical guidance block itself and prepends it to
+#                      the brief, so nothing upstream has to remember to.
 #   --route role=model Per-dispatch routing override (repeatable). The claiming TUI
 #                      exports it as LORE_MODEL_<ROLE> into the spawned session, riding
 #                      the resolver's top-precedence env layer. role MUST be in the
@@ -147,7 +148,7 @@ while [[ $# -gt 0 ]]; do
     --confirm) SKIP_CONFIRM="false"; shift ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,79p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,83p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
       echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--target <name> | --prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--framework <claude-code|codex|opencode>] [--worktree-identity <json|file>] [--worktree-id <id> --execution-dir <path>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
@@ -414,18 +415,32 @@ if [[ -n "$CONTEXT" ]]; then
   fi
 fi
 
-# Worker-session enqueue is an actual launch boundary, not a prompt-authoring
-# surface. Require the exact composed brief here so a caller cannot queue a
-# floorless worker and hope the claiming TUI repairs it later.
+# Worker-session enqueue is an actual launch boundary: the claiming TUI runs the
+# brief verbatim as the session's whole prompt, so the standing-defaults floor has
+# to be inside it. Render it here rather than instructing every caller to prepend
+# it — this is the last step before the row is durable, which is the latest moment
+# at which "invocation-fresh" is still true, and a floor nobody has to remember
+# cannot be forgotten. A brief that already carries a block is left as composed:
+# one floor per prompt, whoever rendered it.
+#
+# Worker-scoped on purpose. For spec/implement/chat the claiming TUI splices
+# extra_context into a slash-command argument (`/spec <slug> -- <ctx>`), where a
+# multi-line block does not belong; those launches meet the floor through the
+# harness's own admission gate instead.
 if [[ "$TYPE" == "worker" ]]; then
   [[ "$EXTRA_JSON" != "null" ]] || \
-    fail "--context is required for --type worker and must contain the current canonical dispatch-guidance block"
+    fail "--context is required for --type worker (the composed brief is the session's whole prompt)"
   WORKER_PROMPT="$(printf '%s' "$EXTRA_JSON" | jq -r '.dispatch_guidance // empty')"
   [[ -n "$WORKER_PROMPT" ]] || \
     fail "worker --context must provide a non-empty dispatch_guidance string"
-  # shellcheck disable=SC2119
-  VALIDATION_ERROR="$(printf '%s' "$WORKER_PROMPT" | validate_dispatch_guidance 2>&1 >/dev/null || true)"
-  [[ -z "$VALIDATION_ERROR" ]] || fail "$VALIDATION_ERROR"
+  if [[ "$WORKER_PROMPT" != *"lore-dispatch-guidance:v1:"* ]]; then
+    # shellcheck disable=SC2119
+    GUIDANCE_BLOCK="$(render_dispatch_guidance)" || \
+      fail "could not render the canonical dispatch-guidance block; nothing was enqueued"
+    EXTRA_JSON="$(printf '%s' "$EXTRA_JSON" \
+      | jq -c --arg block "$GUIDANCE_BLOCK" --arg brief "$WORKER_PROMPT" \
+        '. + {dispatch_guidance: ($block + "\n" + $brief)}')"
+  fi
 fi
 
 # Nullable string fields become explicit JSON null when unset.
