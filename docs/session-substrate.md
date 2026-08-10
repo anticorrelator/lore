@@ -693,7 +693,6 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `orphaned` | TUI | a dead instance's atomic recovery owner found no surviving tmux session; carries `reason=instance-death`, the dead `target_instance`, persisted spawn `request_id` when available, and evidence-bounded `spend` |
 | `step_completed` | hosted `/spec` and `/implement` leads | a durable intra-protocol milestone completed: `/spec` investigation, reviewed design, or plan-ready state; or an `/implement` task accepted, logged, and checked off |
 | `terminus_reached` | `spec-finalize` / `impl-close` | the hosted protocol completed its durable terminal writes; carries actor, slug, session type, and terminal verb in `reason`, but no queue `request_id` |
-| `harness_turn_ended` | stop hooks | a harness turn boundary was reached |
 | `spawn_failed` | TUI | spawn failed; request returned to pending (carries `reason`) |
 | `request_reclaimed` | TUI (any instance) | a stale/incomplete claim was returned to pending (carries `reason`) |
 | `request_abandoned` | TUI | `attempts >= 3`; request dropped, journal row is the dead-letter (carries last `reason`) |
@@ -760,8 +759,8 @@ and TUI-driven queue lifecycle; the enqueue writer owns `requested`; the
 `send_requested` (its enqueue), while the TUI owns the `sent` / `send_refused`
 outcomes it decides at consume; the `session answer` verb owns `answer_requested`,
 while the TUI owns `answered` / `answer_refused`; hosted `/spec` and `/implement` leads own
-`step_completed`, while their terminal verbs own `terminus_reached`;
-stop hooks own `harness_turn_ended`. Peek has no events — it is a read.
+`step_completed`, while their terminal verbs own `terminus_reached`. Peek has no
+events — it is a read.
 
 ### Prospective emission (emitter obligation)
 
