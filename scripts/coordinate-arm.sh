@@ -10,11 +10,11 @@
 # Usage:
 #   lore coordinate arm  (--owner-pid <pid> | --owner-tmux <session>)
 #                        (--install <settings.json> | --render)
-#                        [--tmux-server <name>] [--slug <s>]... [--arc <slug>]...
+#                        [--tmux-server <name>] [--arc <slug>]...
 #                        [--window <sec>] [--hook-timeout <sec>]
 #                        [--kdir <path>] [--json]
 #   lore coordinate arm run  (--owner-pid <pid> | --owner-tmux <session>)
-#                        [--tmux-server <name>] [--slug <s>]... [--arc <slug>]...
+#                        [--tmux-server <name>] [--arc <slug>]...
 #                        [--window <sec>] [--kdir <path>]
 #   lore coordinate disarm --settings <settings.json> [--kdir <path>] [--json]
 #
@@ -40,7 +40,6 @@
 #   --owner-tmux <name>   tmux session name of the owner (same handle format as
 #                         `lore coordinate worktree allocate`).
 #   --tmux-server <name>  tmux server socket for --owner-tmux (default: lore-tui).
-#   --slug <s>            Scope wakes to this work item (repeatable).
 #   --arc <slug>          Scope wakes to an arc's declared members (repeatable).
 #   --window <sec>        How long one watcher window runs (default: 3600).
 #   --hook-timeout <sec>  The hook entry's own timeout (default: 3900). MUST be
@@ -98,7 +97,7 @@
 #
 # How a later closure finds this watcher:
 #   The installed hook entry carries its own scope. `watcher_command` writes the
-#   `--arc <slug>` and `--slug <s>` flags into the command line verbatim, and the
+#   `--arc <slug>` flags into the command line verbatim, and the
 #   `LORE_FRAMEWORK=<name>` prefix names the adapter that installed it — so the
 #   settings file answers who armed what, for whom, without a second file
 #   mirroring it. `lore arc close` reads the entry. Nothing is recorded anywhere
@@ -150,7 +149,6 @@ MODE="arm"
 OWNER_PID=""
 OWNER_TMUX=""
 TMUX_SERVER="lore-tui"
-SLUGS=()
 ARCS=()
 WINDOW=3600
 HOOK_TIMEOUT=3900
@@ -182,7 +180,6 @@ while [[ $# -gt 0 ]]; do
     --owner-pid) OWNER_PID="${2:-}"; shift 2 ;;
     --owner-tmux) OWNER_TMUX="${2:-}"; shift 2 ;;
     --tmux-server) TMUX_SERVER="${2:-}"; shift 2 ;;
-    --slug) SLUGS+=("${2:-}"); shift 2 ;;
     --arc) ARCS+=("${2:-}"); shift 2 ;;
     --window) WINDOW="${2:-}"; shift 2 ;;
     --hook-timeout) HOOK_TIMEOUT="${2:-}"; shift 2 ;;
@@ -194,7 +191,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) usage; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: coordinate-arm.sh [run] (--owner-pid <pid> | --owner-tmux <session>) (--install <path> | --render) [--slug <s>]... [--arc <slug>]... [--window <sec>] [--hook-timeout <sec>] [--kdir <path>] [--json]" >&2
+      echo "Usage: coordinate-arm.sh [run] (--owner-pid <pid> | --owner-tmux <session>) (--install <path> | --render) [--arc <slug>]... [--window <sec>] [--hook-timeout <sec>] [--kdir <path>] [--json]" >&2
       echo "       coordinate-arm.sh disarm --settings <path> [--kdir <path>] [--json]" >&2
       exit 1
       ;;
@@ -254,10 +251,6 @@ else
 fi
 
 SCOPE_ARGS=()
-for slug in ${SLUGS+"${SLUGS[@]}"}; do
-  [[ -n "$slug" ]] || fail "empty --slug"
-  SCOPE_ARGS+=(--slug "$slug")
-done
 for arc in ${ARCS+"${ARCS[@]}"}; do
   [[ -n "$arc" ]] || fail "empty --arc"
   SCOPE_ARGS+=(--arc "$arc")
@@ -353,7 +346,6 @@ watcher_command() {
   if [[ -n "$OWNER_TMUX" ]]; then
     cmd+=" --owner-tmux $OWNER_TMUX --tmux-server $TMUX_SERVER"
   fi
-  for slug in ${SLUGS+"${SLUGS[@]}"}; do cmd+=" --slug $slug"; done
   for arc in ${ARCS+"${ARCS[@]}"}; do cmd+=" --arc $arc"; done
   cmd+=" --window $WINDOW"
   printf '%s' "$cmd"
@@ -647,8 +639,7 @@ WINDOW_LOCK_FD=9
 # the declared scope rather than the arc-expanded one — the firings this guards
 # against all carry the identical command line the hook entry was armed with.
 scope_lock_file() {
-  local slug arc tokens="" key suffix=""
-  for slug in ${SLUGS+"${SLUGS[@]}"}; do tokens+="slug:$slug"$'\n'; done
+  local arc tokens="" key suffix=""
   for arc in ${ARCS+"${ARCS[@]}"}; do tokens+="arc:$arc"$'\n'; done
   if [[ -n "$tokens" ]]; then
     key="$(printf '%s' "$tokens" | LC_ALL=C sort -u \

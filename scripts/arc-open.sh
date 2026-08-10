@@ -288,8 +288,6 @@ for command in armed:
     for i, tok in enumerate(argv):
         if tok == "--arc" and i + 1 < len(argv):
             tokens.append("arc:%s" % argv[i + 1])
-        elif tok == "--slug" and i + 1 < len(argv):
-            tokens.append("slug:%s" % argv[i + 1])
 print("armed\t%s" % (", ".join(tokens) or "the whole board"))
 PYEOF
 }

@@ -2819,38 +2819,40 @@ watch_json() {
   bash "$WATCH" "$@" --json --kdir "$TEST_KDIR" 2>/dev/null || true
 }
 
-@test "watch: --slug scopes on both identity keys and leaves other sessions asleep" {
+@test "watch: a scope matches on both identity keys and leaves other sessions asleep" {
   : > "$TEST_KDIR/_sessions/events.jsonl"
-  run bash "$WATCH" --slug feature-x --timeout 0 --kdir "$TEST_KDIR"
+  write_arc one-arc active feature-x
+  run bash "$WATCH" --arc one-arc --timeout 0 --kdir "$TEST_KDIR"
   [ "$status" -eq 2 ]
 
   # A different work item's row is not this seat's business.
   echo '{"event":"closed","request_id":"r1","slug":"other-item"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
-  run bash "$WATCH" --slug feature-x --timeout 0 --kdir "$TEST_KDIR"
+  run bash "$WATCH" --arc one-arc --timeout 0 --kdir "$TEST_KDIR"
   [ "$status" -eq 2 ]
 
   # .slug is the spec/implement session key.
   echo '{"event":"needs_input","slug":"feature-x","reason":"prompt"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
-  local out; out="$(watch_json --slug feature-x --timeout 0)"
+  local out; out="$(watch_json --arc one-arc --timeout 0)"
   echo "$out" | jq -e '.outcome=="matched" and .matched.slug=="feature-x"'
 
   # links.work_item is the worker-session key. A slug-only filter drops this row,
   # which is every worker session on the board.
   echo '{"event":"terminus_reached","actor_instance":"inst-b","slug":"feature-x--w3","session_type":"implement","reason":"impl-close"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
-  out="$(watch_json --slug feature-x --timeout 0)"
+  out="$(watch_json --arc one-arc --timeout 0)"
   echo "$out" | jq -e '.outcome=="matched" and .matched.slug=="feature-x--w3" and .matched.links.work_item=="feature-x"'
 }
 
 @test "watch: an actionable row carrying neither identity key wakes a scoped watch as a labeled advisory" {
   : > "$TEST_KDIR/_sessions/events.jsonl"
-  run bash "$WATCH" --slug feature-x --timeout 0 --kdir "$TEST_KDIR"
+  write_arc one-arc active feature-x
+  run bash "$WATCH" --arc one-arc --timeout 0 --kdir "$TEST_KDIR"
   [ "$status" -eq 2 ]
 
   # Roughly 2% of journal rows carry neither key. Dropping them would make a
   # scoped watch silent on a real event, which is the one outcome the wake
   # contract forbids.
   echo '{"event":"orphaned","reason":"no host"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
-  local out; out="$(watch_json --slug feature-x --timeout 0)"
+  local out; out="$(watch_json --arc one-arc --timeout 0)"
   echo "$out" | jq -e '.outcome=="matched" and .matched.event=="orphaned"'
   echo "$out" | jq -e '.tier=="advisory" and .classification.state=="unattributed_row"'
   echo "$out" | jq -e '.classification.label=="row-carries-neither-slug-nor-work-item"'
@@ -2858,9 +2860,11 @@ watch_json() {
 
 @test "watch: two scopes keep separate cursors and neither clobbers the other" {
   : > "$TEST_KDIR/_sessions/events.jsonl"
-  run bash "$WATCH" --slug alpha --timeout 0 --kdir "$TEST_KDIR"
+  write_arc alpha-arc active alpha
+  write_arc beta-arc active beta
+  run bash "$WATCH" --arc alpha-arc --timeout 0 --kdir "$TEST_KDIR"
   [ "$status" -eq 2 ]
-  run bash "$WATCH" --slug beta --timeout 0 --kdir "$TEST_KDIR"
+  run bash "$WATCH" --arc beta-arc --timeout 0 --kdir "$TEST_KDIR"
   [ "$status" -eq 2 ]
 
   local files; files="$(ls "$TEST_KDIR/_coordination" | grep -c '^watch-cursor-')"
@@ -2869,19 +2873,19 @@ watch_json() {
   [ ! -f "$TEST_KDIR/$WATCH_CURSOR" ]
 
   echo '{"event":"closed","request_id":"r1","slug":"alpha"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
-  local out; out="$(watch_json --slug alpha --timeout 0)"
+  local out; out="$(watch_json --arc alpha-arc --timeout 0)"
   echo "$out" | jq -e '.outcome=="matched"'
   local alpha_cursor; alpha_cursor="$(echo "$out" | jq -r '.next_cursor')"
 
   # Beta consuming its own timeout must not move alpha's position, and alpha
   # must not have moved beta past the row beta never saw.
-  run bash "$WATCH" --slug beta --timeout 0 --kdir "$TEST_KDIR"
+  run bash "$WATCH" --arc beta-arc --timeout 0 --kdir "$TEST_KDIR"
   [ "$status" -eq 2 ]
-  out="$(watch_json --slug alpha --timeout 0)"
+  out="$(watch_json --arc alpha-arc --timeout 0)"
   echo "$out" | jq -e --argjson c "$alpha_cursor" '.outcome=="timeout" and .next_cursor==$c'
 
-  # Same scope written a different way resumes the same cursor, not a new one.
-  run bash "$WATCH" --slug alpha --slug alpha --timeout 0 --kdir "$TEST_KDIR"
+  # The same scope written a different way resumes the same cursor, not a new one.
+  run bash "$WATCH" --arc alpha-arc --arc alpha-arc --timeout 0 --kdir "$TEST_KDIR"
   [ "$status" -eq 2 ]
   [ "$(ls "$TEST_KDIR/_coordination" | grep -c '^watch-cursor-')" -eq 2 ]
 }

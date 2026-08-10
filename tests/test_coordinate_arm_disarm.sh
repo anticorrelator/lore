@@ -331,7 +331,6 @@ SETTINGS="$KDIR/settings.json"
 LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc \
   --window 120 --hook-timeout 180 --install "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
 assert_eq "the entry carries the arc scope" "alpha-arc" "$(armed_flag_values "$SETTINGS" --arc)"
-assert_eq "the entry carries no slug scope" "" "$(armed_flag_values "$SETTINGS" --slug)"
 assert_eq "the entry carries the owner handle" "1" "$(armed_flag_values "$SETTINGS" --owner-pid)"
 assert_eq "the entry carries the window it armed" "120" "$(armed_flag_values "$SETTINGS" --window)"
 assert_contains "the entry names the framework that installed it" "$(installed_command "$SETTINGS")" "LORE_FRAMEWORK=claude-code"
@@ -389,16 +388,6 @@ assert_contains "the callout names the scope it will not judge" "$OUT" "arc:othe
 assert_contains "the callout names the exact command to run" "$OUT" "lore coordinate disarm --settings $SETTINGS"
 assert_eq "the hook entry is left armed" "1" "$(stop_armed "$SETTINGS")"
 assert_eq "the scope it will not judge is still on the entry" "shared-arc other-arc" "$(armed_flag_values "$SETTINGS" --arc)"
-
-# A slug scope alongside the arc is the same call: the watcher answers to
-# something this closure has no say over.
-KDIR=$(new_arc_store slugged-arc)
-SETTINGS="$KDIR/settings.json"
-LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc slugged-arc --slug some-item \
-  --install "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
-OUT=$(bash "$ARC_CLOSE" slugged-arc --settings "$SETTINGS" --kdir "$KDIR" 2>&1)
-assert_contains "an item scope also makes the eye wider than the arc" "$OUT" "slug:some-item"
-assert_eq "the hook entry is left armed" "1" "$(stop_armed "$SETTINGS")"
 
 echo "== (e) an entry installed by hand still disarms, and a close still reads it =="
 KDIR=$(new_arc_store handmade-arc)

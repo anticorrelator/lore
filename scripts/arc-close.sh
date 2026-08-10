@@ -94,9 +94,9 @@ ENVELOPE=$("$SCRIPT_DIR/arc-write-meta.sh" --kdir "$KNOWLEDGE_DIR" --slug "$SLUG
 # not have to be — it reads the entry.
 #
 # What gets switched off is only what this arc can be held solely responsible
-# for. A watcher scoped to other arcs or to individual items may still be
-# somebody's live eye, so it is named, not disarmed: blinding a board in
-# progress is the more expensive mistake, and the callout costs a line.
+# for. A watcher naming other arcs too may still be somebody's live eye, so it is
+# named, not disarmed: blinding a board in progress is the more expensive
+# mistake, and the callout costs a line.
 #
 # Nothing here can fail the close. Closure is the coordinator's decision being
 # recorded; watcher hygiene does not get a veto over it. Everything the block
@@ -139,12 +139,10 @@ for entry in (settings.get("hooks") or {}).get("Stop") or []:
         except ValueError:
             continue
         # The scope the entry was armed with, read back off its own command line.
-        arcs, slugs, framework = [], [], ""
+        arcs, framework = [], ""
         for i, tok in enumerate(argv):
             if tok == "--arc" and i + 1 < len(argv):
                 arcs.append(argv[i + 1])
-            elif tok == "--slug" and i + 1 < len(argv):
-                slugs.append(argv[i + 1])
             elif tok.startswith("LORE_FRAMEWORK="):
                 framework = tok[len("LORE_FRAMEWORK="):]
         # Only a watcher this arc's scope names is this arc's business. A
@@ -152,8 +150,8 @@ for entry in (settings.get("hooks") or {}).get("Stop") or []:
         # whether it is still wanted.
         if slug not in arcs:
             continue
-        kind = "sole" if set(arcs) == {slug} and not slugs else "wide"
-        scope = ", ".join(["arc:%s" % a for a in arcs] + ["slug:%s" % s for s in slugs])
+        kind = "sole" if set(arcs) == {slug} else "wide"
+        scope = ", ".join("arc:%s" % a for a in arcs)
         print("\t".join([kind, settings_path, framework, scope]))
 PYEOF
   )

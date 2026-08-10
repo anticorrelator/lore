@@ -18,7 +18,7 @@
 # machine has plainly been asleep. See "Suspension skew".
 #
 # Usage:
-#   lore coordinate watch [--slug <s>]... [--arc <slug>]...
+#   lore coordinate watch [--arc <slug>]...
 #                         [--until <events>] [--since <cursor>]
 #                         [--timeout <sec>] [--pending-stale <sec>]
 #                         [--peek-timeout <sec>]
@@ -28,20 +28,22 @@
 #                         [--wake-shaped] [--kdir <path>] [--json]
 #
 # Scoping:
-#   --slug <s>        Wake only on rows belonging to work item <s>. Repeatable.
-#                     A row belongs when its `.slug` matches or its
-#                     `links.work_item` does — worker sessions run under a
-#                     derived `<work-item>--w<n>` slug, so a slug-only test would
-#                     drop every worker row. With no --slug and no --arc the
-#                     watch stays board-wide, which is what a seat owning the
-#                     whole board wants.
-#   --arc <slug>      Add every work item the arc declares in its `members[]`.
-#                     Repeatable, and combinable with --slug. Membership is
-#                     declared, not inferred: items merely carrying the arc's
-#                     project label are not included, so an arc whose members[]
-#                     is empty contributes nothing. A scope that expands to no
-#                     work items at all is refused rather than falling back to
-#                     the whole board.
+#   --arc <slug>      Wake only on rows belonging to a work item the arc declares
+#                     in its `members[]`. Repeatable; with no --arc the watch
+#                     stays board-wide, which is what a seat owning the whole
+#                     board wants. A row belongs when its `.slug` matches a
+#                     member or its `links.work_item` does — worker sessions run
+#                     under a derived `<work-item>--w<n>` slug, so a slug-only
+#                     test would drop every worker row. Membership is declared,
+#                     not inferred: items merely carrying the arc's project label
+#                     are not included, so an arc whose members[] is empty
+#                     contributes nothing. A scope that expands to no work items
+#                     at all is refused rather than falling back to the whole
+#                     board.
+#
+#                     Arc is the only scoping key. Work is grouped into arcs and
+#                     watched by arc; a second key naming individual items would
+#                     be a second way to say the same thing.
 #
 #   Actionable rows carrying neither identity key still wake a scoped watch, as
 #   labeled "unattributed" advisories. Such a row cannot be scoped in or out on
@@ -271,7 +273,6 @@ SCOPE_ARCS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --slug) SCOPE_SLUGS+=("${2:-}"); shift 2 ;;
     --arc) SCOPE_ARCS+=("${2:-}"); shift 2 ;;
     --until) UNTIL="${2:-}"; shift 2 ;;
     --since) SINCE="${2:-}"; SINCE_SET=1; shift 2 ;;
@@ -291,7 +292,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) sed -n '2,235p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: coordinate-watch.sh [--slug <s>]... [--arc <slug>]... [--until <events>] [--since <cursor>] [--timeout <sec>] [--pending-stale <sec>] [--peek-timeout <sec>] [--spawn-gap <sec>] [--owner-pid <pid>] [--owner-tmux <name>] [--tmux-server <name>] [--wake-shaped] [--kdir <path>] [--json]" >&2
+      echo "Usage: coordinate-watch.sh [--arc <slug>]... [--until <events>] [--since <cursor>] [--timeout <sec>] [--pending-stale <sec>] [--peek-timeout <sec>] [--spawn-gap <sec>] [--owner-pid <pid>] [--owner-tmux <name>] [--tmux-server <name>] [--wake-shaped] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -361,7 +362,7 @@ COORD_DIR="$KNOWLEDGE_DIR/_coordination"
 # --- Resolve the scope ------------------------------------------------------
 
 SCOPE_REQUESTED=0
-if [[ ${#SCOPE_SLUGS[@]} -gt 0 || ${#SCOPE_ARCS[@]} -gt 0 ]]; then
+if [[ ${#SCOPE_ARCS[@]} -gt 0 ]]; then
   SCOPE_REQUESTED=1
 fi
 
@@ -373,7 +374,7 @@ for arc in ${SCOPE_ARCS[@]+"${SCOPE_ARCS[@]}"}; do
     0) ;;
     1) fail "unknown --arc: '$arc' (no arc record at _work/_arcs/$arc/_meta.json)" ;;
     2) fail "unreadable arc record for --arc '$arc': _work/_arcs/$arc/_meta.json is not a JSON object" ;;
-    3) fail "--arc '$arc' is archived or carries an unknown status; scope it by --slug if you mean to watch it anyway" ;;
+    3) fail "--arc '$arc' is archived or carries an unknown status; reopen it, or watch the whole board, if you mean to watch it anyway" ;;
     *) fail "could not expand --arc '$arc'" ;;
   esac
   # An arc with no declared members scopes to nothing on its own. Naming it beats
@@ -389,15 +390,11 @@ for arc in ${SCOPE_ARCS[@]+"${SCOPE_ARCS[@]}"}; do
   done <<< "$ARC_MEMBERS"
 done
 
-for slug in ${SCOPE_SLUGS[@]+"${SCOPE_SLUGS[@]}"}; do
-  [[ -n "$slug" ]] || fail "empty --slug: pass a work-item slug"
-done
-
 # A requested scope that expanded to nothing must not fall through to watching
 # the whole board — the caller would get wakes it did not ask for and no sign
 # that its scope was dropped. Refuse here, where the message can name the fix.
 if [[ $SCOPE_REQUESTED -eq 1 && ${#SCOPE_SLUGS[@]} -eq 0 ]]; then
-  fail "the requested scope expands to no work items (every --arc given declares an empty members[]); add members with \`lore arc member\`, or scope by --slug"
+  fail "the requested scope expands to no work items (every --arc given declares an empty members[]); add members with \`lore arc member\`, or drop --arc to watch the whole board"
 fi
 
 SCOPED=0
