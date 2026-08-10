@@ -131,10 +131,10 @@ out_lacks() {
 }
 
 # --- Managed-placement fixtures --------------------------------------------
-# The manager-registry validation in session-request.sh checks six independent
-# conditions and reports each by name, so the tests below share one row that
-# satisfies all six and break exactly one per case with a jq patch. That keeps
-# each test's subject the single condition it names.
+# session-request.sh transports the manager's placement tuple rather than
+# re-deriving it: the allocation verb owns the registry and the claiming TUI
+# re-checks guard identity before spawn. These build one well-formed tuple so
+# the request-side test can assert what arrives in the queue row.
 
 managed_execution_dir() {
   mkdir -p "$TEST_KDIR/managed-tree"
@@ -143,25 +143,6 @@ managed_execution_dir() {
 
 managed_identity() {
   jq -cn --arg dir "$1" '{version:1,canonical_path:$dir,git_common_dir:"/tmp/repo/.git",git_dir:"/tmp/repo/.git/worktrees/session-tree",epoch:"epoch-1",captured:{canonical_path:"/tmp/repo",git_common_dir:"/tmp/repo/.git",git_dir:"/tmp/repo/.git",head_oid:"abc",index_digest:"index",worktree_digest:"tree"},target_ref:"refs/heads/main",target_oid:"abc",state:"captured"}'
-}
-
-# write_manager_row <execution_dir> <identity-json> [jq-patch]
-write_manager_row() {
-  local dir="$1" identity="$2" patch="${3:-.}"
-  mkdir -p "$TEST_KDIR/_coordination/worktrees/registry"
-  jq -n --arg dir "$dir" --argjson identity "$identity" \
-    '{schema_version:1,worktree_id:"tree-1",execution_dir:$dir,state:"reserved",owner:{kind:"session",id:"worker-1"},guard_identity:$identity}' \
-    | jq "$patch" > "$TEST_KDIR/_coordination/worktrees/registry/tree-1.json"
-}
-
-# run_managed_request <execution_dir> <identity-json>
-# The worker arm carries --context because the dispatch-guidance requirement is
-# checked before the registry is read; without it every one of these cases would
-# refuse for that reason instead and prove nothing about the registry checks.
-run_managed_request() {
-  run bash "$REQUEST" --type worker --slug impl-demo--w1 --worktree-id tree-1 \
-    --execution-dir "$1" --worktree-identity "$2" \
-    --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR"
 }
 
 # Build events.jsonl directly from explicit compact rows so byte offsets are
@@ -326,153 +307,31 @@ journal_boundaries() {
   [ "$status" -eq 0 ]
 }
 
-@test "request refuses a truncated worktree identity before enqueue" {
-  run bash "$REQUEST" --type implement --slug wi --worktree-identity '{"version":1,"canonical_path":"/tmp/session-tree"}' --anywhere --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"invalid --worktree-identity"* ]]
-  [ ! -e "$TEST_KDIR/_sessions/requests" ]
-}
-
-@test "request carries manager-validated worktree_id and execution_dir as hard placement" {
-  mkdir -p "$TEST_KDIR/managed-tree" "$TEST_KDIR/_coordination/worktrees/registry"
-  local execution_dir; execution_dir="$(cd "$TEST_KDIR/managed-tree" && pwd -P)"
-  local identity
-  identity="$(jq -cn --arg dir "$execution_dir" '{version:1,canonical_path:$dir,git_common_dir:"/tmp/repo/.git",git_dir:"/tmp/repo/.git/worktrees/session-tree",epoch:"epoch-1",captured:{canonical_path:"/tmp/repo",git_common_dir:"/tmp/repo/.git",git_dir:"/tmp/repo/.git",head_oid:"abc",index_digest:"index",worktree_digest:"tree"},target_ref:"refs/heads/main",target_oid:"abc",state:"captured"}')"
-  jq -n --arg dir "$execution_dir" --argjson identity "$identity" \
-    '{schema_version:1,worktree_id:"tree-1",execution_dir:$dir,state:"reserved",owner:{kind:"session",id:"worker-1"},guard_identity:$identity}' \
-    > "$TEST_KDIR/_coordination/worktrees/registry/tree-1.json"
-
-  run bash "$REQUEST" --type worker --slug impl-demo--w1 --worktree-id tree-1 \
-    --execution-dir "$execution_dir" --worktree-identity "$identity" --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR" --json
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e --arg dir "$execution_dir" \
-    '.worktree_id == "tree-1" and .execution_dir == $dir and .enqueued == true'
-  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
-  run jq -e --arg dir "$execution_dir" \
-    '.worktree_id == "tree-1" and .execution_dir == $dir and .worktree_identity.canonical_path == $dir' "$pending"
-  [ "$status" -eq 0 ]
-  run jq -e --arg dir "$execution_dir" \
-    '.event == "requested" and .worktree_id == "tree-1" and .execution_dir == $dir' "$TEST_KDIR/_sessions/events.jsonl"
-  [ "$status" -eq 0 ]
-}
-
-@test "request refuses a partial managed placement tuple" {
-  mkdir -p "$TEST_KDIR/managed-tree"
-  local execution_dir; execution_dir="$(cd "$TEST_KDIR/managed-tree" && pwd -P)"
-  run bash "$REQUEST" --type worker --slug impl-demo--w1 --worktree-id tree-1 \
-    --execution-dir "$execution_dir" --anywhere --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"requires --worktree-id, --execution-dir, and --worktree-identity together"* ]]
-  [ ! -e "$TEST_KDIR/_sessions/requests" ]
-}
-
-@test "request names the id disagreement when the registry row is another stream's" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.worktree_id = "different"'
-
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "carries worktree_id 'different', not 'tree-1'" "lore coordinate worktree show" \
-    && [ ! -e "$TEST_KDIR/_sessions/requests" ]
-}
-
-@test "request explains a seat-owned tree as a routing mistake, naming both remedies" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.owner.kind = "seat"'
-
-  run_managed_request "$execution_dir" "$identity"
-  # Both remedies: dispatch a subagent in that tree, or drop the tuple and let the
-  # claiming TUI allocate a session-owned one.
-  outcome_is 1 "seat-owned allocation (owner.kind=seat)" "subagent in that tree" \
-    "the manager tuple (--worktree-id/--execution-dir/--worktree-identity)" \
-    && [ ! -e "$TEST_KDIR/_sessions/requests" ]
-}
-
-@test "request names an unexpected owner kind separately from the seat case" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.owner.kind = "sweeper"'
-
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "owner.kind='sweeper'" "requires owner.kind=session" \
-    && out_lacks "seat-owned allocation"
-}
-
-@test "request names the lifecycle state when the tree is past bound" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.state = "active"'
-
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "at state 'active'" "reserved or bound" \
-    && [ ! -e "$TEST_KDIR/_sessions/requests" ]
-}
-
-@test "request names a stale guard identity as its own condition" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.guard_identity.captured.head_oid = "def"'
-
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "does not equal the guard_identity recorded" \
-    && [ ! -e "$TEST_KDIR/_sessions/requests" ]
-}
-
-@test "request names an empty owner.id on an otherwise session-owned tree" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.owner.id = ""'
-
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "no owner.id"
-}
-
-@test "request names the registered execution_dir when placement disagrees" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.execution_dir = "/elsewhere"'
-
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "registered at '/elsewhere'"
-}
-
-@test "request names an unreadable registry row rather than reporting a mismatch" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  mkdir -p "$TEST_KDIR/_coordination/worktrees/registry"
-  printf '%s' '{"schema_version":1,' > "$TEST_KDIR/_coordination/worktrees/registry/tree-1.json"
-
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "not a readable JSON object"
-}
-
-@test "request names a missing registry row as one the manager never wrote" {
+@test "request carries the manager's worktree tuple through to the queue row" {
   local execution_dir; execution_dir="$(managed_execution_dir)"
   local identity; identity="$(managed_identity "$execution_dir")"
 
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "registry row not found for --worktree-id 'tree-1'"
-}
-
-@test "request names a future schema_version as unreadable-by-this-build" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.schema_version = 2'
-
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "schema_version=2"
-}
-
-@test "request accepts a bound tree, not only a reserved one" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.state = "bound"'
-
+  # No registry row is written: the allocation verb validated the tuple when it
+  # handed it back, so this verb transports it rather than re-deriving it.
   run bash "$REQUEST" --type worker --slug impl-demo--w1 --worktree-id tree-1 \
     --execution-dir "$execution_dir" --worktree-identity "$identity" \
-    --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR"
-  [ "$status" -eq 0 ]
+    --context "brief body" --anywhere --kdir "$TEST_KDIR" --json
+  outcome_is 0 '"worktree_id": "tree-1"' '"enqueued": true' || return 1
+
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  jq -e --arg dir "$execution_dir" \
+    '.worktree_id == "tree-1" and .execution_dir == $dir and .worktree_identity.canonical_path == $dir' \
+    "$pending" >/dev/null || return 1
+  run jq -e --arg dir "$execution_dir" \
+    '.event == "requested" and .worktree_id == "tree-1" and .execution_dir == $dir' \
+    "$TEST_KDIR/_sessions/events.jsonl"
+  outcome_is 0
+}
+
+@test "request refuses a --worktree-identity that is not JSON" {
+  run bash "$REQUEST" --type implement --slug wi --worktree-identity 'not json' --anywhere --kdir "$TEST_KDIR"
+  [ ! -e "$TEST_KDIR/_sessions/requests" ] || return 1
+  outcome_is 1 "invalid --worktree-identity"
 }
 
 @test "request with invalid --framework refuses before enqueue" {
