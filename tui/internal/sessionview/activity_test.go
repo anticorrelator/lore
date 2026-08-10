@@ -28,16 +28,15 @@ func TestFoldEventsOrphanedClearsDeadOwnerActivity(t *testing.T) {
 }
 
 // TestFoldEvents_ActivityLastWins verifies per-slug activity is matched by
-// ordering: the last of needs_input/quiescent/resumed wins.
+// ordering: the last of needs_input/resumed wins.
 func TestFoldEvents_ActivityLastWins(t *testing.T) {
 	got := FoldEvents(nil, []session.Event{
-		ev(session.EventQuiescent, "inst-a", "", "foo"),
 		ev(session.EventNeedsInput, "inst-a", "", "foo"),
 		ev(session.EventResumed, "inst-a", "", "foo"),
 	})
 	a := got[ActivityKey{Instance: "inst-a", Slug: "foo"}]
-	if a.NeedsInput || a.Quiescent {
-		t.Errorf("resumed should clear needs-input and quiescent, got %+v", a)
+	if a.NeedsInput {
+		t.Errorf("resumed should clear needs-input, got %+v", a)
 	}
 
 	got = FoldEvents(nil, []session.Event{
@@ -57,7 +56,6 @@ func TestFoldEvents_ClosePendingMatchedByOrderingNotAdjacency(t *testing.T) {
 	events := []session.Event{
 		ev(session.EventCloseRequested, "", "inst-a", "foo"),
 		ev(session.EventNeedsInput, "inst-a", "", "foo"), // interleaved during teardown
-		ev(session.EventQuiescent, "inst-a", "", "foo"),
 	}
 	got := FoldEvents(nil, events)
 	if a := got[ActivityKey{Instance: "inst-a", Slug: "foo"}]; !a.ClosePending {
@@ -95,7 +93,7 @@ func TestNextAction_Precedence(t *testing.T) {
 	if got := (Activity{ClosePending: true}).NextAction(); got != "close pending" {
 		t.Errorf("close-pending label, got %q", got)
 	}
-	if got := (Activity{Quiescent: true}).NextAction(); got != "" {
-		t.Errorf("quiescent alone has no pending action, got %q", got)
+	if got := (Activity{}).NextAction(); got != "" {
+		t.Errorf("an empty overlay has no pending action, got %q", got)
 	}
 }

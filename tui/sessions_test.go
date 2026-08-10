@@ -344,13 +344,13 @@ func TestIdleEventFor(t *testing.T) {
 }
 
 // TestNeedsInputChangedJournalsTransitions is the end-to-end trace through the
-// real appender: entering needs-input lands quiescent + needs_input, a repeated
+// real appender: entering needs-input lands one needs_input row, a repeated
 // same-state tick re-emits nothing (edge guard), and resuming lands resumed.
 func TestNeedsInputChangedJournalsTransitions(t *testing.T) {
 	m := sessionModelWithRealScript(t)
 	kdir := m.config.KnowledgeDir
 
-	// Enter idle: the panel's single quiescence signal grounds both events.
+	// Enter idle: the panel's one idle edge lands one row.
 	var cmd tea.Cmd
 	m, cmd = m.handleNeedsInputChanged(work.NeedsInputChangedMsg{Slug: "demo", NeedsInput: true})
 	if !m.sessionIdle["demo"] {
@@ -358,12 +358,8 @@ func TestNeedsInputChangedJournalsTransitions(t *testing.T) {
 	}
 	runJournalCmds(t, cmd)
 	got := readEventTypes(t, kdir)
-	if len(got) != 2 {
-		t.Fatalf("enter emitted %v, want two events", got)
-	}
-	seen := map[string]bool{got[0]: true, got[1]: true}
-	if !seen[session.EventQuiescent] || !seen[session.EventNeedsInput] {
-		t.Fatalf("enter events = %v, want quiescent + needs_input", got)
+	if len(got) != 1 || got[0] != session.EventNeedsInput {
+		t.Fatalf("enter events = %v, want a single needs_input", got)
 	}
 
 	// Repeated enter tick in the same state: guard suppresses re-emission.
@@ -371,7 +367,7 @@ func TestNeedsInputChangedJournalsTransitions(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("repeated needs-input tick re-emitted")
 	}
-	if n := len(readEventTypes(t, kdir)); n != 2 {
+	if n := len(readEventTypes(t, kdir)); n != 1 {
 		t.Fatalf("guard failed: events grew to %d", n)
 	}
 
@@ -382,7 +378,7 @@ func TestNeedsInputChangedJournalsTransitions(t *testing.T) {
 	}
 	runJournalCmds(t, cmd)
 	got = readEventTypes(t, kdir)
-	if len(got) != 3 || got[2] != session.EventResumed {
+	if len(got) != 2 || got[1] != session.EventResumed {
 		t.Fatalf("resume events = %v, want trailing resumed", got)
 	}
 

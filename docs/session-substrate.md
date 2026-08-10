@@ -685,7 +685,6 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `claimed` | TUI | an instance won the claim rename and wrote claim metadata |
 | `spawned` | TUI | the session process started; claimed file deleted |
 | `needs_input` | TUI | a running session is waiting on input |
-| `quiescent` | TUI | a running session went idle |
 | `resumed` | TUI | a session resumed after idle/input |
 | `modal_blocked` | TUI | the shared readiness classifier observed a running session enter a harness modal; carries `reason=modal` and the observed `modal_signature`, emits once per observed entry, and carries no `request_id` |
 | `recovered` | TUI | a restarted/replacement instance adopted a still-running tmux-hosted session from a dead instance's registry row; `reason` names the predecessor (`adopted from <dead-instance>`). Session-transition class — no `request_id` |

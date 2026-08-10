@@ -17,7 +17,7 @@ type genEvent struct{ ev Event }
 
 func (genEvent) Generate(r *rand.Rand, _ int) reflect.Value {
 	events := []string{
-		EventRequested, EventClaimed, EventSpawned, EventNeedsInput, EventQuiescent,
+		EventRequested, EventClaimed, EventSpawned, EventNeedsInput,
 		EventResumed, EventModalBlocked, EventRecovered, EventClosed, EventStepCompleted,
 		EventOrphaned,
 		EventSpawnFailed, EventReclaimed, EventAbandoned, EventCancelled,

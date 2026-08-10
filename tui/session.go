@@ -412,12 +412,7 @@ func (m model) handleNeedsInputChanged(msg work.NeedsInputChangedMsg) (model, te
 
 	script, kdir := m.eventScript, m.config.KnowledgeDir
 	if msg.NeedsInput {
-		// The panel's single quiescence signal grounds both substrate events: the
-		// session went idle and is now treated as awaiting input.
-		return m, tea.Batch(
-			journalCmd(script, kdir, m.idleEventFor(msg.Slug, session.EventQuiescent, ls)),
-			journalCmd(script, kdir, m.idleEventFor(msg.Slug, session.EventNeedsInput, ls)),
-		)
+		return m, journalCmd(script, kdir, m.idleEventFor(msg.Slug, session.EventNeedsInput, ls))
 	}
 	return m, journalCmd(script, kdir, m.idleEventFor(msg.Slug, session.EventResumed, ls))
 }

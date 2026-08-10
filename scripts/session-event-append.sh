@@ -30,7 +30,7 @@
 #             worker lifecycle row points back at its work item.
 #
 # Required fields:
-#   event        enum: requested | claimed | spawned | needs_input | quiescent |
+#   event        enum: requested | claimed | spawned | needs_input |
 #                resumed | recovered | closed | orphaned | step_completed |
 #                terminus_reached |
 #                spawn_failed | request_reclaimed |
@@ -133,7 +133,7 @@ fi
 # --- Validate event against the closed vocabulary ---
 EVENT=$(printf '%s' "$ROW" | jq -r '.event // ""')
 case "$EVENT" in
-  requested|claimed|spawned|needs_input|quiescent|resumed|recovered|closed|orphaned|\
+  requested|claimed|spawned|needs_input|resumed|recovered|closed|orphaned|\
 step_completed|terminus_reached|spawn_failed|request_reclaimed|\
 request_abandoned|request_cancelled|close_requested|close_failed|send_requested|sent|send_refused|answer_requested|answered|answer_refused|modal_blocked|\
 restore_refused|worktree_quarantined) ;;
@@ -141,7 +141,7 @@ restore_refused|worktree_quarantined) ;;
     fail "missing required field: event"
     ;;
   *)
-    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, recovered, closed, orphaned, step_completed, terminus_reached, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, close_failed, send_requested, sent, send_refused, answer_requested, answered, answer_refused, modal_blocked, restore_refused, worktree_quarantined)"
+    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, resumed, recovered, closed, orphaned, step_completed, terminus_reached, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, close_failed, send_requested, sent, send_refused, answer_requested, answered, answer_refused, modal_blocked, restore_refused, worktree_quarantined)"
     ;;
 esac
 

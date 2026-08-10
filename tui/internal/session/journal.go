@@ -42,7 +42,6 @@ const (
 	EventClaimed             = "claimed"
 	EventSpawned             = "spawned"
 	EventNeedsInput          = "needs_input"
-	EventQuiescent           = "quiescent"
 	EventResumed             = "resumed"
 	EventModalBlocked        = "modal_blocked"
 	EventRecovered           = "recovered"
