@@ -21,12 +21,13 @@
 #                      Omitted (default) defers to --initiator (agent auto-closes,
 #                      human holds open); true forces auto-close, false holds open.
 #   --requested-by <w> Who enqueued it (default: $LORE_SESSION_INSTANCE, else $USER).
-#   --context <t|file> Dispatch guidance handed to prompt composition. Value is read
-#                      from a file when it names one, else treated as literal text. A
-#                      JSON object is stored verbatim as extra_context; any other text
-#                      is wrapped as {"dispatch_guidance": <text>}. Worker requests
-#                      require dispatch_guidance to contain the current canonical
-#                      block rendered by `lore dispatch guidance`.
+#   --context <t|file> Task content handed to prompt composition — the brief alone,
+#                      with no guidance floor of your own. Value is read from a file
+#                      when it names one, else treated as literal text. A JSON object
+#                      is stored verbatim as extra_context; any other text is wrapped
+#                      as {"dispatch_guidance": <text>}. For --type worker this verb
+#                      renders the canonical guidance block itself and prepends it to
+#                      the brief, so nothing upstream has to remember to.
 #   --route role=model Per-dispatch routing override (repeatable). The claiming TUI
 #                      exports it as LORE_MODEL_<ROLE> into the spawned session, riding
 #                      the resolver's top-precedence env layer. role MUST be in the
@@ -56,11 +57,13 @@
 #                      otherwise the value is parsed as JSON. When omitted for a
 #                      fresh request, the claiming TUI allocates and captures a
 #                      session-owned worktree before reaching the launch boundary.
-#   --worktree-id <id>  Manager-owned coordination worktree identifier. Requires
-#                      --execution-dir and --worktree-identity; the three values
-#                      are checked against the live manager registry row.
-#   --execution-dir <p> Absolute manager-resolved child working directory. This is
-#                      hard placement, unlike the claim-timing-only --prefer-dir.
+#   --worktree-id <id>  Manager-owned coordination worktree identifier, carried
+#                      through to the claiming TUI unchanged. The allocation verb
+#                      (`lore coordinate worktree`) owns the registry and hands
+#                      back a verified tuple; this verb transports it, and the
+#                      claiming TUI re-checks guard identity before spawn.
+#   --execution-dir <p> Manager-resolved child working directory. This is hard
+#                      placement, unlike the claim-timing-only --prefer-dir.
 #   --prefer-dir <p>   Soft project-dir preference stored as prefer_project_dir: an
 #                      instance whose project dir matches claims immediately; any
 #                      other defers ~15s before it may claim. Resolved physically at
@@ -116,7 +119,6 @@ WORKTREE_IDENTITY_PROVIDED=0
 WORKTREE_ID=""
 WORKTREE_ID_PROVIDED=0
 EXECUTION_DIR=""
-EXECUTION_DIR_PROVIDED=0
 PREFER_DIR=""
 PREFER_DIR_PROVIDED=0
 PREFER_CWD_PROVIDED=0
@@ -139,7 +141,7 @@ while [[ $# -gt 0 ]]; do
     --framework) FRAMEWORK="$2"; FRAMEWORK_PROVIDED=1; shift 2 ;;
     --worktree-identity) WORKTREE_IDENTITY="$2"; WORKTREE_IDENTITY_PROVIDED=1; shift 2 ;;
     --worktree-id) WORKTREE_ID="$2"; WORKTREE_ID_PROVIDED=1; shift 2 ;;
-    --execution-dir) EXECUTION_DIR="$2"; EXECUTION_DIR_PROVIDED=1; shift 2 ;;
+    --execution-dir) EXECUTION_DIR="$2"; shift 2 ;;
     --prefer-dir) PREFER_DIR="$2"; PREFER_DIR_PROVIDED=1; shift 2 ;;
     --prefer-cwd) PREFER_CWD_PROVIDED=1; shift ;;
     --anywhere) ANYWHERE_PROVIDED=1; shift ;;
@@ -147,7 +149,7 @@ while [[ $# -gt 0 ]]; do
     --confirm) SKIP_CONFIRM="false"; shift ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,79p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,83p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
       echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--target <name> | --prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--framework <claude-code|codex|opencode>] [--worktree-identity <json|file>] [--worktree-id <id> --execution-dir <path>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
@@ -189,10 +191,8 @@ fi
 # never sees the worker at all. The TUI groups workers under their base item from
 # the same parse. None of those failures announce themselves.
 #
-# Refusal rather than advisory, matching --worktree-id's shape check two blocks
-# down: the value is fully determined at enqueue, and the cost of getting it wrong
-# is invisible downstream loss. The advisories in this script are the other
-# situation — a correct value an older reader may ignore.
+# A refusal rather than a warning: the value is fully determined at enqueue, and
+# the cost of getting it wrong is invisible downstream loss.
 #
 # The base must be a slugify() output, which collapses every `--` run to a single
 # `-`; that is what makes the suffix an unambiguous marker rather than a guess.
@@ -256,50 +256,22 @@ if [[ $FRAMEWORK_PROVIDED -eq 1 ]]; then
   FRAMEWORK_JSON="$(jq -n --arg fw "$FRAMEWORK" '$fw')"
 fi
 
-# worktree_identity is the versioned request-to-launch seam. Validate the
-# complete v1 JSON shape at enqueue so a present-but-truncated identity never
-# enters the queue; Git/path ownership is validated again by the claiming TUI
-# immediately before spawn. The field remains omit-when-empty for additive
-# schema compatibility; a fresh omitted identity is allocated before launch.
+# Managed placement is a tuple the allocation verb produced and this verb
+# transports. `lore coordinate worktree` owns the registry, validates the tuple
+# it hands back, and the claiming TUI re-checks guard identity immediately
+# before spawn — so re-deriving those conditions here was a second check on a
+# value nobody else had touched in between. The only thing done to the identity
+# is the parse the row emit needs: read it from a file when the value names one,
+# otherwise from the literal. The field stays omit-when-empty; an omitted
+# identity is allocated by the claiming TUI before launch.
 WORKTREE_IDENTITY_JSON=""
 if [[ $WORKTREE_IDENTITY_PROVIDED -eq 1 ]]; then
-  [[ -n "$WORKTREE_IDENTITY" ]] || fail "empty --worktree-identity (a v1 identity JSON object or file is required)"
+  [[ -n "$WORKTREE_IDENTITY" ]] || fail "empty --worktree-identity (an identity JSON object or file is required)"
   if [[ -f "$WORKTREE_IDENTITY" ]]; then
     WORKTREE_IDENTITY_JSON="$(jq -c '.' "$WORKTREE_IDENTITY" 2>/dev/null)" || fail "invalid --worktree-identity file: '$WORKTREE_IDENTITY' (expected JSON)"
   else
     WORKTREE_IDENTITY_JSON="$(printf '%s' "$WORKTREE_IDENTITY" | jq -c '.' 2>/dev/null)" || fail "invalid --worktree-identity (expected a JSON object or readable file)"
   fi
-  if ! printf '%s' "$WORKTREE_IDENTITY_JSON" | jq -e '
-    type == "object" and
-    .version == 1 and
-    ([.canonical_path, .git_common_dir, .git_dir, .epoch, .target_oid] | all(type == "string" and length > 0)) and
-    (.target_ref | type == "string") and
-    (.captured | type == "object" and
-      ([.canonical_path, .git_common_dir, .git_dir, .head_oid, .index_digest, .worktree_digest] | all(type == "string" and length > 0))) and
-    .state == "captured"
-  ' >/dev/null 2>&1; then
-    fail "invalid --worktree-identity (expected complete v1 identity in captured state)"
-  fi
-fi
-
-# Manager-owned placement is an all-or-nothing tuple. The guard identity is the
-# repository identity proof; worktree_id is the manager record key; execution_dir
-# is the hard child cwd. Never infer one from another when a projection dropped a
-# field, because that would turn schema loss into an incorrectly placed writer.
-MANAGED_PLACEMENT_FIELDS=$((WORKTREE_ID_PROVIDED + EXECUTION_DIR_PROVIDED))
-if [[ $MANAGED_PLACEMENT_FIELDS -ne 0 ]]; then
-  [[ $MANAGED_PLACEMENT_FIELDS -eq 2 && $WORKTREE_IDENTITY_PROVIDED -eq 1 ]] || \
-    fail "managed worktree placement requires --worktree-id, --execution-dir, and --worktree-identity together"
-  [[ "$WORKTREE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || \
-    fail "invalid --worktree-id: '$WORKTREE_ID'"
-  [[ "$EXECUTION_DIR" = /* ]] || \
-    fail "invalid --execution-dir: '$EXECUTION_DIR' (must be absolute)"
-  EXECUTION_DIR_RESOLVED="$(cd "$EXECUTION_DIR" 2>/dev/null && pwd -P || true)"
-  [[ -n "$EXECUTION_DIR_RESOLVED" ]] || \
-    fail "invalid --execution-dir: '$EXECUTION_DIR' (must name an existing directory)"
-  IDENTITY_DIR="$(printf '%s' "$WORKTREE_IDENTITY_JSON" | jq -r '.canonical_path')"
-  [[ "$EXECUTION_DIR_RESOLVED" == "$IDENTITY_DIR" ]] || \
-    fail "execution_dir does not match worktree_identity.canonical_path"
 fi
 
 # prefer_project_dir is a soft routing preference: a matching instance claims
@@ -388,14 +360,6 @@ if [[ -n "$MIN_VINTAGE" ]]; then
   MIN_VINTAGE_JSON="$(jq -n --arg v "$MIN_VINTAGE_RESOLVED" '$v')"
 fi
 
-if [[ $FRAMEWORK_PROVIDED -eq 1 && -z "$MIN_VINTAGE" ]]; then
-  echo "[session] advisory: --framework was provided without --min-vintage; old claiming TUIs may ignore the framework field" >&2
-fi
-
-if [[ -n "$PREFER_PROJECT_DIR_JSON" && -z "$MIN_VINTAGE" ]]; then
-  echo "[session] advisory: --prefer-dir/--prefer-cwd was provided without --min-vintage; old claiming TUIs may ignore the prefer_project_dir field and claim immediately" >&2
-fi
-
 if [[ -z "$REQUESTED_BY" ]]; then
   REQUESTED_BY="${LORE_SESSION_INSTANCE:-${USER:-unknown}}"
 fi
@@ -414,18 +378,32 @@ if [[ -n "$CONTEXT" ]]; then
   fi
 fi
 
-# Worker-session enqueue is an actual launch boundary, not a prompt-authoring
-# surface. Require the exact composed brief here so a caller cannot queue a
-# floorless worker and hope the claiming TUI repairs it later.
+# Worker-session enqueue is an actual launch boundary: the claiming TUI runs the
+# brief verbatim as the session's whole prompt, so the standing-defaults floor has
+# to be inside it. Render it here rather than instructing every caller to prepend
+# it — this is the last step before the row is durable, which is the latest moment
+# at which "invocation-fresh" is still true, and a floor nobody has to remember
+# cannot be forgotten. A brief that already carries a block is left as composed:
+# one floor per prompt, whoever rendered it.
+#
+# Worker-scoped on purpose. For spec/implement/chat the claiming TUI splices
+# extra_context into a slash-command argument (`/spec <slug> -- <ctx>`), where a
+# multi-line block does not belong; those launches meet the floor through the
+# harness's own admission gate instead.
 if [[ "$TYPE" == "worker" ]]; then
   [[ "$EXTRA_JSON" != "null" ]] || \
-    fail "--context is required for --type worker and must contain the current canonical dispatch-guidance block"
+    fail "--context is required for --type worker (the composed brief is the session's whole prompt)"
   WORKER_PROMPT="$(printf '%s' "$EXTRA_JSON" | jq -r '.dispatch_guidance // empty')"
   [[ -n "$WORKER_PROMPT" ]] || \
     fail "worker --context must provide a non-empty dispatch_guidance string"
-  # shellcheck disable=SC2119
-  VALIDATION_ERROR="$(printf '%s' "$WORKER_PROMPT" | validate_dispatch_guidance 2>&1 >/dev/null || true)"
-  [[ -z "$VALIDATION_ERROR" ]] || fail "$VALIDATION_ERROR"
+  if [[ "$WORKER_PROMPT" != *"lore-dispatch-guidance:v1:"* ]]; then
+    # shellcheck disable=SC2119
+    GUIDANCE_BLOCK="$(render_dispatch_guidance)" || \
+      fail "could not render the canonical dispatch-guidance block; nothing was enqueued"
+    EXTRA_JSON="$(printf '%s' "$EXTRA_JSON" \
+      | jq -c --arg block "$GUIDANCE_BLOCK" --arg brief "$WORKER_PROMPT" \
+        '. + {dispatch_guidance: ($block + "\n" + $brief)}')"
+  fi
 fi
 
 # Nullable string fields become explicit JSON null when unset.
@@ -441,90 +419,6 @@ else
   KNOWLEDGE_DIR="$(resolve_knowledge_dir)"
 fi
 [[ -d "$KNOWLEDGE_DIR" ]] || fail "knowledge store not found at: $KNOWLEDGE_DIR"
-
-# The manager registry is the authority for coordinated placement. Validate the
-# exact live row after resolving --kdir so a caller cannot pair a real checkout
-# with a different stream's id or a stale/truncated identity.
-#
-# Six independent conditions decide this, and they fail for unrelated reasons: a
-# seat-owned tree is a routing mistake (the tree is fine, a session request is the
-# wrong way to reach it), a non-reserved/bound state is a lifecycle mistake, a
-# guard-identity mismatch is a stale capture. One predicate collapsing all six
-# into "does not match registry row" tells a caller only that something is wrong,
-# so each condition is checked and reported by name below.
-if [[ $WORKTREE_ID_PROVIDED -eq 1 ]]; then
-  MANAGER_ROW="$KNOWLEDGE_DIR/_coordination/worktrees/registry/$WORKTREE_ID.json"
-  [[ -f "$MANAGER_ROW" ]] || fail "managed worktree registry row not found for --worktree-id '$WORKTREE_ID' (looked in $KNOWLEDGE_DIR/_coordination/worktrees/registry/).
-  The manager writes this row at allocation; nothing here creates it. Allocate the
-  tree first, or list what exists with 'lore coordinate worktree show'."
-
-  jq -e 'type == "object"' "$MANAGER_ROW" >/dev/null 2>&1 || \
-    fail "managed worktree registry row for '$WORKTREE_ID' is not a readable JSON object: $MANAGER_ROW.
-  The manager is the sole writer of this row, so a torn or empty one means the
-  allocation did not complete. Re-allocate the tree rather than repairing the file."
-
-  ROW_SCHEMA="$(jq -r 'if has("schema_version") then (.schema_version | tostring) else "absent" end' "$MANAGER_ROW")"
-  ROW_STATE="$(jq -r '.state // "absent"' "$MANAGER_ROW")"
-  ROW_OWNER_KIND="$(jq -r '.owner.kind // "absent"' "$MANAGER_ROW")"
-
-  [[ "$ROW_SCHEMA" == "1" ]] || \
-    fail "managed worktree registry row for '$WORKTREE_ID' declares schema_version=$ROW_SCHEMA, and this verb reads schema 1 only.
-  A row from a newer manager cannot be validated here without guessing at fields
-  this build does not know about. Update the lore install that is enqueueing."
-
-  jq -e --arg id "$WORKTREE_ID" '.worktree_id == $id' "$MANAGER_ROW" >/dev/null 2>&1 || \
-    fail "managed worktree registry row at $MANAGER_ROW carries worktree_id '$(jq -r '.worktree_id // "absent"' "$MANAGER_ROW")', not '$WORKTREE_ID'.
-  The file name and the id inside it disagree, so one of them belongs to another
-  stream. Read the row you meant with 'lore coordinate worktree show --worktree-id <id>'
-  and pass that id."
-
-  jq -e --arg dir "$EXECUTION_DIR_RESOLVED" '.execution_dir == $dir' "$MANAGER_ROW" >/dev/null 2>&1 || \
-    fail "--execution-dir resolves to '$EXECUTION_DIR_RESOLVED', but worktree '$WORKTREE_ID' is registered at '$(jq -r '.execution_dir // "absent"' "$MANAGER_ROW")'.
-  execution_dir is hard placement — the child's working directory — so it is taken
-  from the manager's record, never from where you happen to be standing. Pass the
-  registered path, or allocate a tree for this directory."
-
-  case "$ROW_STATE" in
-    reserved|bound) ;;
-    *)
-      fail "worktree '$WORKTREE_ID' is at state '$ROW_STATE'; a session request can be pinned to one only at reserved or bound.
-  Those two are the states in which no session is running in the tree yet. Anything
-  further along (active, recovered, quiescent, reconciling, cleanup_due, ...) is a
-  tree already in use or on its way out, and dispatching a second session into it
-  would put two writers in one checkout. Allocate a fresh tree for this request."
-      ;;
-  esac
-
-  if [[ "$ROW_OWNER_KIND" != "session" ]]; then
-    if [[ "$ROW_OWNER_KIND" == "seat" ]]; then
-      fail "worktree '$WORKTREE_ID' is a seat-owned allocation (owner.kind=seat), and a session request can only be pinned to a session-owned tree.
-  A seat-owned tree hosts harness-native subagents under the seat's own lease, which
-  the seat renews; a session request would hand it to a session whose lifecycle does
-  not renew that lease. Either dispatch this work as a subagent in that tree, or drop
-  the manager tuple (--worktree-id/--execution-dir/--worktree-identity) and let the
-  claiming TUI allocate the worker its own session-owned tree."
-    else
-      fail "worktree '$WORKTREE_ID' declares owner.kind='$ROW_OWNER_KIND'; a session request requires owner.kind=session.
-  Ownership decides which lease renewal keeps the tree alive, so it is never inferred.
-  Allocate with --owner-kind session, or drop the manager tuple and let the claiming
-  TUI allocate the worker its own tree."
-    fi
-  fi
-
-  jq -e '.owner.id | type == "string" and length > 0' "$MANAGER_ROW" >/dev/null 2>&1 || \
-    fail "worktree '$WORKTREE_ID' is session-owned but carries no owner.id.
-  The owner id is what the lease is renewed against, so an empty one means the tree
-  is swept on the lease timer no matter who is working in it. Re-allocate with a
-  non-empty --owner-id."
-
-  jq -e --argjson identity "$WORKTREE_IDENTITY_JSON" '.guard_identity == $identity' "$MANAGER_ROW" >/dev/null 2>&1 || \
-    fail "--worktree-identity does not equal the guard_identity recorded for worktree '$WORKTREE_ID'.
-  The guard identity is the repository-identity proof captured at allocation; a
-  mismatch means the identity you passed came from a different tree or from before
-  a re-capture, and it is what the claiming TUI re-checks immediately before spawn.
-  Read the current one from the registry row and pass it unchanged:
-  'lore coordinate worktree show --worktree-id $WORKTREE_ID'."
-fi
 
 PENDING_DIR="$KNOWLEDGE_DIR/_sessions/requests/pending"
 mkdir -p "$PENDING_DIR"
@@ -594,7 +488,7 @@ fi
 # worktree_id/execution_dir are hard placement and therefore travel together.
 # prefer_project_dir remains a separate, soft claim-timing hint.
 if [[ $WORKTREE_ID_PROVIDED -eq 1 ]]; then
-  ROW="$(printf '%s' "$ROW" | jq -c --arg id "$WORKTREE_ID" --arg dir "$EXECUTION_DIR_RESOLVED" '. + {worktree_id: $id, execution_dir: $dir}')"
+  ROW="$(printf '%s' "$ROW" | jq -c --arg id "$WORKTREE_ID" --arg dir "$EXECUTION_DIR" '. + {worktree_id: $id, execution_dir: $dir}')"
 fi
 
 # prefer_project_dir follows omit-when-empty: added only when --prefer-dir or
@@ -629,7 +523,7 @@ EVENT_ROW="$(jq -n \
   --argjson slug "$SLUG_JSON" \
   --argjson target "$TARGET_JSON" \
   --arg worktree_id "$WORKTREE_ID" \
-  --arg execution_dir "${EXECUTION_DIR_RESOLVED:-}" \
+  --arg execution_dir "$EXECUTION_DIR" \
   '{event: "requested", request_id: $request_id, session_type: $session_type, initiator: $initiator}
    + (if $slug != null then {slug: $slug} else {} end)
    + (if $target != null then {target_instance: $target} else {} end)
@@ -650,7 +544,7 @@ if [[ $JSON_MODE -eq 1 ]]; then
     --argjson slug "$SLUG_JSON" \
     --argjson target "$TARGET_JSON" \
     --arg worktree_id "$WORKTREE_ID" \
-    --arg execution_dir "${EXECUTION_DIR_RESOLVED:-}" \
+    --arg execution_dir "$EXECUTION_DIR" \
     --arg path "$RELPATH" \
     '{request_id: $request_id, type: $type, slug: $slug, target_instance: $target, path: $path, enqueued: true}
      + (if $worktree_id != "" then {worktree_id: $worktree_id, execution_dir: $execution_dir} else {} end)')"

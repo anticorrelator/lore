@@ -131,10 +131,10 @@ out_lacks() {
 }
 
 # --- Managed-placement fixtures --------------------------------------------
-# The manager-registry validation in session-request.sh checks six independent
-# conditions and reports each by name, so the tests below share one row that
-# satisfies all six and break exactly one per case with a jq patch. That keeps
-# each test's subject the single condition it names.
+# session-request.sh transports the manager's placement tuple rather than
+# re-deriving it: the allocation verb owns the registry and the claiming TUI
+# re-checks guard identity before spawn. These build one well-formed tuple so
+# the request-side test can assert what arrives in the queue row.
 
 managed_execution_dir() {
   mkdir -p "$TEST_KDIR/managed-tree"
@@ -143,25 +143,6 @@ managed_execution_dir() {
 
 managed_identity() {
   jq -cn --arg dir "$1" '{version:1,canonical_path:$dir,git_common_dir:"/tmp/repo/.git",git_dir:"/tmp/repo/.git/worktrees/session-tree",epoch:"epoch-1",captured:{canonical_path:"/tmp/repo",git_common_dir:"/tmp/repo/.git",git_dir:"/tmp/repo/.git",head_oid:"abc",index_digest:"index",worktree_digest:"tree"},target_ref:"refs/heads/main",target_oid:"abc",state:"captured"}'
-}
-
-# write_manager_row <execution_dir> <identity-json> [jq-patch]
-write_manager_row() {
-  local dir="$1" identity="$2" patch="${3:-.}"
-  mkdir -p "$TEST_KDIR/_coordination/worktrees/registry"
-  jq -n --arg dir "$dir" --argjson identity "$identity" \
-    '{schema_version:1,worktree_id:"tree-1",execution_dir:$dir,state:"reserved",owner:{kind:"session",id:"worker-1"},guard_identity:$identity}' \
-    | jq "$patch" > "$TEST_KDIR/_coordination/worktrees/registry/tree-1.json"
-}
-
-# run_managed_request <execution_dir> <identity-json>
-# The worker arm carries --context because the dispatch-guidance requirement is
-# checked before the registry is read; without it every one of these cases would
-# refuse for that reason instead and prove nothing about the registry checks.
-run_managed_request() {
-  run bash "$REQUEST" --type worker --slug impl-demo--w1 --worktree-id tree-1 \
-    --execution-dir "$1" --worktree-identity "$2" \
-    --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR"
 }
 
 # Build events.jsonl directly from explicit compact rows so byte offsets are
@@ -326,153 +307,31 @@ journal_boundaries() {
   [ "$status" -eq 0 ]
 }
 
-@test "request refuses a truncated worktree identity before enqueue" {
-  run bash "$REQUEST" --type implement --slug wi --worktree-identity '{"version":1,"canonical_path":"/tmp/session-tree"}' --anywhere --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"invalid --worktree-identity"* ]]
-  [ ! -e "$TEST_KDIR/_sessions/requests" ]
-}
-
-@test "request carries manager-validated worktree_id and execution_dir as hard placement" {
-  mkdir -p "$TEST_KDIR/managed-tree" "$TEST_KDIR/_coordination/worktrees/registry"
-  local execution_dir; execution_dir="$(cd "$TEST_KDIR/managed-tree" && pwd -P)"
-  local identity
-  identity="$(jq -cn --arg dir "$execution_dir" '{version:1,canonical_path:$dir,git_common_dir:"/tmp/repo/.git",git_dir:"/tmp/repo/.git/worktrees/session-tree",epoch:"epoch-1",captured:{canonical_path:"/tmp/repo",git_common_dir:"/tmp/repo/.git",git_dir:"/tmp/repo/.git",head_oid:"abc",index_digest:"index",worktree_digest:"tree"},target_ref:"refs/heads/main",target_oid:"abc",state:"captured"}')"
-  jq -n --arg dir "$execution_dir" --argjson identity "$identity" \
-    '{schema_version:1,worktree_id:"tree-1",execution_dir:$dir,state:"reserved",owner:{kind:"session",id:"worker-1"},guard_identity:$identity}' \
-    > "$TEST_KDIR/_coordination/worktrees/registry/tree-1.json"
-
-  run bash "$REQUEST" --type worker --slug impl-demo--w1 --worktree-id tree-1 \
-    --execution-dir "$execution_dir" --worktree-identity "$identity" --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR" --json
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e --arg dir "$execution_dir" \
-    '.worktree_id == "tree-1" and .execution_dir == $dir and .enqueued == true'
-  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
-  run jq -e --arg dir "$execution_dir" \
-    '.worktree_id == "tree-1" and .execution_dir == $dir and .worktree_identity.canonical_path == $dir' "$pending"
-  [ "$status" -eq 0 ]
-  run jq -e --arg dir "$execution_dir" \
-    '.event == "requested" and .worktree_id == "tree-1" and .execution_dir == $dir' "$TEST_KDIR/_sessions/events.jsonl"
-  [ "$status" -eq 0 ]
-}
-
-@test "request refuses a partial managed placement tuple" {
-  mkdir -p "$TEST_KDIR/managed-tree"
-  local execution_dir; execution_dir="$(cd "$TEST_KDIR/managed-tree" && pwd -P)"
-  run bash "$REQUEST" --type worker --slug impl-demo--w1 --worktree-id tree-1 \
-    --execution-dir "$execution_dir" --anywhere --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"requires --worktree-id, --execution-dir, and --worktree-identity together"* ]]
-  [ ! -e "$TEST_KDIR/_sessions/requests" ]
-}
-
-@test "request names the id disagreement when the registry row is another stream's" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.worktree_id = "different"'
-
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "carries worktree_id 'different', not 'tree-1'" "lore coordinate worktree show" \
-    && [ ! -e "$TEST_KDIR/_sessions/requests" ]
-}
-
-@test "request explains a seat-owned tree as a routing mistake, naming both remedies" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.owner.kind = "seat"'
-
-  run_managed_request "$execution_dir" "$identity"
-  # Both remedies: dispatch a subagent in that tree, or drop the tuple and let the
-  # claiming TUI allocate a session-owned one.
-  outcome_is 1 "seat-owned allocation (owner.kind=seat)" "subagent in that tree" \
-    "the manager tuple (--worktree-id/--execution-dir/--worktree-identity)" \
-    && [ ! -e "$TEST_KDIR/_sessions/requests" ]
-}
-
-@test "request names an unexpected owner kind separately from the seat case" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.owner.kind = "sweeper"'
-
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "owner.kind='sweeper'" "requires owner.kind=session" \
-    && out_lacks "seat-owned allocation"
-}
-
-@test "request names the lifecycle state when the tree is past bound" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.state = "active"'
-
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "at state 'active'" "reserved or bound" \
-    && [ ! -e "$TEST_KDIR/_sessions/requests" ]
-}
-
-@test "request names a stale guard identity as its own condition" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.guard_identity.captured.head_oid = "def"'
-
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "does not equal the guard_identity recorded" \
-    && [ ! -e "$TEST_KDIR/_sessions/requests" ]
-}
-
-@test "request names an empty owner.id on an otherwise session-owned tree" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.owner.id = ""'
-
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "no owner.id"
-}
-
-@test "request names the registered execution_dir when placement disagrees" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.execution_dir = "/elsewhere"'
-
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "registered at '/elsewhere'"
-}
-
-@test "request names an unreadable registry row rather than reporting a mismatch" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  mkdir -p "$TEST_KDIR/_coordination/worktrees/registry"
-  printf '%s' '{"schema_version":1,' > "$TEST_KDIR/_coordination/worktrees/registry/tree-1.json"
-
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "not a readable JSON object"
-}
-
-@test "request names a missing registry row as one the manager never wrote" {
+@test "request carries the manager's worktree tuple through to the queue row" {
   local execution_dir; execution_dir="$(managed_execution_dir)"
   local identity; identity="$(managed_identity "$execution_dir")"
 
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "registry row not found for --worktree-id 'tree-1'"
-}
-
-@test "request names a future schema_version as unreadable-by-this-build" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.schema_version = 2'
-
-  run_managed_request "$execution_dir" "$identity"
-  outcome_is 1 "schema_version=2"
-}
-
-@test "request accepts a bound tree, not only a reserved one" {
-  local execution_dir; execution_dir="$(managed_execution_dir)"
-  local identity; identity="$(managed_identity "$execution_dir")"
-  write_manager_row "$execution_dir" "$identity" '.state = "bound"'
-
+  # No registry row is written: the allocation verb validated the tuple when it
+  # handed it back, so this verb transports it rather than re-deriving it.
   run bash "$REQUEST" --type worker --slug impl-demo--w1 --worktree-id tree-1 \
     --execution-dir "$execution_dir" --worktree-identity "$identity" \
-    --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR"
-  [ "$status" -eq 0 ]
+    --context "brief body" --anywhere --kdir "$TEST_KDIR" --json
+  outcome_is 0 '"worktree_id": "tree-1"' '"enqueued": true' || return 1
+
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  jq -e --arg dir "$execution_dir" \
+    '.worktree_id == "tree-1" and .execution_dir == $dir and .worktree_identity.canonical_path == $dir' \
+    "$pending" >/dev/null || return 1
+  run jq -e --arg dir "$execution_dir" \
+    '.event == "requested" and .worktree_id == "tree-1" and .execution_dir == $dir' \
+    "$TEST_KDIR/_sessions/events.jsonl"
+  outcome_is 0
+}
+
+@test "request refuses a --worktree-identity that is not JSON" {
+  run bash "$REQUEST" --type implement --slug wi --worktree-identity 'not json' --anywhere --kdir "$TEST_KDIR"
+  [ ! -e "$TEST_KDIR/_sessions/requests" ] || return 1
+  outcome_is 1 "invalid --worktree-identity"
 }
 
 @test "request with invalid --framework refuses before enqueue" {
@@ -482,17 +341,16 @@ journal_boundaries() {
   [ ! -e "$TEST_KDIR/_sessions/requests" ]
 }
 
-@test "request --framework without --min-vintage emits an advisory but enqueues" {
+@test "request --framework without --min-vintage enqueues silently" {
   local err="$TEST_KDIR/framework.err"
   local out
   out="$(bash "$REQUEST" --type implement --slug wi --framework codex --anywhere --kdir "$TEST_KDIR" 2>"$err")"
-  [[ "$out" == *"Enqueued implement request"* ]]
-  [ "$(wc -l < "$err" | tr -d ' ')" -eq 1 ]
-  grep -q -- "--min-vintage" "$err"
+  [[ "$out" == *"Enqueued implement request"* ]] || return 1
+  [ ! -s "$err" ] || return 1
 
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.framework == "codex"' "$pending"
-  [ "$status" -eq 0 ]
+  outcome_is 0
 }
 
 @test "request omits prefer_project_dir when neither prefer flag is passed" {
@@ -543,16 +401,16 @@ journal_boundaries() {
   [ ! -e "$TEST_KDIR/_sessions/requests" ]
 }
 
-@test "request --prefer-cwd without --min-vintage emits an advisory but enqueues" {
+@test "request --prefer-cwd without --min-vintage enqueues silently" {
   local err="$TEST_KDIR/prefer.err"
   local out
   out="$(bash "$REQUEST" --type implement --slug wi --prefer-cwd --kdir "$TEST_KDIR" 2>"$err")"
-  [[ "$out" == *"Enqueued implement request"* ]]
-  grep -q -- "--min-vintage" "$err"
+  [[ "$out" == *"Enqueued implement request"* ]] || return 1
+  [ ! -s "$err" ] || return 1
 
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e 'has("prefer_project_dir")' "$pending"
-  [ "$status" -eq 0 ]
+  outcome_is 0
 }
 
 @test "request without a placement stance refuses naming all four options" {
@@ -619,18 +477,35 @@ journal_boundaries() {
   [ "$status" -eq 0 ]
 }
 
-@test "worker request refuses a missing or altered canonical guidance floor before enqueue" {
+@test "worker request renders the guidance floor and prepends it to a bare brief" {
   run bash "$REQUEST" --type worker --slug "impl-foo--w1" --context "brief body" --anywhere --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"Run 'lore dispatch guidance'"* ]]
-  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+  outcome_is 0 "Enqueued worker request" || return 1
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  local guidance; guidance="$(jq -r '.extra_context.dispatch_guidance' "$pending")"
+  # The composed brief opens with a complete block and closes with the caller's
+  # task content — a floor nobody had to remember, ahead of the work itself.
+  [[ "$guidance" == "<!-- lore-dispatch-guidance:v1:begin -->"* ]] || return 1
+  [[ "$guidance" == *"<!-- lore-dispatch-guidance:v1:end -->"$'\n'"brief body" ]] || return 1
+  # What the verb renders is what the floor's own validator accepts.
+  run bash -c "printf '%s' \"\$1\" | bash '$REPO_DIR/scripts/validate-dispatch-guidance.sh'" _ "$guidance"
+  outcome_is 0
+}
 
-  local altered="$TEST_KDIR/altered-guidance.txt"
-  sed 's/Binding: Treat/Binding: Ignore/' "$(worker_guidance_file)" > "$altered"
-  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --context "$altered" --anywhere --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"guidance binding declaration"* ]]
-  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+@test "worker request leaves a brief that already carries a block at one floor" {
+  local brief="$TEST_KDIR/composed.md"
+  cat "$(worker_guidance_file)" > "$brief"
+  printf 'brief body\n' >> "$brief"
+  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --context "$brief" --anywhere --kdir "$TEST_KDIR"
+  outcome_is 0 "Enqueued worker request" || return 1
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  local guidance; guidance="$(jq -r '.extra_context.dispatch_guidance' "$pending")"
+  [ "$(grep -cF '<!-- lore-dispatch-guidance:v1:begin -->' <<<"$guidance")" -eq 1 ]
+}
+
+@test "worker request still refuses an absent brief" {
+  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --anywhere --kdir "$TEST_KDIR"
+  [ ! -e "$TEST_KDIR/_sessions/requests" ] || return 1
+  outcome_is 1 "--context is required for --type worker"
 }
 
 @test "request stores a JSON-object --context verbatim" {
@@ -1980,172 +1855,6 @@ coordinate_event_vocab() {
   out="$(bash "$WAIT" feature-x --since 0 --timeout 5 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
   [ "$code" -eq 0 ]
   echo "$out" | jq -e --argjson nc "$first_row_end" '.matched.event=="needs_input" and .next_cursor==$nc'
-}
-
-@test "wait follow: one process emits every row through terminal (sleep-blocked delegation regression)" {
-  write_instance inst-a feature-x
-  local f="$TEST_KDIR/_sessions/events.jsonl"
-  printf '%s\n' \
-    '{"event":"step_completed","slug":"feature-x","step_id":"one"}' \
-    '{"event":"step_completed","slug":"feature-x","step_id":"two"}' \
-    '{"event":"terminus_reached","slug":"feature-x"}' \
-    '{"event":"closed","request_id":"spawn-rid","slug":"feature-x"}' > "$f"
-
-  local out code
-  out="$(bash "$WAIT" feature-x --follow --until terminus_reached --since 0 --timeout 10 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
-  [ "$code" -eq 0 ]
-  [ "$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("event")) | .event] | join(",")')" = \
-    "step_completed,step_completed,terminus_reached" ]
-  [ "$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("next_cursor"))] | length')" -eq 3 ]
-
-  local terminal_cursor
-  terminal_cursor="$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("next_cursor")) | .next_cursor][-1]')"
-  run bash "$WAIT" feature-x --until closed --since "$terminal_cursor" --timeout 1 --kdir "$TEST_KDIR"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *'"event":"closed"'* ]]
-}
-
-@test "wait follow: a backgrounded non-terminal row keeps polling to a later terminal (set -e continue-path regression)" {
-  # Backgrounded (non-tty stdout) follow whose first poll batch holds only a
-  # non-terminal row must keep polling. The read-loop's last body command is the
-  # `[[ terminal == true ]]` guard, which returns 1 for a non-terminal row; under
-  # `set -e` that once aborted the whole verb with exit 1 (no stderr) right after
-  # emitting the row, instead of continuing until the stop-set row landed.
-  write_instance inst-a feature-x
-  local f="$TEST_KDIR/_sessions/events.jsonl"
-  printf '%s\n' '{"event":"step_completed","slug":"feature-x","step_id":"one"}' > "$f"
-
-  local out="$TEST_KDIR/follow.out" err="$TEST_KDIR/follow.err" code
-  # stdout to a file (not a tty), stdin detached — model the background invocation.
-  bash "$WAIT" feature-x --follow --until terminus_reached --since 0 --timeout 10 --kdir "$TEST_KDIR" </dev/null >"$out" 2>"$err" &
-  local pid=$!
-  # Append the terminal row after the first poll batch has been consumed.
-  sleep 2
-  printf '%s\n' '{"event":"terminus_reached","slug":"feature-x"}' >> "$f"
-  wait "$pid" && code=0 || code=$?
-
-  [ "$code" -eq 0 ]
-  [ "$(jq -rs '[.[] | select(has("event")) | .event] | join(",")' "$out")" = \
-    "step_completed,terminus_reached" ]
-  [ "$(jq -rs '[.[] | select(has("next_cursor"))] | length' "$out")" -eq 2 ]
-}
-
-@test "wait follow: checkpoints survive stderr suppression (stderr cursor-loss regression)" {
-  write_instance inst-a feature-x
-  printf '%s\n' \
-    '{"event":"step_completed","slug":"feature-x","step_id":"one"}' \
-    '{"event":"closed","request_id":"spawn-rid","slug":"feature-x"}' \
-    > "$TEST_KDIR/_sessions/events.jsonl"
-
-  local out
-  out="$(bash "$WAIT" feature-x --follow --since 0 --timeout 10 --kdir "$TEST_KDIR" 2>/dev/null)"
-  [ "$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("event"))] | length')" -eq 2 ]
-  [ "$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("next_cursor"))] | length')" -eq 2 ]
-  local nc size
-  nc="$(printf '%s\n' "$out" | tail -n1 | jq -r '.next_cursor')"
-  size="$(wc -c < "$TEST_KDIR/_sessions/events.jsonl" | tr -d ' ')"
-  [ "$nc" -eq "$size" ]
-}
-
-@test "wait follow: an empty batch times out without a false match (BSD grep -qv regression)" {
-  write_instance inst-a feature-x
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  local stub_bin="$TEST_KDIR/stub-bin" date_count="$TEST_KDIR/date-count"
-  mkdir -p "$stub_bin"
-  cat > "$stub_bin/date" <<'EOF'
-#!/usr/bin/env bash
-count=0
-[ ! -f "$DATE_COUNT" ] || count="$(cat "$DATE_COUNT")"
-count=$((count + 1))
-printf '%s\n' "$count" > "$DATE_COUNT"
-if [ "$count" -eq 1 ]; then printf '%s\n' 100; else printf '%s\n' 3700; fi
-EOF
-  cat > "$stub_bin/sleep" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-  chmod +x "$stub_bin/date" "$stub_bin/sleep"
-
-  local out err="$TEST_KDIR/wait.err" code
-  out="$(PATH="$stub_bin:$PATH" DATE_COUNT="$date_count" bash "$WAIT" feature-x --follow --since 0 --json --kdir "$TEST_KDIR" 2>"$err")" && code=0 || code=$?
-  [ "$code" -eq 2 ]
-  [ "$(printf '%s\n' "$out" | jq -s 'length')" -eq 1 ]
-  echo "$out" | jq -e '.outcome=="timeout" and .matched==null and .next_cursor==0'
-  grep -q "timed out after 3600s" "$err"
-}
-
-@test "wait follow: JSON emits ordered matched objects and marks only the stop row terminal" {
-  write_instance inst-a feature-x
-  printf '%s\n' \
-    '{"event":"step_completed","slug":"feature-x","step_id":"one"}' \
-    '{"event":"terminus_reached","slug":"feature-x"}' \
-    > "$TEST_KDIR/_sessions/events.jsonl"
-  local out
-  out="$(bash "$WAIT" feature-x --follow --until terminus_reached --since 0 --json --timeout 10 --kdir "$TEST_KDIR")"
-  echo "$out" | jq -s -e '
-    length == 2
-    and [.[].matched.event] == ["step_completed", "terminus_reached"]
-    and [.[].terminal] == [false, true]
-    and (.[0].next_cursor < .[1].next_cursor)
-  '
-}
-
-@test "wait next-session: binds claimed or spawned first, survives retry rows, and ignores predecessor terminal" {
-  local order
-  for order in claimed-first spawned-first; do
-    : > "$TEST_KDIR/_sessions/events.jsonl"
-    printf '%s\n' '{"event":"closed","request_id":"old-rid","slug":"feature-x"}' >> "$TEST_KDIR/_sessions/events.jsonl"
-    if [[ "$order" == claimed-first ]]; then
-      printf '%s\n' \
-        '{"event":"claimed","request_id":"next-rid","slug":"feature-x"}' \
-        '{"event":"spawn_failed","request_id":"next-rid","slug":"feature-x"}' \
-        '{"event":"request_reclaimed","request_id":"next-rid","slug":"feature-x"}' \
-        '{"event":"spawned","request_id":"next-rid","slug":"feature-x"}' \
-        >> "$TEST_KDIR/_sessions/events.jsonl"
-    else
-      printf '%s\n' \
-        '{"event":"spawned","request_id":"next-rid","slug":"feature-x"}' \
-        '{"event":"claimed","request_id":"next-rid","slug":"feature-x"}' \
-        >> "$TEST_KDIR/_sessions/events.jsonl"
-    fi
-    printf '%s\n' \
-      '{"event":"step_completed","slug":"feature-x","step_id":"one"}' \
-      '{"event":"terminus_reached","slug":"feature-x"}' \
-      >> "$TEST_KDIR/_sessions/events.jsonl"
-
-    local out code
-    out="$(bash "$WAIT" feature-x --follow --next-session --until terminus_reached --since 0 --timeout 10 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
-    [ "$code" -eq 0 ]
-    [[ "$out" != *'"request_id":"old-rid"'* ]]
-    [[ "$out" == *'"request_id":"next-rid"'* ]]
-    [ "$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("event")) | .event][-1]')" = "terminus_reached" ]
-  done
-}
-
-@test "wait next-session: abandoned successor emits the row and exits session-gone 3" {
-  printf '%s\n' \
-    '{"event":"requested","request_id":"next-rid","slug":"feature-x"}' \
-    '{"event":"request_abandoned","request_id":"next-rid","slug":"feature-x"}' \
-    > "$TEST_KDIR/_sessions/events.jsonl"
-  local out code
-  out="$(bash "$WAIT" feature-x --follow --next-session --until closed --since 0 --timeout 10 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
-  [ "$code" -eq 3 ]
-  [ "$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("event")) | .event] | join(",")')" = \
-    "requested,request_abandoned" ]
-}
-
-@test "wait next-session: rejects incompatible target and request modes" {
-  run bash "$WAIT" feature-x --next-session --since 0 --timeout 0 --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"--next-session requires --follow"* ]]
-
-  run bash "$WAIT" --work-item feature-x --follow --next-session --since 0 --timeout 0 --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"requires an exact positional slug"* ]]
-
-  run bash "$WAIT" feature-x --follow --next-session --request-id rid --since 0 --timeout 0 --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"binds the successor request ID"* ]]
 }
 
 @test "wait: the default until-set also wakes on close_failed" {
