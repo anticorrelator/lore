@@ -3101,6 +3101,27 @@ answer_peek_ready() {
 }
 
 # --- Transient modal flashes -----------------------------------------------
+
+# Answer the next peek request with an explicit readiness verdict, standing in for
+# the owning TUI instance. One response per call — a peek deletes what it reads.
+answer_peek_with() {
+  local slug="$1" ready="$2" blocked="$3"
+  ( local f="" rid _i
+    for _i in $(seq 1 100); do
+      f="$(ls "$TEST_KDIR/_sessions/peek-requests"/*.json 2>/dev/null | head -1)"
+      if [ -n "$f" ]; then break; fi
+      sleep 0.1
+    done
+    [ -n "$f" ] || exit 0
+    rid="$(jq -r .request_id "$f")"
+    rm -f "$f"
+    mkdir -p "$TEST_KDIR/_sessions/peek-responses"
+    jq -n --arg r "$rid" --arg s "$slug" --argjson ready "$ready" --arg b "$blocked" \
+      '{request_id: $r, slug: $s, captured_at: "t", ready: $ready,
+        blocked_reason: $b, rows: ["x"]}' \
+      > "$TEST_KDIR/_sessions/peek-responses/$rid.json" ) &
+}
+
 #
 # Some harnesses raise a modal and clear it themselves inside a second — under
 # bypass-permissions the seat never had a decision to make. The emitter's row was
@@ -3304,169 +3325,11 @@ answer_peek_ready() {
   [[ "$output" == *'`lore session wait`'* ]]
 }
 
-# --- Stall detection and suspension skew -----------------------------------
+# --- Suspension skew --------------------------------------------------------
 #
-# A session that hangs mid-turn writes no row, and a suspended machine freezes a
-# whole window the same silent way. Both read as a healthy quiet board, so these
-# pin the two timers that look anyway: what the probe wakes on, what it
-# deliberately stays quiet about, and that a slept-through window ends before any
-# age-derived check gets to speak.
-
-# Answer the next peek request with an explicit readiness verdict, standing in for
-# the owning TUI instance. One response per call — a peek deletes what it reads.
-answer_peek_with() {
-  local slug="$1" ready="$2" blocked="$3"
-  ( local f="" rid _i
-    for _i in $(seq 1 100); do
-      f="$(ls "$TEST_KDIR/_sessions/peek-requests"/*.json 2>/dev/null | head -1)"
-      if [ -n "$f" ]; then break; fi
-      sleep 0.1
-    done
-    [ -n "$f" ] || exit 0
-    rid="$(jq -r .request_id "$f")"
-    rm -f "$f"
-    mkdir -p "$TEST_KDIR/_sessions/peek-responses"
-    jq -n --arg r "$rid" --arg s "$slug" --argjson ready "$ready" --arg b "$blocked" \
-      '{request_id: $r, slug: $s, captured_at: "t", ready: $ready,
-        blocked_reason: $b, rows: ["x"]}' \
-      > "$TEST_KDIR/_sessions/peek-responses/$rid.json" ) &
-}
-
-@test "watch: a live session gone silent with a waiting composer wakes confirmed" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  write_instance inst-a feature-x
-  write_event_ago quiescent feature-x 1000
-  answer_peek_with feature-x true ""
-  local out; out="$(watch_json --since 0 --no-board-delta --peek-timeout 10 \
-    --stall-after 60 --timeout 0)"
-  wait
-
-  # No row said anything: the last thing this session emitted was a quiescent
-  # sixteen minutes ago, and the screen is what turned that silence into a verdict.
-  echo "$out" | jq -e '.outcome=="session_stalled" and .tier=="confirmed"'
-  echo "$out" | jq -e '.authority=="screen-signature" and .classification.state=="stall_confirmed"'
-  echo "$out" | jq -e '.classification.label=="stalled-at-composer"'
-  echo "$out" | jq -e '.matched==null'
-  echo "$out" | jq -e '.probe.session.slug=="feature-x" and .probe.session.band=="stalled"'
-  echo "$out" | jq -e '.probe.session.last_row_event=="quiescent"'
-  echo "$out" | jq -e '.probe.session.row_age_seconds >= 1000 and .probe.session.peek.ready==true'
-  echo "$out" | jq -e '.probe.live_sessions==1 and .probe.in_scope==1 and .probe.eligible==1 and .probe.examined==1'
-
-  # The signature set grew two trigger keys, so the version consumers read moved
-  # with it.
-  echo "$out" | jq -e '.signature_version==2'
-}
-
-@test "watch: a long turn stays quiet below the aged threshold and is still counted" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  write_instance inst-a feature-x
-  write_event_ago quiescent feature-x 1000
-  answer_peek_with feature-x false generating
-  local out; out="$(watch_json --since 0 --no-board-delta --peek-timeout 10 \
-    --stall-after 60 --stall-aged-after 5000 --timeout 0)"
-  wait
-
-  # A screen still producing output is a session working. This is the one place
-  # the watcher deliberately says nothing about something it looked at — nothing
-  # is waiting on the seat, so there is no actionable event being silenced.
-  echo "$out" | jq -e '.outcome=="timeout" and .tier=="quiet"'
-
-  # Not delivered is not discarded: the counts ride the quiet wake, so a window
-  # that looked and found nothing reads differently from one that never looked.
-  echo "$out" | jq -e '.probe.consulted==true and .probe.eligible==1 and .probe.examined==1'
-  echo "$out" | jq -e '.probe.session==null'
-}
-
-@test "watch: the same generating screen past the aged threshold wakes aged_advisory" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  write_instance inst-a feature-x
-  write_event_ago quiescent feature-x 1000
-  answer_peek_with feature-x false generating
-  local out; out="$(watch_json --since 0 --no-board-delta --peek-timeout 10 \
-    --stall-after 60 --stall-aged-after 600 --timeout 0)"
-  wait
-
-  # Past this threshold the length of the turn is itself the finding.
-  echo "$out" | jq -e '.outcome=="session_stalled" and .tier=="aged_advisory"'
-  echo "$out" | jq -e '.classification.state=="stall_unconfirmed"'
-  echo "$out" | jq -e '.classification.label=="long-turn-past-aged-threshold"'
-  echo "$out" | jq -e '.probe.session.band=="aged"'
-}
-
-@test "watch: a stall wakes once per escalation step, and its next row clears the record" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  write_instance inst-a feature-x
-  write_event_ago quiescent feature-x 1000
-  answer_peek_with feature-x true ""
-  local out; out="$(watch_json --since 0 --no-board-delta --peek-timeout 10 \
-    --stall-after 60 --probe-every 1 --timeout 0)"
-  wait
-  echo "$out" | jq -e '.outcome=="session_stalled" and .tier=="confirmed"'
-  [ -f "$TEST_KDIR/_coordination/watch-stalls.json" ]
-
-  # Still hung, same tier, same silence. On a two-minute cadence an unsuppressed
-  # confirmed stall would be thirty wakes an hour for one problem.
-  sleep 1
-  answer_peek_with feature-x true ""
-  out="$(watch_json --since 0 --no-board-delta --peek-timeout 10 \
-    --stall-after 60 --probe-every 1 --timeout 0)"
-  wait
-  echo "$out" | jq -e '.outcome=="timeout" and .probe.examined==1 and .probe.session==null'
-
-  # A new row is exactly the evidence that the silence ended, so it drops the
-  # record and the next stall is a fresh one.
-  write_event_ago step_completed feature-x 500
-  sleep 1
-  answer_peek_with feature-x true ""
-  out="$(watch_json --since 0 --no-board-delta --peek-timeout 10 \
-    --stall-after 60 --probe-every 1 --timeout 0)"
-  wait
-  echo "$out" | jq -e '.outcome=="session_stalled" and .tier=="confirmed"'
-  echo "$out" | jq -e '.probe.session.last_row_event=="step_completed"'
-}
-
-@test "watch: an out-of-scope stalled session is not this seat's to wake on" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  write_instance inst-a other-item
-  write_event_ago quiescent other-item 1000
-  local out; out="$(watch_json --slug feature-x --since 0 --no-board-delta \
-    --peek-timeout 1 --stall-after 60 --timeout 0)"
-
-  # The opposite of the rule for actionable rows, and deliberately so: a row with
-  # no identity key cannot be scoped on its own evidence, while a registry session
-  # always carries its slug. Nothing undecidable is being dropped here, and a
-  # probe is an active interrogation of somebody else's session.
-  echo "$out" | jq -e '.outcome=="timeout"'
-  echo "$out" | jq -e '.probe.live_sessions==1 and .probe.in_scope==0 and .probe.eligible==0'
-  [ ! -f "$TEST_KDIR/_coordination/watch-stalls.json" ]
-}
-
-@test "watch: a live session with no slug is counted, not silently dropped" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  write_instance_session inst-b "" 22222222-2222-2222-2222-222222222222
-  local out; out="$(watch_json --since 0 --no-board-delta --peek-timeout 1 \
-    --stall-after 60 --timeout 0)"
-
-  # Peek addresses sessions by slug, so a chat session cannot be probed at all.
-  # Reporting the count makes that gap visible instead of invisible.
-  echo "$out" | jq -e '.probe.live_sessions==1 and .probe.skipped_slugless==1'
-  echo "$out" | jq -e '.probe.in_scope==0 and .probe.examined==0'
-}
-
-@test "watch: an unanswered peek on a session the registry claims is live is a confirmed stall" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  write_instance inst-a feature-x
-  write_event_ago quiescent feature-x 1000
-  # No responder. The registry says an instance is live and hosting this session,
-  # so silence means the thing that does the observing has stopped serving — which
-  # is why this is confirmed here and only an advisory on the row-driven path,
-  # where a park row can name a session no instance hosts at all.
-  local out; out="$(watch_json --since 0 --no-board-delta --peek-timeout 1 \
-    --stall-after 60 --timeout 0)"
-  echo "$out" | jq -e '.outcome=="session_stalled" and .tier=="confirmed"'
-  echo "$out" | jq -e '.classification.label=="probe-unanswered-by-live-instance"'
-  echo "$out" | jq -e '.probe.session.peek.consulted==true and .probe.session.peek.error!=null'
-}
+# A suspended machine freezes a whole window silently, and a frozen window reads
+# as a healthy quiet board. These pin the timer that looks anyway: a
+# slept-through window ends before any age-derived check gets to speak.
 
 @test "watch: a window that slept through a suspension ends before any age check speaks" {
   : > "$TEST_KDIR/_sessions/events.jsonl"
@@ -3475,19 +3338,18 @@ answer_peek_with() {
   write_pending_request req-stuck feature-x--w2 dead-instance 3600
 
   # Wall time advances across a system suspension and monotonic time does not, so
-  # the gap between the two IS the nap. Both other checks would fire on this
-  # fixture, and neither may: after a nap every request looks stale and every
-  # session looks silent, so reporting those first would bury the freeze that
-  # produced them.
+  # the gap between the two IS the nap. The pending check would fire on this
+  # fixture and may not: after a nap every request looks stale, so reporting that
+  # first would bury the freeze that produced it.
   local base; base="$(python3 -c 'import time; print("%.3f %.3f" % (time.time() - 600, time.monotonic()))')"
   local out
   out="$(LORE_WATCH_CLOCK_BASELINE="$base" bash "$WATCH" --since 0 --no-board-delta \
-    --peek-timeout 1 --stall-after 60 --json --timeout 0 --kdir "$TEST_KDIR" 2>/dev/null || true)"
+    --peek-timeout 1 --json --timeout 0 --kdir "$TEST_KDIR" 2>/dev/null || true)"
   echo "$out" | jq -e '.outcome=="clock_skew" and .tier=="confirmed"'
   echo "$out" | jq -e '.classification.label=="window-slept-through-suspension"'
   echo "$out" | jq -e '.clock_skew.skew_seconds >= 120 and .clock_skew.threshold_seconds==120'
   echo "$out" | jq -e '.clock_skew.wall_elapsed_seconds > .clock_skew.monotonic_elapsed_seconds'
-  echo "$out" | jq -e '.probe.session==null and .pending==[]'
+  echo "$out" | jq -e '.pending==[]'
 
   # It is a wake to re-arm from, so it ends the window the way every other
   # re-armable terminal does.
@@ -3497,7 +3359,7 @@ answer_peek_with() {
 
   # A window whose clocks agree does not end early — the pending request nobody
   # claimed is what wakes it instead.
-  out="$(watch_json --since 0 --no-board-delta --peek-timeout 1 --stall-after 0 --timeout 0)"
+  out="$(watch_json --since 0 --no-board-delta --peek-timeout 1 --timeout 0)"
   echo "$out" | jq -e '.outcome=="pending_stale" and .clock_skew==null'
 }
 
@@ -3506,51 +3368,14 @@ answer_peek_with() {
   local base; base="$(python3 -c 'import time; print("%.3f %.3f" % (time.time() - 600, time.monotonic()))')"
   local out
   out="$(LORE_WATCH_CLOCK_BASELINE="$base" bash "$WATCH" --since 0 --no-board-delta \
-    --suspend-skew 0 --stall-after 0 --json --timeout 0 --kdir "$TEST_KDIR" 2>/dev/null || true)"
+    --suspend-skew 0 --json --timeout 0 --kdir "$TEST_KDIR" 2>/dev/null || true)"
   echo "$out" | jq -e '.outcome=="timeout" and .clock_skew==null'
 }
 
-@test "watch: --probe-every 0 and --stall-after 0 each turn stall probing off by name" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  write_instance inst-a feature-x
-  write_event_ago quiescent feature-x 1000
-
-  local out; out="$(watch_json --since 0 --no-board-delta --probe-every 0 --timeout 0)"
-  echo "$out" | jq -e '.outcome=="timeout" and .probe.consulted==false'
-  echo "$out" | jq -e '.probe.reason=="disabled by --probe-every 0"'
-
-  out="$(watch_json --since 0 --no-board-delta --stall-after 0 --timeout 0)"
-  echo "$out" | jq -e '.probe.consulted==false and .probe.reason=="disabled by --stall-after 0"'
-
-  # The probe reads screens; a run that cannot read one has no instrument, so it
-  # says so rather than treating every session as unreachable.
-  out="$(watch_json --since 0 --no-board-delta --peek-timeout 0 --timeout 0)"
-  echo "$out" | jq -e '.probe.consulted==false and (.probe.reason|test("--peek-timeout 0"))'
-}
-
-@test "watch: refuses probe thresholds that are non-numeric or inverted" {
-  run bash "$WATCH" --probe-every soon --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"invalid --probe-every"* ]]
-
-  run bash "$WATCH" --stall-after later --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"invalid --stall-after"* ]]
-
+@test "watch: refuses a non-numeric --suspend-skew" {
   run bash "$WATCH" --suspend-skew never --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
   [[ "$output" == *"invalid --suspend-skew"* ]]
-
-  # An inverted pair reads as configured and reaches nothing, so it is a usage
-  # error rather than a watcher that silently never escalates.
-  run bash "$WATCH" --stall-after 900 --stall-aged-after 100 --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"below --stall-after"* ]]
-
-  # Zero on either side means "off", which is not an inversion.
-  run bash "$WATCH" --stall-after 900 --stall-aged-after 0 --no-board-delta \
-    --timeout 0 --kdir "$TEST_KDIR"
-  [ "$status" -eq 2 ]
 }
 
 @test "coordinate watch routes through the dispatcher and is advertised" {
