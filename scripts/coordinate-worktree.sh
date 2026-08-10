@@ -14,10 +14,8 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import uuid
 from pathlib import Path
@@ -26,9 +24,12 @@ from pathlib import Path
 SCRIPT_DIR = Path(sys.argv[1])
 ARGV = sys.argv[2:]
 REPO_ROOT = SCRIPT_DIR.parent
-LEASE_SECONDS = 15 * 60
 SCHEMA_VERSION = 1
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+# `sweep_claimed` and `swept` are no longer written: they name the reclaim a
+# lease-expiry sweeper used to perform, and a tree now comes down as part of the
+# release that declared it done. They stay in the set because archived rows
+# carry them in their histories, and a record must still read back.
 STATES = {
     "reserved", "bound", "active", "recovered", "quiescent",
     "reconciling", "cleanup_due", "cleanup_blocked", "sweep_claimed",
@@ -48,13 +49,6 @@ TRANSITIONS = {
 # this says only which of those edges is the normal one, so no hint can name a
 # transition the machine would refuse.
 ROUTE_PREFERENCE = {"bound": "active", "active": "quiescent"}
-# Why a sweep took a tree, keyed on the state it was in when the sweep found it.
-# Anything not listed here reached the sweep through the dead-man's switch.
-SWEEP_REASONS = {
-    "cleanup_due": "cleanup due — the owner released this tree, so the sweep finished "
-                   "the teardown cleanup would have done",
-    "cleanup_blocked": "retrying a cleanup that was blocked",
-}
 
 
 def now():
@@ -63,10 +57,6 @@ def now():
 
 def iso(value):
     return value.isoformat().replace("+00:00", "Z")
-
-
-def parse_time(value):
-    return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def fail(message):
@@ -139,14 +129,6 @@ def atomic_json(path, value):
             os.unlink(name)
 
 
-def sha256_file(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def safe_id(value, label):
     if not ID_RE.fullmatch(value or ""):
         fail(f"invalid {label}: {value!r}")
@@ -166,8 +148,7 @@ class Manager:
         self.claims = self.root / "claims"
         self.archive = self.root / "archive"
         self.trees = self.root / "trees"
-        self.recovery = self.kdir / "_coordination" / "recovery"
-        for path in (self.registry, self.claims, self.archive, self.trees, self.recovery):
+        for path in (self.registry, self.claims, self.archive, self.trees):
             path.mkdir(parents=True, exist_ok=True)
         self.lock_handle = open(self.root / ".manager.lock", "a+")
         fcntl.flock(self.lock_handle, fcntl.LOCK_EX)
@@ -199,7 +180,7 @@ class Manager:
         required = (
             "schema_version", "worktree_id", "execution_dir", "temporary_branch",
             "git_common_dir", "allocation_base_sha", "owner_item", "stream_id",
-            "attempt_id", "owner", "lease", "guard_identity", "state", "history",
+            "attempt_id", "owner", "guard_identity", "state", "history",
         )
         missing = [field for field in required if field not in row]
         if missing:
@@ -213,8 +194,6 @@ class Manager:
             fail("execution_dir is outside the manager-owned namespace")
         if row["owner"].get("kind") not in ("session", "seat") or not row["owner"].get("id"):
             fail("owner must carry kind=session|seat and a durable id")
-        if row["lease"].get("duration_seconds") != LEASE_SECONDS:
-            fail("lease duration must be exactly 900 seconds")
 
     def validate_identity(self, row):
         observed = guard("validate", identity=row["guard_identity"])
@@ -226,101 +205,11 @@ class Manager:
         row["updated_at"] = iso(now())
         row["history"].append({"state": state, "at": row["updated_at"], "reason": reason})
 
-    def check_owner_pid(self, pid, verb):
-        """Refuse a handle that cannot outlive the command recording it.
-
-        Every --owner-pid surface warns about `$$` and none of them checked it,
-        so the warning only ever reached people who did not need it. Both
-        refusals below describe the same silent failure: a pid that is dead by
-        the time the sweep reads it is indistinguishable from no handle at all,
-        and the tree goes fifteen minutes later with the work still in it.
-
-        `lore` execs straight through to this process, so a `$$` typed on the
-        command line arrives as this pid or its parent depending on how many
-        subshells the caller's line went through. Deeper ancestors are not
-        checked: a long-lived harness process is also an ancestor, and there is
-        nothing in a pid that separates the two.
-        """
-        if pid is None:
-            return
-        expiry = (
-            f"  A handle that dies with the command is swept exactly like no handle at "
-            f"all — {LEASE_SECONDS}s from now, with the work still running in the tree.\n"
-            "  Pass the pid of the long-lived harness process that owns the seat."
-        )
-        if pid == os.getpid():
-            fail(
-                f"refusing --owner-pid {pid}: that is this command's own process. `lore` "
-                "execs straight through to the manager, so a `$$` written on the command "
-                f"line lands here, and it is gone the moment {verb} returns.\n"
-                + expiry
-            )
-        if pid == os.getppid():
-            fail(
-                f"refusing --owner-pid {pid}: that is the shell that invoked this command, "
-                f"which exits as soon as {verb} returns — the `$$` trap, one process "
-                "further out.\n" + expiry
-            )
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            fail(
-                f"refusing --owner-pid {pid}: no such process. The handle is dead before "
-                "it is even recorded.\n"
-                f"  A dead handle is swept exactly like no handle at all, {LEASE_SECONDS}s "
-                "from now, with the work still running in the tree.\n"
-                "  Pass the pid of a process that is alive now and outlives this command."
-            )
-        except PermissionError:
-            # Another user's process: it exists, which is the whole claim a
-            # handle makes. owner_live() reads this case the same way.
-            pass
-
     def allocate(self, args):
-        sweep_result = self.sweep_all()
-        if sweep_result["failed"]:
-            fail("stale cleanup is blocked; retry sweep before allocating: " + ", ".join(sweep_result["failed"]))
         for value, label in ((args.work_item, "work item"), (args.stream, "stream"), (args.attempt, "attempt"), (args.owner_id, "owner id")):
             safe_id(value, label)
         if args.owner_kind not in ("session", "seat"):
             fail("owner kind must be session or seat")
-        self.check_owner_pid(args.owner_pid, "allocate")
-        # The lease is a dead-man's switch, not a timer: sweep_all reclaims an
-        # expired tree only when owner_live() cannot prove the owner is still
-        # there. owner_live() knows exactly two proofs — owner.pid and
-        # owner.tmux_name — so an owner record carrying neither is
-        # unprotectable by construction and its tree is reclaimed at
-        # LEASE_SECONDS while the owner is alive and working in it.
-        #
-        # Refusing at allocate beats a silent countdown: the failure lands on
-        # the dispatcher, at dispatch, with a fixable message, instead of on a
-        # worker fifteen minutes later with its checkout gone.
-        if not args.owner_pid and not args.owner_tmux:
-            if args.owner_kind == "seat":
-                fail(
-                    "seat lease requires a liveness handle: pass --owner-pid or --owner-tmux.\n"
-                    "  Without one the owner cannot be proven alive, and the tree is swept "
-                    f"{LEASE_SECONDS}s after allocation even while the seat is working in it.\n"
-                    "  --owner-pid must be the long-lived harness process that owns the seat. "
-                    "Do NOT pass $$: a subshell's pid dies when the command returns, which "
-                    "records a handle that looks live at allocate time and fails identically later."
-                )
-            # `session` is deliberately still permitted. No automated caller
-            # allocates at all (the TUI's allocateSessionWorktreeCmd drives the
-            # Go guard-identity path, and session-request.sh only consumes an
-            # already-allocated --worktree-id), so there is no call site that
-            # can be shown to already pass a handle — the precondition for
-            # tightening this path. Warn instead of refusing, so the hole is
-            # visible without breaking the documented flow.
-            warn(
-                "session-owned trees are normally allocated by the claiming TUI, which owns "
-                "the lease through its registry identity and renews it on its own sync loop; "
-                "a seat dispatching an item-backed worker session allocates nothing extra. "
-                "This call is a hand-allocation and it carries no liveness handle, so the "
-                f"tree is swept {LEASE_SECONDS}s from now even if the session is alive. "
-                "If you are hand-allocating one, pass --owner-pid (the long-lived harness "
-                "process, never $$) or --owner-tmux."
-            )
         item_dir = self.kdir / "_work" / args.work_item
         if not item_dir.is_dir():
             fail(f"active owner work item not found: {args.work_item}")
@@ -348,13 +237,7 @@ class Manager:
             git(source, "branch", "-D", branch, check=False)
             raise
         stamp = now()
-        expires = stamp + dt.timedelta(seconds=LEASE_SECONDS)
         owner = {"kind": args.owner_kind, "id": args.owner_id}
-        if args.owner_pid is not None:
-            owner["pid"] = args.owner_pid
-        if args.owner_tmux:
-            owner["tmux_name"] = args.owner_tmux
-            owner["tmux_server"] = args.tmux_server
         row = {
             "schema_version": SCHEMA_VERSION,
             "worktree_id": worktree_id,
@@ -366,14 +249,12 @@ class Manager:
             "stream_id": args.stream,
             "attempt_id": args.attempt,
             "owner": owner,
-            "lease": {"duration_seconds": LEASE_SECONDS, "renewed_at": iso(stamp), "expires_at": iso(expires)},
             "guard_identity": identity,
             "state": "reserved",
             "created_at": iso(stamp),
             "updated_at": iso(stamp),
             "history": [{"state": "reserved", "at": iso(stamp), "reason": "allocated"}],
             "cleanup_proof": None,
-            "recovery": None,
         }
         atomic_json(self.registry / f"{worktree_id}.json", row)
         return row
@@ -384,22 +265,16 @@ class Manager:
             fail(claimed_or_terminal(row, "bind"))
         if row["state"] not in ("reserved", "bound", "active", "recovered"):
             fail(
-                f"worktree {args.worktree_id} is at '{row['state']}'; bind attaches or repairs "
-                "the owner handle on a lease that is still being worked, and quiescent onward "
-                "is the teardown half of the lifecycle — the owner has already released it.\n"
+                f"worktree {args.worktree_id} is at '{row['state']}'; bind attaches the owner "
+                "to a tree that is still being worked, and quiescent onward is the teardown "
+                "half of the lifecycle — the owner has already released it.\n"
                 + remaining_steps(row)
             )
         if row["owner"]["id"] != args.owner_id:
             fail(owner_mismatch(row, args.owner_id))
-        self.check_owner_pid(args.owner_pid, "bind")
         self.validate_identity(row)
         if row["state"] == "reserved":
             row["guard_identity"] = guard("transition", identity=row["guard_identity"], state="active")
-        if args.owner_pid is not None:
-            row["owner"]["pid"] = args.owner_pid
-        if args.owner_tmux:
-            row["owner"]["tmux_name"] = args.owner_tmux
-            row["owner"]["tmux_server"] = args.tmux_server
         if row["state"] == "reserved":
             self.add_history(row, "bound", "owner bound")
         else:
@@ -416,58 +291,12 @@ class Manager:
         self.validate_identity(row)
         self.add_history(row, args.to, args.reason or "manager transition")
         atomic_json(path, row)
+        if args.to == "cleanup_due":
+            # Removal hangs on the one act only the releasing owner performs.
+            # Asking for the release and asking for the teardown were two calls,
+            # and the second was the one that went missing.
+            return self.remove(row, args.reason or "released by its owner")
         return row
-
-    def renew(self, args):
-        path, row = self.load(args.worktree_id)
-        if path.parent != self.registry:
-            fail(claimed_or_terminal(row, "renew"))
-        if row["state"] in ("cleanup_due", "cleanup_blocked"):
-            fail(
-                f"worktree {args.worktree_id} is at '{row['state']}'; the lease stops being "
-                "renewable once cleanup is due, because renewing it would only postpone a "
-                "teardown its owner already asked for.\n"
-                "  Finish it instead: lore coordinate worktree cleanup --worktree-id "
-                f"{args.worktree_id}"
-            )
-        if row["owner"]["id"] != args.owner_id:
-            fail(owner_mismatch(row, args.owner_id))
-        self.validate_identity(row)
-        stamp = now()
-        row["lease"]["renewed_at"] = iso(stamp)
-        row["lease"]["expires_at"] = iso(stamp + dt.timedelta(seconds=LEASE_SECONDS))
-        row["updated_at"] = iso(stamp)
-        atomic_json(path, row)
-        return row
-
-    def owner_live(self, row):
-        owner = row["owner"]
-        pid = owner.get("pid")
-        if isinstance(pid, int) and pid > 0:
-            try:
-                os.kill(pid, 0)
-                return True
-            except ProcessLookupError:
-                pass
-            except PermissionError:
-                return True
-        tmux_name = owner.get("tmux_name")
-        if tmux_name:
-            server = owner.get("tmux_server") or "lore-tui"
-            try:
-                proc = run(["tmux", "-L", server, "has-session", "-t", tmux_name], check=False)
-            except FileNotFoundError:
-                # tmux is not installed, so this owner's liveness is
-                # unknowable. Report LIVE: the switch reclaims on proof of
-                # death, and inability to check is not that proof. Matches the
-                # PermissionError branch above, which also protects rather than
-                # reclaims. Without this the exception propagates out of
-                # sweep_all's per-row try, marking the row "failed" — which in
-                # turn blocks every subsequent `allocate`.
-                return True
-            if proc.returncode == 0:
-                return True
-        return False
 
     def claim(self, row):
         source = self.registry / f"{row['worktree_id']}.json"
@@ -476,41 +305,6 @@ class Manager:
             fail(f"cleanup already claimed: {row['worktree_id']}")
         os.rename(source, target)
         return target
-
-    def capture_bundle(self, row, reason):
-        worktree = Path(row["execution_dir"])
-        stamp = iso(now()).replace(":", "").replace("-", "")
-        bundle = self.recovery / row["worktree_id"] / stamp
-        bundle.mkdir(parents=True, exist_ok=False)
-        commands = {
-            "status-v2.z": ("status", "--porcelain=v2", "-z", "--untracked-files=all"),
-            "tracked.patch": ("diff", "--binary", "HEAD", "--"),
-            "staged.patch": ("diff", "--binary", "--cached", "HEAD", "--"),
-            "unstaged.patch": ("diff", "--binary", "--"),
-        }
-        for name, command in commands.items():
-            (bundle / name).write_bytes(git(worktree, *command).stdout)
-        untracked_raw = git(worktree, "ls-files", "--others", "--exclude-standard", "-z").stdout
-        (bundle / "untracked.z").write_bytes(untracked_raw)
-        names = [part.decode(errors="surrogateescape") for part in untracked_raw.split(b"\0") if part]
-        with tarfile.open(bundle / "untracked.tar", "w") as archive:
-            for relative in names:
-                candidate = worktree / relative
-                if candidate.exists() or candidate.is_symlink():
-                    archive.add(candidate, arcname=relative, recursive=True)
-        files = []
-        for artifact in sorted(bundle.iterdir()):
-            files.append({"name": artifact.name, "sha256": sha256_file(artifact), "size": artifact.stat().st_size})
-        manifest = {
-            "schema_version": 1,
-            "worktree_id": row["worktree_id"],
-            "captured_at": iso(now()),
-            "reason": reason,
-            "source_identity": row["guard_identity"],
-            "files": files,
-        }
-        atomic_json(bundle / "manifest.json", manifest)
-        return bundle, sha256_file(bundle / "manifest.json")
 
     def reconcile(self, operation, row, *extra):
         """Invoke the reconciliation sole writer.
@@ -554,123 +348,44 @@ class Manager:
              f"  The tree exists and is yours. Replay registration: {repair}")
         return {"registered": False, "error": detail, "repair": repair}
 
-    def project_sweep_recovery(self, row):
-        """Copy the recorded sweep facts onto the stream lifecycle record.
+    def remove_and_prove(self, row, reason):
+        """Take the checkout down and prove it is gone, keeping what it committed.
 
-        Cleanup has already finished and archived by the time this runs, so a
-        failure is a projection failure and not a cleanup failure. The facts
-        stay on the archived manager row, which is what makes the retry
-        possible after the checkout is gone.
+        The temporary branch is deleted here, so anything committed on it would
+        become unreachable. A quarantine ref pinned at the tip before the
+        deletion preserves every commit for the cost of one Git command, and the
+        proof names it — a proof that reads as pure destruction is how a
+        preserved tree came to be reported as data loss.
         """
-        fact = row.get("coord_sweep_recovery")
-        if not fact:
-            return {"projected": False, "reason": "no recorded sweep facts"}
-        probe = self.reconcile("lookup-attempt", row)
-        if probe.returncode != 0:
-            return {"projected": False, "failed": True, "reason": self.proc_detail(probe)}
-        try:
-            found = json.loads(probe.stdout.decode(errors="replace"))
-        except json.JSONDecodeError as exc:
-            return {"projected": False, "failed": True, "reason": f"lookup returned invalid JSON: {exc}"}
-        outcome = found.get("outcome")
-        if outcome in ("coord_lookup_record_absent", "coord_lookup_stream_absent",
-                       "coord_lookup_attempt_absent"):
-            # A tree allocated before the lifecycle record existed has nothing
-            # to project onto. That is an absence, not a failure.
-            return {"projected": False, "reason": outcome}
-        extra = ["--expected-status", found.get("status"),
-                 "--branch-relevance", fact["relevance"]]
-        for flag, key in (("--branch-base-sha", "allocation_base_sha"),
-                          ("--branch-tip-sha", "branch_tip_sha"),
-                          ("--recovery-bundle", "recovery_bundle_path"),
-                          ("--quarantine-patch", "quarantine_patch_path")):
-            if fact.get(key):
-                extra += [flag, fact[key]]
-        proc = self.reconcile("advance-attempt", row, *extra)
-        if proc.returncode == 0:
-            return {"projected": True}
-        detail = self.proc_detail(proc)
-        warn(f"sweep recovery projection failed for {row['worktree_id']}: {detail}\n"
-             "  Cleanup itself succeeded. The facts are on the archived manager "
-             "row under coord_sweep_recovery; retry the projection from there.")
-        return {"projected": False, "failed": True, "reason": detail}
-
-    def note_projection(self, result, row):
-        outcome = self.project_sweep_recovery(row)
-        if outcome.get("projected"):
-            result["projected"].append(row["worktree_id"])
-        elif outcome.get("failed"):
-            result["projection_failed"][row["worktree_id"]] = outcome.get("reason")
-
-    def branch_recovery_relevance(self, row, repository, branch_ref):
-        """Whether the temporary branch ever moved off its allocation base.
-
-        `coord_branch_unchanged` says only that there is no committed delta
-        beyond the base. It is not "nothing to recover": capture_bundle
-        collects staged, unstaged, and untracked state whether or not the
-        branch ever moved, so the bundle path is reported either way.
-        """
-        base = row.get("allocation_base_sha")
-        probe = git(repository, "rev-parse", "--verify", "--quiet",
-                    branch_ref + "^{commit}", check=False)
-        tip = probe.stdout.decode(errors="replace").strip() if probe.returncode == 0 else ""
-        if not tip or not base:
-            relevance = "coord_branch_unavailable"
-        elif tip == base:
-            relevance = "coord_branch_unchanged"
-        else:
-            relevance = "coord_branch_advanced"
-        recovery = row.get("recovery") or {}
-        artifact = recovery.get("result_artifact") or {}
-        return {
-            "relevance": relevance,
-            "allocation_base_sha": base,
-            "branch_tip_sha": tip or None,
-            "recovery_bundle_path": recovery.get("bundle_path"),
-            "quarantine_patch_path": artifact.get("patch_path"),
-        }
-
-    def remove_and_prove(self, row, sweep, reason):
         worktree = Path(row["execution_dir"])
         repository = row["guard_identity"]["captured"]["canonical_path"]
         if worktree.exists():
             self.validate_identity(row)
-            if row["guard_identity"]["state"] == "captured":
-                row["guard_identity"] = guard("transition", identity=row["guard_identity"], state="active")
-            if row["guard_identity"]["state"] != "quarantined":
-                bundle, bundle_hash = self.capture_bundle(row, reason)
-                quarantine = guard("quarantine", identity=row["guard_identity"], reason=reason)
-                row["guard_identity"] = quarantine["identity"]
-                row["recovery"] = {
-                    "bundle_path": str(bundle),
-                    "manifest_sha256": bundle_hash,
-                    "result_artifact": quarantine["artifact"],
-                    "captured_before_removal": True,
-                }
-            elif not row.get("recovery", {}).get("captured_before_removal"):
-                raise RuntimeError("quarantined identity lacks persisted pre-removal recovery evidence")
-            # Persist the evidence pointer while the checkout still exists.
-            atomic_json(self.claims / f"{row['worktree_id']}.json", row)
             if os.environ.get("LORE_WORKTREE_FAIL_REMOVE") == "1":
                 raise RuntimeError("injected worktree removal failure")
             git(repository, "worktree", "remove", "--force", worktree)
-        elif not row.get("recovery", {}).get("captured_before_removal"):
-            raise RuntimeError("worktree vanished before recovery evidence was persisted")
         else:
             # A previous manager may have died after removal. Finish the
-            # registry/ref proof from the already-persisted recovery record.
+            # registry/ref proof over a checkout that is already gone.
             git(repository, "worktree", "remove", "--force", worktree, check=False)
         branch_ref = "refs/heads/" + row["temporary_branch"]
+        quarantine_ref = f"refs/lore/quarantine/{row['worktree_id']}"
+        # Read the tip while the ref still exists: after the deletion below
+        # nothing can tell whether the owner ever committed.
+        probe = git(repository, "rev-parse", "--verify", "--quiet",
+                    branch_ref + "^{commit}", check=False)
+        tip = probe.stdout.decode(errors="replace").strip() if probe.returncode == 0 else ""
+        # A branch still sitting on its allocation base has nothing of its own:
+        # every commit on it is already reachable from where it was cut, so a
+        # ref there would preserve nothing and read as though it did.
+        if tip and tip != row.get("allocation_base_sha"):
+            git(repository, "update-ref", quarantine_ref, tip)
+        else:
+            tip = ""
         guard_refs = [
             f"refs/lore/worktrees/{row['worktree_id']}/captured",
             f"refs/lore/worktrees/{row['worktree_id']}/result",
-            f"refs/lore/quarantine/{row['worktree_id']}",
         ]
-        # Read the branch tip while the ref still exists — the loop below
-        # deletes it, and after that nothing can tell whether the owner ever
-        # committed. The `coord_branch_*` vocabulary is defined in
-        # coordinate-reconcile.py; this is a quote of it, not a second copy.
-        row["coord_sweep_recovery"] = self.branch_recovery_relevance(row, repository, branch_ref)
         for ref in [branch_ref, *guard_refs]:
             git(repository, "update-ref", "-d", ref)
         registry_paths = []
@@ -690,149 +405,37 @@ class Manager:
             "git_registry_absent": registry_absent,
             "branch_disposition": "deleted" if branch_absent else "present",
             "guard_refs_disposition": "deleted" if guard_absent else "present",
+            "quarantine_ref": quarantine_ref if tip else None,
+            "quarantine_sha": tip or None,
             "verified_at": iso(now()),
         }
         proof["verified"] = path_absent and registry_absent and branch_absent and guard_absent
-        # Carry the recovery pointer INTO the cleanup proof. The proof is the
-        # artifact a human or agent reads at reclamation time, and on its own it
-        # reads as pure destruction — branch deleted, path absent, verified true
-        # — with no hint that the work survives in the `recovery` field of the
-        # same manifest. That omission cost forty minutes and a wrong data-loss
-        # report. Duplicating one path is cheap; re-deriving "was anything
-        # saved?" from a deleted checkout is not.
-        recovery = row.get("recovery") or {}
-        quarantine_patch = (recovery.get("result_artifact") or {}).get("patch_path")
-        proof["recovery_bundle_path"] = recovery.get("bundle_path")
-        # The bundle and the quarantine patch cover disjoint work: the bundle
-        # holds only what was uncommitted, so for a tree whose owner committed,
-        # naming the bundle alone reads as data loss.
-        proof["quarantine_patch_path"] = quarantine_patch
-        hints = []
-        if recovery.get("bundle_path"):
-            hints.append(
-                "Uncommitted work is in recovery.bundle_path (staged, unstaged, "
-                "and untracked)."
-            )
-        if quarantine_patch:
-            hints.append(
-                "Work the owner committed is in cleanup_proof.quarantine_patch_path, "
-                "not in the bundle."
-            )
-        if hints:
-            hints.append(
-                "Apply either with plain `git apply <patch>` — never "
-                "`git apply --3way`, which fails 'does not match index' because "
-                "the quarantined blobs are not in the target repository's index."
-            )
-        proof["recovery_hint"] = " ".join(hints) or None
         row["cleanup_proof"] = proof
         if not proof["verified"]:
             raise RuntimeError("cleanup proof incomplete across path, Git registry, or refs")
-        self.add_history(row, "swept" if sweep else "removed", reason)
+        self.add_history(row, "removed", reason)
         return row
 
-    def finish_claim(self, row, sweep, reason):
-        claim_path = self.claims / f"{row['worktree_id']}.json"
+    def remove(self, row, reason):
+        """Move the record registry -> claims -> archive as the tree comes down.
+
+        The rename is the transition: a crash leaves the record in the directory
+        that says how far the teardown got, and never in a state that claims
+        more than happened. A failure puts it back in the registry one state
+        short of released, so re-driving the release is the retry.
+        """
+        claim_path = self.claim(row)
         try:
-            if sweep and row["state"] != "sweep_claimed":
-                self.add_history(row, "sweep_claimed", reason)
-                atomic_json(claim_path, row)
-            row = self.remove_and_prove(row, sweep, reason)
+            row = self.remove_and_prove(row, reason)
         except BaseException as exc:
             row["last_cleanup_error"] = str(exc)
-            self.add_history(row, "cleanup_blocked", str(exc))
+            self.add_history(row, "reconciling", f"teardown did not finish: {exc}")
             atomic_json(claim_path, row)
             os.replace(claim_path, self.registry / claim_path.name)
             raise
         atomic_json(claim_path, row)
         os.replace(claim_path, self.archive / claim_path.name)
         return row
-
-    def cleanup(self, args):
-        path, row = self.load(args.worktree_id)
-        if path.parent != self.registry:
-            fail(claimed_or_terminal(row, "cleanup"))
-        if row["state"] not in ("cleanup_due", "cleanup_blocked"):
-            fail(
-                f"worktree {args.worktree_id} is at '{row['state']}'; cleanup removes a tree "
-                "only from cleanup_due or cleanup_blocked.\n"
-                "  Cleanup is the last beat of a lifecycle its owner drives: a tree is removed "
-                "because its owner released it, not because teardown came around and found it "
-                "sitting there.\n" + remaining_steps(row)
-            )
-        self.validate_identity(row)
-        self.claim(row)
-        return self.finish_claim(row, False, args.reason or "normal cleanup")
-
-    def sweep_all(self):
-        # `recovery` maps each swept id to its bundle path. A sweep result that
-        # lists only ids reads as pure destruction, which is how a reclaimed
-        # tree got reported as data loss; the pointer belongs in the same
-        # payload as the id, not one lookup away in an archived manifest.
-        result = {"swept": [], "protected": [], "not_expired": [], "failed": [],
-                  "recovery": {}, "projected": [], "projection_failed": {}}
-        for path in sorted(self.claims.glob("*.json")):
-            try:
-                row = json.loads(path.read_text(encoding="utf-8"))
-                self.validate_manifest(row)
-                row = self.finish_claim(row, True, "resume interrupted cleanup claim")
-                result["swept"].append(row["worktree_id"])
-                self.note_recovery(result, row)
-                self.note_projection(result, row)
-            except BaseException:
-                result["failed"].append(path.stem)
-        for path in sorted(self.registry.glob("*.json")):
-            try:
-                row = json.loads(path.read_text(encoding="utf-8"))
-                self.validate_manifest(row)
-                cleanup_retry = row["state"] in ("cleanup_due", "cleanup_blocked")
-                if not cleanup_retry and parse_time(row["lease"]["expires_at"]) > now():
-                    result["not_expired"].append(row["worktree_id"])
-                    continue
-                if not cleanup_retry and self.owner_live(row):
-                    result["protected"].append(row["worktree_id"])
-                    continue
-                self.validate_identity(row)
-                self.claim(row)
-                # Two different things reach this line and they are not the same
-                # event. A cleanup_due or cleanup_blocked tree skips both the
-                # expiry test and owner_live() above, deliberately: its owner
-                # already released it, so there is no live worker to protect and
-                # nothing to wait fifteen minutes for. Recording that as an
-                # "expired owner lease" reads as a reclaim from a live owner and
-                # contradicts the dead-man's-switch contract in the archived
-                # history — which is exactly how it was first read.
-                row = self.finish_claim(row, True, SWEEP_REASONS.get(
-                    row["state"], "expired owner lease — owner could not be proven alive"))
-                result["swept"].append(row["worktree_id"])
-                self.note_recovery(result, row)
-                self.note_projection(result, row)
-            except BaseException:
-                result["failed"].append(path.stem)
-        return result
-
-    def note_recovery(self, result, row):
-        fact = row.get("coord_sweep_recovery") or {}
-        bundle = (row.get("recovery") or {}).get("bundle_path")
-        patch = fact.get("quarantine_patch_path")
-        if not bundle and not patch:
-            return
-        result["recovery"][row["worktree_id"]] = {
-            "bundle_path": bundle,
-            "quarantine_patch_path": patch,
-            "branch_relevance": fact.get("relevance"),
-        }
-        where = []
-        if bundle:
-            where.append(f"uncommitted work in {bundle}")
-        if patch:
-            where.append(f"committed work in {patch}")
-        warn(
-            f"swept {row['worktree_id']}; work is recoverable — {'; '.join(where)} — "
-            "apply with plain `git apply <patch>`, never `git apply --3way` "
-            "(it fails 'does not match index': the quarantined blobs are not "
-            "in the target repository's index)"
-        )
 
     def show(self, args):
         if args.worktree_id:
@@ -857,32 +460,14 @@ def parser():
     root = argparse.ArgumentParser(prog="coordinate-worktree.sh")
     sub = root.add_subparsers(dest="command", required=True)
 
-    handle_help = (
-        "Liveness handle. The lease is a dead-man's switch, not a timer: an "
-        "expired tree is reclaimed only when the owner cannot be proven alive, "
-        "and the only two proofs are --owner-pid and --owner-tmux. An owner "
-        f"with neither is swept {LEASE_SECONDS}s after allocation even while it "
-        "is working in the tree. Required for --owner-kind seat."
-    )
-    pid_help = (
-        "PID of the LONG-LIVED harness process that owns the seat or session. "
-        "Never pass $$: a bash subshell's pid dies the moment the command "
-        "returns, recording a handle that looks live at allocate time and fails "
-        "identically to no handle at all later. Refused, not merely warned "
-        "about: this verb rejects its own pid, the pid of the shell that "
-        "invoked it, and any pid that is not alive right now. " + handle_help
-    )
-
     allocate = sub.add_parser(
         "allocate", parents=[common],
         description=(
-            "Allocate a manager-owned stream worktree under a lease. Pass a "
-            "liveness handle or the tree is reclaimed while you are using it. "
-            "If a tree is reclaimed, its work is not lost: the manifest's "
-            "`recovery.bundle_path` holds a patch set and the quarantine ref. "
-            "Recover with plain `git apply <patch>` — never `git apply --3way`, "
-            "which fails 'does not match index' because the quarantined blobs "
-            "are not in the target repository's index."
+            "Allocate a manager-owned stream worktree. Release it with "
+            "`transition --to cleanup_due`, which is also what takes it down: "
+            "anything committed on its temporary branch is pinned at "
+            "refs/lore/quarantine/<worktree-id> before the branch is deleted, "
+            "and the cleanup proof names that ref."
         ),
     )
     allocate.add_argument("--work-item", required=True)
@@ -890,38 +475,30 @@ def parser():
     allocate.add_argument("--attempt", required=True)
     allocate.add_argument("--owner-kind", required=True, help="session or seat")
     allocate.add_argument("--owner-id", required=True)
-    allocate.add_argument("--owner-pid", type=int, help=pid_help)
-    allocate.add_argument("--owner-tmux", help="tmux session name of the owner. " + handle_help)
-    allocate.add_argument("--tmux-server", default="lore-tui")
     allocate.add_argument("--source-dir", required=True)
 
     bind = sub.add_parser(
         "bind", parents=[common],
         description=(
-            "Attach or update the owner's liveness handle on an existing lease. "
-            "This is the repair path for a tree allocated without one."
+            "Attach the owner to an allocated tree, advancing its guard "
+            "identity to active. This is the step between allocate and work."
         ),
     )
     bind.add_argument("--worktree-id", required=True)
     bind.add_argument("--owner-id", required=True)
-    bind.add_argument("--owner-pid", type=int, help=pid_help)
-    bind.add_argument("--owner-tmux", help="tmux session name of the owner. " + handle_help)
-    bind.add_argument("--tmux-server", default="lore-tui")
 
-    transition = sub.add_parser("transition", parents=[common])
+    transition = sub.add_parser(
+        "transition", parents=[common],
+        description=(
+            "Take one lifecycle edge. `--to cleanup_due` is the release, and "
+            "the release is the teardown: it removes the checkout, deletes the "
+            "temporary branch, and archives the record."
+        ),
+    )
     transition.add_argument("--worktree-id", required=True)
     transition.add_argument("--to", required=True)
     transition.add_argument("--reason")
 
-    renew = sub.add_parser("renew", parents=[common])
-    renew.add_argument("--worktree-id", required=True)
-    renew.add_argument("--owner-id", required=True)
-
-    cleanup = sub.add_parser("cleanup", parents=[common])
-    cleanup.add_argument("--worktree-id", required=True)
-    cleanup.add_argument("--reason")
-
-    sweep = sub.add_parser("sweep", parents=[common])
     show = sub.add_parser("show", parents=[common])
     show.add_argument("--worktree-id")
     return root
@@ -980,19 +557,19 @@ def claimed_or_terminal(row, verb):
     """Why a record outside the live registry answers no verb at all."""
     return (
         f"worktree {row['worktree_id']} is at '{row['state']}' and its record has left the "
-        f"live registry, so {verb} has nothing to act on: cleanup has already claimed or "
+        f"live registry, so {verb} has nothing to act on: teardown has already claimed or "
         "finished this tree.\n"
-        f"  Its cleanup proof and recovery pointers are still readable: "
+        f"  Its cleanup proof, including the quarantine ref, is still readable: "
         f"lore coordinate worktree show --worktree-id {row['worktree_id']}"
     )
 
 
 def owner_mismatch(row, offered):
     return (
-        f"owner id {offered!r} does not own worktree {row['worktree_id']}; the lease belongs "
+        f"owner id {offered!r} does not own worktree {row['worktree_id']}; this tree belongs "
         f"to {row['owner']['id']!r}.\n"
-        "  A lease answers only to the owner that allocated it, so that a second seat cannot "
-        "renew or re-bind a tree it is not working in."
+        "  A tree answers only to the owner that allocated it, so that a second seat cannot "
+        "re-bind one it is not working in."
     )
 
 
@@ -1003,9 +580,8 @@ def transition_refusal(row, target):
         lines.append(f"  From '{row['state']}' the only legal next states are: {', '.join(legal)}.")
     else:
         lines.append(
-            f"  '{row['state']}' has no outgoing transition. cleanup_due and cleanup_blocked "
-            "are handed to `lore coordinate worktree cleanup`; sweep_claimed, removed and "
-            "swept are terminal."
+            f"  '{row['state']}' has no outgoing transition: cleanup_due takes the tree down "
+            "as it is entered, and sweep_claimed, removed and swept are terminal."
         )
     route = cleanup_route(row["state"])
     if route:
@@ -1023,19 +599,19 @@ def next_hint(row):
     A fresh allocation sits at `reserved`, and nothing downstream complains
     about that: the seat can allocate, dispatch, and integrate without the
     manifest ever leaving the state it started in — the omission only surfaces
-    at teardown, when the tree it thought it had finished with is still holding
-    a lease. The hint rides the allocate output rather than the manifest,
-    because it is advice to the caller, not state the manager owns.
+    at teardown, when the checkout it thought it had finished with is still on
+    disk. The hint rides the allocate output rather than the manifest, because
+    it is advice to the caller, not state the manager owns.
     """
     if row["owner"]["kind"] != "seat":
         return None
     return (
         "bind this tree before you dispatch into it "
         f"(lore coordinate worktree bind --worktree-id {row['worktree_id']} "
-        f"--owner-id {row['owner']['id']} --owner-pid <long-lived harness pid>), "
-        "then walk it through " + " -> ".join(cleanup_route("bound")) + " as you "
-        "accept and integrate; a tree left at reserved is still leased at "
-        "teardown and nothing before then will say so."
+        f"--owner-id {row['owner']['id']}), then walk it through "
+        + " -> ".join(cleanup_route("bound")) + " as you accept and integrate; "
+        "the last of those removes the checkout, and a tree left at reserved is "
+        "still on disk with nothing before teardown to say so."
     )
 
 
@@ -1064,13 +640,6 @@ elif args.command == "bind":
     output = manager.bind(args)
 elif args.command == "transition":
     output = manager.transition(args)
-elif args.command == "renew":
-    output = manager.renew(args)
-elif args.command == "cleanup":
-    output = manager.cleanup(args)
-    output = {**output, "lifecycle_projection": manager.project_sweep_recovery(output)}
-elif args.command == "sweep":
-    output = manager.sweep_all()
 else:
     output = manager.show(args)
 print(json.dumps(output, indent=2 if args.json else None, sort_keys=True))

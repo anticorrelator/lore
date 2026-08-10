@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -1252,7 +1251,7 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 			if placement.Owner.Kind != "session" {
 				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: managed worktree owner kind %q cannot host a session", placement.Owner.Kind)}
 			}
-			if err := runManagedWorktreeCommand(context.Background(), knowledgeDir, "bind", d.WorktreeID, placement.Owner.ID, 0, ""); err != nil {
+			if err := runManagedWorktreeCommand(context.Background(), knowledgeDir, "bind", d.WorktreeID, placement.Owner.ID); err != nil {
 				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: %w", err)}
 			}
 		}
@@ -1482,13 +1481,8 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 			processPID = cmd.Process.Pid
 		}
 		if managed {
-			ownerTmux := ""
-			ownerPID := processPID
-			if tmuxName != "" {
-				ownerTmux = tmuxName
-			}
-			if err := runManagedWorktreeCommand(context.Background(), knowledgeDir, "bind", d.WorktreeID, placement.Owner.ID, ownerPID, ownerTmux); err == nil {
-				err = runManagedWorktreeCommand(context.Background(), knowledgeDir, "transition-active", d.WorktreeID, placement.Owner.ID, 0, "")
+			if err := runManagedWorktreeCommand(context.Background(), knowledgeDir, "bind", d.WorktreeID, placement.Owner.ID); err == nil {
+				err = runManagedWorktreeCommand(context.Background(), knowledgeDir, "transition-active", d.WorktreeID, placement.Owner.ID)
 			}
 			if err != nil {
 				_ = ptmx.Close()
@@ -1519,17 +1513,11 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 	}
 }
 
-func runManagedWorktreeCommand(ctx context.Context, knowledgeDir, action, worktreeID, ownerID string, ownerPID int, ownerTmux string) error {
+func runManagedWorktreeCommand(ctx context.Context, knowledgeDir, action, worktreeID, ownerID string) error {
 	args := []string{"coordinate", "worktree"}
 	switch action {
 	case "bind":
 		args = append(args, "bind", "--worktree-id", worktreeID, "--owner-id", ownerID)
-		if ownerPID != 0 {
-			args = append(args, "--owner-pid", strconv.Itoa(ownerPID))
-		}
-		if ownerTmux != "" {
-			args = append(args, "--owner-tmux", ownerTmux, "--tmux-server", tmuxServerLabel)
-		}
 	case "transition-active":
 		args = append(args, "transition", "--worktree-id", worktreeID, "--to", "active")
 	case "transition-recovered":
@@ -1592,9 +1580,9 @@ func AttachTerminalCmd(slug, tmuxName, sessionID, harness, knowledgeDir, worktre
 			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("pty start: %w", err)}
 		}
 		if managed {
-			managerErr := runManagedWorktreeCommand(context.Background(), knowledgeDir, "bind", worktreeID, placement.Owner.ID, panePID, tmuxName)
+			managerErr := runManagedWorktreeCommand(context.Background(), knowledgeDir, "bind", worktreeID, placement.Owner.ID)
 			if managerErr == nil && placement.State == "active" {
-				managerErr = runManagedWorktreeCommand(context.Background(), knowledgeDir, "transition-recovered", worktreeID, placement.Owner.ID, 0, "")
+				managerErr = runManagedWorktreeCommand(context.Background(), knowledgeDir, "transition-recovered", worktreeID, placement.Owner.ID)
 			}
 			if managerErr != nil {
 				_ = ptmx.Close()

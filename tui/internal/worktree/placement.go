@@ -26,16 +26,6 @@ func TransitionManagedPlacement(ctx context.Context, knowledgeDir, worktreeID, n
 	return runManager(ctx, knowledgeDir, "transition", "--worktree-id", worktreeID, "--to", next)
 }
 
-// RenewManagedPlacement refreshes one live owner's lease through the sole manager.
-func RenewManagedPlacement(ctx context.Context, knowledgeDir, worktreeID, ownerID string) error {
-	return runManager(ctx, knowledgeDir, "renew", "--worktree-id", worktreeID, "--owner-id", ownerID)
-}
-
-// SweepManagedPlacements runs the manager's bounded stale-owner maintenance pass.
-func SweepManagedPlacements(ctx context.Context, knowledgeDir string) error {
-	return runManager(ctx, knowledgeDir, "sweep")
-}
-
 func runManager(ctx context.Context, knowledgeDir, verb string, args ...string) error {
 	managerArgs := append([]string{"coordinate", "worktree", verb}, args...)
 	managerArgs = append(managerArgs, "--kdir", knowledgeDir, "--json")

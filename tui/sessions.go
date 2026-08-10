@@ -142,24 +142,10 @@ func readInstancesCmd(sessionsDir string) tea.Cmd {
 func (m model) syncInstanceCmd() tea.Cmd {
 	dir := m.sessionsDir
 	inst := m.instanceRow()
-	kdir := m.config.KnowledgeDir
 	return func() tea.Msg {
-		if err := session.Heartbeat(dir, inst); err != nil {
-			return instanceSyncedMsg{err: err}
-		}
-		for _, hosted := range inst.Sessions {
-			if hosted.WorktreeID == "" {
-				continue
-			}
-			placement, err := worktree.ValidateManagedPlacement(context.Background(), kdir, hosted.WorktreeID, hosted.ExecutionDir, hosted.Worktree)
-			if err != nil {
-				return instanceSyncedMsg{err: fmt.Errorf("renew managed worktree %s: %w", hosted.WorktreeID, err)}
-			}
-			if err := worktree.RenewManagedPlacement(context.Background(), kdir, hosted.WorktreeID, placement.Owner.ID); err != nil {
-				return instanceSyncedMsg{err: err}
-			}
-		}
-		return instanceSyncedMsg{err: worktree.SweepManagedPlacements(context.Background(), kdir)}
+		// A managed tree needs nothing from this loop: it comes down as part of
+		// the release its owner drives, not on a lease this heartbeat renews.
+		return instanceSyncedMsg{err: session.Heartbeat(dir, inst)}
 	}
 }
 
@@ -888,11 +874,6 @@ func (m model) adoptionScanCmd() tea.Cmd {
 			if err := session.DeleteClaim(claimPath); err != nil {
 				notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "adoption-claim-delete", Message: compactErr("adoption claim delete", err)})
 			}
-		}
-		// Crash evidence and adoption ownership transfers above must be durable
-		// before the manager may sweep an abandoned coordinated checkout.
-		if err := worktree.SweepManagedPlacements(context.Background(), kdir); err != nil {
-			notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "worktree-sweep", Message: compactErr("managed worktree sweep", err)})
 		}
 		return adoptionScanMsg{alive: alive, retained: retained, notices: notices, diagnostics: diagnostics}
 	}

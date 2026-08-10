@@ -16,13 +16,13 @@ import (
 // it, admin directory gone, temporary-branch disposition recorded.
 //
 // It differs from the manager's proof in exactly one place, deliberately. The
-// manager deletes refs/lore/worktrees/<epoch>/{captured,result} and
-// refs/lore/quarantine/<epoch> as part of its proof, because for a manager-owned
-// tree the durable artifact is the recovery bundle it captured beforehand. For a
-// session tree those refs *are* the preservation — they are the only remaining
-// record of what the session produced. Cleanup therefore requires them to exist
-// going in, requires the live checkout content to already be reachable from one
-// of them, and re-verifies every one of them by OID after the directory is gone.
+// manager deletes refs/lore/worktrees/<epoch>/{captured,result} as part of its
+// proof, keeping only refs/lore/quarantine/<epoch>, which it pins at the
+// temporary branch tip on the way out. For a session tree the result and
+// quarantine refs *are* the preservation — they are the only remaining record of
+// what the session produced. Cleanup therefore requires them to exist going in,
+// requires the live checkout content to already be reachable from one of them,
+// and re-verifies every one of them by OID after the directory is gone.
 // Deleting them would convert this from disk hygiene into silent data loss.
 
 // RefOID names a preserved ref and the object it pointed at.
