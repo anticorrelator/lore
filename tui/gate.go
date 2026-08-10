@@ -37,6 +37,7 @@ const (
 type screenMatcher struct {
 	composer          func(rows []string) bool
 	interactive       func(rows []string) bool
+	interactiveReason func(rows []string) string
 	choices           func(rows []string) optionGeometry
 	pending           func(rows []string) bool
 	placeholder       func(rows []string, ansiRows []string) bool
@@ -56,6 +57,7 @@ var screenMatchers = map[string]screenMatcher{
 	"claude-code": {
 		composer:          ccComposerReady,
 		interactive:       ccInteractivePrompt,
+		interactiveReason: ccInteractiveReason,
 		choices:           ccModalOptions,
 		pending:           ccComposerPending,
 		placeholder:       ccComposerPlaceholder,
@@ -67,15 +69,29 @@ var screenMatchers = map[string]screenMatcher{
 }
 
 type screenClass struct {
-	composer         bool
-	interactive      bool
-	selectedOption   int
-	availableOptions []int
-	pending          bool
-	placeholder      bool
-	heldInput        bool
-	numberedModal    *config.NumberedModalSignature
+	composer          bool
+	interactive       bool
+	interactiveReason string
+	selectedOption    int
+	availableOptions  []int
+	pending           bool
+	placeholder       bool
+	heldInput         bool
+	numberedModal     *config.NumberedModalSignature
 }
+
+// Interactive-classification tokens. A screen can be interactive without being
+// answerable — no title, or fewer than two parseable options — in which case
+// numberedModal is nil and the token is the only thing that survives the paint.
+// claude-code's predicate is a disjunction, and the two disjuncts read different
+// regions (whole-screen tail vs the composer band, which itself falls back to
+// the last few rows on a partial repaint), so naming which one fired is what
+// separates a real prompt from a misfire after the screen is gone.
+const (
+	modalScreenCCPermission   = "cc-permission-modal"
+	modalScreenCCOptionSelect = "cc-option-select"
+	modalScreenCCBoth         = "cc-permission-modal+cc-option-select"
+)
 
 // closeObservation is one close tick's view of a panel: process lifecycle and
 // the timer-derived idle edge paired with one shared screen classification.
@@ -113,6 +129,14 @@ func classifyScreen(framework string, snap work.ScreenSnapshot) (screenClass, bo
 		pending:     mm.pending != nil && mm.pending(rows),
 		placeholder: mm.placeholder != nil && mm.placeholder(rows, ansiRows),
 		heldInput:   mm.heldInput != nil && mm.heldInput(rows, ansiRows),
+	}
+	if state.interactive {
+		state.interactiveReason = framework + "-interactive"
+		if mm.interactiveReason != nil {
+			if token := mm.interactiveReason(rows); token != "" {
+				state.interactiveReason = token
+			}
+		}
 	}
 	if mm.choices != nil {
 		geometry := mm.choices(rows)
@@ -360,6 +384,24 @@ func ccComposerReady(rows []string) bool {
 
 func ccInteractivePrompt(rows []string) bool {
 	return ccPermissionModal(rows) || ccOptionSelectModal(rows)
+}
+
+// ccInteractiveReason names which disjunct of ccInteractivePrompt fired. It
+// re-runs both predicates rather than threading a result out of the boolean
+// matcher: they are pure over the same rows, and only an already-interactive
+// screen pays for the second pass.
+func ccInteractiveReason(rows []string) string {
+	permission := ccPermissionModal(rows)
+	optionSelect := ccOptionSelectModal(rows)
+	switch {
+	case permission && optionSelect:
+		return modalScreenCCBoth
+	case permission:
+		return modalScreenCCPermission
+	case optionSelect:
+		return modalScreenCCOptionSelect
+	}
+	return ""
 }
 
 func ccModalOptions(rows []string) optionGeometry {

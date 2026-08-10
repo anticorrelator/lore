@@ -27,6 +27,7 @@ type Event struct {
 	Option         int               `json:"option,omitempty"`
 	RegistrationID string            `json:"registration_id,omitempty"`
 	Reason         string            `json:"reason,omitempty"`
+	ModalSignature string            `json:"modal_signature,omitempty"`
 	StepID         string            `json:"step_id,omitempty"`
 	StepLabel      string            `json:"step_label,omitempty"`
 	Links          map[string]string `json:"links,omitempty"`

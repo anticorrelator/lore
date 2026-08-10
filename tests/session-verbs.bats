@@ -1330,6 +1330,52 @@ PYEOF
   [ "$status" -eq 0 ]
 }
 
+@test "append accepts modal_blocked carrying the observed modal_signature" {
+  run bash "$APPEND" --row '{"event":"modal_blocked","slug":"feature-x","reason":"modal","modal_signature":"Do you want to proceed?"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run bash "$APPEND" --row '{"event":"modal_blocked","slug":"feature-y","reason":"modal","modal_signature":"cc-option-select"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run jq -s -e 'map(select(.event=="modal_blocked") | .modal_signature) == ["Do you want to proceed?","cc-option-select"]' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+  # The emitter truncates to exactly the limit, so the limit itself must pass.
+  local limit
+  limit=$(printf 'x%.0s' $(seq 160))
+  run bash "$APPEND" --row "{\"event\":\"modal_blocked\",\"slug\":\"feature-z\",\"reason\":\"modal\",\"modal_signature\":\"$limit\"}" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+}
+
+@test "append accepts modal_blocked without a modal_signature" {
+  run bash "$APPEND" --row '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run jq -e 'select(.event=="modal_blocked") | has("modal_signature") | not' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "append rejects modal_signature outside modal_blocked" {
+  run bash "$APPEND" --row '{"event":"needs_input","slug":"feature-x","modal_signature":"Do you want to proceed?"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"allowed only on event 'modal_blocked'"* ]]
+  [ ! -f "$TEST_KDIR/_sessions/events.jsonl" ]
+}
+
+@test "append rejects an empty, oversized, or multiline modal_signature" {
+  run bash "$APPEND" --row '{"event":"modal_blocked","slug":"feature-x","reason":"modal","modal_signature":""}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"1-160 characters"* ]]
+  local long
+  long=$(printf 'x%.0s' $(seq 161))
+  run bash "$APPEND" --row "{\"event\":\"modal_blocked\",\"slug\":\"feature-x\",\"reason\":\"modal\",\"modal_signature\":\"$long\"}" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"1-160 characters"* ]]
+  run bash "$APPEND" --row '{"event":"modal_blocked","slug":"feature-x","reason":"modal","modal_signature":"line one\nline two"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"single-line string"* ]]
+  run bash "$APPEND" --row '{"event":"modal_blocked","slug":"feature-x","reason":"modal","modal_signature":160}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"single-line string"* ]]
+  [ ! -f "$TEST_KDIR/_sessions/events.jsonl" ]
+}
+
 @test "append accepts answer lifecycle rows with numeric option and closed refusal reason" {
   run bash "$APPEND" --row '{"event":"answer_requested","request_id":"a1","slug":"feature-x","option":2,"registration_id":"standing-answer-v1"}' --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -438,6 +439,7 @@ type modalObservation struct {
 	known         bool
 	blocked       bool
 	framework     string
+	screenReason  string
 	numberedModal *config.NumberedModalSignature
 }
 
@@ -456,7 +458,50 @@ func observeModalPanel(panel work.SessionPanelModel) modalObservation {
 		return modalObservation{}
 	}
 	state, ok := classifyScreen(framework, snap)
-	return modalObservation{known: ok, blocked: ok && state.interactive, framework: framework, numberedModal: state.numberedModal}
+	return modalObservation{
+		known:         ok,
+		blocked:       ok && state.interactive,
+		framework:     framework,
+		screenReason:  state.interactiveReason,
+		numberedModal: state.numberedModal,
+	}
+}
+
+// modalSignature is the observed evidence stamped onto a modal_blocked row. The
+// screen that produced the row is repainted within seconds and peek responses
+// are consumed on read, so without this the row records only that *something*
+// classified as a modal. A parsed modal title is the strongest evidence a real
+// prompt was up; failing that, the predicate token at least names what fired.
+func modalSignature(obs modalObservation) string {
+	if obs.numberedModal != nil {
+		if title := sanitizeModalSignature(obs.numberedModal.Title); title != "" {
+			return title
+		}
+	}
+	return sanitizeModalSignature(obs.screenReason)
+}
+
+// modalSignatureMaxRunes bounds the stamped evidence; the sole writer refuses a
+// longer value, and a modal title beyond this is truncated rather than dropped.
+const modalSignatureMaxRunes = 160
+
+// sanitizeModalSignature reduces a screen-derived string to one printable line:
+// control characters flatten to spaces and runs of whitespace collapse, so the
+// title reads the way it rendered. The sole writer refuses a multiline or
+// overlong value, and the row matters more than its last few words, so the
+// bound is applied here — on runes, not bytes — rather than losing the append.
+func sanitizeModalSignature(s string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+	cleaned = strings.Join(strings.Fields(cleaned), " ")
+	if runes := []rune(cleaned); len(runes) > modalSignatureMaxRunes {
+		cleaned = strings.TrimSpace(string(runes[:modalSignatureMaxRunes]))
+	}
+	return cleaned
 }
 
 func (m model) observeModal(panel work.SessionPanelModel) modalObservation {
@@ -513,7 +558,7 @@ func (m model) advanceModalObservations() (model, []tea.Cmd) {
 			m.sessionModalBlocked = make(map[string]bool)
 		}
 		m.sessionModalBlocked[slug] = true
-		blocked := m.modalBlockedEventFor(slug, ls)
+		blocked := m.modalBlockedEventFor(slug, ls, obs)
 		if obs.numberedModal != nil {
 			if registration, matched := matchModalAnswer(obs.framework, *obs.numberedModal); matched {
 				cmds = append(cmds, registeredModalAnswerCmd(m.eventScript, m.config.KnowledgeDir, slug, blocked, registration))
@@ -1355,14 +1400,17 @@ func (m model) idleEventFor(slug, event string, ls liveSession) session.Event {
 // modalBlockedEventFor builds the entry-only modal classification row. Like the
 // idle transitions it describes a running session rather than a queue request,
 // so it carries no request_id; reason=modal is mandatory at the sole writer.
-func (m model) modalBlockedEventFor(slug string, ls liveSession) session.Event {
+// The observation that triggered the row is stamped as modal_signature so the
+// row outlives the screen it was derived from.
+func (m model) modalBlockedEventFor(slug string, ls liveSession, obs modalObservation) session.Event {
 	return session.Event{
-		Event:         session.EventModalBlocked,
-		ActorInstance: session.StrPtr(m.instanceName),
-		Slug:          slug,
-		SessionType:   ls.typ,
-		Initiator:     ls.initiator,
-		Reason:        sendReasonModal,
+		Event:          session.EventModalBlocked,
+		ActorInstance:  session.StrPtr(m.instanceName),
+		Slug:           slug,
+		SessionType:    ls.typ,
+		Initiator:      ls.initiator,
+		Reason:         sendReasonModal,
+		ModalSignature: modalSignature(obs),
 	}
 }
 

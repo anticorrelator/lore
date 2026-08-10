@@ -665,6 +665,7 @@ protocol terminal verbs, stop hooks) appends through the one sanctioned writer,
 | `request_id` | string | The request this event concerns; required for queue-lifecycle events. |
 | `option` | integer | Positive displayed modal option number; required on `answer_requested`, `answered`, and `answer_refused`. |
 | `reason` | string | Failure/reclaim reason; also the review-gate rationale carried by `review_flagged`/`review_held`/`review_released`. Also carried by `spawn_failed`, `request_reclaimed`, `request_abandoned`; `modal_blocked` requires exactly `modal`; `answer_refused` uses its closed refusal set; `terminus_reached` requires `spec-finalize` or `impl-close`. |
+| `modal_signature` | string | Screen evidence for a `modal_blocked` row, and valid only there. Omit-when-empty; single line, at most 160 characters. Holds the parsed modal title when the classifier read one, otherwise a token naming which interactive predicate fired (`cc-permission-modal`, `cc-option-select`, `cc-permission-modal+cc-option-select`, or `<framework>-interactive`). The screen a modal row is derived from is repainted within seconds and peek responses are consumed on read, so without this the row cannot afterwards be told apart from a misfire on a partially repainted screen. |
 | `step_id` | string | Stable machine-readable milestone identity. Required on `step_completed`; `/spec` uses `spec:investigation`, `spec:design`, and `spec:plan-ready`, while `/implement` uses `implement:task:<task-id>`. |
 | `step_label` | string | Concise human-readable milestone label. Required on `step_completed`. |
 | `gate_id` | string | Review-gate audit join key. Omit-when-empty. A gate-open verb (`review_flagged`/`review_held`) sets it as the row's `event_id`; the `review_released` row echoes it here so a reader pairs release→open without replaying state. See [docs/review-gates.md](review-gates.md). |
@@ -687,7 +688,7 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `needs_input` | TUI | a running session is waiting on input |
 | `quiescent` | TUI | a running session went idle |
 | `resumed` | TUI | a session resumed after idle/input |
-| `modal_blocked` | TUI | the shared readiness classifier observed a running session enter a harness modal; carries `reason=modal`, emits once per observed entry, and carries no `request_id` |
+| `modal_blocked` | TUI | the shared readiness classifier observed a running session enter a harness modal; carries `reason=modal` and the observed `modal_signature`, emits once per observed entry, and carries no `request_id` |
 | `recovered` | TUI | a restarted/replacement instance adopted a still-running tmux-hosted session from a dead instance's registry row; `reason` names the predecessor (`adopted from <dead-instance>`). Session-transition class — no `request_id` |
 | `closed` | TUI | a session ended (carries `spend`: token counts where the harness exposes them, else duration-only) |
 | `orphaned` | TUI | a dead instance's atomic recovery owner found no surviving tmux session; carries `reason=instance-death`, the dead `target_instance`, persisted spawn `request_id` when available, and evidence-bounded `spend` |

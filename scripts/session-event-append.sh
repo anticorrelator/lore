@@ -50,7 +50,13 @@
 #   option. answer_refused requires reason=not-modal|expect-mismatch|
 #   option-unavailable|no-contract|error|unconfirmed.
 #   modal_blocked requires a non-empty slug and exactly reason=modal; it is a
-#   running-session transition, not a queue-lifecycle event.
+#   running-session transition, not a queue-lifecycle event. It may carry
+#   modal_signature (optional, omit-when-empty): the evidence the emitter
+#   observed on the screen that produced the row — the parsed modal title, or a
+#   token naming which interactive predicate fired when no title was parseable.
+#   Valid only on modal_blocked; a non-empty single-line string, at most 160
+#   characters, since the screen it describes is repainted within seconds and
+#   nothing else in the row distinguishes a real prompt from a misfire.
 #   step_completed requires actor_instance, slug, session_type, step_id, and
 #   step_label, and forbids a top-level request_id.
 #   terminus_reached requires actor_instance, slug, session_type, and
@@ -179,6 +185,17 @@ if [[ "$EVENT" == "modal_blocked" ]]; then
       fail "missing required field: reason (modal_blocked requires reason=modal)"
     fi
     fail "invalid field: reason (modal_blocked requires reason=modal)"
+  fi
+fi
+
+# modal_signature is the emitter's screen evidence, carried only by modal_blocked.
+# Bounded and single-line so one journal row stays one readable line.
+if printf '%s' "$ROW" | jq -e 'has("modal_signature")' >/dev/null 2>&1; then
+  if [[ "$EVENT" != "modal_blocked" ]]; then
+    fail "invalid field: modal_signature (allowed only on event 'modal_blocked')"
+  fi
+  if ! printf '%s' "$ROW" | jq -e '.modal_signature | type == "string" and length > 0 and length <= 160 and (test("[[:cntrl:]]") | not)' >/dev/null 2>&1; then
+    fail "invalid field: modal_signature (must be a single-line string of 1-160 characters)"
   fi
 fi
 

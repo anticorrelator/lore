@@ -203,6 +203,42 @@ func TestClassifyScreenDerivesExactNumberedModalSignature(t *testing.T) {
 	}
 }
 
+// TestClassifyScreenNamesTheInteractivePredicate pins the token a modal_blocked
+// row stamps when no title is parseable. claude-code's interactive predicate is
+// a disjunction over two screen regions, so the token must say which disjunct
+// fired; frameworks without a reason matcher fall back to a framework-scoped
+// token rather than an empty string.
+func TestClassifyScreenNamesTheInteractivePredicate(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		framework string
+		rows      []string
+		want      string
+	}{
+		{"claude-code permission modal", "claude-code", ccModalRows, modalScreenCCPermission},
+		{"claude-code option select", "claude-code", ccOptionSelectRows, modalScreenCCOptionSelect},
+		{"codex has no reason matcher", "codex", cxModalRows, "codex-interactive"},
+		{"opencode has no reason matcher", "opencode", ocModalRows, "opencode-interactive"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, ok := classifyScreen(tc.framework, work.ScreenSnapshot{Rows: tc.rows})
+			if !ok || !state.interactive {
+				t.Fatalf("classification = %+v known=%v, want interactive", state, ok)
+			}
+			if state.interactiveReason != tc.want {
+				t.Fatalf("interactive reason = %q, want %q", state.interactiveReason, tc.want)
+			}
+		})
+	}
+
+	// A cleared composer carries no token: the field exists to describe a modal,
+	// so a stale value could not be told from a fresh observation.
+	state, ok := classifyScreen("claude-code", work.ScreenSnapshot{Rows: ccComposerRows})
+	if !ok || state.interactive || state.interactiveReason != "" {
+		t.Fatalf("cleared composer = %+v known=%v, want no interactive reason", state, ok)
+	}
+}
+
 func TestCodexPartialRepaintAndModalScrollback(t *testing.T) {
 	partial, ok := classifyScreen("codex", work.ScreenSnapshot{Rows: cxPartialRepaintRows})
 	if !ok || !partial.interactive || partial.composer {

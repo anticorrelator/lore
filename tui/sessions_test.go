@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -507,6 +508,111 @@ func TestHealthyCodexComposersEmitNoModalEvent(t *testing.T) {
 	}
 }
 
+// TestModalRowsStampObservedScreenEvidence drives both stamping paths through
+// the real sole writer. The screen behind a modal row is repainted within
+// seconds, so the row itself has to say what was seen: the parsed modal title
+// where the classifier read one, and otherwise the predicate token — which is
+// the case a partial repaint produces, and the one the row previously lost.
+func TestModalRowsStampObservedScreenEvidence(t *testing.T) {
+	titled, titledKnown := classifyScreen("claude-code", work.ScreenSnapshot{Rows: ccOptionSelectRows})
+	if !titledKnown || titled.numberedModal == nil {
+		t.Fatalf("titled fixture classified as %+v known=%v", titled, titledKnown)
+	}
+	for _, tc := range []struct {
+		name string
+		obs  modalObservation
+		want string
+	}{
+		{
+			name: "parsed title",
+			obs: modalObservation{
+				known: true, blocked: true, framework: "claude-code",
+				screenReason: titled.interactiveReason, numberedModal: titled.numberedModal,
+			},
+			want: "Choose the next step",
+		},
+		{
+			name: "no parseable title falls back to the predicate token",
+			obs: modalObservation{
+				known: true, blocked: true, framework: "claude-code",
+				screenReason: modalScreenCCOptionSelect,
+			},
+			want: modalScreenCCOptionSelect,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := sessionModelWithRealScript(t)
+			m.sessionPanels = map[string]work.SessionPanelModel{"demo": {}}
+			m.observeModalFn = func(work.SessionPanelModel) modalObservation { return tc.obs }
+			m, cmds := m.advanceModalObservations()
+			for _, cmd := range cmds {
+				runJournalCmds(t, cmd)
+			}
+			data, err := os.ReadFile(filepath.Join(m.config.KnowledgeDir, "_sessions", "events.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ev session.Event
+			if err := json.Unmarshal(bytes.TrimSpace(data), &ev); err != nil {
+				t.Fatal(err)
+			}
+			if ev.Event != session.EventModalBlocked || ev.ModalSignature != tc.want {
+				t.Fatalf("modal row = %+v, want modal_signature %q", ev, tc.want)
+			}
+		})
+	}
+}
+
+// TestModalSignatureStaysOneBoundedLine covers the values the sole writer would
+// otherwise refuse: screen text can arrive with control characters or run past
+// the field's limit, and losing the row to a validation failure would destroy
+// the evidence the stamp exists to keep.
+func TestModalSignatureStaysOneBoundedLine(t *testing.T) {
+	long := strings.Repeat("愛", 400)
+	for _, tc := range []struct {
+		name string
+		obs  modalObservation
+		want string
+	}{
+		{
+			name: "control characters collapse to single spaces",
+			obs: modalObservation{numberedModal: &config.NumberedModalSignature{
+				Title: "Do you want\tto\nproceed?  ",
+			}},
+			want: "Do you want to proceed?",
+		},
+		{
+			name: "an empty title falls through to the token",
+			obs: modalObservation{
+				numberedModal: &config.NumberedModalSignature{Title: "   "},
+				screenReason:  modalScreenCCBoth,
+			},
+			want: modalScreenCCBoth,
+		},
+		{
+			name: "an unclassifiable observation stamps nothing",
+			obs:  modalObservation{},
+			want: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := modalSignature(tc.obs); got != tc.want {
+				t.Fatalf("modalSignature = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	truncated := modalSignature(modalObservation{
+		numberedModal: &config.NumberedModalSignature{Title: long},
+	})
+	if got := utf8.RuneCountInString(truncated); got != modalSignatureMaxRunes {
+		t.Fatalf("truncated signature = %d runes, want %d", got, modalSignatureMaxRunes)
+	}
+	if !strings.HasPrefix(long, truncated) {
+		t.Fatalf("truncation split a multibyte rune: %q", truncated)
+	}
+}
+
 func normalizedEventRow(t *testing.T, kdir string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(kdir, "_sessions", "events.jsonl"))
@@ -527,19 +633,21 @@ func normalizedEventRow(t *testing.T, kdir string) []byte {
 }
 
 func TestUnregisteredModalPathIsByteIdenticalToExistingJournalCommand(t *testing.T) {
-	baseline := sessionModelWithRealScript(t)
-	baselineCmd := journalCmd(baseline.eventScript, baseline.config.KnowledgeDir,
-		baseline.modalBlockedEventFor("demo", baseline.localSessions["demo"]))
-	runJournalCmds(t, baselineCmd)
-
-	candidate := sessionModelWithRealScript(t)
-	candidate.sessionPanels = map[string]work.SessionPanelModel{"demo": {}}
 	signature := config.NumberedModalSignature{
 		Kind: config.NumberedModalSignatureV1, Title: "Additional safety checks",
 		Options: []config.ModalAnswerOption{{Number: 1, Label: "Retry"}, {Number: 2, Label: "Keep waiting"}},
 	}
+	obs := modalObservation{known: true, blocked: true, framework: "codex", numberedModal: &signature}
+
+	baseline := sessionModelWithRealScript(t)
+	baselineCmd := journalCmd(baseline.eventScript, baseline.config.KnowledgeDir,
+		baseline.modalBlockedEventFor("demo", baseline.localSessions["demo"], obs))
+	runJournalCmds(t, baselineCmd)
+
+	candidate := sessionModelWithRealScript(t)
+	candidate.sessionPanels = map[string]work.SessionPanelModel{"demo": {}}
 	candidate.observeModalFn = func(work.SessionPanelModel) modalObservation {
-		return modalObservation{known: true, blocked: true, framework: "codex", numberedModal: &signature}
+		return obs
 	}
 	previousMatcher := matchModalAnswer
 	matchModalAnswer = func(string, config.NumberedModalSignature) (config.ModalAnswerRegistration, bool) {
