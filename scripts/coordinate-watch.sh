@@ -23,7 +23,6 @@
 #                         [--timeout <sec>] [--pending-stale <sec>]
 #                         [--peek-timeout <sec>]
 #                         [--spawn-gap <sec>]
-#                         [--suspend-skew <sec>]
 #                         [--owner-pid <pid>] [--owner-tmux <name>]
 #                         [--tmux-server <name>]
 #                         [--wake-shaped] [--kdir <path>] [--json]
@@ -82,10 +81,6 @@
 #   --spawn-gap <sec> How young a session may be before a screen-confirmed park is
 #                     demoted to a `spawn-gap` advisory (default: 90; 0 disables
 #                     the age gate). See "Classification".
-#   --suspend-skew <sec>
-#                     How far this window's wall clock may drift from its
-#                     monotonic clock before the window ends (default: 120; 0
-#                     disables the check). See "Suspension skew".
 #   --owner-pid <pid> / --owner-tmux <name> / --tmux-server <name>
 #                     Liveness handles for the seat this watcher reports to; the
 #                     same two handles a coordination worktree lease records
@@ -161,29 +156,16 @@
 #   which staying quiet is the safe answer.
 #
 # Suspension skew:
-#   A laptop that sleeps with a window open freezes that window the same silent
-#   way a hung session does. Wall time keeps moving across a suspension and
-#   monotonic time does not, so the difference between how much of each has
-#   elapsed since the window opened is the suspension and nothing else, to within
-#   scheduling jitter of well under a second against a one-second poll. When that
-#   difference reaches --suspend-skew the window ends
-#   immediately, with outcome `clock_skew` and a body saying to re-join the board
-#   before trusting quiet.
+#   A laptop that sleeps with a window open freezes that window silently. Wall
+#   time keeps moving across a suspension and monotonic time does not, so the
+#   difference between how much of each elapsed since the window opened is the
+#   suspension and nothing else, to within scheduling jitter of well under a
+#   second.
 #
-#   It ends the window rather than merely waking, because every piece of state
-#   this window owns was computed against a clock that stopped. A fresh window
-#   recomputes all of it.
-#
-#   On each tick the check runs directly after the journal read, ahead of the
-#   pending-staleness check. After a nap every pending request looks stale, so a
-#   skew check running later would emit a burst of wakes about the frozen interval
-#   before reporting the freeze that caused them. A real journal row still wins: it
-#   is an event that happened, not an age computed against a stopped clock.
-#
-#   A supervisor that forks this watcher repeatedly across one logical window can
-#   export LORE_WATCH_CLOCK_BASELINE as "<wall> <monotonic>" — the pair its own
-#   span started from — and the skew is then measured from there rather than from
-#   this child's start, so a suspension spanning a re-arm boundary is still seen.
+#   The quiet wake reports that difference as `clock_skew.skew_seconds` and
+#   leaves the reading to the seat: a window whose clocks disagree by minutes
+#   computed every age it holds against a stopped clock, and the board is worth
+#   re-joining before quiet is believed.
 #
 # Owner liveness:
 #   With a handle passed, each poll checks whether the seat this watcher reports
@@ -224,12 +206,12 @@
 #     {schema_version, outcome, tier, authority, signature_version,
 #      classification: {state, label, reason, peek, spawn_gap, modal_gate},
 #      clock_skew: {wall_elapsed_seconds, monotonic_elapsed_seconds,
-#                   skew_seconds, threshold_seconds} | null,
+#                   skew_seconds} | null,
 #      matched, pending,
 #      scope: {mode, slugs, arcs, cursor_file}, next_cursor, until}
 #   There is no top-level `slug`: session identity lives on the matched row.
 #
-#   `outcome` is one of: matched, pending_stale, clock_skew, owner_gone, timeout,
+#   `outcome` is one of: matched, pending_stale, owner_gone, timeout,
 #   internal_error.
 #
 # Exit codes (local to this verb):
@@ -274,7 +256,6 @@ PEEK_TIMEOUT=10
 # gap sends the seat to steer a session that is still booting, which is the
 # failure this gate exists to stop.
 SPAWN_GAP=90
-SUSPEND_SKEW=120
 OWNER_PID=""
 OWNER_TMUX=""
 TMUX_SERVER="lore-tui"
@@ -298,7 +279,6 @@ while [[ $# -gt 0 ]]; do
     --pending-stale) PENDING_STALE="${2:-}"; shift 2 ;;
     --peek-timeout) PEEK_TIMEOUT="${2:-}"; shift 2 ;;
     --spawn-gap) SPAWN_GAP="${2:-}"; shift 2 ;;
-    --suspend-skew) SUSPEND_SKEW="${2:-}"; shift 2 ;;
     --owner-pid) OWNER_PID="${2:-}"; shift 2 ;;
     --owner-tmux) OWNER_TMUX="${2:-}"; shift 2 ;;
     --tmux-server) TMUX_SERVER="${2:-}"; shift 2 ;;
@@ -308,10 +288,10 @@ while [[ $# -gt 0 ]]; do
     # The header comment above is the help text. This range ends on its last
     # line; a header that grows past it prints truncated, which --help itself
     # cannot notice.
-    -h|--help) sed -n '2,253p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,235p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: coordinate-watch.sh [--slug <s>]... [--arc <slug>]... [--until <events>] [--since <cursor>] [--timeout <sec>] [--pending-stale <sec>] [--peek-timeout <sec>] [--spawn-gap <sec>] [--suspend-skew <sec>] [--owner-pid <pid>] [--owner-tmux <name>] [--tmux-server <name>] [--wake-shaped] [--kdir <path>] [--json]" >&2
+      echo "Usage: coordinate-watch.sh [--slug <s>]... [--arc <slug>]... [--until <events>] [--since <cursor>] [--timeout <sec>] [--pending-stale <sec>] [--peek-timeout <sec>] [--spawn-gap <sec>] [--owner-pid <pid>] [--owner-tmux <name>] [--tmux-server <name>] [--wake-shaped] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -338,7 +318,6 @@ check_non_negative --timeout "$TIMEOUT"
 check_non_negative --pending-stale "$PENDING_STALE" "0 disables"
 check_non_negative --peek-timeout "$PEEK_TIMEOUT" "0 disables"
 check_non_negative --spawn-gap "$SPAWN_GAP" "0 disables the age gate"
-check_non_negative --suspend-skew "$SUSPEND_SKEW" "0 disables"
 
 if [[ -n "$OWNER_PID" ]] && ! [[ "$OWNER_PID" =~ ^[1-9][0-9]*$ ]]; then
   fail "invalid --owner-pid: '$OWNER_PID' (must be a positive integer)"
@@ -973,13 +952,7 @@ emit_matched_from_record() {
 
 CLOCK_WALL0=""
 CLOCK_MONO0=""
-if [[ "$SUSPEND_SKEW" -gt 0 ]]; then
-  CLOCK_BASELINE="${LORE_WATCH_CLOCK_BASELINE:-}"
-  if [[ -z "$CLOCK_BASELINE" ]]; then
-    CLOCK_BASELINE="$(clock_pair)" || CLOCK_BASELINE=""
-  fi
-  IFS=$' \t' read -r CLOCK_WALL0 CLOCK_MONO0 <<< "$CLOCK_BASELINE"
-fi
+IFS=$'\t' read -r CLOCK_WALL0 CLOCK_MONO0 <<< "$(clock_pair)"
 
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
 while :; do
@@ -992,29 +965,6 @@ while :; do
   # No match: nothing was withheld from the caller, so the batch cursor is the
   # row after the last row this read consumed, and advancing to it is correct.
   CURSOR="$NEXT"
-
-  # Before anything that reads a clock-derived threshold. After a suspension every
-  # pending request looks stale, so this check running later would emit a burst of
-  # wakes about the frozen interval before reporting the freeze that produced them.
-  if [[ -n "$CLOCK_WALL0" && -n "$CLOCK_MONO0" ]]; then
-    SKEW_LINE="$(clock_elapsed "$CLOCK_WALL0" "$CLOCK_MONO0")" || SKEW_LINE=""
-    if [[ -n "$SKEW_LINE" ]]; then
-      IFS=$'\t' read -r WALL_ELAPSED MONO_ELAPSED SKEW <<< "$SKEW_LINE"
-      if [[ "$SKEW" -ge "$SUSPEND_SKEW" ]]; then
-        WAKE_CLOCK_SKEW="$(jq -cn --argjson wall "$WALL_ELAPSED" --argjson mono "$MONO_ELAPSED" \
-          --argjson skew "$SKEW" --argjson threshold "$SUSPEND_SKEW" \
-          '{wall_elapsed_seconds: $wall, monotonic_elapsed_seconds: $mono,
-            skew_seconds: $skew, threshold_seconds: $threshold}')"
-        WAKE_OUTCOME="clock_skew"
-        WAKE_TIER="confirmed"
-        WAKE_AUTHORITY="none"
-        WAKE_STATE="clock_skew"
-        WAKE_LABEL="window-slept-through-suspension"
-        emit_wake "$CURSOR" 0 \
-          "[coordinate] this machine was asleep for about ${SKEW}s with the window open; every age this window computed is measured against a stopped clock. Re-join the board and re-arm before trusting quiet"
-      fi
-    fi
-  fi
 
   # A journal row always wins: it is the real event, and the pending check is
   # only there for the case where no row will ever come.
@@ -1063,5 +1013,19 @@ WAKE_TIER="quiet"
 WAKE_AUTHORITY="none"
 WAKE_STATE="quiet"
 WAKE_LABEL="nothing-actionable-in-scope"
+
+# What the two clocks say this window actually spanned. A machine that slept with
+# the window open froze the monotonic clock and not the wall clock, so a wide
+# difference here says every age this window computed was measured against a
+# stopped clock — worth re-joining the board before believing the quiet.
+SKEW_LINE="$(clock_elapsed "$CLOCK_WALL0" "$CLOCK_MONO0")" || SKEW_LINE=""
+if [[ -n "$SKEW_LINE" ]]; then
+  IFS=$'\t' read -r WALL_ELAPSED MONO_ELAPSED SKEW <<< "$SKEW_LINE"
+  WAKE_CLOCK_SKEW="$(jq -cn --argjson wall "$WALL_ELAPSED" --argjson mono "$MONO_ELAPSED" \
+    --argjson skew "$SKEW" \
+    '{wall_elapsed_seconds: $wall, monotonic_elapsed_seconds: $mono,
+      skew_seconds: $skew}')"
+fi
+
 emit_wake "$CURSOR" 2 \
   "[coordinate] nothing actionable in scope after ${TIMEOUT}s (cursor $CURSOR persisted; re-arm with the same call)"

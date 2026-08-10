@@ -3301,55 +3301,27 @@ answer_peek_with() {
 
 # --- Suspension skew --------------------------------------------------------
 #
-# A suspended machine freezes a whole window silently, and a frozen window reads
-# as a healthy quiet board. These pin the timer that looks anyway: a
-# slept-through window ends before any age-derived check gets to speak.
+# A suspended machine freezes a whole window silently, and every age the window
+# computed is then measured against a stopped clock. The quiet wake reports the
+# gap between the two clocks and leaves the reading to the seat.
 
-@test "watch: a window that slept through a suspension ends before any age check speaks" {
+@test "watch: the quiet wake reports what the two clocks say the window spanned" {
   : > "$TEST_KDIR/_sessions/events.jsonl"
-  write_instance inst-a feature-x
-  write_event_ago quiescent feature-x 1000
+  local out; out="$(watch_json --since 0 --timeout 0)"
+  echo "$out" | jq -e '.outcome=="timeout" and .tier=="quiet"'
+  echo "$out" | jq -e '(.clock_skew.wall_elapsed_seconds|type)=="number"'
+  echo "$out" | jq -e '(.clock_skew.monotonic_elapsed_seconds|type)=="number"'
+  # No suspension here, so the two clocks agree to within scheduling jitter.
+  echo "$out" | jq -e '.clock_skew.skew_seconds >= -1 and .clock_skew.skew_seconds <= 1'
+}
+
+@test "watch: a wake that ends on something else carries no clock reading" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
   write_pending_request req-stuck feature-x--w2 dead-instance 3600
-
-  # Wall time advances across a system suspension and monotonic time does not, so
-  # the gap between the two IS the nap. The pending check would fire on this
-  # fixture and may not: after a nap every request looks stale, so reporting that
-  # first would bury the freeze that produced it.
-  local base; base="$(python3 -c 'import time; print("%.3f %.3f" % (time.time() - 600, time.monotonic()))')"
-  local out
-  out="$(LORE_WATCH_CLOCK_BASELINE="$base" bash "$WATCH" --since 0 \
-    --peek-timeout 1 --json --timeout 0 --kdir "$TEST_KDIR" 2>/dev/null || true)"
-  echo "$out" | jq -e '.outcome=="clock_skew" and .tier=="confirmed"'
-  echo "$out" | jq -e '.classification.label=="window-slept-through-suspension"'
-  echo "$out" | jq -e '.clock_skew.skew_seconds >= 120 and .clock_skew.threshold_seconds==120'
-  echo "$out" | jq -e '.clock_skew.wall_elapsed_seconds > .clock_skew.monotonic_elapsed_seconds'
-  echo "$out" | jq -e '.pending==[]'
-
-  # It is a wake to re-arm from, so it ends the window the way every other
-  # re-armable terminal does.
-  LORE_WATCH_CLOCK_BASELINE="$base" bash "$WATCH" --wake-shaped --since 0 \
-    --timeout 0 --kdir "$TEST_KDIR" >/dev/null 2>&1 && status=0 || status=$?
-  [ "$status" -eq 2 ]
-
-  # A window whose clocks agree does not end early — the pending request nobody
-  # claimed is what wakes it instead.
-  out="$(watch_json --since 0 --peek-timeout 1 --timeout 0)"
+  # The reading is about the window's own span; a window cut short by an event
+  # never spanned it, so the field stays null rather than reporting a partial one.
+  local out; out="$(watch_json --since 0 --peek-timeout 1 --timeout 0)"
   echo "$out" | jq -e '.outcome=="pending_stale" and .clock_skew==null'
-}
-
-@test "watch: --suspend-skew 0 turns the clock comparison off" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  local base; base="$(python3 -c 'import time; print("%.3f %.3f" % (time.time() - 600, time.monotonic()))')"
-  local out
-  out="$(LORE_WATCH_CLOCK_BASELINE="$base" bash "$WATCH" --since 0 \
-    --suspend-skew 0 --json --timeout 0 --kdir "$TEST_KDIR" 2>/dev/null || true)"
-  echo "$out" | jq -e '.outcome=="timeout" and .clock_skew==null'
-}
-
-@test "watch: refuses a non-numeric --suspend-skew" {
-  run bash "$WATCH" --suspend-skew never --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"invalid --suspend-skew"* ]]
 }
 
 @test "coordinate watch routes through the dispatcher and is advertised" {
