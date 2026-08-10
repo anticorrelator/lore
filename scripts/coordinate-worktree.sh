@@ -26,29 +26,23 @@ ARGV = sys.argv[2:]
 REPO_ROOT = SCRIPT_DIR.parent
 SCHEMA_VERSION = 1
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-# `sweep_claimed` and `swept` are no longer written: they name the reclaim a
-# lease-expiry sweeper used to perform, and a tree now comes down as part of the
-# release that declared it done. They stay in the set because archived rows
-# carry them in their histories, and a record must still read back.
+# The declared machine is the observed one. `sweep_claimed` and `swept` are no
+# longer written — they name the reclaim a lease-expiry sweeper used to perform
+# — but archived rows carry them in their histories, so a record must still read
+# back. `recovered` and `cleanup_blocked` are not here at all: neither ever
+# appeared in a row's history, and a state nothing has ever reached teaches a
+# lifecycle nobody walks.
 STATES = {
-    "reserved", "bound", "active", "recovered", "quiescent",
-    "reconciling", "cleanup_due", "cleanup_blocked", "sweep_claimed",
-    "removed", "swept",
+    "reserved", "bound", "active", "quiescent", "reconciling",
+    "cleanup_due", "sweep_claimed", "removed", "swept",
 }
 TRANSITIONS = {
     "reserved": {"bound"},
-    "bound": {"active", "recovered"},
-    "active": {"recovered", "quiescent"},
-    "recovered": {"quiescent"},
+    "bound": {"active"},
+    "active": {"quiescent"},
     "quiescent": {"reconciling"},
     "reconciling": {"cleanup_due"},
-    "cleanup_blocked": {"cleanup_due"},
 }
-# Which legal edge the ordinary accept-and-integrate route takes where a state
-# offers more than one. TRANSITIONS stays the only statement of what is legal;
-# this says only which of those edges is the normal one, so no hint can name a
-# transition the machine would refuse.
-ROUTE_PREFERENCE = {"bound": "active", "active": "quiescent"}
 
 
 def now():
@@ -263,7 +257,7 @@ class Manager:
         path, row = self.load(args.worktree_id)
         if path.parent != self.registry:
             fail(claimed_or_terminal(row, "bind"))
-        if row["state"] not in ("reserved", "bound", "active", "recovered"):
+        if row["state"] not in ("reserved", "bound", "active"):
             fail(
                 f"worktree {args.worktree_id} is at '{row['state']}'; bind attaches the owner "
                 "to a tree that is still being worked, and quiescent onward is the teardown "
@@ -515,12 +509,9 @@ def cleanup_route(state):
     route = []
     cursor = state
     while cursor in TRANSITIONS and len(route) < len(STATES):
-        options = TRANSITIONS[cursor]
-        nxt = ROUTE_PREFERENCE.get(cursor)
-        if nxt not in options:
-            nxt = sorted(options)[0]
+        nxt = sorted(TRANSITIONS[cursor])[0]
         route.append(nxt)
-        if nxt in ("cleanup_due", "cleanup_blocked"):
+        if nxt == "cleanup_due":
             break
         cursor = nxt
     return route

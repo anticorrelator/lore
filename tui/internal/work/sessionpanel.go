@@ -1520,8 +1520,6 @@ func runManagedWorktreeCommand(ctx context.Context, knowledgeDir, action, worktr
 		args = append(args, "bind", "--worktree-id", worktreeID, "--owner-id", ownerID)
 	case "transition-active":
 		args = append(args, "transition", "--worktree-id", worktreeID, "--to", "active")
-	case "transition-recovered":
-		args = append(args, "transition", "--worktree-id", worktreeID, "--to", "recovered")
 	default:
 		return fmt.Errorf("unknown managed worktree action %q", action)
 	}
@@ -1580,10 +1578,10 @@ func AttachTerminalCmd(slug, tmuxName, sessionID, harness, knowledgeDir, worktre
 			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("pty start: %w", err)}
 		}
 		if managed {
+			// A re-attached session picks its tree back up where it left it:
+			// binding is the whole of the reattachment, and the lifecycle state
+			// it was already at is still the true one.
 			managerErr := runManagedWorktreeCommand(context.Background(), knowledgeDir, "bind", worktreeID, placement.Owner.ID)
-			if managerErr == nil && placement.State == "active" {
-				managerErr = runManagedWorktreeCommand(context.Background(), knowledgeDir, "transition-recovered", worktreeID, placement.Owner.ID)
-			}
 			if managerErr != nil {
 				_ = ptmx.Close()
 				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("managed worktree recovery failed: %w", managerErr)}

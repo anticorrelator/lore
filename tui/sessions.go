@@ -185,7 +185,7 @@ func (m model) quiesceManagedWorktreeCmd(slug string, ls liveSession, closeReque
 		if err != nil {
 			return managedWorktreeQuiescedMsg{slug: slug, closeRequestID: closeRequestID, err: err}
 		}
-		if placement.State != "active" && placement.State != "recovered" {
+		if placement.State != "active" {
 			return managedWorktreeQuiescedMsg{slug: slug, closeRequestID: closeRequestID,
 				err: fmt.Errorf("managed worktree state %q cannot quiesce", placement.State)}
 		}
@@ -642,7 +642,7 @@ func validateAdoptionIdentity(kdir string, s session.Session) error {
 		if err != nil {
 			return err
 		}
-		if placement.State != "active" && placement.State != "recovered" {
+		if placement.State != "active" {
 			return fmt.Errorf("managed worktree lifecycle %q cannot host a surviving process", placement.State)
 		}
 		if placement.Owner.Kind != "session" || placement.Owner.PID != s.PID ||

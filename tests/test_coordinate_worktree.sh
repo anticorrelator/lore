@@ -211,7 +211,7 @@ SKIP_REFUSAL="$(bash "$MANAGER" transition --kdir "$KDIR" --worktree-id "$TEACH_
   --to quiescent --json 2>&1)"
 assert_eq "a skipped transition is refused" "1" "$?"
 case "$SKIP_REFUSAL" in
-  *"legal next states are: active, recovered"*) pass "the transition refusal names the legal set" ;;
+  *"legal next states are: active"*) pass "the transition refusal names the legal set" ;;
   *) fail "the transition refusal names the legal set" "$SKIP_REFUSAL" ;;
 esac
 case "$SKIP_REFUSAL" in
