@@ -9,9 +9,10 @@
 #
 # Usage:
 #   lore coordinate arm  (--owner-pid <pid> | --owner-tmux <session>)
+#                        (--install <settings.json> | --render)
 #                        [--tmux-server <name>] [--slug <s>]... [--arc <slug>]...
 #                        [--window <sec>] [--hook-timeout <sec>]
-#                        [--install <settings.json>] [--kdir <path>] [--json]
+#                        [--kdir <path>] [--json]
 #   lore coordinate arm run  (--owner-pid <pid> | --owner-tmux <session>)
 #                        [--tmux-server <name>] [--slug <s>]... [--arc <slug>]...
 #                        [--window <sec>] [--kdir <path>]
@@ -19,10 +20,12 @@
 #
 # Three surfaces, one script:
 #
-#   (no subcommand)  The arming surface a coordinator runs. Prints the hook
-#                    entry to install and the exact watcher command line it
-#                    carries; `--install <path>` writes the entry into that
-#                    settings file through the harness hook adapter.
+#   (no subcommand)  The arming surface a coordinator runs. `--install <path>`
+#                    writes the hook entry into that settings file through the
+#                    harness hook adapter and reads it back to prove it landed;
+#                    `--render` prints the entry and the watcher command line it
+#                    carries and arms nothing. One of the two is required; see
+#                    "Arming and rendering are separate requests" below.
 #   run              The watcher window the hook itself runs. Not a human
 #                    surface — every terminal state it can reach becomes a wake.
 #   disarm           Removes the installed hook entry again. Same script as arm
@@ -46,6 +49,10 @@
 #   --install <path>      Write the entry into this settings file. No default —
 #                         the file decides which sessions get armed, and lore
 #                         will not guess a scope that could arm unrelated ones.
+#   --render              Print the entry and the watcher command without
+#                         writing anything. Whoever installs a rendered entry by
+#                         hand owns removing it by hand. Not combinable with
+#                         --install: one writes, the other deliberately does not.
 #   --kdir <path>         Knowledge-store override (test isolation).
 #   --json                Emit one machine-readable object instead of prose.
 #
@@ -55,6 +62,26 @@
 #                         not: the file decides which sessions are affected.
 #   --kdir <path>         Knowledge-store override (test isolation).
 #   --json                Emit one machine-readable object instead of prose.
+#
+# Arming and rendering are separate requests, and one of them must be made:
+#   A bare `lore coordinate arm` used to print the hook entry and exit 0 with
+#   nothing armed. The output reads exactly like success — a watcher command, a
+#   hook entry, no error — so a seat takes it for an armed eye, and then nothing
+#   ever wakes it. That has cost two seats a park each: one arc's worker sat
+#   finished for over an hour with its coordinator blind, and an earlier seat
+#   stalled on the same ambiguity.
+#
+#   So the mode is now always explicit. `--install <path>` arms and says what it
+#   armed; `--render` prints and says it armed nothing; passing neither is a
+#   usage error naming both, and passing both is a usage error too. The one thing
+#   this surface will not do is pick a settings file on your behalf: installing
+#   into a shared file arms every session that reads it, which is why the path is
+#   never defaulted and rendering stays a first-class mode rather than a fallback.
+#
+#   A successful --install is verified by reading the settings file back and
+#   finding the exact command that was armed. An adapter that exits 0 without
+#   leaving an entry is the same silence in a different place, so it is reported
+#   as a failure rather than as an install.
 #
 # Disarming, and what it does not do:
 #   Disarm belongs in the arc-closure sequence. A watcher armed for an arc that
@@ -114,8 +141,9 @@
 #   none     No hook-return continuation at all. Same seat-owned re-arm.
 #
 # Exit codes:
-#   0  armed (or emitted), or the harness degrades and the contract was printed
-#   1  usage error, including a missing owner handle
+#   0  armed and verified, or --render printed the contract and said so
+#   1  usage error: a missing owner handle, neither --install nor --render,
+#      both of them, or an --install the settings file does not carry afterwards
 #   2  (run) a wake was delivered on stderr — the harness's re-arm signal
 #   3  (run) the owner is provably gone; no wake, no re-arm
 #   0  (disarm) the entry was removed, or there was none to remove — both are
@@ -138,6 +166,7 @@ ARCS=()
 WINDOW=3600
 HOOK_TIMEOUT=3900
 INSTALL_PATH=""
+RENDER_ONLY=0
 SETTINGS_PATH=""
 KDIR_OVERRIDE=""
 JSON_MODE=0
@@ -154,7 +183,7 @@ WINDOW_OVERRUN_GRACE_SECONDS="${LORE_ARM_OVERRUN_GRACE_SECONDS:-60}"
 ERROR_WAKE_BACKOFF_SECONDS="${LORE_ARM_ERROR_BACKOFF_SECONDS:-60}"
 
 usage() {
-  sed -n '2,122p' "$0"
+  sed -n '2,150p' "$0"
 }
 
 case "${1:-}" in
@@ -172,13 +201,14 @@ while [[ $# -gt 0 ]]; do
     --window) WINDOW="${2:-}"; shift 2 ;;
     --hook-timeout) HOOK_TIMEOUT="${2:-}"; shift 2 ;;
     --install) INSTALL_PATH="${2:-}"; shift 2 ;;
+    --render) RENDER_ONLY=1; shift ;;
     --settings) SETTINGS_PATH="${2:-}"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="${2:-}"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: coordinate-arm.sh [run] (--owner-pid <pid> | --owner-tmux <session>) [--slug <s>]... [--arc <slug>]... [--window <sec>] [--hook-timeout <sec>] [--install <path>] [--kdir <path>] [--json]" >&2
+      echo "Usage: coordinate-arm.sh [run] (--owner-pid <pid> | --owner-tmux <session>) (--install <path> | --render) [--slug <s>]... [--arc <slug>]... [--window <sec>] [--hook-timeout <sec>] [--kdir <path>] [--json]" >&2
       echo "       coordinate-arm.sh disarm --settings <path> [--kdir <path>] [--json]" >&2
       exit 1
       ;;
@@ -197,6 +227,10 @@ fail() {
 
 # Disarm takes no owner handle and no window: it removes an entry, it does not
 # start anything. Its own flags are validated below, in cmd_disarm.
+if [[ "$MODE" != "arm" && $RENDER_ONLY -eq 1 ]]; then
+  fail "--render belongs to the arming surface: it chooses between writing the hook entry and only printing it. '$MODE' does neither"
+fi
+
 if [[ "$MODE" != "disarm" ]]; then
 
 if [[ -n "$SETTINGS_PATH" ]]; then
@@ -491,6 +525,65 @@ watcher_command() {
 
 REWAKE_MESSAGE="The board watcher you armed finished a window. Read the wake on stderr, act on what it reports, then end your turn: ending the turn is what arms the next window."
 
+# 0 when the settings file carries a Stop hook whose command is exactly the one
+# this arm composed. The adapter reports success by exit code, and an exit code
+# is a claim about a write, not the write — so the claim is checked against the
+# file. Same failure class as a bare arm reading like an armed one, one layer
+# further in.
+installed_entry_present() {
+  local path="$1" cmd="$2"
+  [[ -f "$path" ]] || return 1
+  python3 - "$path" "$cmd" <<'PYEOF'
+import json, sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        settings = json.load(f)
+except (OSError, ValueError):
+    raise SystemExit(1)
+wanted = sys.argv[2]
+for entry in (settings.get("hooks") or {}).get("Stop") or []:
+    for hook in entry.get("hooks") or []:
+        if hook.get("command") == wanted:
+            raise SystemExit(0)
+raise SystemExit(1)
+PYEOF
+}
+
+# The gate that keeps this verb from ever succeeding without having armed
+# anything. Runs after the harness is known, because what the caller can even ask
+# for depends on it: a harness with no turn-boundary continuation has no entry to
+# install, so --render is the only request it can honor.
+require_explicit_mode() {
+  local support="$1" framework="$2" command="$3"
+
+  if [[ -n "$INSTALL_PATH" && $RENDER_ONLY -eq 1 ]]; then
+    fail "refusing --install with --render: --install writes the hook entry into $INSTALL_PATH, --render
+  deliberately writes nothing. Pass the one you meant — there is no reading of both that arms a watcher
+  and also leaves the file untouched."
+  fi
+
+  if [[ -n "$INSTALL_PATH" || $RENDER_ONLY -eq 1 ]]; then
+    return 0
+  fi
+
+  if [[ "$support" == "full" ]]; then
+    fail "refusing a bare arm: nothing was armed, and printing the entry here would read exactly like
+  having armed it — a watcher command, a hook entry, exit 0 — while no window ever opens and every park
+  goes unseen. Say which you want:
+    --install <settings.json>   write the entry and arm the standing eye
+    --render                    print the entry and the watcher command, arming nothing
+  The settings file is never defaulted: every session that reads it inherits this watcher, so the scope
+  is yours to choose. Choosing it is the arm."
+  fi
+
+  fail "refusing a bare arm: turn_boundary_rewake is '$support' on $framework, so there is no hook entry
+  to install here and this command can only print — which, at exit 0 with no request made, reads as an
+  armed watcher that does not exist. Pass --render to print the contract, then run the watcher from the
+  seat, re-running it after each wake:
+    $command"
+}
+
 cmd_arm() {
   local framework support adapter command entry="" install_abs="" recorded=0
   framework="$(resolve_active_framework 2>/dev/null)" || framework=""
@@ -499,6 +592,8 @@ cmd_arm() {
   support="$(framework_capability turn_boundary_rewake "$framework")"
   command="$(watcher_command "$framework")"
   adapter="$LORE_REPO_DIR/adapters/hooks/$framework.sh"
+
+  require_explicit_mode "$support" "$framework" "$command"
 
   if [[ "$support" == "full" ]]; then
     [[ -f "$adapter" ]] || fail "turn_boundary_rewake is '$support' on $framework but its hook adapter is missing at $adapter"
@@ -514,6 +609,17 @@ cmd_arm() {
         --command "$command" \
         --timeout "$HOOK_TIMEOUT" \
         --message "$REWAKE_MESSAGE" || fail "hook adapter could not install the rewake entry into $INSTALL_PATH"
+      # The adapter said it wrote; the file says whether it did. Without python3
+      # there is no way to read it back, and refusing a good install over a
+      # missing interpreter would be the louder error in the wrong direction —
+      # so that one case degrades to a note naming what went unchecked.
+      if command -v python3 >/dev/null 2>&1; then
+        installed_entry_present "$INSTALL_PATH" "$command" || fail "the hook adapter reported success but $INSTALL_PATH does not carry the entry
+  it was asked to write. Nothing is armed, whatever the adapter's exit code said. Inspect that file's
+  Stop hooks before re-running: something else is writing it, or the write did not survive."
+      else
+        record_note "no python3 to read $INSTALL_PATH back; the adapter reported the install but it was not verified"
+      fi
       # Only a successful install is recorded. A record written beside a failed
       # install would point a later closure at a watcher that was never armed.
       install_abs="$(abs_settings_path "$INSTALL_PATH")" || install_abs=""
@@ -540,8 +646,9 @@ cmd_arm() {
       --argjson entry "${entry:-null}" \
       --argjson window "$WINDOW" \
       --argjson hook_timeout "$HOOK_TIMEOUT" \
+      --argjson armed "$([[ -n "$INSTALL_PATH" ]] && echo true || echo false)" \
       '{framework: $fw, turn_boundary_rewake: $support, watcher_command: $command,
-        window_seconds: $window, hook_timeout_seconds: $hook_timeout,
+        window_seconds: $window, hook_timeout_seconds: $hook_timeout, armed: $armed,
         hook_entry: $entry, installed_into: (if $installed == "" then null else $installed end)}')"
   fi
 
@@ -559,14 +666,16 @@ cmd_arm() {
       printf '%s\n' "$entry"
       echo
       if [[ -n "$INSTALL_PATH" ]]; then
-        echo "[coordinate] installed into $INSTALL_PATH — the next turn boundary arms the first window."
+        echo "[coordinate] installed into $INSTALL_PATH and read back — the next turn boundary arms the first window."
         if [[ $recorded -eq 1 ]]; then
           echo "[coordinate] recorded in $ARMED_RECORD_FILE, so 'lore arc close' can find this watcher."
         fi
       else
-        echo "[coordinate] not installed. Add the entry to the settings file whose scope you want armed,"
-        echo "             or re-run with --install <settings.json>. Every session that reads that file"
-        echo "             gets this watcher, so pick the file deliberately."
+        echo "[coordinate] --render: NOTHING IS ARMED. No settings file was written and no window will open."
+        echo "             Add the entry above to the settings file whose scope you want armed, and own"
+        echo "             removing it by hand — a rendered entry leaves no record for 'lore arc close'."
+        echo "             To arm it here instead: re-run with --install <settings.json>. Every session"
+        echo "             that reads that file gets this watcher, so pick the file deliberately."
       fi
       ;;
     partial)

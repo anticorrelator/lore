@@ -332,7 +332,7 @@ teardown_arm_harness() {
 
 @test "coordinate arm emits an asyncRewake entry whose timeout outlasts the window" {
   set_framework claude-code
-  run bash "$ARM_SH" --owner-pid 1 --window 600 --hook-timeout 900 --json
+  run bash "$ARM_SH" --owner-pid 1 --window 600 --hook-timeout 900 --render --json
   [ "$status" -eq 0 ]
   echo "$output" | python3 -c '
 import json, sys
@@ -384,12 +384,18 @@ PY
 
 @test "coordinate arm degrades without installing where rewake is not full" {
   # codex has the continuation channel but not async execution; opencode has
-  # neither. Both must still print a runnable watcher command — a capability
-  # gap degrades the loop, it never aborts it — and both must refuse --install,
-  # because an installed entry there would re-arm nothing.
+  # neither. Both must still print a runnable watcher command on request — a
+  # capability gap degrades the loop, it never aborts it — and both must refuse
+  # --install, because an installed entry there would re-arm nothing. Printing
+  # is a request in its own right (--render): a bare arm here would exit 0
+  # having armed nothing, which is what a seat reads as an armed watcher.
   for fw in codex opencode; do
     set_framework "$fw"
     run bash "$ARM_SH" --owner-pid 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--render"* ]]
+
+    run bash "$ARM_SH" --owner-pid 1 --render
     [ "$status" -eq 0 ]
     [[ "$output" == *"degraded"* ]]
     [[ "$output" == *"coordinate-arm.sh run"* ]]
