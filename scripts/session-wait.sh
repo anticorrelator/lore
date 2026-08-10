@@ -8,8 +8,7 @@
 # Usage:
 #   lore session wait (<slug> | --work-item <base-slug>)
 #                            [--until <events>] [--since <cursor>]
-#                            [--request-id <id>] [--follow] [--next-session]
-#                            [--timeout <sec>] [--ttl <sec>]
+#                            [--request-id <id>] [--timeout <sec>] [--ttl <sec>]
 #                            [--kdir <path>] [--json]
 #
 # Options:
@@ -40,10 +39,6 @@
 #                     remains a deliberately sloppy wake for an exact re-read.
 #   --work-item <slug> Match the base slug and canonical derived worker slugs
 #                     `<slug>--w<n>`. This is an alternative to positional slug.
-#   --follow          Emit every target row and stop after emitting the first
-#                     event in --until. Without it, wait remains one-shot.
-#   --next-session    Follow-only exact-slug mode: ignore the predecessor and
-#                     bind the first future request identity before emitting.
 #   --timeout <sec>   How long to wait before giving up (default: 3600).
 #   --ttl <sec>       Liveness window for the owning-instance check (default: 30).
 #   --kdir <path>     Knowledge-store override (test isolation).
@@ -62,14 +57,11 @@
 #
 #   On a match that cursor is the boundary immediately after the matched row, not
 #   the end of the read that found it: one read can hold several matching rows and
-#   one-shot delivers only the first, so re-arming from the emitted cursor resumes
+#   this verb delivers only the first, so re-arming from the emitted cursor resumes
 #   at the next one rather than past it. Exits that deliver no row (timeout,
 #   session-gone) withhold nothing and so carry the read's end.
 #
-# Output (--json): one-shot emits one object
-#   {outcome, matched, next_cursor, slug, until}. Follow emits one NDJSON matched
-#   object per target row, with terminal=true on the --until stop row; timeout,
-#   session-gone, and internal-error append the existing terminal-shaped object.
+# Output (--json): one object — {outcome, matched, next_cursor, slug, until}.
 #
 # Exit codes (meanings are local to this verb — do not read them as a cross-verb
 # contract):
@@ -98,10 +90,11 @@
 #   lore session close <slug>
 #   lore session wait <slug> --since "$C"
 #
-# This verb watches ONE session, so N live sessions need N of them, each with its
-# own cursor to carry. When you want to sleep until anything on the board moves,
-# `lore coordinate watch` is the board-scoped form: zero arguments, one
-# self-managed cursor, same actionable stop set.
+# This verb answers ONE targeted question about ONE session and returns. It is not
+# a streaming eye: when you want to sleep until anything on the board moves,
+# `lore coordinate watch` is the board-scoped form — zero arguments, one
+# self-managed cursor, same actionable stop set — and a fleet of per-session
+# followers is the shape `watch` retired.
 
 set -euo pipefail
 
@@ -121,8 +114,6 @@ KDIR_OVERRIDE=""
 JSON_MODE=0
 REQUEST_ID=""
 REQUEST_ID_SET=0
-FOLLOW=0
-NEXT_SESSION=0
 
 # The writer's event vocabulary mirror (SESSION_EVENT_VOCAB), the actionable
 # default stop set (SESSION_ACTIONABLE_EVENTS), and the reference-reader retry
@@ -140,16 +131,14 @@ while [[ $# -gt 0 ]]; do
     --since) SINCE="$2"; SINCE_SET=1; shift 2 ;;
     --request-id) REQUEST_ID="$2"; REQUEST_ID_SET=1; shift 2 ;;
     --work-item) WORK_ITEM="$2"; WORK_ITEM_SET=1; shift 2 ;;
-    --follow) FOLLOW=1; shift ;;
-    --next-session) NEXT_SESSION=1; shift ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
     --ttl) TTL="$2"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,82p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,80p' "$0"; exit 0 ;;
     --*)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-wait.sh (<slug> | --work-item <base-slug>) [--until <events>] [--since <cursor>] [--request-id <id>] [--follow] [--next-session] [--timeout <sec>] [--ttl <sec>] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-wait.sh (<slug> | --work-item <base-slug>) [--until <events>] [--since <cursor>] [--request-id <id>] [--timeout <sec>] [--ttl <sec>] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
     *)
@@ -200,11 +189,6 @@ fi
 if [[ $REQUEST_ID_SET -eq 1 && -z "$REQUEST_ID" ]]; then
   fail "invalid --request-id: value must be non-empty"
 fi
-if [[ $NEXT_SESSION -eq 1 ]]; then
-  [[ $FOLLOW -eq 1 ]] || fail "--next-session requires --follow"
-  [[ $WORK_ITEM_SET -eq 0 ]] || fail "--next-session requires an exact positional slug, not --work-item"
-  [[ $REQUEST_ID_SET -eq 0 ]] || fail "--next-session binds the successor request ID; do not pass --request-id"
-fi
 
 # --- Validate --until against the writer's vocabulary; build the until-set ---
 [[ -n "${UNTIL// }" ]] || fail "empty --until: pass at least one event name"
@@ -226,9 +210,6 @@ for tok in "${UNTIL_TOKENS[@]}"; do
     if [[ "$tok" == "$p" ]]; then LIVENESS_ENABLED=0; break 2; fi
   done
 done
-if [[ $NEXT_SESSION -eq 1 ]]; then
-  LIVENESS_ENABLED=0
-fi
 
 # --- Resolve store ---
 if [[ -n "$KDIR_OVERRIDE" ]]; then
@@ -284,11 +265,11 @@ read_from() {
 # admit only the base and canonical worker suffix. A supplied request ID narrows
 # `closed` only; other requested outcomes remain loose wakes.
 #
-# The pairing is what makes a one-shot wait re-armable without loss. One read can
-# hold several matching rows, and one-shot hands over only the first; reporting
-# the read's end cursor would consume the rest without ever delivering them, so a
-# caller re-arming from the cursor it was given would never see them. Records
-# carry each row's own boundary — the same boundaries follow mode already uses.
+# The pairing is what makes the wait re-armable without loss. One read can hold
+# several matching rows and only the first is handed over; reporting the read's
+# end cursor would consume the rest without ever delivering them, so a caller
+# re-arming from the cursor it was given would never see them. The reader gives
+# each row its own boundary, and that is the one reported.
 first_match_record() {
   printf '%s' "$1" | jq -c --arg slug "$SLUG" --argjson until "$UNTIL_JSON" \
     --arg request_id "$REQUEST_ID" --argjson request_id_set "$REQUEST_ID_SET" \
@@ -304,102 +285,6 @@ first_match_record() {
       and (.event.event as $e | $until | index($e))
       and ($request_id_set == 0 or .event.event != "closed" or .event.request_id? == $request_id)
     ))' 2>/dev/null || true
-}
-
-# Ordered target-scoped reader records for follow mode. The reader owns each
-# row's byte boundary; this verb only applies target and request filters.
-follow_records() {
-  printf '%s' "$1" | jq -c --arg slug "$SLUG" \
-    --arg request_id "$REQUEST_ID" --argjson request_id_set "$REQUEST_ID_SET" \
-    --argjson work_item_set "$WORK_ITEM_SET" \
-    'def target_matches:
-      . == $slug or (
-        $work_item_set == 1
-        and startswith($slug + "--w")
-        and (.[($slug | length) + 3:] | test("^[0-9]+$"))
-      );
-    .records[] | select(
-      (.event.slug | target_matches)
-      and ($request_id_set == 0 or .event.event != "closed" or .event.request_id? == $request_id)
-    )'
-}
-
-event_in_until() {
-  local event="$1" tok
-  for tok in "${UNTIL_TOKENS[@]}"; do
-    [[ "$event" == "$tok" ]] && return 0
-  done
-  return 1
-}
-
-emit_follow_record() {
-  local row="$1" cursor="$2" terminal="$3"
-  if [[ $JSON_MODE -eq 1 ]]; then
-    jq -cn --argjson matched "$row" --argjson nc "$cursor" \
-      --arg slug "$SLUG" --argjson until "$UNTIL_JSON" --argjson terminal "$terminal" \
-      '{outcome: "matched", matched: $matched, next_cursor: $nc, slug: $slug, until: $until, terminal: $terminal}'
-  else
-    printf '%s\n' "$row"
-    jq -cn --argjson nc "$cursor" '{next_cursor: $nc}'
-  fi
-}
-
-process_follow_result() {
-  local result="$1" record row row_cursor event row_request_id terminal
-  while IFS= read -r record; do
-    [[ -n "$record" ]] || continue
-    row="$(printf '%s' "$record" | jq -c '.event')"
-    row_cursor="$(printf '%s' "$record" | jq -r '.next_cursor')"
-    event="$(printf '%s' "$row" | jq -r '.event')"
-
-    if [[ $NEXT_SESSION -eq 1 ]]; then
-      row_request_id="$(printf '%s' "$row" | jq -r '.request_id? // empty')"
-      if [[ $NEXT_BOUND -eq 0 ]]; then
-        case "$event" in
-          requested|claimed|spawned|spawn_failed)
-            [[ -n "$row_request_id" ]] || continue
-            NEXT_BOUND=1
-            BOUND_REQUEST_ID="$row_request_id"
-            ;;
-          *) continue ;;
-        esac
-      fi
-
-      case "$event" in
-        requested|claimed|spawned|spawn_failed|request_reclaimed|request_abandoned|request_cancelled|closed)
-          [[ "$row_request_id" == "$BOUND_REQUEST_ID" ]] || continue
-          ;;
-      esac
-
-      [[ "$event" == "claimed" ]] && BOUND_CLAIM_SEEN=1
-      if [[ "$event" == "spawned" ]]; then
-        LIVENESS_ENABLED=1
-      elif [[ "$event" == "recovered" && $BOUND_CLAIM_SEEN -eq 1 ]]; then
-        LIVENESS_ENABLED=1
-      fi
-
-      if [[ "$event" == "request_abandoned" || "$event" == "request_cancelled" ]]; then
-        emit_follow_record "$row" "$row_cursor" false
-        emit_terminal "session_gone" "$row_cursor" 3 \
-          "[session] successor request '$BOUND_REQUEST_ID' ended with $event; session gone (re-armable from cursor $row_cursor)"
-      fi
-    fi
-
-    terminal=false
-    if event_in_until "$event"; then
-      terminal=true
-    fi
-    if [[ $NEXT_SESSION -eq 1 && ( "$event" == "spawn_failed" || "$event" == "request_reclaimed" ) ]]; then
-      terminal=false
-    fi
-    emit_follow_record "$row" "$row_cursor" "$terminal"
-    [[ "$terminal" == true ]] && exit 0
-  done < <(follow_records "$result")
-  # A non-terminal last row leaves the read-loop's status at 1 (the failed
-  # `[[ terminal == true ]]` guard), which under `set -e` would kill this
-  # standalone call and abort the poll after emitting rows. Return 0 so the
-  # caller keeps polling until a stop-set row, timeout, or session-gone.
-  return 0
 }
 
 # Echo one live owner for the active target mode. Work-item mode deliberately
@@ -481,22 +366,14 @@ else
   CURSOR="$(session_events_cursor "$EVENTS_SH" "$KNOWLEDGE_DIR")" || emit_internal_error null
 fi
 
-NEXT_BOUND=0
-BOUND_REQUEST_ID=""
-BOUND_CLAIM_SEEN=0
-
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
 while :; do
   RESULT="$(read_from "$CURSOR")" || emit_internal_error "$CURSOR"
-  if [[ $FOLLOW -eq 0 ]]; then
-    RECORD="$(first_match_record "$RESULT")"
-    if [[ -n "$RECORD" && "$RECORD" != "null" ]]; then
-      emit_matched \
-        "$(printf '%s' "$RECORD" | jq -c '.event')" \
-        "$(printf '%s' "$RECORD" | jq -r '.next_cursor')"
-    fi
-  else
-    process_follow_result "$RESULT"
+  RECORD="$(first_match_record "$RESULT")"
+  if [[ -n "$RECORD" && "$RECORD" != "null" ]]; then
+    emit_matched \
+      "$(printf '%s' "$RECORD" | jq -c '.event')" \
+      "$(printf '%s' "$RECORD" | jq -r '.next_cursor')"
   fi
   # No match: nothing was withheld from the caller, so the read's end is where
   # the next poll belongs.
@@ -510,15 +387,11 @@ while :; do
       # short grace, then read exactly once more before declaring session-gone.
       sleep "$SESSION_GONE_GRACE_SECONDS"
       RESULT="$(read_from "$CURSOR")" || emit_internal_error "$CURSOR"
-      if [[ $FOLLOW -eq 0 ]]; then
-        RECORD="$(first_match_record "$RESULT")"
-        if [[ -n "$RECORD" && "$RECORD" != "null" ]]; then
-          emit_matched \
-            "$(printf '%s' "$RECORD" | jq -c '.event')" \
-            "$(printf '%s' "$RECORD" | jq -r '.next_cursor')"
-        fi
-      else
-        process_follow_result "$RESULT"
+      RECORD="$(first_match_record "$RESULT")"
+      if [[ -n "$RECORD" && "$RECORD" != "null" ]]; then
+        emit_matched \
+          "$(printf '%s' "$RECORD" | jq -c '.event')" \
+          "$(printf '%s' "$RECORD" | jq -r '.next_cursor')"
       fi
       # Reached only when the final read matched nothing, so session-gone
       # withholds no row and re-arms from the read's end.
