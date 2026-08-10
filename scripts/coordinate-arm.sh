@@ -97,24 +97,14 @@
 #   A settings file with no armed entry is reported as such and exits 0, so
 #   disarm is safe to run unconditionally at closure without checking first.
 #
-# What arming records, and why that is not a defaulted scope:
-#   A successful --install upserts a record into
-#   $KNOWLEDGE_DIR/_coordination/armed-watchers.json, keyed by the absolute
-#   settings path, carrying the scope, owner, framework and deadlines it armed
-#   with. The seat that closes an arc is often not the seat that armed it — a
-#   fresh seat resumes from the ledger, and settings paths are harness config
-#   rather than ledger material — so closure needs a mechanical way to find a
-#   watcher nobody remembers arming.
-#
-#   The record is discovery metadata, never authority: the settings file remains
-#   the truth about what is armed, disarm works fine with no record at all, and
-#   disarm removes the record even when there was no entry to uninstall, so a
-#   record can never outlive its hook entry. Reading back a record this surface
-#   itself wrote is remembering an explicit choice, not guessing a scope — which
-#   is why --install and --settings are still never defaulted. Arming without
-#   --install writes nothing: whoever installs the printed entry by hand owns
-#   removing it by hand. Every record failure degrades to a stderr note and the
-#   behavior that predates the record; none of them blocks arm or disarm.
+# How a later closure finds this watcher:
+#   The installed hook entry carries its own scope. `watcher_command` writes the
+#   `--arc <slug>` and `--slug <s>` flags into the command line verbatim, and the
+#   `LORE_FRAMEWORK=<name>` prefix names the adapter that installed it — so the
+#   settings file answers who armed what, for whom, without a second file
+#   mirroring it. `lore arc close` reads the entry. Nothing is recorded anywhere
+#   else, and --install and --settings stay undefaulted: which settings file gets
+#   the entry is the arm.
 #
 # The owner handle is required (arm and run surfaces only). A watcher with no provable owner is a runaway
 # waiting to happen: it would keep waking a seat that no longer exists, and
@@ -364,144 +354,10 @@ owner_label() {
   echo "$label"
 }
 
-# --- The record of what is armed ----------------------------------------------
-#
-# Sole writer: this script. Arm's --install upserts, disarm removes, and nothing
-# else touches the file — one writer is what keeps the record from disagreeing
-# with itself about a watcher two seats both think they own.
-#
-# Discovery metadata, not authority. `lore arc close` reads it to find a watcher
-# armed by a seat that is gone; the settings file decides what is actually
-# armed. So every failure below is a note and a shrug: an unrecorded arm is the
-# behavior that predates this file, and it works.
-ARMED_RECORD_FILE="$KNOWLEDGE_DIR/_coordination/armed-watchers.json"
-
-# The key both surfaces agree on. Lexically absolute plus symlinks resolved, so
-# `~/.claude/settings.json` from one seat and an absolute path from another land
-# on the same record instead of two half-records that each look complete.
-abs_settings_path() {
-  python3 - "$1" <<'PYEOF' 2>/dev/null
-import os, sys
-print(os.path.realpath(os.path.expanduser(sys.argv[1])))
-PYEOF
-}
+# --- Notes that do not fail the arm ------------------------------------------
 
 record_note() {
   echo "[coordinate] $1" >&2
-}
-
-# Upsert this arm into the record. 0 when the record now describes it, 1 when it
-# does not — callers report the difference and carry on either way.
-record_armed_watcher() {
-  local settings_abs="$1" framework="$2"
-  local dir tmp scope_tokens=() slug arc
-
-  [[ -n "$settings_abs" ]] || { record_note "could not resolve an absolute path for $INSTALL_PATH; the arm was not recorded, so 'lore arc close' will not find it"; return 1; }
-
-  dir="$(dirname "$ARMED_RECORD_FILE")"
-  mkdir -p "$dir" 2>/dev/null || { record_note "could not create $dir; the arm was not recorded, so 'lore arc close' will not find it"; return 1; }
-  tmp="$(mktemp "$dir/.tmp.armed-watchers.XXXXXX" 2>/dev/null)" || { record_note "could not open a temporary file in $dir; the arm was not recorded"; return 1; }
-
-  for slug in ${SLUGS+"${SLUGS[@]}"}; do scope_tokens+=("slug:$slug"); done
-  for arc in ${ARCS+"${ARCS[@]}"}; do scope_tokens+=("arc:$arc"); done
-
-  if python3 - "$ARMED_RECORD_FILE" "$tmp" "$settings_abs" "$(owner_label)" \
-      "$framework" "$(timestamp_iso)" "$WINDOW" "$HOOK_TIMEOUT" \
-      ${scope_tokens+"${scope_tokens[@]}"} <<'PYEOF'
-import json, os, sys
-
-record_path, tmp_path, settings, owner, framework, armed_at = sys.argv[1:7]
-window, hook_timeout = int(sys.argv[7]), int(sys.argv[8])
-tokens = sys.argv[9:]
-
-records = {}
-if os.path.exists(record_path):
-    try:
-        with open(record_path, encoding="utf-8") as f:
-            records = json.load(f)
-    except (OSError, ValueError) as exc:
-        # Refuse rather than start fresh: an unreadable record may still hold
-        # another seat's watcher, and overwriting it would lose the only pointer
-        # anyone has to that entry.
-        print("existing record at %s is unreadable (%s)" % (record_path, exc), file=sys.stderr)
-        raise SystemExit(1)
-    if not isinstance(records, dict):
-        print("existing record at %s is not an object" % record_path, file=sys.stderr)
-        raise SystemExit(1)
-
-records[settings] = {
-    "settings_path": settings,
-    "scopes": {
-        "slugs": [t[len("slug:"):] for t in tokens if t.startswith("slug:")],
-        "arcs": [t[len("arc:"):] for t in tokens if t.startswith("arc:")],
-    },
-    "owner": owner,
-    "framework": framework,
-    "armed_at": armed_at,
-    "window_seconds": window,
-    "hook_timeout_seconds": hook_timeout,
-}
-
-with open(tmp_path, "w", encoding="utf-8") as f:
-    json.dump(records, f, indent=2, sort_keys=True)
-    f.write("\n")
-PYEOF
-  then
-    mv "$tmp" "$ARMED_RECORD_FILE" && return 0
-    rm -f "$tmp"
-    record_note "could not move the updated record into $ARMED_RECORD_FILE; the arm was not recorded"
-    return 1
-  fi
-
-  rm -f "$tmp"
-  record_note "the arm was not recorded in $ARMED_RECORD_FILE; 'lore arc close' will not find this watcher, so disarm it by hand: lore coordinate disarm --settings $settings_abs"
-  return 1
-}
-
-# Drop this settings path from the record. Called on every disarm path that has
-# resolved a settings file, including the ones that found nothing to uninstall:
-# a record that outlived its hook entry would send a later close chasing a
-# watcher that is not there.
-forget_armed_watcher() {
-  local settings_abs="$1"
-  local dir tmp
-
-  [[ -n "$settings_abs" ]] || return 0
-  [[ -f "$ARMED_RECORD_FILE" ]] || return 0
-
-  dir="$(dirname "$ARMED_RECORD_FILE")"
-  tmp="$(mktemp "$dir/.tmp.armed-watchers.XXXXXX" 2>/dev/null)" || { record_note "could not open a temporary file in $dir; $settings_abs is disarmed but its record remains"; return 1; }
-
-  if python3 - "$ARMED_RECORD_FILE" "$tmp" "$settings_abs" <<'PYEOF'
-import json, sys
-
-record_path, tmp_path, settings = sys.argv[1:4]
-try:
-    with open(record_path, encoding="utf-8") as f:
-        records = json.load(f)
-except (OSError, ValueError) as exc:
-    print("record at %s is unreadable (%s)" % (record_path, exc), file=sys.stderr)
-    raise SystemExit(1)
-if not isinstance(records, dict):
-    print("record at %s is not an object" % record_path, file=sys.stderr)
-    raise SystemExit(1)
-
-records.pop(settings, None)
-
-with open(tmp_path, "w", encoding="utf-8") as f:
-    json.dump(records, f, indent=2, sort_keys=True)
-    f.write("\n")
-PYEOF
-  then
-    mv "$tmp" "$ARMED_RECORD_FILE" && return 0
-    rm -f "$tmp"
-    record_note "could not move the updated record into $ARMED_RECORD_FILE; $settings_abs is disarmed but its record remains"
-    return 1
-  fi
-
-  rm -f "$tmp"
-  record_note "could not update $ARMED_RECORD_FILE; $settings_abs is disarmed but its record remains, so a later 'lore arc close' may report a watcher that is already gone"
-  return 1
 }
 
 # --- Arming surface -----------------------------------------------------------
@@ -585,7 +441,7 @@ require_explicit_mode() {
 }
 
 cmd_arm() {
-  local framework support adapter command entry="" install_abs="" recorded=0
+  local framework support adapter command entry=""
   framework="$(resolve_active_framework 2>/dev/null)" || framework=""
   [[ -n "$framework" ]] || fail "could not resolve the active harness; set LORE_FRAMEWORK for this process"
 
@@ -619,12 +475,6 @@ cmd_arm() {
   Stop hooks before re-running: something else is writing it, or the write did not survive."
       else
         record_note "no python3 to read $INSTALL_PATH back; the adapter reported the install but it was not verified"
-      fi
-      # Only a successful install is recorded. A record written beside a failed
-      # install would point a later closure at a watcher that was never armed.
-      install_abs="$(abs_settings_path "$INSTALL_PATH")" || install_abs=""
-      if record_armed_watcher "$install_abs" "$framework"; then
-        recorded=1
       fi
     fi
   elif [[ -n "$INSTALL_PATH" ]]; then
@@ -667,13 +517,12 @@ cmd_arm() {
       echo
       if [[ -n "$INSTALL_PATH" ]]; then
         echo "[coordinate] installed into $INSTALL_PATH and read back — the next turn boundary arms the first window."
-        if [[ $recorded -eq 1 ]]; then
-          echo "[coordinate] recorded in $ARMED_RECORD_FILE, so 'lore arc close' can find this watcher."
-        fi
+        echo "[coordinate] the entry carries its own scope, so 'lore arc close' can find this watcher."
       else
         echo "[coordinate] --render: NOTHING IS ARMED. No settings file was written and no window will open."
         echo "             Add the entry above to the settings file whose scope you want armed, and own"
-        echo "             removing it by hand — a rendered entry leaves no record for 'lore arc close'."
+        echo "             removing it by hand — 'lore arc close' only reads the settings file lore itself"
+        echo "             installs into."
         echo "             To arm it here instead: re-run with --install <settings.json>. Every session"
         echo "             that reads that file gets this watcher, so pick the file deliberately."
       fi
@@ -728,11 +577,9 @@ disarm_report() {
 }
 
 cmd_disarm() {
-  local framework support adapter before after removed settings_abs
+  local framework support adapter before after removed
 
   [[ -n "$SETTINGS_PATH" ]] || fail "disarming requires --settings <path>: the settings file decides which sessions are disarmed, and lore will not guess a scope that could switch off a board somebody else is still working"
-
-  settings_abs="$(abs_settings_path "$SETTINGS_PATH")" || settings_abs=""
 
   framework="$(resolve_active_framework 2>/dev/null)" || framework=""
   [[ -n "$framework" ]] || fail "could not resolve the active harness; set LORE_FRAMEWORK for this process"
@@ -752,8 +599,6 @@ cmd_disarm() {
   [[ -f "$adapter" ]] || fail "turn_boundary_rewake is '$support' on $framework but its hook adapter is missing at $adapter"
 
   if [[ ! -f "$SETTINGS_PATH" ]]; then
-    # No file, so no entry — and therefore no record is allowed to survive.
-    forget_armed_watcher "$settings_abs" || true
     disarm_report "$framework" "$support" 0 \
       "nothing to disarm: no settings file at $SETTINGS_PATH."
     exit 0
@@ -765,12 +610,6 @@ cmd_disarm() {
     --settings "$SETTINGS_PATH" || fail "hook adapter could not remove the rewake entry from $SETTINGS_PATH"
   after="$(stop_entry_count "$SETTINGS_PATH")"
   removed=$(( before - after ))
-
-  # The entry goes first, the record after it — in that order, a failure between
-  # the two leaves a record with no entry (a stale pointer a later close resolves
-  # to "nothing to disarm") rather than an entry with no record (a live watcher
-  # no closure can find).
-  forget_armed_watcher "$settings_abs" || true
 
   if [[ "$removed" -le 0 ]]; then
     disarm_report "$framework" "$support" 0 \

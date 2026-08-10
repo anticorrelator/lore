@@ -250,19 +250,18 @@ owner_tmux_server() {
   printf '%s' "$(basename "$socket")"
 }
 
-# What the settings file and the registry jointly say is already armed:
+# What the settings file says is already armed:
 #   none        no lore watcher entry in the settings file
-#   armed<TAB>  an entry the registry also knows about, with its recorded scope
-#   entry-only  an entry nobody recorded — somebody installed it by hand
-# Both halves matter. An entry with no record is still a live eye, so arming over
-# it would replace a scope this command did not choose; the settings file carries
-# exactly one lore watcher, and the adapter replaces on that marker.
+#   armed<TAB>  an entry, with the scope read off its own command line
+# An entry is a live eye whoever installed it, so arming over it would replace a
+# scope this command did not choose; the settings file carries exactly one lore
+# watcher, and the adapter replaces on that marker.
 watcher_state() {
   local settings="$1"
-  python3 - "$settings" "$KNOWLEDGE_DIR/_coordination/armed-watchers.json" <<'PYEOF' 2>/dev/null
-import json, os, sys
+  python3 - "$settings" <<'PYEOF' 2>/dev/null
+import json, shlex, sys
 
-settings_path, record_path = sys.argv[1], sys.argv[2]
+settings_path = sys.argv[1]
 try:
     with open(settings_path, encoding="utf-8") as f:
         settings = json.load(f)
@@ -271,7 +270,8 @@ except (OSError, ValueError):
     raise SystemExit(0)
 
 armed = [
-    h for e in (settings.get("hooks") or {}).get("Stop") or []
+    h.get("command") or ""
+    for e in (settings.get("hooks") or {}).get("Stop") or []
     for h in e.get("hooks") or []
     if "coordinate-arm.sh" in (h.get("command") or "")
 ]
@@ -279,24 +279,17 @@ if not armed:
     print("none")
     raise SystemExit(0)
 
-key = os.path.realpath(os.path.expanduser(settings_path))
-records = {}
-try:
-    with open(record_path, encoding="utf-8") as f:
-        loaded = json.load(f)
-    if isinstance(loaded, dict):
-        records = loaded
-except (OSError, ValueError):
-    pass
-
-rec = records.get(key)
-if not isinstance(rec, dict):
-    print("entry-only")
-    raise SystemExit(0)
-
-scopes = rec.get("scopes") or {}
-tokens = ["arc:%s" % a for a in scopes.get("arcs") or []]
-tokens += ["slug:%s" % s for s in scopes.get("slugs") or []]
+tokens = []
+for command in armed:
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        continue
+    for i, tok in enumerate(argv):
+        if tok == "--arc" and i + 1 < len(argv):
+            tokens.append("arc:%s" % argv[i + 1])
+        elif tok == "--slug" and i + 1 < len(argv):
+            tokens.append("slug:%s" % argv[i + 1])
 print("armed\t%s" % (", ".join(tokens) or "the whole board"))
 PYEOF
 }
@@ -333,10 +326,6 @@ arm_standing_eye() {
         eye "         it does not name '$SLUG'. To widen it, re-arm deliberately with every scope you want:"
         eye "         lore coordinate arm --arc $SLUG --arc <the others> --install $settings"
       fi
-      return 0
-      ;;
-    entry-only)
-      eye "$settings already carries a watcher entry that lore has no record of — left exactly as it is, because replacing it would drop a scope this command did not choose. Re-arm deliberately with 'lore coordinate arm' if it should cover '$SLUG'."
       return 0
       ;;
   esac

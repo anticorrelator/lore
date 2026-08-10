@@ -21,19 +21,24 @@ Records the arc as closed and stamps its closure time. Closing an already-closed
 arc leaves the recorded closure time alone.
 
 Options:
-  --json         Emit the updated record as JSON.
-  --kdir <path>  Override the resolved knowledge dir (testing).
-  --help, -h     Show this help.
+  --json             Emit the updated record as JSON.
+  --settings <path>  The settings file to read for a standing eye scoped to this
+                     arc. Defaults to the active harness's settings file, which
+                     is where `lore arc open` arms one.
+  --kdir <path>      Override the resolved knowledge dir (testing).
+  --help, -h         Show this help.
 EOF
 }
 
 SLUG=""
 JSON_MODE=0
 KDIR_OVERRIDE=""
+SETTINGS_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --json) JSON_MODE=1; shift ;;
+    --settings) SETTINGS_OVERRIDE="${2:-}"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     --*)
@@ -81,9 +86,12 @@ ENVELOPE=$("$SCRIPT_DIR/arc-write-meta.sh" --kdir "$KNOWLEDGE_DIR" --slug "$SLUG
 # `lore coordinate arm --install` installs a Stop-hook watcher that re-fires at
 # every turn boundary. Nothing else in the closure path removes it, so an armed
 # eye survives its arc and keeps waking a seat about a board nobody is working.
-# The record arm leaves behind is how a closing seat finds a watcher it never
-# armed itself — the seat that closes an arc is usually not the seat that opened
-# it.
+#
+# The entry itself says what it watches: `coordinate arm` writes the scope flags
+# and the LORE_FRAMEWORK prefix into the command line verbatim, so the settings
+# file is both the authority on what is armed and the record of what it covers.
+# The seat that closes an arc is usually not the seat that armed it, and it does
+# not have to be — it reads the entry.
 #
 # What gets switched off is only what this arc can be held solely responsible
 # for. A watcher scoped to other arcs or to individual items may still be
@@ -94,41 +102,59 @@ ENVELOPE=$("$SCRIPT_DIR/arc-write-meta.sh" --kdir "$KNOWLEDGE_DIR" --slug "$SLUG
 # recorded; watcher hygiene does not get a veto over it. Everything the block
 # says goes to stderr, beside the missing-report warning above and clear of the
 # --json contract on stdout.
-ARMED_RECORD_FILE="$KNOWLEDGE_DIR/_coordination/armed-watchers.json"
+EYE_SETTINGS_FILE="$SETTINGS_OVERRIDE"
+if [[ -z "$EYE_SETTINGS_FILE" ]]; then
+  CLOSE_FRAMEWORK="$(resolve_active_framework 2>/dev/null)" || CLOSE_FRAMEWORK=""
+  if [[ -n "$CLOSE_FRAMEWORK" ]]; then
+    EYE_SETTINGS_FILE="$(resolve_harness_install_path settings "$CLOSE_FRAMEWORK" 2>/dev/null)" || EYE_SETTINGS_FILE=""
+    [[ "$EYE_SETTINGS_FILE" == "unsupported" ]] && EYE_SETTINGS_FILE=""
+  fi
+fi
 
-if [[ -f "$ARMED_RECORD_FILE" ]]; then
-  ARMED_MATCHES=$(python3 - "$ARMED_RECORD_FILE" "$SLUG" <<'PYEOF' || true
-import json, sys
+if [[ -n "$EYE_SETTINGS_FILE" && -f "$EYE_SETTINGS_FILE" ]]; then
+  ARMED_MATCHES=$(python3 - "$EYE_SETTINGS_FILE" "$SLUG" <<'PYEOF' || true
+import json, re, shlex, sys
 
-record_path, slug = sys.argv[1], sys.argv[2]
+settings_path, slug = sys.argv[1], sys.argv[2]
 try:
-    with open(record_path, encoding="utf-8") as f:
-        records = json.load(f)
+    with open(settings_path, encoding="utf-8") as f:
+        settings = json.load(f)
 except (OSError, ValueError) as exc:
     print("[arc] Warning: could not read %s (%s) — any armed watcher for this "
           "arc is still armed; disarm it with 'lore coordinate disarm "
-          "--settings <path>'" % (record_path, exc), file=sys.stderr)
+          "--settings <path>'" % (settings_path, exc), file=sys.stderr)
     raise SystemExit(0)
-if not isinstance(records, dict):
+if not isinstance(settings, dict):
     print("[arc] Warning: %s is not an object; skipping the standing-eye check"
-          % record_path, file=sys.stderr)
+          % settings_path, file=sys.stderr)
     raise SystemExit(0)
 
-for key, rec in sorted(records.items()):
-    if not isinstance(rec, dict):
-        continue
-    scopes = rec.get("scopes") or {}
-    arcs = [a for a in (scopes.get("arcs") or []) if a]
-    slugs = [s for s in (scopes.get("slugs") or []) if s]
-    # Only a watcher this arc's scope names is this arc's business. A board-wide
-    # eye names no arc, so closing one arc says nothing about whether it is
-    # still wanted.
-    if slug not in arcs:
-        continue
-    kind = "sole" if set(arcs) == {slug} and not slugs else "wide"
-    scope = ", ".join(["arc:%s" % a for a in arcs] + ["slug:%s" % s for s in slugs])
-    print("\t".join([kind, rec.get("settings_path") or key,
-                     rec.get("framework") or "", scope]))
+for entry in (settings.get("hooks") or {}).get("Stop") or []:
+    for hook in entry.get("hooks") or []:
+        command = hook.get("command") or ""
+        if "coordinate-arm.sh" not in command:
+            continue
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            continue
+        # The scope the entry was armed with, read back off its own command line.
+        arcs, slugs, framework = [], [], ""
+        for i, tok in enumerate(argv):
+            if tok == "--arc" and i + 1 < len(argv):
+                arcs.append(argv[i + 1])
+            elif tok == "--slug" and i + 1 < len(argv):
+                slugs.append(argv[i + 1])
+            elif tok.startswith("LORE_FRAMEWORK="):
+                framework = tok[len("LORE_FRAMEWORK="):]
+        # Only a watcher this arc's scope names is this arc's business. A
+        # board-wide eye names no arc, so closing one arc says nothing about
+        # whether it is still wanted.
+        if slug not in arcs:
+            continue
+        kind = "sole" if set(arcs) == {slug} and not slugs else "wide"
+        scope = ", ".join(["arc:%s" % a for a in arcs] + ["slug:%s" % s for s in slugs])
+        print("\t".join([kind, settings_path, framework, scope]))
 PYEOF
   )
 
@@ -141,7 +167,7 @@ PYEOF
       continue
     fi
 
-    # The framework the arm recorded, not the one closing: the adapter that
+    # The framework the entry names, not the one closing: the adapter that
     # installed the entry is the only one that can recognize and remove it.
     DISARM_RC=0
     DISARM_OUT=""
