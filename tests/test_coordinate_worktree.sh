@@ -226,6 +226,25 @@ case "$ALLOC_HELP" in
   *) fail "allocate help names where committed work goes" "$ALLOC_HELP" ;;
 esac
 
+# --- A worker session cannot be pinned to a manager-allocated tree -----------
+# That pin was the only thing that ever put a worker session into this
+# registry, and nothing has used it since 2026-07-25. A worker session's
+# checkout comes from the claiming TUI, which owns it end to end.
+SESSION_REFUSAL="$(bash "$MANAGER" allocate --kdir "$KDIR" --work-item demo \
+  --stream stream-a --attempt session-pin --owner-kind session \
+  --owner-id session-owner --source-dir "$SOURCE" --json 2>&1)"
+assert_eq "a session-owned allocation is refused" "1" "$?"
+case "$SESSION_REFUSAL" in
+  *"owner kind must be seat"*) pass "the refusal names the only owner kind left" ;;
+  *) fail "the refusal names the only owner kind left" "$SESSION_REFUSAL" ;;
+esac
+case "$SESSION_REFUSAL" in
+  *"claiming TUI"*) pass "the refusal says where a worker session's checkout comes from" ;;
+  *) fail "the refusal says where a worker session's checkout comes from" "$SESSION_REFUSAL" ;;
+esac
+assert_eq "the refused allocation wrote no registry row" "0" \
+  "$(grep -l '"attempt_id": "session-pin"' "$KDIR"/_coordination/worktrees/registry/*.json 2>/dev/null | wc -l | tr -d ' ')"
+
 REFUSE="$(allocate refuse-missing-identity refuse-seat)"
 REFUSE_ID="$(jq -r '.worktree_id' <<<"$REFUSE")"
 REFUSE_MANIFEST="$KDIR/_coordination/worktrees/registry/$REFUSE_ID.json"

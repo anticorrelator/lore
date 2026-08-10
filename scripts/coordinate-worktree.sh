@@ -186,8 +186,11 @@ class Manager:
         safe_id(row["worktree_id"], "worktree id")
         if Path(row["execution_dir"]).parent != self.trees:
             fail("execution_dir is outside the manager-owned namespace")
+        # A row written while worker sessions could still be pinned to a
+        # manager-allocated tree carries kind=session. It stays readable; it is
+        # no longer creatable.
         if row["owner"].get("kind") not in ("session", "seat") or not row["owner"].get("id"):
-            fail("owner must carry kind=session|seat and a durable id")
+            fail("owner must carry kind=seat and a durable id")
 
     def validate_identity(self, row):
         observed = guard("validate", identity=row["guard_identity"])
@@ -202,8 +205,15 @@ class Manager:
     def allocate(self, args):
         for value, label in ((args.work_item, "work item"), (args.stream, "stream"), (args.attempt, "attempt"), (args.owner_id, "owner id")):
             safe_id(value, label)
-        if args.owner_kind not in ("session", "seat"):
-            fail("owner kind must be session or seat")
+        if args.owner_kind != "seat":
+            fail(
+                f"owner kind must be seat, not {args.owner_kind!r}. Pinning a worker "
+                "session to a manager-allocated tree was the bridge that put such a "
+                "session into this registry, and nothing has crossed it since "
+                "2026-07-25 — worker sessions get their checkout from the claiming "
+                "TUI, which owns it end to end.\n"
+                "  A seat allocates here for the subagents it dispatches itself."
+            )
         item_dir = self.kdir / "_work" / args.work_item
         if not item_dir.is_dir():
             fail(f"active owner work item not found: {args.work_item}")
@@ -457,7 +467,9 @@ def parser():
     allocate = sub.add_parser(
         "allocate", parents=[common],
         description=(
-            "Allocate a manager-owned stream worktree. Release it with "
+            "Allocate a manager-owned stream worktree for a seat and the "
+            "subagents it dispatches into that tree. A worker session gets its "
+            "checkout from the claiming TUI instead. Release it with "
             "`transition --to cleanup_due`, which is also what takes it down: "
             "anything committed on its temporary branch is pinned at "
             "refs/lore/quarantine/<worktree-id> before the branch is deleted, "
@@ -467,7 +479,8 @@ def parser():
     allocate.add_argument("--work-item", required=True)
     allocate.add_argument("--stream", required=True)
     allocate.add_argument("--attempt", required=True)
-    allocate.add_argument("--owner-kind", required=True, help="session or seat")
+    allocate.add_argument("--owner-kind", required=True,
+                          help="seat — the only owner this manager allocates for")
     allocate.add_argument("--owner-id", required=True)
     allocate.add_argument("--source-dir", required=True)
 
@@ -594,8 +607,6 @@ def next_hint(row):
     disk. The hint rides the allocate output rather than the manifest, because
     it is advice to the caller, not state the manager owns.
     """
-    if row["owner"]["kind"] != "seat":
-        return None
     return (
         "bind this tree before you dispatch into it "
         f"(lore coordinate worktree bind --worktree-id {row['worktree_id']} "
