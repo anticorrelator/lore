@@ -549,7 +549,7 @@ walk (`lore session send <slug> <message>`). Enqueue emits `send_requested`.
 **The readiness gate is strict.** The owning instance injects only when the
 session is quiescent AND its harness `composer_signature` matches the rendered
 screen AND the `permission_prompt_signature` does NOT — the screen check is
-load-bearing because quiescent/needs_input fire on a single timer edge and cannot,
+load-bearing because `needs_input` fires on a single timer edge and cannot,
 alone, distinguish a composer-idle session from one paused on a permission modal
 (injected text could *answer* the modal). Any other state is a refusal
 (`send_refused` with a reason: `generating`, `modal`, `no-signature`,
@@ -742,14 +742,6 @@ top-level `request_id`. Its deterministic event id incorporates the live
 registry's persisted spawn request identity, so exact replay is idempotent without
 conflating completion with a queue lifecycle.
 
-**Work-item review events** — `review_flagged`, `review_held`, `review_notified`,
-`review_released` — form a third event class keyed to a work item rather than a
-queue request, so each MUST carry a non-empty `slug` (a distinct writer branch:
-`slug` is optional for every other event). The gate mechanism, verbs, packet
-contract, and audit semantics are the [review-gates contract](review-gates.md);
-this vocabulary is the journal half. Notify is a direct append (the coordinator
-owns it, no verb); flag/hold/release are emitted by their `lore work` verbs.
-
 **Emitter ownership** (per the settled design): the TUI owns session transitions
 and TUI-driven queue lifecycle; the enqueue writer owns `requested`; the
 `session close` verb owns `close_requested` (its enqueue forms) and
@@ -853,13 +845,6 @@ Idempotency is the emitter's responsibility: an emit site that must be at-most-o
 constructs a **deterministic `event_id`** and guards on it (checking its own state
 or the journal) before calling the writer. Most session transitions are naturally
 once-only and need no guard; the writer-generated `event_id` is fine for them.
-
-Review events inherit this posture keyed to what a duplicate *means*: the
-flag/hold/release verbs refuse a second gate on an already-gated item and refuse a
-release with no active gate, so `review_flagged`/`review_held`/`review_released`
-are naturally once-only per gate (the verb's state guard, not the writer, enforces
-it). `review_notified` is fire-per-occurrence — a stateless notification with no
-gate — so re-emitting it is a new observation, never a duplicate.
 
 ## Ownership matrix
 
@@ -1002,12 +987,11 @@ rather than growing this contract.**
   PID/tmux ownership for renewal and sweep protection. Dependency readiness,
   reconciliation objects, and terminal cleanup proof remain `_coordination/`
   surfaces consumed through `lore coordinate`, not new `_sessions/` writers.
-- **Review mechanism — landed (separate contract).** The four `review_*` events
-  are journal vocabulary here, but the gate mechanism they record (flag/hold/notify
-  spectrum, the `_meta.json` review block, the flag/hold/release verbs, the review
-  packet, and the retro audit read-path) is its own contract in
-  [docs/review-gates.md](review-gates.md). Route review-gate needs there, not into
-  this substrate.
+- **Review mechanism — retired (2026-08-10).** A work-item review event class
+  (flag/hold/release verbs and four `review_*` journal names) shipped and was
+  never used — zero rows in the journal's entire history — and was deleted in the
+  coordination-machinery cleanup. Review gating lives in the coordinator's ledger
+  vocabulary (hold/flag/notify per stream), not in this substrate.
 - **No compaction, truncation, or rotation** of `events.jsonl` in v1. Byte-offset
   cursors depend on it. If the journal outgrows a single file, that is a new design
   decision, not an in-place change.

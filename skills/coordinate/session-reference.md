@@ -55,36 +55,29 @@ another close terminal. Quarantine preserves content, not the physical directory
 
 ## Coordinated writer ownership and cleanup
 
-`lore coordinate worktree` is the sole manager for coordinated stream trees. Its
+`lore coordinate worktree` is the sole manager for seat-allocated stream trees. Its
 manifest embeds the canonical guard identity from `tui/internal/worktree/guard.go` and
 adds immutable work item, stream, attempt, temporary branch, allocation base, and
-owner/lease identity. The manager alone allocates and advances the outer lifecycle:
-`reserved → bound → active|recovered → quiescent → reconciling → cleanup_due →
-removed`; abnormal cleanup claims advance through `sweep_claimed → swept`, while
-`cleanup_blocked` remains retryable and never means success.
+owner identity. The manager alone allocates and advances the outer lifecycle:
+`reserved → bound → active → quiescent → reconciling → removed` — release is
+removal; declaring a tree finished is the act that takes it down, and a failed
+removal raises loudly with the record returned to `reconciling` so re-driving the
+release is the retry.
 
-Allocation authority stays with the coordinator or dispatching seat. A session owns
-the 900-second lease through its durable registry identity; a seat owns it only
-through an explicit liveness handle — `--owner-pid` (the long-lived harness process,
-never a `$$` subshell pid) or `--owner-tmux` — which allocate requires for
-seat-owned trees. The lease is a dead-man's switch: live PID or tmux ownership
-protects the tree regardless of lease age, expiry only sets the liveness re-test
-cadence, and a reclaimed tree is quarantined with a recovery bundle, never
-destroyed silently. A mutating subagent may run only inside a worktree allocated
-to its dispatching seat; it neither allocates nor receives independent ownership.
-If no seat lease is available, use an item-backed worker session. Read-only agents
-require no worktree. Renewals rewrite the manager row through the sole manager
-rather than relying on registry mtime.
+Allocation authority stays with the coordinator or dispatching seat; the manager
+allocates only for seats. A mutating subagent may run only inside a worktree
+allocated to its dispatching seat; it neither allocates nor receives independent
+ownership. When no seat tree is warranted, use an item-backed worker session — the
+claiming TUI allocates its tree outside this registry. Read-only agents require no
+worktree.
 
-After quiescence, freeze the immutable source manifest, reconcile from the stable
-control checkout, and freeze the integrated manifest before cleanup. The coordinator
-chooses intended composition; merge conflicts are aborted and recorded, then a
-worker edits the leased source tree and returns a new attempt. Cleanup or crash sweep
-first persists tracked, staged, unstaged, and untracked recovery evidence outside the
-tree, then removes it. Terminal proof requires path absence, absence from `git
-worktree list --porcelain`, and recorded temporary-branch and guard-ref disposition.
-Missing proof or failed removal stays `cleanup_blocked`, so the stream cannot satisfy
-a dependency edge.
+Integration happens on the stable control checkout: merge the stream's commits,
+verify with the suites, record the merge SHA and counts in the ledger. The
+coordinator chooses intended composition; merge conflicts are aborted and recorded,
+then a worker edits its stream tree and returns a new attempt. Removal pins the
+temporary branch's tip to a quarantine ref when it moved off its allocation base,
+then proves itself: path absence, absence from `git worktree list --porcelain`, and
+recorded branch and ref disposition.
 
 ## Send and answer semantics
 
@@ -137,7 +130,7 @@ Close authority is full-discretion and everything journals — the check on a wr
 close is the audit trail, not a gate. Closing a *human*-initiated session is within
 authority but exceptional: prefer a hands-request. `--initiator` records provenance;
 teardown policy rides `--auto-close`. A failed close moves guard ownership to
-`teardown-pending`; it does not release the session registry row or manager lease
+`teardown-pending`; it does not release the session registry row
 while the process may still write. Process teardown, guard disposition,
 reconciliation, and verified manager cleanup remain separate decisions.
 
@@ -215,18 +208,18 @@ self-propulsion: it advances only through exit-2 delivery into a live harness
 turn, and every window is bounded by its hook timeout, so no watcher outlives
 its seat.
 
-Arming with `--install` also records what it installed — the settings path and
-any scope — in `$KNOWLEDGE_DIR/_coordination/armed-watchers.json`, and `lore
-coordinate disarm --settings <path>` removes both the hook entry and the record.
-The record is discovery metadata, never authority: the settings file remains the
-truth about what is armed; the record lets `lore arc close` find arc-scoped
-watchers no live seat remembers. Close selects only records whose arc scope
-includes the closing arc: one scoped solely to it is auto-disarmed; one also
-naming other arcs or item scopes earns a non-blocking callout naming the disarm
-command — a watcher spanning arcs may still be another arc's eye, so that call
-stays with the seat. An unscoped record is never selected: the bare board-wide
-eye is a seat-lifetime resource attributable to no arc, disarmed by its seat at
-wind-down, never by closure. Disarm is idempotent — nothing to remove exits 0 —
+The installed hook entry is its own record: its command line carries the arc
+scope verbatim, so `lore arc close` finds arc-scoped watchers by reading the
+settings file's Stop entries directly (`--settings <path>` overrides the default
+of the active harness's settings file — the same place `arc open` auto-arms).
+Close selects only entries whose arc scope includes the closing arc: one scoped
+solely to it is auto-disarmed; one also naming other arcs earns a non-blocking
+callout naming the disarm command — a watcher spanning arcs may still be another
+arc's eye, so that call stays with the seat. An unscoped entry is never selected:
+the bare board-wide eye is a seat-lifetime resource attributable to no arc,
+disarmed by its seat at wind-down, never by closure. A hand-installed entry is as
+visible to closure as an armed one — an entry is an entry, and it says what it
+watches. Disarm is idempotent — nothing to remove exits 0 —
 and safe to run unconditionally. One residual wake after disarm is expected:
 removing the hook stops future windows from opening, but the window already
 running ends at its own deadline and delivers its wake.
@@ -244,10 +237,10 @@ lead, not a shipped path.
 ## Watch mechanics
 
 `lore coordinate watch` is the standing eye. Bare, it is board-scoped: it wakes
-on the first actionable row from any session. Repeatable `--slug <s>` narrows the
-trigger set with a two-key predicate — a row matches when its `slug` or its
-`links.work_item` equals a scoped slug (workers run under derived `<item>--w<n>`
-slugs; the second key is what keeps them in scope). `--arc <slug>` expands the
+on the first actionable row from any session. Scoping is by arc alone — a row
+matches when its `slug` or its `links.work_item` equals a member of the arc
+(workers run under derived `<item>--w<n>` slugs; the second key is what keeps
+them in scope). `--arc <slug>` expands the
 arc's declared `members[]` (statuses `active` and `closed`, matching `arc list`)
 into the same predicate — membership is declared, never inferred from project
 labels. An actionable row carrying neither key bypasses scope and wakes as a
@@ -265,10 +258,9 @@ cursor arguments at all.
 Classification: on a park-shaped row the watcher peek-confirms through the owning
 instance's shared readiness gate before waking. A strict match against the
 versioned per-harness signature set wakes `confirmed`; no strict match wakes
-`advisory` carrying the labeled reason no signature fired; an advisory repeating
-past its age threshold wakes `aged_advisory`; a window reaching its deadline with nothing
-actionable wakes `quiet` with the cursor position. Strictness selects tier, never
-existence. `--advisory-age <sec>` sets the escalation threshold; `--peek-timeout
+`advisory` carrying the labeled reason no signature fired; a window reaching its
+deadline with nothing actionable wakes `quiet` with the cursor position.
+Strictness selects tier, never existence. `--peek-timeout
 <sec>` bounds the round-trip through the owning instance, and `0` skips the peek
 entirely — a skipped peek still wakes, at `advisory` tier with the skip as its
 label, because no classification outcome may end in silence. When the matched row itself carries authoritative lifecycle state,
@@ -285,17 +277,10 @@ Every wake body names its authority (`hook-row`, `screen-signature`, `owner-hand
 matcher-contract drift (the codex composer-badge class — see Calibrations below)
 is detectable rather than silent; signatures are versioned and refreshable.
 
-The wake payload is six-part: tier, authority, signature version, the matched row
-or advisory, the board delta, and the next cursor. The delta comes from `lore
-coordinate status --json` (~1s per wake), diffed as per-bucket row-id sets
-against `_coordination/watch-board-baseline.json` beside the cursor (same
-per-scope naming) and refreshed on each wake; row ids are content-stable, so the
-diff is exact across runs. That projection is the wake's dominant cost, and
-`--no-board-delta` is the only lever on it: the wake still carries tier,
-authority, and the matched row, and you re-run `status` by hand. The delta is
-board-wide even under a scoped
-watch — scope governs triggers; the delta is information — and its shape reserves
-an advisory slot for signals outside the board projection: `--pending-stale
+The wake payload is five-part: tier, authority, signature version, the matched row
+or advisory, and the next cursor. Cross-board context is a deliberate read —
+`lore coordinate status` when steering needs it, never an embedded snapshot. One
+signal rides the wake from outside the board projection: `--pending-stale
 <sec>` (default 300, `0` disables) wakes on a pending request older than the
 threshold, age read from the row's `requested_at`, never mtime, which claim
 retries rewrite; a journal match outranks an advisory in the same poll.
@@ -309,9 +294,9 @@ an owner handle (`--owner-pid`/`--owner-tmux`, passed through by arm; add
 `--tmux-server <label>` when the seat runs on a non-default tmux server) the watch
 runs a stop-biased liveness check each poll: an owner provably dead — pid reaped,
 tmux session absent — gets a grace window, one final journal read, then exit 3
-and no re-arm. The bias is the worktree lease's inverted: a lease's false "dead"
-destroys work, a watcher's false "alive" is a runaway, so unknowable liveness
-never extends the chain past the current window. The verb reads the journal and
+and no re-arm. The bias is deliberate: a watcher's false "alive" is a runaway,
+so unknowable liveness never extends the chain past the current window — while
+work itself is never at stake, because trees survive their watchers. The verb reads the journal and
 writes nothing to it.
 
 Run watchers and coordinator control from the stable checkout, never from a mutating
