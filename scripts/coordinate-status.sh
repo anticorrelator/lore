@@ -85,13 +85,12 @@ EXPECTED_VERSION = "1"
 # item-local ledgers there.
 ARC_ROOT = "_work/_arcs"
 
-# Attempt statuses that release a stream for dispatch. Everything else — the
-# pre-freeze phases, a frozen source, a staged merge — still holds it. The
-# tokens are declared by scripts/coordinate-reconcile.py and quoted here rather
-# than imported: this board stays readable when that reader is broken, and
-# imports would put its failures in the projection's own call path.
-RELEASING_ATTEMPT_STATUS = "integrated"
-READ_ONLY_RELEASING_ATTEMPT_STATUS = "coord_report_accepted"
+# The attempt status that releases a stream for dispatch. Everything before it —
+# allocated, dispatched — still holds the stream. The token is declared by
+# scripts/coordinate-reconcile.py and quoted here rather than imported: this
+# board stays readable when that reader is broken, and imports would put its
+# failures in the projection's own call path.
+RELEASING_ATTEMPT_STATUS = "coord_report_accepted"
 
 SOURCE_ORDER = [
     "work-index",
@@ -118,11 +117,10 @@ RULES = {
     "reconcile.work.action-evidence-gap": "An active planned item lacks versioned task/DAG evidence; absence is not treated as unblocked.",
     "reconcile.work.action-wait-conflict": "A pending task is locally unblocked while its work item carries explicit waiting evidence.",
     "act.coordinate.ready": "A pending stream has no active attempt, every explicit predecessor is done/full/cleaned, and a settings-derived seat is available.",
-    "waiting.coordinate.dependency": "A stream remains waiting until every explicit predecessor is done/full with verified cleanup.",
+    "waiting.coordinate.dependency": "A stream remains waiting until every explicit predecessor is recorded done/full in the ledger.",
     "waiting.coordinate.capacity": "A ready stream waits because the settings-derived concurrency ceiling has no remaining seat.",
     "waiting.coordinate.active": "An active attempt is suppressed from the actionable projection.",
-    "needs.coordinate.predecessor": "A terminal predecessor without full verdict and verified cleanup requires coordinator judgment.",
-    "needs.coordinate.conflict": "A frozen source attempt records merge conflicts that the coordinator judges and a worker edits.",
+    "needs.coordinate.predecessor": "A terminal predecessor without a full verdict requires coordinator judgment.",
 }
 
 
@@ -263,21 +261,23 @@ def parse_ledger(path):
 
 
 def reconciliation_projection(slug):
+    """Project the attempt record as the reconciler wrote it.
+
+    Read directly rather than through the writer: this is a plain projection of
+    one JSON document, and shelling out to its author to be handed the same
+    rows back put the writer's failures in the board's call path.
+    """
     state_path = kdir / "_coordination" / "reconciliation" / slug / "streams.json"
     if not state_path.is_file():
         return {}, None
-    proc = subprocess.run(
-        [sys.executable, str(scripts / "coordinate-reconcile.py"), "status",
-         "--kdir", str(kdir), "--slug", slug, "--json"],
-        text=True, capture_output=True, check=False,
-    )
-    if proc.returncode != 0:
-        return {}, proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
     try:
-        payload = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        return {}, f"reconciliation status returned invalid JSON: {exc}"
-    return {row.get("stream_id"): row for row in payload.get("streams", []) if isinstance(row, dict)}, None
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, f"attempt record is unreadable: {exc}"
+    streams = payload.get("streams")
+    if not isinstance(streams, list):
+        return {}, "attempt record carries no streams list"
+    return {row.get("stream_id"): row for row in streams if isinstance(row, dict)}, None
 
 
 def latest_attempt(stream):
@@ -299,9 +299,7 @@ def attempt_liveness(attempt, tree):
     if not isinstance(status, str) or not status:
         return {"attempt_present": True, "attempt_status": None,
                 "attempt_status_recorded": False, "holds_stream": True}
-    released = status == RELEASING_ATTEMPT_STATUS or (
-        tree == "read-only" and status == READ_ONLY_RELEASING_ATTEMPT_STATUS
-    )
+    released = status == RELEASING_ATTEMPT_STATUS
     return {"attempt_present": True, "attempt_status": status,
             "attempt_status_recorded": True, "holds_stream": not released}
 
@@ -496,14 +494,6 @@ def project_arc_coordination(record):
                 [arc, stream_id, verdict], "reconcile.work.action-evidence-gap",
             ))
             continue
-        if attempt and attempt.get("status") == "needs_judgment":
-            buckets["needs_judgment"].append(make_row(
-                "needs_judgment", "work-index", "stream-merge-conflict",
-                f"{arc}/{stream_id}: merge conflict needs composition judgment",
-                facts, locator, [arc, stream_id, attempt.get("attempt_id")],
-                "needs.coordinate.conflict",
-            ))
-            continue
         if status == "in-flight" or liveness["holds_stream"]:
             coordination_active.append((arc, stream_id, tree))
             buckets["waiting"].append(make_row(
@@ -521,18 +511,15 @@ def project_arc_coordination(record):
             if predecessor is None:
                 judgment.append({"stream_id": dependency, "reason": "missing ledger row"})
                 continue
-            predecessor_state = reconciled.get(dependency, {})
-            predecessor_attempt = latest_attempt(predecessor_state)
-            cleanup_ok = predecessor.get("tree") == "read-only" or bool(
-                predecessor_attempt and predecessor_attempt.get("terminal_full_cleaned")
-            )
-            if predecessor.get("status") == "done" and predecessor.get("verdict") == "full" and cleanup_ok:
+            # The ledger row is the account of a predecessor's outcome: the seat
+            # writes done/full there once it has merged the stream and run the
+            # suites. Nothing else is consulted, so nothing else can disagree.
+            if predecessor.get("status") == "done" and predecessor.get("verdict") == "full":
                 continue
             detail = {
                 "stream_id": dependency,
                 "status": predecessor.get("status"),
                 "verdict": predecessor.get("verdict"),
-                "cleanup_verified": cleanup_ok,
             }
             if predecessor.get("status") == "done" or predecessor.get("verdict") in {"partial", "none"}:
                 judgment.append(detail)
@@ -542,8 +529,8 @@ def project_arc_coordination(record):
         facts["judgment_predecessors"] = judgment
         if judgment:
             buckets["needs_judgment"].append(make_row(
-                "needs_judgment", "work-index", "predecessor-not-full-cleaned",
-                f"{arc}/{stream_id}: terminal predecessor is not full and cleaned",
+                "needs_judgment", "work-index", "predecessor-not-full",
+                f"{arc}/{stream_id}: terminal predecessor is not recorded full",
                 facts, locator, [arc, stream_id, judgment],
                 "needs.coordinate.predecessor",
             ))

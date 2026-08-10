@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# coordinate-reconcile.sh — Resolve a work item and invoke the reconciliation sole writer.
+# coordinate-reconcile.sh — Resolve a work item and invoke the attempt-record sole writer.
 
 set -euo pipefail
 
@@ -10,7 +10,7 @@ usage() {
   cat >&2 <<'EOF'
 Usage: lore coordinate reconcile <operation> <ref> [options]
 
-Lifecycle operations, covering an attempt from allocation to hand-off:
+Lifecycle operations, covering an attempt from allocation to report acceptance:
   register-attempt  --stream S --attempt A --tree writer --worktree-id ID
                     --tree read-only registers a stream that owns no checkout.
   advance-attempt   --stream S --attempt A --expected-status STATUS
@@ -22,11 +22,8 @@ Lifecycle operations, covering an attempt from allocation to hand-off:
                     worktree id by hand. Always exits 0: read `.outcome` to tell
                     "no record yet" from "the pointer went stale".
 
-Evidence operations:
-  freeze-source | merge | record-conflict | freeze-integrated | status
-
-Freeze immutable source/integrated stream evidence, record unresolved merge
-conflicts, or validate the aggregate against the worktree lifecycle archive.
+What shipped is not recorded here. The integration commit and the suite counts
+that verified it belong in the arc ledger row, where a reader looks for them.
 EOF
 }
 
@@ -37,7 +34,6 @@ shift 2
 
 case "$OPERATION" in
   register-attempt|advance-attempt|lookup-attempt) ;;
-  freeze-source|merge|record-conflict|freeze-integrated|status) ;;
   *) echo "[coordinate-reconcile] Error: unknown operation '$OPERATION'" >&2; usage; exit 1 ;;
 esac
 

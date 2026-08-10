@@ -104,7 +104,7 @@ assert_eq "identical advance replays as success" "coord_advance_replayed" "$(jq 
 assert_eq "replayed advance does not rewrite" "$BEFORE" "$(state_hash)"
 
 SKIP="$(recon advance-attempt --stream stream-a --attempt attempt-1 \
-  --expected-status coord_dispatched --to pending 2>&1)"
+  --expected-status coord_allocated --to coord_report_accepted 2>&1)"
 assert_eq "a skipped edge is refused" "1" "$?"
 assert_eq "refused skip leaves the record untouched" "$BEFORE" "$(state_hash)"
 case "$SKIP" in
@@ -118,10 +118,10 @@ assert_eq "a backward edge is refused" "1" "$?"
 
 FORGE="$(recon advance-attempt --stream stream-a --attempt attempt-1 \
   --expected-status coord_dispatched --to source_frozen 2>&1)"
-assert_eq "advance cannot manufacture a reconciliation status" "1" "$?"
+assert_eq "advance cannot manufacture a status the machine does not declare" "1" "$?"
 case "$FORGE" in
-  *source_frozen*integrated*) pass "refusal says which verbs own those statuses" ;;
-  *) fail "refusal says which verbs own those statuses" "$FORGE" ;;
+  *coord_report_accepted*) pass "refusal names where an attempt rests" ;;
+  *) fail "refusal names where an attempt rests" "$FORGE" ;;
 esac
 assert_eq "refused advance leaves the record untouched" "$BEFORE" "$(state_hash)"
 
@@ -129,14 +129,17 @@ STALE="$(recon advance-attempt --stream stream-a --attempt attempt-1 \
   --expected-status coord_allocated --to source_frozen 2>&1)"
 assert_eq "a stale expected status conflicts" "1" "$?"
 
-# Walk the rest of the writer graph through to the hand-off.
+# Report acceptance is where a writer attempt rests: what it shipped is the
+# integration commit and the suite counts in the ledger, not a status here.
+REST="$(recon advance-attempt --stream stream-a --attempt attempt-1 \
+  --expected-status coord_dispatched --to coord_report_accepted)"
+assert_eq "a writer attempt rests at report acceptance" "coord_report_accepted" \
+  "$(jq -r '.status' <<<"$REST")"
 recon advance-attempt --stream stream-a --attempt attempt-1 \
-  --expected-status coord_dispatched --to coord_report_accepted >/dev/null
-HANDOFF="$(recon advance-attempt --stream stream-a --attempt attempt-1 \
-  --expected-status coord_report_accepted --to pending)"
-assert_eq "report acceptance hands off to pending" "pending" "$(jq -r '.status' <<<"$HANDOFF")"
+  --expected-status coord_report_accepted --to coord_dispatched >/dev/null 2>&1
+assert_eq "there is no edge out of report acceptance" "1" "$?"
 
-# A read-only attempt rests at coord_report_accepted; it never reaches a freeze.
+# A read-only attempt rests at the same place.
 recon advance-attempt --stream stream-ro --attempt attempt-1 \
   --expected-status coord_dispatched --to coord_report_accepted >/dev/null
 assert_eq "read-only attempt reaches report acceptance" "coord_report_accepted" \
@@ -214,16 +217,6 @@ assert_eq "an unknown stream is distinguishable" "coord_lookup_stream_absent" \
 assert_eq "an unknown attempt is distinguishable" "coord_lookup_attempt_absent" \
   "$(recon lookup-attempt --stream stream-a --attempt attempt-99 | jq -r '.outcome')"
 
-# --- status tolerates a tree-less attempt ------------------------------------
-# The reader used to subscript worktree_id bare, and KeyError was not in the
-# caught tuple, so one read-only stream crashed the whole projection.
-STATUS="$(recon status)"
-assert_eq "status survives a tree-less attempt" "0" "$?"
-assert_eq "a read-only attempt reads as tree-less, not invalid" "coord_lookup_tree_absent" \
-  "$(jq -r '[.streams[] | select(.stream_id=="stream-ro") | .attempts[0].worktree][0]' <<<"$STATUS")"
-assert_eq "a tree-less attempt is still valid" "true" \
-  "$(jq -r '[.streams[] | select(.stream_id=="stream-ro") | .attempts[0].valid][0]' <<<"$STATUS")"
-
 # --- a record written before this change stays readable, then upgrades --------
 python3 - "$STATE" <<'PY'
 import json, sys
@@ -232,7 +225,7 @@ state = json.load(open(path, encoding="utf-8"))
 state["schema_version"] = 2
 json.dump(state, open(path, "w", encoding="utf-8"), indent=2, sort_keys=True)
 PY
-V2_STATUS="$(recon status)"
+V2_STATUS="$(recon lookup-attempt --stream stream-a --attempt attempt-1)"
 assert_eq "a version 2 record is read unchanged" "2" "$(jq -r '.schema_version' <<<"$V2_STATUS")"
 assert_eq "a version 2 read reports its own version" "2" "$(jq -r '.schema_version' "$STATE")"
 V2_ATTEMPTS="$(jq '[.streams[].attempts[]] | length' "$STATE")"

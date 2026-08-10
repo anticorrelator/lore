@@ -114,7 +114,7 @@ PY
   grep -Fq '`scripts/widget.sh`' "$artifact"
 }
 
-@test "a stream record with no frozen manifest leaves the diff as the account of what shipped" {
+@test "a coordinated stream leaves the diff as the account of what shipped" {
   python3 "$REPO_DIR/scripts/coordinate-reconcile.py" register-attempt \
     --kdir "$LORE_KNOWLEDGE_DIR" --slug render-item --stream s1 --attempt a1 \
     --tree read-only --json >/dev/null
@@ -130,11 +130,8 @@ PY
 import json, sys
 payload = json.load(sys.stdin)
 assert payload["counts"]["changed_files"] == 2, payload["counts"]
-assert payload["counts"]["stream_diffs"] == 0, payload["counts"]
-reason = payload["panel_coverage"]["shipped_diff"]["reason"]
-assert "no frozen manifest" in reason, reason
+assert payload["panel_coverage"]["shipped_diff"]["status"] == "present", payload["panel_coverage"]
 '
-  grep -Fq "Stream evidence absent:" "$ITEM_DIR/closure-conformance.md"
   grep -Fq '`scripts/widget.sh`' "$ITEM_DIR/closure-conformance.md"
   python3 - "$ITEM_DIR/closure-conformance.md" <<'PY'
 import json, re, sys

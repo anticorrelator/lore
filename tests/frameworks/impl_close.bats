@@ -599,51 +599,12 @@ write_stream_worktree() {
 JSON
 }
 
-@test "a read-only stream resting at its terminal phase closes without cleanup proof" {
-  python3 "$RECONCILE_SH" register-attempt --kdir "$TEST_KDIR" --slug anchored-done \
-    --stream s1 --attempt a1 --tree read-only --json >/dev/null
-  python3 "$RECONCILE_SH" advance-attempt --kdir "$TEST_KDIR" --slug anchored-done \
-    --stream s1 --attempt a1 --expected-status coord_dispatched \
-    --to coord_report_accepted --json >/dev/null
-
-  run bash "$CLOSE_SH" anchored-done --verdict full --summary "capability operable"
-  [ "$status" -eq 0 ]
-  ! echo "$output" | grep -q "cleanup is unproven"
-  [ -d "$WORK_DIR/_archive/anchored-done" ]
-}
-
-@test "an allocated writer attempt is exempt from the cleanup refusal but not from the terminal test" {
+@test "a coordinated item closes on its own evidence, not on the attempt record" {
   write_stream_worktree wt-alloc anchored-done s1 a1
   python3 "$RECONCILE_SH" register-attempt --kdir "$TEST_KDIR" --slug anchored-done \
     --stream s1 --attempt a1 --tree writer --worktree-id wt-alloc --json >/dev/null
 
   run bash "$CLOSE_SH" anchored-done --verdict full --summary "capability operable"
-  [ "$status" -eq 1 ]
-  ! echo "$output" | grep -q "cleanup is unproven"
-  echo "$output" | grep -q "has not reached its terminal phase"
-  echo "$output" | grep -q "status=coord_allocated"
-  [ ! -d "$WORK_DIR/_archive/anchored-done" ]
-}
-
-@test "a record written before the lifecycle phases still refuses an unproven cleanup" {
-  mkdir -p "$TEST_KDIR/_coordination/reconciliation/anchored-done"
-  cat > "$TEST_KDIR/_coordination/reconciliation/anchored-done/streams.json" <<'JSON'
-{
-  "schema_version": 2,
-  "work_item": "anchored-done",
-  "updated_at": "2026-07-21T00:00:00Z",
-  "streams": [
-    {"stream_id": "s1", "tree": "writer", "depends_on": [],
-     "attempts": [{"attempt_id": "a1", "status": "source_frozen",
-                   "worktree_id": "wt-legacy", "updated_at": "2026-07-21T00:00:00Z"}]}
-  ]
-}
-JSON
-  write_stream_worktree wt-legacy anchored-done s1 a1
-
-  run bash "$CLOSE_SH" anchored-done --verdict full --summary "capability operable"
-  [ "$status" -eq 1 ]
-  echo "$output" | grep -q "cleanup is unproven"
-  ! echo "$output" | grep -q "aggregate schema/hash validation failed"
-  [ ! -d "$WORK_DIR/_archive/anchored-done" ]
+  [ "$status" -eq 0 ]
+  [ -d "$WORK_DIR/_archive/anchored-done" ]
 }
