@@ -190,7 +190,12 @@ and correlated abandonment or cancellation emits and exits 3.
 
 ## Arm mechanics
 
-`lore coordinate arm` installs the standing eye once, at seat open. It refuses a
+`lore coordinate arm` installs the standing eye once, at seat open — and `lore
+arc open` now runs it for you by default (idempotent, `--no-watcher` to opt out),
+so the manual verb is the override surface. It refuses a bare invocation: an
+arming call must say `--install` or `--render` explicitly, because rendering a
+hook without installing it is precisely how a seat once armed nothing and
+believed otherwise. It also refuses a
 handle-less arm: `--owner-pid` (the long-lived harness process, never a `$$`
 subshell pid) or `--owner-tmux` is required, the same liveness-handle discipline
 as seat-owned worktree allocation. The handle feeds the watch's stop-biased
