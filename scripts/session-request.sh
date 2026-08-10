@@ -191,10 +191,8 @@ fi
 # never sees the worker at all. The TUI groups workers under their base item from
 # the same parse. None of those failures announce themselves.
 #
-# Refusal rather than advisory, matching --worktree-id's shape check two blocks
-# down: the value is fully determined at enqueue, and the cost of getting it wrong
-# is invisible downstream loss. The advisories in this script are the other
-# situation — a correct value an older reader may ignore.
+# A refusal rather than a warning: the value is fully determined at enqueue, and
+# the cost of getting it wrong is invisible downstream loss.
 #
 # The base must be a slugify() output, which collapses every `--` run to a single
 # `-`; that is what makes the suffix an unambiguous marker rather than a guess.
@@ -360,14 +358,6 @@ if [[ -n "$MIN_VINTAGE" ]]; then
     [[ -n "$MIN_VINTAGE_RESOLVED" ]] || fail "invalid --min-vintage: '$MIN_VINTAGE' (expected an ISO-8601 UTC timestamp like 2026-07-05T12:00:00Z or a resolvable git commit-ish)"
   fi
   MIN_VINTAGE_JSON="$(jq -n --arg v "$MIN_VINTAGE_RESOLVED" '$v')"
-fi
-
-if [[ $FRAMEWORK_PROVIDED -eq 1 && -z "$MIN_VINTAGE" ]]; then
-  echo "[session] advisory: --framework was provided without --min-vintage; old claiming TUIs may ignore the framework field" >&2
-fi
-
-if [[ -n "$PREFER_PROJECT_DIR_JSON" && -z "$MIN_VINTAGE" ]]; then
-  echo "[session] advisory: --prefer-dir/--prefer-cwd was provided without --min-vintage; old claiming TUIs may ignore the prefer_project_dir field and claim immediately" >&2
 fi
 
 if [[ -z "$REQUESTED_BY" ]]; then

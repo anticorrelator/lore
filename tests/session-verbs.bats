@@ -341,17 +341,16 @@ journal_boundaries() {
   [ ! -e "$TEST_KDIR/_sessions/requests" ]
 }
 
-@test "request --framework without --min-vintage emits an advisory but enqueues" {
+@test "request --framework without --min-vintage enqueues silently" {
   local err="$TEST_KDIR/framework.err"
   local out
   out="$(bash "$REQUEST" --type implement --slug wi --framework codex --anywhere --kdir "$TEST_KDIR" 2>"$err")"
-  [[ "$out" == *"Enqueued implement request"* ]]
-  [ "$(wc -l < "$err" | tr -d ' ')" -eq 1 ]
-  grep -q -- "--min-vintage" "$err"
+  [[ "$out" == *"Enqueued implement request"* ]] || return 1
+  [ ! -s "$err" ] || return 1
 
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.framework == "codex"' "$pending"
-  [ "$status" -eq 0 ]
+  outcome_is 0
 }
 
 @test "request omits prefer_project_dir when neither prefer flag is passed" {
@@ -402,16 +401,16 @@ journal_boundaries() {
   [ ! -e "$TEST_KDIR/_sessions/requests" ]
 }
 
-@test "request --prefer-cwd without --min-vintage emits an advisory but enqueues" {
+@test "request --prefer-cwd without --min-vintage enqueues silently" {
   local err="$TEST_KDIR/prefer.err"
   local out
   out="$(bash "$REQUEST" --type implement --slug wi --prefer-cwd --kdir "$TEST_KDIR" 2>"$err")"
-  [[ "$out" == *"Enqueued implement request"* ]]
-  grep -q -- "--min-vintage" "$err"
+  [[ "$out" == *"Enqueued implement request"* ]] || return 1
+  [ ! -s "$err" ] || return 1
 
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e 'has("prefer_project_dir")' "$pending"
-  [ "$status" -eq 0 ]
+  outcome_is 0
 }
 
 @test "request without a placement stance refuses naming all four options" {
