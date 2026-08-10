@@ -33,11 +33,10 @@
 #
 # Options (arming surface):
 #   --owner-pid <pid>     The long-lived harness process that owns the seat.
-#                         Never $$: a subshell's pid dies when the command
-#                         returns, recording a handle that looks live now and
-#                         fails identically later. Refused, not merely warned
-#                         about: arming rejects its own pid, the pid of the
-#                         shell that invoked it, and any pid that is not alive.
+#                         A pid that is not alive is refused outright: the
+#                         handle would be dead before the watcher is armed, and
+#                         the first window would stop on a seat that was never
+#                         there.
 #   --owner-tmux <name>   tmux session name of the owner (same handle format as
 #                         `lore coordinate worktree allocate`).
 #   --tmux-server <name>  tmux server socket for --owner-tmux (default: lore-tui).
@@ -119,8 +118,8 @@
 #   past its timeout ends the whole re-arm chain and says nothing about it. The
 #   watcher window is therefore set strictly shorter and always exits with a
 #   wake of its own, which turns the harness timeout into a backstop that never
-#   fires. If it ever does fire, the SIGTERM trap below leaves a marker file so
-#   the kill is distinguishable from a clean wake afterwards.
+#   fires. That invariant is validated at arm time and refused loudly, which is
+#   where the guarantee lives.
 #
 # Cross-harness behavior is read from the `turn_boundary_rewake` capability
 # cell, never from the framework name:
@@ -165,9 +164,6 @@ JSON_MODE=0
 # registry drops an owner before the journal records why it went, so an instant
 # verdict reads a teardown as a death.
 OWNER_GONE_GRACE_SECONDS=2
-# Slack between the watcher's own deadline and the point this wrapper stops
-# waiting for it. Only reachable if the watcher overruns its --timeout.
-WINDOW_OVERRUN_GRACE_SECONDS="${LORE_ARM_OVERRUN_GRACE_SECONDS:-60}"
 # Pause before an error wake so a reader that fails every time re-arms at a
 # readable cadence instead of spinning the seat through wake-fail-wake turns.
 ERROR_WAKE_BACKOFF_SECONDS="${LORE_ARM_ERROR_BACKOFF_SECONDS:-60}"
@@ -308,9 +304,7 @@ owner_may_continue() {
 }
 
 # The arming surface's own check on the handle it is about to bake into a hook
-# entry. Every --owner-pid surface warns about `$$` and none of them checked it,
-# so the warning only reached the people who did not need it: a pid that dies
-# with the command arms a watcher that halts at its first window, which reads as
+# entry: a dead pid arms a watcher that halts at its first window, which reads as
 # silence rather than as a refusal.
 #
 # The arm surface only. `run` receives the pid the hook entry was armed with, and
@@ -319,20 +313,6 @@ owner_may_continue() {
 # already answers a dead owner with exit 3.
 check_arm_owner_pid() {
   [[ -n "$OWNER_PID" ]] || return 0
-  local expiry='  A handle that dies with the command arms a watcher that stops at its first window
-  and never re-arms, which reaches the seat as silence.
-  Pass the pid of the long-lived harness process that owns the seat.'
-  if [[ "$OWNER_PID" == "$$" ]]; then
-    fail "refusing --owner-pid $OWNER_PID: that is this command's own process. \`lore\` execs
-  straight through to this script, so a \`\$\$\` written on the command line lands here, and
-  it is gone the moment the command returns.
-$expiry"
-  fi
-  if [[ "$OWNER_PID" == "$PPID" ]]; then
-    fail "refusing --owner-pid $OWNER_PID: that is the shell that invoked this command, which
-  exits as soon as the command returns — the \`\$\$\` trap, one process further out.
-$expiry"
-  fi
   if [[ "$(probe_pid "$OWNER_PID")" == "dead" ]]; then
     fail "refusing --owner-pid $OWNER_PID: no such process. The handle is dead before the
   watcher is even armed, so the first window would stop on a seat that was never there.
@@ -633,9 +613,7 @@ cmd_disarm() {
 # state that should reach a person becomes exit 2 here, and the one state that
 # should not — a seat that no longer exists — is the only one that stays quiet.
 
-KILL_MARKER_FILE="$KNOWLEDGE_DIR/_coordination/arm-window-killed.json"
 WATCH_PID=""
-WINDOW_STARTED_AT=""
 
 # --- One live window per scope ------------------------------------------------
 #
@@ -713,33 +691,9 @@ PY
   esac
 }
 
-# The harness kills this command at the hook timeout, and a killed hook is
-# indistinguishable from one that simply never woke anybody. The marker is the
-# distinguishing evidence, written where the next window's operator can find it.
-write_kill_marker() {
-  local dir tmp elapsed
-  dir="$(dirname "$KILL_MARKER_FILE")"
-  mkdir -p "$dir" 2>/dev/null || return 0
-  elapsed=$(( $(date +%s) - ${WINDOW_STARTED_AT:-$(date +%s)} ))
-  tmp="$(mktemp "$dir/.tmp.arm-window-killed.XXXXXX")" || return 0
-  if jq -n \
-    --arg at "$(timestamp_iso)" \
-    --arg owner "$(owner_label)" \
-    --argjson window "$WINDOW" \
-    --argjson elapsed "$elapsed" \
-    '{killed_at: $at, owner: $owner, window_seconds: $window, elapsed_seconds: $elapsed,
-      note: "SIGTERM reached the armed watcher window. The re-arm chain stopped here: a signalled hook exits 143, which the harness does not read as a wake."}' \
-    > "$tmp" 2>/dev/null; then
-    mv "$tmp" "$KILL_MARKER_FILE"
-  else
-    rm -f "$tmp"
-  fi
-}
-
 on_sigterm() {
   trap - TERM
   [[ -n "$WATCH_PID" ]] && kill -TERM "$WATCH_PID" 2>/dev/null || true
-  write_kill_marker
   exit 143
 }
 
@@ -762,7 +716,7 @@ emit_owner_gone() {
 
 cmd_run() {
   # Before anything else, and before the TERM trap: a losing instance should
-  # cost the seat one fork, not a grace sleep and a kill marker.
+  # cost the seat one fork, not a grace sleep.
   acquire_window_lock "$(scope_lock_file)" || exit 0
 
   trap on_sigterm TERM
@@ -772,12 +726,11 @@ cmd_run() {
     owner_may_continue || emit_owner_gone
   fi
 
-  local err_file watch_status=0 overran=0 hard_deadline now
+  local err_file watch_status=0
   err_file="$(mktemp)"
   # shellcheck disable=SC2064
   trap "rm -f '$err_file'" EXIT
 
-  WINDOW_STARTED_AT="$(date +%s)"
   # The watcher does not inherit the lock descriptor. The lock names the wrapper
   # that can still deliver a wake, so it must die with the wrapper: an orphaned
   # watcher holding it would block every re-arm for a whole window while having
@@ -788,19 +741,9 @@ cmd_run() {
     >/dev/null 2>"$err_file" 9>&- &
   WATCH_PID=$!
 
-  # The watcher owns its own deadline; this only catches the case where it does
-  # not come back at it, because a window that outlives the hook timeout is the
-  # silent-kill this whole design exists to make impossible.
-  hard_deadline=$(( WINDOW_STARTED_AT + WINDOW + WINDOW_OVERRUN_GRACE_SECONDS ))
-  while kill -0 "$WATCH_PID" 2>/dev/null; do
-    now="$(date +%s)"
-    if [[ "$now" -ge "$hard_deadline" ]]; then
-      kill -TERM "$WATCH_PID" 2>/dev/null || true
-      overran=1
-      break
-    fi
-    sleep 1
-  done
+  # The watcher owns its own deadline and exits at it, every time, with a wake.
+  # --hook-timeout > --window is validated at arm time, so the harness kill is a
+  # backstop the arithmetic already excludes.
   wait "$WATCH_PID" || watch_status=$?
   WATCH_PID=""
 
@@ -810,11 +753,6 @@ cmd_run() {
   # the seat every wake twice.
   local body
   body="$(cat "$err_file")"
-
-  if [[ $overran -eq 1 ]]; then
-    emit_wake "overran" "The watcher did not return at its ${WINDOW}s deadline and was stopped ${WINDOW_OVERRUN_GRACE_SECONDS}s past it. Nothing was read after that point.
-$body"
-  fi
 
   # A window that ends while the seat is gone has nobody to wake; every other
   # ending does, including the ones that found nothing.

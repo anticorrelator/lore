@@ -284,23 +284,8 @@ RENDERED=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc 
   | grep -m1 '^  LORE_FRAMEWORK=' | sed 's/^  //')
 assert_eq "the installed command is the rendered command, verbatim" "$RENDERED" "$(installed_command "$SETTINGS")"
 
-echo "== a handle that dies with the command is refused, not armed =="
-# The `$$` warning sat in this script's own refusal text and in its --help, and
-# nothing checked it. `lore` execs straight through to this script, so a `$$` on
-# the command line arrives as this process when the caller's shell is replaced
-# and as its parent when it is not.
+echo "== a dead handle is refused, not armed =="
 KDIR=$(new_store)
-OUT=$(LORE_FRAMEWORK=claude-code bash -c 'exec bash "$1" --owner-pid $$ --kdir "$2"' \
-  _ "$ARM" "$KDIR" 2>&1); RC=$?
-assert_eq "arming with the verb's own pid exits 1" "1" "$RC"
-assert_contains "the refusal says whose process that pid is" "$OUT" "this command's own process"
-assert_contains "the refusal names the failure it prevents" "$OUT" "never re-arms"
-
-OUT=$(LORE_FRAMEWORK=claude-code bash -c 'bash "$1" --owner-pid $$ --kdir "$2"; exit $?' \
-  _ "$ARM" "$KDIR" 2>&1); RC=$?
-assert_eq "arming with the invoking shell's pid exits 1" "1" "$RC"
-assert_contains "the refusal names the caller's shell" "$OUT" "the shell that invoked this command"
-
 sleep 0.1 &
 DEAD_PID=$!
 wait "$DEAD_PID" 2>/dev/null
