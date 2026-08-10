@@ -43,12 +43,15 @@ new_store() {
   echo "$kdir"
 }
 
-# A store with one open arc in it, for the closure cases.
+# A store with one open arc in it, for the closure cases. --no-watcher because
+# opening now arms the standing eye into the harness settings file, and every
+# case below arms its own watcher at a path it controls; an arc open that also
+# armed would write to the real settings file of whoever runs this suite.
 new_arc_store() {
   local slug="$1" kdir
   kdir="$(new_store)"
   mkdir -p "$kdir/_work"
-  bash "$ARC_OPEN" --kdir "$kdir" --title "$slug" --anchor "acceptance fixture" >/dev/null 2>&1
+  bash "$ARC_OPEN" --kdir "$kdir" --no-watcher --title "$slug" --anchor "acceptance fixture" >/dev/null 2>&1
   echo "$kdir"
 }
 
