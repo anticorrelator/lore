@@ -21,21 +21,16 @@
 #   the report instead of landing it. Here it is one call that either lands the
 #   file or tells you why it did not.
 #
-#   The verb lands and validates identity. It does not judge the report: whether
-#   the Tier-2 references check out and the consultations were acknowledged is
-#   impl-check-report.sh's job, and it runs on the landed file.
+#   The verb lands. It does not judge the report: whether the Tier-2 references
+#   check out and the consultations were acknowledged is impl-check-report.sh's
+#   job, and it runs on the landed file.
 #
-# What gets validated:
-#   The schema-v1 identity header — the contiguous block of `Field: value` lines
-#   at the top of the body. All nine fields must be present:
-#
-#     Report-schema (must be 1), Report-id, Work-item, Task, Producer-role,
-#     Dispatch-path, Harness, Status, Template-version
-#
-#   Report-id must match --report-id and Work-item must match <work-item>. Those
-#   two checks are the ones worth having: a report landed under someone else's
-#   id, or into the wrong item's directory, is evidence pointing at the wrong
-#   work, and nothing downstream would catch it.
+# Why it does not validate an identity header:
+#   The path is the identity. A file at <work-item>/worker-reports/<id>.md
+#   already asserts which item and which report id it belongs to, and asserts it
+#   where a reader will actually look. A header restating both was compared
+#   against argv — two values the same seat typed seconds earlier — so it could
+#   only catch a caller disagreeing with itself.
 #
 # Write-once, and why a replay is refused:
 #   An accepted report is immutable, and a re-dispatch is supposed to carry a
@@ -48,36 +43,21 @@
 # Exit codes:
 #   0  landed — the file is at the reported path
 #   1  usage or environment error (bad arguments, no such work item, empty body)
-#   3  the identity header failed validation — nothing was written
 #   4  the report path already exists — nothing was written, and the existing
 #      file is named in the message
 #
-#   Codes 3 and 4 split for the same reason they split on `coordinate pin
-#   --preflight`: 3 means what you handed me is wrong, 4 means the destination
-#   is already spoken for. They call for different corrections, and a caller
-#   that cannot tell them apart has to go look at the directory to find out.
+#   4 stays distinct from 1 for the same reason it does on `coordinate pin
+#   --preflight`: 1 means what you handed me is wrong, 4 means the destination is
+#   already spoken for. They call for different corrections, and a caller that
+#   cannot tell them apart has to go look at the directory to find out.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
-# The schema-v1 identity header, as skills/coordinate/SKILL.md defines it for
-# every dispatch mechanism. Order is not required; presence is.
-REQUIRED_HEADER_FIELDS=(
-  Report-schema
-  Report-id
-  Work-item
-  Task
-  Producer-role
-  Dispatch-path
-  Harness
-  Status
-  Template-version
-)
-
 usage() {
-  sed -n '2,58p' "$0" >&2
+  sed -n '2,52p' "$0" >&2
 }
 
 WORK_ITEM=""
@@ -152,82 +132,6 @@ BODY="$(cat)"
 # Glob-match rather than ${BODY//[[:space:]]/}: pattern substitution over a large
 # multibyte body is super-linear in bash, and report bodies run to tens of KB.
 [[ "$BODY" == *[![:space:]]* ]] || fail "the report body arrives on stdin and it was empty — pipe the returned report in, e.g. printf '%s' \"\$REPORT\" | lore coordinate report $WORK_ITEM --report-id $REPORT_ID"
-
-# --- Identity header validation ----------------------------------------------
-
-WORK_TMP="$(mktemp -d)" || fail "could not create a temporary directory"
-trap 'rm -rf "$WORK_TMP"' EXIT
-BODY_FILE="$WORK_TMP/body.md"
-printf '%s\n' "$BODY" > "$BODY_FILE"
-
-HEADER_ERROR="$(
-  python3 - "$BODY_FILE" "$REPORT_ID" "$WORK_ITEM" "${REQUIRED_HEADER_FIELDS[@]}" <<'PYEOF'
-import re, sys
-
-body_path, report_id, work_item = sys.argv[1:4]
-required = sys.argv[4:]
-
-FIELD = re.compile(r"^([A-Za-z][A-Za-z0-9-]*):[ \t]*(.*)$")
-
-# The header is the contiguous run of `Field: value` lines starting at the first
-# non-blank line. Anything else there ends it, which is what makes a body with
-# no header at all fail rather than get scanned to its end.
-fields = {}
-started = False
-with open(body_path, encoding="utf-8") as f:
-    body_lines = f.read().splitlines()
-for line in body_lines:
-    if not started and not line.strip():
-        continue
-    match = FIELD.match(line)
-    if not match:
-        if started:
-            break
-        print(
-            "the report body does not start with a schema-v1 identity header "
-            "(expected 'Report-schema: 1' and its eight companion fields before "
-            "the report sections)"
-        )
-        raise SystemExit(0)
-    started = True
-    fields.setdefault(match.group(1), match.group(2).strip())
-
-missing = [name for name in required if name not in fields]
-if missing:
-    print("identity header is missing required field(s): " + ", ".join(missing))
-    raise SystemExit(0)
-
-if fields["Report-schema"] != "1":
-    print(
-        f"identity header declares Report-schema: {fields['Report-schema']!r}; "
-        "this verb lands schema-v1 reports only"
-    )
-    raise SystemExit(0)
-
-if fields["Report-id"] != report_id:
-    print(
-        f"identity header says Report-id: {fields['Report-id']!r} but the landing "
-        f"was called with --report-id {report_id!r}. One of the two is the wrong "
-        "attempt — a retry gets a fresh id, and the header has to carry it."
-    )
-    raise SystemExit(0)
-
-if fields["Work-item"] != work_item:
-    print(
-        f"identity header says Work-item: {fields['Work-item']!r} but the landing "
-        f"targets {work_item!r}; a report filed under another item's directory "
-        "points evidence at the wrong work"
-    )
-    raise SystemExit(0)
-
-for name in required:
-    if not fields[name]:
-        print(f"identity header field {name!r} is present but empty")
-        raise SystemExit(0)
-PYEOF
-)" || fail "could not read the identity header"
-
-[[ -z "$HEADER_ERROR" ]] || refuse 3 "$HEADER_ERROR"
 
 # --- Landing ------------------------------------------------------------------
 
