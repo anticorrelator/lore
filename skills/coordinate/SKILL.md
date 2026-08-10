@@ -146,7 +146,7 @@ Keep `lore session wait <slug>` for targeted questions about one session — nev
      and the verb, in both directions — a renamed token orphans the seat's reading of
      live wakes. Extend by addition, and amend the watch verb, its coverage, and this
      block in the same commit.
-       wake tier:  confirmed | advisory | aged_advisory | quiet
+       wake tier:  confirmed | advisory | quiet
        authority:  hook-row | screen-signature | owner-handle | none -->
 
 ### Verifying and closing

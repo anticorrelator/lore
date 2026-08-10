@@ -7,11 +7,11 @@
 # unrelated Stop entries, and the help text's two obligations — that disarm
 # belongs in arc closure, and that it does not end a window already running.
 #
-# Covers, too, the record that makes closure able to act on any of that: what
-# `--install` writes into `_coordination/armed-watchers.json`, that disarm never
-# leaves a record behind its hook entry, and what `lore arc close` does with a
-# record it can attribute solely to the closing arc versus one it cannot. The
-# through-line of the close cases is that none of them can fail a close.
+# Covers, too, how closure finds a watcher nobody remembers arming: the installed
+# hook entry carries its own scope on its command line, and `lore arc close`
+# reads it — disarming an eye it can attribute solely to the closing arc, naming
+# one it cannot. The through-line of the close cases is that none of them can
+# fail a close.
 
 set -uo pipefail
 
@@ -57,41 +57,28 @@ new_arc_store() {
 
 # The record keys on the absolute, symlink-resolved settings path, the same way
 # both surfaces compute it — so the test resolves it too rather than assuming
-# the string it passed in comes back unchanged.
-record_key() {
-  python3 - "$1" <<'PYEOF'
-import os, sys
-print(os.path.realpath(os.path.expanduser(sys.argv[1])))
-PYEOF
-}
-
-# 1 when the record file holds an entry for this settings path, 0 otherwise —
-# including when there is no record file at all.
-record_has() {
-  python3 - "$1/_coordination/armed-watchers.json" "$(record_key "$2")" <<'PYEOF'
-import json, os, sys
-path, key = sys.argv[1], sys.argv[2]
-if not os.path.exists(path):
-    print(0)
-    raise SystemExit(0)
+# The tokens following <flag> on the installed watcher command, space-joined.
+# This is the record: the entry says what it watches.
+armed_flag_values() {
+  python3 - "$1" "$2" <<'PYEOF'
+import json, shlex, sys
+path, flag = sys.argv[1], sys.argv[2]
 try:
     with open(path, encoding="utf-8") as f:
-        records = json.load(f)
+        settings = json.load(f)
 except (OSError, ValueError):
-    print(0)
+    print("")
     raise SystemExit(0)
-print(1 if key in records else 0)
-PYEOF
-}
-
-# One field out of a record, addressed as a python expression over `rec`.
-record_field() {
-  python3 - "$1/_coordination/armed-watchers.json" "$(record_key "$2")" "$3" <<'PYEOF'
-import json, sys
-path, key, expr = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(path, encoding="utf-8") as f:
-    rec = json.load(f)[key]
-print(eval(expr))  # noqa: S307 - test-local field accessor
+out = []
+for entry in (settings.get("hooks") or {}).get("Stop") or []:
+    for hook in entry.get("hooks") or []:
+        command = hook.get("command") or ""
+        if "coordinate-arm.sh" not in command:
+            continue
+        argv = shlex.split(command)
+        out += [argv[i + 1] for i, t in enumerate(argv)
+                if t == flag and i + 1 < len(argv)]
+print(" ".join(out))
 PYEOF
 }
 
@@ -240,7 +227,6 @@ if [[ "$OUT" != *"Stop hook entry:"* ]]; then
 else
   fail "the refusal does not print an entry that could be mistaken for an armed one" "printed the hook entry anyway"
 fi
-assert_eq "a bare arm writes no record" "0" "$([[ -f "$KDIR/_coordination/armed-watchers.json" ]] && echo 1 || echo 0)"
 
 echo "== --render keeps print-only available, and says what it did not do =="
 KDIR=$(new_store)
@@ -251,8 +237,7 @@ assert_contains "it still prints the watcher command" "$OUT" "coordinate-arm.sh 
 assert_contains "the scope asked for is on the printed command" "$OUT" "--arc alpha-arc"
 assert_contains "it states that nothing is armed" "$OUT" "NOTHING IS ARMED"
 assert_contains "it names the way to actually arm" "$OUT" "--install <settings.json>"
-assert_contains "it says a rendered entry leaves no record" "$OUT" "removing it by hand"
-assert_eq "--render writes no record" "0" "$([[ -f "$KDIR/_coordination/armed-watchers.json" ]] && echo 1 || echo 0)"
+assert_contains "it says a rendered entry is the caller's to remove" "$OUT" "removing it by hand"
 
 echo "== --install and --render are not combinable =="
 KDIR=$(new_store)
@@ -299,23 +284,8 @@ RENDERED=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc 
   | grep -m1 '^  LORE_FRAMEWORK=' | sed 's/^  //')
 assert_eq "the installed command is the rendered command, verbatim" "$RENDERED" "$(installed_command "$SETTINGS")"
 
-echo "== a handle that dies with the command is refused, not armed =="
-# The `$$` warning sat in this script's own refusal text and in its --help, and
-# nothing checked it. `lore` execs straight through to this script, so a `$$` on
-# the command line arrives as this process when the caller's shell is replaced
-# and as its parent when it is not.
+echo "== a dead handle is refused, not armed =="
 KDIR=$(new_store)
-OUT=$(LORE_FRAMEWORK=claude-code bash -c 'exec bash "$1" --owner-pid $$ --kdir "$2"' \
-  _ "$ARM" "$KDIR" 2>&1); RC=$?
-assert_eq "arming with the verb's own pid exits 1" "1" "$RC"
-assert_contains "the refusal says whose process that pid is" "$OUT" "this command's own process"
-assert_contains "the refusal names the failure it prevents" "$OUT" "never re-arms"
-
-OUT=$(LORE_FRAMEWORK=claude-code bash -c 'bash "$1" --owner-pid $$ --kdir "$2"; exit $?' \
-  _ "$ARM" "$KDIR" 2>&1); RC=$?
-assert_eq "arming with the invoking shell's pid exits 1" "1" "$RC"
-assert_contains "the refusal names the caller's shell" "$OUT" "the shell that invoked this command"
-
 sleep 0.1 &
 DEAD_PID=$!
 wait "$DEAD_PID" 2>/dev/null
@@ -325,7 +295,6 @@ OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid "$DEAD_PID" --install "
 assert_eq "arming with a dead pid exits 1" "1" "$RC"
 assert_contains "the dead-handle refusal says the process is not there" "$OUT" "no such process"
 assert_eq "the refused arm installed nothing" "0" "$([[ -f "$SETTINGS" ]] && echo 1 || echo 0)"
-assert_eq "the refused arm recorded nothing" "0" "$(record_has "$KDIR" "$SETTINGS")"
 
 # `run` is the other side of the same handle and must not inherit the guard: the
 # harness runs the armed hook as a direct child of the process the pid names, so
@@ -356,45 +325,41 @@ assert_contains "help names the lock the window holds" "$OUT" "per-scope lock"
 assert_contains "help says --settings is never defaulted" "$OUT" "never defaulted"
 assert_contains "help documents the disarm exit code" "$OUT" "(disarm) the entry was removed"
 
-echo "== (a) arm --install records what it installed; a bare arm records nothing =="
+echo "== (a) the installed entry carries the scope a later closure reads =="
 KDIR=$(new_store)
 SETTINGS="$KDIR/settings.json"
 LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc \
   --window 120 --hook-timeout 180 --install "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
-assert_eq "the record exists after an installing arm" "1" "$(record_has "$KDIR" "$SETTINGS")"
-assert_eq "the record carries the arc scope" "alpha-arc" "$(record_field "$KDIR" "$SETTINGS" 'rec["scopes"]["arcs"][0]')"
-assert_eq "the record carries no slug scope" "0" "$(record_field "$KDIR" "$SETTINGS" 'len(rec["scopes"]["slugs"])')"
-assert_eq "the record names the framework that installed it" "claude-code" "$(record_field "$KDIR" "$SETTINGS" 'rec["framework"]')"
-assert_eq "the record carries the owner handle" "pid 1" "$(record_field "$KDIR" "$SETTINGS" 'rec["owner"]')"
-assert_eq "the record carries the window it armed" "120" "$(record_field "$KDIR" "$SETTINGS" 'rec["window_seconds"]')"
-assert_eq "the record carries the hook timeout" "180" "$(record_field "$KDIR" "$SETTINGS" 'rec["hook_timeout_seconds"]')"
+assert_eq "the entry carries the arc scope" "alpha-arc" "$(armed_flag_values "$SETTINGS" --arc)"
+assert_eq "the entry carries the owner handle" "1" "$(armed_flag_values "$SETTINGS" --owner-pid)"
+assert_eq "the entry carries the window it armed" "120" "$(armed_flag_values "$SETTINGS" --window)"
+assert_contains "the entry names the framework that installed it" "$(installed_command "$SETTINGS")" "LORE_FRAMEWORK=claude-code"
 
-# Whoever installs the printed entry by hand owns removing it by hand, so a
-# rendering arm must leave no record claiming otherwise.
+# Whoever installs the printed entry by hand owns removing it by hand: nothing is
+# written anywhere, so there is no settings file for a closure to read.
 KDIR=$(new_store)
 OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc --render --kdir "$KDIR" 2>&1); RC=$?
 assert_eq "--render exits 0" "0" "$RC"
-assert_eq "an arm without --install writes no record" "0" "$([[ -f "$KDIR/_coordination/armed-watchers.json" ]] && echo 1 || echo 0)"
+assert_eq "an arm without --install writes no settings file" "0" "$([[ -f "$KDIR/settings.json" ]] && echo 1 || echo 0)"
 
-echo "== (b) disarm removes the hook entry and the record together =="
+echo "== (b) disarm removes the hook entry, which is the whole record =="
 KDIR=$(new_store)
 SETTINGS="$KDIR/settings.json"
 LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc --install "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
 LORE_FRAMEWORK=claude-code bash "$ARM" disarm --settings "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
 assert_eq "the hook entry is gone" "0" "$(stop_armed "$SETTINGS")"
-assert_eq "the record is gone with it" "0" "$(record_has "$KDIR" "$SETTINGS")"
+assert_eq "and with it the scope any closure could have read" "" "$(armed_flag_values "$SETTINGS" --arc)"
 
 echo "== (c) arc close disarms a watcher scoped solely to the closing arc =="
 KDIR=$(new_arc_store solo-arc)
 SETTINGS="$KDIR/settings.json"
 LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc solo-arc --install "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
-OUT=$(bash "$ARC_CLOSE" solo-arc --kdir "$KDIR" 2>&1); RC=$?
+OUT=$(bash "$ARC_CLOSE" solo-arc --settings "$SETTINGS" --kdir "$KDIR" 2>&1); RC=$?
 assert_eq "the close still exits 0" "0" "$RC"
 assert_contains "the close is still recorded" "$OUT" "[arc] Closed: solo-arc"
 assert_contains "the close names the watcher it switched off" "$OUT" "the only scope on the watcher"
 assert_contains "the disarm surface reports what it removed" "$OUT" "disarmed: removed 1 watcher entry"
 assert_eq "the hook entry is gone" "0" "$(stop_armed "$SETTINGS")"
-assert_eq "the record is gone with it" "0" "$(record_has "$KDIR" "$SETTINGS")"
 
 # The closure record is the thing that must survive all of this.
 assert_eq "the arc is recorded closed" "closed" "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["status"])' "$KDIR/_work/_arcs/solo-arc/_meta.json")"
@@ -403,7 +368,7 @@ echo "== (c2) --json close keeps a parseable contract on stdout =="
 KDIR=$(new_arc_store json-arc)
 SETTINGS="$KDIR/settings.json"
 LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc json-arc --install "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
-OUT=$(bash "$ARC_CLOSE" json-arc --json --kdir "$KDIR" 2>/dev/null); RC=$?
+OUT=$(bash "$ARC_CLOSE" json-arc --json --settings "$SETTINGS" --kdir "$KDIR" 2>/dev/null); RC=$?
 assert_eq "the json close exits 0" "0" "$RC"
 assert_eq "stdout is the arc record and nothing else" "json-arc" "$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["slug"])' "$OUT" 2>/dev/null)"
 assert_eq "the watcher was still disarmed" "0" "$(stop_armed "$SETTINGS")"
@@ -413,62 +378,53 @@ KDIR=$(new_arc_store shared-arc)
 SETTINGS="$KDIR/settings.json"
 LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc shared-arc --arc other-arc \
   --install "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
-OUT=$(bash "$ARC_CLOSE" shared-arc --kdir "$KDIR" 2>&1); RC=$?
+OUT=$(bash "$ARC_CLOSE" shared-arc --settings "$SETTINGS" --kdir "$KDIR" 2>&1); RC=$?
 assert_eq "the close still exits 0" "0" "$RC"
 assert_contains "the close is still recorded" "$OUT" "[arc] Closed: shared-arc"
 assert_contains "the callout says the eye covers more than this arc" "$OUT" "covers 'shared-arc' and more"
 assert_contains "the callout names the scope it will not judge" "$OUT" "arc:other-arc"
-# The recorded path, not the one the test typed: the callout is meant to be
-# pasted, so it must name the file the record actually keys on.
-assert_contains "the callout names the exact command to run" "$OUT" "lore coordinate disarm --settings $(record_key "$SETTINGS")"
+# The callout is meant to be pasted, so it names the settings file the close
+# actually read.
+assert_contains "the callout names the exact command to run" "$OUT" "lore coordinate disarm --settings $SETTINGS"
 assert_eq "the hook entry is left armed" "1" "$(stop_armed "$SETTINGS")"
-assert_eq "the record is left alone" "1" "$(record_has "$KDIR" "$SETTINGS")"
+assert_eq "the scope it will not judge is still on the entry" "shared-arc other-arc" "$(armed_flag_values "$SETTINGS" --arc)"
 
-# A slug scope alongside the arc is the same call: the watcher answers to
-# something this closure has no say over.
-KDIR=$(new_arc_store slugged-arc)
+echo "== (e) an entry installed by hand still disarms, and a close still reads it =="
+KDIR=$(new_arc_store handmade-arc)
 SETTINGS="$KDIR/settings.json"
-LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc slugged-arc --slug some-item \
-  --install "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
-OUT=$(bash "$ARC_CLOSE" slugged-arc --kdir "$KDIR" 2>&1)
-assert_contains "an item scope also makes the eye wider than the arc" "$OUT" "slug:some-item"
-assert_eq "the hook entry is left armed" "1" "$(stop_armed "$SETTINGS")"
+# No arm ran here at all: the entry was pasted in, which is exactly the case the
+# retired registry could not see.
+python3 - "$SETTINGS" "$REPO_ROOT/scripts/coordinate-arm.sh" <<'PYEOF'
+import json, sys
+settings_path, arm_path = sys.argv[1], sys.argv[2]
+command = "LORE_FRAMEWORK=claude-code bash %s run --owner-pid 1 --arc handmade-arc --window 120" % arm_path
+json.dump({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": command, "timeout": 180}]}]}},
+          open(settings_path, "w"))
+PYEOF
+OUT=$(bash "$ARC_CLOSE" handmade-arc --settings "$SETTINGS" --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "the close still exits 0" "0" "$RC"
+assert_contains "the close finds the hand-installed eye" "$OUT" "the only scope on the watcher"
+assert_eq "and disarms it" "0" "$(stop_armed "$SETTINGS")"
 
-echo "== (e) a hook entry with no record still disarms =="
-KDIR=$(new_store)
-SETTINGS="$KDIR/settings.json"
-LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc --install "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
-rm -f "$KDIR/_coordination/armed-watchers.json"
-OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" disarm --settings "$SETTINGS" --kdir "$KDIR" 2>&1); RC=$?
-assert_eq "disarm without a record exits 0" "0" "$RC"
-assert_contains "disarm still reports the removal" "$OUT" "disarmed"
-assert_eq "the hook entry is gone" "0" "$(stop_armed "$SETTINGS")"
-
-echo "== (f) a record whose settings file is gone does not fail the close =="
+echo "== (f) a settings file that is gone does not fail the close =="
 KDIR=$(new_arc_store vanished-arc)
 SETTINGS="$KDIR/settings.json"
 LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc vanished-arc --install "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
 rm -f "$SETTINGS"
-OUT=$(bash "$ARC_CLOSE" vanished-arc --kdir "$KDIR" 2>&1); RC=$?
+OUT=$(bash "$ARC_CLOSE" vanished-arc --settings "$SETTINGS" --kdir "$KDIR" 2>&1); RC=$?
 assert_eq "the close still exits 0" "0" "$RC"
 assert_contains "the close is still recorded" "$OUT" "[arc] Closed: vanished-arc"
-assert_contains "the disarm reports the missing file rather than claiming a removal" "$OUT" "nothing to disarm: no settings file"
-assert_eq "the stale record is cleared" "0" "$(record_has "$KDIR" "$SETTINGS")"
-# The close states the attribution, which is its own to make, and leaves the
-# outcome to the surface that measured it. It used to announce "— disarming it."
-# on every exit-0 disarm, printed directly above "nothing to disarm".
-assert_contains "the close states only that it ran disarm" "$OUT" "so this close ran disarm on it:"
-if [[ "$OUT" != *"disarming it."* ]]; then
-  pass "the close claims no removal the disarm did not report"
+if [[ "$OUT" != *"Standing eye"* ]]; then
+  pass "a settings file that is gone carries no eye to call out"
 else
-  fail "the close claims no removal the disarm did not report" "announced a disarm above 'nothing to disarm'"
+  fail "a settings file that is gone carries no eye to call out" "close named a watcher it could not read"
 fi
 
 echo "== a closing arc no watcher names is silent about watchers =="
 KDIR=$(new_arc_store lonely-arc)
 SETTINGS="$KDIR/settings.json"
 LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc unrelated-arc --install "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
-OUT=$(bash "$ARC_CLOSE" lonely-arc --kdir "$KDIR" 2>&1); RC=$?
+OUT=$(bash "$ARC_CLOSE" lonely-arc --settings "$SETTINGS" --kdir "$KDIR" 2>&1); RC=$?
 assert_eq "the close exits 0" "0" "$RC"
 assert_eq "another arc's eye is untouched" "1" "$(stop_armed "$SETTINGS")"
 if [[ "$OUT" != *"Standing eye"* && "$OUT" != *"lore coordinate disarm"* ]]; then
@@ -477,19 +433,20 @@ else
   fail "an unrelated watcher draws no callout" "close mentioned a watcher it has no claim on"
 fi
 
-echo "== an unreadable record is a warning, not a failed close =="
+echo "== an unreadable settings file is a warning, not a failed close =="
 KDIR=$(new_arc_store corrupt-arc)
-printf 'not json at all\n' > "$KDIR/_coordination/armed-watchers.json"
-OUT=$(bash "$ARC_CLOSE" corrupt-arc --kdir "$KDIR" 2>&1); RC=$?
+SETTINGS="$KDIR/settings.json"
+printf 'not json at all\n' > "$SETTINGS"
+OUT=$(bash "$ARC_CLOSE" corrupt-arc --settings "$SETTINGS" --kdir "$KDIR" 2>&1); RC=$?
 assert_eq "the close still exits 0" "0" "$RC"
 assert_contains "the close is still recorded" "$OUT" "[arc] Closed: corrupt-arc"
-assert_contains "the unreadable record is called out" "$OUT" "could not read"
+assert_contains "the unreadable settings file is called out" "$OUT" "could not read"
 
-echo "== the help text explains the record and its standing =="
+echo "== the help text explains how a closure finds the watcher =="
 OUT=$(bash "$ARM" --help 2>&1)
-assert_contains "help names the record file" "$OUT" "armed-watchers.json"
-assert_contains "help says the record is not the authority" "$OUT" "discovery metadata, never authority"
-assert_contains "help says a bare arm records nothing" "$OUT" "Arming without"
+assert_contains "help says the entry carries its own scope" "$OUT" "carries its own scope"
+assert_contains "help says nothing is mirrored elsewhere" "$OUT" "Nothing is recorded anywhere"
+assert_contains "help says arc close reads the entry" "$OUT" "reads the entry"
 
 echo "== the help text carries the arm-or-render contract =="
 assert_contains "help states the two modes are a required choice" "$OUT" "Arming and rendering are separate requests"

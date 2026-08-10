@@ -228,17 +228,9 @@ print(type(value).__name__, value)
   [[ "$output" == *"--arc arc-one"* ]]
   [[ "$output" == *"--owner-pid $$"* ]]
 
-  # And the registry row that lets a later `lore arc close` find it.
-  run python3 -c '
-import json, sys
-records = json.load(open(sys.argv[1]))
-assert len(records) == 1, records
-rec = next(iter(records.values()))
-assert rec["scopes"]["arcs"] == ["arc-one"], rec
-assert rec["framework"] == "claude-code", rec
-print("ok")
-' "$TEST_KDIR/_coordination/armed-watchers.json"
-  [ "$status" -eq 0 ]
+  # The entry is also the record: its command line is what a later `lore arc
+  # close` reads to learn the scope and the harness that installed it.
+  [[ "$output" == *"LORE_FRAMEWORK=claude-code"* ]]
 }
 
 @test "open leaves an eye that is already armed exactly as it is" {
@@ -254,15 +246,7 @@ print("ok")
   # narrowing the eye to arc-two and dropping a scope nobody asked to drop.
   echo "$output" | grep -q "it does not name 'arc-two'"
   [ "$(armed_command)" = "$FIRST" ]
-
-  run python3 -c '
-import json, sys
-records = json.load(open(sys.argv[1]))
-assert len(records) == 1, records
-assert next(iter(records.values()))["scopes"]["arcs"] == ["arc-one"], records
-print("ok")
-' "$TEST_KDIR/_coordination/armed-watchers.json"
-  [ "$status" -eq 0 ]
+  [[ "$(armed_command)" == *"--arc arc-one"* ]]
 }
 
 @test "--no-watcher opens the arc and arms nothing" {
@@ -273,7 +257,6 @@ print("ok")
   echo "$output" | grep -q "Opened: arc-one"
   echo "$output" | grep -q -- "--no-watcher"
   [ ! -f "$(seat_settings)" ]
-  [ ! -f "$TEST_KDIR/_coordination/armed-watchers.json" ]
 }
 
 @test "a harness with no async hook still opens the arc and says the eye is manual" {

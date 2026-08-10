@@ -13,7 +13,6 @@ import "github.com/anticorrelator/lore/tui/internal/session"
 // state the option-modal incident left invisible.
 type Activity struct {
 	NeedsInput   bool
-	Quiescent    bool
 	ClosePending bool
 }
 
@@ -44,7 +43,7 @@ func (a Activity) NextAction() string {
 
 // FoldEvents folds new journal rows into the running activity overlay, returning
 // a fresh map (prev is not mutated). Activity is matched per (instance, slug) by
-// ordering — the last of needs_input/quiescent/resumed for a slug wins — never
+// ordering — the last of needs_input/resumed for a slug wins — never
 // by adjacency: teardown interleaves activity rows between close_requested and
 // closed, so the pair is matched by a later `closed` clearing the entry, not by
 // the two rows being consecutive.
@@ -59,18 +58,11 @@ func FoldEvents(prev map[ActivityKey]Activity, events []session.Event) map[Activ
 			k := ActivityKey{Instance: actor(ev), Slug: ev.Slug}
 			a := out[k]
 			a.NeedsInput = true
-			a.Quiescent = true
-			out[k] = a
-		case session.EventQuiescent:
-			k := ActivityKey{Instance: actor(ev), Slug: ev.Slug}
-			a := out[k]
-			a.Quiescent = true
 			out[k] = a
 		case session.EventResumed:
 			k := ActivityKey{Instance: actor(ev), Slug: ev.Slug}
 			a := out[k]
 			a.NeedsInput = false
-			a.Quiescent = false
 			out[k] = a
 		case session.EventCloseRequested:
 			k := ActivityKey{Instance: target(ev), Slug: ev.Slug}

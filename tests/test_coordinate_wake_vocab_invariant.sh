@@ -105,7 +105,7 @@ assert_eq "wake authorities: block and verb agree" "$BLOCK_AUTHORITY" "$VERB_AUT
 # The block pins the vocabulary the seat is taught; these are the terms it was
 # written to pin, so a silent rewrite of the block itself does not pass by
 # agreeing with a verb renamed in the same commit.
-assert_eq "wake tiers are the canonical four" "advisory aged_advisory confirmed quiet" "$BLOCK_TIER"
+assert_eq "wake tiers are the canonical three" "advisory confirmed quiet" "$BLOCK_TIER"
 assert_eq "wake authorities are the canonical four" "hook-row none owner-handle screen-signature" "$BLOCK_AUTHORITY"
 
 # session-reference.md is where the seat reads what a tier or an authority means.

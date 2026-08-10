@@ -129,20 +129,22 @@ func (m model) buildSessionRows(instances []session.Instance, pending []session.
 			}
 			base := deriveBase(s.Slug)
 			rows = append(rows, sessionview.SessionRow{
-				RowID:        inst.Name + "|" + s.Slug + "|" + s.SessionID,
-				PanelKey:     s.Slug,
-				Slug:         s.Slug,
-				Display:      display,
-				Type:         s.Type,
-				Initiator:    s.Initiator,
-				Instance:     inst.Name,
-				Local:        local,
-				SessionID:    s.SessionID,
-				BaseItem:     base,
-				Tmux:         s.Tmux,
-				Project:      projectOf(s.Slug, base),
-				NeedsInput:   act.NeedsInput,
-				Quiescent:    act.Quiescent,
+				RowID:      inst.Name + "|" + s.Slug + "|" + s.SessionID,
+				PanelKey:   s.Slug,
+				Slug:       s.Slug,
+				Display:    display,
+				Type:       s.Type,
+				Initiator:  s.Initiator,
+				Instance:   inst.Name,
+				Local:      local,
+				SessionID:  s.SessionID,
+				BaseItem:   base,
+				Tmux:       s.Tmux,
+				Project:    projectOf(s.Slug, base),
+				NeedsInput: act.NeedsInput,
+				// Quiescence is needs-input: the panel's one idle edge grounded
+				// both, and the substrate now carries only the one row.
+				Quiescent:    act.NeedsInput,
 				ClosePending: act.ClosePending,
 				Started:      s.Started,
 			})

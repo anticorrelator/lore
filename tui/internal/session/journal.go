@@ -42,7 +42,6 @@ const (
 	EventClaimed             = "claimed"
 	EventSpawned             = "spawned"
 	EventNeedsInput          = "needs_input"
-	EventQuiescent           = "quiescent"
 	EventResumed             = "resumed"
 	EventModalBlocked        = "modal_blocked"
 	EventRecovered           = "recovered"
@@ -50,7 +49,6 @@ const (
 	EventOrphaned            = "orphaned"
 	EventStepCompleted       = "step_completed"
 	EventTerminusReached     = "terminus_reached"
-	EventHarnessTurnEnded    = "harness_turn_ended"
 	EventSpawnFailed         = "spawn_failed"
 	EventReclaimed           = "request_reclaimed"
 	EventAbandoned           = "request_abandoned"
@@ -65,13 +63,6 @@ const (
 	EventCloseFailed         = "close_failed"
 	EventRestoreRefused      = "restore_refused"
 	EventWorktreeQuarantined = "worktree_quarantined"
-
-	// Work-item review events — a third class the writer keys to a work-item
-	// slug (not a request_id), so a row carrying one of these MUST set Slug.
-	EventReviewFlagged  = "review_flagged"
-	EventReviewHeld     = "review_held"
-	EventReviewNotified = "review_notified"
-	EventReviewReleased = "review_released"
 )
 
 // AppendEvent emits one journal row by piping it into the sole-writer script

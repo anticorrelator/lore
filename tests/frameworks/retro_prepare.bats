@@ -38,7 +38,7 @@ PY
   run "$LORE" scorecard rollup --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
 
-  SESSION_ROW="$(jq -cn --arg now "$NOW" '{event:"review_flagged",slug:"cycle-a",ts:$now}')"
+  SESSION_ROW="$(jq -cn --arg now "$NOW" '{event:"needs_input",slug:"cycle-a",ts:$now}')"
   run bash "$REPO_DIR/scripts/session-event-append.sh" --kdir "$TEST_KDIR" --row "$SESSION_ROW" --json
   [ "$status" -eq 0 ]
 
@@ -115,7 +115,7 @@ manifest_row() {
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '
     .reader_contract_version == "1" and .projection_mode == "half-open-window" and
-    (.events | length) == 1 and .events[0].event == "review_flagged" and (.next_cursor | type) == "number"
+    (.events | length) == 1 and .events[0].event == "needs_input" and (.next_cursor | type) == "number"
   '
   run_prepare
   manifest_row session_events | jq -e '.reader_contract_version == "1" and .cursor > 0'

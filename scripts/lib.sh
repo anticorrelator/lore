@@ -1206,7 +1206,7 @@ framework_interaction_field() {
 # validation case-arm). tests/session-verbs.bats cross-checks this list against
 # the writer and names any drift; if that test fails, reconcile this line with
 # the writer rather than silencing the test.
-SESSION_EVENT_VOCAB="requested claimed spawned needs_input quiescent resumed recovered closed orphaned step_completed terminus_reached harness_turn_ended spawn_failed request_reclaimed request_abandoned request_cancelled close_requested close_failed restore_refused worktree_quarantined send_requested sent send_refused answer_requested answered answer_refused modal_blocked review_flagged review_held review_notified review_released"
+SESSION_EVENT_VOCAB="requested claimed spawned needs_input resumed recovered closed orphaned step_completed terminus_reached spawn_failed request_reclaimed request_abandoned request_cancelled close_requested close_failed restore_refused worktree_quarantined send_requested sent send_refused answer_requested answered answer_refused modal_blocked"
 
 # The events a coordinator can actually do something about, and therefore the
 # default stop set for anything that waits on the journal. It covers both ends of
@@ -1402,7 +1402,7 @@ SESSION_PARK_SHAPED_EVENTS="needs_input modal_blocked"
 # Version of the signature set session_park_classify accepts. It travels in the
 # consumer's output so a matcher-contract change surfaces there instead of
 # silently reclassifying parks. Bump it whenever the accepted set below changes.
-SESSION_PARK_SIGNATURE_VERSION=2
+SESSION_PARK_SIGNATURE_VERSION=3
 
 # session_park_classify <trigger> <ready> <blocked_reason>
 # Compare one peek result against the strict signature set for <trigger> and print
@@ -1414,18 +1414,8 @@ SESSION_PARK_SIGNATURE_VERSION=2
 #            is a labeled result, never a dropped one — the label is what the
 #            caller reports.
 #
-# <trigger> is either a journal event that put the question ("this row says the
-# session parked; is it still parked?") or one of the timer triggers below, which
-# ask the opposite question ("nothing has said anything about this session for a
-# long time; is it alive?"):
-#
-#   probe:stalled  a scoped live session whose last journal row is old
-#   probe:aged     the same, past the much longer threshold at which even a
-#                  legitimately long turn is itself the anomaly
-#
-# The colon keeps the timer triggers out of the journal's event vocabulary, which
-# is bare words: no caller can pass one of these to the journal writer by mistake,
-# and nothing here is ever appended anywhere.
+# <trigger> is the journal event that put the question: "this row says the session
+# parked; is it still parked?"
 #
 # <ready> is a peek response's `.ready` (`true`/`false`) and <blocked_reason> its
 # `.blocked_reason`, whose vocabulary is the send/peek readiness gate's:
@@ -1450,30 +1440,6 @@ session_park_classify() {
       fi
       if [[ "$reason" == "modal" ]]; then
         printf 'confirmed\tmodal-signature\n'
-        return 0
-      fi
-      ;;
-    probe:stalled|probe:aged)
-      # Silence plus a composer waiting for input, or silence plus a modal, is a
-      # session that stopped and is waiting on somebody who does not know it.
-      if [[ "$ready" == "true" ]]; then
-        printf 'confirmed\tstalled-at-composer\n'
-        return 0
-      fi
-      if [[ "$ready" == "false" && "$reason" == "modal" ]]; then
-        printf 'confirmed\tstalled-at-modal\n'
-        return 0
-      fi
-      # A screen still producing output is a session working, not a session
-      # stuck. Below the longer threshold that is an ordinary long turn and the
-      # caller is expected to stay quiet about it; past it, the length of the
-      # turn is the finding.
-      if [[ "$ready" == "false" && "$reason" == "generating" ]]; then
-        if [[ "$trigger" == "probe:aged" ]]; then
-          printf 'unconfirmed\tlong-turn-past-aged-threshold\n'
-        else
-          printf 'unconfirmed\tlong-turn-below-aged-threshold\n'
-        fi
         return 0
       fi
       ;;
@@ -1628,64 +1594,6 @@ if os.path.isdir(instances_dir):
             if sess.get("slug") == slug:
                 print(row.get("name", ""))
                 sys.exit(0)
-PYEOF
-}
-
-# --- session_live_slugs ---
-# Print one line per session the registry currently claims is live, as
-# "<state><TAB><slug>":
-#
-#   named<TAB><slug>   the session carries a slug, so a peek can address it
-#   slugless<TAB>      the session carries no slug (a chat session); nothing that
-#                      keys on slug can reach it
-#
-# Slugs are deduplicated across instances. Slugless rows are printed one per
-# session, since there is nothing to deduplicate them by, and a caller that can
-# only work in slugs is expected to count them rather than drop them silently.
-# Empty output means nothing is live.
-#
-# "Live" is the same file-mtime filter resolve_session_owner applies to pick the
-# instance that must serve a peek, so a named slug printed here is exactly a slug
-# a peek can reach right now. That equivalence is what makes an unanswered peek
-# on one of these slugs evidence about the session: an instance claims to be
-# hosting it and did not answer, which is different from addressing a session
-# nobody hosts and hearing nothing back.
-#
-# Args: $1 = instances dir ($SESSIONS_DIR/instances), $2 = ttl seconds.
-session_live_slugs() {
-  local instances_dir="$1"
-  local ttl="$2"
-  python3 - "$instances_dir" "$ttl" <<'PYEOF'
-import json, os, sys, time
-
-instances_dir, ttl = sys.argv[1], float(sys.argv[2])
-now = time.time()
-seen = set()
-if os.path.isdir(instances_dir):
-    for name in sorted(os.listdir(instances_dir)):
-        if not name.endswith(".json"):
-            continue
-        path = os.path.join(instances_dir, name)
-        try:
-            if (now - os.path.getmtime(path)) > ttl:
-                continue
-            with open(path, encoding="utf-8") as handle:
-                row = json.load(handle)
-        except (OSError, ValueError):
-            continue
-        if not isinstance(row, dict):
-            continue
-        for sess in row.get("sessions") or []:
-            if not isinstance(sess, dict):
-                continue
-            slug = sess.get("slug") or ""
-            if not slug:
-                print("slugless\t")
-                continue
-            if slug in seen:
-                continue
-            seen.add(slug)
-            print("named\t%s" % slug)
 PYEOF
 }
 

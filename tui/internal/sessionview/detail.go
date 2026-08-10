@@ -173,7 +173,7 @@ func activityAction(r SessionRow) string {
 	if r.InFlight {
 		return "spawning"
 	}
-	a := Activity{NeedsInput: r.NeedsInput, Quiescent: r.Quiescent, ClosePending: r.ClosePending}
+	a := Activity{NeedsInput: r.NeedsInput, ClosePending: r.ClosePending}
 	if s := a.NextAction(); s != "" {
 		return s
 	}

@@ -10,11 +10,11 @@
 # Usage:
 #   lore coordinate arm  (--owner-pid <pid> | --owner-tmux <session>)
 #                        (--install <settings.json> | --render)
-#                        [--tmux-server <name>] [--slug <s>]... [--arc <slug>]...
+#                        [--tmux-server <name>] [--arc <slug>]...
 #                        [--window <sec>] [--hook-timeout <sec>]
 #                        [--kdir <path>] [--json]
 #   lore coordinate arm run  (--owner-pid <pid> | --owner-tmux <session>)
-#                        [--tmux-server <name>] [--slug <s>]... [--arc <slug>]...
+#                        [--tmux-server <name>] [--arc <slug>]...
 #                        [--window <sec>] [--kdir <path>]
 #   lore coordinate disarm --settings <settings.json> [--kdir <path>] [--json]
 #
@@ -33,15 +33,13 @@
 #
 # Options (arming surface):
 #   --owner-pid <pid>     The long-lived harness process that owns the seat.
-#                         Never $$: a subshell's pid dies when the command
-#                         returns, recording a handle that looks live now and
-#                         fails identically later. Refused, not merely warned
-#                         about: arming rejects its own pid, the pid of the
-#                         shell that invoked it, and any pid that is not alive.
+#                         A pid that is not alive is refused outright: the
+#                         handle would be dead before the watcher is armed, and
+#                         the first window would stop on a seat that was never
+#                         there.
 #   --owner-tmux <name>   tmux session name of the owner (same handle format as
 #                         `lore coordinate worktree allocate`).
 #   --tmux-server <name>  tmux server socket for --owner-tmux (default: lore-tui).
-#   --slug <s>            Scope wakes to this work item (repeatable).
 #   --arc <slug>          Scope wakes to an arc's declared members (repeatable).
 #   --window <sec>        How long one watcher window runs (default: 3600).
 #   --hook-timeout <sec>  The hook entry's own timeout (default: 3900). MUST be
@@ -97,24 +95,14 @@
 #   A settings file with no armed entry is reported as such and exits 0, so
 #   disarm is safe to run unconditionally at closure without checking first.
 #
-# What arming records, and why that is not a defaulted scope:
-#   A successful --install upserts a record into
-#   $KNOWLEDGE_DIR/_coordination/armed-watchers.json, keyed by the absolute
-#   settings path, carrying the scope, owner, framework and deadlines it armed
-#   with. The seat that closes an arc is often not the seat that armed it — a
-#   fresh seat resumes from the ledger, and settings paths are harness config
-#   rather than ledger material — so closure needs a mechanical way to find a
-#   watcher nobody remembers arming.
-#
-#   The record is discovery metadata, never authority: the settings file remains
-#   the truth about what is armed, disarm works fine with no record at all, and
-#   disarm removes the record even when there was no entry to uninstall, so a
-#   record can never outlive its hook entry. Reading back a record this surface
-#   itself wrote is remembering an explicit choice, not guessing a scope — which
-#   is why --install and --settings are still never defaulted. Arming without
-#   --install writes nothing: whoever installs the printed entry by hand owns
-#   removing it by hand. Every record failure degrades to a stderr note and the
-#   behavior that predates the record; none of them blocks arm or disarm.
+# How a later closure finds this watcher:
+#   The installed hook entry carries its own scope. `watcher_command` writes the
+#   `--arc <slug>` flags into the command line verbatim, and the
+#   `LORE_FRAMEWORK=<name>` prefix names the adapter that installed it — so the
+#   settings file answers who armed what, for whom, without a second file
+#   mirroring it. `lore arc close` reads the entry. Nothing is recorded anywhere
+#   else, and --install and --settings stay undefaulted: which settings file gets
+#   the entry is the arm.
 #
 # The owner handle is required (arm and run surfaces only). A watcher with no provable owner is a runaway
 # waiting to happen: it would keep waking a seat that no longer exists, and
@@ -129,8 +117,8 @@
 #   past its timeout ends the whole re-arm chain and says nothing about it. The
 #   watcher window is therefore set strictly shorter and always exits with a
 #   wake of its own, which turns the harness timeout into a backstop that never
-#   fires. If it ever does fire, the SIGTERM trap below leaves a marker file so
-#   the kill is distinguishable from a clean wake afterwards.
+#   fires. That invariant is validated at arm time and refused loudly, which is
+#   where the guarantee lives.
 #
 # Cross-harness behavior is read from the `turn_boundary_rewake` capability
 # cell, never from the framework name:
@@ -161,7 +149,6 @@ MODE="arm"
 OWNER_PID=""
 OWNER_TMUX=""
 TMUX_SERVER="lore-tui"
-SLUGS=()
 ARCS=()
 WINDOW=3600
 HOOK_TIMEOUT=3900
@@ -175,9 +162,6 @@ JSON_MODE=0
 # registry drops an owner before the journal records why it went, so an instant
 # verdict reads a teardown as a death.
 OWNER_GONE_GRACE_SECONDS=2
-# Slack between the watcher's own deadline and the point this wrapper stops
-# waiting for it. Only reachable if the watcher overruns its --timeout.
-WINDOW_OVERRUN_GRACE_SECONDS="${LORE_ARM_OVERRUN_GRACE_SECONDS:-60}"
 # Pause before an error wake so a reader that fails every time re-arms at a
 # readable cadence instead of spinning the seat through wake-fail-wake turns.
 ERROR_WAKE_BACKOFF_SECONDS="${LORE_ARM_ERROR_BACKOFF_SECONDS:-60}"
@@ -196,7 +180,6 @@ while [[ $# -gt 0 ]]; do
     --owner-pid) OWNER_PID="${2:-}"; shift 2 ;;
     --owner-tmux) OWNER_TMUX="${2:-}"; shift 2 ;;
     --tmux-server) TMUX_SERVER="${2:-}"; shift 2 ;;
-    --slug) SLUGS+=("${2:-}"); shift 2 ;;
     --arc) ARCS+=("${2:-}"); shift 2 ;;
     --window) WINDOW="${2:-}"; shift 2 ;;
     --hook-timeout) HOOK_TIMEOUT="${2:-}"; shift 2 ;;
@@ -208,7 +191,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) usage; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: coordinate-arm.sh [run] (--owner-pid <pid> | --owner-tmux <session>) (--install <path> | --render) [--slug <s>]... [--arc <slug>]... [--window <sec>] [--hook-timeout <sec>] [--kdir <path>] [--json]" >&2
+      echo "Usage: coordinate-arm.sh [run] (--owner-pid <pid> | --owner-tmux <session>) (--install <path> | --render) [--arc <slug>]... [--window <sec>] [--hook-timeout <sec>] [--kdir <path>] [--json]" >&2
       echo "       coordinate-arm.sh disarm --settings <path> [--kdir <path>] [--json]" >&2
       exit 1
       ;;
@@ -268,10 +251,6 @@ else
 fi
 
 SCOPE_ARGS=()
-for slug in ${SLUGS+"${SLUGS[@]}"}; do
-  [[ -n "$slug" ]] || fail "empty --slug"
-  SCOPE_ARGS+=(--slug "$slug")
-done
 for arc in ${ARCS+"${ARCS[@]}"}; do
   [[ -n "$arc" ]] || fail "empty --arc"
   SCOPE_ARGS+=(--arc "$arc")
@@ -318,9 +297,7 @@ owner_may_continue() {
 }
 
 # The arming surface's own check on the handle it is about to bake into a hook
-# entry. Every --owner-pid surface warns about `$$` and none of them checked it,
-# so the warning only reached the people who did not need it: a pid that dies
-# with the command arms a watcher that halts at its first window, which reads as
+# entry: a dead pid arms a watcher that halts at its first window, which reads as
 # silence rather than as a refusal.
 #
 # The arm surface only. `run` receives the pid the hook entry was armed with, and
@@ -329,20 +306,6 @@ owner_may_continue() {
 # already answers a dead owner with exit 3.
 check_arm_owner_pid() {
   [[ -n "$OWNER_PID" ]] || return 0
-  local expiry='  A handle that dies with the command arms a watcher that stops at its first window
-  and never re-arms, which reaches the seat as silence.
-  Pass the pid of the long-lived harness process that owns the seat.'
-  if [[ "$OWNER_PID" == "$$" ]]; then
-    fail "refusing --owner-pid $OWNER_PID: that is this command's own process. \`lore\` execs
-  straight through to this script, so a \`\$\$\` written on the command line lands here, and
-  it is gone the moment the command returns.
-$expiry"
-  fi
-  if [[ "$OWNER_PID" == "$PPID" ]]; then
-    fail "refusing --owner-pid $OWNER_PID: that is the shell that invoked this command, which
-  exits as soon as the command returns — the \`\$\$\` trap, one process further out.
-$expiry"
-  fi
   if [[ "$(probe_pid "$OWNER_PID")" == "dead" ]]; then
     fail "refusing --owner-pid $OWNER_PID: no such process. The handle is dead before the
   watcher is even armed, so the first window would stop on a seat that was never there.
@@ -364,144 +327,10 @@ owner_label() {
   echo "$label"
 }
 
-# --- The record of what is armed ----------------------------------------------
-#
-# Sole writer: this script. Arm's --install upserts, disarm removes, and nothing
-# else touches the file — one writer is what keeps the record from disagreeing
-# with itself about a watcher two seats both think they own.
-#
-# Discovery metadata, not authority. `lore arc close` reads it to find a watcher
-# armed by a seat that is gone; the settings file decides what is actually
-# armed. So every failure below is a note and a shrug: an unrecorded arm is the
-# behavior that predates this file, and it works.
-ARMED_RECORD_FILE="$KNOWLEDGE_DIR/_coordination/armed-watchers.json"
-
-# The key both surfaces agree on. Lexically absolute plus symlinks resolved, so
-# `~/.claude/settings.json` from one seat and an absolute path from another land
-# on the same record instead of two half-records that each look complete.
-abs_settings_path() {
-  python3 - "$1" <<'PYEOF' 2>/dev/null
-import os, sys
-print(os.path.realpath(os.path.expanduser(sys.argv[1])))
-PYEOF
-}
+# --- Notes that do not fail the arm ------------------------------------------
 
 record_note() {
   echo "[coordinate] $1" >&2
-}
-
-# Upsert this arm into the record. 0 when the record now describes it, 1 when it
-# does not — callers report the difference and carry on either way.
-record_armed_watcher() {
-  local settings_abs="$1" framework="$2"
-  local dir tmp scope_tokens=() slug arc
-
-  [[ -n "$settings_abs" ]] || { record_note "could not resolve an absolute path for $INSTALL_PATH; the arm was not recorded, so 'lore arc close' will not find it"; return 1; }
-
-  dir="$(dirname "$ARMED_RECORD_FILE")"
-  mkdir -p "$dir" 2>/dev/null || { record_note "could not create $dir; the arm was not recorded, so 'lore arc close' will not find it"; return 1; }
-  tmp="$(mktemp "$dir/.tmp.armed-watchers.XXXXXX" 2>/dev/null)" || { record_note "could not open a temporary file in $dir; the arm was not recorded"; return 1; }
-
-  for slug in ${SLUGS+"${SLUGS[@]}"}; do scope_tokens+=("slug:$slug"); done
-  for arc in ${ARCS+"${ARCS[@]}"}; do scope_tokens+=("arc:$arc"); done
-
-  if python3 - "$ARMED_RECORD_FILE" "$tmp" "$settings_abs" "$(owner_label)" \
-      "$framework" "$(timestamp_iso)" "$WINDOW" "$HOOK_TIMEOUT" \
-      ${scope_tokens+"${scope_tokens[@]}"} <<'PYEOF'
-import json, os, sys
-
-record_path, tmp_path, settings, owner, framework, armed_at = sys.argv[1:7]
-window, hook_timeout = int(sys.argv[7]), int(sys.argv[8])
-tokens = sys.argv[9:]
-
-records = {}
-if os.path.exists(record_path):
-    try:
-        with open(record_path, encoding="utf-8") as f:
-            records = json.load(f)
-    except (OSError, ValueError) as exc:
-        # Refuse rather than start fresh: an unreadable record may still hold
-        # another seat's watcher, and overwriting it would lose the only pointer
-        # anyone has to that entry.
-        print("existing record at %s is unreadable (%s)" % (record_path, exc), file=sys.stderr)
-        raise SystemExit(1)
-    if not isinstance(records, dict):
-        print("existing record at %s is not an object" % record_path, file=sys.stderr)
-        raise SystemExit(1)
-
-records[settings] = {
-    "settings_path": settings,
-    "scopes": {
-        "slugs": [t[len("slug:"):] for t in tokens if t.startswith("slug:")],
-        "arcs": [t[len("arc:"):] for t in tokens if t.startswith("arc:")],
-    },
-    "owner": owner,
-    "framework": framework,
-    "armed_at": armed_at,
-    "window_seconds": window,
-    "hook_timeout_seconds": hook_timeout,
-}
-
-with open(tmp_path, "w", encoding="utf-8") as f:
-    json.dump(records, f, indent=2, sort_keys=True)
-    f.write("\n")
-PYEOF
-  then
-    mv "$tmp" "$ARMED_RECORD_FILE" && return 0
-    rm -f "$tmp"
-    record_note "could not move the updated record into $ARMED_RECORD_FILE; the arm was not recorded"
-    return 1
-  fi
-
-  rm -f "$tmp"
-  record_note "the arm was not recorded in $ARMED_RECORD_FILE; 'lore arc close' will not find this watcher, so disarm it by hand: lore coordinate disarm --settings $settings_abs"
-  return 1
-}
-
-# Drop this settings path from the record. Called on every disarm path that has
-# resolved a settings file, including the ones that found nothing to uninstall:
-# a record that outlived its hook entry would send a later close chasing a
-# watcher that is not there.
-forget_armed_watcher() {
-  local settings_abs="$1"
-  local dir tmp
-
-  [[ -n "$settings_abs" ]] || return 0
-  [[ -f "$ARMED_RECORD_FILE" ]] || return 0
-
-  dir="$(dirname "$ARMED_RECORD_FILE")"
-  tmp="$(mktemp "$dir/.tmp.armed-watchers.XXXXXX" 2>/dev/null)" || { record_note "could not open a temporary file in $dir; $settings_abs is disarmed but its record remains"; return 1; }
-
-  if python3 - "$ARMED_RECORD_FILE" "$tmp" "$settings_abs" <<'PYEOF'
-import json, sys
-
-record_path, tmp_path, settings = sys.argv[1:4]
-try:
-    with open(record_path, encoding="utf-8") as f:
-        records = json.load(f)
-except (OSError, ValueError) as exc:
-    print("record at %s is unreadable (%s)" % (record_path, exc), file=sys.stderr)
-    raise SystemExit(1)
-if not isinstance(records, dict):
-    print("record at %s is not an object" % record_path, file=sys.stderr)
-    raise SystemExit(1)
-
-records.pop(settings, None)
-
-with open(tmp_path, "w", encoding="utf-8") as f:
-    json.dump(records, f, indent=2, sort_keys=True)
-    f.write("\n")
-PYEOF
-  then
-    mv "$tmp" "$ARMED_RECORD_FILE" && return 0
-    rm -f "$tmp"
-    record_note "could not move the updated record into $ARMED_RECORD_FILE; $settings_abs is disarmed but its record remains"
-    return 1
-  fi
-
-  rm -f "$tmp"
-  record_note "could not update $ARMED_RECORD_FILE; $settings_abs is disarmed but its record remains, so a later 'lore arc close' may report a watcher that is already gone"
-  return 1
 }
 
 # --- Arming surface -----------------------------------------------------------
@@ -517,7 +346,6 @@ watcher_command() {
   if [[ -n "$OWNER_TMUX" ]]; then
     cmd+=" --owner-tmux $OWNER_TMUX --tmux-server $TMUX_SERVER"
   fi
-  for slug in ${SLUGS+"${SLUGS[@]}"}; do cmd+=" --slug $slug"; done
   for arc in ${ARCS+"${ARCS[@]}"}; do cmd+=" --arc $arc"; done
   cmd+=" --window $WINDOW"
   printf '%s' "$cmd"
@@ -585,7 +413,7 @@ require_explicit_mode() {
 }
 
 cmd_arm() {
-  local framework support adapter command entry="" install_abs="" recorded=0
+  local framework support adapter command entry=""
   framework="$(resolve_active_framework 2>/dev/null)" || framework=""
   [[ -n "$framework" ]] || fail "could not resolve the active harness; set LORE_FRAMEWORK for this process"
 
@@ -619,12 +447,6 @@ cmd_arm() {
   Stop hooks before re-running: something else is writing it, or the write did not survive."
       else
         record_note "no python3 to read $INSTALL_PATH back; the adapter reported the install but it was not verified"
-      fi
-      # Only a successful install is recorded. A record written beside a failed
-      # install would point a later closure at a watcher that was never armed.
-      install_abs="$(abs_settings_path "$INSTALL_PATH")" || install_abs=""
-      if record_armed_watcher "$install_abs" "$framework"; then
-        recorded=1
       fi
     fi
   elif [[ -n "$INSTALL_PATH" ]]; then
@@ -667,13 +489,12 @@ cmd_arm() {
       echo
       if [[ -n "$INSTALL_PATH" ]]; then
         echo "[coordinate] installed into $INSTALL_PATH and read back — the next turn boundary arms the first window."
-        if [[ $recorded -eq 1 ]]; then
-          echo "[coordinate] recorded in $ARMED_RECORD_FILE, so 'lore arc close' can find this watcher."
-        fi
+        echo "[coordinate] the entry carries its own scope, so 'lore arc close' can find this watcher."
       else
         echo "[coordinate] --render: NOTHING IS ARMED. No settings file was written and no window will open."
         echo "             Add the entry above to the settings file whose scope you want armed, and own"
-        echo "             removing it by hand — a rendered entry leaves no record for 'lore arc close'."
+        echo "             removing it by hand — 'lore arc close' only reads the settings file lore itself"
+        echo "             installs into."
         echo "             To arm it here instead: re-run with --install <settings.json>. Every session"
         echo "             that reads that file gets this watcher, so pick the file deliberately."
       fi
@@ -728,11 +549,9 @@ disarm_report() {
 }
 
 cmd_disarm() {
-  local framework support adapter before after removed settings_abs
+  local framework support adapter before after removed
 
   [[ -n "$SETTINGS_PATH" ]] || fail "disarming requires --settings <path>: the settings file decides which sessions are disarmed, and lore will not guess a scope that could switch off a board somebody else is still working"
-
-  settings_abs="$(abs_settings_path "$SETTINGS_PATH")" || settings_abs=""
 
   framework="$(resolve_active_framework 2>/dev/null)" || framework=""
   [[ -n "$framework" ]] || fail "could not resolve the active harness; set LORE_FRAMEWORK for this process"
@@ -752,8 +571,6 @@ cmd_disarm() {
   [[ -f "$adapter" ]] || fail "turn_boundary_rewake is '$support' on $framework but its hook adapter is missing at $adapter"
 
   if [[ ! -f "$SETTINGS_PATH" ]]; then
-    # No file, so no entry — and therefore no record is allowed to survive.
-    forget_armed_watcher "$settings_abs" || true
     disarm_report "$framework" "$support" 0 \
       "nothing to disarm: no settings file at $SETTINGS_PATH."
     exit 0
@@ -765,12 +582,6 @@ cmd_disarm() {
     --settings "$SETTINGS_PATH" || fail "hook adapter could not remove the rewake entry from $SETTINGS_PATH"
   after="$(stop_entry_count "$SETTINGS_PATH")"
   removed=$(( before - after ))
-
-  # The entry goes first, the record after it — in that order, a failure between
-  # the two leaves a record with no entry (a stale pointer a later close resolves
-  # to "nothing to disarm") rather than an entry with no record (a live watcher
-  # no closure can find).
-  forget_armed_watcher "$settings_abs" || true
 
   if [[ "$removed" -le 0 ]]; then
     disarm_report "$framework" "$support" 0 \
@@ -794,9 +605,7 @@ cmd_disarm() {
 # state that should reach a person becomes exit 2 here, and the one state that
 # should not — a seat that no longer exists — is the only one that stays quiet.
 
-KILL_MARKER_FILE="$KNOWLEDGE_DIR/_coordination/arm-window-killed.json"
 WATCH_PID=""
-WINDOW_STARTED_AT=""
 
 # --- One live window per scope ------------------------------------------------
 #
@@ -830,8 +639,7 @@ WINDOW_LOCK_FD=9
 # the declared scope rather than the arc-expanded one — the firings this guards
 # against all carry the identical command line the hook entry was armed with.
 scope_lock_file() {
-  local slug arc tokens="" key suffix=""
-  for slug in ${SLUGS+"${SLUGS[@]}"}; do tokens+="slug:$slug"$'\n'; done
+  local arc tokens="" key suffix=""
   for arc in ${ARCS+"${ARCS[@]}"}; do tokens+="arc:$arc"$'\n'; done
   if [[ -n "$tokens" ]]; then
     key="$(printf '%s' "$tokens" | LC_ALL=C sort -u \
@@ -874,33 +682,9 @@ PY
   esac
 }
 
-# The harness kills this command at the hook timeout, and a killed hook is
-# indistinguishable from one that simply never woke anybody. The marker is the
-# distinguishing evidence, written where the next window's operator can find it.
-write_kill_marker() {
-  local dir tmp elapsed
-  dir="$(dirname "$KILL_MARKER_FILE")"
-  mkdir -p "$dir" 2>/dev/null || return 0
-  elapsed=$(( $(date +%s) - ${WINDOW_STARTED_AT:-$(date +%s)} ))
-  tmp="$(mktemp "$dir/.tmp.arm-window-killed.XXXXXX")" || return 0
-  if jq -n \
-    --arg at "$(timestamp_iso)" \
-    --arg owner "$(owner_label)" \
-    --argjson window "$WINDOW" \
-    --argjson elapsed "$elapsed" \
-    '{killed_at: $at, owner: $owner, window_seconds: $window, elapsed_seconds: $elapsed,
-      note: "SIGTERM reached the armed watcher window. The re-arm chain stopped here: a signalled hook exits 143, which the harness does not read as a wake."}' \
-    > "$tmp" 2>/dev/null; then
-    mv "$tmp" "$KILL_MARKER_FILE"
-  else
-    rm -f "$tmp"
-  fi
-}
-
 on_sigterm() {
   trap - TERM
   [[ -n "$WATCH_PID" ]] && kill -TERM "$WATCH_PID" 2>/dev/null || true
-  write_kill_marker
   exit 143
 }
 
@@ -923,7 +707,7 @@ emit_owner_gone() {
 
 cmd_run() {
   # Before anything else, and before the TERM trap: a losing instance should
-  # cost the seat one fork, not a grace sleep and a kill marker.
+  # cost the seat one fork, not a grace sleep.
   acquire_window_lock "$(scope_lock_file)" || exit 0
 
   trap on_sigterm TERM
@@ -933,13 +717,11 @@ cmd_run() {
     owner_may_continue || emit_owner_gone
   fi
 
-  local out_file err_file watch_status=0 overran=0 hard_deadline now
-  out_file="$(mktemp)"
+  local err_file watch_status=0
   err_file="$(mktemp)"
   # shellcheck disable=SC2064
-  trap "rm -f '$out_file' '$err_file'" EXIT
+  trap "rm -f '$err_file'" EXIT
 
-  WINDOW_STARTED_AT="$(date +%s)"
   # The watcher does not inherit the lock descriptor. The lock names the wrapper
   # that can still deliver a wake, so it must die with the wrapper: an orphaned
   # watcher holding it would block every re-arm for a whole window while having
@@ -947,32 +729,21 @@ cmd_run() {
   "$WATCH_SH" --wake-shaped --timeout "$WINDOW" \
     ${KDIR_OVERRIDE:+--kdir "$KDIR_OVERRIDE"} \
     ${SCOPE_ARGS+"${SCOPE_ARGS[@]}"} \
-    >"$out_file" 2>"$err_file" 9>&- &
+    >/dev/null 2>"$err_file" 9>&- &
   WATCH_PID=$!
 
-  # The watcher owns its own deadline; this only catches the case where it does
-  # not come back at it, because a window that outlives the hook timeout is the
-  # silent-kill this whole design exists to make impossible.
-  hard_deadline=$(( WINDOW_STARTED_AT + WINDOW + WINDOW_OVERRUN_GRACE_SECONDS ))
-  while kill -0 "$WATCH_PID" 2>/dev/null; do
-    now="$(date +%s)"
-    if [[ "$now" -ge "$hard_deadline" ]]; then
-      kill -TERM "$WATCH_PID" 2>/dev/null || true
-      overran=1
-      break
-    fi
-    sleep 1
-  done
+  # The watcher owns its own deadline and exits at it, every time, with a wake.
+  # --hook-timeout > --window is validated at arm time, so the harness kill is a
+  # backstop the arithmetic already excludes.
   wait "$WATCH_PID" || watch_status=$?
   WATCH_PID=""
 
+  # Only stderr. Under --wake-shaped the watcher writes its wake body to both
+  # streams, and stderr's copy is the superset — it carries the matched row and
+  # the next cursor that stdout reports separately. Concatenating the two sent
+  # the seat every wake twice.
   local body
-  body="$(cat "$out_file"; cat "$err_file")"
-
-  if [[ $overran -eq 1 ]]; then
-    emit_wake "overran" "The watcher did not return at its ${WINDOW}s deadline and was stopped ${WINDOW_OVERRUN_GRACE_SECONDS}s past it. Nothing was read after that point.
-$body"
-  fi
+  body="$(cat "$err_file")"
 
   # A window that ends while the seat is gone has nobody to wake; every other
   # ending does, including the ones that found nothing.
