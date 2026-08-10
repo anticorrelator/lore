@@ -23,7 +23,6 @@ func (genEvent) Generate(r *rand.Rand, _ int) reflect.Value {
 		EventSpawnFailed, EventReclaimed, EventAbandoned, EventCancelled,
 		EventSendRequested, EventSent, EventSendRefused, EventCloseFailed,
 		EventAnswerRequested, EventAnswered, EventAnswerRefused,
-		EventReviewFlagged, EventReviewHeld, EventReviewNotified, EventReviewReleased,
 	}
 	tok := func() string { return string(rune('a'+r.Intn(26))) + string(rune('a'+r.Intn(26))) + "-x" }
 	ev := Event{Event: events[r.Intn(len(events))]}
@@ -179,9 +178,6 @@ func TestScriptReviewVocabulary(t *testing.T) {
 		wantErr bool
 	}{
 		{"out-of-set event rejected", Event{Event: "bogus_event", Slug: "demo-slug"}, true},
-		{"review event without slug rejected", Event{Event: EventReviewFlagged}, true},
-		{"review_held with slug accepted", Event{Event: EventReviewHeld, Slug: "demo-slug"}, false},
-		{"review_released with slug accepted", Event{Event: EventReviewReleased, Slug: "demo-slug"}, false},
 		{"close_requested with request_id accepted", Event{Event: "close_requested", RequestID: "20260705T000000Z-abcd1234"}, false},
 		{"requested still accepted", Event{Event: EventRequested, RequestID: "20260705T000000Z-abcd1234"}, false},
 		{"answer requested with numeric option accepted", Event{Event: EventAnswerRequested, RequestID: "answer-1", Slug: "demo-slug", Option: 2}, false},
