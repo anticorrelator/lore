@@ -43,12 +43,15 @@ new_store() {
   echo "$kdir"
 }
 
-# A store with one open arc in it, for the closure cases.
+# A store with one open arc in it, for the closure cases. --no-watcher because
+# opening now arms the standing eye into the harness settings file, and every
+# case below arms its own watcher at a path it controls; an arc open that also
+# armed would write to the real settings file of whoever runs this suite.
 new_arc_store() {
   local slug="$1" kdir
   kdir="$(new_store)"
   mkdir -p "$kdir/_work"
-  bash "$ARC_OPEN" --kdir "$kdir" --title "$slug" --anchor "acceptance fixture" >/dev/null 2>&1
+  bash "$ARC_OPEN" --kdir "$kdir" --no-watcher --title "$slug" --anchor "acceptance fixture" >/dev/null 2>&1
   echo "$kdir"
 }
 
@@ -103,6 +106,25 @@ except (OSError, ValueError):
     print(0)
     raise SystemExit(0)
 print(len((settings.get("hooks") or {}).get("Stop") or []))
+PYEOF
+}
+
+# The armed entry's command line, verbatim, out of a settings file. The install
+# read-back matches on exactly this string, so the tests compare it to the
+# command --render prints rather than to a substring of it.
+installed_command() {
+  python3 - "$1" <<'PYEOF'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        settings = json.load(f)
+except (OSError, ValueError):
+    raise SystemExit(0)
+for entry in (settings.get("hooks") or {}).get("Stop") or []:
+    for hook in entry.get("hooks") or []:
+        if "coordinate-arm.sh" in hook.get("command", ""):
+            print(hook["command"])
+            raise SystemExit(0)
 PYEOF
 }
 
@@ -202,6 +224,81 @@ assert_contains "the owner refusal still explains itself" "$OUT" "liveness handl
 OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --window 100 --hook-timeout 50 --kdir "$KDIR" 2>&1); RC=$?
 assert_eq "arming still refuses an inverted timeout pair" "1" "$RC"
 
+echo "== a bare arm refuses rather than printing something that reads as armed =="
+# The defect this covers: `lore coordinate arm` without --install printed the
+# watcher command and the hook entry and exited 0, arming nothing. Two seats read
+# that as an armed eye and went blind — one of them for over an hour, with its
+# worker finished and parked the whole time.
+KDIR=$(new_store)
+OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "a bare arm exits 1" "1" "$RC"
+assert_contains "the refusal says nothing was armed" "$OUT" "nothing was armed"
+assert_contains "it names the mode that arms" "$OUT" "--install <settings.json>"
+assert_contains "it names the mode that only prints" "$OUT" "--render"
+if [[ "$OUT" != *"Stop hook entry:"* ]]; then
+  pass "the refusal does not print an entry that could be mistaken for an armed one"
+else
+  fail "the refusal does not print an entry that could be mistaken for an armed one" "printed the hook entry anyway"
+fi
+assert_eq "a bare arm writes no record" "0" "$([[ -f "$KDIR/_coordination/armed-watchers.json" ]] && echo 1 || echo 0)"
+
+echo "== --render keeps print-only available, and says what it did not do =="
+KDIR=$(new_store)
+OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc --render --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "--render exits 0" "0" "$RC"
+assert_contains "it still prints the hook entry" "$OUT" "Stop hook entry:"
+assert_contains "it still prints the watcher command" "$OUT" "coordinate-arm.sh run --owner-pid 1"
+assert_contains "the scope asked for is on the printed command" "$OUT" "--arc alpha-arc"
+assert_contains "it states that nothing is armed" "$OUT" "NOTHING IS ARMED"
+assert_contains "it names the way to actually arm" "$OUT" "--install <settings.json>"
+assert_contains "it says a rendered entry leaves no record" "$OUT" "removing it by hand"
+assert_eq "--render writes no record" "0" "$([[ -f "$KDIR/_coordination/armed-watchers.json" ]] && echo 1 || echo 0)"
+
+echo "== --install and --render are not combinable =="
+KDIR=$(new_store)
+SETTINGS="$KDIR/settings.json"
+OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --install "$SETTINGS" --render --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "passing both exits 1" "1" "$RC"
+assert_contains "the refusal contrasts the two" "$OUT" "deliberately writes nothing"
+assert_eq "and nothing was written" "0" "$([[ -f "$SETTINGS" ]] && echo 1 || echo 0)"
+
+echo "== --json says which of the two happened =="
+KDIR=$(new_store)
+SETTINGS="$KDIR/settings.json"
+OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --render --json --kdir "$KDIR" 2>/dev/null)
+assert_eq "render reports armed: false" "False" "$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["armed"])' "$OUT")"
+OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --install "$SETTINGS" --json --kdir "$KDIR" 2>/dev/null)
+assert_eq "install reports armed: true" "True" "$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["armed"])' "$OUT")"
+
+echo "== a degraded harness refuses a bare arm too, and names --render =="
+KDIR=$(new_store)
+OUT=$(LORE_FRAMEWORK=codex bash "$ARM" --owner-pid 1 --arc some-arc --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "the bare arm exits 1" "1" "$RC"
+assert_contains "it says there is no entry to install here" "$OUT" "no hook entry"
+assert_contains "it carries the seat-run command" "$OUT" "coordinate-arm.sh run --owner-pid 1"
+assert_contains "it names --render as the way to print it" "$OUT" "--render"
+OUT=$(LORE_FRAMEWORK=codex bash "$ARM" --owner-pid 1 --arc some-arc --render --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "--render on a degraded harness exits 0" "0" "$RC"
+assert_contains "it still says the watcher is seat-run" "$OUT" "re-arm it after each wake"
+
+echo "== --render belongs to the arming surface only =="
+KDIR=$(new_store)
+OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" disarm --settings "$KDIR/settings.json" --render --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "disarm --render exits 1" "1" "$RC"
+assert_contains "the refusal says where --render belongs" "$OUT" "--render belongs to the arming surface"
+
+echo "== an install is verified against the settings file, not the adapter's word =="
+KDIR=$(new_store)
+SETTINGS="$KDIR/settings.json"
+OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc --install "$SETTINGS" --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "the install exits 0" "0" "$RC"
+assert_contains "the report says the entry was read back" "$OUT" "read back"
+# The read-back matches the command exactly, so the entry in the file and the
+# command --render prints have to be the same string, not merely similar.
+RENDERED=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc --render --kdir "$KDIR" 2>/dev/null \
+  | grep -m1 '^  LORE_FRAMEWORK=' | sed 's/^  //')
+assert_eq "the installed command is the rendered command, verbatim" "$RENDERED" "$(installed_command "$SETTINGS")"
+
 echo "== a handle that dies with the command is refused, not armed =="
 # The `$$` warning sat in this script's own refusal text and in its --help, and
 # nothing checked it. `lore` execs straight through to this script, so a `$$` on
@@ -273,9 +370,10 @@ assert_eq "the record carries the window it armed" "120" "$(record_field "$KDIR"
 assert_eq "the record carries the hook timeout" "180" "$(record_field "$KDIR" "$SETTINGS" 'rec["hook_timeout_seconds"]')"
 
 # Whoever installs the printed entry by hand owns removing it by hand, so a
-# non-installing arm must leave no record claiming otherwise.
+# rendering arm must leave no record claiming otherwise.
 KDIR=$(new_store)
-LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc --kdir "$KDIR" >/dev/null 2>&1
+OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc --render --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "--render exits 0" "0" "$RC"
 assert_eq "an arm without --install writes no record" "0" "$([[ -f "$KDIR/_coordination/armed-watchers.json" ]] && echo 1 || echo 0)"
 
 echo "== (b) disarm removes the hook entry and the record together =="
@@ -392,6 +490,12 @@ OUT=$(bash "$ARM" --help 2>&1)
 assert_contains "help names the record file" "$OUT" "armed-watchers.json"
 assert_contains "help says the record is not the authority" "$OUT" "discovery metadata, never authority"
 assert_contains "help says a bare arm records nothing" "$OUT" "Arming without"
+
+echo "== the help text carries the arm-or-render contract =="
+assert_contains "help states the two modes are a required choice" "$OUT" "Arming and rendering are separate requests"
+assert_contains "help documents --render" "$OUT" "--render"
+assert_contains "help says the install is read back" "$OUT" "reading the settings file back"
+assert_contains "help's exit codes cover the bare arm" "$OUT" "neither --install nor --render"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
