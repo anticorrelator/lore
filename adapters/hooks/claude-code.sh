@@ -334,6 +334,13 @@ cmd_rewake_entry() {
 # The marker is the command's own script path: `lore coordinate arm` is the only
 # writer of a Stop entry pointing at coordinate-arm.sh, so replacing on that
 # substring re-arms in place instead of stacking a second watcher per call.
+#
+# The marker matches on the script and not on the seat, so the replace drops an
+# entry another seat armed into this file just as readily as it drops a stale one
+# of the caller's own. Install therefore prints what it removed — one line per
+# displaced entry, on stdout, for the arming surface to pass on. A settings file
+# holds one watcher entry; whoever arms into a shared one is switching off
+# somebody's eye and should hear about it.
 REWAKE_MARKER="coordinate-arm.sh"
 
 cmd_rewake_install() {
@@ -347,7 +354,7 @@ cmd_rewake_install() {
   local entry
   entry="$(render_rewake_entry)"
   python3 - "$REWAKE_SETTINGS" "$REWAKE_MARKER" "$entry" <<'PYEOF'
-import json, os, sys
+import json, os, shlex, sys
 
 settings_path, marker, entry_json = sys.argv[1], sys.argv[2], sys.argv[3]
 entry = json.loads(entry_json)
@@ -358,10 +365,32 @@ if os.path.exists(settings_path):
         settings = json.load(f)
 
 hooks = settings.setdefault("hooks", {})
-stop = [
-    e for e in hooks.get("Stop", [])
-    if not any(marker in h.get("command", "") for h in e.get("hooks", []))
-]
+
+
+def watcher_commands(hook_entry):
+    return [
+        h.get("command", "") for h in hook_entry.get("hooks", [])
+        if marker in h.get("command", "")
+    ]
+
+
+def describe(command):
+    """Who a displaced entry was watching for, read off its own command line."""
+    argv = shlex.split(command)
+    owner, arcs = "", []
+    for i, token in enumerate(argv):
+        if i + 1 >= len(argv):
+            break
+        if token in ("--owner-pid", "--owner-tmux"):
+            owner = "%s %s" % (token[len("--owner-"):], argv[i + 1])
+        elif token == "--arc":
+            arcs.append(argv[i + 1])
+    scope = "arc " + ", ".join(arcs) if arcs else "the whole board"
+    return "owner %s, scope %s" % (owner or "unnamed", scope)
+
+
+displaced = [c for e in hooks.get("Stop", []) for c in watcher_commands(e)]
+stop = [e for e in hooks.get("Stop", []) if not watcher_commands(e)]
 stop.append(entry)
 hooks["Stop"] = stop
 settings["hooks"] = hooks
@@ -369,6 +398,9 @@ settings["hooks"] = hooks
 with open(settings_path, "w") as f:
     json.dump(settings, f, indent=2)
     f.write("\n")
+
+for command in displaced:
+    print("replaced a watcher entry already in %s (%s)" % (settings_path, describe(command)))
 PYEOF
 }
 

@@ -41,8 +41,10 @@
 #                         `lore coordinate worktree allocate`).
 #   --tmux-server <name>  tmux server socket for --owner-tmux (default: lore-tui).
 #   --arc <slug>          Scope wakes to an arc's declared members (repeatable).
-#   --window <sec>        How long one watcher window runs (default: 3600).
-#   --hook-timeout <sec>  The hook entry's own timeout (default: 3900). MUST be
+#                         The arc must have a record in the store being armed
+#                         from; see "A scope is checked before it is armed".
+#   --window <sec>        How long one watcher window runs (default: 600).
+#   --hook-timeout <sec>  The hook entry's own timeout (default: 660). MUST be
 #                         strictly greater than --window; see "Two deadlines".
 #   --install <path>      Write the entry into this settings file. No default —
 #                         the file decides which sessions get armed, and lore
@@ -120,6 +122,53 @@
 #   fires. That invariant is validated at arm time and refused loudly, which is
 #   where the guarantee lives.
 #
+#   The defaults pair a ten-minute window with an eleven-minute hook timeout, so
+#   a seat hears from its board at least every ten minutes. A quiet window is
+#   still a wake — it says the board had nothing, and ending that turn opens the
+#   next window. Pass a longer --window (and a --hook-timeout above it) if a
+#   seat genuinely wants to hear less often.
+#
+# A window runs only for the seat that armed it:
+#   The hook entry lives in a settings file, and every session that reads that
+#   file fires it at every turn boundary — including sessions with no connection
+#   to the seat named in the entry. So `run` first walks its own process
+#   ancestry: the harness runs an armed hook as a direct child of the session
+#   whose turn ended, so the owning seat is this process or one of its parents.
+#   A firing that does not descend from a live --owner-pid is somebody else's
+#   turn boundary reaching this seat's entry; it exits 0 without opening a window
+#   and without a wake, which leaves the owner's own firing free to take the
+#   window.
+#
+#   When the process table cannot be read at all, the window runs. The same
+#   trade the per-scope lock makes: a missed rejection costs one duplicate
+#   window, while refusing on an unreadable ancestry would cost the wake itself.
+#
+# Every window says what it did:
+#   Each `run` appends one line to
+#   $KNOWLEDGE_DIR/_coordination/arm-window<scope>.log, keyed by the same
+#   per-scope suffix the window lock uses. The line carries the timestamp, this
+#   process, its parent, the owner handle the entry was armed with, and what
+#   became of the window: foreign, lock-held, opened, or the terminal it reached.
+#   This script is the file's only writer; everything else reads it.
+#
+#   A window that opens and never delivers is otherwise indistinguishable from
+#   one that was never opened — both are exit 0 with nothing on any stream — so
+#   this is the file to read first when a seat has gone quiet. It is trimmed to
+#   its recent tail past a small byte ceiling, and a log that cannot be written
+#   degrades to a note on stderr rather than costing the window.
+#
+# A scope is checked before it is armed:
+#   Every --arc is expanded against the store this command resolved, before
+#   anything is written or printed, and an arc with no record there is refused by
+#   name alongside the store it was looked for in. Membership is whatever the arc
+#   record declares; an arc that exists but declares no members yet is armed with
+#   a note, because arming at arc open precedes adding members.
+#
+#   Installing also reports what it displaced. One settings file holds one
+#   watcher entry, so arming into a file another seat already armed replaces that
+#   seat's entry — the report names its owner and scope, so the seat doing the
+#   arming can put it back.
+#
 # Cross-harness behavior is read from the `turn_boundary_rewake` capability
 # cell, never from the framework name:
 #   full     Arm the hook; the session parks idle while the window runs.
@@ -134,6 +183,8 @@
 #      both of them, or an --install the settings file does not carry afterwards
 #   2  (run) a wake was delivered on stderr — the harness's re-arm signal
 #   3  (run) the owner is provably gone; no wake, no re-arm
+#   0  (run) this firing belongs to another seat, or a window for this scope is
+#      already open; no window, no wake, and the window log says which it was
 #   0  (disarm) the entry was removed, or there was none to remove — both are
 #      the state the caller asked for, so neither is a refusal
 
@@ -150,8 +201,8 @@ OWNER_PID=""
 OWNER_TMUX=""
 TMUX_SERVER="lore-tui"
 ARCS=()
-WINDOW=3600
-HOOK_TIMEOUT=3900
+WINDOW=600
+HOOK_TIMEOUT=660
 INSTALL_PATH=""
 RENDER_ONLY=0
 SETTINGS_PATH=""
@@ -167,7 +218,7 @@ OWNER_GONE_GRACE_SECONDS=2
 ERROR_WAKE_BACKOFF_SECONDS="${LORE_ARM_ERROR_BACKOFF_SECONDS:-60}"
 
 usage() {
-  sed -n '2,150p' "$0"
+  sed -n '2,189p' "$0"
 }
 
 case "${1:-}" in
@@ -313,6 +364,46 @@ check_arm_owner_pid() {
   fi
 }
 
+# The arming surface's check on the scope it is about to bake into the entry,
+# and the third member of the set the other two already cover: a dead handle is
+# refused, an install that did not land is refused, and a scope that resolves to
+# nothing would otherwise arm a watcher that exits 1 at every window.
+#
+# Which store the scope is resolved against matters as much as the answer: the
+# hook command carries no --kdir, so a session running this entry resolves the
+# store from its own working directory. Naming the store here is what makes a
+# refusal actionable rather than puzzling.
+check_arm_arc_scope() {
+  local arc status members
+  [[ ${#ARCS[@]} -gt 0 ]] || return 0
+  if ! command -v python3 >/dev/null 2>&1; then
+    record_note "no python3 to expand --arc against $KNOWLEDGE_DIR; the scope is being armed unchecked"
+    return 0
+  fi
+  for arc in ${ARCS[@]+"${ARCS[@]}"}; do
+    status=0
+    members="$(session_arc_member_slugs "$KNOWLEDGE_DIR" "$arc")" || status=$?
+    case "$status" in
+      0) ;;
+      1) fail "refusing --arc '$arc': $KNOWLEDGE_DIR has no arc record at _work/_arcs/$arc/_meta.json.
+  A watcher armed for a scope that resolves to nothing exits with an error at every window and
+  wakes nobody. Check the slug, or arm from the store the arc lives in — the installed entry
+  carries no store path, so every window resolves it from the running session's directory." ;;
+      2) fail "refusing --arc '$arc': its record in $KNOWLEDGE_DIR is not readable as a JSON object
+  (_work/_arcs/$arc/_meta.json). Repair the record before arming an eye that depends on it." ;;
+      3) fail "refusing --arc '$arc': its record in $KNOWLEDGE_DIR is archived or carries an unknown
+  status, and the watcher will not expand it. Reopen the arc, or arm the whole board instead." ;;
+      *) fail "refusing --arc '$arc': could not expand it against $KNOWLEDGE_DIR (exit $status)" ;;
+    esac
+    # An arc opens before it has members, and arming is part of opening one, so
+    # an empty members[] is a note rather than a refusal. It does mean this
+    # scope contributes nothing until members are added.
+    if [[ -z "${members//[[:space:]]/}" ]]; then
+      record_note "arc '$arc' declares no members yet; it contributes nothing to this scope until members are added"
+    fi
+  done
+}
+
 owner_label() {
   local label=""
   if [[ -n "$OWNER_PID" ]]; then
@@ -412,8 +503,12 @@ require_explicit_mode() {
     $command"
 }
 
+# What an install replaced, as the hook adapter reported it. Empty when the
+# settings file carried no watcher entry of its own.
+DISPLACED=""
+
 cmd_arm() {
-  local framework support adapter command entry=""
+  local framework support adapter command entry="" displaced_line
   framework="$(resolve_active_framework 2>/dev/null)" || framework=""
   [[ -n "$framework" ]] || fail "could not resolve the active harness; set LORE_FRAMEWORK for this process"
 
@@ -422,6 +517,9 @@ cmd_arm() {
   adapter="$LORE_REPO_DIR/adapters/hooks/$framework.sh"
 
   require_explicit_mode "$support" "$framework" "$command"
+  # After the mode is settled and before anything is written or printed: the
+  # scope has to resolve in this store or there is nothing worth arming.
+  check_arm_arc_scope
 
   if [[ "$support" == "full" ]]; then
     [[ -f "$adapter" ]] || fail "turn_boundary_rewake is '$support' on $framework but its hook adapter is missing at $adapter"
@@ -431,12 +529,15 @@ cmd_arm() {
       --timeout "$HOOK_TIMEOUT" \
       --message "$REWAKE_MESSAGE")" || fail "hook adapter could not render the rewake entry"
     if [[ -n "$INSTALL_PATH" ]]; then
-      "$adapter" rewake-install \
+      # The adapter's stdout is its account of what the install displaced: one
+      # settings file holds one watcher entry, so arming here can switch off an
+      # eye somebody else is relying on.
+      DISPLACED="$("$adapter" rewake-install \
         --framework "$framework" \
         --settings "$INSTALL_PATH" \
         --command "$command" \
         --timeout "$HOOK_TIMEOUT" \
-        --message "$REWAKE_MESSAGE" || fail "hook adapter could not install the rewake entry into $INSTALL_PATH"
+        --message "$REWAKE_MESSAGE")" || fail "hook adapter could not install the rewake entry into $INSTALL_PATH"
       # The adapter said it wrote; the file says whether it did. Without python3
       # there is no way to read it back, and refusing a good install over a
       # missing interpreter would be the louder error in the wrong direction —
@@ -465,13 +566,15 @@ cmd_arm() {
       --arg support "$support" \
       --arg command "$command" \
       --arg installed "${INSTALL_PATH:-}" \
+      --arg displaced "$DISPLACED" \
       --argjson entry "${entry:-null}" \
       --argjson window "$WINDOW" \
       --argjson hook_timeout "$HOOK_TIMEOUT" \
       --argjson armed "$([[ -n "$INSTALL_PATH" ]] && echo true || echo false)" \
       '{framework: $fw, turn_boundary_rewake: $support, watcher_command: $command,
         window_seconds: $window, hook_timeout_seconds: $hook_timeout, armed: $armed,
-        hook_entry: $entry, installed_into: (if $installed == "" then null else $installed end)}')"
+        hook_entry: $entry, installed_into: (if $installed == "" then null else $installed end),
+        displaced: (if $displaced == "" then null else $displaced end)}')"
   fi
 
   echo "[coordinate] harness $framework, turn_boundary_rewake: $support"
@@ -490,6 +593,13 @@ cmd_arm() {
       if [[ -n "$INSTALL_PATH" ]]; then
         echo "[coordinate] installed into $INSTALL_PATH and read back — the next turn boundary arms the first window."
         echo "[coordinate] the entry carries its own scope, so 'lore arc close' can find this watcher."
+        if [[ -n "$DISPLACED" ]]; then
+          while IFS= read -r displaced_line; do
+            [[ -n "$displaced_line" ]] || continue
+            echo "[coordinate] $displaced_line"
+          done <<< "$DISPLACED"
+          echo "[coordinate] that seat is now unwatched. Re-arm it into a settings file of its own if it is still working a board."
+        fi
       else
         echo "[coordinate] --render: NOTHING IS ARMED. No settings file was written and no window will open."
         echo "             Add the entry above to the settings file whose scope you want armed, and own"
@@ -635,18 +745,22 @@ WATCH_PID=""
 WINDOW_LOCK_FD=9
 
 # Same recipe the watcher uses for its per-scope sidecars: order-insensitive and
-# duplicate-insensitive, so one scope written two ways takes one lock. Keyed on
-# the declared scope rather than the arc-expanded one — the firings this guards
-# against all carry the identical command line the hook entry was armed with.
-scope_lock_file() {
-  local arc tokens="" key suffix=""
+# duplicate-insensitive, so one scope written two ways takes one lock and writes
+# one log. Keyed on the declared scope rather than the arc-expanded one — the
+# firings this guards against all carry the identical command line the hook
+# entry was armed with. With no scope, and when the key cannot be computed, the
+# suffix is empty and every firing shares one pair of sidecars.
+scope_suffix() {
+  local arc tokens="" key
   for arc in ${ARCS+"${ARCS[@]}"}; do tokens+="arc:$arc"$'\n'; done
-  if [[ -n "$tokens" ]]; then
-    key="$(printf '%s' "$tokens" | LC_ALL=C sort -u \
-      | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])')"
-    suffix="-$key"
-  fi
-  printf '%s' "$KNOWLEDGE_DIR/_coordination/arm-window${suffix}.lock"
+  [[ -n "$tokens" ]] || return 0
+  key="$(printf '%s' "$tokens" | LC_ALL=C sort -u \
+    | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])')" || return 0
+  printf '%s' "-$key"
+}
+
+scope_lock_file() {
+  printf '%s' "$KNOWLEDGE_DIR/_coordination/arm-window$(scope_suffix).lock"
 }
 
 # 0 when this process now owns the window, 1 when another instance already does.
@@ -682,8 +796,99 @@ PY
   esac
 }
 
+# --- The per-scope window log -------------------------------------------------
+#
+# What a window did, in one line, at the same per-scope key as the lock. This
+# script is the file's only writer: every disposition it records — a firing
+# refused as foreign, a firing that lost the lock — exists only here, in the
+# wrapper, and is gone by the time anything else could observe it. Everything
+# else that wants to know what a window did reads this file.
+#
+# A refused firing and a healthy one are otherwise identical from outside: both
+# exit 0 with nothing on any stream, and the harness reports no output and no
+# errors for either. Reading this file is how a seat that has gone quiet finds
+# out whether its windows were opening at all.
+#
+# Nothing here may cost a window. A log that cannot be written or trimmed
+# degrades to a note on stderr.
+WINDOW_LOG_MAX_BYTES=65536
+WINDOW_LOG_KEEP_BYTES=32768
+
+scope_window_log() {
+  printf '%s' "$KNOWLEDGE_DIR/_coordination/arm-window$(scope_suffix).log"
+}
+
+trim_window_log() {
+  local log_file="$1" size tmp
+  size="$(wc -c < "$log_file" 2>/dev/null)" || return 0
+  size="${size//[[:space:]]/}"
+  [[ "$size" =~ ^[0-9]+$ ]] || return 0
+  [[ "$size" -gt "$WINDOW_LOG_MAX_BYTES" ]] || return 0
+  tmp="$log_file.trim.$$"
+  # The first line of a byte-bounded tail is usually a fragment of a line.
+  if tail -c "$WINDOW_LOG_KEEP_BYTES" "$log_file" 2>/dev/null | tail -n +2 > "$tmp" 2>/dev/null \
+    && mv "$tmp" "$log_file" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  echo "[coordinate] could not trim $log_file; it keeps growing until it can be" >&2
+}
+
+record_window_disposition() {
+  local disposition="$1" note="${2:-}" log_file line
+  log_file="$(scope_window_log)"
+  mkdir -p "$(dirname "$log_file")" 2>/dev/null || true
+  line="$(timestamp_iso) pid=$$ ppid=${PPID:-unknown} owner=${OWNER_PID:-none} disposition=$disposition"
+  [[ -n "$note" ]] && line+=" note=$note"
+  if ! printf '%s\n' "$line" >> "$log_file" 2>/dev/null; then
+    echo "[coordinate] could not append this window's disposition ($disposition) to $log_file" >&2
+    return 0
+  fi
+  trim_window_log "$log_file"
+}
+
+# --- Whose turn boundary is this? ---------------------------------------------
+#
+# Bounded so an unexpected process table — a cycle, a pid that reports itself as
+# its own parent — cannot spin the walk instead of answering.
+ANCESTRY_WALK_LIMIT=64
+
+parent_pid_of() {
+  local pid="$1" parent
+  parent="$(ps -o ppid= -p "$pid" 2>/dev/null)" || return 1
+  parent="${parent//[[:space:]]/}"
+  [[ "$parent" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$parent"
+}
+
+# Where this firing sits relative to the seat the entry names:
+#   owned       the owner handle is this process or one of its ancestors
+#   foreign     the owner is alive elsewhere, so this is another seat's turn
+#               boundary running an entry it inherited from a shared settings file
+#   owner-gone  no owner process to descend from; the window's own owner check
+#               answers that case, and answers it with a report
+#   unreadable  the process table would not say
+classify_firing() {
+  local pid=$$ steps=0 parent
+  [[ -n "$OWNER_PID" ]] || { printf owned; return 0; }
+  command -v ps >/dev/null 2>&1 || { printf unreadable; return 0; }
+  while [[ "$pid" -gt 1 && $steps -lt $ANCESTRY_WALK_LIMIT ]]; do
+    [[ "$pid" == "$OWNER_PID" ]] && { printf owned; return 0; }
+    parent="$(parent_pid_of "$pid")" || { printf unreadable; return 0; }
+    pid="$parent"
+    steps=$((steps + 1))
+  done
+  [[ "$pid" == "$OWNER_PID" ]] && { printf owned; return 0; }
+  if [[ "$(probe_pid "$OWNER_PID")" == "alive" ]]; then
+    printf foreign
+  else
+    printf owner-gone
+  fi
+}
+
 on_sigterm() {
   trap - TERM
+  record_window_disposition killed
   [[ -n "$WATCH_PID" ]] && kill -TERM "$WATCH_PID" 2>/dev/null || true
   exit 143
 }
@@ -706,16 +911,37 @@ emit_owner_gone() {
 }
 
 cmd_run() {
+  # Whose firing this is, before the lock: a foreign session contesting a lock it
+  # has no business holding is how a seat loses its own window, and the loser of
+  # that contest exits 0 in silence — no wake, and so no next window either.
+  case "$(classify_firing)" in
+    foreign)
+      record_window_disposition foreign
+      exit 0
+      ;;
+    unreadable)
+      echo "[coordinate] could not read this process's ancestry to check it against owner $OWNER_PID; opening the window anyway" >&2
+      ;;
+  esac
+
   # Before anything else, and before the TERM trap: a losing instance should
   # cost the seat one fork, not a grace sleep.
-  acquire_window_lock "$(scope_lock_file)" || exit 0
+  if ! acquire_window_lock "$(scope_lock_file)"; then
+    record_window_disposition lock-held
+    exit 0
+  fi
 
   trap on_sigterm TERM
 
   if ! owner_may_continue; then
     sleep "$OWNER_GONE_GRACE_SECONDS"
-    owner_may_continue || emit_owner_gone
+    if ! owner_may_continue; then
+      record_window_disposition owner-gone before-opening
+      emit_owner_gone
+    fi
   fi
+
+  record_window_disposition opened
 
   local err_file watch_status=0
   err_file="$(mktemp)"
@@ -749,14 +975,27 @@ cmd_run() {
   # ending does, including the ones that found nothing.
   if ! owner_may_continue; then
     sleep "$OWNER_GONE_GRACE_SECONDS"
-    owner_may_continue || emit_owner_gone
+    if ! owner_may_continue; then
+      record_window_disposition owner-gone after-window
+      emit_owner_gone
+    fi
   fi
 
   case "$watch_status" in
-    0) emit_wake "actionable" "$body" ;;
-    2) emit_wake "quiet" "$body" ;;
-    3) emit_owner_gone ;;
+    0)
+      record_window_disposition wake-actionable
+      emit_wake "actionable" "$body"
+      ;;
+    2)
+      record_window_disposition wake-quiet
+      emit_wake "quiet" "$body"
+      ;;
+    3)
+      record_window_disposition owner-gone reported-by-watcher
+      emit_owner_gone
+      ;;
     *)
+      record_window_disposition watcher-failed "exit-$watch_status"
       sleep "$ERROR_WAKE_BACKOFF_SECONDS"
       emit_wake "watcher-failed (exit $watch_status)" "$body"
       ;;

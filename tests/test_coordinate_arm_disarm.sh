@@ -12,6 +12,12 @@
 # reads it — disarming an eye it can attribute solely to the closing arc, naming
 # one it cannot. The through-line of the close cases is that none of them can
 # fail a close.
+#
+# And the four ways a window can end up not running for the seat that armed it:
+# the arming defaults that set the cadence, the ancestry check that keeps another
+# session's turn boundary out of this seat's window, the per-scope log that says
+# which of those happened, and the arm-time refusals — an unresolvable scope, and
+# an install that displaces somebody else's entry.
 
 set -uo pipefail
 
@@ -43,15 +49,24 @@ new_store() {
   echo "$kdir"
 }
 
-# A store with one open arc in it, for the closure cases. --no-watcher because
-# opening now arms the standing eye into the harness settings file, and every
-# case below arms its own watcher at a path it controls; an arc open that also
-# armed would write to the real settings file of whoever runs this suite.
+# An arc record in an existing store. Arming refuses a scope that resolves to no
+# arc in the store it is arming from, so every case that arms for an arc opens
+# that arc first. --no-watcher because opening now arms the standing eye into the
+# harness settings file, and every case below arms its own watcher at a path it
+# controls; an arc open that also armed would write to the real settings file of
+# whoever runs this suite.
+add_arc() {
+  local kdir="$1" slug="$2"
+  mkdir -p "$kdir/_work"
+  bash "$ARC_OPEN" --kdir "$kdir" --no-watcher --slug "$slug" \
+    --title "$slug" --anchor "acceptance fixture" >/dev/null 2>&1
+}
+
+# A store with one open arc in it, for the closure cases.
 new_arc_store() {
   local slug="$1" kdir
   kdir="$(new_store)"
-  mkdir -p "$kdir/_work"
-  bash "$ARC_OPEN" --kdir "$kdir" --no-watcher --title "$slug" --anchor "acceptance fixture" >/dev/null 2>&1
+  add_arc "$kdir" "$slug"
   echo "$kdir"
 }
 
@@ -211,6 +226,69 @@ assert_contains "the owner refusal still explains itself" "$OUT" "liveness handl
 OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --window 100 --hook-timeout 50 --kdir "$KDIR" 2>&1); RC=$?
 assert_eq "arming still refuses an inverted timeout pair" "1" "$RC"
 
+echo "== the defaults are the cadence a seat can count on =="
+# Ten minutes is the floor: a window ends at least that often, and a board with
+# nothing to report ends it with a quiet wake rather than with silence. The hook
+# timeout stays above the window, so the harness kill remains a backstop.
+KDIR=$(new_store)
+SETTINGS="$KDIR/settings.json"
+OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --install "$SETTINGS" --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "arming with no --window exits 0" "0" "$RC"
+assert_eq "the armed watcher carries the ten-minute window" "600" "$(armed_flag_values "$SETTINGS" --window)"
+assert_eq "and the hook entry's timeout is above it" "660" "$(python3 -c '
+import json,sys
+for entry in json.load(open(sys.argv[1]))["hooks"]["Stop"]:
+    for hook in entry["hooks"]:
+        if "coordinate-arm.sh" in hook["command"]:
+            print(hook["timeout"])
+' "$SETTINGS")"
+assert_contains "and the report states the pair" "$OUT" "watcher window 600s inside a 660s hook timeout"
+
+echo "== a scope that resolves to nothing is refused, not armed =="
+# The installed entry carries no store path, so every window resolves the scope
+# from the running session's directory — an arc missing from the store being
+# armed from is an entry that errors at every window and wakes nobody.
+KDIR=$(new_store)
+SETTINGS="$KDIR/settings.json"
+OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc ghost-arc --render --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "rendering an unresolvable scope exits 1" "1" "$RC"
+assert_contains "the refusal names the arc" "$OUT" "ghost-arc"
+assert_contains "and the store it was looked for in" "$OUT" "$KDIR"
+assert_eq "and nothing was installed" "0" "$([[ -f "$SETTINGS" ]] && echo 1 || echo 0)"
+OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc ghost-arc --install "$SETTINGS" --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "installing one exits 1 too" "1" "$RC"
+assert_eq "and still writes no settings file" "0" "$([[ -f "$SETTINGS" ]] && echo 1 || echo 0)"
+# An arc opens before it has members, and opening one arms the eye, so an empty
+# members[] is a note rather than a refusal.
+KDIR=$(new_arc_store fresh-arc)
+OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc fresh-arc --render --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "an arc with no members yet still arms" "0" "$RC"
+assert_contains "with a note that it scopes to nothing so far" "$OUT" "declares no members yet"
+
+echo "== an install says whose watcher it displaced =="
+# One settings file holds one watcher entry: the marker matches the script, not
+# the seat, so arming into a file another seat armed switches that seat's eye off.
+KDIR=$(new_arc_store first-arc)
+SETTINGS="$KDIR/settings.json"
+LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc first-arc --install "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
+OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid $$ --install "$SETTINGS" --kdir "$KDIR" 2>&1); RC=$?
+assert_eq "the second install exits 0" "0" "$RC"
+assert_contains "it reports that it replaced an entry" "$OUT" "replaced a watcher entry"
+assert_contains "it names the displaced entry's owner" "$OUT" "owner pid 1"
+assert_contains "it names the displaced entry's scope" "$OUT" "scope arc first-arc"
+assert_eq "and the file still holds exactly one" "1" "$(stop_armed "$SETTINGS")"
+OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --install "$SETTINGS" --json --kdir "$KDIR" 2>/dev/null)
+assert_contains "--json carries the same report" "$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["displaced"])' "$OUT")" "owner pid $$"
+# A file with no watcher entry displaces nothing, and says nothing about it.
+KDIR=$(new_store)
+SETTINGS="$KDIR/settings.json"
+OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --install "$SETTINGS" --kdir "$KDIR" 2>&1)
+if [[ "$OUT" != *"replaced a watcher entry"* ]]; then
+  pass "a first install reports no displacement"
+else
+  fail "a first install reports no displacement" "reported replacing something that was not there"
+fi
+
 echo "== a bare arm refuses rather than printing something that reads as armed =="
 # The defect this covers: `lore coordinate arm` without --install printed the
 # watcher command and the hook entry and exited 0, arming nothing. Two seats read
@@ -229,7 +307,7 @@ else
 fi
 
 echo "== --render keeps print-only available, and says what it did not do =="
-KDIR=$(new_store)
+KDIR=$(new_arc_store alpha-arc)
 OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc --render --kdir "$KDIR" 2>&1); RC=$?
 assert_eq "--render exits 0" "0" "$RC"
 assert_contains "it still prints the hook entry" "$OUT" "Stop hook entry:"
@@ -256,7 +334,7 @@ OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --install "$SETTINGS"
 assert_eq "install reports armed: true" "True" "$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["armed"])' "$OUT")"
 
 echo "== a degraded harness refuses a bare arm too, and names --render =="
-KDIR=$(new_store)
+KDIR=$(new_arc_store some-arc)
 OUT=$(LORE_FRAMEWORK=codex bash "$ARM" --owner-pid 1 --arc some-arc --kdir "$KDIR" 2>&1); RC=$?
 assert_eq "the bare arm exits 1" "1" "$RC"
 assert_contains "it says there is no entry to install here" "$OUT" "no hook entry"
@@ -273,7 +351,7 @@ assert_eq "disarm --render exits 1" "1" "$RC"
 assert_contains "the refusal says where --render belongs" "$OUT" "--render belongs to the arming surface"
 
 echo "== an install is verified against the settings file, not the adapter's word =="
-KDIR=$(new_store)
+KDIR=$(new_arc_store alpha-arc)
 SETTINGS="$KDIR/settings.json"
 OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc --install "$SETTINGS" --kdir "$KDIR" 2>&1); RC=$?
 assert_eq "the install exits 0" "0" "$RC"
@@ -304,11 +382,57 @@ OUT=$(LORE_FRAMEWORK=claude-code LORE_ARM_ERROR_BACKOFF_SECONDS=1 \
   bash -c 'bash "$1" run --owner-pid $$ --window 1 --kdir "$2"; exit $?' \
   _ "$ARM" "$KDIR" 2>&1); RC=$?
 assert_eq "the watcher window still accepts its parent as the owner" "2" "$RC"
+assert_contains "and the window it opened is in the log" "$(cat "$KDIR/_coordination/arm-window.log")" "disposition=opened"
+
+echo "== the window is the armed seat's, and nobody else's =="
+# The entry lives in a settings file every session on the machine reads, so every
+# session's turn boundary runs it. A firing that does not descend from the seat
+# the entry names is that other session's turn boundary, and it must leave the
+# window alone: the seat's own firing has to find the lock free.
+KDIR=$(new_store)
+sleep 30 &
+FOREIGN_PID=$!
+OUT=$(LORE_FRAMEWORK=claude-code bash -c 'bash "$1" run --owner-pid "$2" --window 30 --kdir "$3"; exit $?' \
+  _ "$ARM" "$FOREIGN_PID" "$KDIR" 2>&1); RC=$?
+assert_eq "a firing for a seat this process does not descend from exits 0" "0" "$RC"
+assert_eq "and delivers no wake" "" "$OUT"
+LIVE_WATCHERS=$(ps -Ao command | grep -c "[c]oordinate-watch.sh.*$KDIR")
+assert_eq "and forks no watcher" "0" "$LIVE_WATCHERS"
+kill "$FOREIGN_PID" 2>/dev/null
+wait "$FOREIGN_PID" 2>/dev/null
+
+echo "== the window log tells a refused firing from a losing one =="
+# Both exit 0 with nothing on any stream, so without this file the two are the
+# same event from outside — which is what made a dead wake chain take transcript
+# forensics to diagnose.
+WINDOW_LOG="$KDIR/_coordination/arm-window.log"
+FOREIGN_LINE=$(grep "disposition=foreign" "$WINDOW_LOG" | tail -1)
+assert_contains "the refused firing names the owner it was armed for" "$FOREIGN_LINE" "owner=$FOREIGN_PID"
+assert_contains "and names the process that ran it" "$FOREIGN_LINE" "pid="
+assert_contains "and that process's parent" "$FOREIGN_LINE" "ppid="
+
+# A second firing for the same scope while a window is open: the lock is the
+# guard, and losing it is a different event from being refused as foreign.
+python3 - "$KDIR/_coordination/arm-window.lock" <<'PYEOF' &
+import fcntl, sys, time
+handle = open(sys.argv[1], "w")
+fcntl.flock(handle, fcntl.LOCK_EX)
+time.sleep(20)
+PYEOF
+HOLDER_PID=$!
+sleep 1
+OUT=$(LORE_FRAMEWORK=claude-code bash -c 'bash "$1" run --owner-pid $$ --window 1 --kdir "$2"; exit $?' \
+  _ "$ARM" "$KDIR" 2>&1); RC=$?
+kill "$HOLDER_PID" 2>/dev/null
+wait "$HOLDER_PID" 2>/dev/null
+assert_eq "a firing that loses the per-scope lock exits 0" "0" "$RC"
+assert_contains "and says so in the log" "$(tail -1 "$WINDOW_LOG")" "disposition=lock-held"
+assert_eq "so the two dispositions are distinguishable" "1" "$(grep -c 'disposition=lock-held' "$WINDOW_LOG")"
 
 echo "== a degraded harness refuses --install with the command it wants run =="
 # The refusal used to send the caller to "the printed watcher command" and then
 # exit before printing one.
-KDIR=$(new_store)
+KDIR=$(new_arc_store some-arc)
 OUT=$(LORE_FRAMEWORK=codex bash "$ARM" --owner-pid 1 --arc some-arc \
   --install "$KDIR/settings.json" --kdir "$KDIR" 2>&1); RC=$?
 assert_eq "the refusal exits 1" "1" "$RC"
@@ -319,6 +443,13 @@ assert_eq "and nothing was" "0" "$([[ -f "$KDIR/settings.json" ]] && echo 1 || e
 
 echo "== the help text carries the closure rule and the in-flight caveat =="
 OUT=$(bash "$ARM" --help 2>&1)
+# Help is a fixed line range over the header, so a longer header silently loses
+# its tail unless the range moves with it. The last line of the header is the
+# canary: if it prints, nothing in between was truncated.
+assert_contains "help reaches the last line of the header" "$OUT" "so neither is a refusal"
+assert_contains "help explains whose firing opens a window" "$OUT" "A window runs only for the seat that armed it"
+assert_contains "help names the window log and its only writer" "$OUT" "arm-window<scope>.log"
+assert_contains "help says a scope is checked before it is armed" "$OUT" "A scope is checked before it is armed"
 assert_contains "help places disarm in arc closure" "$OUT" "Disarm belongs in the arc-closure sequence"
 assert_contains "help says a running window is not killed" "$OUT" "does not stop a window that is already running"
 assert_contains "help names the lock the window holds" "$OUT" "per-scope lock"
@@ -326,7 +457,7 @@ assert_contains "help says --settings is never defaulted" "$OUT" "never defaulte
 assert_contains "help documents the disarm exit code" "$OUT" "(disarm) the entry was removed"
 
 echo "== (a) the installed entry carries the scope a later closure reads =="
-KDIR=$(new_store)
+KDIR=$(new_arc_store alpha-arc)
 SETTINGS="$KDIR/settings.json"
 LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc \
   --window 120 --hook-timeout 180 --install "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
@@ -337,13 +468,13 @@ assert_contains "the entry names the framework that installed it" "$(installed_c
 
 # Whoever installs the printed entry by hand owns removing it by hand: nothing is
 # written anywhere, so there is no settings file for a closure to read.
-KDIR=$(new_store)
+KDIR=$(new_arc_store alpha-arc)
 OUT=$(LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc --render --kdir "$KDIR" 2>&1); RC=$?
 assert_eq "--render exits 0" "0" "$RC"
 assert_eq "an arm without --install writes no settings file" "0" "$([[ -f "$KDIR/settings.json" ]] && echo 1 || echo 0)"
 
 echo "== (b) disarm removes the hook entry, which is the whole record =="
-KDIR=$(new_store)
+KDIR=$(new_arc_store alpha-arc)
 SETTINGS="$KDIR/settings.json"
 LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc alpha-arc --install "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
 LORE_FRAMEWORK=claude-code bash "$ARM" disarm --settings "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
@@ -375,6 +506,7 @@ assert_eq "the watcher was still disarmed" "0" "$(stop_armed "$SETTINGS")"
 
 echo "== (d) a wider-scoped watcher is named, never switched off =="
 KDIR=$(new_arc_store shared-arc)
+add_arc "$KDIR" other-arc
 SETTINGS="$KDIR/settings.json"
 LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc shared-arc --arc other-arc \
   --install "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
@@ -422,6 +554,7 @@ fi
 
 echo "== a closing arc no watcher names is silent about watchers =="
 KDIR=$(new_arc_store lonely-arc)
+add_arc "$KDIR" unrelated-arc
 SETTINGS="$KDIR/settings.json"
 LORE_FRAMEWORK=claude-code bash "$ARM" --owner-pid 1 --arc unrelated-arc --install "$SETTINGS" --kdir "$KDIR" >/dev/null 2>&1
 OUT=$(bash "$ARC_CLOSE" lonely-arc --settings "$SETTINGS" --kdir "$KDIR" 2>&1); RC=$?

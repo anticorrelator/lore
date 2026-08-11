@@ -65,10 +65,13 @@
 #                     explicit value wins over the cursor file. Treat it as
 #                     opaque: pass back a cursor this verb, `lore session wait`,
 #                     or `lore session events` reported, never one you computed.
-#   --timeout <sec>   How long to sleep before giving up (default: 3600). Exit 2.
+#   --timeout <sec>   How long to sleep before giving up (default: 600). Exit 2.
 #                     Run this in the background rather than in the foreground of
 #                     a harness turn — a foreground command is killed long before
-#                     an hour is up, and a killed watcher reads as a hang.
+#                     ten minutes are up, and a killed watcher reads as a hang.
+#                     The default is the cadence a seat can count on: a window
+#                     ends at least every ten minutes, and a board with nothing
+#                     to report ends it with a quiet wake rather than silence.
 #   --pending-stale <sec>
 #                     Also wake when a spawn request has been sitting in the
 #                     pending queue this long without being claimed (default:
@@ -244,7 +247,7 @@ source "$SCRIPT_DIR/lib.sh"
 UNTIL="${SESSION_ACTIONABLE_EVENTS// /,}"
 SINCE=""
 SINCE_SET=0
-TIMEOUT=3600
+TIMEOUT=600
 PENDING_STALE=300
 PEEK_TIMEOUT=10
 # The spawn-paste gap, measured rather than guessed. Live wakes on 2026-08-03 put
