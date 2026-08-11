@@ -714,6 +714,12 @@ cmd_disarm() {
 # stderr reaches the seat, and every other code is silence. So every terminal
 # state that should reach a person becomes exit 2 here, and the one state that
 # should not — a seat that no longer exists — is the only one that stays quiet.
+#
+# This window always asks for --wake-shaped, so the watcher has already collapsed
+# 0 and 2 into 2 by the time the status reaches here: what came back says the
+# window is re-armable, not what it found. Anything that needs to tell a match
+# from a quiet timeout reads the wake body, never the status. See
+# wake_disposition.
 
 WATCH_PID=""
 
@@ -893,6 +899,49 @@ on_sigterm() {
   exit 143
 }
 
+# What this window actually found, read off the wake body rather than off the
+# watcher's exit code.
+#
+# The code cannot answer it. Under --wake-shaped the watcher folds every
+# re-armable terminal onto exit 2 on purpose — seat-owned windows invoke the
+# watch verb directly and act on that one code — so the status this wrapper waits
+# on says "re-armable", never "actionable". Keying the disposition off it logged
+# every wake as quiet, including the ones carrying a closed row, which is exactly
+# the distinction the window log exists to record.
+#
+# The body says which. Its payload carries the matched row and the pending
+# requests, so the wake that woke somebody and the wake that found nothing are
+# told apart by what was delivered:
+#
+#   actionable  a matched row, or unclaimed spawn requests — something to act on
+#   quiet       neither: a window that ended with nothing to report
+#   unreadable  no payload to read, so neither claim can be made honestly
+#
+# Returns the disposition on stdout.
+wake_disposition() {
+  local body="$1" line payload="" verdict
+  # The payload is the last JSON object on the body; the human line comes first,
+  # and anything the watcher's dependencies wrote to stderr is not a payload.
+  while IFS= read -r line; do
+    case "$line" in
+      '{'*) ;;
+      *) continue ;;
+    esac
+    printf '%s' "$line" | jq -e 'type == "object" and has("outcome")' >/dev/null 2>&1 \
+      || continue
+    payload="$line"
+  done <<< "$body"
+
+  [[ -n "$payload" ]] || { printf unreadable; return 0; }
+  verdict="$(printf '%s' "$payload" | jq -r \
+    'if (.matched != null) or (((.pending // []) | length) > 0)
+     then "actionable" else "quiet" end' 2>/dev/null)" || verdict=""
+  case "$verdict" in
+    actionable|quiet) printf '%s' "$verdict" ;;
+    *) printf unreadable ;;
+  esac
+}
+
 # Exit 2 with the body on stderr: the only shape the rewake channel reads.
 emit_wake() {
   local tier="$1" body="$2"
@@ -981,14 +1030,14 @@ cmd_run() {
     fi
   fi
 
+  local disposition
   case "$watch_status" in
-    0)
-      record_window_disposition wake-actionable
-      emit_wake "actionable" "$body"
-      ;;
-    2)
-      record_window_disposition wake-quiet
-      emit_wake "quiet" "$body"
+    0|2)
+      # One arm for both: the watcher normalizes 0 and 2 to 2 before it exits, so
+      # the two arms this used to have were one live arm and one unreachable one.
+      disposition="$(wake_disposition "$body")"
+      record_window_disposition "wake-$disposition"
+      emit_wake "$disposition" "$body"
       ;;
     3)
       record_window_disposition owner-gone reported-by-watcher

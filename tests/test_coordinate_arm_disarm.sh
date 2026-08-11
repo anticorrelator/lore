@@ -18,6 +18,10 @@
 # session's turn boundary out of this seat's window, the per-scope log that says
 # which of those happened, and the arm-time refusals — an unresolvable scope, and
 # an install that displaces somebody else's entry.
+#
+# The log's other job is covered here too: a window that ran has to say what it
+# found, and a wake carrying a matched row or an unclaimed spawn request has to
+# be told from an empty window that merely ended on time.
 
 set -uo pipefail
 
@@ -383,6 +387,49 @@ OUT=$(LORE_FRAMEWORK=claude-code LORE_ARM_ERROR_BACKOFF_SECONDS=1 \
   _ "$ARM" "$KDIR" 2>&1); RC=$?
 assert_eq "the watcher window still accepts its parent as the owner" "2" "$RC"
 assert_contains "and the window it opened is in the log" "$(cat "$KDIR/_coordination/arm-window.log")" "disposition=opened"
+assert_contains "and a window that found nothing is logged quiet" "$(tail -1 "$KDIR/_coordination/arm-window.log")" "disposition=wake-quiet"
+
+echo "== the log says what the window found, not merely that it woke =="
+# The watcher normalizes every re-armable terminal to exit 2 on purpose, so the
+# status this wrapper waits on cannot tell a delivered row from an empty window.
+# A disposition read off that status logged every wake as quiet — including the
+# ones carrying a closed row, which is the one distinction the log exists for.
+
+# A row the watcher can match: the journal carries it, and a cursor at the start
+# of the journal is what makes the window read it rather than baseline past it.
+seed_matched_row() {
+  local kdir="$1"
+  mkdir -p "$kdir/_sessions" "$kdir/_coordination"
+  echo '{"event":"closed","event_id":"closed-actionable","request_id":"spawn-1","slug":"awaited-work"}' \
+    > "$kdir/_sessions/events.jsonl"
+  echo '{"schema_version":1,"cursor":0,"updated_at":"2026-01-01T00:00:00Z"}' \
+    > "$kdir/_coordination/watch-cursor.json"
+}
+
+KDIR=$(new_store)
+seed_matched_row "$KDIR"
+OUT=$(LORE_FRAMEWORK=claude-code LORE_ARM_ERROR_BACKOFF_SECONDS=1 \
+  bash -c 'bash "$1" run --owner-pid $$ --window 5 --kdir "$2"; exit $?' \
+  _ "$ARM" "$KDIR" 2>&1); RC=$?
+assert_eq "a window that matched a row still exits 2, like every re-armable end" "2" "$RC"
+assert_contains "the wake it delivers carries the matched row" "$OUT" '"outcome":"matched"'
+assert_contains "and the log calls that window actionable" "$(tail -1 "$KDIR/_coordination/arm-window.log")" "disposition=wake-actionable"
+assert_contains "and the seat is told so in the wake header" "$OUT" "[coordinate wake] actionable"
+assert_eq "so a matched window is never filed as quiet" "0" "$(grep -c 'disposition=wake-quiet' "$KDIR/_coordination/arm-window.log")"
+
+# The other thing worth waking for: a spawn request nobody claimed never reaches
+# the journal, so the wake carries pending requests instead of a matched row.
+KDIR=$(new_store)
+mkdir -p "$KDIR/_sessions/requests/pending"
+: > "$KDIR/_sessions/events.jsonl"
+echo '{"request_id":"stuck-1","slug":"awaited-work","requested_at":"2026-01-01T00:00:00Z"}' \
+  > "$KDIR/_sessions/requests/pending/stuck-1.json"
+OUT=$(LORE_FRAMEWORK=claude-code LORE_ARM_ERROR_BACKOFF_SECONDS=1 \
+  bash -c 'bash "$1" run --owner-pid $$ --window 5 --kdir "$2"; exit $?' \
+  _ "$ARM" "$KDIR" 2>&1); RC=$?
+assert_eq "a window reporting an unclaimed request exits 2 too" "2" "$RC"
+assert_contains "the wake it delivers carries the pending request" "$OUT" '"outcome":"pending_stale"'
+assert_contains "and the log calls that window actionable as well" "$(tail -1 "$KDIR/_coordination/arm-window.log")" "disposition=wake-actionable"
 
 echo "== the window is the armed seat's, and nobody else's =="
 # The entry lives in a settings file every session on the machine reads, so every
