@@ -72,6 +72,8 @@ Immediately before each ordinary agent launch attempt, run `lore dispatch guidan
 
 The claude-code admission gate is a self-healing backstop for launches outside any protocol: when a launch prompt carries no trace of a guidance block, the hook renders a fresh block and injects it before the tool runs, so ad-hoc dispatch proceeds without ritual. This does not loosen the convention for protocol seats — a prompt that carries guidance markers is validated strictly, and a tampered, duplicated, truncated, or stale block still denies the launch. Protocols keep rendering at their own seams; the gate only supplies the floor where no seam exists.
 
+The guidance block never names a model, but the gate supplies one. A launch that states no model inherits the tier of the session that spawned it, so a small fan-out dispatched from an expensive seat bills at that seat's rate and leaves nothing in the record to show the tier was never chosen. When a claude-code launch arrives without a model, the hook fills in the settings-resolved default for the harness before the tool runs; a launch that states a model keeps exactly what it stated. If no default resolves, the launch is denied rather than allowed to inherit — the same fail-closed posture the gate takes when guidance cannot be rendered. State the model you want at the launch and the gate stays out of the way.
+
 ### Knowledge in Worker Prompts
 Embed pre-fetched knowledge under a `## Prior Knowledge` header. This applies to both:
 - **Prefetch-based** (spec, bootstrap): output of `lore prefetch` embedded in the Task prompt
