@@ -56,16 +56,17 @@ esac
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 PROMPT_PATH="$TMP_DIR/prompt.txt"
+MODEL_PATH="$TMP_DIR/model.txt"
 DEFAULTS_PATH="$TMP_DIR/defaults.txt"
 ERROR_PATH="$TMP_DIR/error.txt"
 
 if [[ -n "$HOOK_FRAMEWORK" ]]; then
   PAYLOAD_PATH="$TMP_DIR/payload.json"
   tee "$PAYLOAD_PATH" >/dev/null
-  if ! python3 - "$HOOK_FRAMEWORK" "$PAYLOAD_PATH" "$PROMPT_PATH" >"$ERROR_PATH" 2>&1 <<'PY'; then
+  if ! python3 - "$HOOK_FRAMEWORK" "$PAYLOAD_PATH" "$PROMPT_PATH" "$MODEL_PATH" >"$ERROR_PATH" 2>&1 <<'PY'; then
 import json, sys
 
-framework, payload_path, prompt_path = sys.argv[1:]
+framework, payload_path, prompt_path, model_path = sys.argv[1:]
 try:
     with open(payload_path, encoding="utf-8") as fh:
         payload = json.load(fh)
@@ -81,16 +82,22 @@ if framework == "claude-code":
     if tool_name != "Agent":
         raise SystemExit(f"unsupported claude-code launch tool: {tool_name!r}")
     prompt = tool_input.get("prompt")
+    model = tool_input.get("model")
 else:
     if tool_name != "spawn_agent":
         raise SystemExit(f"unsupported codex launch tool: {tool_name!r}")
     prompt = tool_input.get("message")
+    model = None
 
 if not isinstance(prompt, str) or not prompt.strip():
     raise SystemExit("launch prompt is missing or empty")
 
 with open(prompt_path, "w", encoding="utf-8") as fh:
     fh.write(prompt)
+# A missing, empty, or non-string model field is an unstated model: the launch
+# would inherit whatever tier the spawning session happens to run on.
+with open(model_path, "w", encoding="utf-8") as fh:
+    fh.write(model.strip() if isinstance(model, str) else "")
 PY
     FAILURE_REASON=$(tr '\n' ' ' < "$ERROR_PATH" | sed 's/[[:space:]]*$//')
   fi
@@ -109,41 +116,18 @@ FAILURE_REASON="${FAILURE_REASON:-}"
 # this seam and inject it via updatedInput instead of teaching by denial.
 # Any marker presence means a protocol seat attempted the form; those prompts
 # fall through to strict validation so tampering and staleness still surface.
+INJECT_GUIDANCE_PATH=""
 if [[ "$HOOK_FRAMEWORK" == "claude-code" && -z "$FAILURE_REASON" ]] \
   && ! grep -qF 'lore-dispatch-guidance:v1:' "$PROMPT_PATH"; then
   GUIDANCE_PATH="$TMP_DIR/guidance.txt"
   if "$SCRIPT_DIR/render-dispatch-guidance.sh" > "$GUIDANCE_PATH" 2>"$ERROR_PATH"; then
-    python3 - "$PAYLOAD_PATH" "$GUIDANCE_PATH" <<'PY'
-import json, sys
-
-payload_path, guidance_path = sys.argv[1:]
-with open(payload_path, encoding="utf-8") as fh:
-    payload = json.load(fh)
-with open(guidance_path, encoding="utf-8") as fh:
-    guidance = fh.read()
-if not guidance.endswith("\n"):
-    guidance += "\n"
-
-tool_input = dict(payload["tool_input"])
-tool_input["prompt"] = guidance + tool_input["prompt"]
-print(json.dumps({"hookSpecificOutput": {
-    "hookEventName": "PreToolUse",
-    "permissionDecision": "allow",
-    "permissionDecisionReason": (
-        "Dispatch guidance was absent from this launch prompt; a fresh "
-        "schema-v1 guidance block was rendered and prepended at the "
-        "admission gate."
-    ),
-    "updatedInput": tool_input,
-}}, separators=(",", ":")))
-PY
-    exit 0
+    INJECT_GUIDANCE_PATH="$GUIDANCE_PATH"
   else
     FAILURE_REASON="guidance rendering failed at the admission gate: $(tr '\n' ' ' < "$ERROR_PATH" | sed 's/[[:space:]]*$//')"
   fi
 fi
 
-if [[ -z "$FAILURE_REASON" ]]; then
+if [[ -z "$FAILURE_REASON" && -z "$INJECT_GUIDANCE_PATH" ]]; then
   "$SCRIPT_DIR/render-standing-defaults.sh" > "$DEFAULTS_PATH"
   if ! python3 - "$PROMPT_PATH" "$DEFAULTS_PATH" >"$ERROR_PATH" 2>&1 <<'PY'; then
 import hashlib, re, sys
@@ -214,7 +198,65 @@ PY
   fi
 fi
 
+# Model floor (claude-code hook mode only): a launch that names no model
+# inherits whatever tier the spawning session runs on, so a cheap fan-out
+# dispatched from an expensive seat bills at that seat's tier and looks
+# identical to a launch that chose it. Supply the settings-resolved default
+# for this harness instead. A named model always passes through untouched —
+# the gate fills a gap, it never overrides a stated choice. Resolution runs in
+# a subshell so the library's globals stay out of the gate, and pins the
+# harness to claude-code because that is the harness this hook mode gates.
+INJECT_MODEL=""
+if [[ "$HOOK_FRAMEWORK" == "claude-code" && -z "$FAILURE_REASON" && ! -s "$MODEL_PATH" ]]; then
+  if ! INJECT_MODEL=$(LORE_FRAMEWORK=claude-code bash -c \
+        'source "$1/lib.sh" && resolve_model_for_role default' _ "$SCRIPT_DIR" 2>"$ERROR_PATH") \
+    || [[ -z "$INJECT_MODEL" ]]; then
+    INJECT_MODEL=""
+    FAILURE_REASON="the default launch model failed to resolve at the admission gate: $(tr '\n' ' ' < "$ERROR_PATH" | sed 's/[[:space:]]*$//')"
+  fi
+fi
+
 if [[ -z "$FAILURE_REASON" ]]; then
+  # One rewrite carries whatever this gate supplied. Nothing to supply means
+  # no output at all, which is how the non-claude-code modes always exit.
+  if [[ -n "$INJECT_GUIDANCE_PATH" || -n "$INJECT_MODEL" ]]; then
+    python3 - "$PAYLOAD_PATH" "$INJECT_GUIDANCE_PATH" "$INJECT_MODEL" <<'PY'
+import json, sys
+
+payload_path, guidance_path, model = sys.argv[1:]
+with open(payload_path, encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+tool_input = dict(payload["tool_input"])
+reasons = []
+
+if guidance_path:
+    with open(guidance_path, encoding="utf-8") as fh:
+        guidance = fh.read()
+    if not guidance.endswith("\n"):
+        guidance += "\n"
+    tool_input["prompt"] = guidance + tool_input["prompt"]
+    reasons.append(
+        "Dispatch guidance was absent from this launch prompt; a fresh "
+        "schema-v1 guidance block was rendered and prepended at the "
+        "admission gate."
+    )
+
+if model:
+    tool_input["model"] = model
+    reasons.append(
+        "This launch named no model, so the settings-resolved default for "
+        f"this harness ({model}) was supplied at the admission gate."
+    )
+
+print(json.dumps({"hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow",
+    "permissionDecisionReason": " ".join(reasons),
+    "updatedInput": tool_input,
+}}, separators=(",", ":")))
+PY
+  fi
   exit 0
 fi
 
