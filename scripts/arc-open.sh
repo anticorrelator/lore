@@ -15,12 +15,12 @@
 # visible, and a coordinator who forgets it coordinates blind. The ledger is the
 # moment the board starts mattering, so that is where the eye goes on.
 #
-# What that arming is, exactly: the same install and the same registry write
+# What that arming is, exactly: the same identity-scoped install
 # `lore coordinate arm --install` performs, scoped to this arc — invoked through
 # that verb rather than reimplemented, so its refusals (a dead owner handle, a
 # harness that cannot host the hook) apply here too and the two surfaces cannot
 # drift. `lore arc close` already switches off a watcher scoped solely to the
-# closing arc, so open and close are symmetric without close changing at all.
+# closing arc, so open and close remain symmetric across identity-scoped entries.
 #
 # Nothing in the arming can fail the open. An arc is a record the coordinator
 # asked for; watcher hygiene does not get a veto over it. Every outcome the
@@ -41,8 +41,10 @@ Opens a coordination arc as its own directory under _work/_arcs/, holding the
 record, the ledger, and whatever documents the arc accumulates.
 
 Opening an arc arms the standing board watcher as its final act, scoped to the
-new arc, into the harness settings file. `lore arc close` switches it off again.
-An eye that is already armed is left exactly as it is.
+new arc, into the repository's project-local harness settings file
+(`.claude/settings.local.json` on Claude Code). `lore arc close` records that
+exact path and switches only this watcher identity off again. Other watcher
+identities in the same file remain intact.
 
 Options:
   --title <title>    What the arc is about. The slug is derived from it.
@@ -250,50 +252,8 @@ owner_tmux_server() {
   printf '%s' "$(basename "$socket")"
 }
 
-# What the settings file says is already armed:
-#   none        no lore watcher entry in the settings file
-#   armed<TAB>  an entry, with the scope read off its own command line
-# An entry is a live eye whoever installed it, so arming over it would replace a
-# scope this command did not choose; the settings file carries exactly one lore
-# watcher, and the adapter replaces on that marker.
-watcher_state() {
-  local settings="$1"
-  python3 - "$settings" <<'PYEOF' 2>/dev/null
-import json, shlex, sys
-
-settings_path = sys.argv[1]
-try:
-    with open(settings_path, encoding="utf-8") as f:
-        settings = json.load(f)
-except (OSError, ValueError):
-    print("none")
-    raise SystemExit(0)
-
-armed = [
-    h.get("command") or ""
-    for e in (settings.get("hooks") or {}).get("Stop") or []
-    for h in e.get("hooks") or []
-    if "coordinate-arm.sh" in (h.get("command") or "")
-]
-if not armed:
-    print("none")
-    raise SystemExit(0)
-
-tokens = []
-for command in armed:
-    try:
-        argv = shlex.split(command)
-    except ValueError:
-        continue
-    for i, tok in enumerate(argv):
-        if tok == "--arc" and i + 1 < len(argv):
-            tokens.append("arc:%s" % argv[i + 1])
-print("armed\t%s" % (", ".join(tokens) or "the whole board"))
-PYEOF
-}
-
 arm_standing_eye() {
-  local framework support settings state scope want_proc handle=() manual
+  local framework support settings want_proc handle=() manual
 
   framework="$(resolve_active_framework 2>/dev/null)" || framework=""
   if [[ -z "$framework" ]]; then
@@ -302,7 +262,7 @@ arm_standing_eye() {
   fi
 
   support="$(framework_capability turn_boundary_rewake "$framework" 2>/dev/null)" || support="none"
-  settings="$(resolve_harness_install_path settings "$framework" 2>/dev/null)" || settings=""
+  settings="$(resolve_harness_install_path watcher_settings "$framework" 2>/dev/null)" || settings=""
 
   if [[ "$support" != "full" ]]; then
     eye "the standing eye is manual on $framework (turn_boundary_rewake: $support) — there is no turn-boundary hook to host it, so nothing was installed. Run the watcher from the seat, re-running it after each wake:"
@@ -314,19 +274,6 @@ arm_standing_eye() {
     eye "the standing eye was not armed: $framework exposes no settings file to install it into. Arm it by hand with 'lore coordinate arm --arc $SLUG --install <settings.json>'."
     return 0
   fi
-
-  state="$(watcher_state "$settings")" || state=""
-  case "${state%%$'\t'*}" in
-    armed)
-      scope="${state#*$'\t'}"
-      eye "a standing eye is already armed in $settings (scope: $scope) — left exactly as it is."
-      if [[ "$scope" != *"arc:$SLUG"* && "$scope" != "the whole board" ]]; then
-        eye "         it does not name '$SLUG'. To widen it, re-arm deliberately with every scope you want:"
-        eye "         lore coordinate arm --arc $SLUG --arc <the others> --install $settings"
-      fi
-      return 0
-      ;;
-  esac
 
   if [[ -n "$OWNER_PID" ]]; then
     handle=(--owner-pid "$OWNER_PID")
@@ -352,7 +299,14 @@ arm_standing_eye() {
   local refusal=""
   if refusal="$("$SCRIPT_DIR/coordinate-arm.sh" "${handle[@]}" --arc "$SLUG" \
       --install "$settings" --kdir "$KNOWLEDGE_DIR" 2>&1)"; then
-    eye "standing eye armed for '$SLUG' in $settings (owner: ${handle[*]}) — 'lore arc close' switches it off again."
+    # The arc metadata writer is the sole writer of _meta.json. Persisting the
+    # exact project-local file makes close independent of its cwd/worktree.
+    if ENVELOPE=$("$SCRIPT_DIR/arc-write-meta.sh" --kdir "$KNOWLEDGE_DIR" \
+        --slug "$SLUG" --op watcher-set --watcher-settings "$settings"); then
+      eye "standing eye armed for '$SLUG' in $settings (owner: ${handle[*]}) — 'lore arc close' switches this identity off again."
+    else
+      eye "Warning: the watcher was installed in $settings but its path could not be recorded on arc '$SLUG'; close will need --settings $settings."
+    fi
   else
     # The refusal itself, not a pointer to it: re-running to find out why is a
     # second round trip for something already known here.

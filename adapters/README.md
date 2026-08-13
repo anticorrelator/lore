@@ -207,7 +207,7 @@ sessions; it is not ambient process truth.
 
 **Signature:** `resolve_harness_install_path <kind>` / `ResolveHarnessInstallPath(kind string) (string, error)`.
 
-**Closed kind set:** `instructions`, `skills`, `agents`, `settings`, `teams`, `ephemeral_plans`. Any other kind is a programming error and both sides MUST reject it with a non-zero exit / non-nil error; do NOT silently fall back to a "best-guess" path.
+**Closed kind set:** `instructions`, `skills`, `agents`, `settings`, `watcher_settings`, `teams`, `ephemeral_plans`, `mcp_servers`. Any other kind is a programming error and both sides MUST reject it with a non-zero exit / non-nil error; do NOT silently fall back to a "best-guess" path. `watcher_settings` is project-local and expands `$PROJECT_ROOT` from the physical Git worktree root at call time; the other supported paths are user-global and expand `$HOME`.
 
 **Source:** `adapters/capabilities.json` `.frameworks.<active>.install_paths.<kind>` (a sidecar manifest added by T7). When the harness has no path for that kind, both sides return the literal string `"unsupported"` and exit 0 — absence is a stable answer, not an error.
 

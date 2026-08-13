@@ -35,7 +35,9 @@ setup() {
   [ -f "$OPEN" ] || skip "arc-open.sh missing"
   command -v python3 >/dev/null 2>&1 || skip "python3 required"
   TEST_KDIR="$(mktemp -d)"
-  mkdir -p "$TEST_KDIR/_work"
+  TEST_PROJECT="$TEST_KDIR/project"
+  mkdir -p "$TEST_KDIR/_work" "$TEST_PROJECT"
+  git -C "$TEST_PROJECT" init -q
 }
 
 teardown() {
@@ -56,20 +58,16 @@ open_arc() {
   bash "$OPEN" --kdir "$TEST_KDIR" --no-watcher "$@"
 }
 
-# Arc open with arming live, pointed at a throwaway HOME. The settings target is
-# resolved from capabilities.json ($HOME/.claude/settings.json on claude-code),
-# so redirecting HOME is what makes the real install path testable rather than
-# mocked. The owner handle is passed explicitly: resolution walks this process's
-# ancestry for the harness, and the suite must not depend on what happens to be
-# running it.
+# Arc open with arming live from a throwaway Git project. Watcher settings are
+# project-local, so the repo root is the isolation boundary. The tmux owner is
+# explicit; arming records identity but does not need to fire a window here.
 open_arc_arming() {
-  mkdir -p "$TEST_KDIR/home"
-  HOME="$TEST_KDIR/home" LORE_FRAMEWORK="${ARM_FRAMEWORK:-claude-code}" \
-    bash "$OPEN" --kdir "$TEST_KDIR" --owner-pid $$ "$@"
+  (cd "$TEST_PROJECT" && LORE_FRAMEWORK="${ARM_FRAMEWORK:-claude-code}" \
+    bash "$OPEN" --kdir "$TEST_KDIR" --owner-tmux test-seat "$@")
 }
 
 seat_settings() {
-  printf '%s' "$TEST_KDIR/home/.claude/settings.json"
+  printf '%s' "$TEST_PROJECT/.claude/settings.local.json"
 }
 
 # The armed watcher command in the seat settings file, or the empty string.
@@ -85,7 +83,6 @@ for entry in (settings.get("hooks") or {}).get("Stop") or []:
     for hook in entry.get("hooks") or []:
         if "coordinate-arm.sh" in (hook.get("command") or ""):
             print(hook["command"])
-            raise SystemExit(0)
 PYEOF
 }
 
@@ -226,33 +223,30 @@ print(type(value).__name__, value)
   [ "$status" -eq 0 ]
   [[ "$output" == *"coordinate-arm.sh run"* ]]
   [[ "$output" == *"--arc arc-one"* ]]
-  [[ "$output" == *"--owner-pid $$"* ]]
+  [[ "$output" == *"--owner-tmux test-seat"* ]]
+  [[ "$output" == *"--kdir $TEST_KDIR"* ]]
 
   # The entry is also the record: its command line is what a later `lore arc
   # close` reads to learn the scope and the harness that installed it.
   [[ "$output" == *"LORE_FRAMEWORK=claude-code"* ]]
 }
 
-@test "open leaves an eye that is already armed exactly as it is" {
+@test "open adds a distinct identity without replacing an already armed arc" {
   open_arc_arming --title "Arc one" --anchor "one" >/dev/null 2>&1
-  FIRST="$(armed_command)"
 
   run open_arc_arming --title "Arc two" --anchor "two"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Opened: arc-two"
-  echo "$output" | grep -q "already armed"
-  echo "$output" | grep -q "arc:arc-one"
-  # The second open says so and stops. Installing would have replaced the entry,
-  # narrowing the eye to arc-two and dropping a scope nobody asked to drop.
-  echo "$output" | grep -q "it does not name 'arc-two'"
-  [ "$(armed_command)" = "$FIRST" ]
-  [[ "$(armed_command)" == *"--arc arc-one"* ]]
+  commands="$(armed_command)"
+  [ "$(printf '%s\n' "$commands" | grep -c 'coordinate-arm.sh')" -eq 2 ]
+  [[ "$commands" == *"--arc arc-one"* ]]
+  [[ "$commands" == *"--arc arc-two"* ]]
 }
 
 @test "--no-watcher opens the arc and arms nothing" {
-  mkdir -p "$TEST_KDIR/home"
-  run env HOME="$TEST_KDIR/home" LORE_FRAMEWORK=claude-code \
-    bash "$OPEN" --kdir "$TEST_KDIR" --no-watcher --title "Arc one" --anchor "one"
+  run env LORE_FRAMEWORK=claude-code \
+    bash -c 'cd "$1" && bash "$2" --kdir "$3" --no-watcher --title "Arc one" --anchor "one"' \
+    _ "$TEST_PROJECT" "$OPEN" "$TEST_KDIR"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Opened: arc-one"
   echo "$output" | grep -q -- "--no-watcher"
@@ -263,7 +257,7 @@ print(type(value).__name__, value)
   # codex carries a continuation channel but runs hooks synchronously; opencode
   # has neither. Neither can host the watcher, and neither may cost the arc.
   for fw in codex opencode; do
-    rm -rf "$TEST_KDIR/_work/_arcs" "$TEST_KDIR/home"
+    rm -rf "$TEST_KDIR/_work/_arcs" "$TEST_PROJECT/.claude"
     ARM_FRAMEWORK="$fw" run open_arc_arming --title "Arc $fw" --anchor "one"
     [ "$status" -eq 0 ]
     echo "$output" | grep -q "Opened: arc-$fw"

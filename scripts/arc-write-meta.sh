@@ -2,7 +2,8 @@
 # arc-write-meta.sh — sole writer of the arc record
 #   _work/_arcs/<slug>/_meta.json (schema v1):
 #     {"schema_version": 1, "slug", "title", "status", "anchor",
-#      "project"?, "members": [...], "opened", "closed_at"?}
+#      "project"?, "watcher_settings_path"?, "members": [...], "opened",
+#      "closed_at"?}
 #   `project` is omitted when unset rather than stored as an empty string, and
 #   `closed_at` is absent while the arc is active. Every `lore arc` verb and the
 #   arc migration shell to this script; nothing else writes the file.
@@ -33,6 +34,7 @@ Operations:
                accepts --status, --opened, and --closed-at. Creation-only: it
                refuses an arc that already exists, so it cannot rewrite history.
   set          Update --title, --anchor, --project, or --clear-project.
+  watcher-set  Record the exact settings file containing this arc's watcher.
   close        Record closure and stamp closed_at.
   archive      Record archival, preserving an existing closed_at.
   member-add   Add a work item to members. Needs --member.
@@ -48,6 +50,8 @@ Options:
   --project <name>       Project label. An empty value is refused — pass
                          --clear-project to remove the label.
   --clear-project        Remove the project label.
+  --watcher-settings <path>
+                         Exact installed settings path. Needs `--op watcher-set`.
   --member <slug>        Work-item slug, resolved in active work items then in
                          the archive.
   --status <s>           active|closed|archived. Accepted only with --op import.
@@ -70,6 +74,7 @@ MEMBER=""; HAS_MEMBER=0
 STATUS=""; HAS_STATUS=0
 OPENED=""; HAS_OPENED=0
 CLOSED_AT=""; HAS_CLOSED_AT=0
+WATCHER_SETTINGS=""; HAS_WATCHER_SETTINGS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -84,6 +89,7 @@ while [[ $# -gt 0 ]]; do
     --status) STATUS="${2:-}"; HAS_STATUS=1; shift 2 ;;
     --opened) OPENED="${2:-}"; HAS_OPENED=1; shift 2 ;;
     --closed-at) CLOSED_AT="${2:-}"; HAS_CLOSED_AT=1; shift 2 ;;
+    --watcher-settings) WATCHER_SETTINGS="${2:-}"; HAS_WATCHER_SETTINGS=1; shift 2 ;;
     --kdir) KDIR_OVERRIDE="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[arc] Error: unknown option '$1'" >&2; usage; exit 1 ;;
@@ -101,7 +107,7 @@ if [[ ! "$SLUG" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
 fi
 
 case "$OP" in
-  open|import|set|close|archive|member-add|member-rm) ;;
+  open|import|set|watcher-set|close|archive|member-add|member-rm) ;;
   "") echo "[arc] Error: --op is required" >&2; usage; exit 1 ;;
   *) echo "[arc] Error: unknown operation '$OP'" >&2; usage; exit 1 ;;
 esac
@@ -161,6 +167,7 @@ RECORD=$(
   ARC_STATUS="$STATUS" ARC_STATUS_SET="$HAS_STATUS" \
   ARC_OPENED="$OPENED" ARC_OPENED_SET="$HAS_OPENED" \
   ARC_CLOSED_AT="$CLOSED_AT" ARC_CLOSED_AT_SET="$HAS_CLOSED_AT" \
+  ARC_WATCHER_SETTINGS="$WATCHER_SETTINGS" ARC_WATCHER_SETTINGS_SET="$HAS_WATCHER_SETTINGS" \
   python3 - <<'PYEOF'
 import json
 import os
@@ -175,7 +182,7 @@ NOW = env["ARC_NOW"]
 
 STATUSES = ("active", "closed", "archived")
 KEY_ORDER = ("schema_version", "slug", "title", "status", "anchor",
-             "project", "members", "opened", "closed_at")
+             "project", "watcher_settings_path", "members", "opened", "closed_at")
 
 
 def fail(message):
@@ -200,6 +207,7 @@ member = flag("ARC_MEMBER")
 status = flag("ARC_STATUS")
 opened = flag("ARC_OPENED")
 closed_at = flag("ARC_CLOSED_AT")
+watcher_settings = flag("ARC_WATCHER_SETTINGS")
 
 existing = None
 if os.path.exists(META_PATH):
@@ -236,6 +244,10 @@ if OP not in ("open", "import", "set"):
              "and set — not to %s" % OP)
 if OP not in ("member-add", "member-rm") and member is not None:
     fail("--member is accepted only with --op member-add or --op member-rm")
+if OP != "watcher-set" and watcher_settings is not None:
+    fail("--watcher-settings is accepted only with --op watcher-set")
+if OP == "watcher-set" and (watcher_settings is None or not watcher_settings.strip()):
+    fail("--op watcher-set requires --watcher-settings")
 
 
 def resolve_member(slug):
@@ -299,6 +311,10 @@ else:
             record["project"] = project
         if clear_project:
             record.pop("project", None)
+    elif OP == "watcher-set":
+        if current != "active":
+            fail("arc '%s' is not active; refusing to attach watcher settings" % SLUG)
+        record["watcher_settings_path"] = os.path.realpath(watcher_settings)
     elif OP == "close":
         if current == "active":
             record["status"] = "closed"

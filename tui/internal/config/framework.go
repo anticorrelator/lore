@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -45,6 +46,7 @@ var HarnessInstallKinds = []string{
 	"skills",
 	"agents",
 	"settings",
+	"watcher_settings",
 	"teams",
 	"ephemeral_plans",
 	"mcp_servers",
@@ -484,7 +486,8 @@ func ResolveTUILaunchFramework() (string, error) {
 // ResolveHarnessInstallPath mirrors scripts/lib.sh resolve_harness_install_path.
 // Returns:
 //   - (path, true, nil) when the kind has an absolute path on the active harness.
-//     $HOME / ${HOME} references are expanded.
+//     $HOME / ${HOME} and $PROJECT_ROOT / ${PROJECT_ROOT} references are
+//     expanded.
 //   - ("", false, nil) when the active harness explicitly marks the kind
 //     unsupported (capabilities.json install_paths.<kind> == "unsupported").
 //   - ("", false, error) when the kind is not in the closed set, or the
@@ -528,6 +531,18 @@ func ResolveHarnessInstallPath(kind string) (string, bool, error) {
 	home, _ := os.UserHomeDir()
 	expanded := strings.ReplaceAll(raw, "${HOME}", home)
 	expanded = strings.ReplaceAll(expanded, "$HOME", home)
+	if strings.Contains(expanded, "$PROJECT_ROOT") || strings.Contains(expanded, "${PROJECT_ROOT}") {
+		root, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+		if err != nil {
+			return "", false, fmt.Errorf("install_paths.%s requires a git project root: %w", kind, err)
+		}
+		projectRoot, err := filepath.EvalSymlinks(strings.TrimSpace(string(root)))
+		if err != nil {
+			return "", false, fmt.Errorf("resolve project root for install_paths.%s: %w", kind, err)
+		}
+		expanded = strings.ReplaceAll(expanded, "${PROJECT_ROOT}", projectRoot)
+		expanded = strings.ReplaceAll(expanded, "$PROJECT_ROOT", projectRoot)
+	}
 	return expanded, true, nil
 }
 
