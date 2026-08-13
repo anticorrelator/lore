@@ -1334,12 +1334,13 @@ def scope_state($scoped; $slugs):
 # records with an empty `members[]` alongside several labeled items are a live
 # case, so a label join would silently widen the scope.
 #
-# Statuses follow `arc list`'s default listing (active and closed). The record
-# omits keys it has no value for rather than storing null, so every field is read
-# defensively.
+# A watcher may expand only an active arc. Closed is terminal for watcher
+# firings: accepting it here lets a stale installed entry keep opening windows
+# after the arc has ended. The record omits keys it has no value for rather than
+# storing null, so every field is read defensively.
 #
 # Exit: 0 listed (possibly nothing), 1 no such record, 2 record unparseable,
-#       3 record status outside active/closed.
+#       3 record status is not active.
 session_arc_member_slugs() {
   local kdir="$1" arc="$2"
   python3 - "$kdir" "$arc" <<'PYEOF'
@@ -1356,11 +1357,50 @@ except (OSError, ValueError):
     raise SystemExit(2)
 if not isinstance(record, dict):
     raise SystemExit(2)
-if record.get("status") not in ("active", "closed"):
+if record.get("status") != "active":
     raise SystemExit(3)
 for member in record.get("members") or []:
     if isinstance(member, str) and member:
         print(member)
+PYEOF
+}
+
+# --- Canonical watcher identity ---------------------------------------------
+
+# canonical_existing_dir <path>
+# Resolve one existing directory to an absolute physical path. This is the
+# store-path rule carried by installed watcher commands: symlink spellings and
+# relative spellings collapse before they become identity.
+canonical_existing_dir() {
+  local path="$1"
+  [[ -d "$path" ]] || return 1
+  (cd "$path" 2>/dev/null && pwd -P)
+}
+
+# shell_quote_arg <value>
+# Quote one runtime value for round-tripping through the command string stored
+# in a harness settings file. shlex.quote and shlex.split are the paired writer
+# and reader for watcher identity.
+shell_quote_arg() {
+  python3 - "$1" <<'PYEOF'
+import shlex, sys
+print(shlex.quote(sys.argv[1]), end="")
+PYEOF
+}
+
+# watcher_identity_hash <kdir> <owner-kind> <owner-value> <tmux-server> [arc...]
+# The arcs are normalized again here so every sidecar caller gets an
+# order-insensitive, duplicate-insensitive identity even if its argument parser
+# forgot to normalize first. The JSON tuple is the canonical hash encoding.
+watcher_identity_hash() {
+  python3 - "$@" <<'PYEOF'
+import hashlib, json, sys
+
+kdir, owner_kind, owner_value, tmux_server, *arcs = sys.argv[1:]
+identity = ["watcher-identity-v1", kdir, owner_kind, owner_value,
+            tmux_server if owner_kind == "tmux" else "", sorted(set(arcs))]
+encoded = json.dumps(identity, ensure_ascii=False, separators=(",", ":"))
+print(hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16])
 PYEOF
 }
 
@@ -2162,8 +2202,8 @@ resolve_route_for_role() {
 # --- resolve_harness_install_path ---
 # Print the install path for a kind on the active framework (or optional
 # explicit framework), with $HOME and similar shell-style references expanded.
-# Closed kind set: instructions | skills | agents | settings | teams |
-#                  ephemeral_plans | mcp_servers
+# Closed kind set: instructions | skills | agents | settings |
+#                  watcher_settings | teams | ephemeral_plans | mcp_servers
 # Output:
 #   - On supported kinds: an absolute path on stdout, exit 0.
 #   - On the literal string "unsupported" stored in install_paths (e.g., codex
@@ -2184,9 +2224,9 @@ resolve_harness_install_path() {
   local explicit_framework="${2:-}"
 
   case "$kind" in
-    instructions|skills|agents|settings|teams|ephemeral_plans|mcp_servers) ;;
+    instructions|skills|agents|settings|watcher_settings|teams|ephemeral_plans|mcp_servers) ;;
     *)
-      echo "Error: unknown kind '$kind' (allowed: instructions, skills, agents, settings, teams, ephemeral_plans, mcp_servers)" >&2
+      echo "Error: unknown kind '$kind' (allowed: instructions, skills, agents, settings, watcher_settings, teams, ephemeral_plans, mcp_servers)" >&2
       return 1
       ;;
   esac
@@ -2214,11 +2254,22 @@ resolve_harness_install_path() {
     return 0
   fi
 
-  # Expand $HOME / ${HOME}; install paths are restricted to absolute paths
-  # rooted in known env vars to keep substitution explainable.
+  # Expand the two declared roots. $HOME is the user-global install surface;
+  # $PROJECT_ROOT is the physical git worktree root at call time and exists for
+  # project-local surfaces such as Claude's settings.local.json.
   local expanded="$raw"
   expanded="${expanded//\$HOME/$HOME}"
   expanded="${expanded//\$\{HOME\}/$HOME}"
+  if [[ "$expanded" == *'$PROJECT_ROOT'* || "$expanded" == *'${PROJECT_ROOT}'* ]]; then
+    local project_root
+    project_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+      echo "Error: install_paths.$kind requires a git project root" >&2
+      return 1
+    }
+    project_root="$(canonical_existing_dir "$project_root")" || return 1
+    expanded="${expanded//\$PROJECT_ROOT/$project_root}"
+    expanded="${expanded//\$\{PROJECT_ROOT\}/$project_root}"
+  fi
   echo "$expanded"
 }
 

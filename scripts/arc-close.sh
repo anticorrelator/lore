@@ -22,9 +22,9 @@ arc leaves the recorded closure time alone.
 
 Options:
   --json             Emit the updated record as JSON.
-  --settings <path>  The settings file to read for a standing eye scoped to this
-                     arc. Defaults to the active harness's settings file, which
-                     is where `lore arc open` arms one.
+  --settings <path>  Explicit settings file override. Normally close reads the
+                     exact project-local path recorded by `lore arc open`;
+                     pre-existing arcs fall back to the framework default.
   --kdir <path>      Override the resolved knowledge dir (testing).
   --help, -h         Show this help.
 EOF
@@ -87,9 +87,9 @@ ENVELOPE=$("$SCRIPT_DIR/arc-write-meta.sh" --kdir "$KNOWLEDGE_DIR" --slug "$SLUG
 # every turn boundary. Nothing else in the closure path removes it, so an armed
 # eye survives its arc and keeps waking a seat about a board nobody is working.
 #
-# The entry itself says what it watches: `coordinate arm` writes the scope flags
-# and the LORE_FRAMEWORK prefix into the command line verbatim, so the settings
-# file is both the authority on what is armed and the record of what it covers.
+# The entry itself says what it watches: `coordinate arm` writes canonical store,
+# owner, normalized scope flags, and the LORE_FRAMEWORK prefix into the command
+# line, so the settings file is the authority on the installed identity.
 # The seat that closes an arc is usually not the seat that armed it, and it does
 # not have to be — it reads the entry.
 #
@@ -104,16 +104,25 @@ ENVELOPE=$("$SCRIPT_DIR/arc-write-meta.sh" --kdir "$KNOWLEDGE_DIR" --slug "$SLUG
 # --json contract on stdout.
 EYE_SETTINGS_FILE="$SETTINGS_OVERRIDE"
 if [[ -z "$EYE_SETTINGS_FILE" ]]; then
+  EYE_SETTINGS_FILE="$(printf '%s' "$ENVELOPE" | python3 -c '
+import json, sys
+print((json.load(sys.stdin).get("record") or {}).get("watcher_settings_path") or "")
+')"
+fi
+if [[ -z "$EYE_SETTINGS_FILE" ]]; then
   CLOSE_FRAMEWORK="$(resolve_active_framework 2>/dev/null)" || CLOSE_FRAMEWORK=""
   if [[ -n "$CLOSE_FRAMEWORK" ]]; then
+    # Records predating watcher_settings_path were armed through the old
+    # framework settings default (user-global on Claude Code). This fallback is
+    # migration discovery only; new installs use watcher_settings and persist it.
     EYE_SETTINGS_FILE="$(resolve_harness_install_path settings "$CLOSE_FRAMEWORK" 2>/dev/null)" || EYE_SETTINGS_FILE=""
     [[ "$EYE_SETTINGS_FILE" == "unsupported" ]] && EYE_SETTINGS_FILE=""
   fi
 fi
 
 if [[ -n "$EYE_SETTINGS_FILE" && -f "$EYE_SETTINGS_FILE" ]]; then
-  ARMED_MATCHES=$(python3 - "$EYE_SETTINGS_FILE" "$SLUG" <<'PYEOF' || true
-import json, re, shlex, sys
+  ARMED_MATCHES=$(python3 - "$EYE_SETTINGS_FILE" "$SLUG" "$KNOWLEDGE_DIR" <<'PYEOF' || true
+import json, os, shlex, sys
 
 settings_path, slug = sys.argv[1], sys.argv[2]
 try:
@@ -138,32 +147,66 @@ for entry in (settings.get("hooks") or {}).get("Stop") or []:
             argv = shlex.split(command)
         except ValueError:
             continue
-        # The scope the entry was armed with, read back off its own command line.
-        arcs, framework = [], ""
+        # The complete installed identity, read back off its command line.
+        arcs, framework, kdir = [], "", ""
+        owner_kind, owner_value, tmux_server = "", "", ""
         for i, tok in enumerate(argv):
             if tok == "--arc" and i + 1 < len(argv):
                 arcs.append(argv[i + 1])
             elif tok.startswith("LORE_FRAMEWORK="):
                 framework = tok[len("LORE_FRAMEWORK="):]
+            elif tok == "--kdir" and i + 1 < len(argv):
+                kdir = os.path.realpath(argv[i + 1])
+            elif tok == "--owner-pid" and i + 1 < len(argv):
+                owner_kind, owner_value = "pid", argv[i + 1]
+            elif tok == "--owner-tmux" and i + 1 < len(argv):
+                owner_kind, owner_value = "tmux", argv[i + 1]
+            elif tok == "--tmux-server" and i + 1 < len(argv):
+                tmux_server = argv[i + 1]
         # Only a watcher this arc's scope names is this arc's business. A
         # board-wide eye names no arc, so closing one arc says nothing about
         # whether it is still wanted.
         if slug not in arcs:
             continue
+        if not kdir or not owner_kind or not owner_value or (owner_kind == "tmux" and not tmux_server):
+            print("\x1f".join(["legacy", settings_path, framework, "", "", "", "", ", ".join(sorted(set(arcs)))]))
+            continue
+        if kdir != os.path.realpath(sys.argv[3]):
+            continue
         kind = "sole" if set(arcs) == {slug} else "wide"
-        scope = ", ".join("arc:%s" % a for a in arcs)
-        print("\t".join([kind, settings_path, framework, scope]))
+        scope = ", ".join("arc:%s" % a for a in sorted(set(arcs)))
+        print("\x1f".join([kind, settings_path, framework, kdir, owner_kind,
+                         owner_value, tmux_server, scope]))
 PYEOF
   )
 
-  while IFS=$'\t' read -r EYE_KIND EYE_SETTINGS EYE_FRAMEWORK EYE_SCOPE; do
+  while IFS=$'\x1f' read -r EYE_KIND EYE_SETTINGS EYE_FRAMEWORK EYE_KDIR EYE_OWNER_KIND EYE_OWNER_VALUE EYE_TMUX_SERVER EYE_SCOPE; do
     [[ -n "$EYE_KIND" && -n "$EYE_SETTINGS" ]] || continue
 
-    if [[ "$EYE_KIND" != "sole" ]]; then
-      echo "[arc] Warning: an armed standing eye covers '$SLUG' and more (scope: $EYE_SCOPE) — it is left armed, because switching it off could blind a board somebody is still working. Disarm it deliberately once it is no longer wanted:" >&2
-      echo "         lore coordinate disarm --settings $EYE_SETTINGS" >&2
+    if [[ "$EYE_KIND" == "legacy" ]]; then
+      echo "[arc] Warning: legacy watcher at $EYE_SETTINGS names '$SLUG' but carries no complete store/owner identity; it was left armed. Remove it only with an explicit legacy sweep:" >&2
+      echo "         lore coordinate disarm --settings $(shell_quote_arg "$EYE_SETTINGS") --kdir $(shell_quote_arg "$KNOWLEDGE_DIR") --legacy-sweep" >&2
       continue
     fi
+
+    EYE_IDENTITY="store $EYE_KDIR, owner $EYE_OWNER_KIND $EYE_OWNER_VALUE"
+    [[ "$EYE_OWNER_KIND" == "tmux" ]] && EYE_IDENTITY="store $EYE_KDIR, owner tmux $EYE_TMUX_SERVER:$EYE_OWNER_VALUE"
+    EYE_IDENTITY+=", scope $EYE_SCOPE"
+
+    if [[ "$EYE_KIND" != "sole" ]]; then
+      echo "[arc] Warning: watcher identity $EYE_IDENTITY covers '$SLUG' and more; it is left armed because the other arcs remain attributable to it." >&2
+      continue
+    fi
+
+    DISARM_IDENTITY=(--settings "$EYE_SETTINGS" --kdir "$EYE_KDIR")
+    if [[ "$EYE_OWNER_KIND" == "pid" ]]; then
+      DISARM_IDENTITY+=(--owner-pid "$EYE_OWNER_VALUE")
+    else
+      DISARM_IDENTITY+=(--owner-tmux "$EYE_OWNER_VALUE" --tmux-server "$EYE_TMUX_SERVER")
+    fi
+    while IFS= read -r EYE_ARC; do
+      [[ -n "$EYE_ARC" ]] && DISARM_IDENTITY+=(--arc "${EYE_ARC#arc:}")
+    done < <(printf '%s\n' "$EYE_SCOPE" | tr ',' '\n' | sed 's/^[[:space:]]*//')
 
     # The framework the entry names, not the one closing: the adapter that
     # installed the entry is the only one that can recognize and remove it.
@@ -171,10 +214,10 @@ PYEOF
     DISARM_OUT=""
     if [[ -n "$EYE_FRAMEWORK" ]]; then
       DISARM_OUT=$(LORE_FRAMEWORK="$EYE_FRAMEWORK" bash "$SCRIPT_DIR/coordinate-arm.sh" \
-        disarm --settings "$EYE_SETTINGS" --kdir "$KNOWLEDGE_DIR" 2>&1) || DISARM_RC=$?
+        disarm "${DISARM_IDENTITY[@]}" 2>&1) || DISARM_RC=$?
     else
       DISARM_OUT=$(bash "$SCRIPT_DIR/coordinate-arm.sh" \
-        disarm --settings "$EYE_SETTINGS" --kdir "$KNOWLEDGE_DIR" 2>&1) || DISARM_RC=$?
+        disarm "${DISARM_IDENTITY[@]}" 2>&1) || DISARM_RC=$?
     fi
 
     # What the disarm found is the disarm surface's to report — an entry
@@ -185,10 +228,15 @@ PYEOF
     # the attribution, which is this script's to make, and hands the outcome to
     # the surface that measured it.
     if [[ $DISARM_RC -eq 0 ]]; then
-      echo "[arc] Standing eye: '$SLUG' is the only scope on the watcher at $EYE_SETTINGS, so this close ran disarm on it:" >&2
+      echo "[arc] Standing eye: closing '$SLUG' disarmed watcher identity $EYE_IDENTITY:" >&2
     else
       echo "[arc] Warning: could not disarm the standing eye at $EYE_SETTINGS (exit $DISARM_RC) — '$SLUG' is closed regardless, but the watcher is still armed. Run it by hand:" >&2
-      echo "         lore coordinate disarm --settings $EYE_SETTINGS" >&2
+      MANUAL_DISARM="lore coordinate disarm --settings $(shell_quote_arg "$EYE_SETTINGS") --kdir $(shell_quote_arg "$EYE_KDIR") --owner-$EYE_OWNER_KIND $(shell_quote_arg "$EYE_OWNER_VALUE")"
+      [[ "$EYE_OWNER_KIND" == "tmux" ]] && MANUAL_DISARM+=" --tmux-server $(shell_quote_arg "$EYE_TMUX_SERVER")"
+      while IFS= read -r EYE_ARC; do
+        [[ -n "$EYE_ARC" ]] && MANUAL_DISARM+=" --arc $(shell_quote_arg "${EYE_ARC#arc:}")"
+      done < <(printf '%s\n' "$EYE_SCOPE" | tr ',' '\n' | sed 's/^[[:space:]]*//')
+      echo "         $MANUAL_DISARM" >&2
     fi
     if [[ -n "$DISARM_OUT" ]]; then
       printf '%s\n' "$DISARM_OUT" >&2

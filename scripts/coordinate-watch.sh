@@ -186,8 +186,9 @@
 #   seat's checkout destroys work.
 #
 # The cursor:
-#   Persisted at $KNOWLEDGE_DIR/_coordination/watch-cursor.json (board scope) or
-#   watch-cursor-<scope>.json (scoped) as {schema_version, cursor, updated_at},
+#   Persisted at $KNOWLEDGE_DIR/_coordination/watch-cursor-<identity>-<scope>.json
+#   as {schema_version, cursor, updated_at}. Identity is canonical store + owner
+#   handle + normalized declared arcs; scope is the expanded member-slug set.
 #   rewritten on every exit that reached the journal. That is what makes the
 #   re-arm argument-free: the next call resumes exactly where this one stopped, so
 #   no row is replayed and none is skipped. The first-ever run for a scope has no
@@ -326,6 +327,9 @@ check_non_negative --spawn-gap "$SPAWN_GAP" "0 disables the age gate"
 if [[ -n "$OWNER_PID" ]] && ! [[ "$OWNER_PID" =~ ^[1-9][0-9]*$ ]]; then
   fail "invalid --owner-pid: '$OWNER_PID' (must be a positive integer)"
 fi
+if [[ -n "$OWNER_PID" && -n "$OWNER_TMUX" ]]; then
+  fail "watcher identity takes exactly one owner handle: pass --owner-pid or --owner-tmux, not both"
+fi
 if [[ $SINCE_SET -eq 1 ]]; then
   case "$SINCE" in
     ''|*[!0-9]*) fail "invalid --since: '$SINCE' (must be a non-negative byte offset)" ;;
@@ -351,7 +355,22 @@ if [[ -n "$KDIR_OVERRIDE" ]]; then
 else
   KNOWLEDGE_DIR="$(resolve_knowledge_dir)"
 fi
-[[ -d "$KNOWLEDGE_DIR" ]] || fail "knowledge store not found at: $KNOWLEDGE_DIR"
+if [[ ! -d "$KNOWLEDGE_DIR" ]]; then
+  # A hook-hosted firing for a removed store is stale identity. It must not
+  # create the store, emit a wake, or enter an error/re-arm loop.
+  [[ $WAKE_SHAPED -eq 1 ]] && exit 3
+  fail "knowledge store not found at: $KNOWLEDGE_DIR"
+fi
+KNOWLEDGE_DIR="$(canonical_existing_dir "$KNOWLEDGE_DIR")" \
+  || fail "could not canonicalize knowledge store: $KNOWLEDGE_DIR"
+
+if [[ ${#SCOPE_ARCS[@]} -gt 0 ]]; then
+  NORMALIZED_ARCS=()
+  while IFS= read -r arc; do
+    [[ -n "$arc" ]] && NORMALIZED_ARCS+=("$arc")
+  done < <(printf '%s\n' "${SCOPE_ARCS[@]}" | LC_ALL=C sort -u)
+  SCOPE_ARCS=("${NORMALIZED_ARCS[@]}")
+fi
 
 EVENTS_SH="$SCRIPT_DIR/session-events.sh"
 PEEK_SH="$SCRIPT_DIR/session-peek.sh"
@@ -377,7 +396,7 @@ for arc in ${SCOPE_ARCS[@]+"${SCOPE_ARCS[@]}"}; do
     0) ;;
     1) fail "unknown --arc: '$arc' (no arc record at _work/_arcs/$arc/_meta.json)" ;;
     2) fail "unreadable arc record for --arc '$arc': _work/_arcs/$arc/_meta.json is not a JSON object" ;;
-    3) fail "--arc '$arc' is archived or carries an unknown status; reopen it, or watch the whole board, if you mean to watch it anyway" ;;
+    3) fail "--arc '$arc' is closed, archived, or carries an unknown status; only active arcs can be watched" ;;
     *) fail "could not expand --arc '$arc'" ;;
   esac
   # An arc with no declared members scopes to nothing on its own. Naming it beats
@@ -402,17 +421,26 @@ fi
 
 SCOPED=0
 SCOPE_MODE="board"
-SCOPE_SUFFIX=""
+SCOPE_SUFFIX="board"
 if [[ ${#SCOPE_SLUGS[@]} -gt 0 ]]; then
   SCOPED=1
   SCOPE_MODE="scoped"
   # One scope, one set of sidecars. The key is order-insensitive and
   # duplicate-insensitive so the same scope written two ways resumes one cursor.
-  SCOPE_SUFFIX="-$(printf '%s\n' "${SCOPE_SLUGS[@]}" | LC_ALL=C sort -u \
+  SCOPE_SUFFIX="$(printf '%s\n' "${SCOPE_SLUGS[@]}" | LC_ALL=C sort -u \
     | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])')"
 fi
 
-CURSOR_FILE="$COORD_DIR/watch-cursor${SCOPE_SUFFIX}.json"
+if [[ -n "$OWNER_PID" ]]; then
+  IDENTITY_OWNER_KIND="pid"; IDENTITY_OWNER_VALUE="$OWNER_PID"
+elif [[ -n "$OWNER_TMUX" ]]; then
+  IDENTITY_OWNER_KIND="tmux"; IDENTITY_OWNER_VALUE="$OWNER_TMUX"
+else
+  IDENTITY_OWNER_KIND="none"; IDENTITY_OWNER_VALUE=""
+fi
+IDENTITY_KEY="$(watcher_identity_hash "$KNOWLEDGE_DIR" "$IDENTITY_OWNER_KIND" \
+  "$IDENTITY_OWNER_VALUE" "$TMUX_SERVER" ${SCOPE_ARCS+"${SCOPE_ARCS[@]}"})"
+CURSOR_FILE="$COORD_DIR/watch-cursor-$IDENTITY_KEY-$SCOPE_SUFFIX.json"
 
 if [[ $SCOPED -eq 1 ]]; then
   SCOPE_SLUGS_JSON="$(printf '%s\n' "${SCOPE_SLUGS[@]}" | LC_ALL=C sort -u | jq -R . | jq -s -c .)"

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -142,13 +143,29 @@ func TestResolveHarnessInstallPath_ClaudeCode(t *testing.T) {
 			t.Errorf("kind=%s: path=%q, want %q", c.kind, path, c.want)
 		}
 	}
+
+	repoRootBytes, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		t.Fatalf("resolve test repository root: %v", err)
+	}
+	repoRoot, err := filepath.EvalSymlinks(strings.TrimSpace(string(repoRootBytes)))
+	if err != nil {
+		t.Fatalf("canonicalize test repository root: %v", err)
+	}
+	path, supported, err := ResolveHarnessInstallPath("watcher_settings")
+	if err != nil || !supported {
+		t.Fatalf("watcher_settings: path=%q supported=%v err=%v", path, supported, err)
+	}
+	if want := filepath.Join(repoRoot, ".claude", "settings.local.json"); path != want {
+		t.Errorf("watcher_settings path=%q, want %q", path, want)
+	}
 }
 
 func TestResolveHarnessInstallPath_Unsupported(t *testing.T) {
 	setupFakeLoreData(t, "opencode", nil)
 	t.Setenv("LORE_FRAMEWORK", "opencode")
 
-	for _, kind := range []string{"teams", "ephemeral_plans"} {
+	for _, kind := range []string{"watcher_settings", "teams", "ephemeral_plans"} {
 		path, supported, err := ResolveHarnessInstallPath(kind)
 		if err != nil {
 			t.Errorf("kind=%s on opencode: unexpected error: %v", kind, err)

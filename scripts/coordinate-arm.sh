@@ -16,7 +16,10 @@
 #   lore coordinate arm run  (--owner-pid <pid> | --owner-tmux <session>)
 #                        [--tmux-server <name>] [--arc <slug>]...
 #                        [--window <sec>] [--kdir <path>]
-#   lore coordinate disarm --settings <settings.json> [--kdir <path>] [--json]
+#   lore coordinate disarm --settings <settings.json>
+#                        (--owner-pid <pid> | --owner-tmux <session>)
+#                        [--tmux-server <name>] [--arc <slug>]...
+#                        [--kdir <path>] [--json]
 #
 # Three surfaces, one script:
 #
@@ -57,9 +60,11 @@
 #   --json                Emit one machine-readable object instead of prose.
 #
 # Options (disarm surface):
-#   --settings <path>     The settings file to remove the entry from. Required,
-#                         and never defaulted, for the same reason --install is
-#                         not: the file decides which sessions are affected.
+#   --settings <path>     The settings file to remove the identity from.
+#   --owner-pid / --owner-tmux / --tmux-server / --arc
+#                         The same canonical identity selectors used at arm.
+#   --legacy-sweep        Also remove marker-only entries from the pre-identity
+#                         format. They are otherwise reported and left intact.
 #   --kdir <path>         Knowledge-store override (test isolation).
 #   --json                Emit one machine-readable object instead of prose.
 #
@@ -88,9 +93,9 @@
 #   has since closed keeps waking a seat about a board nobody is working, and
 #   nothing else in the closure path switches it off.
 #
-#   What disarm removes is the hook entry, so no future turn boundary starts a
-#   new window. It does not stop a window that is already running: that watcher
-#   is a live process holding a per-scope lock, and it ends at its own deadline
+#   What disarm removes is the matching identity's hook entry, so no future turn
+#   boundary starts its window. It does not stop a window already running: that watcher
+#   is a live process holding a per-identity lock, and it ends at its own deadline
 #   with a final wake. Expect one more wake after disarming — a still-running
 #   watcher is the previous window finishing, not a failed disarm.
 #
@@ -98,15 +103,13 @@
 #   disarm is safe to run unconditionally at closure without checking first.
 #
 # How a later closure finds this watcher:
-#   The installed hook entry carries its own scope. `watcher_command` writes the
-#   `--arc <slug>` flags into the command line verbatim, and the
+#   The installed hook entry carries canonical `--kdir`, one owner kind/value,
+#   and its sorted/deduplicated `--arc <slug>` set, plus the
 #   `LORE_FRAMEWORK=<name>` prefix names the adapter that installed it — so the
-#   settings file answers who armed what, for whom, without a second file
-#   mirroring it. `lore arc close` reads the entry. Nothing is recorded anywhere
-#   else, and --install and --settings stay undefaulted: which settings file gets
-#   the entry is the arm.
+#   settings file answers who armed what, for whom. `lore arc close` reads the
+#   entry and the arc record names the exact settings file containing it.
 #
-# The owner handle is required (arm and run surfaces only). A watcher with no provable owner is a runaway
+# The owner handle is required for arm, run, and attributed disarm. A watcher with no provable owner is a runaway
 # waiting to happen: it would keep waking a seat that no longer exists, and
 # nothing in the chain would notice. Refusing here puts the failure in front of
 # the person arming it, with a fixable message, instead of leaving a stray
@@ -139,14 +142,16 @@
 #   and without a wake, which leaves the owner's own firing free to take the
 #   window.
 #
-#   When the process table cannot be read at all, the window runs. The same
-#   trade the per-scope lock makes: a missed rejection costs one duplicate
+#   For a pid owner, when the process table cannot be read at all, the window
+#   runs. The same trade the per-identity lock makes: a missed rejection costs one duplicate
 #   window, while refusing on an unreadable ancestry would cost the wake itself.
+#   A tmux-only handle is stricter: the firing must be provably descended from a
+#   pane in the named server/session, otherwise it exits quietly.
 #
 # Every window says what it did:
 #   Each `run` appends one line to
-#   $KNOWLEDGE_DIR/_coordination/arm-window<scope>.log, keyed by the same
-#   per-scope suffix the window lock uses. The line carries the timestamp, this
+#   $KNOWLEDGE_DIR/_coordination/arm-window-<identity>.log, keyed by the same
+#   canonical store + owner + declared-arcs identity as the window lock. The line carries the timestamp, this
 #   process, its parent, the owner handle the entry was armed with, and what
 #   became of the window: foreign, lock-held, opened, or the terminal it reached.
 #   This script is the file's only writer; everything else reads it.
@@ -164,10 +169,9 @@
 #   record declares; an arc that exists but declares no members yet is armed with
 #   a note, because arming at arc open precedes adding members.
 #
-#   Installing also reports what it displaced. One settings file holds one
-#   watcher entry, so arming into a file another seat already armed replaces that
-#   seat's entry — the report names its owner and scope, so the seat doing the
-#   arming can put it back.
+#   A settings file may hold several watcher identities. Installing reports and
+#   replaces only an entry with the same canonical store, owner, and normalized
+#   arc set; foreign entries remain intact.
 #
 # Cross-harness behavior is read from the `turn_boundary_rewake` capability
 # cell, never from the framework name:
@@ -194,6 +198,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 WATCH_SH="$SCRIPT_DIR/coordinate-watch.sh"
+# The installed command is interpreted later by a shell; keep the portable
+# home-relative spelling literal here so the settings entry is user-independent.
+# shellcheck disable=SC2088
 HOOK_COMMAND_PATH="~/.lore/scripts/coordinate-arm.sh"
 
 MODE="arm"
@@ -208,6 +215,7 @@ RENDER_ONLY=0
 SETTINGS_PATH=""
 KDIR_OVERRIDE=""
 JSON_MODE=0
+LEGACY_SWEEP=0
 
 # Grace before a not-alive owner is believed, mirroring session-wait.sh: the
 # registry drops an owner before the journal records why it went, so an instant
@@ -218,7 +226,7 @@ OWNER_GONE_GRACE_SECONDS=2
 ERROR_WAKE_BACKOFF_SECONDS="${LORE_ARM_ERROR_BACKOFF_SECONDS:-60}"
 
 usage() {
-  sed -n '2,189p' "$0"
+  awk 'NR > 1 && /^set -euo pipefail$/ { exit } NR > 1 { print }' "$0"
 }
 
 case "${1:-}" in
@@ -239,11 +247,12 @@ while [[ $# -gt 0 ]]; do
     --settings) SETTINGS_PATH="${2:-}"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="${2:-}"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
+    --legacy-sweep) LEGACY_SWEEP=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
       echo "Usage: coordinate-arm.sh [run] (--owner-pid <pid> | --owner-tmux <session>) (--install <path> | --render) [--arc <slug>]... [--window <sec>] [--hook-timeout <sec>] [--kdir <path>] [--json]" >&2
-      echo "       coordinate-arm.sh disarm --settings <path> [--kdir <path>] [--json]" >&2
+      echo "       coordinate-arm.sh disarm --settings <path> (--owner-pid <pid> | --owner-tmux <session>) [--tmux-server <name>] [--arc <slug>]... [--kdir <path>] [--legacy-sweep] [--json]" >&2
       exit 1
       ;;
   esac
@@ -259,10 +268,13 @@ fail() {
 
 # --- Argument validation ------------------------------------------------------
 
-# Disarm takes no owner handle and no window: it removes an entry, it does not
-# start anything. Its own flags are validated below, in cmd_disarm.
+# Disarm takes identity selectors but no render mode. Its own selector contract
+# is validated below, in cmd_disarm.
 if [[ "$MODE" != "arm" && $RENDER_ONLY -eq 1 ]]; then
   fail "--render belongs to the arming surface: it chooses between writing the hook entry and only printing it. '$MODE' does neither"
+fi
+if [[ "$MODE" != "disarm" && $LEGACY_SWEEP -eq 1 ]]; then
+  fail "--legacy-sweep belongs to 'coordinate disarm'"
 fi
 
 if [[ "$MODE" != "disarm" ]]; then
@@ -278,6 +290,10 @@ if [[ -z "$OWNER_PID" && -z "$OWNER_TMUX" ]]; then
   --owner-pid must be the long-lived harness process that owns the seat. Do NOT pass
   $$: a subshell'"'"'s pid dies when the command returns, which records a handle that
   looks live at arm time and fails identically later.'
+fi
+
+if [[ -n "$OWNER_PID" && -n "$OWNER_TMUX" ]]; then
+  fail "watcher identity takes exactly one owner handle: pass --owner-pid or --owner-tmux, not both"
 fi
 
 if [[ -n "$OWNER_PID" ]] && ! [[ "$OWNER_PID" =~ ^[1-9][0-9]*$ ]]; then
@@ -299,6 +315,27 @@ if [[ -n "$KDIR_OVERRIDE" ]]; then
   KNOWLEDGE_DIR="$KDIR_OVERRIDE"
 else
   KNOWLEDGE_DIR="$(resolve_knowledge_dir)"
+fi
+
+# Hook firings against a removed store are stale identity, not an error loop.
+# Resolve before any _coordination path is formed so the firing cannot recreate
+# the missing store as a side effect.
+if [[ ! -d "$KNOWLEDGE_DIR" ]]; then
+  [[ "$MODE" == "run" ]] && exit 0
+  fail "knowledge store not found at: $KNOWLEDGE_DIR"
+fi
+KNOWLEDGE_DIR="$(canonical_existing_dir "$KNOWLEDGE_DIR")" \
+  || fail "could not canonicalize knowledge store: $KNOWLEDGE_DIR"
+KDIR_OVERRIDE="$KNOWLEDGE_DIR"
+
+# The declared arc set is identity. Normalize once before composing commands,
+# adapter selectors, sidecar keys, or child arguments.
+if [[ ${#ARCS[@]} -gt 0 ]]; then
+  NORMALIZED_ARCS=()
+  while IFS= read -r arc; do
+    [[ -n "$arc" ]] && NORMALIZED_ARCS+=("$arc")
+  done < <(printf '%s\n' "${ARCS[@]}" | LC_ALL=C sort -u)
+  ARCS=("${NORMALIZED_ARCS[@]}")
 fi
 
 SCOPE_ARGS=()
@@ -370,9 +407,8 @@ check_arm_owner_pid() {
 # nothing would otherwise arm a watcher that exits 1 at every window.
 #
 # Which store the scope is resolved against matters as much as the answer: the
-# hook command carries no --kdir, so a session running this entry resolves the
-# store from its own working directory. Naming the store here is what makes a
-# refusal actionable rather than puzzling.
+# hook command carries its canonical --kdir so every firing checks the same
+# store, independent of the session's working directory.
 check_arm_arc_scope() {
   local arc status members
   [[ ${#ARCS[@]} -gt 0 ]] || return 0
@@ -388,7 +424,7 @@ check_arm_arc_scope() {
       1) fail "refusing --arc '$arc': $KNOWLEDGE_DIR has no arc record at _work/_arcs/$arc/_meta.json.
   A watcher armed for a scope that resolves to nothing exits with an error at every window and
   wakes nobody. Check the slug, or arm from the store the arc lives in — the installed entry
-  carries no store path, so every window resolves it from the running session's directory." ;;
+  carries this canonical store path into every firing." ;;
       2) fail "refusing --arc '$arc': its record in $KNOWLEDGE_DIR is not readable as a JSON object
   (_work/_arcs/$arc/_meta.json). Repair the record before arming an eye that depends on it." ;;
       3) fail "refusing --arc '$arc': its record in $KNOWLEDGE_DIR is archived or carries an unknown
@@ -432,13 +468,15 @@ record_note() {
 # wrong adapter for every harness but that one.
 watcher_command() {
   local framework="$1"
-  local cmd="LORE_FRAMEWORK=$framework bash $HOOK_COMMAND_PATH run"
-  [[ -n "$OWNER_PID" ]] && cmd+=" --owner-pid $OWNER_PID"
+  local cmd
+  cmd="LORE_FRAMEWORK=$(shell_quote_arg "$framework") bash $HOOK_COMMAND_PATH run"
+  cmd+=" --kdir $(shell_quote_arg "$KNOWLEDGE_DIR")"
+  [[ -n "$OWNER_PID" ]] && cmd+=" --owner-pid $(shell_quote_arg "$OWNER_PID")"
   if [[ -n "$OWNER_TMUX" ]]; then
-    cmd+=" --owner-tmux $OWNER_TMUX --tmux-server $TMUX_SERVER"
+    cmd+=" --owner-tmux $(shell_quote_arg "$OWNER_TMUX") --tmux-server $(shell_quote_arg "$TMUX_SERVER")"
   fi
-  for arc in ${ARCS+"${ARCS[@]}"}; do cmd+=" --arc $arc"; done
-  cmd+=" --window $WINDOW"
+  for arc in ${ARCS+"${ARCS[@]}"}; do cmd+=" --arc $(shell_quote_arg "$arc")"; done
+  cmd+=" --window $(shell_quote_arg "$WINDOW")"
   printf '%s' "$cmd"
 }
 
@@ -504,7 +542,7 @@ require_explicit_mode() {
 }
 
 # What an install replaced, as the hook adapter reported it. Empty when the
-# settings file carried no watcher entry of its own.
+# settings file carried no watcher entry with the same identity.
 DISPLACED=""
 
 cmd_arm() {
@@ -529,9 +567,8 @@ cmd_arm() {
       --timeout "$HOOK_TIMEOUT" \
       --message "$REWAKE_MESSAGE")" || fail "hook adapter could not render the rewake entry"
     if [[ -n "$INSTALL_PATH" ]]; then
-      # The adapter's stdout is its account of what the install displaced: one
-      # settings file holds one watcher entry, so arming here can switch off an
-      # eye somebody else is relying on.
+      # The adapter's stdout accounts for same-identity replacement and any
+      # legacy marker-only entries it deliberately left untouched.
       DISPLACED="$("$adapter" rewake-install \
         --framework "$framework" \
         --settings "$INSTALL_PATH" \
@@ -598,7 +635,7 @@ cmd_arm() {
             [[ -n "$displaced_line" ]] || continue
             echo "[coordinate] $displaced_line"
           done <<< "$DISPLACED"
-          echo "[coordinate] that seat is now unwatched. Re-arm it into a settings file of its own if it is still working a board."
+          echo "[coordinate] foreign watcher identities in this file were left untouched."
         fi
       else
         echo "[coordinate] --render: NOTHING IS ARMED. No settings file was written and no window will open."
@@ -623,45 +660,57 @@ cmd_arm() {
 
 # --- Disarming surface --------------------------------------------------------
 
-# How many Stop entries the settings file carries. Compared across the adapter
-# call to tell "removed one" from "there was none" — the adapter filters by its
-# own command marker and reports neither, and duplicating that marker here would
-# put the identity of an armed entry in a second place.
-stop_entry_count() {
-  local path="$1"
-  [[ -f "$path" ]] || { echo 0; return 0; }
-  python3 - "$path" <<'PYEOF'
-import json, sys
-
-try:
-    with open(sys.argv[1], encoding="utf-8") as f:
-        settings = json.load(f)
-except (OSError, ValueError):
-    print(0)
-    raise SystemExit(0)
-print(len((settings.get("hooks") or {}).get("Stop") or []))
-PYEOF
-}
-
 disarm_report() {
-  local framework="$1" support="$2" removed="$3" note="$4"
+  local framework="$1" support="$2" removed="$3" identity="$4" note="$5"
   if [[ $JSON_MODE -eq 1 ]]; then
     json_output "$(jq -n \
       --arg fw "$framework" \
       --arg support "$support" \
       --arg settings "$SETTINGS_PATH" \
+      --arg identity "$identity" \
       --arg note "$note" \
       --argjson removed "$removed" \
       '{framework: $fw, turn_boundary_rewake: $support, settings: $settings,
+        identity: (if $identity == "" then null else $identity end),
         entries_removed: $removed, note: $note}')"
   fi
   echo "[coordinate] $note"
 }
 
 cmd_disarm() {
-  local framework support adapter before after removed
+  local framework support adapter removed identity adapter_report=""
+  local adapter_args=()
 
   [[ -n "$SETTINGS_PATH" ]] || fail "disarming requires --settings <path>: the settings file decides which sessions are disarmed, and lore will not guess a scope that could switch off a board somebody else is still working"
+
+  if [[ -n "$OWNER_PID" && -n "$OWNER_TMUX" ]]; then
+    fail "watcher identity takes exactly one owner handle: pass --owner-pid or --owner-tmux, not both"
+  fi
+  if [[ -z "$OWNER_PID" && -z "$OWNER_TMUX" && $LEGACY_SWEEP -eq 0 ]]; then
+    fail "attributed disarm requires --owner-pid or --owner-tmux, plus the same --kdir and --arc set used at arm time"
+  fi
+  if [[ -n "$OWNER_PID" ]] && ! [[ "$OWNER_PID" =~ ^[1-9][0-9]*$ ]]; then
+    fail "invalid --owner-pid: '$OWNER_PID' (must be a positive integer)"
+  fi
+
+  identity=""
+  if [[ -n "$OWNER_PID" || -n "$OWNER_TMUX" ]]; then
+    identity="store $KNOWLEDGE_DIR, owner $(owner_label), scope "
+    if [[ ${#ARCS[@]} -gt 0 ]]; then
+      identity+="$(printf 'arc:%s, ' "${ARCS[@]}")"
+      identity="${identity%, }"
+    else
+      identity+="the whole board"
+    fi
+    adapter_args=(--kdir "$KNOWLEDGE_DIR")
+    if [[ -n "$OWNER_PID" ]]; then
+      adapter_args+=(--owner-pid "$OWNER_PID")
+    else
+      adapter_args+=(--owner-tmux "$OWNER_TMUX" --tmux-server "$TMUX_SERVER")
+    fi
+    for arc in ${ARCS+"${ARCS[@]}"}; do adapter_args+=(--arc "$arc"); done
+  fi
+  [[ $LEGACY_SWEEP -eq 1 ]] && adapter_args+=(--legacy-sweep)
 
   framework="$(resolve_active_framework 2>/dev/null)" || framework=""
   [[ -n "$framework" ]] || fail "could not resolve the active harness; set LORE_FRAMEWORK for this process"
@@ -673,7 +722,7 @@ cmd_disarm() {
   # entry was ever written and there is nothing here to remove. The watcher on
   # such a harness is seat-run, and it stops when the seat stops re-running it.
   if [[ "$support" != "full" ]]; then
-    disarm_report "$framework" "$support" 0 \
+    disarm_report "$framework" "$support" 0 "$identity" \
       "nothing to disarm: turn_boundary_rewake is '$support' on $framework, so no hook entry was ever installed. A watcher here is seat-run — stop re-running it and it ends at its window deadline."
     exit 0
   fi
@@ -681,28 +730,29 @@ cmd_disarm() {
   [[ -f "$adapter" ]] || fail "turn_boundary_rewake is '$support' on $framework but its hook adapter is missing at $adapter"
 
   if [[ ! -f "$SETTINGS_PATH" ]]; then
-    disarm_report "$framework" "$support" 0 \
+    disarm_report "$framework" "$support" 0 "$identity" \
       "nothing to disarm: no settings file at $SETTINGS_PATH."
     exit 0
   fi
 
-  before="$(stop_entry_count "$SETTINGS_PATH")"
-  "$adapter" rewake-uninstall \
+  adapter_report="$("$adapter" rewake-uninstall \
     --framework "$framework" \
-    --settings "$SETTINGS_PATH" || fail "hook adapter could not remove the rewake entry from $SETTINGS_PATH"
-  after="$(stop_entry_count "$SETTINGS_PATH")"
-  removed=$(( before - after ))
+    --settings "$SETTINGS_PATH" \
+    "${adapter_args[@]}")" || fail "hook adapter could not remove the rewake entry from $SETTINGS_PATH"
+  removed="$(printf '%s\n' "$adapter_report" | grep -c '^removed watcher entry ' || true)"
 
   if [[ "$removed" -le 0 ]]; then
-    disarm_report "$framework" "$support" 0 \
-      "nothing to disarm: $SETTINGS_PATH carries no armed watcher entry."
+    [[ -n "$adapter_report" ]] && printf '%s\n' "$adapter_report"
+    disarm_report "$framework" "$support" 0 "$identity" \
+      "nothing to disarm for ${identity:-the requested legacy sweep}: no matching watcher entry was removed from $SETTINGS_PATH."
     exit 0
   fi
 
   local noun="entries"
   [[ "$removed" -eq 1 ]] && noun="entry"
-  disarm_report "$framework" "$support" "$removed" \
-    "disarmed: removed $removed watcher $noun from $SETTINGS_PATH — no further turn boundary will start a window. A window already running holds its own lock and ends at its deadline, so one more wake is expected."
+  [[ -n "$adapter_report" ]] && printf '%s\n' "$adapter_report"
+  disarm_report "$framework" "$support" "$removed" "$identity" \
+    "disarmed ${identity:-legacy watcher entries}: removed $removed watcher $noun from $SETTINGS_PATH — no further turn boundary will start that identity. A window already running holds its own lock and finishes at its deadline, so one final wake is expected."
   exit 0
 }
 
@@ -723,7 +773,7 @@ cmd_disarm() {
 
 WATCH_PID=""
 
-# --- One live window per scope ------------------------------------------------
+# --- One live window per watcher identity ------------------------------------
 #
 # The harness does not deduplicate async hooks: "each execution creates a
 # separate background process. There is no deduplication across multiple firings
@@ -733,7 +783,8 @@ WATCH_PID=""
 # on the same scope, all racing the same cursor file, all waking for the same
 # row.
 #
-# So: one scope, one window. A second instance that finds the lock held exits 0
+# So: one canonical store + owner + declared-arc identity, one window. A second
+# instance for that identity that finds the lock held exits 0
 # and emits nothing. That is not wake suppression. The instance holding the lock
 # owns this window and will deliver its wake on stderr with exit 2, and its exit
 # arms the next one; what the loser suppresses is a duplicate *watcher*, not a
@@ -750,23 +801,22 @@ WATCH_PID=""
 # eval to work around that buys nothing over a named constant in comments.
 WINDOW_LOCK_FD=9
 
-# Same recipe the watcher uses for its per-scope sidecars: order-insensitive and
-# duplicate-insensitive, so one scope written two ways takes one lock and writes
-# one log. Keyed on the declared scope rather than the arc-expanded one — the
-# firings this guards against all carry the identical command line the hook
-# entry was armed with. With no scope, and when the key cannot be computed, the
-# suffix is empty and every firing shares one pair of sidecars.
-scope_suffix() {
-  local arc tokens="" key
-  for arc in ${ARCS+"${ARCS[@]}"}; do tokens+="arc:$arc"$'\n'; done
-  [[ -n "$tokens" ]] || return 0
-  key="$(printf '%s' "$tokens" | LC_ALL=C sort -u \
-    | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])')" || return 0
+# The wrapper sidecars retain declared-arc scope under the full installed
+# identity. The child cursor adds expanded member slugs beneath this same key.
+identity_suffix() {
+  local kind value key
+  if [[ -n "$OWNER_PID" ]]; then
+    kind="pid"; value="$OWNER_PID"
+  else
+    kind="tmux"; value="$OWNER_TMUX"
+  fi
+  key="$(watcher_identity_hash "$KNOWLEDGE_DIR" "$kind" "$value" "$TMUX_SERVER" \
+    ${ARCS+"${ARCS[@]}"})" || return 1
   printf '%s' "-$key"
 }
 
 scope_lock_file() {
-  printf '%s' "$KNOWLEDGE_DIR/_coordination/arm-window$(scope_suffix).lock"
+  printf '%s' "$KNOWLEDGE_DIR/_coordination/arm-window$(identity_suffix).lock"
 }
 
 # 0 when this process now owns the window, 1 when another instance already does.
@@ -777,7 +827,7 @@ acquire_window_lock() {
   local lock_file="$1"
   mkdir -p "$(dirname "$lock_file")" 2>/dev/null || true
   if ! command -v python3 >/dev/null 2>&1; then
-    echo "[coordinate] no python3 to take the per-scope window lock; running unguarded (duplicate watchers possible)" >&2
+    echo "[coordinate] no python3 to take the per-identity window lock; running unguarded (duplicate watchers possible)" >&2
     return 0
   fi
   if ! exec 9>"$lock_file"; then
@@ -796,15 +846,15 @@ PY
     0) return 0 ;;
     1) return 1 ;;
     *)
-      echo "[coordinate] per-scope window lock could not be evaluated (exit $status); running unguarded" >&2
+      echo "[coordinate] per-identity window lock could not be evaluated (exit $status); running unguarded" >&2
       return 0
       ;;
   esac
 }
 
-# --- The per-scope window log -------------------------------------------------
+# --- The per-identity window log ---------------------------------------------
 #
-# What a window did, in one line, at the same per-scope key as the lock. This
+# What a window did, in one line, at the same identity key as the lock. This
 # script is the file's only writer: every disposition it records — a firing
 # refused as foreign, a firing that lost the lock — exists only here, in the
 # wrapper, and is gone by the time anything else could observe it. Everything
@@ -821,7 +871,7 @@ WINDOW_LOG_MAX_BYTES=65536
 WINDOW_LOG_KEEP_BYTES=32768
 
 scope_window_log() {
-  printf '%s' "$KNOWLEDGE_DIR/_coordination/arm-window$(scope_suffix).log"
+  printf '%s' "$KNOWLEDGE_DIR/_coordination/arm-window$(identity_suffix).log"
 }
 
 trim_window_log() {
@@ -844,7 +894,7 @@ record_window_disposition() {
   local disposition="$1" note="${2:-}" log_file line
   log_file="$(scope_window_log)"
   mkdir -p "$(dirname "$log_file")" 2>/dev/null || true
-  line="$(timestamp_iso) pid=$$ ppid=${PPID:-unknown} owner=${OWNER_PID:-none} disposition=$disposition"
+  line="$(timestamp_iso) pid=$$ ppid=${PPID:-unknown} identity=$(identity_suffix) owner=$(owner_label) disposition=$disposition"
   [[ -n "$note" ]] && line+=" note=$note"
   if ! printf '%s\n' "$line" >> "$log_file" 2>/dev/null; then
     echo "[coordinate] could not append this window's disposition ($disposition) to $log_file" >&2
@@ -874,9 +924,27 @@ parent_pid_of() {
 #   owner-gone  no owner process to descend from; the window's own owner check
 #               answers that case, and answers it with a report
 #   unreadable  the process table would not say
+#   unresolved  a tmux-only handle could not prove this firing belongs to one
+#               of the named session's panes; it is not firing ownership
 classify_firing() {
-  local pid=$$ steps=0 parent
-  [[ -n "$OWNER_PID" ]] || { printf owned; return 0; }
+  local pid=$$ steps=0 parent pane pane_pids
+  if [[ -n "$OWNER_TMUX" ]]; then
+    command -v tmux >/dev/null 2>&1 || { printf unresolved; return 0; }
+    command -v ps >/dev/null 2>&1 || { printf unresolved; return 0; }
+    pane_pids="$(tmux -L "$TMUX_SERVER" list-panes -t "$OWNER_TMUX" -F '#{pane_pid}' 2>/dev/null)" \
+      || { printf unresolved; return 0; }
+    [[ -n "${pane_pids//[[:space:]]/}" ]] || { printf unresolved; return 0; }
+    while [[ "$pid" -gt 1 && $steps -lt $ANCESTRY_WALK_LIMIT ]]; do
+      while IFS= read -r pane; do
+        [[ "$pid" == "$pane" ]] && { printf owned; return 0; }
+      done <<< "$pane_pids"
+      parent="$(parent_pid_of "$pid")" || { printf unresolved; return 0; }
+      pid="$parent"
+      steps=$((steps + 1))
+    done
+    printf foreign
+    return 0
+  fi
   command -v ps >/dev/null 2>&1 || { printf unreadable; return 0; }
   while [[ "$pid" -gt 1 && $steps -lt $ANCESTRY_WALK_LIMIT ]]; do
     [[ "$pid" == "$OWNER_PID" ]] && { printf owned; return 0; }
@@ -960,12 +1028,26 @@ emit_owner_gone() {
 }
 
 cmd_run() {
+  local arc status
+  # Stale identity is a quiet no-op. This gate precedes the firing classifier,
+  # lock, log, and child cursor, so a missing/closed arc creates no sidecar.
+  # Disarm only removes future hook entries: a window already beyond this gate
+  # deliberately finishes and may deliver one final wake.
+  for arc in ${ARCS+"${ARCS[@]}"}; do
+    status=0
+    session_arc_member_slugs "$KNOWLEDGE_DIR" "$arc" >/dev/null 2>&1 || status=$?
+    [[ $status -eq 0 ]] || exit 0
+  done
+
   # Whose firing this is, before the lock: a foreign session contesting a lock it
   # has no business holding is how a seat loses its own window, and the loser of
   # that contest exits 0 in silence — no wake, and so no next window either.
   case "$(classify_firing)" in
     foreign)
       record_window_disposition foreign
+      exit 0
+      ;;
+    unresolved)
       exit 0
       ;;
     unreadable)
@@ -993,6 +1075,12 @@ cmd_run() {
   record_window_disposition opened
 
   local err_file watch_status=0
+  local owner_args=()
+  if [[ -n "$OWNER_PID" ]]; then
+    owner_args=(--owner-pid "$OWNER_PID")
+  else
+    owner_args=(--owner-tmux "$OWNER_TMUX" --tmux-server "$TMUX_SERVER")
+  fi
   err_file="$(mktemp)"
   # shellcheck disable=SC2064
   trap "rm -f '$err_file'" EXIT
@@ -1002,7 +1090,8 @@ cmd_run() {
   # watcher holding it would block every re-arm for a whole window while having
   # no channel left to wake anyone through.
   "$WATCH_SH" --wake-shaped --timeout "$WINDOW" \
-    ${KDIR_OVERRIDE:+--kdir "$KDIR_OVERRIDE"} \
+    --kdir "$KNOWLEDGE_DIR" \
+    "${owner_args[@]}" \
     ${SCOPE_ARGS+"${SCOPE_ARGS[@]}"} \
     >/dev/null 2>"$err_file" 9>&- &
   WATCH_PID=$!

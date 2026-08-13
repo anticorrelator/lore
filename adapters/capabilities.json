@@ -228,6 +228,7 @@
         "skills":           "$HOME/.claude/skills",
         "agents":           "$HOME/.claude/agents",
         "settings":         "$HOME/.claude/settings.json",
+        "watcher_settings": "$PROJECT_ROOT/.claude/settings.local.json",
         "teams":            "$HOME/.claude/teams",
         "ephemeral_plans":  "$HOME/.claude/plans",
         "mcp_servers":      "$HOME/.claude/settings.json"
@@ -400,6 +401,7 @@
         "skills":           "$HOME/.agents/skills",
         "agents":           "$HOME/.claude/agents",
         "settings":         "$HOME/.config/opencode/config.json",
+        "watcher_settings": "unsupported",
         "teams":            "unsupported",
         "ephemeral_plans":  "unsupported",
         "mcp_servers":      "$HOME/.config/opencode/opencode.json"
@@ -569,6 +571,7 @@
         "skills":           "$HOME/.codex/skills",
         "agents":           "$HOME/.codex/agents",
         "settings":         "$HOME/.codex/config.toml",
+        "watcher_settings": "unsupported",
         "teams":            "unsupported",
         "ephemeral_plans":  "unsupported",
         "mcp_servers":      "$HOME/.codex/config.toml"

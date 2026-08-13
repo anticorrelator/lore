@@ -64,7 +64,8 @@ setup() {
   # sides both walk the LORE_DATA_DIR/scripts symlink to find the repo, so we
   # replicate that here.
   TEST_LORE_DATA_DIR="$(mktemp -d)"
-  mkdir -p "$TEST_LORE_DATA_DIR/config"
+  TEST_KDIR="$TEST_LORE_DATA_DIR/kdir"
+  mkdir -p "$TEST_LORE_DATA_DIR/config" "$TEST_KDIR"
   ln -s "$REPO_DIR/scripts" "$TEST_LORE_DATA_DIR/scripts"
   export LORE_DATA_DIR="$TEST_LORE_DATA_DIR"
   unset LORE_FRAMEWORK
@@ -299,7 +300,7 @@ ARM_SH="$REPO_DIR/scripts/coordinate-arm.sh"
 # stub's exit code is the watch terminal under test.
 stage_arm_harness() {
   ARM_ROOT="$(mktemp -d)"
-  mkdir -p "$ARM_ROOT/scripts" "$ARM_ROOT/kdir/_coordination"
+  mkdir -p "$ARM_ROOT/scripts" "$ARM_ROOT/kdir/_coordination" "$ARM_ROOT/bin"
   cp "$REPO_DIR/scripts/lib.sh" "$REPO_DIR/scripts/coordinate-arm.sh" "$ARM_ROOT/scripts/"
   cat > "$ARM_ROOT/scripts/coordinate-watch.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -308,11 +309,40 @@ echo "watch-diagnostic" >&2
 exit "${STUB_WATCH_EXIT:-0}"
 EOF
   chmod +x "$ARM_ROOT/scripts/coordinate-watch.sh"
+  cat > "$ARM_ROOT/bin/ps" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "-p 4242") exit 0 ;;
+  *"-o ppid= -p "*) echo 4242; exit 0 ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$ARM_ROOT/bin/ps"
+  cat > "$ARM_ROOT/bin/tmux" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"has-session"*"seat-a"*|*"has-session"*"seat-b"*) exit 0 ;;
+  *"list-panes"*"seat-a"*|*"list-panes"*"seat-b"*) echo 4242; exit 0 ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$ARM_ROOT/bin/tmux"
+  ARM_ORIGINAL_PATH="$PATH"
+  export PATH="$ARM_ROOT/bin:$PATH"
+  PROVABLE_OWNER_PID=4242
 }
 
 teardown_arm_harness() {
+  [ -n "${ARM_ORIGINAL_PATH:-}" ] && export PATH="$ARM_ORIGINAL_PATH"
   [ -n "${ARM_ROOT:-}" ] && rm -rf "$ARM_ROOT"
   ARM_ROOT=""
+}
+
+stage_arc() {
+  local slug="$1" status="${2:-active}" member="${3:-$1-work}"
+  mkdir -p "$ARM_ROOT/kdir/_work/_arcs/$slug"
+  printf '{"schema_version":1,"slug":"%s","status":"%s","members":["%s"]}\n' \
+    "$slug" "$status" "$member" > "$ARM_ROOT/kdir/_work/_arcs/$slug/_meta.json"
 }
 
 @test "coordinate arm refuses a handle-less arm and names both flags" {
@@ -332,7 +362,7 @@ teardown_arm_harness() {
 
 @test "coordinate arm emits an asyncRewake entry whose timeout outlasts the window" {
   set_framework claude-code
-  run bash "$ARM_SH" --owner-pid 1 --window 600 --hook-timeout 900 --render --json
+  run bash "$ARM_SH" --owner-tmux test-seat --window 600 --hook-timeout 900 --render --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
   echo "$output" | python3 -c '
 import json, sys
@@ -346,7 +376,9 @@ assert hook["rewakeMessage"], "entry must carry a rewakeMessage"
 cmd = hook["command"]
 assert cmd.startswith("LORE_FRAMEWORK=claude-code "), cmd
 assert "~/.lore/scripts/coordinate-arm.sh run" in cmd, cmd
-assert "--owner-pid 1" in cmd, cmd
+assert "--owner-tmux test-seat" in cmd, cmd
+assert "--tmux-server lore-tui" in cmd, cmd
+assert "--kdir " in cmd, cmd
 assert "--window 600" in cmd, cmd
 '
 }
@@ -357,12 +389,12 @@ assert "--window 600" in cmd, cmd
   cat > "$settings" <<'JSON'
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"user-owned-stop"}]}]}}
 JSON
-  run bash "$ARM_SH" --owner-pid 1 --window 600 --hook-timeout 900 --install "$settings"
+  run bash "$ARM_SH" --owner-tmux test-seat --window 600 --hook-timeout 900 --install "$settings" --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
   # pid 1 again rather than a second made-up number: arming now refuses a pid
   # that is not alive, and what this case is about is the second arm replacing
   # the first entry in place rather than stacking beside it.
-  run bash "$ARM_SH" --owner-pid 1 --window 700 --hook-timeout 1000 --install "$settings"
+  run bash "$ARM_SH" --owner-tmux test-seat --window 700 --hook-timeout 1000 --install "$settings" --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
   run python3 - "$settings" <<'PY'
 import json, sys
@@ -373,6 +405,164 @@ assert len(armed) == 1, f"re-arming stacked {len(armed)} watchers"
 assert armed[0]["hooks"][0]["timeout"] == 1000, armed
 PY
   [ "$status" -eq 0 ]
+}
+
+@test "watcher command round-trips canonical quoted identity and normalized arcs" {
+  set_framework claude-code
+  real_store="$TEST_LORE_DATA_DIR/store with space"
+  link_store="$TEST_LORE_DATA_DIR/store-link"
+  mkdir -p "$real_store/_work/_arcs/alpha" "$real_store/_work/_arcs/zeta"
+  printf '%s\n' '{"status":"active","members":["a"]}' > "$real_store/_work/_arcs/alpha/_meta.json"
+  printf '%s\n' '{"status":"active","members":["z"]}' > "$real_store/_work/_arcs/zeta/_meta.json"
+  ln -s "$real_store" "$link_store"
+
+  run bash "$ARM_SH" --owner-tmux "seat one" --tmux-server "server one" \
+    --arc zeta --arc alpha --arc zeta --render --kdir "$link_store" --json
+  [ "$status" -eq 0 ]
+  EXPECTED_STORE="$(cd "$real_store" && pwd -P)" OUTPUT="$output" run python3 - <<'PY'
+import json, os, shlex
+d = json.loads(os.environ["OUTPUT"])
+argv = shlex.split(d["watcher_command"])
+def values(flag):
+    return [argv[i + 1] for i, token in enumerate(argv[:-1]) if token == flag]
+assert values("--kdir") == [os.environ["EXPECTED_STORE"]], argv
+assert values("--owner-tmux") == ["seat one"], argv
+assert values("--tmux-server") == ["server one"], argv
+assert values("--arc") == ["alpha", "zeta"], argv
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "rewake install replaces only the same identity and preserves a foreign watcher" {
+  set_framework claude-code
+  settings="$TEST_LORE_DATA_DIR/multi-settings.json"
+  mkdir -p "$TEST_KDIR/_work/_arcs/shared"
+  printf '%s\n' '{"status":"active","members":["work"]}' > "$TEST_KDIR/_work/_arcs/shared/_meta.json"
+
+  run bash "$ARM_SH" --owner-tmux seat-a --arc shared --install "$settings" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run bash "$ARM_SH" --owner-tmux seat-b --arc shared --install "$settings" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run bash "$ARM_SH" --owner-tmux seat-a --arc shared --window 700 --hook-timeout 800 \
+    --install "$settings" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+
+  run python3 - "$settings" <<'PY'
+import json, shlex, sys
+rows = json.load(open(sys.argv[1]))["hooks"]["Stop"]
+watchers = [h for row in rows for h in row.get("hooks", []) if "coordinate-arm.sh" in h.get("command", "")]
+assert len(watchers) == 2, watchers
+by_owner = {}
+for hook in watchers:
+    argv = shlex.split(hook["command"])
+    owner = argv[argv.index("--owner-tmux") + 1]
+    by_owner[owner] = hook["timeout"]
+assert by_owner == {"seat-a": 800, "seat-b": 660}, by_owner
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "concurrent watcher installs on one settings file preserve both identities" {
+  set_framework claude-code
+  settings="$TEST_LORE_DATA_DIR/concurrent-settings.json"
+  mkdir -p "$TEST_KDIR/_work/_arcs/shared"
+  printf '%s\n' '{"status":"active","members":["work"]}' > "$TEST_KDIR/_work/_arcs/shared/_meta.json"
+
+  bash "$ARM_SH" --owner-tmux seat-a --arc shared --install "$settings" --kdir "$TEST_KDIR" >/dev/null &
+  first=$!
+  bash "$ARM_SH" --owner-tmux seat-b --arc shared --install "$settings" --kdir "$TEST_KDIR" >/dev/null &
+  second=$!
+  wait "$first"
+  wait "$second"
+
+  run python3 - "$settings" <<'PY'
+import json, shlex, sys
+commands = [h.get("command", "") for row in json.load(open(sys.argv[1]))["hooks"]["Stop"] for h in row.get("hooks", [])]
+owners = sorted(shlex.split(command)[shlex.split(command).index("--owner-tmux") + 1] for command in commands)
+assert owners == ["seat-a", "seat-b"], owners
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "attributed disarm removes only its identity and names it" {
+  set_framework claude-code
+  settings="$TEST_LORE_DATA_DIR/disarm-settings.json"
+  mkdir -p "$TEST_KDIR/_work/_arcs/shared"
+  printf '%s\n' '{"status":"active","members":["work"]}' > "$TEST_KDIR/_work/_arcs/shared/_meta.json"
+  bash "$ARM_SH" --owner-tmux seat-a --arc shared --install "$settings" --kdir "$TEST_KDIR" >/dev/null
+  bash "$ARM_SH" --owner-tmux seat-b --arc shared --install "$settings" --kdir "$TEST_KDIR" >/dev/null
+
+  run bash "$ARM_SH" disarm --owner-tmux seat-a --arc shared --settings "$settings" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"owner tmux lore-tui:seat-a"* ]]
+  run python3 - "$settings" <<'PY'
+import json, shlex, sys
+commands = [h.get("command", "") for row in json.load(open(sys.argv[1]))["hooks"]["Stop"] for h in row.get("hooks", [])]
+assert len(commands) == 1, commands
+argv = shlex.split(commands[0])
+assert argv[argv.index("--owner-tmux") + 1] == "seat-b", argv
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "legacy watcher is reported and preserved unless legacy sweep is explicit" {
+  set_framework claude-code
+  settings="$TEST_LORE_DATA_DIR/legacy-settings.json"
+  cat > "$settings" <<'JSON'
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/coordinate-arm.sh run --owner-pid 1 --arc old"}]}]}}
+JSON
+  run bash "$ARM_SH" disarm --owner-tmux seat-a --arc old --settings "$settings" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"legacy watcher left"* ]]
+  grep -q 'coordinate-arm.sh' "$settings"
+
+  run bash "$ARM_SH" disarm --settings "$settings" --kdir "$TEST_KDIR" --legacy-sweep
+  [ "$status" -eq 0 ]
+  ! grep -q 'coordinate-arm.sh' "$settings"
+}
+
+@test "standard install and uninstall leave watcher entries alone" {
+  set_framework claude-code
+  export HOME="$TEST_LORE_DATA_DIR/home-standard"
+  settings="$HOME/.claude/settings.json"
+  mkdir -p "$HOME/.claude" "$TEST_KDIR/_work/_arcs/standard"
+  printf '%s\n' '{"status":"active","members":["work"]}' > "$TEST_KDIR/_work/_arcs/standard/_meta.json"
+  bash "$ARM_SH" --owner-tmux seat-a --arc standard --install "$settings" --kdir "$TEST_KDIR" >/dev/null
+
+  run bash "$CC_ADAPTER" install --framework claude-code
+  [ "$status" -eq 0 ]
+  run bash "$CC_ADAPTER" uninstall --framework claude-code
+  [ "$status" -eq 0 ]
+  grep -q 'coordinate-arm.sh' "$settings"
+
+  run bash "$CC_ADAPTER" uninstall --framework claude-code --include-watchers
+  [ "$status" -eq 0 ]
+  ! grep -q 'coordinate-arm.sh' "$settings"
+}
+
+@test "arc open installs project-locally and close uses the recorded path from another cwd" {
+  set_framework claude-code
+  project="$TEST_LORE_DATA_DIR/project"
+  mkdir -p "$project"
+  git -C "$project" init -q
+  open="$REPO_DIR/scripts/arc-open.sh"
+  close="$REPO_DIR/scripts/arc-close.sh"
+
+  run bash -c 'cd "$1" && LORE_FRAMEWORK=claude-code bash "$2" --title "Local eye" --anchor "Watch it" --slug local-eye --owner-tmux seat-a --kdir "$3"' _ "$project" "$open" "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  settings="$project/.claude/settings.local.json"
+  [ -f "$settings" ]
+  run python3 - "$TEST_KDIR/_work/_arcs/local-eye/_meta.json" "$settings" <<'PY'
+import json, os, sys
+row = json.load(open(sys.argv[1]))
+assert row["watcher_settings_path"] == os.path.realpath(sys.argv[2]), row
+PY
+  [ "$status" -eq 0 ]
+
+  run env LORE_FRAMEWORK=claude-code bash "$close" local-eye --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"store $TEST_KDIR"* ]]
+  ! grep -q 'coordinate-arm.sh' "$settings"
 }
 
 @test "rewake-entry refuses to render an entry with no explicit timeout" {
@@ -391,17 +581,17 @@ PY
   # having armed nothing, which is what a seat reads as an armed watcher.
   for fw in codex opencode; do
     set_framework "$fw"
-    run bash "$ARM_SH" --owner-pid 1
+    run bash "$ARM_SH" --owner-tmux test-seat --kdir "$TEST_KDIR"
     [ "$status" -eq 1 ]
     [[ "$output" == *"--render"* ]]
 
-    run bash "$ARM_SH" --owner-pid 1 --render
+    run bash "$ARM_SH" --owner-tmux test-seat --kdir "$TEST_KDIR" --render
     [ "$status" -eq 0 ]
     [[ "$output" == *"degraded"* ]]
     [[ "$output" == *"coordinate-arm.sh run"* ]]
     [[ "$output" == *"LORE_FRAMEWORK=$fw"* ]]
 
-    run bash "$ARM_SH" --owner-pid 1 --install "$TEST_LORE_DATA_DIR/$fw-settings.json"
+    run bash "$ARM_SH" --owner-tmux test-seat --kdir "$TEST_KDIR" --install "$TEST_LORE_DATA_DIR/$fw-settings.json"
     [ "$status" -ne 0 ]
     [[ "$output" == *"refusing --install"* ]]
     [ ! -f "$TEST_LORE_DATA_DIR/$fw-settings.json" ]
@@ -416,7 +606,7 @@ PY
   stage_arm_harness
   for stub in 0 2; do
     run env STUB_WATCH_EXIT="$stub" bash "$ARM_ROOT/scripts/coordinate-arm.sh" run \
-      --owner-pid $$ --window 5 --kdir "$ARM_ROOT/kdir"
+      --owner-pid "$PROVABLE_OWNER_PID" --window 5 --kdir "$ARM_ROOT/kdir"
     [ "$status" -eq 2 ]
     [[ "$output" == *"[coordinate wake]"* ]]
     [[ "$output" == *"watch-args: --wake-shaped --timeout 5"* ]]
@@ -424,7 +614,7 @@ PY
   # A reader failure is a wake too, labeled as one, rather than a chain that
   # ends without saying why.
   run env STUB_WATCH_EXIT=4 LORE_ARM_ERROR_BACKOFF_SECONDS=1 \
-    bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 5 --kdir "$ARM_ROOT/kdir"
+    bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid "$PROVABLE_OWNER_PID" --window 5 --kdir "$ARM_ROOT/kdir"
   [ "$status" -eq 2 ]
   [[ "$output" == *"watcher-failed"* ]]
 
@@ -435,7 +625,7 @@ PY
 exit 2
 EOF
   chmod +x "$ARM_ROOT/scripts/coordinate-watch.sh"
-  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 3 --kdir "$ARM_ROOT/kdir"
+  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid "$PROVABLE_OWNER_PID" --window 3 --kdir "$ARM_ROOT/kdir"
   [ "$status" -eq 2 ]
   [[ "$output" == *"[coordinate wake] quiet"* ]]
   teardown_arm_harness
@@ -450,17 +640,22 @@ stage_slow_alpha_watcher() {
 #!/usr/bin/env bash
 echo "watch-args: $*"
 case "$*" in *alpha*) sleep 8 ;; esac
+echo '{"outcome":"matched","matched":{"event":"closed"},"pending":[]}' >&2
 exit 0
 EOF
   chmod +x "$ARM_ROOT/scripts/coordinate-watch.sh"
 }
 
-# Block until the armed wrapper has actually entered its window — it forks the
-# watcher only after taking the lock, so a child is proof the lock is held.
+# Block until the wrapper records that it opened its window. This avoids making
+# the fixture depend on host process-table access; the staged ps command is the
+# explicit liveness/ancestry authority for the wrapper itself.
 wait_for_window() {
-  local arm_pid="$1"
+  local arm_pid="$1" log
   for _ in $(seq 1 200); do
-    [ -n "$(pgrep -P "$arm_pid" 2>/dev/null)" ] && return 0
+    for log in "$ARM_ROOT"/kdir/_coordination/arm-window-*.log; do
+      [ -f "$log" ] && grep -q 'disposition=opened' "$log" && return 0
+    done
+    kill -0 "$arm_pid" 2>/dev/null || break
     sleep 0.05
   done
   echo "armed window never started for pid $arm_pid"
@@ -473,15 +668,16 @@ wait_for_window() {
   # second watcher on the same scope and the same cursor.
   stage_arm_harness
   stage_slow_alpha_watcher
+  stage_arc alpha
 
-  bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 25 \
-    --kdir "$ARM_ROOT/kdir" --slug alpha >"$ARM_ROOT/first.out" 2>"$ARM_ROOT/first.err" &
+  bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid "$PROVABLE_OWNER_PID" --window 25 \
+    --kdir "$ARM_ROOT/kdir" --arc alpha >"$ARM_ROOT/first.out" 2>"$ARM_ROOT/first.err" &
   first_pid=$!
   wait_for_window "$first_pid"
 
   started="$(date +%s)"
-  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 25 \
-    --kdir "$ARM_ROOT/kdir" --slug alpha
+  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid "$PROVABLE_OWNER_PID" --window 25 \
+    --kdir "$ARM_ROOT/kdir" --arc alpha
   elapsed=$(( $(date +%s) - started ))
   # Exit 0 is the only terminal a completed window cannot reach (it wakes with 2
   # or stops with 3), so this alone proves the second instance never ran one.
@@ -508,17 +704,19 @@ wait_for_window() {
   # be a wake the guard swallowed rather than deduplicated.
   stage_arm_harness
   stage_slow_alpha_watcher
+  stage_arc alpha
+  stage_arc beta
 
-  bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 25 \
-    --kdir "$ARM_ROOT/kdir" --slug alpha >/dev/null 2>&1 &
+  bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid "$PROVABLE_OWNER_PID" --window 25 \
+    --kdir "$ARM_ROOT/kdir" --arc alpha >/dev/null 2>&1 &
   first_pid=$!
   wait_for_window "$first_pid"
 
-  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 25 \
-    --kdir "$ARM_ROOT/kdir" --slug beta
+  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid "$PROVABLE_OWNER_PID" --window 25 \
+    --kdir "$ARM_ROOT/kdir" --arc beta
   [ "$status" -eq 2 ]
   [[ "$output" == *"[coordinate wake] actionable"* ]]
-  [[ "$output" == *"--slug beta"* ]]
+  [[ "$output" == *"--arc beta"* ]]
 
   # Two scopes, two distinct locks.
   locks=("$ARM_ROOT"/kdir/_coordination/arm-window-*.lock)
@@ -532,15 +730,43 @@ wait_for_window() {
   teardown_arm_harness
 }
 
+@test "window lock and disposition log are distinct for different owners on one scope" {
+  stage_arm_harness
+  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-tmux seat-a \
+    --tmux-server test-server --window 5 --kdir "$ARM_ROOT/kdir"
+  [ "$status" -eq 2 ]
+  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-tmux seat-b \
+    --tmux-server test-server --window 5 --kdir "$ARM_ROOT/kdir"
+  [ "$status" -eq 2 ]
+  locks=("$ARM_ROOT"/kdir/_coordination/arm-window-*.lock)
+  logs=("$ARM_ROOT"/kdir/_coordination/arm-window-*.log)
+  [ "${#locks[@]}" -eq 2 ]
+  [ "${#logs[@]}" -eq 2 ]
+  teardown_arm_harness
+}
+
+@test "watch cursor is distinct for different owners on one scope" {
+  mkdir -p "$TEST_KDIR/_sessions"
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  watch="$REPO_DIR/scripts/coordinate-watch.sh"
+  run bash "$watch" --owner-pid $$ --timeout 0 --pending-stale 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+  run bash "$watch" --owner-pid "$PPID" --timeout 0 --pending-stale 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+  cursors=("$TEST_KDIR"/_coordination/watch-cursor-*.json)
+  [ "${#cursors[@]}" -eq 2 ]
+}
+
 @test "a dead window releases its lock without leaving a stale holder behind" {
   # The guard is an flock on a descriptor the wrapper holds, so the kernel drops
   # it on process death — including a SIGKILL that runs no trap. Nothing here
   # inspects or repairs a recorded pid, and nothing should need to.
   stage_arm_harness
   stage_slow_alpha_watcher
+  stage_arc alpha
 
-  bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 25 \
-    --kdir "$ARM_ROOT/kdir" --slug alpha >/dev/null 2>&1 &
+  bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid "$PROVABLE_OWNER_PID" --window 25 \
+    --kdir "$ARM_ROOT/kdir" --arc alpha >/dev/null 2>&1 &
   first_pid=$!
   wait_for_window "$first_pid"
   # SIGKILL the wrapper and reap the watcher it can no longer clean up. The
@@ -560,8 +786,8 @@ echo "watch-args: $*"
 exit 0
 EOF
   chmod +x "$ARM_ROOT/scripts/coordinate-watch.sh"
-  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 25 \
-    --kdir "$ARM_ROOT/kdir" --slug alpha
+  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid "$PROVABLE_OWNER_PID" --window 25 \
+    --kdir "$ARM_ROOT/kdir" --arc alpha
   [ "$status" -eq 2 ]
   [[ "$output" == *"[coordinate wake] actionable"* ]]
   teardown_arm_harness
@@ -569,10 +795,14 @@ EOF
 
 @test "the armed command relays scope flags to the watcher" {
   stage_arm_harness
+  stage_arc alpha
+  stage_arc beta
+  stage_arc gamma
   run env STUB_WATCH_EXIT=0 bash "$ARM_ROOT/scripts/coordinate-arm.sh" run \
-    --owner-pid $$ --window 5 --kdir "$ARM_ROOT/kdir" --slug alpha --slug beta --arc gamma
+    --owner-pid "$PROVABLE_OWNER_PID" --window 5 --kdir "$ARM_ROOT/kdir" \
+    --arc gamma --arc alpha --arc beta --arc alpha
   [ "$status" -eq 2 ]
-  [[ "$output" == *"--slug alpha --slug beta --arc gamma"* ]]
+  [[ "$output" == *"--arc alpha --arc beta --arc gamma"* ]]
   teardown_arm_harness
 }
 
@@ -588,36 +818,62 @@ EOF
   teardown_arm_harness
 }
 
-@test "a SIGTERMed window leaves a marker distinguishing the kill from a wake" {
+@test "a firing for a missing store exits quietly without creating sidecars" {
+  stage_arm_harness
+  missing="$ARM_ROOT/missing-store"
+  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid "$PROVABLE_OWNER_PID" \
+    --window 5 --kdir "$missing" --arc absent
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ ! -e "$missing" ]
+  teardown_arm_harness
+}
+
+@test "a firing for a closed arc exits quietly without creating sidecars" {
+  stage_arm_harness
+  stage_arc closed-arc closed
+  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid "$PROVABLE_OWNER_PID" \
+    --window 5 --kdir "$ARM_ROOT/kdir" --arc closed-arc
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  sidecars=("$ARM_ROOT"/kdir/_coordination/arm-window-*)
+  [ "${#sidecars[@]}" -eq 1 ]
+  [ ! -e "${sidecars[0]}" ]
+  teardown_arm_harness
+}
+
+@test "a tmux-only firing without provable pane ancestry exits quietly" {
+  stage_arm_harness
+  run bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-tmux absent-seat \
+    --tmux-server absent-server --window 5 --kdir "$ARM_ROOT/kdir"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  sidecars=("$ARM_ROOT"/kdir/_coordination/arm-window-*)
+  [ "${#sidecars[@]}" -eq 1 ]
+  [ ! -e "${sidecars[0]}" ]
+  teardown_arm_harness
+}
+
+@test "a SIGTERMed window exits 143 and logs killed disposition" {
   stage_arm_harness
   cat > "$ARM_ROOT/scripts/coordinate-watch.sh" <<'EOF'
 #!/usr/bin/env bash
 sleep 60
 EOF
   chmod +x "$ARM_ROOT/scripts/coordinate-watch.sh"
-  bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid $$ --window 30 \
+  bash "$ARM_ROOT/scripts/coordinate-arm.sh" run --owner-pid "$PROVABLE_OWNER_PID" --window 30 \
     --kdir "$ARM_ROOT/kdir" >/dev/null 2>&1 &
   arm_pid=$!
-  # Let the window start before signalling it.
-  for _ in $(seq 1 200); do
-    [ -n "$(pgrep -P "$arm_pid" 2>/dev/null)" ] && break
-    sleep 0.05
-  done
+  wait_for_window "$arm_pid"
   kill -TERM "$arm_pid"
   arm_status=0
   wait "$arm_pid" || arm_status=$?
   # 143 is what the harness sees, and it is exactly the code the rewake branch
   # does not read — hence the marker.
   [ "$arm_status" -eq 143 ]
-  marker="$ARM_ROOT/kdir/_coordination/arm-window-killed.json"
-  [ -f "$marker" ]
-  run python3 - "$marker" <<'PY'
-import json, sys
-row = json.load(open(sys.argv[1]))
-for field in ("killed_at", "owner", "window_seconds", "elapsed_seconds", "note"):
-    assert row.get(field) not in (None, ""), field
-PY
-  [ "$status" -eq 0 ]
+  logs=("$ARM_ROOT"/kdir/_coordination/arm-window-*.log)
+  [ "${#logs[@]}" -eq 1 ]
+  grep -q 'disposition=killed' "${logs[0]}"
   teardown_arm_harness
 }
 
