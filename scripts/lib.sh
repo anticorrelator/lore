@@ -1602,6 +1602,18 @@ PYEOF
   printf '%s\n' "$age"
 }
 
+# --- canonical_session_slug ---
+# Convert the human-rendered generated-chat handle chat:<suffix> back to the
+# durable registry slug chat-<suffix>. Every other slug is returned byte-for-byte,
+# so spec/implement/worker addressing semantics are unchanged.
+canonical_session_slug() {
+  local slug="$1"
+  case "$slug" in
+    chat:*) printf 'chat-%s\n' "${slug#chat:}" ;;
+    *) printf '%s\n' "$slug" ;;
+  esac
+}
+
 # --- resolve_session_owner ---
 # Echo the name of the single live TUI instance whose registry row hosts <slug>,
 # or nothing when none is live within <ttl_seconds>. The owning instance is the

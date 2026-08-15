@@ -15,10 +15,9 @@
 # or torn row is excluded with a stderr warning and never rewritten (reader
 # contract) — validation is the writer's job, paid once at write time.
 #
-# In the human summary a slugless session renders as chat:<8-hex-of-session_id>
-# (chat:? when it carries no session_id) instead of a blank slug, so no live
-# hosted session is invisible; that short id is what `session close --session`
-# accepts. The --json envelope is unchanged (raw registry rows).
+# In the human summary a generated chat slug renders as chat:<request-suffix>;
+# legacy slugless sessions render as chat:<8-hex-of-session_id> (chat:? without
+# one). The --json envelope is unchanged (raw registry rows).
 #
 # Exit codes: 0 success; 1 error. Codes 2 and 3 are reserved (unused here) for
 # session verb family / composed-terminal-verb namespace compatibility.
@@ -141,13 +140,10 @@ if [[ "$INSTANCE_COUNT" -gt 0 ]]; then
   # explicit-fallback idiom as vintage. The distinction matters to the coordinator's
   # one-list-read routing: an omitted segment would read as claude-code, whereas
   # "unknown" says "can't tell — peek or pin the instance".
-  # A slugless session (chat/work session with no work-item slug) has an empty
-  # slug, so listing raw slugs renders it invisibly as a blank in the joined
-  # column. Render it instead as chat:<8-hex-of-session_id> — the same short id
-  # `lore session close --session <id>` accepts, so a coordinator can copy it
-  # straight from this line to tear the session down. A slugless session that
-  # also carries no session_id (older row / non-id-binding harness) has nothing
-  # targetable to show and renders chat:? — visible, honestly un-addressable.
+  # Generated chat identities retain the compact chat:<suffix> display handle;
+  # every session verb canonicalizes it back to the registry's chat-<suffix>.
+  # A legacy slugless row falls back to its session id so it stays visible and
+  # closeable through `session close --session` during rolling upgrades.
   printf '%s' "$RESULT" | jq -r '
     .instances[]
     | (if .build_sha then .build_sha + (if .build_time then " (" + .build_time + ")" else "" end)
@@ -156,7 +152,9 @@ if [[ "$INSTANCE_COUNT" -gt 0 ]]; then
     | ((.framework // "unknown")) as $framework
     | ((.project_dir // "unknown")) as $project_dir
     | ([.sessions[]?
-        | if (.slug // "") != "" then .slug
+        | if .type == "chat" and ((.slug // "") | test("^chat-[0-9a-f]{8}$"))
+          then (.slug | sub("^chat-"; "chat:"))
+          elif (.slug // "") != "" then .slug
           else "chat:" + ((.session_id // "") | if . == "" then "?" else .[0:8] end)
           end]
        | join(", ")) as $sessions

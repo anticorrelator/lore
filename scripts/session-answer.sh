@@ -100,6 +100,7 @@ fi
 [[ -d "$KNOWLEDGE_DIR" ]] || fail "knowledge store not found at: $KNOWLEDGE_DIR"
 
 SESSIONS_DIR="$KNOWLEDGE_DIR/_sessions"
+SLUG="$(canonical_session_slug "$SLUG")"
 TARGET_INSTANCE="$(resolve_session_owner "$SESSIONS_DIR/instances" "$SLUG" "$TTL")"
 [[ -n "$TARGET_INSTANCE" ]] || fail "no live instance is running session '$SLUG'"
 

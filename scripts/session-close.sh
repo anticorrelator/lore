@@ -277,7 +277,7 @@ elif [[ -n "$SESSION_ID_ARG" ]]; then
 else
   # Slug form: the owning live instance is the one whose registry row hosts the
   # slug. Exactly one live instance is eligible; a missing one is a clear error.
-  SLUG="$SLUG_ARG"
+  SLUG="$(canonical_session_slug "$SLUG_ARG")"
   command -v python3 &>/dev/null || fail "python3 is required but not found on PATH"
   TARGET_INSTANCE="$(resolve_session_owner "$SESSIONS_DIR/instances" "$SLUG" "$TTL")"
   [[ -n "$TARGET_INSTANCE" ]] || fail "no live instance is running session '$SLUG'"

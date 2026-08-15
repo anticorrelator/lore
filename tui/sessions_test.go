@@ -93,6 +93,54 @@ func TestAgentClaimSpawnsWithoutStealingFocus(t *testing.T) {
 	}
 }
 
+// TestLegacyChatClaimDerivesAddressableIdentity covers rolling compatibility:
+// an older pending row with a null slug is claimed under a deterministic slug,
+// journals that slug, and promotes it into the registry writer's live set.
+func TestLegacyChatClaimDerivesAddressableIdentity(t *testing.T) {
+	m, sessionsDir := baseSessionModel(t)
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	const requestID = "20260815T022031Z-940ee194"
+	const slug = "chat-940ee194"
+	if err := session.WritePending(sessionsDir, session.Request{
+		RequestID: requestID, Type: "chat", Initiator: "agent",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := m.queueTickCmd()().(queueTickResultMsg)
+	if msg.err != nil || msg.result.Claimed == nil {
+		t.Fatalf("chat request was not claimed: result=%+v err=%v", msg.result, msg.err)
+	}
+	var cmd tea.Cmd
+	m, cmd = m.handleQueueTickResult(msg)
+	if _, ok := m.pendingSpawns[slug]; !ok {
+		t.Fatalf("legacy chat was not keyed by %q: %+v", slug, m.pendingSpawns)
+	}
+
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok || len(batch) < 1 {
+		t.Fatalf("claim handler returned %T, want journal+spawn batch", cmd())
+	}
+	runJournalCmds(t, batch[0])
+	data, err := os.ReadFile(filepath.Join(m.config.KnowledgeDir, "_sessions", "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claimed session.Event
+	if err := json.Unmarshal(bytes.TrimSpace(data), &claimed); err != nil {
+		t.Fatalf("decode claimed event: %v", err)
+	}
+	if claimed.Event != session.EventClaimed || claimed.Slug != slug {
+		t.Fatalf("claimed journal identity = %+v, want slug %q", claimed, slug)
+	}
+
+	m, _ = m.handleSessionProcessStarted(work.SessionProcessStartedMsg{Slug: slug})
+	row := m.instanceRow()
+	if len(row.Sessions) != 1 || row.Sessions[0].Slug != slug || row.Sessions[0].Type != "chat" {
+		t.Fatalf("registry row did not preserve chat identity: %+v", row.Sessions)
+	}
+}
+
 // TestSpecProcessStartedPromotesQueueSession verifies the started handler moves a
 // pending agent spawn into the live session set and does not steal focus.
 func TestSpecProcessStartedPromotesQueueSession(t *testing.T) {

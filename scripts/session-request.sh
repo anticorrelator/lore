@@ -7,8 +7,9 @@
 #
 # Options:
 #   --type <t>         Required. Session type: spec | implement | chat | worker.
-#   --slug <s>         Work-item slug the request targets (default: null / no work
-#                      item). REQUIRED for --type worker, and its shape is checked:
+#   --slug <s>         Work-item slug the request targets. An unscoped chat gets
+#                      a durable chat-<request-suffix> session slug automatically.
+#                      REQUIRED for --type worker, and its shape is checked:
 #                      a worker's slug is the derived <work-item-slug>--w<n> that is
 #                      its session identity, and the suffix is what the journal,
 #                      scoped watches, and the TUI parse to find the work item.
@@ -176,9 +177,10 @@ case "$TYPE" in
 esac
 
 # A worker session's slug is its identity — the derived <work-item-slug>--w<n>
-# the claiming TUI keys panels, tmux names, and journal rows on. Unlike spec/chat
-# (which may run with no work item and thus a null slug), a worker with no slug
-# has no session identity, so require one at enqueue.
+# the claiming TUI keys panels, tmux names, and journal rows on. Unlike spec (which
+# may run with no work item and thus a null slug), a worker with no slug has no
+# session identity, so require one at enqueue. Unscoped chat identity is minted
+# after REQUEST_ID is known below; worker derivation remains caller-owned.
 if [[ "$TYPE" == "worker" && -z "$SLUG" ]]; then
   fail "--slug is required for --type worker (the derived slug is the session identity)"
 fi
@@ -406,9 +408,8 @@ if [[ "$TYPE" == "worker" ]]; then
   fi
 fi
 
-# Nullable string fields become explicit JSON null when unset.
-SLUG_JSON="null"
-[[ -n "$SLUG" ]] && SLUG_JSON="$(jq -n --arg s "$SLUG" '$s')"
+# Nullable target becomes explicit JSON null when unset. Slug is resolved after
+# REQUEST_ID is minted below because unscoped chats derive their identity from it.
 TARGET_JSON="null"
 [[ -n "$TARGET" ]] && TARGET_JSON="$(jq -n --arg t "$TARGET" '$t')"
 
@@ -426,6 +427,17 @@ mkdir -p "$PENDING_DIR"
 RAND="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 REQUEST_ID="$(date -u +%Y%m%dT%H%M%SZ)-${RAND}"
 REQUESTED_AT="$(timestamp_iso)"
+
+# An unscoped chat still needs a durable session identity: every live-session
+# verb, registry join, and scoped journal reader addresses by slug. The request
+# id is already the spawn's durable identity, and its random suffix is compact,
+# deterministic, and stable across claim retries. Explicit chat slugs (for chats
+# attached to a work item/follow-up) stay byte-identical.
+if [[ "$TYPE" == "chat" && -z "$SLUG" ]]; then
+  SLUG="chat-${REQUEST_ID##*-}"
+fi
+SLUG_JSON="null"
+[[ -n "$SLUG" ]] && SLUG_JSON="$(jq -n --arg s "$SLUG" '$s')"
 
 # attempts MUST be a JSON number (--argjson), never a quoted string, so the Go
 # decoder accepts it (docs/session-substrate.md, Type discipline).

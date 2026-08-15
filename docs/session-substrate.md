@@ -110,8 +110,8 @@ second TTL mechanism.
 
 **Crash/restart recovery (tmux adoption).** When tmux hosting is active, a
 TUI-spawned harness runs inside a tmux session (`lore-<instance>-<slug>`) on a
-dedicated server, so the harness outlives the TUI process. A **slugless** session
-(a chat/work session carrying no work-item slug) hosts the same way under a
+dedicated server, so the harness outlives the TUI process. A **legacy slugless**
+session (a row written before unscoped chats received durable slugs) hosts the same way under a
 generated `lore-<instance>-chat-<short-id>` name recorded on its registry row —
 no session class silently loses crash recovery while hosting is active; the two
 fallbacks (no instance name, or a tmux creation failure) each announce the
@@ -230,7 +230,7 @@ and, once an instance claims it, moves to `requests/claimed/<request_id>.json`.
 |-------|------|-------|
 | `request_id` | string | Unique id; also the filename stem. |
 | `type` | string | Enum `spec\|implement\|chat\|worker`. |
-| `slug` | string \| null | Work-item slug the request targets, or null (e.g. a chat with no work item). **Required for `worker`**: a worker's slug is the derived `<work-item-slug>--w<n>` that is its session identity (see [Worker sessions](#worker-sessions)). |
+| `slug` | string \| null | Session identity. An unscoped chat receives `chat-<request-suffix>` at enqueue; an explicitly scoped chat/spec/implement keeps its work-item slug. Null remains valid for a slugless spec and for legacy chat rows. **Required for `worker`**: a worker's slug is the derived `<work-item-slug>--w<n>` that is its session identity (see [Worker sessions](#worker-sessions)). |
 | `target_instance` | string \| null | Instance name the request is addressed to, or null for "any instance". |
 | `initiator` | string | Enum `agent\|human`. |
 | `requested_by` | string | Who enqueued it (instance name, agent id, or human). |
@@ -395,7 +395,7 @@ teardown.
 | `reason` | string | Enum `protocol_terminus\|coordinator\|human` — who/what asked for the close. |
 | `requested_by` | string | Who enqueued it (instance name, agent id, or human). |
 | `requested_at` | string | ISO 8601 UTC timestamp of enqueue. |
-| `session_id` | string \| absent | Harness session id (full or the leading prefix passed to `close --session`) naming the exact session to close. Stamped only by the `--session` form; omit-when-empty. The consumer matches it against each hosted session's id by exact-or-leading-prefix and keys teardown off that session's slug; a row without it (every other form, every legacy row) keys off `slug` unchanged. It is the only handle that disambiguates two slugless sessions, whose `slug` is both null. |
+| `session_id` | string \| absent | Harness session id (full or the leading prefix passed to `close --session`) naming the exact session to close. Stamped only by the `--session` form; omit-when-empty. The consumer matches it against each hosted session's id by exact-or-leading-prefix and keys teardown off that session's slug; a row without it (every other form, every legacy row) keys off `slug` unchanged. It remains the compatibility handle for legacy slugless sessions and disambiguates two such rows whose `slug` is both null. |
 
 **Enqueue** = write a tmp file + rename into `close-requests/<request_id>.json`
 (atomic; readers never see a torn row) — the same primitive as the spawn queue.

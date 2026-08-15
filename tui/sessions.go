@@ -991,7 +991,7 @@ func emitSpawnFailedCmd(dir, script, kdir, requestID, reason, actor string) tea.
 		ev := session.Event{
 			Event:         session.EventSpawnFailed,
 			ActorInstance: session.StrPtr(actor),
-			Slug:          req.SlugValue(),
+			Slug:          req.SessionSlug(),
 			SessionType:   req.Type,
 			Initiator:     req.Initiator,
 			RequestID:     requestID,
@@ -1065,7 +1065,7 @@ func (m model) handleQueueTickResult(msg queueTickResultMsg) (model, tea.Cmd) {
 			Event:          session.EventClaimed,
 			ActorInstance:  session.StrPtr(m.instanceName),
 			TargetInstance: req.TargetInstance,
-			Slug:           req.SlugValue(),
+			Slug:           req.SessionSlug(),
 			SessionType:    req.Type,
 			Initiator:      req.Initiator,
 			RequestID:      req.RequestID,
@@ -1103,8 +1103,8 @@ func descriptorFromRequest(req session.Request) work.SessionDescriptor {
 	}
 	return work.SessionDescriptor{
 		Type:             req.Type,
-		Slug:             req.SlugValue(),
-		Title:            req.SlugValue(),
+		Slug:             req.SessionSlug(),
+		Title:            req.SessionSlug(),
 		ExtraContext:     req.ExtraContextText(),
 		Initiator:        req.Initiator,
 		AutoClose:        req.AutoClose,

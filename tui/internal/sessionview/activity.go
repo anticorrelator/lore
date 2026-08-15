@@ -18,9 +18,9 @@ type Activity struct {
 
 // ActivityKey identifies the session an activity overlay entry describes. It is
 // (owning-instance, slug): the running instance for activity events, the target
-// instance for a close request. A slugless session keys on an empty slug, so two
-// co-resident slugless sessions on one instance share an entry — the known
-// consumer-side collision this pass does not fix.
+// instance for a close request. A legacy slugless session keys on an empty slug,
+// so two co-resident legacy rows on one instance still share an entry during a
+// rolling upgrade; newly enqueued chats always carry a durable slug.
 type ActivityKey struct {
 	Instance string
 	Slug     string

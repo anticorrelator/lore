@@ -28,7 +28,7 @@ type SessionRow struct {
 	RowID     string
 	PanelKey  string
 	Slug      string
-	Display   string // slug, or chat:<8hex> for a slugless session
+	Display   string // slug, chat:<request-suffix>, or legacy chat:<8hex-of-session-id>
 	Type      string // spec|implement|chat|worker
 	Initiator string // agent|human
 	Instance  string // owning instance
@@ -245,6 +245,30 @@ func ChatDisplayID(sessionID string) string {
 		hex = hex[:8]
 	}
 	return "chat:" + hex
+}
+
+// SessionDisplay preserves the compact chat:<suffix> handle for generated chat
+// identities while keeping the registry/request slug canonical as chat-<suffix>.
+// Explicit chat slugs and every non-chat slug render unchanged. Slugless legacy
+// rows retain the session-id fallback so they remain visible during upgrades.
+func SessionDisplay(slug, sessionType, sessionID string) string {
+	if slug == "" {
+		return ChatDisplayID(sessionID)
+	}
+	const prefix = "chat-"
+	if sessionType != "chat" || !strings.HasPrefix(slug, prefix) {
+		return slug
+	}
+	suffix := strings.TrimPrefix(slug, prefix)
+	if len(suffix) != 8 {
+		return slug
+	}
+	for _, r := range suffix {
+		if !strings.ContainsRune("0123456789abcdef", r) {
+			return slug
+		}
+	}
+	return "chat:" + suffix
 }
 
 var (

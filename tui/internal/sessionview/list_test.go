@@ -20,6 +20,22 @@ func TestChatDisplayID(t *testing.T) {
 	}
 }
 
+func TestSessionDisplay(t *testing.T) {
+	cases := []struct {
+		slug, typ, sessionID, want string
+	}{
+		{"chat-deadbeef", "chat", "", "chat:deadbeef"},
+		{"chat-followup", "chat", "", "chat-followup"},
+		{"chat-deadbeef", "implement", "", "chat-deadbeef"},
+		{"", "chat", "deadbeefcafef00d", "chat:deadbeef"},
+	}
+	for _, tc := range cases {
+		if got := SessionDisplay(tc.slug, tc.typ, tc.sessionID); got != tc.want {
+			t.Errorf("SessionDisplay(%q, %q, %q) = %q, want %q", tc.slug, tc.typ, tc.sessionID, got, tc.want)
+		}
+	}
+}
+
 // TestListGroupsWorkersUnderBase verifies derived-slug workers render under a
 // base-item header while standalone sessions render flat, and that the cursor
 // lands on a selectable session row (never a header) from the first frame.

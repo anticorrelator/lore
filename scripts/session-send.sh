@@ -214,7 +214,7 @@ EOF
 }
 
 # --- Resolve the owning live instance ---
-SLUG="$SLUG_ARG"
+SLUG="$(canonical_session_slug "$SLUG_ARG")"
 TARGET_INSTANCE="$(resolve_session_owner "$SESSIONS_DIR/instances" "$SLUG" "$TTL")"
 [[ -n "$TARGET_INSTANCE" ]] || fail "no live instance is running session '$SLUG'"
 
