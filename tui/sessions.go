@@ -377,11 +377,17 @@ func pluralize(n int, singular, plural string) string {
 	return fmt.Sprintf("%d %s", n, plural)
 }
 
-// queueTickCmd runs one reclaim+claim pass. The live-instance set is read inside
-// the Cmd; the plan-doc gate is snapshotted from the loaded work items now.
+// queueTickCmd runs the request-expiry sweep, then one reclaim+claim pass. The
+// expiry helper owns pending->expiring->journal->delete recovery; hosting it on
+// this heartbeat means every live TUI advances the terminal transition without
+// making `session list` or a requester-owned watcher mutate state. The
+// live-instance set is read inside the Cmd; the plan-doc gate is snapshotted
+// from the loaded work items now.
 func (m model) queueTickCmd() tea.Cmd {
 	dir := m.sessionsDir
 	name := m.instanceName
+	expiryScript := m.expiryScript
+	kdir := m.config.KnowledgeDir
 	vintage := m.buildTime
 	projectDir := m.normalizedProjectDir
 	planDocs := make(map[string]bool)
@@ -400,6 +406,13 @@ func (m model) queueTickCmd() tea.Cmd {
 		liveSlugs[slug] = true
 	}
 	return func() tea.Msg {
+		var expiryErr error
+		if expiryScript != "" {
+			cmd := exec.Command("bash", expiryScript, "--kdir", kdir)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				expiryErr = fmt.Errorf("expiry sweep: %w: %s", err, strings.TrimSpace(string(out)))
+			}
+		}
 		live := make(map[string]bool)
 		instances, instanceDiagnostics := session.ListInstancesWithDiagnostics(dir)
 		for _, inst := range instances {
@@ -409,6 +422,11 @@ func (m model) queueTickCmd() tea.Cmd {
 			func(slug string) bool { return planDocs[slug] },
 			func(slug string) bool { return liveSlugs[slug] },
 			time.Now(), session.ReclaimAfter)
+		if err == nil {
+			err = expiryErr
+		} else if expiryErr != nil {
+			err = fmt.Errorf("%v; %w", expiryErr, err)
+		}
 		res.Diagnostics = append(instanceDiagnostics, res.Diagnostics...)
 		return queueTickResultMsg{result: res, err: err}
 	}

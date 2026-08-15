@@ -308,6 +308,13 @@
           "minimum": 1,
           "default": 1,
           "description": "Cap on concurrently dispatchable coordination streams. scripts/coordinate-status.sh reads this key and falls back to one seat when it is absent or not a positive integer."
+        },
+        "session_request_ttl_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 604800,
+          "default": 3600,
+          "description": "Maximum age of an unclaimed session spawn request, measured only from its durable requested_at field. Every live TUI runs the expiry sweep before claiming; the sweep records request_expired through the sole journal writer before deleting the row. Runtime readers fall back to 3600 seconds when this key is absent for rolling compatibility."
         }
       }
     },

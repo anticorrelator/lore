@@ -25,6 +25,10 @@ $KDIR/_sessions/
   requests/pending/<id>.json     queue — one file per waiting request
   requests/claimed/<id>.json     queue — a request a specific instance has claimed
                                  (claim = atomic rename pending/ -> claimed/)
+  requests/expiring/<id>.json    queue — TTL terminal selected; journal append
+                                 must succeed before this recovery row is deleted
+  requests/cancelling/<id>.json  queue — cancel terminal selected; journal append
+                                 must succeed before this recovery row is deleted
   close-requests/<id>.json       queue — one file per close request, consumed
                                  (deleted) by the owning instance (no claim split)
   send-requests/<id>.json        queue — one file per send request, consumed
@@ -86,6 +90,11 @@ becomes a visible column rather than a silent behavioral skew. It is fully
 rejected** by `min_vintage` filtering (see [Request queue](#request-queue)).
 `lore session list` renders the vintage column (`build_sha`, falling back to
 `build_time`, else `unknown`).
+
+The same list read annotates every pending request with `age_seconds`, computed
+from `requested_at` rather than file mtime, and `past_ttl` against the configured
+request TTL. Human output prints the age and marks past-TTL rows explicitly. The
+list remains read-only; a live TUI heartbeat owns the expiry transition.
 
 Per nested session object: `slug` (string), `type` (string enum
 `spec|implement|chat|worker`), `initiator` (string enum `agent|human`), `started`
@@ -223,6 +232,8 @@ published branch.
 
 One file per request. A request begins in `requests/pending/<request_id>.json`
 and, once an instance claims it, moves to `requests/claimed/<request_id>.json`.
+If it remains unclaimed past its TTL, the claim-side sweep instead moves it to
+`requests/expiring/<request_id>.json` until its terminal journal row is durable.
 
 `request_id` = `<timestamp>-<random suffix>`.
 
@@ -268,6 +279,11 @@ A **claimed** file additionally carries:
 **Enqueue** = write a tmp file + rename into `requests/pending/<request_id>.json`
 (atomic; readers never see a torn request row).
 
+An enqueue carrying `--target` first joins the name against the registry using
+the same 30s mtime liveness window as `coordinate pin --preflight`. A missing or
+stale row is refused with its age and the re-pin/`--anywhere` choices; the writer
+never silently weakens hard placement into an untargeted request.
+
 **Claim** = `os.Rename(pending/X, claimed/X)`. Rename on one filesystem is atomic,
 so exactly one racing instance succeeds — this is the sole at-most-once guard, and
 it lives entirely at the queue layer. The winner then rewrites the claimed file
@@ -296,6 +312,10 @@ for that transition succeeds — for `claimed`, that means after `claimed_by` an
 `claimed_at` are written, not merely after the directory rename. A crash before
 the journal append loses at most one history row; a crash before claim metadata is
 written leaves an incomplete claimed row handled by the recovery rule below.
+Expiry is deliberately stronger: the claim-side sweep first atomically moves a
+row to `requests/expiring/`, appends its deterministic `request_expired` event,
+and only then deletes the expiring row. An append failure or interrupted sweep
+therefore leaves replayable state; the next live TUI retries the same event id.
 
 | Terminal state | Trigger | Effect | Journal event |
 |----------------|---------|--------|---------------|
@@ -304,7 +324,8 @@ written leaves an incomplete claimed row handled by the recovery rule below.
 | **abandoned** | a claim attempt observes `attempts >= 3` on a pending row | delete the row (journal row is the dead-letter record) | `request_abandoned` (with last `reason`) |
 | **reclaimed** | claimed row whose `claimed_by` is stale/absent in the registry AND `claimed_at` older than 60s | rename claimed → pending, `attempts` unchanged (the claimer died; the request didn't fail) | `request_reclaimed` (`reason: "stale_instance"`) |
 | **incomplete-claim reclaimed** | claimed row missing `claimed_by` or `claimed_at`, claimed-file mtime older than 60s | rename claimed → pending, preserve `attempts`, set `last_error: "incomplete_claim"` | `request_reclaimed` (`reason: "incomplete_claim"`) |
-| **cancelled** | reserved for item 2's `close`/cancel verb | delete pending row | `request_cancelled` |
+| **cancelled** | `session close --request` atomically wins pending→cancelling | append deterministic terminal, then delete cancelling row | `request_cancelled` |
+| **expired** | `requested_at` is older than `coordination.session_request_ttl_seconds` (default 3600s) | atomically move pending → expiring; append terminal; delete only after append succeeds | `request_expired` (`reason: "ttl_elapsed"`) |
 
 `request_reclaimed` fires only **after** the durable rename back to `pending/`
 succeeds. `last_error` takes the values `"incomplete_claim"` and
@@ -523,8 +544,11 @@ instance liveness**: once the owning instance leaves the registry, the outcome w
 never arrive and the reader stops waiting on it.
 
 The cancel form `lore session close --request <id>` is unrelated to this queue: it
-deletes a still-**pending spawn** row in `requests/pending/` and emits
-`request_cancelled` (the terminal state the request lifecycle reserves for it).
+atomically moves a still-**pending spawn** row from `requests/pending/` to
+`requests/cancelling/`, emits deterministic `request_cancelled` (the terminal
+state the request lifecycle reserves for it), and deletes the recovery row only
+after that append succeeds. A failed append is a surfaced retry, never invisible
+removal.
 
 ## Send-request queue
 
@@ -664,7 +688,7 @@ protocol terminal verbs, stop hooks) appends through the one sanctioned writer,
 | `initiator` | string | `agent\|human`. |
 | `request_id` | string | The request this event concerns; required for queue-lifecycle events. |
 | `option` | integer | Positive displayed modal option number; required on `answer_requested`, `answered`, and `answer_refused`. |
-| `reason` | string | Failure/reclaim reason, carried by `spawn_failed`, `request_reclaimed`, `request_abandoned`; `modal_blocked` requires exactly `modal`; `answer_refused` uses its closed refusal set; `terminus_reached` requires `spec-finalize` or `impl-close`. |
+| `reason` | string | Failure/reclaim reason, carried by `spawn_failed`, `request_reclaimed`, `request_abandoned`; `request_expired` requires exactly `ttl_elapsed`; `modal_blocked` requires exactly `modal`; `answer_refused` uses its closed refusal set; `terminus_reached` requires `spec-finalize` or `impl-close`. |
 | `modal_signature` | string | Screen evidence for a `modal_blocked` row, and valid only there. Omit-when-empty; single line, at most 160 characters. Holds the parsed modal title when the classifier read one, otherwise a token naming which interactive predicate fired (`cc-permission-modal`, `cc-option-select`, `cc-permission-modal+cc-option-select`, or `<framework>-interactive`). The screen a modal row is derived from is repainted within seconds and peek responses are consumed on read, so without this the row cannot afterwards be told apart from a misfire on a partially repainted screen. |
 | `step_id` | string | Stable machine-readable milestone identity. Required on `step_completed`; `/spec` uses `spec:investigation`, `spec:design`, and `spec:plan-ready`, while `/implement` uses `implement:task:<task-id>`. |
 | `step_label` | string | Concise human-readable milestone label. Required on `step_completed`. |
@@ -696,6 +720,7 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `request_reclaimed` | TUI (any instance) | a stale/incomplete claim was returned to pending (carries `reason`) |
 | `request_abandoned` | TUI | `attempts >= 3`; request dropped, journal row is the dead-letter (carries last `reason`) |
 | `request_cancelled` | `session close --request` cancel verb | a pending spawn request was cancelled |
+| `request_expired` | claim-side TUI expiry sweep | an unclaimed request exceeded the configured TTL; deterministic `event_id`, `reason=ttl_elapsed` |
 | `close_requested` | `session close` enqueue verb (`<slug>` / `--self`) | a close request was enqueued for the instance running a slug |
 | `close_failed` | TUI | a consumed close request did not complete teardown; `reason` names why (`interactive-prompt`/`still-generating`/`rung-exhausted`/`error`), or `target-instance-dead` records exact dead-target retirement |
 | `restore_refused` | TUI | a worktree identity, ownership, or publish precondition could not be proven; carries a reason and links to the expected identity/generation, plus observed values when available. It is a worktree outcome, not a close terminal |
@@ -708,7 +733,7 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `answer_refused` | TUI | the choice failed closed; `reason` is `not-modal`, `expect-mismatch`, `option-unavailable`, `no-contract`, `error`, or `unconfirmed` |
 
 **Queue-lifecycle events** — `requested`, `claimed`, `spawned`, `spawn_failed`,
-`request_reclaimed`, `request_abandoned`, `request_cancelled`, `close_requested`,
+`request_reclaimed`, `request_abandoned`, `request_cancelled`, `request_expired`, `close_requested`,
 `close_failed`, `send_requested`, `sent`, `send_refused`, `answer_requested`,
 `answered`, `answer_refused` — each concern a specific
 request and MUST carry a non-empty `request_id`. The writer enforces this. (`sent`
@@ -750,7 +775,10 @@ and TUI-driven queue lifecycle; the enqueue writer owns `requested`; the
 `send_requested` (its enqueue), while the TUI owns the `sent` / `send_refused`
 outcomes it decides at consume; the `session answer` verb owns `answer_requested`,
 while the TUI owns `answered` / `answer_refused`; hosted `/spec` and `/implement` leads own
-`step_completed`, while their terminal verbs own `terminus_reached`. Peek has no
+`step_completed`, while their terminal verbs own `terminus_reached`. The
+claim-side TUI heartbeat hosts `session-request-expire.sh`; that helper owns the
+pending→expiring transition and emits `request_expired` through the same sole
+journal writer. Peek has no
 events — it is a read.
 
 ### Prospective emission (emitter obligation)
@@ -840,11 +868,11 @@ O(1) stat, no rows replayed) for capturing a baseline before acting, and `--tail
 
 ### Dedupe posture
 
-The appender **does not dedupe** — it appends every validated row unconditionally.
-Idempotency is the emitter's responsibility: an emit site that must be at-most-once
-constructs a **deterministic `event_id`** and guards on it (checking its own state
-or the journal) before calling the writer. Most session transitions are naturally
-once-only and need no guard; the writer-generated `event_id` is fine for them.
+The appender dedupes only caller-supplied event identities: an exact replay of a
+deterministic `event_id` succeeds without appending, while reuse for different
+evidence is refused. Rows without a caller id receive a fresh writer-generated id
+and append normally. Emitters that need retry-safe at-most-once behavior therefore
+construct a deterministic id; `request_expired` is one such transition.
 
 ## Ownership matrix
 
@@ -856,6 +884,8 @@ reads full snapshots.
 | `instances/<name>.json` | the owning TUI instance (its own file) | tmp + `os.Rename`, `os.Chtimes` heartbeat | Phase 2 (TUI) |
 | `requests/pending/<id>.json` | the enqueuer | item 2 `request` verb; TUI human path | item 2 / Phase 2 |
 | `requests/claimed/<id>.json` | the claiming TUI instance | `os.Rename` claim + tmp+rename metadata | Phase 2 (TUI) |
+| `requests/expiring/<id>.json` | `scripts/session-request-expire.sh`, serialized across live TUI heartbeats | atomic rename from pending; delete only after deterministic terminal append | request expiry |
+| `requests/cancelling/<id>.json` | `scripts/session-close.sh --request` | atomic rename from pending; delete only after deterministic terminal append | request cancel |
 | `close-requests/<id>.json` | the enqueuer (`session close` verb); deleted-on-consume by the owning TUI instance | tmp + rename enqueue; owning instance deletes | item 2 (enqueue) / Phase 2 (consume) |
 | `answer-requests/<id>.json` | the enqueuer (`session answer` verb); deleted-on-consume by the owning TUI instance | tmp + rename enqueue; owning instance deletes after the shared classifier gate | answer verb |
 | `events.jsonl` | `scripts/session-event-append.sh` | every emitter, via subprocess | Phase 1 |

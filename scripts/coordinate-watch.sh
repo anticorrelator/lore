@@ -55,7 +55,7 @@
 #
 # Options:
 #   --until <events>  Comma-separated event names to wake on. Default is the
-#                     actionable set: closed, close_failed, orphaned,
+#                     actionable set: closed, close_failed, orphaned, request_expired,
 #                     worktree_quarantined, terminus_reached, needs_input,
 #                     modal_blocked, restore_refused — every edge where a session
 #                     ended or parked waiting on somebody. Names are validated

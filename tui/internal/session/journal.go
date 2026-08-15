@@ -53,6 +53,7 @@ const (
 	EventReclaimed           = "request_reclaimed"
 	EventAbandoned           = "request_abandoned"
 	EventCancelled           = "request_cancelled"
+	EventExpired             = "request_expired"
 	EventSendRequested       = "send_requested"
 	EventSent                = "sent"
 	EventSendRefused         = "send_refused"

@@ -203,32 +203,53 @@ PYEOF
   exit 0
 fi
 
-# --- Cancel form: delete a pending spawn row, emit request_cancelled ---
+# --- Cancel form: claim pending row, append terminal, then delete ---
 if [[ -n "$CANCEL_ID" ]]; then
+  command -v python3 &>/dev/null || fail "python3 is required but not found on PATH"
   PENDING_FILE="$SESSIONS_DIR/requests/pending/${CANCEL_ID}.json"
-  [[ -f "$PENDING_FILE" ]] || fail "no pending request '$CANCEL_ID' to cancel"
+  CANCELLING_DIR="$SESSIONS_DIR/requests/cancelling"
+  CANCELLING_FILE="$CANCELLING_DIR/${CANCEL_ID}.json"
+  mkdir -p "$CANCELLING_DIR"
+  if [[ -f "$PENDING_FILE" ]]; then
+    # Atomic rename is the cancel-vs-claim/expiry arbiter. If another transition
+    # won, this move fails and no terminal is invented here.
+    mv "$PENDING_FILE" "$CANCELLING_FILE" 2>/dev/null \
+      || fail "pending request '$CANCEL_ID' changed before cancellation could claim it"
+  elif [[ ! -f "$CANCELLING_FILE" ]]; then
+    fail "no pending request '$CANCEL_ID' to cancel"
+  fi
 
-  # Copy identifying fields for the event before deleting (tolerant read).
-  C_SLUG="$(jq -r '.slug // empty' "$PENDING_FILE" 2>/dev/null || true)"
-  C_TYPE="$(jq -r '.type // empty' "$PENDING_FILE" 2>/dev/null || true)"
-  C_TARGET="$(jq -r '.target_instance // empty' "$PENDING_FILE" 2>/dev/null || true)"
-
-  rm -f "$PENDING_FILE"
+  # A retained cancelling row is the retry record if the append failed or the
+  # process stopped. Its event identity cannot vary between retries.
+  C_SLUG="$(jq -r '.slug // empty' "$CANCELLING_FILE" 2>/dev/null || true)"
+  C_TYPE="$(jq -r '.type // empty' "$CANCELLING_FILE" 2>/dev/null || true)"
+  C_TARGET="$(jq -r '.target_instance // empty' "$CANCELLING_FILE" 2>/dev/null || true)"
+  CANCEL_EVENT_ID="request-cancelled-$(python3 - "$CANCEL_ID" <<'PYEOF'
+import hashlib, sys
+print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:32])
+PYEOF
+)"
 
   EVENT_ROW="$(jq -n \
+    --arg event_id "$CANCEL_EVENT_ID" \
     --arg request_id "$CANCEL_ID" \
     --arg slug "$C_SLUG" \
     --arg session_type "$C_TYPE" \
     --arg target "$C_TARGET" \
     --arg reason "cancelled" \
-    '{event: "request_cancelled", request_id: $request_id, reason: $reason}
+    '{event_id: $event_id, event: "request_cancelled", request_id: $request_id, reason: $reason}
      + (if $slug != "" then {slug: $slug} else {} end)
      + (if $session_type != "" then {session_type: $session_type} else {} end)
      + (if $target != "" then {target_instance: $target} else {} end)')"
-  emit_event "$EVENT_ROW"
+  if ! printf '%s' "$EVENT_ROW" \
+      | bash "$SCRIPT_DIR/session-event-append.sh" --kdir "$KNOWLEDGE_DIR" >/dev/null; then
+    fail "could not append cancellation for request '$CANCEL_ID'; cancelling row was retained"
+  fi
+  rm -f "$CANCELLING_FILE"
 
   if [[ $JSON_MODE -eq 1 ]]; then
-    json_output "$(jq -n --arg request_id "$CANCEL_ID" '{request_id: $request_id, cancelled: true}')"
+    json_output "$(jq -n --arg request_id "$CANCEL_ID" --arg event_id "$CANCEL_EVENT_ID" \
+      '{request_id: $request_id, event_id: $event_id, cancelled: true}')"
   fi
   echo "[session] Cancelled pending request $CANCEL_ID"
   exit 0

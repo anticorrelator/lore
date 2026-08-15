@@ -13,7 +13,7 @@
 #
 # Options:
 #   --until <events>  Comma-separated event names to wake on. The default is the
-#                     actionable set: closed, close_failed, orphaned,
+#                     actionable set: closed, close_failed, orphaned, request_expired,
 #                     worktree_quarantined, terminus_reached, needs_input,
 #                     modal_blocked, restore_refused — every edge where a session
 #                     either ended or parked waiting on somebody. A default wait
@@ -105,6 +105,7 @@ SLUG_ARG=""
 WORK_ITEM=""
 WORK_ITEM_SET=0
 UNTIL="${SESSION_ACTIONABLE_EVENTS// /,}"
+UNTIL_EXPLICIT=0
 SINCE=""
 SINCE_SET=0
 TIMEOUT=3600
@@ -123,11 +124,11 @@ REQUEST_ID_SET=0
 # Waiting on any of these queue/pre-spawn events means an unhosted slug is the
 # normal starting state, so the session-gone (liveness) exit is disabled for them —
 # timeout is the only bound.
-PRESPAWN_EVENTS="requested claimed spawned spawn_failed request_reclaimed request_abandoned request_cancelled"
+PRESPAWN_EVENTS="requested claimed spawned spawn_failed request_reclaimed request_abandoned request_cancelled request_expired"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --until) UNTIL="$2"; shift 2 ;;
+    --until) UNTIL="$2"; UNTIL_EXPLICIT=1; shift 2 ;;
     --since) SINCE="$2"; SINCE_SET=1; shift 2 ;;
     --request-id) REQUEST_ID="$2"; REQUEST_ID_SET=1; shift 2 ;;
     --work-item) WORK_ITEM="$2"; WORK_ITEM_SET=1; shift 2 ;;
@@ -204,12 +205,18 @@ done
 [[ ${#UNTIL_TOKENS[@]} -gt 0 ]] || fail "empty --until: pass at least one event name"
 
 # --- Session-gone applies only to session-lifetime watches (see PRESPAWN_EVENTS) ---
+# The default actionable set now includes request_expired as a coordinator wake,
+# but remains a session-lifetime wait for this targeted verb. Only an explicit
+# pre-spawn --until disables liveness; otherwise adding one board-level terminal
+# would turn every default no-owner result into a timeout.
 LIVENESS_ENABLED=1
-for tok in "${UNTIL_TOKENS[@]}"; do
-  for p in $PRESPAWN_EVENTS; do
-    if [[ "$tok" == "$p" ]]; then LIVENESS_ENABLED=0; break 2; fi
+if [[ $UNTIL_EXPLICIT -eq 1 ]]; then
+  for tok in "${UNTIL_TOKENS[@]}"; do
+    for p in $PRESPAWN_EVENTS; do
+      if [[ "$tok" == "$p" ]]; then LIVENESS_ENABLED=0; break 2; fi
+    done
   done
-done
+fi
 
 # --- Resolve store ---
 if [[ -n "$KDIR_OVERRIDE" ]]; then

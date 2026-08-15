@@ -34,7 +34,7 @@
 #                resumed | recovered | closed | orphaned | step_completed |
 #                terminus_reached |
 #                spawn_failed | request_reclaimed |
-#                request_abandoned | request_cancelled | close_requested |
+#                request_abandoned | request_cancelled | request_expired | close_requested |
 #                close_failed | send_requested | sent | send_refused |
 #                answer_requested | answered | answer_refused |
 #                modal_blocked |
@@ -42,7 +42,7 @@
 #
 # Conditional rules:
 #   Queue-lifecycle events (requested, claimed, spawned, spawn_failed,
-#   request_reclaimed, request_abandoned, request_cancelled, close_requested,
+#   request_reclaimed, request_abandoned, request_cancelled, request_expired, close_requested,
 #   close_failed, send_requested, sent, send_refused) REQUIRE a non-empty
 #   request_id.
 #   Answer lifecycle events also require a non-empty slug and a positive integer
@@ -135,13 +135,13 @@ EVENT=$(printf '%s' "$ROW" | jq -r '.event // ""')
 case "$EVENT" in
   requested|claimed|spawned|needs_input|resumed|recovered|closed|orphaned|\
 step_completed|terminus_reached|spawn_failed|request_reclaimed|\
-request_abandoned|request_cancelled|close_requested|close_failed|send_requested|sent|send_refused|answer_requested|answered|answer_refused|modal_blocked|\
+request_abandoned|request_cancelled|request_expired|close_requested|close_failed|send_requested|sent|send_refused|answer_requested|answered|answer_refused|modal_blocked|\
 restore_refused|worktree_quarantined) ;;
   "")
     fail "missing required field: event"
     ;;
   *)
-    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, resumed, recovered, closed, orphaned, step_completed, terminus_reached, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, close_failed, send_requested, sent, send_refused, answer_requested, answered, answer_refused, modal_blocked, restore_refused, worktree_quarantined)"
+    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, resumed, recovered, closed, orphaned, step_completed, terminus_reached, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, request_expired, close_requested, close_failed, send_requested, sent, send_refused, answer_requested, answered, answer_refused, modal_blocked, restore_refused, worktree_quarantined)"
     ;;
 esac
 
@@ -221,12 +221,24 @@ fi
 
 # --- Queue-lifecycle events require a non-empty request_id ---
 case "$EVENT" in
-  requested|claimed|spawned|spawn_failed|request_reclaimed|request_abandoned|request_cancelled|close_requested|close_failed|send_requested|sent|send_refused|answer_requested|answered|answer_refused)
+  requested|claimed|spawned|spawn_failed|request_reclaimed|request_abandoned|request_cancelled|request_expired|close_requested|close_failed|send_requested|sent|send_refused|answer_requested|answered|answer_refused)
     if ! printf '%s' "$ROW" | jq -e '(.request_id // "") != ""' >/dev/null 2>&1; then
       fail "missing required field: request_id (required for queue-lifecycle event '$EVENT')"
     fi
     ;;
 esac
+
+# Expiry retries after an interrupted sweep must be exact replays. Requiring the
+# deterministic id and closed reason here keeps a future emitter from turning
+# the terminal into two writer-generated rows.
+if [[ "$EVENT" == "request_expired" ]]; then
+  if ! printf '%s' "$ROW" | jq -e '(.event_id // "") != ""' >/dev/null 2>&1; then
+    fail "missing required field: event_id (request_expired requires a deterministic retry id)"
+  fi
+  if ! printf '%s' "$ROW" | jq -e '.reason == "ttl_elapsed"' >/dev/null 2>&1; then
+    fail "invalid field: reason (request_expired requires ttl_elapsed)"
+  fi
+fi
 
 # --- Answer lifecycle rows carry the selected displayed option ---
 case "$EVENT" in

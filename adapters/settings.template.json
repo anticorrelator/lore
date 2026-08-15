@@ -74,6 +74,7 @@
     "vaults": {}
   },
   "coordination": {
-    "max_concurrency": 1
+    "max_concurrency": 1,
+    "session_request_ttl_seconds": 3600
   }
 }
