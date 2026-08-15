@@ -223,6 +223,19 @@ PYEOF
   echo "$output" | grep -q "lore work conformance anchored-done"
 }
 
+@test "unset render_rate notes the 0.25 fallback without changing close success" {
+  settings_dir="$TEST_KDIR/settings-data"
+  mkdir -p "$settings_dir/config"
+  printf '{}\n' > "$settings_dir/config/settings.json"
+
+  run env LORE_DATA_DIR="$settings_dir" bash "$CLOSE_SH" anchored-done \
+    --verdict full --summary "done"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -Fq "conformance_sampling.render_rate is unset; using built-in fallback 0.25"
+  echo "$output" | grep -Fq "Run install.sh to declare the key"
+  [ -d "$WORK_DIR/_archive/anchored-done" ]
+}
+
 @test "degraded verdict always renders conformance regardless of rate" {
   LORE_CONFORMANCE_RENDER_RATE=0 run partial_close
   [ "$status" -eq 3 ]

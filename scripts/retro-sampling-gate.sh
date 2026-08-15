@@ -140,7 +140,10 @@ ROWS_FILE="$KNOWLEDGE_DIR/_scorecards/rows.jsonl"
 # --- Resolve routine_rate: flag override > settings.json > 0 ---
 if [[ -z "$ROUTINE_RATE" ]]; then
   ROUTINE_RATE=$(bash "$SCRIPT_DIR/settings.sh" get retro_sampling.routine_rate 2>/dev/null || true)
-  [[ -z "$ROUTINE_RATE" || "$ROUTINE_RATE" == "null" ]] && ROUTINE_RATE="0"
+  if [[ -z "$ROUTINE_RATE" || "$ROUTINE_RATE" == "null" ]]; then
+    ROUTINE_RATE="0"
+    echo "[retro] Note: retro_sampling.routine_rate is unset; using built-in fallback 0. Run install.sh to declare the key." >&2
+  fi
 fi
 if ! python3 -c "
 import sys

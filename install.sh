@@ -531,6 +531,27 @@ if [ -f "$SETTINGS_FILE" ]; then
   fi
 fi
 
+# Declared-key backfill: upgrade an existing settings.json with top-level keys
+# that the shipped template now declares. This is intentionally add-only and
+# shallow: if a top-level key already exists, its entire value remains the
+# user's, even when the template contains additional nested members. Fresh
+# installs already start from the template in the create-only migration above,
+# so this pass is a no-op for them.
+#
+# Like the prune, the backfill refuses rather than guesses. A missing or invalid
+# schema/template leaves settings.json untouched and produces only a warning;
+# the next successful install can retry safely.
+if [ -f "$SETTINGS_FILE" ]; then
+  info "Backfilling missing declared top-level keys in $SETTINGS_FILE"
+  if ! $DRY_RUN; then
+    if ! python3 "$LORE_REPO_DIR/scripts/backfill-settings.py" \
+      --settings "$SETTINGS_FILE" --schema "$SETTINGS_SCHEMA" \
+      --template "$SETTINGS_TEMPLATE"; then
+      echo "  [warning] skipped declared-key backfill — settings left unchanged"
+    fi
+  fi
+fi
+
 # --- 1b. Split agent.json::symlink_manifest -> .install-state/symlinks.json (D6) ---
 # Co-ownership: install reads-and-merges into the install-state file; it must
 # never blindly overwrite a non-empty manifest (agent-toggle disable writes

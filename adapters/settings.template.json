@@ -76,5 +76,11 @@
   "coordination": {
     "max_concurrency": 1,
     "session_request_ttl_seconds": 3600
+  },
+  "retro_sampling": {
+    "routine_rate": 0.25
+  },
+  "conformance_sampling": {
+    "render_rate": 0.25
   }
 }

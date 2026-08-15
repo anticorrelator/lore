@@ -73,6 +73,10 @@
     "retro_sampling": {
       "$ref": "#/$defs/retro_sampling_config",
       "description": "Retro-sampling gate controls (retro-sampling-gate.sh, consulted at the spec-finalize and impl-close protocol termini). Absent section reads as routine_rate=0 in the gate: no routine coin ever lands, so only the deterministic always-strata (new template version, first-K of a routing pair, degraded/contested closure) trigger a retro; every other cycle defers to the batch queue. This is a sampling-cadence preference, not a routing or harness control."
+    },
+    "conformance_sampling": {
+      "$ref": "#/$defs/conformance_sampling_config",
+      "description": "Closure-conformance render sampling, consulted by impl-close.sh before archive. Absent render_rate uses impl-close.sh's built-in 0.25 fallback; install.sh declares the shipped value explicitly for both fresh and upgraded settings files."
     }
   },
 
@@ -330,6 +334,20 @@
           "maximum": 1,
           "default": 0,
           "description": "Probability [0,1] that a ROUTINE work cycle (one that trips none of the deterministic always-strata) surfaces a retro at its protocol terminus rather than deferring to the batch queue. The gate compares a mechanical coin — a hash of the work-item slug plus the calendar date, checkable and RNG-free — against this rate. Readers default to 0 when the key or section is absent: no routine cycle is ever sampled in, so the gate reduces to the always-strata alone. 1 samples in every routine cycle. Out-of-range values are rejected at the schema boundary — this is a closed constraint, not a clamp."
+        }
+      }
+    },
+
+    "conformance_sampling_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "render_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.25,
+          "description": "Probability [0,1] that a routine full closure eagerly renders its reproducible conformance aggregate. Degraded closures always render. Readers use a built-in 0.25 fallback when the key is absent, and clamp malformed values defensively; the schema rejects out-of-range values at the configuration boundary."
         }
       }
     }
