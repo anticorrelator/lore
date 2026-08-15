@@ -7,7 +7,8 @@
 # Options:
 #   --ttl <seconds>   Instance liveness TTL (default: 30, matching the heartbeat contract).
 #   --kdir <path>     Knowledge-store override (test isolation).
-#   --json            Emit a JSON object {instances, pending, claimed, close_requests}.
+#   --json            Emit a JSON object {instances, pending, claimed, close_requests};
+#                     pending rows include age_seconds and past_ttl.
 #
 # Prepare-and-return reader. Registry instances are filtered to the live set by
 # file mtime within the TTL (a hard-killed TUI leaves a stale file that ages out);
@@ -18,7 +19,8 @@
 # In the human summary a slugless session renders as chat:<8-hex-of-session_id>
 # (chat:? when it carries no session_id) instead of a blank slug, so no live
 # hosted session is invisible; that short id is what `session close --session`
-# accepts. The --json envelope is unchanged (raw registry rows).
+# accepts. The --json registry rows remain raw; pending rows gain the derived
+# age_seconds/past_ttl requester-facing projection.
 #
 # Exit codes: 0 success; 1 error. Codes 2 and 3 are reserved (unused here) for
 # session verb family / composed-terminal-verb namespace compatibility.
@@ -65,13 +67,16 @@ fi
 [[ -d "$KNOWLEDGE_DIR" ]] || fail "knowledge store not found at: $KNOWLEDGE_DIR"
 
 SESSIONS_DIR="$KNOWLEDGE_DIR/_sessions"
+REQUEST_TTL="$(session_request_ttl_seconds)"
 
 # One parse produces the full envelope; warnings for excluded rows go to stderr.
-RESULT="$(python3 - "$SESSIONS_DIR" "$TTL" <<'PYEOF'
+RESULT="$(python3 - "$SESSIONS_DIR" "$TTL" "$REQUEST_TTL" <<'PYEOF'
+import datetime as dt
 import json, os, sys, time
 
 sessions_dir = sys.argv[1]
 ttl = float(sys.argv[2])
+request_ttl = int(sys.argv[3])
 now = time.time()
 
 
@@ -107,11 +112,25 @@ def load_dir(subpath, live_only=False):
     return rows
 
 
+pending = load_dir("requests/pending")
+for row in pending:
+    try:
+        stamp = str(row.get("requested_at") or "")
+        requested = dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if requested.tzinfo is None:
+            requested = requested.replace(tzinfo=dt.timezone.utc)
+        age = max(0, int((dt.datetime.now(dt.timezone.utc) - requested).total_seconds()))
+    except (ValueError, TypeError):
+        age = None
+    row["age_seconds"] = age
+    row["past_ttl"] = age is not None and age > request_ttl
+
 envelope = {
     "fold_version": "1",
     "vocabulary_version": "1",
+    "request_ttl_seconds": request_ttl,
     "instances": load_dir("instances", live_only=True),
-    "pending": load_dir("requests/pending"),
+    "pending": pending,
     "claimed": load_dir("requests/claimed"),
     "close_requests": load_dir("close-requests"),
 }
@@ -163,7 +182,12 @@ if [[ "$INSTANCE_COUNT" -gt 0 ]]; then
     | "  instance \(.name) (pid \(.pid)) — \($framework) @ \($project_dir) — vintage \($vintage) — sessions: \(if $sessions == "" then "none" else $sessions end)"'
 fi
 if [[ "$PENDING_COUNT" -gt 0 ]]; then
-  printf '%s' "$RESULT" | jq -r '.pending[] | "  pending \(.request_id) \(.type) \(.slug // "(no slug)") → \(.target_instance // "any")\(if .min_vintage then " (min-vintage \(.min_vintage))" else "" end)"'
+  printf '%s' "$RESULT" | jq -r --argjson ttl "$REQUEST_TTL" '
+    .pending[]
+    | "  pending \(.request_id) \(.type) \(.slug // "(no slug)") → \(.target_instance // "any")"
+      + (if .min_vintage then " (min-vintage \(.min_vintage))" else "" end)
+      + " — age \(if .age_seconds == null then "unknown" else (.age_seconds|tostring) + "s" end)"
+      + (if .past_ttl then " [past TTL \($ttl)s]" else "" end)'
 fi
 if [[ "$CLAIMED_COUNT" -gt 0 ]]; then
   printf '%s' "$RESULT" | jq -r '.claimed[] | "  claimed \(.request_id) by \(.claimed_by // "?")"'

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -90,6 +91,35 @@ func TestAgentClaimSpawnsWithoutStealingFocus(t *testing.T) {
 	}
 	if claimed.ClaimedBy == nil || *claimed.ClaimedBy != "me" {
 		t.Fatalf("claim metadata not written: %+v", claimed)
+	}
+}
+
+// TestQueueTickHostsRequestExpiry pins the host decision: the live TUI
+// heartbeat invokes the expiry writer before its Go claim pass. session list
+// and requester-owned watchers remain readers only.
+func TestQueueTickHostsRequestExpiry(t *testing.T) {
+	m, _ := baseSessionModel(t)
+	marker := filepath.Join(t.TempDir(), "expiry-called")
+	script := filepath.Join(t.TempDir(), "expire.sh")
+	body := fmt.Sprintf("#!/usr/bin/env bash\nprintf '%%s\\n' \"$*\" > %q\n", marker)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m.expiryScript = script
+
+	msg, ok := m.queueTickCmd()().(queueTickResultMsg)
+	if !ok {
+		t.Fatal("queueTickCmd did not return queueTickResultMsg")
+	}
+	if msg.err != nil {
+		t.Fatalf("queue tick: %v", msg.err)
+	}
+	args, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("expiry sweep was not invoked: %v", err)
+	}
+	if !strings.Contains(string(args), "--kdir "+m.config.KnowledgeDir) {
+		t.Fatalf("expiry sweep args = %q", args)
 	}
 }
 

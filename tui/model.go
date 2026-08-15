@@ -258,6 +258,7 @@ type model struct {
 	instanceName       string
 	sessionsDir        string
 	eventScript        string
+	expiryScript       string
 	spendScript        string
 	instanceStartedISO string
 	// buildSHA/buildTime are this instance's build vintage, resolved once at

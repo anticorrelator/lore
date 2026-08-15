@@ -20,10 +20,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
-# Mirrors session.LivenessTTL (tui/internal/session/registry.go): an instance
-# file whose mtime is within this window is live. Kept in sync by contract.
-LIVENESS_TTL_SECONDS=30
-
 usage() {
   cat >&2 <<'EOF'
 Usage:
@@ -171,15 +167,7 @@ atomic_write() {
 # pin_live <instance> — 0 (live) when the registry row's mtime is within the
 # TTL, 1 otherwise. Derived only; no liveness is ever persisted.
 pin_live() {
-  local instance="$1" path mtime now
-  path="$INSTANCES_DIR/$instance.json"
-  [[ -f "$path" ]] || return 1
-  mtime=$(get_mtime "$path")
-  now=$(date -u +%s)
-  if (( now - mtime <= LIVENESS_TTL_SECONDS )); then
-    return 0
-  fi
-  return 1
+  session_instance_live "$INSTANCES_DIR" "$1"
 }
 
 case "$MODE" in
@@ -276,7 +264,7 @@ PYEOF
       if [[ "$LIVE" != "live" ]]; then
         echo "[coordinate] Error: project '$SLUG' is pinned to '$PIN_INSTANCE', which is not live." >&2
         echo "             Its registry row at $INSTANCES_DIR/$PIN_INSTANCE.json has not been touched" >&2
-        echo "             within the ${LIVENESS_TTL_SECONDS}s liveness window (or is gone entirely)." >&2
+        echo "             within the ${SESSION_INSTANCE_LIVENESS_TTL_SECONDS}s liveness window (or is gone entirely)." >&2
         echo "             Re-pin to a live instance:  lore coordinate pin $SLUG <instance>" >&2
         echo "             Or clear the pin:           lore coordinate pin $SLUG --clear" >&2
         exit 3

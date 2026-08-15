@@ -13,7 +13,9 @@
 #                      its session identity, and the suffix is what the journal,
 #                      scoped watches, and the TUI parse to find the work item.
 #   --target <name>    Placement stance: address the request to one instance (the
-#                      named instance alone may claim). Every request MUST carry
+#                      named live instance alone may claim). A missing/stale
+#                      registry row is refused; re-pin or use --anywhere rather
+#                      than parking a request at a dead target. Every request MUST carry
 #                      exactly one placement stance — --target, --prefer-dir,
 #                      --prefer-cwd, or --anywhere; a stanceless request is refused.
 #   --initiator <i>    Who initiated the request: agent | human (default: human).
@@ -419,6 +421,22 @@ else
   KNOWLEDGE_DIR="$(resolve_knowledge_dir)"
 fi
 [[ -d "$KNOWLEDGE_DIR" ]] || fail "knowledge store not found at: $KNOWLEDGE_DIR"
+
+# A hard target is useful only while its registry row is live. Reuse the pin
+# preflight's shared mtime-TTL rule: silently rewriting this to --anywhere would
+# change placement stance, while accepting it would create a request no live
+# instance can claim. Soft/anywhere stances remain deliberately untouched.
+if [[ -n "$TARGET" ]]; then
+  INSTANCES_DIR="$KNOWLEDGE_DIR/_sessions/instances"
+  if ! TARGET_AGE="$(session_instance_age_seconds "$INSTANCES_DIR" "$TARGET")"; then
+    fail "refusing --target '$TARGET': its registry row is absent (age unavailable; live window ${SESSION_INSTANCE_LIVENESS_TTL_SECONDS}s).
+Re-pin the project to a live instance and retry, or choose --anywhere explicitly."
+  fi
+  if (( TARGET_AGE > SESSION_INSTANCE_LIVENESS_TTL_SECONDS )); then
+    fail "refusing --target '$TARGET': its registry row is ${TARGET_AGE}s old (live window ${SESSION_INSTANCE_LIVENESS_TTL_SECONDS}s).
+Re-pin the project to a live instance and retry, or choose --anywhere explicitly."
+  fi
+fi
 
 PENDING_DIR="$KNOWLEDGE_DIR/_sessions/requests/pending"
 mkdir -p "$PENDING_DIR"

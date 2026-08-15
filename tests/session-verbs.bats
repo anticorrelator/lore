@@ -19,6 +19,7 @@
 REPO_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME:-$0}")/.." && pwd)"
 LORE="$REPO_DIR/cli/lore"
 REQUEST="$REPO_DIR/scripts/session-request.sh"
+EXPIRE="$REPO_DIR/scripts/session-request-expire.sh"
 LIST="$REPO_DIR/scripts/session-list.sh"
 EVENTS="$REPO_DIR/scripts/session-events.sh"
 CLOSE="$REPO_DIR/scripts/session-close.sh"
@@ -195,6 +196,7 @@ journal_boundaries() {
 # =====================================================================
 
 @test "request happy path writes a pending row and emits a requested event" {
+  write_instance inst-a existing
   run bash "$REQUEST" --type implement --slug wi --target inst-a --initiator agent --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
 
@@ -209,6 +211,27 @@ journal_boundaries() {
 
   run grep -c '"event":"requested"' "$TEST_KDIR/_sessions/events.jsonl"
   [ "$output" = "1" ]
+}
+
+@test "request refuses a missing or stale hard target and accepts a live target" {
+  run bash "$REQUEST" --type chat --target gone --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"registry row is absent"* ]]
+  [[ "$output" == *"age unavailable"* ]]
+  [[ "$output" == *"Re-pin"* ]]
+  [[ "$output" == *"--anywhere"* ]]
+
+  write_instance stale-inst existing
+  touch -t 202601010000 "$TEST_KDIR/_sessions/instances/stale-inst.json"
+  run bash "$REQUEST" --type chat --target stale-inst --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"registry row is "*"s old"* ]]
+  [[ "$output" == *"live window 30s"* ]]
+
+  write_instance live-inst existing
+  run bash "$REQUEST" --type chat --target live-inst --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.enqueued==true and .target_instance=="live-inst"'
 }
 
 @test "request without --type refuses and creates no pending dir" {
@@ -354,6 +377,7 @@ journal_boundaries() {
 }
 
 @test "request omits prefer_project_dir when neither prefer flag is passed" {
+  write_instance inst-a existing
   bash "$REQUEST" --type spec --slug wi --target inst-a --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e 'has("prefer_project_dir") | not' "$pending"
@@ -426,6 +450,7 @@ journal_boundaries() {
 
 @test "each placement stance alone satisfies the requirement" {
   mkdir -p "$TEST_KDIR/dir"
+  write_instance inst-a existing
   bash "$REQUEST" --type chat --target inst-a --kdir "$TEST_KDIR"
   bash "$REQUEST" --type chat --prefer-dir "$TEST_KDIR/dir" --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR"
   ( cd "$TEST_KDIR/dir" && bash "$REQUEST" --type chat --prefer-cwd --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR" )
@@ -603,6 +628,94 @@ journal_boundaries() {
   run bash "$LIST" --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '(.pending|length)==1 and (.claimed|length)==1 and (.close_requests|length)==1'
+}
+
+@test "list renders pending age from requested_at and flags rows past the configured TTL" {
+  export LORE_DATA_DIR="$TEST_KDIR/data"
+  mkdir -p "$LORE_DATA_DIR/config" "$TEST_KDIR/_sessions/requests/pending"
+  echo '{"coordination":{"session_request_ttl_seconds":60}}' > "$LORE_DATA_DIR/config/settings.json"
+  local old_at fresh_at
+  old_at="$(python3 - <<'PYEOF'
+import datetime as dt
+print((dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PYEOF
+)"
+  fresh_at="$(python3 - <<'PYEOF'
+import datetime as dt
+print(dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PYEOF
+)"
+  printf '{"request_id":"old","type":"chat","requested_at":"%s"}\n' "$old_at" > "$TEST_KDIR/_sessions/requests/pending/old.json"
+  printf '{"request_id":"fresh","type":"chat","requested_at":"%s"}\n' "$fresh_at" > "$TEST_KDIR/_sessions/requests/pending/fresh.json"
+
+  run bash "$LIST" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    .request_ttl_seconds==60
+    and (.pending[] | select(.request_id=="old") | .age_seconds >= 299 and .past_ttl==true)
+    and (.pending[] | select(.request_id=="fresh") | .age_seconds < 10 and .past_ttl==false)'
+
+  run bash "$LIST" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"pending old"*"age "*"[past TTL 60s]"* ]]
+}
+
+@test "expiry honors settings TTL and requested_at rather than mtime, with one terminal row" {
+  export LORE_DATA_DIR="$TEST_KDIR/data"
+  mkdir -p "$LORE_DATA_DIR/config" "$TEST_KDIR/_sessions/requests/pending"
+  echo '{"coordination":{"session_request_ttl_seconds":60}}' > "$LORE_DATA_DIR/config/settings.json"
+  local old_at fresh_at
+  old_at="$(python3 - <<'PYEOF'
+import datetime as dt
+print((dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PYEOF
+)"
+  fresh_at="$(python3 - <<'PYEOF'
+import datetime as dt
+print(dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PYEOF
+)"
+  printf '{"request_id":"old","type":"chat","slug":null,"target_instance":null,"initiator":"human","requested_at":"%s"}\n' "$old_at" > "$TEST_KDIR/_sessions/requests/pending/old.json"
+  printf '{"request_id":"fresh","type":"chat","slug":null,"target_instance":null,"initiator":"human","requested_at":"%s"}\n' "$fresh_at" > "$TEST_KDIR/_sessions/requests/pending/fresh.json"
+  # Fresh mtime cannot rescue the old stamp; ancient mtime cannot expire the fresh stamp.
+  touch "$TEST_KDIR/_sessions/requests/pending/old.json"
+  touch -t 202601010000 "$TEST_KDIR/_sessions/requests/pending/fresh.json"
+
+  run bash "$EXPIRE" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.expired==1 and .request_ttl_seconds==60'
+  [ ! -f "$TEST_KDIR/_sessions/requests/pending/old.json" ]
+  [ -f "$TEST_KDIR/_sessions/requests/pending/fresh.json" ]
+  [ ! -f "$TEST_KDIR/_sessions/requests/expiring/old.json" ]
+  [ "$(jq -r 'select(.event=="request_expired" and .request_id=="old") | .event' "$TEST_KDIR/_sessions/events.jsonl" | wc -l | tr -d ' ')" = "1" ]
+
+  # Simulate append-before-delete interruption: the recovery row reappears after
+  # the deterministic terminal is already durable. Replay deletes it without a
+  # second writer appending another terminal.
+  printf '{"request_id":"old","type":"chat","slug":null,"target_instance":null,"initiator":"human","requested_at":"%s"}\n' "$old_at" > "$TEST_KDIR/_sessions/requests/expiring/old.json"
+  bash "$EXPIRE" --kdir "$TEST_KDIR" >/dev/null
+  [ ! -f "$TEST_KDIR/_sessions/requests/expiring/old.json" ]
+  [ "$(jq -s 'map(select(.event=="request_expired")) | length' "$TEST_KDIR/_sessions/events.jsonl")" = "1" ]
+}
+
+@test "expiry retains its recovery row when the terminal append fails" {
+  mkdir -p "$TEST_KDIR/_sessions/requests/pending"
+  local rid="expire-collision" event_id
+  printf '%s\n' '{"request_id":"expire-collision","type":"chat","slug":null,"target_instance":null,"initiator":"human","requested_at":"2026-01-01T00:00:00Z"}' \
+    > "$TEST_KDIR/_sessions/requests/pending/$rid.json"
+  event_id="request-expired-$(python3 - "$rid" <<'PYEOF'
+import hashlib, sys
+print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:32])
+PYEOF
+)"
+  echo '{"event_id":"'"$event_id"'","event":"request_expired","request_id":"different","reason":"ttl_elapsed"}' \
+    | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+
+  run bash "$EXPIRE" --kdir "$TEST_KDIR" --ttl 1
+  [ "$status" -eq 1 ]
+  [ ! -f "$TEST_KDIR/_sessions/requests/pending/$rid.json" ]
+  [ -f "$TEST_KDIR/_sessions/requests/expiring/$rid.json" ]
+  [ "$(jq -s --arg id "$rid" 'map(select(.event=="request_expired" and .request_id==$id)) | length' "$TEST_KDIR/_sessions/events.jsonl")" = "0" ]
 }
 
 @test "list renders a slugless session as chat:<short-id> instead of a blank slug" {
@@ -938,6 +1051,31 @@ EOF
 
   run grep -c '"event":"request_cancelled"' "$TEST_KDIR/_sessions/events.jsonl"
   [ "$output" = "1" ]
+
+  run bash "$CLOSE" --request "$rid" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [ ! -f "$TEST_KDIR/_sessions/requests/cancelling/$rid.json" ]
+  [ "$(jq -s 'map(select(.event=="request_cancelled")) | length' "$TEST_KDIR/_sessions/events.jsonl")" = "1" ]
+}
+
+@test "close --request retains its recovery row when the terminal append fails" {
+  local rid="cancel-collision" event_id
+  mkdir -p "$TEST_KDIR/_sessions/requests/pending"
+  printf '%s\n' '{"request_id":"cancel-collision","type":"chat","slug":null,"target_instance":null,"initiator":"human","requested_at":"2026-08-14T00:00:00Z"}' \
+    > "$TEST_KDIR/_sessions/requests/pending/$rid.json"
+  event_id="request-cancelled-$(python3 - "$rid" <<'PYEOF'
+import hashlib, sys
+print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:32])
+PYEOF
+)"
+  echo '{"event_id":"'"$event_id"'","event":"request_cancelled","request_id":"different","reason":"cancelled"}' \
+    | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+
+  run bash "$CLOSE" --request "$rid" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [ ! -f "$TEST_KDIR/_sessions/requests/pending/$rid.json" ]
+  [ -f "$TEST_KDIR/_sessions/requests/cancelling/$rid.json" ]
+  [ "$(jq -s --arg id "$rid" 'map(select(.event=="request_cancelled" and .request_id==$id)) | length' "$TEST_KDIR/_sessions/events.jsonl")" = "0" ]
 }
 
 @test "close --request refuses a nonexistent id" {
@@ -1913,7 +2051,18 @@ coordinate_event_vocab() {
   local out code
   out="$(bash "$WAIT" feature-x --since 0 --timeout 1 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
   [ "$code" -eq 2 ]
-  echo "$out" | jq -e '(.until | sort) == (["closed","close_failed","orphaned","terminus_reached","needs_input","modal_blocked","restore_refused","worktree_quarantined"] | sort)'
+  echo "$out" | jq -e '(.until | sort) == (["closed","close_failed","orphaned","request_expired","terminus_reached","needs_input","modal_blocked","restore_refused","worktree_quarantined"] | sort)'
+}
+
+@test "wait: request_expired is an actionable terminal while requested remains non-actionable" {
+  echo '{"event_id":"request-expired-test","event":"request_expired","request_id":"r-expired","slug":"feature-x","reason":"ttl_elapsed"}' \
+    | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  run bash "$WAIT" feature-x --since 0 --timeout 0 --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    .matched.event=="request_expired"
+    and (.until | index("request_expired")) != null
+    and (.until | index("requested")) == null'
 }
 
 @test "wait: the default until-set wakes on modal_blocked" {
@@ -2364,7 +2513,7 @@ EOF
   out="$(bash "$WATCH" --timeout 0 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
   [ "$code" -eq 2 ]
   echo "$out" | jq -e '.outcome=="timeout" and .matched==null and (.next_cursor|type=="number") and (.until|type=="array")'
-  echo "$out" | jq -e '(.until | sort) == (["closed","close_failed","orphaned","terminus_reached","needs_input","modal_blocked","restore_refused","worktree_quarantined"] | sort)'
+  echo "$out" | jq -e '(.until | sort) == (["closed","close_failed","orphaned","request_expired","terminus_reached","needs_input","modal_blocked","restore_refused","worktree_quarantined"] | sort)'
 
   echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
   out="$(bash "$WATCH" --timeout 5 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
@@ -3061,4 +3210,3 @@ answer_peek_with() {
   [ "$status" -eq 0 ]
   [ "$(shasum -a 256 "$TEST_KDIR/_sessions/events.jsonl" | awk '{print $1}')" = "$before" ]
 }
-

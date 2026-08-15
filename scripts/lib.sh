@@ -457,6 +457,53 @@ get_mtime() {
   fi
 }
 
+# --- Session substrate timing contracts ---
+# Keep the shell enqueue/preflight paths on the same registry liveness window as
+# tui/internal/session/registry.go's session.LivenessTTL.  Callers ask this
+# shared helper instead of growing another mtime interpretation beside the pin
+# preflight.
+SESSION_INSTANCE_LIVENESS_TTL_SECONDS=30
+
+# session_instance_age_seconds <instances-dir> <instance>
+# Prints the registry row age in whole seconds. Missing rows return 1; future
+# mtimes clamp to zero so a small clock adjustment cannot make a row immortal.
+session_instance_age_seconds() {
+  local instances_dir="$1" instance="$2" path mtime now age
+  [[ -n "$instance" && "$instance" != */* ]] || return 1
+  path="$instances_dir/$instance.json"
+  [[ -f "$path" ]] || return 1
+  mtime=$(get_mtime "$path") || return 1
+  now=$(date -u +%s)
+  age=$((now - mtime))
+  (( age < 0 )) && age=0
+  printf '%s\n' "$age"
+}
+
+# session_instance_live <instances-dir> <instance>
+# A registry row is live exactly when its age is inside the shared TTL.
+session_instance_live() {
+  local age
+  age=$(session_instance_age_seconds "$1" "$2") || return 1
+  (( age <= SESSION_INSTANCE_LIVENESS_TTL_SECONDS ))
+}
+
+# session_request_ttl_seconds
+# The schema-declared setting is bounded to one second through seven days and
+# defaults to one hour. Runtime readers fail closed to the shipped default when
+# an old, missing, or hand-edited settings document supplies anything else.
+SESSION_REQUEST_TTL_DEFAULT_SECONDS=3600
+SESSION_REQUEST_TTL_MAX_SECONDS=604800
+session_request_ttl_seconds() {
+  local raw
+  raw=$(bash "$LORE_LIB_DIR/settings.sh" get coordination.session_request_ttl_seconds 2>/dev/null || true)
+  if [[ "$raw" =~ ^[0-9]+$ ]] \
+      && (( raw >= 1 && raw <= SESSION_REQUEST_TTL_MAX_SECONDS )); then
+    printf '%s\n' "$raw"
+  else
+    printf '%s\n' "$SESSION_REQUEST_TTL_DEFAULT_SECONDS"
+  fi
+}
+
 # --- find_lore_config ---
 # Walk from a starting directory up to / looking for a .lore.config file.
 # Echoes the absolute path to the file and returns 0 if found, returns 1 if not.
@@ -1206,7 +1253,7 @@ framework_interaction_field() {
 # validation case-arm). tests/session-verbs.bats cross-checks this list against
 # the writer and names any drift; if that test fails, reconcile this line with
 # the writer rather than silencing the test.
-SESSION_EVENT_VOCAB="requested claimed spawned needs_input resumed recovered closed orphaned step_completed terminus_reached spawn_failed request_reclaimed request_abandoned request_cancelled close_requested close_failed restore_refused worktree_quarantined send_requested sent send_refused answer_requested answered answer_refused modal_blocked"
+SESSION_EVENT_VOCAB="requested claimed spawned needs_input resumed recovered closed orphaned step_completed terminus_reached spawn_failed request_reclaimed request_abandoned request_cancelled request_expired close_requested close_failed restore_refused worktree_quarantined send_requested sent send_refused answer_requested answered answer_refused modal_blocked"
 
 # The events a coordinator can actually do something about, and therefore the
 # default stop set for anything that waits on the journal. It covers both ends of
@@ -1217,7 +1264,7 @@ SESSION_EVENT_VOCAB="requested claimed spawned needs_input resumed recovered clo
 # (terminus_reached). A stop set of terminal outcomes alone means an autonomous
 # session parked at a prompt wakes nobody — the watcher sits there while the work
 # does too. Narrow it with an explicit --until when you want exactly one edge.
-SESSION_ACTIONABLE_EVENTS="closed close_failed orphaned terminus_reached needs_input modal_blocked restore_refused worktree_quarantined"
+SESSION_ACTIONABLE_EVENTS="closed close_failed orphaned request_expired terminus_reached needs_input modal_blocked restore_refused worktree_quarantined"
 
 # session_event_in_vocab <name> — 0 when the writer would accept <name> as an
 # event. Validating an event-name argument up front turns a typo into a usage
