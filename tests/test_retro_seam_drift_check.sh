@@ -100,6 +100,39 @@ printf 'session projection case\n' >> "$repo/tests/frameworks/retro_prepare.bats
 commit_all "$repo" "session reader change paired with the reader contract"
 expect_pass "$repo" "$base"
 
+# The pairing is range-granular: merge-stream pushes land a reader change and
+# its contract companion in sibling commits of one range, and that pairing must
+# pass. Only a range that never supplies the companion is drift.
+
+repo="$TMP/sibling-commit-pairing"
+new_repo "$repo"
+base="$(git -C "$repo" rev-parse HEAD)"
+printf 'window projection change\n' >> "$repo/scripts/session-events.sh"
+commit_all "$repo" "reader change alone"
+printf 'session projection case\n' >> "$repo/tests/frameworks/retro_prepare.bats"
+commit_all "$repo" "contract companion in a sibling commit"
+expect_pass "$repo" "$base"
+
+repo="$TMP/sibling-commit-skill-pairing"
+new_repo "$repo"
+base="$(git -C "$repo" rev-parse HEAD)"
+printf 'skill revision\n' >> "$repo/skills/retro/SKILL.md"
+commit_all "$repo" "retro prose alone"
+printf 'protocol revision\n' >> "$repo/tests/test_retro_evidence_pack_protocol.sh"
+commit_all "$repo" "protocol companion in a sibling commit"
+expect_pass "$repo" "$base"
+
+# A reader change reverted within the range leaves no net drift to pair.
+
+repo="$TMP/reverted-reader"
+new_repo "$repo"
+base="$(git -C "$repo" rev-parse HEAD)"
+printf 'transient change\n' >> "$repo/scripts/retro-prepare.sh"
+commit_all "$repo" "transient reader change"
+printf 'registry baseline\n' > "$repo/scripts/retro-prepare.sh"
+commit_all "$repo" "revert transient reader change"
+expect_pass "$repo" "$base"
+
 # A protected path that no longer exists protects nothing: the pattern stops
 # matching and the pairing silently stops being enforced. Both the checker and
 # the pre-push hook must name only live files.

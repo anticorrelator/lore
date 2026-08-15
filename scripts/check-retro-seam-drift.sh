@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 # Reject retro reader and protocol changes that leave their contract companion behind.
+#
+# Granularity: the pushed range, not the individual commit. A protected-reader
+# change anywhere in BASE..HEAD is paired when the contract test also changes
+# anywhere in that range. Merge-stream workflows routinely land a reader change
+# and its contract-test update in sibling commits of one push; the guarantee
+# that matters at the push seam is that the pushed tree's readers and their
+# contract moved together, not that every commit carried both halves.
 
 set -euo pipefail
 
@@ -23,6 +30,24 @@ PROTECTED_READERS=(
   scripts/session-events.sh
 )
 
+# Enforcement boundary: the checker establishes the rule. If the base predates
+# the checker, advance the base to the commit that introduced it — changes made
+# before the repository published the rule cannot have complied with it.
+if ! git cat-file -e "$BASE:scripts/check-retro-seam-drift.sh" 2>/dev/null; then
+  intro=""
+  while IFS= read -r commit; do
+    if git cat-file -e "$commit:scripts/check-retro-seam-drift.sh" 2>/dev/null; then
+      intro="$commit"
+      break
+    fi
+  done < <(git rev-list --reverse "$BASE..$HEAD")
+  if [[ -z "$intro" ]]; then
+    echo "retro seam drift: PASS"
+    exit 0
+  fi
+  BASE="$intro"
+fi
+
 contains_path() {
   local needle="$1" path
   shift
@@ -33,14 +58,11 @@ contains_path() {
 }
 
 cli_reader_changed() {
-  local commit="$1"
-  git show --format= --unified=0 "$commit" -- cli/lore \
+  git diff --unified=0 "$BASE" "$HEAD" -- cli/lore \
     | grep -Eq '^[+-].*(scorecard-read\.sh|current\|rows)'
 }
 
-skill_has_companion() {
-  local commit="$1"
-  shift
+range_has_companion() {
   local path
   for path in "$@"; do
     case "$path" in
@@ -49,24 +71,17 @@ skill_has_companion() {
         ;;
     esac
   done
-  cli_reader_changed "$commit"
+  cli_reader_changed
 }
 
+# Net tree diff over the range: a change reverted within the range is not drift.
+paths=()
+while IFS= read -r path; do
+  paths+=("$path")
+done < <(git diff --name-only "$BASE" "$HEAD")
+
 failures=0
-while IFS= read -r commit; do
-  [[ -n "$commit" ]] || continue
-  # The checker establishes the enforcement boundary. Commits made before it
-  # existed cannot have complied with a rule the repository had not published.
-  if ! git cat-file -e "$commit^:scripts/check-retro-seam-drift.sh" 2>/dev/null; then
-    continue
-  fi
-  paths=()
-  while IFS= read -r path; do
-    paths+=("$path")
-  done < <(git diff-tree --no-commit-id --name-only -r "$commit")
-  # Merge commits yield no paths from diff-tree (their changes arrive via the
-  # walked parent commits); an empty array also trips `set -u` under bash < 4.4.
-  [[ ${#paths[@]} -eq 0 ]] && continue
+if [[ ${#paths[@]} -gt 0 ]]; then
   reader_change=0
   for protected in "${PROTECTED_READERS[@]}"; do
     if contains_path "$protected" "${paths[@]}"; then
@@ -74,20 +89,20 @@ while IFS= read -r commit; do
       break
     fi
   done
-  if [[ $reader_change -eq 0 ]] && contains_path cli/lore "${paths[@]}" && cli_reader_changed "$commit"; then
+  if [[ $reader_change -eq 0 ]] && contains_path cli/lore "${paths[@]}" && cli_reader_changed; then
     reader_change=1
   fi
 
   if [[ $reader_change -eq 1 ]] && ! contains_path "$CONTRACT_TEST" "${paths[@]}"; then
-    echo "retro seam drift: $commit changes a protected reader without $CONTRACT_TEST" >&2
+    echo "retro seam drift: range $BASE..$HEAD changes a protected reader without $CONTRACT_TEST" >&2
     failures=$((failures + 1))
   fi
 
-  if contains_path "$RETRO_SKILL" "${paths[@]}" && ! skill_has_companion "$commit" "${paths[@]}"; then
-    echo "retro seam drift: $commit changes $RETRO_SKILL without retro behavior, contract-test, or protocol-check changes" >&2
+  if contains_path "$RETRO_SKILL" "${paths[@]}" && ! range_has_companion "${paths[@]}"; then
+    echo "retro seam drift: range $BASE..$HEAD changes $RETRO_SKILL without retro behavior, contract-test, or protocol-check changes" >&2
     failures=$((failures + 1))
   fi
-done < <(git rev-list --reverse "$BASE..$HEAD")
+fi
 
 [[ $failures -eq 0 ]] || exit 1
 echo "retro seam drift: PASS"
