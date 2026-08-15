@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/anticorrelator/lore/tui/internal/worktree"
@@ -137,6 +138,25 @@ func (r Request) SlugValue() string {
 		return ""
 	}
 	return *r.Slug
+}
+
+// SessionSlug returns the session identity a claimed request must use. New
+// unscoped chat requests persist this slug at enqueue; the derivation here keeps
+// legacy pending/claimed rows with a null slug addressable when a newer TUI
+// claims them. Explicit slugs — including every worker's <item>--w<n> identity —
+// are returned byte-for-byte.
+func (r Request) SessionSlug() string {
+	if slug := r.SlugValue(); slug != "" || r.Type != "chat" {
+		return slug
+	}
+	suffix := r.RequestID
+	if i := strings.LastIndexByte(suffix, '-'); i >= 0 {
+		suffix = suffix[i+1:]
+	}
+	if suffix == "" {
+		return ""
+	}
+	return "chat-" + strings.ToLower(suffix)
 }
 
 // TargetValue returns the target instance or "" for "any instance".
@@ -496,7 +516,7 @@ func QueueTick(
 		// work item's plan is guaranteed by the dispatcher). The eviction guard
 		// below keys on that derived slug, distinct from the base slug, so a live
 		// base session never blocks its workers and two workers never collide.
-		if s := req.SlugValue(); s != "" && slugLive != nil && slugLive(s) {
+		if s := req.SessionSlug(); s != "" && slugLive != nil && slugLive(s) {
 			continue // eviction guard: a session for this slug is already live here;
 			// claiming would silently replace it, so leave the row pending until it frees
 		}

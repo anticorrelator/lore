@@ -211,6 +211,22 @@ journal_boundaries() {
   [ "$output" = "1" ]
 }
 
+@test "unscoped chat request persists one slug on the request and journal row" {
+  run bash "$REQUEST" --type chat --initiator agent --anywhere --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+
+  local request_id slug pending
+  request_id="$(printf '%s' "$output" | jq -r .request_id)"
+  slug="$(printf '%s' "$output" | jq -r .slug)"
+  [ "$slug" = "chat-${request_id##*-}" ]
+  [[ "$slug" =~ ^chat-[0-9a-f]{8}$ ]]
+
+  pending="$TEST_KDIR/_sessions/requests/pending/$request_id.json"
+  jq -e --arg slug "$slug" '.type=="chat" and .slug==$slug' "$pending" >/dev/null
+  jq -e --arg slug "$slug" 'select(.event=="requested") | .slug==$slug and .session_type=="chat"' \
+    "$TEST_KDIR/_sessions/events.jsonl" >/dev/null
+}
+
 @test "request without --type refuses and creates no pending dir" {
   run bash "$REQUEST" --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
@@ -630,6 +646,14 @@ journal_boundaries() {
   [[ "$output" != *"chat:"* ]]
 }
 
+@test "list renders a generated chat slug as its addressable chat alias" {
+  write_instance_session inst-b chat-deadbeef deadbeef-0000-0000-0000-000000000000
+  run bash "$LIST" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"chat:deadbeef"* ]]
+  [[ "$output" != *"sessions: chat-deadbeef"* ]]
+}
+
 @test "list renders framework @ project_dir on the instance line" {
   mkdir -p "$TEST_KDIR/_sessions/instances"
   cat > "$TEST_KDIR/_sessions/instances/inst-a.json" <<EOF
@@ -910,6 +934,34 @@ EOF
   run bash "$CLOSE" ghost --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
   [[ "$output" == *"no live instance is running session 'ghost'"* ]]
+}
+
+@test "rendered chat alias resolves to the canonical slug for every session verb" {
+  write_instance_session inst-a chat-deadbeef deadbeef-0000-0000-0000-000000000000
+  ( rid="$(wait_request_id peek-requests)"
+    mkdir -p "$TEST_KDIR/_sessions/peek-responses"
+    printf '%s\n' '{"request_id":"'"$rid"'","slug":"chat-deadbeef","captured_at":"t","ready":true,"blocked_reason":"","rows":["chat prompt"]}' \
+      > "$TEST_KDIR/_sessions/peek-responses/$rid.json" ) &
+  run bash "$PEEK" chat:deadbeef --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"chat prompt"* ]]
+  jq -e '.slug=="chat-deadbeef" and .target_instance=="inst-a"' \
+    "$TEST_KDIR"/_sessions/peek-requests/*.json >/dev/null
+
+  run bash "$SEND" chat:deadbeef "continue" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.slug=="chat-deadbeef" and .target_instance=="inst-a"' >/dev/null
+
+  run bash "$ANSWER" chat:deadbeef --option 2 --expect "Continue?" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.slug=="chat-deadbeef" and .target_instance=="inst-a"' >/dev/null
+
+  run bash "$CLOSE" chat:deadbeef --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.slug=="chat-deadbeef" and .target_instance=="inst-a"' >/dev/null
+  jq -e '.slug=="chat-deadbeef" and .target_instance=="inst-a"' \
+    "$TEST_KDIR"/_sessions/close-requests/*.json >/dev/null
 }
 
 @test "close --self self-addresses from LORE_SESSION_* env" {
@@ -3061,4 +3113,3 @@ answer_peek_with() {
   [ "$status" -eq 0 ]
   [ "$(shasum -a 256 "$TEST_KDIR/_sessions/events.jsonl" | awk '{print $1}')" = "$before" ]
 }
-

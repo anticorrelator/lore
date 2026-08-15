@@ -123,10 +123,7 @@ func (m model) buildSessionRows(instances []session.Instance, pending []session.
 				liveSlugs[s.Slug] = true
 			}
 			act := m.sessionActivity[sessionview.ActivityKey{Instance: inst.Name, Slug: s.Slug}]
-			display := s.Slug
-			if display == "" {
-				display = sessionview.ChatDisplayID(s.SessionID)
-			}
+			display := sessionview.SessionDisplay(s.Slug, s.Type, s.SessionID)
 			base := deriveBase(s.Slug)
 			rows = append(rows, sessionview.SessionRow{
 				RowID:      inst.Name + "|" + s.Slug + "|" + s.SessionID,
@@ -152,13 +149,13 @@ func (m model) buildSessionRows(instances []session.Instance, pending []session.
 	}
 
 	inflight := func(req session.Request, owner string) {
-		slug := req.SlugValue()
+		slug := req.SessionSlug()
 		if slug != "" && liveSlugs[slug] {
 			return // already live in the registry; not still spawning
 		}
-		display := slug
-		if display == "" {
-			display = "chat:? (spawning)"
+		display := sessionview.SessionDisplay(slug, req.Type, "")
+		if slug == "" {
+			display += " (spawning)"
 		}
 		base := deriveBase(slug)
 		rows = append(rows, sessionview.SessionRow{

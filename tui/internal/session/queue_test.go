@@ -19,6 +19,26 @@ func plantPending(t *testing.T, dir string, req Request) {
 	}
 }
 
+func TestRequestSessionSlug(t *testing.T) {
+	cases := []struct {
+		name string
+		req  Request
+		want string
+	}{
+		{"new chat", Request{RequestID: "20260815T022031Z-940ee194", Type: "chat", Slug: strp("chat-940ee194")}, "chat-940ee194"},
+		{"legacy chat", Request{RequestID: "20260815T022031Z-940ee194", Type: "chat"}, "chat-940ee194"},
+		{"worker unchanged", Request{RequestID: "r1", Type: "worker", Slug: strp("feature-x--w2")}, "feature-x--w2"},
+		{"spec remains slugless", Request{RequestID: "r2", Type: "spec"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.req.SessionSlug(); got != tc.want {
+				t.Fatalf("SessionSlug() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestClaimIsAtMostOnce is the core substrate invariant: under any number of
 // racing claimers of one pending row, exactly one wins the atomic rename. Run
 // many rounds with fresh rows to exercise the race repeatedly.
