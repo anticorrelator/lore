@@ -172,6 +172,21 @@ PYEOF
   decision | grep -q "outcome=deferred"
 }
 
+@test "unset routine_rate notes the zero fallback on stderr without changing stdout" {
+  settings_dir="$TEST_KDIR/settings-data"
+  stderr_file="$TEST_KDIR/gate.stderr"
+  mkdir -p "$settings_dir/config"
+  printf '{}\n' > "$settings_dir/config/settings.json"
+
+  run bash -c 'LORE_DATA_DIR="$1" bash "$2" --terminus spec-finalize --slug feat-x \
+    --template-version notahash --date 2026-07-06 --kdir "$3" 2>"$4"' \
+    _ "$settings_dir" "$GATE" "$TEST_KDIR" "$stderr_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == outcome=deferred* ]]
+  grep -Fq "retro_sampling.routine_rate is unset; using built-in fallback 0" "$stderr_file"
+  grep -Fq "Run install.sh to declare the key" "$stderr_file"
+}
+
 # --- Deferral records exactly one queue row with the ledger vocabulary -------
 
 @test "a deferred routine cycle appends exactly one queue row, outcome=deferred" {

@@ -848,7 +848,10 @@ CONF_RATE="${LORE_CONFORMANCE_RENDER_RATE:-}"
 if [[ -z "$CONF_RATE" ]]; then
   CONF_RATE=$(bash "$SCRIPT_DIR/settings.sh" get conformance_sampling.render_rate 2>/dev/null || true)
 fi
-[[ -n "$CONF_RATE" ]] || CONF_RATE="0.25"
+if [[ -z "$CONF_RATE" || "$CONF_RATE" == "null" ]]; then
+  CONF_RATE="0.25"
+  echo "[impl] Note: conformance_sampling.render_rate is unset; using built-in fallback 0.25. Run install.sh to declare the key." >&2
+fi
 CONF_DECISION=$(python3 - "$SLUG" "$VERDICT" "$CONF_RATE" <<'PYEOF'
 import hashlib, sys, datetime
 slug, verdict, rate_str = sys.argv[1], sys.argv[2], sys.argv[3]

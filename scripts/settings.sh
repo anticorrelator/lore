@@ -50,11 +50,12 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 LORE_DATA_DIR="${LORE_DATA_DIR:-$HOME/.lore}"
 SETTINGS_FILE="$LORE_DATA_DIR/config/settings.json"
 SETTINGS_LOCK="$LORE_DATA_DIR/config/.settings.lock"
+SETTINGS_SCHEMA="$SCRIPT_DIR/../adapters/settings.schema.json"
 
 usage() {
   cat >&2 <<EOF
@@ -168,6 +169,22 @@ _patch_unlocked() {
       return 1
     fi
     current=$(cat "$SETTINGS_FILE")
+  fi
+
+  # The schema is the authority for top-level key creation whenever it is
+  # present and closed. Existing top-level keys remain writable, including
+  # legacy keys awaiting a later install-time prune; this is a membership
+  # guard, not full JSON-Schema validation.
+  local top_level="${path%%.*}"
+  if [[ -f "$SETTINGS_SCHEMA" ]] \
+    && jq -e '.additionalProperties == false and (.properties | type == "object")' \
+      "$SETTINGS_SCHEMA" &>/dev/null \
+    && ! jq -e --arg key "$top_level" '.properties | has($key)' \
+      "$SETTINGS_SCHEMA" &>/dev/null \
+    && ! printf '%s' "$current" | jq -e --arg key "$top_level" 'has($key)' &>/dev/null; then
+    echo "Error: refusing to create top-level settings key '$top_level': it is not declared by the authoritative schema at $SETTINGS_SCHEMA" >&2
+    echo "Hint: declare '$top_level' in $SETTINGS_SCHEMA properties before writing it" >&2
+    return 1
   fi
 
   local tmp="$SETTINGS_FILE.tmp.$$"
