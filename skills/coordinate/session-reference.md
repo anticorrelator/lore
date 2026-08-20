@@ -93,8 +93,25 @@ conflict fail closed. The disposition vocabulary is exactly `published`,
 `restore_refused`, and `worktree_quarantined`: refusal/quarantine leaves the
 destination byte-for-byte unchanged and preserves the candidate under a durable
 result ref/patch. Successful `published` projects to the normal exactly-once
-`closed` terminal; refusal and quarantine add their named recovery rows, not
-another close terminal. Quarantine preserves content, not the physical directory.
+`closed` terminal and adds its own `worktree_published` row naming the destination
+checkout the merge landed in; refusal and quarantine add their named recovery rows.
+None of the three is another close terminal.
+Quarantine preserves content, not the physical directory.
+
+A TUI-hosted claude-code session runs under a session-scoped write allowlist
+enforced at the tool call by `scripts/guard-session-worktree-writes.sh`. The
+session may write inside its own checkout, inside the knowledge store outside the
+`_sessions/worktrees` and `_coordination/worktrees/trees` namespaces, and inside
+the system temporary directory; every other target is blocked before the write and
+appended as a `worktree_write_refused` row, identified by `actor_instance` with
+`reason` either `outside-session-allowlist` or `containment-context-missing`. The
+spawn path declares the boundary as `LORE_SESSION_WORKTREE` and the store as
+`LORE_SESSION_STORE_ROOT`; a process carrying neither is an operator's own terminal
+and is never fenced. The fence reads a structured target path, so a write issued
+through a shell command, a tool call naming no path, and any harness other than
+claude-code stay outside it — verify a cross-checkout edit rather than assuming the
+fence caught it. Neither new event joins the default stop set; reach them with an
+explicit `--until`.
 
 ## Coordinated writer ownership and cleanup
 
@@ -102,10 +119,15 @@ another close terminal. Quarantine preserves content, not the physical directory
 manifest embeds the canonical guard identity from `tui/internal/worktree/guard.go` and
 adds immutable work item, stream, attempt, temporary branch, allocation base, and
 owner identity. The manager alone allocates and advances the outer lifecycle:
-`reserved → bound → active → quiescent → reconciling → removed` — release is
+`reserved → bound → active|recovered → quiescent → reconciling → cleanup_due → removed` — release is
 removal; declaring a tree finished is the act that takes it down, and a failed
 removal raises loudly with the record returned to `reconciling` so re-driving the
-release is the retry.
+release is the retry. The manifest binds a session-or-seat 900-second lease;
+renewal and lifecycle transitions rewrite the manager row explicitly, and a live
+owner protects the tree regardless of age. After quiescence, reconciliation freezes
+an immutable source manifest and an integrated manifest before any cleanup runs. A
+removal that cannot be proven stays `cleanup_blocked`: no coordinated stream is
+done and no dependency is satisfied until removal is proven.
 
 Allocation authority stays with the coordinator or dispatching seat; the manager
 allocates only for seats. A mutating subagent may run only inside a worktree

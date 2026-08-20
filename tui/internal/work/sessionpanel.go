@@ -1263,6 +1263,11 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 		if managed {
 			worktreeDir = d.ExecutionDir
 		}
+		// The child's write fence reads its containment boundary and its
+		// operational store root from the environment; both launch paths below
+		// export whatever sessionEnv carries.
+		sessionEnv.WorktreeRoot = worktreeDir
+		sessionEnv.StoreRoot = knowledgeDir
 		// Build the initial prompt to auto-submit. Passing it as a positional
 		// argument to the harness binary starts an interactive session and
 		// submits it immediately — no PTY-write timing hack needed.

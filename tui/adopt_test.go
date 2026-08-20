@@ -488,3 +488,82 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 		t.Fatalf("adoption changed stream marker: got %v err=%v want %v", got, err, streamBytes)
 	}
 }
+
+// TestAdoptionScan_PublishedSessionJournalsDestinationOnce: the recovery sweep's
+// publish is journaled like the interactive one, and its deterministic event id
+// makes a re-run an exact replay rather than a second publication row.
+func TestAdoptionScan_PublishedSessionJournalsDestinationOnce(t *testing.T) {
+	m, sessionsDir := baseSessionModel(t)
+	kdir := m.config.KnowledgeDir
+	m.config.RepoIdentifier = "my-repo"
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+
+	sourceDir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-b", "main"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Lore Test"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", sourceDir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "seed.txt"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", sourceDir, "add", "seed.txt").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v (%s)", err, out)
+	}
+	if out, err := exec.Command("git", "-C", sourceDir, "commit", "-m", "seed").CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v (%s)", err, out)
+	}
+	m.config.ProjectDir = sourceDir
+	m.normalizedProjectDir = sourceDir
+
+	identity, err := worktree.Create(context.Background(), sourceDir, filepath.Join(t.TempDir(), "session-worktree"), "adopt-epoch")
+	if err != nil {
+		t.Fatalf("create session worktree: %v", err)
+	}
+	if identity, err = worktree.Transition(identity, worktree.StateActive); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(identity.CanonicalPath, "stream.txt"), []byte("stream\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plantCorpse(t, sessionsDir, "dead-inst", "my-repo", deadPID(t), []session.Session{
+		{Slug: "demo", Type: "implement", Initiator: "agent", Started: "2026-07-06T00:00:00Z",
+			RequestID: "spawn-1", Worktree: &identity},
+	})
+
+	msg := m.adoptionScanCmd()().(adoptionScanMsg)
+	if len(msg.alive) != 0 {
+		t.Fatalf("dead (no-tmux) session returned as alive: %+v", msg.alive)
+	}
+	got := readEventTypes(t, kdir)
+	if len(got) != 2 || got[0] != session.EventWorktreePublished || got[1] != session.EventOrphaned {
+		t.Fatalf("events = %v, want [worktree_published orphaned]", got)
+	}
+	rows := readEventRows(t, kdir)
+	wantDestination, err := filepath.EvalSymlinks(sourceDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[0].Links["destination_path"] != wantDestination {
+		t.Fatalf("recovery published row destination = %q, want %q", rows[0].Links["destination_path"], wantDestination)
+	}
+	if rows[0].Slug != "demo" || rows[0].Reason != "" {
+		t.Fatalf("recovery published identity = %+v", rows[0])
+	}
+	wantID := recoveryEventID("worktree-published", "dead-inst", "demo", "spawn-1")
+	if rows[0].EventID != wantID {
+		t.Fatalf("recovery published event_id = %q, want deterministic %q", rows[0].EventID, wantID)
+	}
+	// A re-run sweep replays the same evidence under the same id.
+	if err := session.AppendEvent(m.eventScript, kdir, rows[0]); err != nil {
+		t.Fatalf("replaying the recovery row failed: %v", err)
+	}
+	if got := readEventTypes(t, kdir); len(got) != 2 {
+		t.Fatalf("replay appended a second publication row: %v", got)
+	}
+}

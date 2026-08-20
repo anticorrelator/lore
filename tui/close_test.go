@@ -1190,3 +1190,85 @@ func TestHandleCloseLadderDone_ErrorJournalsCloseFailed(t *testing.T) {
 		t.Fatalf("later death emitted a second request terminal before disposition: %+v", rows)
 	}
 }
+
+// TestCloseDispositionPublishJournalsDestination: a close whose publish succeeds
+// journals the destination checkout the merge landed in. That destination is the
+// fact an audit of a wrong-clone merge cannot reconstruct afterward.
+func TestCloseDispositionPublishJournalsDestination(t *testing.T) {
+	sourceDir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-b", "main"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Lore Test"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", sourceDir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "seed.txt"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", sourceDir, "add", "seed.txt").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v (%s)", err, out)
+	}
+	if out, err := exec.Command("git", "-C", sourceDir, "commit", "-m", "seed").CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v (%s)", err, out)
+	}
+	identity, err := worktree.Create(context.Background(), sourceDir, filepath.Join(t.TempDir(), "session-worktree"), "publish-epoch")
+	if err != nil {
+		t.Fatalf("create session worktree: %v", err)
+	}
+	if identity, err = worktree.Transition(identity, worktree.StateActive); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(identity.CanonicalPath, "stream.txt"), []byte("stream\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m, _ := baseSessionModel(t)
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	kdir := m.config.KnowledgeDir
+	m.config.ProjectDir = sourceDir
+	m.normalizedProjectDir = sourceDir
+	ls := liveSession{typ: "implement", initiator: "agent", started: time.Now(), worktree: &identity}
+	m.localSessions = map[string]liveSession{"demo": ls}
+	m, _ = m.endLocalSessionClosed("demo", "close-1")
+	ls = m.localSessions["demo"]
+	msg, ok := m.disposeWorktreeCmd("demo", ls, "close-1")().(worktreeDispositionMsg)
+	if !ok {
+		t.Fatal("close disposition returned unexpected message")
+	}
+	if msg.err != nil || msg.outcome.Kind != worktree.OutcomePublished {
+		t.Fatalf("clean close disposition = %+v err=%v, want published", msg.outcome, msg.err)
+	}
+	if _, outcomeCmd := m.handleWorktreeDisposition(msg); outcomeCmd == nil {
+		t.Fatal("successful publish scheduled no journal command")
+	}
+
+	ev := worktreeOutcomeEvent(m.instanceName, "demo", ls, msg.outcome)
+	if ev.Event != session.EventWorktreePublished {
+		t.Fatalf("published outcome journaled as %q", ev.Event)
+	}
+	if ev.Reason != "" {
+		t.Fatalf("published row carries a refusal reason %q", ev.Reason)
+	}
+	if _, carried := ev.Links["expected_generation"]; carried {
+		t.Error("published row carries the expected generation blob")
+	}
+	if _, carried := ev.Links["observed_generation"]; carried {
+		t.Error("published row carries the observed generation blob")
+	}
+	wantDestination, err := filepath.EvalSymlinks(sourceDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ev.Links["destination_path"]; got != wantDestination {
+		t.Fatalf("destination_path = %q, want %q", got, wantDestination)
+	}
+	if journalMsg, isErr := journalCmd(m.eventScript, kdir, ev)().(journalResultMsg); isErr && journalMsg.err != nil {
+		t.Fatalf("sole writer rejected the published row: %v", journalMsg.err)
+	}
+	if got := readEventTypes(t, kdir); len(got) != 1 || got[0] != session.EventWorktreePublished {
+		t.Fatalf("journal = %v, want [worktree_published]", got)
+	}
+}

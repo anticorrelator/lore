@@ -178,10 +178,82 @@ elsewhere; quarantine does not promise indefinite retention of the physical
 worktree directory.
 
 `published` is the successful internal disposition and projects to the normal
-exactly-once `closed` session terminal; there is no separate `published` journal
-event. `restore_refused` and `worktree_quarantined` add their named worktree rows
-because the operator needs the refusal reason and recovery artifact. Those rows
-remain linked lifecycle outcomes, not additional close terminals.
+exactly-once `closed` session terminal. It also appends its own
+`worktree_published` journal row naming the destination checkout the merge landed
+in: that destination is the one fact no later reader can reconstruct from registry
+state, and auditing a wrong-clone merge needs it. The row carries the session
+slug, the worktree epoch, path, target ref and OID, the result ref and OID, and
+`links.destination_path`; it carries no refusal reason, because a success has
+none, and no generation blobs, because on a success the expected and observed
+generations are equal by construction. It is appended after the merge is known
+successful and before worktree cleanup is sequenced. An append failure surfaces
+through the ordinary journal error path and does not undo the merge — the merge
+stays published. The recovery sweep's row carries a deterministic event id, so a
+re-run sweep replays it rather than publishing a second row. `restore_refused` and
+`worktree_quarantined` add their named worktree rows because the operator needs
+the refusal reason and recovery artifact. None of the three is an additional close
+terminal; all three remain linked lifecycle outcomes.
+
+### Session write containment
+
+A TUI-hosted claude-code session may write inside its own checkout, inside the
+knowledge store outside the `_sessions/worktrees` and
+`_coordination/worktrees/trees` namespaces, and inside the system temporary
+directory. Every other target is refused at the tool call: another session's
+worktree, a coordinated writer's tree, another clone, and any path belonging to no
+checkout at all. The rule is a session-scoped write allowlist, not merely checkout
+isolation.
+
+The spawn path declares what the fence enforces. It exports `LORE_SESSION_WORKTREE`
+(the session's own checkout) and `LORE_SESSION_STORE_ROOT` (the resolved knowledge
+store) into every hosted session, coordinated and ordinary alike. The fence reads
+its policy from those variables and never from the tool payload; the payload's
+reported working directory is used only as the base for a relative target, because
+it describes the call being judged rather than supplying the rule to judge it by.
+A session that has changed into another checkout would otherwise resolve its own
+boundary from the checkout it escaped into. Neither variable is
+`LORE_KNOWLEDGE_DIR`: store resolution short-circuits on that name, so exporting it
+would redirect every `lore` verb the session runs.
+
+`scripts/guard-session-worktree-writes.sh` is the fence, registered by the
+claude-code hook adapter as a `PreToolUse` command hook on the `Edit|Write`
+matcher. It refuses by writing a blocking decision to standard output; an exit
+code alone reads as approval. Target paths are canonicalized without requiring
+them to exist, so a not-yet-created file classifies like any other and an edit
+through a symlink is judged by where the link leads. A process carrying no hosted
+session identity is an operator's own terminal and is approved without
+classification, so a human editing sibling checkouts never trips the fence.
+
+A refusal appends a `worktree_write_refused` row. That row is identified by
+`actor_instance` rather than by slug, because a hosted chat session registers
+without one; the slug rides along when the session has it. Its reason is closed:
+`outside-session-allowlist` when a classified target resolved outside every allowed
+root, and `containment-context-missing` when a session declared hosted identity but
+supplied no usable policy context — an unusable checkout boundary, an unreadable
+payload shape, or a relative target with no reported working directory. The link
+shape follows the reason. `outside-session-allowlist` carries `links.target_path`,
+`links.worktree_path`, and `links.tool_name`. `containment-context-missing` carries
+`links.tool_name` and each path only when it was actually established; an omitted
+link means the value could not be determined, and an empty-string link is invalid.
+A refusal whose row cannot be written still refuses: the block is emitted first and
+the journal failure is reported on standard error. When
+`LORE_SESSION_STORE_ROOT` is itself missing there is no journal destination at all,
+so the call is blocked as `containment-context-missing` and the unavailability is
+reported rather than invented around. Neither new event joins the default
+actionable set that `session wait` and `coordinate watch` stop on — a successful
+merge needs no action, and a blocked write is already contained — but both are
+addressable through an explicit `--until`.
+
+**What the fence does not cover.** It reads a target path out of a structured tool
+field, so a write issued through a shell command is outside it entirely; matching
+on command text is unreliable and would fire on ordinary work. A tool call that
+names no path at all is approved without classification, because there is nothing
+to fence. And the fence is registered for claude-code only: whether the installed
+codex CLI treats a `PreToolUse` refusal as blocking is unverified, and the opencode
+harness exposes only partial tool-hook coverage with matcher and blocking semantics
+that may differ, so sessions on those harnesses get neither prevention nor a
+refusal row. This document names those three paths rather than letting a partial
+fence read as a total one.
 
 ### Coordinated placement and outer lifecycle
 
@@ -725,6 +797,8 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `close_failed` | TUI | a consumed close request did not complete teardown; `reason` names why (`interactive-prompt`/`still-generating`/`rung-exhausted`/`error`), or `target-instance-dead` records exact dead-target retirement |
 | `restore_refused` | TUI | a worktree identity, ownership, or publish precondition could not be proven; carries a reason and links to the expected identity/generation, plus observed values when available. It is a worktree outcome, not a close terminal |
 | `worktree_quarantined` | TUI | a session result was preserved under a durable ref/patch after safe publication was refused; carries the result artifact and expected/observed generation links. It is a worktree outcome, not a close terminal |
+| `worktree_published` | TUI | a session result merged into its destination checkout; requires `slug`, carries no reason, and links the destination the merge landed in as `destination_path`. It is a worktree outcome, not a close terminal |
+| `worktree_write_refused` | `guard-session-worktree-writes.sh` | a hosted session's tool call targeted a path outside its session-scoped write allowlist and was blocked before the write; identified by `actor_instance` rather than `slug`, `reason` is `outside-session-allowlist` or `containment-context-missing`, and links carry the attempted target, the declared boundary, and the tool |
 | `send_requested` | `session send` enqueue verb | a send request was enqueued for the instance running a slug |
 | `sent` | TUI | the message was injected AND a later observation confirmed the composer submitted it (verified-outcome; see [Send-request queue](#send-request-queue)) |
 | `send_refused` | TUI | injection was refused, or an injected message never submitted; `reason` names why — gate refusals (`generating`/`modal`/`no-signature`/`no-contract`/`unsafe-payload`/`error`) or the post-inject `unsubmitted` |

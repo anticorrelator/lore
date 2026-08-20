@@ -1301,7 +1301,7 @@ framework_interaction_field() {
 # validation case-arm). tests/session-verbs.bats cross-checks this list against
 # the writer and names any drift; if that test fails, reconcile this line with
 # the writer rather than silencing the test.
-SESSION_EVENT_VOCAB="requested claimed spawned needs_input resumed recovered closed orphaned step_completed terminus_reached spawn_failed request_reclaimed request_abandoned request_cancelled request_expired close_requested close_failed restore_refused worktree_quarantined send_requested sent send_refused answer_requested answered answer_refused modal_blocked"
+SESSION_EVENT_VOCAB="requested claimed spawned needs_input resumed recovered closed orphaned step_completed terminus_reached spawn_failed request_reclaimed request_abandoned request_cancelled request_expired close_requested close_failed restore_refused worktree_quarantined worktree_published worktree_write_refused send_requested sent send_refused answer_requested answered answer_refused modal_blocked"
 
 # The events a coordinator can actually do something about, and therefore the
 # default stop set for anything that waits on the journal. It covers both ends of

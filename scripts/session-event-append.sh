@@ -38,7 +38,8 @@
 #                close_failed | send_requested | sent | send_refused |
 #                answer_requested | answered | answer_refused |
 #                modal_blocked |
-#                restore_refused | worktree_quarantined
+#                restore_refused | worktree_quarantined | worktree_published |
+#                worktree_write_refused
 #
 # Conditional rules:
 #   Queue-lifecycle events (requested, claimed, spawned, spawn_failed,
@@ -60,6 +61,20 @@
 #   step_label, and forbids a top-level request_id.
 #   terminus_reached requires actor_instance, slug, session_type, and
 #   reason=spec-finalize|impl-close, and forbids a top-level request_id.
+#   Worktree outcomes: worktree_published, restore_refused, and
+#   worktree_quarantined REQUIRE a non-empty slug; the two refusal-shaped ones
+#   also REQUIRE a non-empty reason. A successful publish carries no reason.
+#   worktree_write_refused is the containment fence's row and is identified by a
+#   non-empty actor_instance rather than a slug, because a hosted chat session
+#   registers without one; slug rides along when the session has it. Its reason
+#   is closed: outside-session-allowlist (a classified target resolved outside
+#   every allowed root) or containment-context-missing (the session declared
+#   itself hosted but supplied no usable policy context). Link shape follows the
+#   reason — outside-session-allowlist requires links.target_path,
+#   links.worktree_path, and links.tool_name; containment-context-missing
+#   requires links.tool_name and carries the paths only when they were
+#   established. No link on this event may be an empty string: an omitted link
+#   means undetermined, an empty one means nothing.
 #   links.close_requests is optional and valid only on closed. Its value MUST be
 #   a string encoding a non-empty JSON array of distinct, non-empty strings. The
 #   writer validates but never derives it; absence declares no recovery links.
@@ -136,12 +151,12 @@ case "$EVENT" in
   requested|claimed|spawned|needs_input|resumed|recovered|closed|orphaned|\
 step_completed|terminus_reached|spawn_failed|request_reclaimed|\
 request_abandoned|request_cancelled|request_expired|close_requested|close_failed|send_requested|sent|send_refused|answer_requested|answered|answer_refused|modal_blocked|\
-restore_refused|worktree_quarantined) ;;
+restore_refused|worktree_quarantined|worktree_published|worktree_write_refused) ;;
   "")
     fail "missing required field: event"
     ;;
   *)
-    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, resumed, recovered, closed, orphaned, step_completed, terminus_reached, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, request_expired, close_requested, close_failed, send_requested, sent, send_refused, answer_requested, answered, answer_refused, modal_blocked, restore_refused, worktree_quarantined)"
+    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, resumed, recovered, closed, orphaned, step_completed, terminus_reached, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, request_expired, close_requested, close_failed, send_requested, sent, send_refused, answer_requested, answered, answer_refused, modal_blocked, restore_refused, worktree_quarantined, worktree_published, worktree_write_refused)"
     ;;
 esac
 
@@ -157,16 +172,54 @@ if printf '%s' "$ROW" | jq -e 'has("registration_id")' >/dev/null 2>&1; then
 fi
 
 # --- Worktree outcomes are linked lifecycle rows, not teardown terminals ---
+# A successful publish carries no refusal reason, so only the refusal-shaped
+# outcomes require one.
 case "$EVENT" in
-  restore_refused|worktree_quarantined)
+  worktree_published|restore_refused|worktree_quarantined)
     if ! printf '%s' "$ROW" | jq -e '(.slug // "") != ""' >/dev/null 2>&1; then
       fail "missing required field: slug (required for worktree outcome '$EVENT')"
     fi
+    ;;
+esac
+
+case "$EVENT" in
+  restore_refused|worktree_quarantined)
     if ! printf '%s' "$ROW" | jq -e '(.reason // "") != ""' >/dev/null 2>&1; then
       fail "missing required field: reason (required for worktree outcome '$EVENT')"
     fi
     ;;
 esac
+
+# --- The containment fence's refusal is identified by instance, not by slug ---
+# A hosted chat session registers without a slug, so requiring one here would
+# make exactly the ad-hoc sessions most likely to wander unable to journal what
+# they were stopped from doing. actor_instance is present whenever hosted
+# identity is.
+if [[ "$EVENT" == "worktree_write_refused" ]]; then
+  if ! printf '%s' "$ROW" | jq -e '(.actor_instance // "") != ""' >/dev/null 2>&1; then
+    fail "missing required field: actor_instance (required for event 'worktree_write_refused')"
+  fi
+  REFUSAL_REASON=$(printf '%s' "$ROW" | jq -r '.reason // ""')
+  case "$REFUSAL_REASON" in
+    outside-session-allowlist|containment-context-missing) ;;
+    "") fail "missing required field: reason (worktree_write_refused requires outside-session-allowlist or containment-context-missing)" ;;
+    *) fail "invalid field: reason (worktree_write_refused requires outside-session-allowlist or containment-context-missing)" ;;
+  esac
+  # An omitted link means the value could not be determined; an empty one asserts
+  # a determination that is not there. Only the first is a legible row.
+  if printf '%s' "$ROW" | jq -e '.links | type == "object" and (to_entries | any(.value == ""))' >/dev/null 2>&1; then
+    fail "invalid field: links (worktree_write_refused rejects empty-string links; omit an undetermined value)"
+  fi
+  REQUIRED_LINKS="tool_name"
+  if [[ "$REFUSAL_REASON" == "outside-session-allowlist" ]]; then
+    REQUIRED_LINKS="target_path worktree_path tool_name"
+  fi
+  for link_field in $REQUIRED_LINKS; do
+    if ! printf '%s' "$ROW" | jq -e --arg field "$link_field" '(.links[$field] // "") != ""' >/dev/null 2>&1; then
+      fail "missing required field: links.$link_field (required for worktree_write_refused reason '$REFUSAL_REASON')"
+    fi
+  done
+fi
 
 # --- Modal-entry classification events require session identity and evidence ---
 if [[ "$EVENT" == "modal_blocked" ]]; then

@@ -1004,3 +1004,57 @@ func argValueAfter(args []string, flag string) string {
 	}
 	return ""
 }
+
+// TestStartTerminalCmd_DeclaresContainmentBoundary: the spawn path declares the
+// session's own checkout and the knowledge store, so the write fence in the child
+// learns its boundary from the launcher rather than from a working directory the
+// session may already have left.
+func TestStartTerminalCmd_DeclaresContainmentBoundary(t *testing.T) {
+	stageFakeBinaries(t)
+	dir := stageFakeLoreData(t, "claude-code", nil)
+
+	identity := mustSessionWorktree(t)
+	d := SessionDescriptor{Type: SessionSpec, Slug: "fence-slug", Title: "fence title", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+	cmd := StartTerminalCmd(d, 80, 24, dir,
+		SessionEnv{Instance: "amber-otter", Slug: "fence-slug", Type: "spec"}, false)
+	msg := cmd()
+	started, ok := msg.(SessionProcessStartedMsg)
+	if !ok {
+		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
+	}
+	if started.Ptmx != nil {
+		_ = started.Ptmx.Close()
+	}
+	for _, want := range []string{
+		"LORE_SESSION_WORKTREE=" + identity.CanonicalPath,
+		"LORE_SESSION_STORE_ROOT=" + dir,
+	} {
+		if !envContains(started.Cmd.Env, want) {
+			t.Errorf("Cmd.Env missing %q: %v", want, started.Cmd.Env)
+		}
+	}
+	// LORE_KNOWLEDGE_DIR short-circuits store resolution, so the store root must
+	// never travel under that name.
+	for _, v := range started.Cmd.Env {
+		if strings.HasPrefix(v, "LORE_KNOWLEDGE_DIR=") {
+			t.Errorf("spawn exported %q; store resolution would be redirected for every lore verb", v)
+		}
+	}
+}
+
+func TestSessionEnvVarsCarriesContainmentBoundary(t *testing.T) {
+	got := SessionEnv{Instance: "owner", Type: "chat",
+		WorktreeRoot: "/store/_sessions/worktrees/A", StoreRoot: "/store"}.vars()
+	want := []string{
+		"LORE_SESSION_INSTANCE=owner", "LORE_SESSION_TYPE=chat",
+		"LORE_SESSION_WORKTREE=/store/_sessions/worktrees/A", "LORE_SESSION_STORE_ROOT=/store",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("vars() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("vars()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

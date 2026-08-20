@@ -32,7 +32,16 @@ for token in (
     "byte-for-byte unchanged",
     "durable result ref and patch",
     "projects to the normal exactly-once `closed` session terminal",
-    "there is no separate `published` journal event",
+    "appends its own `worktree_published` journal row naming the destination checkout",
+    "session-scoped write allowlist",
+    "worktree_write_refused",
+    "outside-session-allowlist",
+    "containment-context-missing",
+    # The fence is partial by construction; each uncovered path is pinned by its
+    # own token rather than by a count, so naming a fourth later stays legal.
+    "a write issued through a shell command is outside it entirely",
+    "names no path at all is approved without classification",
+    "registered for claude-code only",
 ):
     assert token in lifecycle, f"session substrate missing worktree obligation: {token}"
 
@@ -43,6 +52,8 @@ for prose in (" ".join(coordinate.split()), " ".join(reference.split())):
         "published",
         "restore_refused",
         "worktree_quarantined",
+        "worktree_published",
+        "session-scoped write allowlist",
         "byte-for-byte unchanged",
         "durable result ref/patch",
     ):

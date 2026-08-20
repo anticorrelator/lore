@@ -252,6 +252,26 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "claude-code install registers the session-worktree write fence on Edit|Write" {
+  [ -f "$CC_ADAPTER" ] || skip "adapters/hooks/claude-code.sh missing"
+  set_framework claude-code
+  export HOME="$TEST_LORE_DATA_DIR/home"
+  mkdir -p "$HOME/.claude"
+  run bash "$CC_ADAPTER" install --framework claude-code
+  [ "$status" -eq 0 ]
+  run python3 - "$HOME/.claude/settings.json" <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1]))["hooks"]["PreToolUse"]
+# The fence covers both structured-path edit tools; the sibling work-item guard
+# matches Write only, so a matcher regression here silently un-fences Edit.
+fence = [r for r in rows if r.get("matcher") == "Edit|Write"]
+assert len(fence) == 1, rows
+command = fence[0]["hooks"][0]["command"]
+assert command == "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/guard-session-worktree-writes.sh", command
+PY
+  [ "$status" -eq 0 ]
+}
+
 @test "every claude-code hook command is pinned to LORE_FRAMEWORK=claude-code" {
   # framework.json holds one framework string (last install wins), so on a
   # multi-harness install any hook command that resolves through it routes to

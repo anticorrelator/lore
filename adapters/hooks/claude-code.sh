@@ -157,6 +157,7 @@ lore_hooks = [
     ("PreCompact",   None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/pre-compact.sh", 5),
     ("TaskCompleted", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/task-completed-capture-check.sh", 10),
     ("PreToolUse",   "Write", "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/guard-work-writes.sh", 5),
+    ("PreToolUse",   "Edit|Write", "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/guard-session-worktree-writes.sh", 5),
     ("PreToolUse",   "Agent", "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/validate-dispatch-guidance.sh --hook claude-code", 5),
     ("SessionEnd",   "clear", "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/pre-compact.sh", 5),
 ]
@@ -653,7 +654,7 @@ cmd_smoke() {
   echo "  -------------------- --------- ----------------------------------------"
   printf '  %-20s %-9s %s\n' session_start      full      "SessionStart hook (~/.lore/scripts/{auto-reindex,mine-retrieval-misses,packet-assess,load-knowledge,load-work,load-threads,extract-session-digest}); doctor.sh runs from TUI startup instead"
   printf '  %-20s %-9s %s\n' user_prompt        full      "(no native UserPromptSubmit hook today; PreToolUse Write matcher covers lore writes)"
-  printf '  %-20s %-9s %s\n' pre_tool           full      "PreToolUse hooks (Write guard; Agent -> validate-dispatch-guidance.sh)"
+  printf '  %-20s %-9s %s\n' pre_tool           full      "PreToolUse hooks (Write guard; Edit|Write session-worktree write fence; Agent -> validate-dispatch-guidance.sh)"
   printf '  %-20s %-9s %s\n' post_tool          full      "(currently unused by lore; PostToolUse hook surface available)"
   printf '  %-20s %-9s %s\n' permission_request full      "PreToolUse JSON-stdout decision protocol (no separate lore handler)"
   printf '  %-20s %-9s %s\n' pre_compact        full      "PreCompact hook (~/.lore/scripts/pre-compact.sh)"

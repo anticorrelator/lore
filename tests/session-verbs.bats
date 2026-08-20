@@ -1679,6 +1679,73 @@ PYEOF
   [[ "$output" == *'"event":"restore_refused"'* ]]
 }
 
+@test "append accepts a successful publish with no refusal reason" {
+  run bash "$APPEND" --row '{"event":"worktree_published","slug":"feature-x","links":{"destination_path":"/repo/checkout","worktree_epoch":"e1"}}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run jq -s -e 'map(select(.event=="worktree_published")) | length == 1 and (.[0].links.destination_path == "/repo/checkout") and (.[0] | has("reason") | not)' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "append rejects a publish without linked session identity" {
+  run bash "$APPEND" --row '{"event":"worktree_published","links":{"destination_path":"/repo/checkout"}}' --kdir "$TEST_KDIR"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"missing required field: slug"* ]]
+}
+
+@test "append identifies a write refusal by instance so a slugless session stays journalable" {
+  run bash "$APPEND" --row '{"event":"worktree_write_refused","actor_instance":"amber-otter","reason":"outside-session-allowlist","links":{"target_path":"/other/checkout/f.txt","worktree_path":"/own/tree","tool_name":"Edit"}}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run bash "$APPEND" --row '{"event":"worktree_write_refused","actor_instance":"amber-otter","slug":"feature-x","reason":"outside-session-allowlist","links":{"target_path":"/other/checkout/f.txt","worktree_path":"/own/tree","tool_name":"Write"}}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run jq -s -e 'map(select(.event=="worktree_write_refused")) | length == 2 and (.[0] | has("slug") | not) and (.[1].slug == "feature-x")' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+  run bash "$APPEND" --row '{"event":"worktree_write_refused","reason":"outside-session-allowlist","links":{"target_path":"/other/f.txt","worktree_path":"/own/tree","tool_name":"Edit"}}' --kdir "$TEST_KDIR"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"missing required field: actor_instance"* ]]
+}
+
+@test "append pins the write-refusal reason to its closed set" {
+  run bash "$APPEND" --row '{"event":"worktree_write_refused","actor_instance":"amber-otter","links":{"tool_name":"Edit"}}' --kdir "$TEST_KDIR"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"missing required field: reason"* ]]
+  run bash "$APPEND" --row '{"event":"worktree_write_refused","actor_instance":"amber-otter","reason":"felt-wrong","links":{"tool_name":"Edit"}}' --kdir "$TEST_KDIR"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"invalid field: reason"* ]]
+  run bash "$APPEND" --row '{"event":"worktree_write_refused","actor_instance":"amber-otter","reason":"containment-context-missing","links":{"tool_name":"Edit"}}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+}
+
+@test "append enforces the write-refusal link shape its reason implies" {
+  run bash "$APPEND" --row '{"event":"worktree_write_refused","actor_instance":"amber-otter","reason":"outside-session-allowlist","links":{"worktree_path":"/own/tree","tool_name":"Edit"}}' --kdir "$TEST_KDIR"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"missing required field: links.target_path"* ]]
+  run bash "$APPEND" --row '{"event":"worktree_write_refused","actor_instance":"amber-otter","reason":"containment-context-missing","links":{"target_path":"/other/f.txt"}}' --kdir "$TEST_KDIR"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"missing required field: links.tool_name"* ]]
+}
+
+@test "append rejects an empty-string link on a write refusal" {
+  run bash "$APPEND" --row '{"event":"worktree_write_refused","actor_instance":"amber-otter","reason":"containment-context-missing","links":{"tool_name":"Edit","worktree_path":""}}' --kdir "$TEST_KDIR"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"empty-string links"* ]]
+}
+
+@test "wait accepts both new worktree events by explicit narrowing only" {
+  echo '{"event":"worktree_published","slug":"feature-x","links":{"destination_path":"/repo/checkout"}}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  run bash "$WAIT" feature-x --until worktree_published --since 0 --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"worktree_published"'* ]]
+  run bash "$WAIT" feature-x --until worktree_write_refused --since 0 --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -ne 0 ]
+}
+
+@test "neither new worktree event joins the default actionable set" {
+  run grep -E '^SESSION_ACTIONABLE_EVENTS=' "$LIB"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"worktree_published"* ]]
+  [[ "$output" != *"worktree_write_refused"* ]]
+}
+
 @test "append accepts orphaned and deterministic replay is idempotent" {
   local row='{"event_id":"orphan-fixed","event":"orphaned","request_id":"spawn-1","slug":"feature-x","reason":"instance-death"}'
   run bash "$APPEND" --row "$row" --kdir "$TEST_KDIR"

@@ -103,6 +103,17 @@ type SessionEnv struct {
 	WorktreeID   string // LORE_WORKTREE_ID for coordinated writers
 	ExecutionDir string // LORE_EXECUTION_DIR, identical to the validated child cwd
 
+	// WorktreeRoot is the session's own checkout — the containment boundary the
+	// write fence classifies against — and StoreRoot is the resolved knowledge
+	// store the session may write into. Both are declared here rather than
+	// derived by the child: a session that has changed into another checkout
+	// would resolve both from that other checkout, so the guard would validate
+	// the escape against the escape. StoreRoot deliberately is not exported as
+	// LORE_KNOWLEDGE_DIR, which resolve-repo.sh short-circuits on — that would
+	// redirect store resolution for every `lore` verb in the session.
+	WorktreeRoot string // LORE_SESSION_WORKTREE
+	StoreRoot    string // LORE_SESSION_STORE_ROOT
+
 	// RoutingOverrides is a per-dispatch role→model map exported as
 	// LORE_MODEL_<ROLE> — the resolver's top-precedence env layer (tranche-1 D2:
 	// per-run direction always wins). This is delivery only; no resolver change.
@@ -129,6 +140,12 @@ func (s SessionEnv) vars() []string {
 	}
 	if s.ExecutionDir != "" {
 		out = append(out, "LORE_EXECUTION_DIR="+s.ExecutionDir)
+	}
+	if s.WorktreeRoot != "" {
+		out = append(out, "LORE_SESSION_WORKTREE="+s.WorktreeRoot)
+	}
+	if s.StoreRoot != "" {
+		out = append(out, "LORE_SESSION_STORE_ROOT="+s.StoreRoot)
 	}
 	// Sort roles for a deterministic env order. Each role→model becomes
 	// LORE_MODEL_<ROLE> with the role uppercased and hyphens mapped to

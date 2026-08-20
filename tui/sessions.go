@@ -224,7 +224,10 @@ func publishWorktree(ctx context.Context, identity worktree.Identity, destinatio
 
 func worktreeOutcomeEvent(instanceName, slug string, ls liveSession, outcome worktree.PublishOutcome) session.Event {
 	event := session.EventRestoreRefused
-	if outcome.Kind == worktree.OutcomeWorktreeQuarantined {
+	switch outcome.Kind {
+	case worktree.OutcomePublished:
+		event = session.EventWorktreePublished
+	case worktree.OutcomeWorktreeQuarantined:
 		event = session.EventWorktreeQuarantined
 	}
 	links := map[string]string{
@@ -233,12 +236,22 @@ func worktreeOutcomeEvent(instanceName, slug string, ls liveSession, outcome wor
 		"target_ref":     outcome.Identity.TargetRef,
 		"target_oid":     outcome.Identity.TargetOID,
 	}
-	if expected, err := json.Marshal(outcome.Expected); err == nil {
-		links["expected_generation"] = string(expected)
-	}
-	if outcome.Observed != nil {
-		if observed, err := json.Marshal(outcome.Observed); err == nil {
-			links["observed_generation"] = string(observed)
+	if outcome.Kind == worktree.OutcomePublished {
+		// Which checkout the merge landed in is the one fact an audit cannot
+		// reconstruct from registry state afterward.
+		if outcome.Observed != nil {
+			links["destination_path"] = outcome.Observed.CanonicalPath
+		}
+	} else {
+		// The generations explain a mismatch. On a success they are equal by
+		// construction, so carrying them would add two large blobs per merge.
+		if expected, err := json.Marshal(outcome.Expected); err == nil {
+			links["expected_generation"] = string(expected)
+		}
+		if outcome.Observed != nil {
+			if observed, err := json.Marshal(outcome.Observed); err == nil {
+				links["observed_generation"] = string(observed)
+			}
 		}
 	}
 	if outcome.Artifact.Ref != "" {
@@ -279,7 +292,7 @@ func (m model) handleWorktreeDisposition(msg worktreeDispositionMsg) (model, tea
 	}
 
 	var outcomeCmd tea.Cmd
-	if msg.outcome.Kind == worktree.OutcomeWorktreeQuarantined {
+	if msg.outcome.Kind == worktree.OutcomeWorktreeQuarantined || msg.outcome.Kind == worktree.OutcomePublished {
 		outcomeCmd = journalCmd(m.eventScript, m.config.KnowledgeDir, worktreeOutcomeEvent(m.instanceName, msg.slug, ls, msg.outcome))
 	}
 	var terminalCmds []tea.Cmd
@@ -859,6 +872,12 @@ func (m model) adoptionScanCmd() tea.Cmd {
 							claimRetained = append(claimRetained, a)
 						} else if outcome.Kind == worktree.OutcomeWorktreeQuarantined {
 							claimEvents = append(claimEvents, worktreeOutcomeEvent(self, s.Slug, ls, outcome))
+						} else if outcome.Kind == worktree.OutcomePublished {
+							// A re-run sweep over the same session must replay this
+							// row rather than publish a second one.
+							published := worktreeOutcomeEvent(self, s.Slug, ls, outcome)
+							published.EventID = recoveryEventID("worktree-published", a.deadInstance, a.slug, a.requestID)
+							claimEvents = append(claimEvents, published)
 						}
 					}
 				}
