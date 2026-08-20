@@ -99,10 +99,15 @@ lore work view <slug>
    ```bash
    lore work list --json --all 2>/dev/null
    ```
-3. For each active work item (and archived items updated within the last 7 days), read `plan.md` and compute overlap with the diff's changed files via the phase `**Files:**` lists. Match = highest overlap with ≥2 overlapping files (or 1 if the plan only lists 1 file).
-4. Fallback: match current branch against each item's `branches` array in `_meta.json`.
+3. For each active work item (and archived items updated within the last 7 days), read `plan.md` and resolve the item's declared file surface, then overlap that surface with the diff's changed files. Two plan shapes, checked in this order:
+   - **Task-level declarations.** A plan whose units are `### Task N:` headings declares each task's owned surface in that task's `**Files:**` block. The item's surface is the union of those blocks across all its tasks, plus any backticked paths on the task lines themselves.
+   - **Phase-level lists (legacy fallback).** A plan whose units are `### Phase N:` headings carries no task-level declarations. Flatten its phase `**Files:**` lists into one surface and use that.
 
-If `lore` is unavailable or no match found, skip silently and fall back to commit-log-only body (same as global `/pr`).
+   An item whose plan declares no file surface under either shape cannot be scored here — carry it to the branch fallback below instead.
+4. Match = the item with the highest overlap, requiring ≥2 overlapping files (or 1 when the item declares only 1 file). The threshold is a floor, not a preference: if no item clears it, the result is no match. Do not relax it, and do not settle for the best of several items that all fall short.
+5. Fallback: match current branch against each item's `branches` array in `_meta.json`.
+
+If `lore` is unavailable, or neither the file-surface pass nor the branch fallback yields a match, skip silently and fall back to a commit-log-only body (same as global `/pr`). No match is a supported outcome: a body derived from the commit log is correct, while a body derived from the wrong work item is not.
 
 ### 4. Read the work item
 
@@ -111,7 +116,7 @@ Once the slug is known, read all of:
 lore work view <slug>           # prints notes.md to stdout
 ```
 Also read directly:
-- `$(lore resolve)/_work/<slug>/plan.md` — for phases, files, design decisions, architecture diagram
+- `$(lore resolve)/_work/<slug>/plan.md` — for tasks, files, design decisions, architecture diagram
 - `$(lore resolve)/_work/<slug>/_meta.json` — for `issue` field (GitHub issue URL)
 
 Extract:

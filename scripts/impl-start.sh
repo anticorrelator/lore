@@ -4,7 +4,8 @@
 #
 # Absorbs the Step 1 bookkeeping of /implement:
 #   - resolve <ref> to a canonical slug (delegates to resolve-work-ref.sh)
-#   - validate plan.md exists with a "## Phases" section and >=1 unchecked "- [ ]"
+#   - validate plan.md exists with a "## Tasks" (or legacy "## Phases") section
+#     and >=1 unchecked "- [ ]"
 #   - read _meta.json: title plus intent_anchor, returned VERBATIM — the
 #     anchor-coverage verdict belongs to the lead (gate-anchor verb); this
 #     script computes facts only and never adjudicates
@@ -54,7 +55,7 @@ while [[ $# -gt 0 ]]; do
 Usage: lore impl start <ref> [--branch <name>] [--json]
 
 Resolve a work item and return the /implement start struct: title, verbatim
-intent anchor, phase/unchecked-task counts, prior Tier 2 claims maps,
+intent anchor, plan unit and unchecked-task counts, prior Tier 2 claims maps,
 role->model bindings, template versions, and branch-cache status.
 
 Writes only the branch cache; makes no judgments.
@@ -67,10 +68,11 @@ EOF
       exit 0
       ;;
     --*)
+      _msg="Unknown flag: $1. Accepted flags are --branch and --json."
       if [[ $JSON_MODE -eq 1 ]]; then
-        json_error "Unknown flag: $1"
+        json_error "$_msg"
       fi
-      echo "[impl] Error: Unknown flag: $1" >&2
+      echo "[impl] Error: $_msg" >&2
       exit 1
       ;;
     *)
@@ -147,11 +149,18 @@ fail() {
 # --- Validate plan.md before any write -------------------------------------
 PLAN="$ITEM_DIR/plan.md"
 if [[ ! -f "$PLAN" ]]; then
-  fail "No structured plan found for '$SLUG'. Run /spec first to create phases and tasks."
+  fail "No structured plan found for '$SLUG'. Run /spec first to create the plan's tasks."
 fi
 UNCHECKED=$(grep -cE '^[[:space:]]*- \[ \]' "$PLAN") || true
+TASK_HEADINGS=$(grep -cE '^### Task [0-9]+:' "$PLAN") || true
 PHASES=$(grep -cE '^### Phase [0-9]+:' "$PLAN") || true
-if ! grep -qE '^## Phases' "$PLAN" || [[ "${UNCHECKED:-0}" -eq 0 ]]; then
+# A plan missing its task list and a plan whose tasks are all checked are
+# different problems and get different refusals — reporting the first as the
+# second sends the caller looking for finished work that was never written.
+if ! grep -qE '^## (Tasks|Phases)' "$PLAN"; then
+  fail "plan.md for '$SLUG' has no '## Tasks' section (a phase-shaped plan's '## Phases' section is also accepted). Add the task list to $PLAN, then run: lore work regen-tasks $SLUG"
+fi
+if [[ "${UNCHECKED:-0}" -eq 0 ]]; then
   fail "All plan tasks are already complete."
 fi
 
@@ -224,7 +233,7 @@ WORKER_TV=$(template_version_or_empty worker "$(resolve_agent_template worker 2>
 ADVISOR_TV=$(template_version_or_empty advisor "$(resolve_agent_template advisor 2>/dev/null || true)")
 
 # --- Assemble and emit the start struct -------------------------------------
-PAYLOAD=$(python3 - "$ITEM_DIR" "$SLUG" "$ARCHIVED" "$PHASES" "$UNCHECKED" \
+PAYLOAD=$(python3 - "$ITEM_DIR" "$SLUG" "$ARCHIVED" "$PHASES" "$TASK_HEADINGS" "$UNCHECKED" \
   "$CACHE_STATUS" "$CURRENT_BRANCH" \
   "$LEAD_MODEL" "$WORKER_MODEL" "$ADVISOR_MODEL" \
   "$LEAD_TV" "$WORKER_TV" "$ADVISOR_TV" \
@@ -234,10 +243,10 @@ import json
 import os
 import sys
 
-(item_dir, slug, archived, phases, unchecked, cache_status, branch,
+(item_dir, slug, archived, phases, task_headings, unchecked, cache_status, branch,
  lead_m, worker_m, advisor_m, lead_tv, worker_tv, advisor_tv,
  worker_mech_m, worker_std_m, worker_jd_m,
- worker_mech_r, worker_std_r, worker_jd_r) = sys.argv[1:20]
+ worker_mech_r, worker_std_r, worker_jd_r) = sys.argv[1:21]
 
 def route_or_none(raw):
     return json.loads(raw) if raw else None
@@ -278,7 +287,8 @@ print(json.dumps({
     "archived": archived == "true",
     "title": title,
     "intent_anchor": anchor,
-    "plan": {"phases": int(phases or 0), "unchecked_tasks": int(unchecked or 0)},
+    "plan": {"tasks": int(task_headings or 0), "phases": int(phases or 0),
+             "unchecked_tasks": int(unchecked or 0)},
     "branch_cache": {"status": cache_status, "branch": branch or None},
     "prior_claims": {"total": total, "by_task": by_task, "by_file": by_file},
     "models": {"lead": lead_m, "worker": worker_m, "advisor": advisor_m},
@@ -322,7 +332,10 @@ print("Worker class routes (source -> target / native): " + "  ".join(
       if route else f"{name}=unresolved"
       for name, route in wr.items()))
 print(f"Template versions: lead={tv['lead']}  worker={tv['worker']}  advisor={tv['advisor']}")
-print(f"Phases: {p['phases']} with {p['unchecked_tasks']} unchecked tasks")
+if p["tasks"]:
+    print(f"Plan: {p['tasks']} tasks, {p['unchecked_tasks']} unchecked")
+else:
+    print(f"Plan: {p['phases']} phases with {p['unchecked_tasks']} unchecked tasks")
 total = d["prior_claims"]["total"]
 if total:
     print(f"Prior Tier 2 claims: {total} rows loaded from task-claims.jsonl")

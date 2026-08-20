@@ -6,13 +6,18 @@ Standalone CLI and importable module. Zero external dependencies (stdlib only).
 CLI usage:
     python3 generate-tasks.py <plan-md-path> [--knowledge-dir <path>]
 
-Outputs JSON to stdout matching the tasks.json schema:
-{
-  "plan_checksum": "sha256-of-plan.md",
-  "generated_at": "ISO-8601-UTC",
-  "phases": [{ "phase_number": 1, "phase_name": "...", "objective": "...",
-                "files": [...], "tasks": [{ "id": "task-1", ... }] }]
-}
+Outputs JSON to stdout matching the tasks.json schema. Which unit array is
+emitted follows the plan's own grammar, and only one is ever present:
+
+    # plan authored with `### Task N:` headings
+    { "plan_checksum": ..., "generated_at": ...,
+      "tasks": [{ "id": "task-1", "name": "...", "deliverable": "...",
+                  "file_targets": [...], "description": "<inline brief>", ... }] }
+
+    # plan authored with `### Phase N:` headings
+    { "plan_checksum": ..., "generated_at": ...,
+      "phases": [{ "phase_number": 1, "phase_name": "...", "objective": "...",
+                   "files": [...], "tasks": [{ "id": "task-1", ... }] }] }
 """
 
 import argparse
@@ -366,6 +371,11 @@ _ROUTE_STRIP_RE = re.compile(r"\s*" + _ROUTE_RE.pattern)
 # prose. Explicit dependencies compose with collision-derived blockedBy edges.
 _DEPENDS_ON_RE = re.compile(r"\[depends-on:\s*([^\]]*)\]", re.IGNORECASE)
 _TREE_RE = re.compile(r"\[tree:\s*(writer|read-only)\s*\]", re.IGNORECASE)
+# The run of `[[backlink]]` and `[marker: value]` brackets that closes a
+# checklist line. Everything before it is prose.
+_TRAILING_MARKERS_RE = re.compile(
+    r"(?:\s*(?:\[\[[^\]]*\]\]|\[[^\]\[]*\]))+\s*$"
+)
 
 
 def extract_route(item_text: str) -> "str | None":
@@ -390,9 +400,20 @@ def strip_route_marker(text: str) -> str:
     return _ROUTE_STRIP_RE.sub("", text).strip()
 
 
-def extract_explicit_dependencies(item_text: str) -> list[str]:
-    """Extract ordered task ids from an optional [depends-on: ...] marker."""
-    match = _DEPENDS_ON_RE.search(item_text)
+def extract_explicit_dependencies(
+    item_text: str, trailing_only: bool = False
+) -> list[str]:
+    """Extract ordered task ids from an optional [depends-on: ...] marker.
+
+    With ``trailing_only``, only the run of bracketed markers and backlinks that
+    closes the line is searched, so a ``[depends-on: …]`` written inside the
+    prose of a checklist line cannot shadow the authored edge.
+    """
+    haystack = item_text
+    if trailing_only:
+        suffix = _TRAILING_MARKERS_RE.search(item_text)
+        haystack = suffix.group(0) if suffix else ""
+    match = _DEPENDS_ON_RE.search(haystack)
     if not match:
         return []
     values: list[str] = []
@@ -434,6 +455,18 @@ def _is_file_path(candidate: str) -> bool:
     return True
 
 
+def backtick_file_paths(text: str) -> list[str]:
+    """Return backtick-quoted paths in ``text``, deduplicated in first-seen order."""
+    targets: list[str] = []
+    seen: set[str] = set()
+    for m in re.finditer(r"`([^`]+)`", text):
+        candidate = m.group(1).strip()
+        if _is_file_path(candidate) and candidate not in seen:
+            targets.append(candidate)
+            seen.add(candidate)
+    return targets
+
+
 def extract_file_targets(task_text: str, phase_files: list[str]) -> list[str]:
     """Extract file targets from a task's text, falling back to phase files.
 
@@ -441,13 +474,7 @@ def extract_file_targets(task_text: str, phase_files: list[str]) -> list[str]:
     If none found, returns the phase-level files list as fallback.
     Returns deduplicated list preserving first-occurrence order.
     """
-    targets: list[str] = []
-    seen: set[str] = set()
-    for m in re.finditer(r"`([^`]+)`", task_text):
-        candidate = m.group(1).strip()
-        if _is_file_path(candidate) and candidate not in seen:
-            targets.append(candidate)
-            seen.add(candidate)
+    targets = backtick_file_paths(task_text)
     if targets:
         return targets
     # Fallback: use phase-level files
@@ -718,13 +745,17 @@ def build_context_section(
 
 
 # ---------------------------------------------------------------------------
-# Phase-level advisor + consultation parsing (D2, D4, D6a)
+# Advisor + consultation parsing
+#
+# Both plan grammars declare these blocks on the unit that owns the brief — the
+# phase in a phase-shaped plan, the task in a flat one — so these parsers take
+# whichever block is declaring.
 # ---------------------------------------------------------------------------
 
-def _phase_has_persistent_advisor(phase_content: str) -> bool:
-    """Return True if the phase declares at least one ``mode: persistent`` advisor.
+def _has_persistent_advisor(block: str) -> bool:
+    """Return True if the block declares at least one ``mode: persistent`` advisor.
 
-    Under the post-hoist routing (D1, D2), only phase advisors tagged
+    Only advisors tagged
     ``mode: persistent`` opt into the advisor-agent pipeline that
     concatenates ``advisory-consultation.md`` onto worker prompts.
     Legacy advisor declarations (``[must-consult]``, ``[on-demand]``)
@@ -738,7 +769,7 @@ def _phase_has_persistent_advisor(phase_content: str) -> bool:
     """
     adv_match = re.search(
         r"^\*\*Advisors:\*\*\s*\n((?:(?!^\*\*|\n##).*\n?)*)",
-        phase_content,
+        block,
         re.MULTILINE,
     )
     if not adv_match:
@@ -747,22 +778,22 @@ def _phase_has_persistent_advisor(phase_content: str) -> bool:
     return bool(re.search(r"\bmode\s*:\s*persistent\b", block))
 
 
-def _parse_consultations_required(phase_content: str) -> list[str]:
-    """Parse phase-level ``**Consultations required:**`` domain labels.
+def _parse_consultations_required(block: str) -> list[str]:
+    """Parse a unit's ``**Consultations required:**`` domain labels.
 
     The block format mirrors ``**Files:**`` — a ``-`` bulleted list of
     domain labels a worker MUST consult before starting implementation.
     Each bullet contributes one label; trailing annotation after ``—`` is
-    preserved as part of the rendered line in ``phase_context`` but the
-    parsed list contains only the label text up to the optional dash.
+    preserved as part of the rendered brief but the parsed list contains only
+    the label text up to the optional dash.
 
-    Returns an empty list when the phase declares no
+    Returns an empty list when the unit declares no
     ``**Consultations required:**`` block. Template placeholder bullets
     (e.g. ``<domain-label>``) are skipped.
     """
     cr_match = re.search(
         r"^\*\*Consultations required:\*\*\s*\n((?:(?!^\*\*|\n##)- .*\n?)*)",
-        phase_content,
+        block,
         re.MULTILINE,
     )
     if not cr_match:
@@ -782,6 +813,138 @@ def _parse_consultations_required(phase_content: str) -> list[str]:
             continue
         domains.append(text)
     return domains
+
+
+def _parse_knowledge_context(block: str) -> list[tuple[str, str]]:
+    """Parse a ``**Knowledge context:**`` block into (backlink, annotation) pairs."""
+    kc_match = re.search(
+        r"\*\*Knowledge context:\*\*\s*\n((?:- .*\n?)*)", block
+    )
+    if not kc_match:
+        return []
+    backlinks: list[tuple[str, str]] = []
+    seen_targets: set[str] = set()
+    for line in kc_match.group(1).splitlines():
+        bl_match = re.search(r"\[\[([^\]]+)\]\]", line)
+        if not bl_match:
+            continue
+        target = bl_match.group(1).strip()
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        # Annotation text after the backlink: " — <annotation>"
+        annotation = ""
+        ann_match = re.match(r"\s*—\s*(.*)", line[bl_match.end():])
+        if ann_match:
+            annotation = ann_match.group(1).strip()
+        backlinks.append((target, annotation))
+    return backlinks
+
+
+def _parse_retrieval_directive(block: str, unit_label: str) -> "dict | None":
+    """Parse a ``**Retrieval directive:**`` block. Two shapes are recognized:
+
+    (legacy/flat) bullets:  "- seeds: ...", "- scale_set: ...", ...
+    (v2 grouped)  bullets:  "- version: 2" plus a "- topics:" tree of
+                            role/topic/seeds/scale_set/limit/activity_vocab/query.
+
+    ``unit_label`` names the declaring unit in v2 validation errors.
+    """
+    match = re.search(
+        r"^\*\*Retrieval directive:\*\*\s*\n((?:(?!^\*\*|\n##).*\n?)*)",
+        block, re.MULTILINE,
+    )
+    if not match:
+        return None
+    body = match.group(1)
+    if _is_v2_directive(body):
+        return _parse_v2_directive(body, unit_label)
+    return _parse_legacy_directive(body)
+
+
+def _parse_files_declaration(block: str) -> list[str]:
+    """Parse a task's ``**Files:**`` block into its declared owned surface.
+
+    Accepts the inline comma-separated form, a following ``- `` bullet list, or
+    both. Entries carrying whitespace are template prose rather than paths and
+    are dropped, so an unfilled placeholder yields no surface (and a refusal)
+    instead of a bogus target.
+    """
+    match = re.search(r"^\*\*Files:\*\*[ \t]*(.*)$", block, re.MULTILINE)
+    if not match:
+        return []
+    entries: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: str) -> None:
+        value = raw.strip().strip("`").strip()
+        if not value or " " in value or "\t" in value:
+            return
+        if value.startswith("<") and value.endswith(">"):
+            return
+        if value in seen:
+            return
+        entries.append(value)
+        seen.add(value)
+
+    for raw in match.group(1).split(","):
+        add(raw)
+    rest = block[match.end():]
+    if rest.startswith("\n"):
+        rest = rest[1:]
+    for line in rest.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            break
+        if stripped.startswith("- [ ]") or stripped.startswith("- [x]"):
+            break
+        add(stripped[2:])
+    return entries
+
+
+def _bullet_lines(block: str, label: str) -> list[str]:
+    """Return the plain ``- `` bullet lines of a ``**<label>:**`` block.
+
+    Checkbox bullets are excluded so a checklist line that follows the block
+    never reads as one of its entries.
+    """
+    match = re.search(
+        rf"^\*\*{re.escape(label)}:\*\*\s*\n((?:(?!^\*\*|\n##)- .*\n?)*)",
+        block, re.MULTILINE,
+    )
+    if not match:
+        return []
+    out: list[str] = []
+    for line in match.group(1).splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        if stripped.startswith("- [ ]") or stripped.startswith("- [x]"):
+            continue
+        out.append(stripped)
+    return out
+
+
+def _parse_scope_lines(block: str) -> list[str]:
+    """Parse a ``**Scope:**`` block, dropping the template's placeholder bullets."""
+    scope_lines: list[str] = []
+    for stripped in _bullet_lines(block, "Scope"):
+        text = stripped[2:].strip()
+        if not text.startswith("Do not modify:") and not text.startswith("Output contract:"):
+            scope_lines.append(stripped)
+        elif "path/to/file" not in text and "<what" not in text:
+            scope_lines.append(stripped)
+    return scope_lines
+
+
+def _parse_verification_lines(block: str) -> list[str]:
+    """Parse a ``**Verification:**`` block, dropping angle-bracket placeholders."""
+    verif_lines: list[str] = []
+    for stripped in _bullet_lines(block, "Verification"):
+        text = stripped[2:].strip()
+        if not (text.startswith("<") and text.endswith(">")):
+            verif_lines.append(stripped)
+    return verif_lines
 
 
 # ---------------------------------------------------------------------------
@@ -995,7 +1158,7 @@ def _parse_legacy_directive(block: str) -> dict:
     }
 
 
-def _parse_v2_directive_yaml(body: str, phase_num: int) -> dict | None:
+def _parse_v2_directive_yaml(body: str, unit_label: str) -> dict | None:
     """Parse a fenced directive body with a real YAML parser when available.
 
     Returns the normalized v2 directive dict, or ``None`` when PyYAML is not
@@ -1022,7 +1185,7 @@ def _parse_v2_directive_yaml(body: str, phase_num: int) -> dict | None:
     topics_raw = data.get("topics")
     if not isinstance(topics_raw, list) or not topics_raw:
         raise ValueError(
-            f"[generate-tasks] phase {phase_num}: retrieval_directive declares "
+            f"[generate-tasks] {unit_label}: retrieval_directive declares "
             f"version: 2 but no topics were parsed; v2 requires a non-empty topics list."
         )
     topics: list[dict] = []
@@ -1030,7 +1193,7 @@ def _parse_v2_directive_yaml(body: str, phase_num: int) -> dict | None:
     for raw_topic in topics_raw:
         if not isinstance(raw_topic, dict):
             raise ValueError(
-                f"[generate-tasks] phase {phase_num}: v2 retrieval_directive "
+                f"[generate-tasks] {unit_label}: v2 retrieval_directive "
                 f"topics must be mappings, got: {type(raw_topic).__name__}"
             )
         topic = _normalize_v2_topic(raw_topic)
@@ -1039,7 +1202,7 @@ def _parse_v2_directive_yaml(body: str, phase_num: int) -> dict | None:
         topics.append(topic)
     if focal_count != 1:
         raise ValueError(
-            f"[generate-tasks] phase {phase_num}: v2 retrieval_directive must "
+            f"[generate-tasks] {unit_label}: v2 retrieval_directive must "
             f"declare exactly one role: focal topic (found {focal_count}). "
             f"If no focal candidate exists, emit a legacy flat directive instead."
         )
@@ -1049,7 +1212,7 @@ def _parse_v2_directive_yaml(body: str, phase_num: int) -> dict | None:
     }
 
 
-def _parse_v2_directive(block: str, phase_num: int) -> dict:
+def _parse_v2_directive(block: str, unit_label: str) -> dict:
     """Parse a ``version: 2`` grouped directive block.
 
     Recognized shape::
@@ -1067,7 +1230,7 @@ def _parse_v2_directive(block: str, phase_num: int) -> dict:
               ...
 
     Enforces exactly one ``role: focal``; zero/multi-focal v2 is a hard error
-    that names ``phase_num``. Also tolerates a literal YAML code-fenced
+    that names ``unit_label``. Also tolerates a literal YAML code-fenced
     ``retrieval_directive:`` block embedded in the directive text.
     """
     # Strip a fenced YAML block if the lead pasted one verbatim.
@@ -1079,7 +1242,7 @@ def _parse_v2_directive(block: str, phase_num: int) -> dict:
         # A fenced block is real YAML (nested keys, multi-line seed lists) that
         # the line-oriented yaml-ish extractor mis-parses — each nested seed
         # bullet reads as a new topic. Prefer a real-YAML parse when available.
-        yaml_parsed = _parse_v2_directive_yaml(body, phase_num)
+        yaml_parsed = _parse_v2_directive_yaml(body, unit_label)
         if yaml_parsed is not None:
             return yaml_parsed
     else:
@@ -1104,7 +1267,7 @@ def _parse_v2_directive(block: str, phase_num: int) -> dict:
     topics_raw = _extract_topics_from_yaml_ish(body)
     if not topics_raw:
         raise ValueError(
-            f"[generate-tasks] phase {phase_num}: retrieval_directive declares "
+            f"[generate-tasks] {unit_label}: retrieval_directive declares "
             f"version: 2 but no topics were parsed; v2 requires a non-empty topics list."
         )
 
@@ -1118,7 +1281,7 @@ def _parse_v2_directive(block: str, phase_num: int) -> dict:
 
     if focal_count != 1:
         raise ValueError(
-            f"[generate-tasks] phase {phase_num}: v2 retrieval_directive must "
+            f"[generate-tasks] {unit_label}: v2 retrieval_directive must "
             f"declare exactly one role: focal topic (found {focal_count}). "
             f"If no focal candidate exists, emit a legacy flat directive instead."
         )
@@ -1242,6 +1405,18 @@ def _normalize_v2_topic(raw: dict) -> dict:
     }
 
 
+# The two unit headings a plan may use. A plan declares its units one way or
+# the other: `### Task N:` blocks carry their own brief, `### Phase N:` blocks
+# group tasks under a shared one. A document using both is refused.
+_PHASE_HEADING_RE = re.compile(r"^### Phase (\d+):\s*(.*)", re.MULTILINE)
+_TASK_HEADING_RE = re.compile(r"^### Task (\d+):\s*(.*)", re.MULTILINE)
+
+# Labels the plan-level acceptance bar where it is rendered into a task brief.
+# The criteria belong to the plan and are honored once at plan close, so a
+# worker reading its own brief does not mistake them for its own checklist.
+PLAN_VERIFICATION_HEADING = "**Plan verification (plan-owned close criteria):**"
+
+
 def generate_tasks_from_plan(
     plan_content: str,
     knowledge_dir: str = "",
@@ -1287,10 +1462,86 @@ def generate_tasks_from_plan(
         )
     all_design_decisions = parse_design_decisions(plan_content)
 
-    # Parse phases
-    phase_re = re.compile(r"^### Phase (\d+):\s*(.*)", re.MULTILINE)
-    phase_matches = list(phase_re.finditer(plan_content))
+    phase_matches = list(_PHASE_HEADING_RE.finditer(plan_content))
+    task_matches = list(_TASK_HEADING_RE.finditer(plan_content))
+    if phase_matches and task_matches:
+        raise ValueError(
+            "[generate-tasks] plan mixes '### Phase "
+            f"{phase_matches[0].group(1)}:' and '### Task "
+            f"{task_matches[0].group(1)}:' headings; a plan declares its units "
+            "one way or the other. No output was written."
+        )
 
+    result = {
+        "plan_checksum": plan_checksum,
+        "generated_at": generated_at,
+        "recommended_workers": 0,
+        "design_decisions_present": design_decisions_present,
+    }
+
+    if task_matches:
+        tasks = _tasks_from_plan(
+            plan_content=plan_content,
+            task_matches=task_matches,
+            cross_cutting_backlinks=cross_cutting_backlinks,
+            strategy=strategy,
+            all_design_decisions=all_design_decisions,
+            knowledge_dir=knowledge_dir,
+            slug=slug,
+            script_dir=script_dir,
+        )
+        all_tasks = tasks
+        result["tasks"] = tasks
+    else:
+        phases = _phases_from_plan(
+            plan_content=plan_content,
+            phase_matches=phase_matches,
+            cross_cutting_backlinks=cross_cutting_backlinks,
+            strategy=strategy,
+            all_design_decisions=all_design_decisions,
+            knowledge_dir=knowledge_dir,
+            slug=slug,
+            script_dir=script_dir,
+        )
+        all_tasks = [task for phase in phases for task in phase["tasks"]]
+        result["phases"] = phases
+
+    _validate_dependency_graph(all_tasks)
+    result["recommended_workers"] = compute_recommended_workers(all_tasks)
+    return result
+
+
+def _validate_dependency_graph(all_tasks: list[dict]) -> None:
+    """Refuse a task list whose blockedBy edges name absent or self ids."""
+    task_ids = {task["id"] for task in all_tasks}
+    for task in all_tasks:
+        unknown = [
+            dependency for dependency in task["blockedBy"]
+            if dependency not in task_ids
+        ]
+        if unknown:
+            raise ValueError(
+                f"{task['id']} declares unknown dependencies: {', '.join(unknown)}"
+            )
+        if task["id"] in task["blockedBy"]:
+            raise ValueError(f"{task['id']} cannot depend on itself")
+
+
+def _phases_from_plan(
+    plan_content: str,
+    phase_matches: list,
+    cross_cutting_backlinks: list,
+    strategy: str,
+    all_design_decisions: list[dict],
+    knowledge_dir: str,
+    slug: str,
+    script_dir: str,
+) -> list[dict]:
+    """Build ``phases[]`` from a plan authored with ``### Phase N:`` headings.
+
+    Each phase's shared brief lands in ``phase_context``; per-task descriptions
+    carry only what is unique to the task.
+    """
     phases = []
     task_counter = 0
     file_last_task: dict[str, str] = {}  # file -> last task id targeting it (across all phases)
@@ -1328,29 +1579,7 @@ def generate_tasks_from_plan(
             and kd_match.group(1).strip().lower() == "full"
         )
 
-        # Extract phase-level knowledge context backlinks with annotations
-        kc_match = re.search(
-            r"\*\*Knowledge context:\*\*\s*\n((?:- .*\n?)*)", phase_content
-        )
-        phase_backlinks: list[tuple[str, str]] = []
-        if kc_match:
-            kc_block = kc_match.group(1)
-            seen_targets: set[str] = set()
-            for line in kc_block.splitlines():
-                bl_match = re.search(r"\[\[([^\]]+)\]\]", line)
-                if not bl_match:
-                    continue
-                target = bl_match.group(1).strip()
-                if target in seen_targets:
-                    continue
-                seen_targets.add(target)
-                # Extract annotation text after the backlink: " — <annotation>"
-                annotation = ""
-                after_bl = line[bl_match.end():]
-                ann_match = re.match(r"\s*—\s*(.*)", after_bl)
-                if ann_match:
-                    annotation = ann_match.group(1).strip()
-                phase_backlinks.append((target, annotation))
+        phase_backlinks = _parse_knowledge_context(phase_content)
 
         # Detect whether this phase declares persistent-mode advisors.
         # Only phase advisors tagged ``mode: persistent`` add advisory prompt
@@ -1360,7 +1589,7 @@ def generate_tasks_from_plan(
         # advisor declarations (e.g. ``[must-consult]``, ``[on-demand]``
         # without a ``mode: persistent`` suffix) route through the lead
         # inline and do NOT inflate per-task context estimates.
-        has_advisory = _phase_has_persistent_advisor(phase_content)
+        has_advisory = _has_persistent_advisor(phase_content)
 
         # Parse phase-level ``**Consultations required:**`` block — a
         # ``-`` bulleted list of consultation domain labels a worker on
@@ -1380,53 +1609,12 @@ def generate_tasks_from_plan(
             and tf_match.group(1).strip().lower() == "prescriptive"
         )
 
-        # Extract Scope block (plain bullet lines after **Scope:**)
-        scope_match = re.search(
-            r"^\*\*Scope:\*\*\s*\n((?:(?!^\*\*|\n##)- .*\n?)*)",
-            phase_content, re.MULTILINE
-        )
-        scope_lines: list[str] = []
-        if scope_match:
-            for line in scope_match.group(1).splitlines():
-                stripped = line.strip()
-                if stripped.startswith("- ") and not stripped.startswith("- [ ]") and not stripped.startswith("- [x]"):
-                    text = stripped[2:].strip()
-                    # Skip template placeholder lines
-                    if not text.startswith("Do not modify:") and not text.startswith("Output contract:"):
-                        scope_lines.append(stripped)
-                    elif "path/to/file" not in text and "<what" not in text:
-                        scope_lines.append(stripped)
+        scope_lines = _parse_scope_lines(phase_content)
+        verif_lines = _parse_verification_lines(phase_content)
 
-        # Extract Verification block (plain bullet lines after **Verification:**)
-        verif_match = re.search(
-            r"^\*\*Verification:\*\*\s*\n((?:(?!^\*\*|\n##)- .*\n?)*)",
-            phase_content, re.MULTILINE
+        retrieval_directive = _parse_retrieval_directive(
+            phase_content, f"phase {phase_num}"
         )
-        verif_lines: list[str] = []
-        if verif_match:
-            for line in verif_match.group(1).splitlines():
-                stripped = line.strip()
-                if stripped.startswith("- ") and not stripped.startswith("- [ ]") and not stripped.startswith("- [x]"):
-                    text = stripped[2:].strip()
-                    # Skip template placeholder lines (angle-bracket content)
-                    if not (text.startswith("<") and text.endswith(">")):
-                        verif_lines.append(stripped)
-
-        # Extract Retrieval directive block. Two shapes are recognized:
-        #   (legacy/flat) bullets:  "- seeds: ...", "- scale_set: ...", ...
-        #   (v2 grouped)  bullets:  "- version: 2" plus a "- topics:" tree of
-        #                           role/topic/seeds/scale_set/limit/activity_vocab/query.
-        ret_dir_match = re.search(
-            r"^\*\*Retrieval directive:\*\*\s*\n((?:(?!^\*\*|\n##).*\n?)*)",
-            phase_content, re.MULTILINE
-        )
-        retrieval_directive: dict | None = None
-        if ret_dir_match:
-            block = ret_dir_match.group(1)
-            if _is_v2_directive(block):
-                retrieval_directive = _parse_v2_directive(block, phase_num)
-            else:
-                retrieval_directive = _parse_legacy_directive(block)
 
         # Annotation quality warning: intent-based + annotation-only delivery
         annotation_warning = (
@@ -1632,31 +1820,370 @@ def generate_tasks_from_plan(
             "retrieval_directive": retrieval_directive,
         })
 
-    # Compute recommended worker count from the assembled DAG
-    all_tasks = [task for phase in phases for task in phase["tasks"]]
-    task_ids = {task["id"] for task in all_tasks}
-    for task in all_tasks:
-        unknown = [dependency for dependency in task["blockedBy"] if dependency not in task_ids]
-        if unknown:
-            raise ValueError(
-                f"{task['id']} declares unknown dependencies: {', '.join(unknown)}"
-            )
-        if task["id"] in task["blockedBy"]:
-            raise ValueError(f"{task['id']} cannot depend on itself")
-    recommended_workers = compute_recommended_workers(all_tasks)
+    return phases
 
-    return {
-        "plan_checksum": plan_checksum,
-        "generated_at": generated_at,
-        "recommended_workers": recommended_workers,
-        "design_decisions_present": design_decisions_present,
-        "phases": phases,
-    }
+
+def _plan_verification_lines(plan_level_text: str) -> list[str]:
+    """Parse the plan's acceptance bar from either shape an author may write it.
+
+    The bar is a ``**Verification:**`` block; when it heads its own
+    ``## Verification`` section the bold marker may be omitted, so the section's
+    bullets are read directly.
+    """
+    lines = _parse_verification_lines(plan_level_text)
+    if lines:
+        return lines
+    section = re.search(r"^##\s+Verification\s*$", plan_level_text, re.MULTILINE)
+    if not section:
+        return []
+    start = section.end()
+    next_h2 = re.search(r"^## ", plan_level_text[start:], re.MULTILINE)
+    body = plan_level_text[start:start + next_h2.start()] if next_h2 else plan_level_text[start:]
+    out: list[str] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        if stripped.startswith("- [ ]") or stripped.startswith("- [x]"):
+            continue
+        text = stripped[2:].strip()
+        if text.startswith("<") and text.endswith(">"):
+            continue
+        out.append(stripped)
+    return out
+
+
+def _flat_task_blocks(plan_content: str, task_matches: list) -> list[dict]:
+    """Slice a plan into one block per ``### Task N:`` heading."""
+    blocks: list[dict] = []
+    for i, match in enumerate(task_matches):
+        body_start = match.end()
+        if i + 1 < len(task_matches):
+            end = task_matches[i + 1].start()
+        else:
+            next_h2 = re.search(r"^## ", plan_content[body_start:], re.MULTILINE)
+            end = body_start + next_h2.start() if next_h2 else len(plan_content)
+        blocks.append({
+            "number": int(match.group(1)),
+            "name": match.group(2).strip(),
+            "heading_start": match.start(),
+            "end": end,
+            "body": plan_content[body_start:end],
+        })
+    return blocks
+
+
+def _plan_level_text(plan_content: str, blocks: list[dict]) -> str:
+    """Return the plan with its task blocks cut out.
+
+    Blocks under `**Verification:**` are parsed from this text, so a task's own
+    block can never be read as the plan's acceptance bar.
+    """
+    parts: list[str] = []
+    cursor = 0
+    for block in blocks:
+        parts.append(plan_content[cursor:block["heading_start"]])
+        cursor = block["end"]
+    parts.append(plan_content[cursor:])
+    return "".join(parts)
+
+
+def _flat_checklist_line(block: dict) -> "str | None":
+    """Return a task block's single unchecked checklist line.
+
+    ``None`` means the line is checked — completed work, which the generator
+    drops from the emitted list. Any count other than one is a refusal: the
+    heading number is the task's id, so two lines under one heading have no
+    distinct identity to take.
+    """
+    unchecked = re.findall(r"^- \[ \]\s+(.*)", block["body"], re.MULTILINE)
+    checked = re.findall(r"^- \[[xX]\]\s+(.*)", block["body"], re.MULTILINE)
+    total = len(unchecked) + len(checked)
+    if total != 1:
+        raise ValueError(
+            f"[generate-tasks] task {block['number']} ({block['name']!r}) carries "
+            f"{total} checklist lines; each '### Task N:' block carries exactly one."
+        )
+    return unchecked[0] if unchecked else None
+
+
+def _flat_file_targets(block: dict, item_text: str) -> list[str]:
+    """Resolve a task's owned file surface from **Files:** plus its task line.
+
+    ``**Files:**`` is authoritative: a backticked path on the task line that the
+    block does not declare is a contradiction, not an addition. With no
+    ``**Files:**`` block the task line's paths stand alone as the surface.
+    """
+    declared = _parse_files_declaration(block["body"])
+    line_paths = backtick_file_paths(item_text)
+    undeclared = [path for path in line_paths if path not in declared]
+    if declared and undeclared:
+        raise ValueError(
+            f"[generate-tasks] task {block['number']} targets "
+            f"{', '.join(undeclared)} on its task line but does not declare "
+            f"{'it' if len(undeclared) == 1 else 'them'} in **Files:**, which is "
+            f"the task's owned surface: {item_text.strip()}"
+        )
+    targets = declared + undeclared
+    if not targets:
+        raise ValueError(
+            f"[generate-tasks] task {block['number']} names no file target; declare "
+            f"the owned surface in **Files:** or in backticks on the task line: "
+            f"{item_text.strip()}"
+        )
+    return targets
+
+
+def _merge_task_backlinks(
+    line_backlinks: list[str], knowledge_context: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """Merge a task's two backlink sources into one task-level tier.
+
+    Task-line order wins, and an entry named in both keeps the annotation the
+    ``**Knowledge context:**`` block gave it.
+    """
+    annotations = dict(knowledge_context)
+    merged: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for target in line_backlinks:
+        merged.append((target, annotations.get(target, "")))
+        seen.add(target)
+    for target, annotation in knowledge_context:
+        if target not in seen:
+            merged.append((target, annotation))
+            seen.add(target)
+    return merged
+
+
+def _tasks_from_plan(
+    plan_content: str,
+    task_matches: list,
+    cross_cutting_backlinks: list,
+    strategy: str,
+    all_design_decisions: list[dict],
+    knowledge_dir: str,
+    slug: str,
+    script_dir: str,
+) -> list[dict]:
+    """Build ``tasks[]`` from a plan authored with ``### Task N:`` headings.
+
+    Each task's brief is composed into its own description, so a consumer reads
+    the whole assignment off the task record with no second fetch and no index
+    into a containing unit. Task ids come from the heading number rather than a
+    running count, which keeps ``[depends-on: task-N]`` pointing at the same
+    task after earlier work is checked off.
+    """
+    blocks = _flat_task_blocks(plan_content, task_matches)
+    plan_verification = _plan_verification_lines(
+        _plan_level_text(plan_content, blocks)
+    )
+
+    tasks: list[dict] = []
+    completed_ids: set[str] = set()
+    seen_numbers: set[int] = set()
+
+    for block in blocks:
+        number = block["number"]
+        if number in seen_numbers:
+            raise ValueError(
+                f"[generate-tasks] duplicate heading '### Task {number}: "
+                f"{block['name']}'; the heading number is the task's id and must "
+                f"be unique."
+            )
+        seen_numbers.add(number)
+        task_id = f"task-{number}"
+
+        item_text = _flat_checklist_line(block)
+        if item_text is None:
+            completed_ids.add(task_id)
+            continue
+
+        body = block["body"]
+        subject = item_text.strip()
+        file_targets = _flat_file_targets(block, item_text)
+
+        deliverable_match = re.search(
+            r"^\*\*Deliverable:\*\*[ \t]*(.*)", body, re.MULTILINE
+        )
+        deliverable = deliverable_match.group(1).strip() if deliverable_match else ""
+
+        kd_match = re.search(r"\*\*Knowledge delivery:\*\*\s*(.*)", body)
+        resolve_full_content = (
+            kd_match is not None and kd_match.group(1).strip().lower() == "full"
+        )
+        tf_match = re.search(r"\*\*Task format:\*\*\s*(.*)", body)
+        is_prescriptive = (
+            tf_match is not None and tf_match.group(1).strip().lower() == "prescriptive"
+        )
+
+        knowledge_context = _parse_knowledge_context(body)
+        scope_lines = _parse_scope_lines(body)
+        consultations_required = _parse_consultations_required(body)
+        has_advisory = _has_persistent_advisor(body)
+        retrieval_directive = _parse_retrieval_directive(body, f"task {number}")
+
+        # A [depends-on: …] written inside the prose of a task line is a
+        # mention, not an edge — only the marker run closing the line declares.
+        explicit_dependencies = extract_explicit_dependencies(
+            item_text, trailing_only=True
+        )
+
+        annotation_warning = (
+            not is_prescriptive
+            and not resolve_full_content
+            and bool(knowledge_context)
+        )
+
+        desc_parts: list[str] = []
+        if deliverable:
+            desc_parts.append(f"**Deliverable:** {deliverable}")
+        formatted_targets = ", ".join(f"`{f}`" for f in file_targets)
+        desc_parts.append(
+            f"**Target files:** {formatted_targets}"
+            " — files this task is expected to modify"
+        )
+        desc_parts.append(f"**Task:** {strip_route_marker(subject)}")
+
+        if scope_lines:
+            desc_parts.append("")
+            desc_parts.append("**Scope:**")
+            desc_parts.extend(scope_lines)
+
+        if consultations_required:
+            desc_parts.append("")
+            desc_parts.append("**Consultations required:**")
+            desc_parts.extend(f"- {domain}" for domain in consultations_required)
+
+        if plan_verification:
+            desc_parts.append("")
+            desc_parts.append(PLAN_VERIFICATION_HEADING)
+            desc_parts.extend(plan_verification)
+
+        if annotation_warning:
+            desc_parts.append("")
+            desc_parts.append(
+                "> **Note:** This task uses intent+constraints task format with "
+                "annotation-only knowledge delivery. Workers interpret design patterns "
+                "from knowledge context — consider using `**Knowledge delivery:** full` "
+                "so workers receive resolved content, not just backlink labels."
+            )
+
+        context = build_context_section(
+            phase_backlinks=[],
+            cross_cutting_backlinks=cross_cutting_backlinks,
+            knowledge_dir=knowledge_dir,
+            script_dir=script_dir,
+            task_backlinks=_merge_task_backlinks(
+                extract_task_backlinks(item_text), knowledge_context
+            ),
+            reference_files=None,
+            design_decisions=all_design_decisions,
+            resolve_full_content=resolve_full_content,
+            strategy=strategy or None,
+        )
+        if context.strip():
+            desc_parts.append("")
+            desc_parts.append(context.strip())
+
+        if slug:
+            desc_parts.append("")
+            desc_parts.append(f"**Plan reference:** [[work:{slug}]]")
+
+        description = "\n".join(desc_parts)
+
+        task_payload = {
+            "id": task_id,
+            "name": block["name"],
+            "subject": subject,
+            "deliverable": deliverable,
+            "description": description,
+            "activeForm": to_active_form(subject),
+            "blockedBy": list(explicit_dependencies),
+            "tree": extract_tree(item_text),
+            "file_targets": file_targets,
+            "judgment_class": extract_judgment_class(item_text),
+            "consultations_required": consultations_required,
+            "retrieval_directive": retrieval_directive,
+            "context_cost_estimate": estimate_context_cost(
+                description=description,
+                file_targets=file_targets,
+                subject=subject,
+                has_advisory=has_advisory,
+            ),
+        }
+        route = extract_route(item_text)
+        if route is not None:
+            task_payload["route"] = route
+        woven_norms = extract_woven_norms(item_text)
+        if woven_norms:
+            task_payload["woven_norms"] = woven_norms
+        tasks.append(task_payload)
+
+    # A dependency on work already checked off is satisfied, so its edge is
+    # dropped; a dependency on a task the plan never declares still fails
+    # validation downstream.
+    for task in tasks:
+        task["blockedBy"] = [
+            dependency for dependency in task["blockedBy"]
+            if dependency not in completed_ids
+        ]
+
+    # Chain tasks that share a file target, in plan order.
+    file_last_task: dict[str, str] = {}
+    for task in tasks:
+        for target in task["file_targets"]:
+            if target in file_last_task:
+                previous = file_last_task[target]
+                if previous not in task["blockedBy"]:
+                    task["blockedBy"].append(previous)
+            file_last_task[target] = task["id"]
+
+    return tasks
 
 
 # ---------------------------------------------------------------------------
 # Diagnostics
 # ---------------------------------------------------------------------------
+
+def _print_flat_sizing_diagnostics(tasks: list[dict]) -> None:
+    """Print the per-task sizing summary for a flat plan, and outlier warnings."""
+    totals = [
+        t.get("context_cost_estimate", {}).get("total_chars", 0) for t in tasks
+    ]
+    avg = int(sum(totals) / len(totals)) if totals else 0
+
+    print("", file=sys.stderr)
+    print("Context cost summary:", file=sys.stderr)
+    print(
+        f"  {'Task':<40}  {'Files':>5}  {'Cost (chars)':>12}",
+        file=sys.stderr,
+    )
+    print("  " + "-" * 61, file=sys.stderr)
+
+    warnings: list[str] = []
+    for task in tasks:
+        label = task.get("name") or task.get("subject", "")
+        display_name = label[:38] + ".." if len(label) > 40 else label
+        total = task.get("context_cost_estimate", {}).get("total_chars", 0)
+        print(
+            f"  {display_name:<40}  {len(task.get('file_targets', [])):>5}"
+            f"  {total:>12,}",
+            file=sys.stderr,
+        )
+        if avg > 0 and total > 2 * avg:
+            warnings.append(
+                f"  WARNING: task '{task.get('subject', '')}' is {total:,} chars"
+                f" ({total / avg:.1f}x plan avg {avg:,}) — consider splitting"
+            )
+
+    if warnings:
+        print("", file=sys.stderr)
+        print("Oversized tasks (>2x plan avg):", file=sys.stderr)
+        for w in warnings:
+            print(w, file=sys.stderr)
+
+    print("", file=sys.stderr)
+
 
 def print_sizing_diagnostics(result: dict) -> None:
     """Print per-phase sizing summary and outlier warnings to stderr.
@@ -1668,6 +2195,11 @@ def print_sizing_diagnostics(result: dict) -> None:
     Args:
         result: The dict returned by generate_tasks_from_plan().
     """
+    tasks = result.get("tasks")
+    if tasks:
+        _print_flat_sizing_diagnostics(tasks)
+        return
+
     phases = result.get("phases", [])
     if not phases:
         return

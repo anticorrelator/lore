@@ -1962,9 +1962,6 @@ cmd_work() {
     conformance)
       exec "$SCRIPTS_DIR/conformance-render.sh" "$@"
       ;;
-    phase-context)
-      exec "$SCRIPTS_DIR/phase-context.sh" "$@"
-      ;;
     check)
       exec "$SCRIPTS_DIR/update-plan-checkbox.sh" "$@"
       ;;

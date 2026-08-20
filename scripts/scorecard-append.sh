@@ -32,7 +32,8 @@
 #
 # Tier conditional rules:
 #   reusable      rows REQUIRE non-empty source_artifact_ids
-#   task-evidence rows REQUIRE task_id and phase_id
+#   task-evidence rows REQUIRE task_id; phase_id is type-checked when present
+#                 and never required
 #   telemetry     rows have no conditional extras
 #   template      rows REQUIRE template_id, template_version (12-char hash),
 #                 metric, sample_size (integer > 0), calibration_state
@@ -208,7 +209,8 @@ fi
 # Allowed values: reusable | task-evidence | telemetry | template | correction
 # Conditional rules:
 #   reusable      rows REQUIRE non-empty source_artifact_ids
-#   task-evidence rows REQUIRE task_id and phase_id
+#   task-evidence rows REQUIRE task_id; phase_id is type-checked when present
+#                 and never required
 #   telemetry     rows have no conditional extras
 #   template      rows REQUIRE template_id, template_version, metric, sample_size, calibration_state
 #   correction    rows REQUIRE corrected_entry_path, correction_target, calibrated_by_verdict_id
@@ -240,10 +242,18 @@ fi
 
 if [[ "$TIER" == "task-evidence" ]]; then
   TASK_EVIDENCE_OK=$(printf '%s' "$ROW" | jq -e '
-    ((.task_id // "") != "") and ((.phase_id // "") != "")
+    ((.task_id // "") != "")
   ' >/dev/null 2>&1 && echo "true" || echo "false")
   if [[ "$TASK_EVIDENCE_OK" != "true" ]]; then
-    fail "task-evidence row rejected: task_id and phase_id are both required and non-empty (tier=task-evidence). Task-local evidence must be anchored to a specific task and phase."
+    fail "task-evidence row rejected: task_id is required and non-empty (tier=task-evidence). Task-local evidence must be anchored to a specific task."
+  fi
+  # phase_id is optional: plans that group tasks under phases supply it, plans
+  # whose tasks stand on their own omit it rather than invent a value. Rows
+  # written when the field was required keep validating unchanged.
+  if printf '%s' "$ROW" | jq -e 'has("phase_id") and (.phase_id != null)' >/dev/null 2>&1; then
+    if ! printf '%s' "$ROW" | jq -e '.phase_id | type == "string" and (length > 0)' >/dev/null 2>&1; then
+      fail "task-evidence row rejected: phase_id, when present, must be a non-empty string (tier=task-evidence)."
+    fi
   fi
 fi
 

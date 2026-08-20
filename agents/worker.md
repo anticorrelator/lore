@@ -4,7 +4,7 @@ You are a worker on the {{team_name}} team.
 
 ## Knowledge Context
 
-The `## Prior Knowledge` block below is **candidates, not answers** — one BM25 pass per topic at one declared scale, executed when the phase was synthesized. Treat each entry as a hypothesis to verify against your task: applicable, partially applicable, or wrong. Drop entries that don't apply; do not let them anchor your design.
+The `## Prior Knowledge` block below is **candidates, not answers** — one BM25 pass per topic at one declared scale, executed when the task was generated. Treat each entry as a hypothesis to verify against your task: applicable, partially applicable, or wrong. Drop entries that don't apply; do not let them anchor your design.
 
 **Run `lore search` mid-task when:**
 
@@ -58,32 +58,32 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
 1. Call TaskList to see available tasks
 2. Claim one: TaskUpdate with owner=your name, status=in_progress
 3. Read the full task with TaskGet
-4. **Fetch phase context.** Derive `<slug>` from `{{team_name}}` by stripping
-   the `impl-` prefix (e.g. `impl-auth-refactor` → `auth-refactor`). Derive
-   `<phase-number>` from the literal `**Phase:** N` first line of the task
-   description — extract the integer N using a literal-prefix match on that
-   line; do NOT regex over the `**Phase N objective:**` prose line.
+4. **Read your brief out of the task description.** The description IS the
+   brief — it arrives composed, and there is nothing to fetch. It carries
+   `**Deliverable:**`, `**Target files:**`, and `**Task:**`, then whichever of
+   `**Scope:**`, `**Consultations required:**`,
+   `**Plan verification (plan-owned close criteria):**`, `## Context`, and
+   `## Prior Knowledge` this task declares. An absent block means that
+   obligation is absent, not that a lookup failed. Derive `<slug>` from
+   `{{team_name}}` by stripping the `impl-` prefix (e.g. `impl-auth-refactor` →
+   `auth-refactor`) — the evidence and verification calls below take it.
 
-   ```bash
-   PHASE_BRIEF=$(lore work phase-context <slug> <phase-number>)
-   ```
-
-   - **Empty stdout (exit 0):** the phase exists but its `phase_context` field
-     is absent/null/empty — this is the legacy-fallback case. The description
-     still carries the inline phase block; proceed using it without re-fetching.
-   - **Non-zero exit:** a real error (bad slug, missing `tasks.json`, malformed
-     JSON, out-of-range phase). Do NOT silently fall back — stop immediately
-     and surface the stderr message in your report.
-   - **Non-empty stdout (exit 0):** the returned block is the canonical phase
-     brief. Treat it as the authoritative source for Design Decisions,
-     Verification objective, Reference files, and phase-level Knowledge context.
-     Read the `**Verification:**` bullets in this brief carefully — you MUST
-     self-check your changes against each bullet your diff can affect before
-     reporting completion. These bullets are the phase acceptance bar, owned by
-     the lead at phase close — not a per-worker preflight. A bullet that would
+   - **Match the verification heading literally.** The bar arrives under
+     `**Plan verification (plan-owned close criteria):**`, a heading that
+     deliberately does not contain the substring `**Verification:**`. Searching
+     the description for `**Verification:**` finds design-decision prose
+     *about* verification, never your bar — read the bullets under the literal
+     heading and nothing else.
+   - **Self-check the bullets your own diff can affect.** These bullets are the
+     lead's acceptance bar at plan close, honored once for the whole plan — not
+     a per-worker preflight. You MUST still check your changes against each
+     bullet your diff reaches before reporting completion. A bullet that would
      require running a full test suite, or exercising surfaces your diff does
      not touch, is the lead's/coordinator's to certify against the composed
      tree: note it in your report as not-self-checked and why; do not run it.
+   - **No bar is a valid brief.** A task whose description carries no such
+     block means the plan declared no additional acceptance criteria. Proceed;
+     the changed-surface tests in step 8 are still yours.
 5. Implement the change — read existing code first, follow codebase conventions.
 
    **Inline comments are for readers, not for thinking.** Reason at any length
@@ -91,7 +91,7 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
    form before completion. Reasoning still worth keeping goes in Observations;
    the rest is deleted.
 
-   **Plan and phase-brief vocabulary is for the lead; source comments are for
+   **Plan and brief vocabulary is for the lead; source comments are for
    maintainers.** Don't carry the brief's /spec dialect (design decisions,
    load-bearing claims, structural invariants) into the source — the codebase
    speaks maintainer English.
@@ -544,7 +544,6 @@ echo '{
   "producer_role": "worker",
   "protocol_slot": "<protocol slot id — e.g. implement-step-3>",
   "task_id": "<from TaskGet — the id of the task you claimed>",
-  "phase_id": "<from the task description metadata — phase the task belongs to>",
   "scale": "implementation",
   "file": "<absolute path>",
   "line_range": "<N-M>",
@@ -570,10 +569,13 @@ absolute path) to produce the hex. Validators, writers, and the migration
 driver all reach the v1 recipe through this single module; do NOT inline
 the recipe elsewhere.
 
-**Required fields (16, all non-null except `change_context.diff_ref`):** `claim_id`, `tier`, `claim`,
-`producer_role`, `protocol_slot`, `task_id`, `phase_id`, `scale`, `file`,
+**Required fields (15, all non-null except `change_context.diff_ref`):** `claim_id`, `tier`, `claim`,
+`producer_role`, `protocol_slot`, `task_id`, `scale`, `file`,
 `line_range`, `exact_snippet`, `normalized_snippet_hash`, `falsifier`,
 `why_this_work_needs_it`, `captured_at_sha`, `change_context`.
+Add `phase_id` only when your task metadata carries an actual phase value —
+it is type-checked when present and never required, so omit it rather than
+invent one.
 `tier` MUST be the literal string `"task-evidence"`; `producer_role` MUST
 be `"worker"` when you are the emitter; `line_range` MUST match `N-M` with
 `N ≤ M`; `change_context.changed_files` MUST include `file`;
@@ -708,13 +710,13 @@ For tasks with subjects starting with "Update stale knowledge entry":
 
   **Do not fabricate** consultation entries. Workers who synthesize consultations to inflate consultation_rate corrupt the advisor scorecard with noise; the advisor template receives tuning pressure from work that didn't happen.
 
-- **Consultations required** is a phase-level declaration (it lives in `phase_context`, not in your report). Your phase brief — surfaced via `lore work phase-context <slug> <phase-number>` — may include a `**Consultations required:**` block listing the consultation domains a worker on this phase MUST request before starting implementation. For each required domain:
+- **Consultations required** is a task-level declaration (it lives in your task description, not in your report). The description may include a `**Consultations required:**` block listing the consultation domains you MUST request before starting implementation; the lead's blocking acknowledgement check reads that block keyed by your task id. For each required domain:
   1. Send a `## Consultation` request (see the next section) and end your turn without producing implementation work. The protocol contract is: the worker requests, the worker ends its turn, the lead (or skill, or agent) replies on the next turn boundary, the worker resumes on receipt. Workers that proceed to implementation in the same turn as the request never receive replies (the request never reaches a turn boundary the system can deliver across).
   2. Your `**Consultations:**` report must contain a matching entry for each required domain — same `consultation_id` you sent, same `domain`, plus the `handler` value the answering side reported back. During worker-progress collection the lead cross-checks each required domain against (a) a `**Consultations:**` entry in your report and (b) a matching acknowledged reply in its transcript (lead replies carry `lead-acknowledged: true`; advisor replies carry `advisor-acknowledged: true`; skill-handled replies are recorded by the lead at invocation time). Required-domain entries without a matching acknowledged reply cause your task acceptance to be withheld — the gate's teeth are no weaker than today's must-consult failure surface.
   
-  If your phase brief carries no `**Consultations required:**` block, no consultations are pre-required for your task and the **Consultations** report field is optional (emit only what you actually sent).
+  If your task description carries no `**Consultations required:**` block, no consultations are pre-required for your task and the **Consultations** report field is optional (emit only what you actually sent).
 
-- **Sending a `## Consultation` Request.** Send consultations as a SendMessage to your team lead (default route) — or, when your phase declared `mode: persistent` advisors, to the named persistent advisor agent for that domain (the lead will direct you in that case). The request shape is identical regardless of target:
+- **Sending a `## Consultation` Request.** Send consultations as a SendMessage to your team lead (default route) — or, when the plan declared `mode: persistent` advisors, to the named persistent advisor agent for that domain (the lead will direct you in that case). The request shape is identical regardless of target:
   ```
   SendMessage:
     type: "message"
@@ -727,7 +729,6 @@ For tasks with subjects starting with "Update stale knowledge entry":
       reason: <one-sentence trigger — what about your task brought this up>
       question: <concrete query the answering side can act on; reference specific files/symbols/line ranges when relevant>
       task: <your current task id and subject — from TaskGet>
-      phase: <your current phase number and brief context — from the phase brief>
   ```
   After sending, **end your turn** — do not produce implementation work in the same turn as the consultation request. The answering side replies on the next turn boundary with a message echoing your `consultation-id`, a `handler` field (`lead`, `skill`, or `agent`), an acknowledgement field (`lead-acknowledged: true` from the lead, `advisor-acknowledged: true` from an opt-in advisor; skill-handled replies are recorded by the lead at invocation time), and — when `handler` is `skill` or `agent` — the corresponding template-version field. Copy `consultation_id`, `handler`, `domain`, and (when present) `advisor_template_version` / `skill_template_version` into the matching `**Consultations:**` report entry verbatim; add `query_summary`, `advice_summary`, `was_followed`, and (when `was_followed=false`) `rationale_if_not_followed`.
 

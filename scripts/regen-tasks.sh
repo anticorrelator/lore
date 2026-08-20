@@ -55,12 +55,24 @@ fi
 
 echo "$OUTPUT" > "$TASKS_FILE"
 
-# Count tasks and phases from the generated JSON
-TASK_COUNT=$(echo "$OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(len(p['tasks']) for p in d['phases']))")
-PHASE_COUNT=$(echo "$OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d['phases']))")
-CHECKSUM=$(echo "$OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['plan_checksum'][:8])")
+# Summarize the generated JSON. tasks[] is authoritative when present; a
+# document carrying only phases[] is summarized through the fallback.
+SUMMARY=$(echo "$OUTPUT" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+tasks = d.get('tasks')
+if isinstance(tasks, list):
+    print(len(tasks), 'tasks')
+elif isinstance(d.get('phases'), list):
+    phases = d['phases']
+    print(sum(len(p['tasks']) for p in phases), 'tasks across', len(phases), 'phases')
+else:
+    sys.exit('[work] Error: generated tasks.json carries neither tasks[] nor phases[]')
+print(d['plan_checksum'][:8])
+") || exit 1
+CHECKSUM=$(echo "$SUMMARY" | tail -1)
 
-echo "[work] Regenerated $TASK_COUNT tasks across $PHASE_COUNT phases. New checksum: $CHECKSUM"
+echo "[work] Regenerated $(echo "$SUMMARY" | head -1). New checksum: $CHECKSUM"
 
 # Update _meta.json timestamp
 update_meta_timestamp "$WORK_ITEM_DIR"

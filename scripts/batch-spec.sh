@@ -857,7 +857,7 @@ execute_spec() {
 # Checks (in order):
 #   1. JSON output is_error field — if true, "failed"
 #   2. plan.md exists — if missing, "failed"
-#   3. plan.md contains ### Phase headers — if missing, "partial"
+#   3. plan.md contains ### Task (or legacy ### Phase) headers — if missing, "partial"
 #   4. plan.md contains - [ ] task checkboxes — if missing, "partial"
 #   5. tasks.json exists — if missing, "partial"
 #   6. All pass = "completed"
@@ -884,8 +884,9 @@ verify_spec() {
     return 0
   fi
 
-  # Check 3: plan.md contains ### Phase headers
-  if ! grep -q '^### Phase' "$plan_file" 2>/dev/null; then
+  # Check 3: plan.md declares its units. A flat plan heads them '### Task N:';
+  # a phase-shaped one heads them '### Phase N:'.
+  if ! grep -qE '^### (Task|Phase) ' "$plan_file" 2>/dev/null; then
     echo "partial"
     return 0
   fi
@@ -988,8 +989,8 @@ report_results() {
         local reason=""
         if [[ ! -f "$WORK_DIR/$slug/tasks.json" ]]; then
           reason=" -- no tasks.json"
-        elif ! grep -q '^### Phase' "$WORK_DIR/$slug/plan.md" 2>/dev/null; then
-          reason=" -- no phase headers"
+        elif ! grep -qE '^### (Task|Phase) ' "$WORK_DIR/$slug/plan.md" 2>/dev/null; then
+          reason=" -- no task headings"
         fi
         printf "  %-${path_width}s (partial%s)\n" "_work/$slug/plan.md" "$reason"
         ;;

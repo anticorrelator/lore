@@ -152,7 +152,13 @@ Score every dimension from 1–5 and give a concrete rationale. Do not adjust a 
 
 Judge whether relevant knowledge reached the working agents and shaped their choices. Implementation output is valid evidence of internalization; citation is not required. Review work should show knowledge preambles. Spec-only work is predictive.
 
-`5` every phase delivered with high completeness | `4` most phases with minor gaps | `3` low annotation quality or spec-only agents lacked available context | `2` phases missing, unresolved delivery, or a silent pipeline drop | `1` no delivery
+Delivery has exactly two tiers and they are scored separately. Task-level delivery is the `**Knowledge context:**` a plan attached to one task's own files; cross-cutting delivery is the material the plan aimed at the whole cycle rather than at any single task. Deduplicate within each tier and across the pair: an entry delivered to one task counts once for that task however often it appears there, and an entry that is both cross-cutting and attached to a specific task counts once in each tier and no more.
+
+Read the cycle's tasks from `tasks.json` before scoring either tier. Prefer the top-level `tasks[]` array; when it is absent, flatten a valid `phases[]` into the tasks it contains and score those. A document carrying neither shape is a delivery-evidence gap — report it as one, never as a zero numerator. Equivalent delivery facts score the same whichever shape recorded them; the nesting a cycle happened to use is not a difference in delivery.
+
+The task-level denominator is the count of generated tasks eligible for delivery. Every generated task is eligible unless the cycle names a reason it could not receive delivery — a cold-start target with no entries to deliver, or a generator artifact that is not a real unit of work. Name each exclusion in the rationale; an unnamed exclusion is a gap, not a smaller denominator. Evaluate cross-cutting delivery once for the plan and report it beside the task-level ratio; it never enters that denominator.
+
+`5` every eligible task delivered with high completeness and cross-cutting delivery intact | `4` most eligible tasks delivered with minor gaps | `3` low annotation quality or spec-only agents lacked available context | `2` eligible tasks with no delivery, unresolved delivery, or a silent pipeline drop | `1` no delivery
 
 D1 stays in the ceremony: its delivery-plumbing half is mechanically evidenced, but internalization remains evaluative. D1 is the named graduation candidate; removal requires a separately registered window with routed-model response variable, denominator, undefined-statistic branch, and one-direction qualitative veto. This implementation does not graduate it.
 

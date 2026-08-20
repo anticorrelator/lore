@@ -174,7 +174,7 @@ else:
     )
     if meaningful_questions:
         state = "follow-up-needed"
-    elif re.search(r"(?m)^## Phases\s*$", plan) and re.search(r"(?m)^\s*- \[[ xX]\] ", plan):
+    elif re.search(r"(?m)^## (?:Tasks|Phases)\s*$", plan) and re.search(r"(?m)^\s*- \[[ xX]\] ", plan):
         state = "synthesis-complete"
     elif re.search(r"(?m)^## Investigations\s*$", plan):
         state = "investigations-only"

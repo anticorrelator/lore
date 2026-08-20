@@ -13,6 +13,8 @@
 #   7. direct validator accepts `provenance: "legacy-no-snippet"` (no snippet/hash)
 #   8. direct validator rejects the mixed state (legacy marker + snippet/hash)
 #   9. evidence-append.sh rejects the legacy marker at the writer-path gate
+#  12. phase_id is optional: rows carrying it and rows omitting it both
+#      validate; a present-but-empty value is rejected
 
 set -euo pipefail
 
@@ -292,6 +294,52 @@ ROW=$(build_row \
   "change_context=__DELETE__")
 assert_eq "validator rejects fast-path row with non-legacy provenance + missing change_context" \
   "$(run_validator "$ROW")" "reject"
+
+echo ""
+echo "Test 12: phase_id is optional — present and absent both validate"
+
+# Rows written when phase_id was a required field must keep validating with no
+# backfill. The base row carries phase_id, so this is the historical shape.
+ROW=$(build_row \
+  "exact_snippet=\"$GOOD_SNIPPET\"" \
+  "normalized_snippet_hash=\"$GOOD_HASH\"")
+assert_eq "validator accepts a row carrying phase_id" "$(run_validator "$ROW")" "pass"
+
+# A plan whose tasks stand on their own omits the field rather than inventing a
+# phase. The validator must not treat absence as an error.
+ROW=$(build_row \
+  "exact_snippet=\"$GOOD_SNIPPET\"" \
+  "normalized_snippet_hash=\"$GOOD_HASH\"" \
+  "phase_id=__DELETE__")
+assert_eq "validator accepts a row omitting phase_id" "$(run_validator "$ROW")" "pass"
+
+# The writer path must agree with the validator.
+ROW=$(build_row \
+  "exact_snippet=\"$GOOD_SNIPPET\"" \
+  "normalized_snippet_hash=\"$GOOD_HASH\"" \
+  "phase_id=__DELETE__")
+assert_eq "evidence-append accepts a row omitting phase_id" \
+  "$(run_appender "$ROW")" "pass"
+
+# Explicit null is the same as absence.
+ROW=$(build_row \
+  "exact_snippet=\"$GOOD_SNIPPET\"" \
+  "normalized_snippet_hash=\"$GOOD_HASH\"" \
+  "phase_id=null")
+assert_eq "validator accepts explicit null phase_id" "$(run_validator "$ROW")" "pass"
+
+# Optional does not mean unchecked: a present value must be a non-empty string.
+ROW=$(build_row \
+  "exact_snippet=\"$GOOD_SNIPPET\"" \
+  "normalized_snippet_hash=\"$GOOD_HASH\"" \
+  "phase_id=\"\"")
+assert_eq "validator rejects empty-string phase_id" "$(run_validator "$ROW")" "reject"
+
+ROW=$(build_row \
+  "exact_snippet=\"$GOOD_SNIPPET\"" \
+  "normalized_snippet_hash=\"$GOOD_HASH\"" \
+  "phase_id=7")
+assert_eq "validator rejects non-string phase_id" "$(run_validator "$ROW")" "reject"
 
 echo ""
 echo "================================"

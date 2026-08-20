@@ -8,7 +8,7 @@ Usage:
     python pk_cli.py search <knowledge_dir> <query> [--limit N] [--threshold F] [--json] [--kind-sections] [--budget N]
     python pk_cli.py prefetch <knowledge_dir> <query> --scale-set <csv> [--format prompt|summary]
     python pk_cli.py query <knowledge_dir> <seeds> --scale-set <csv> [--format json|prompt]
-    python pk_cli.py resolve-manifest <knowledge_dir> --directive <json> --slug <slug> --phase <n>
+    python pk_cli.py resolve-manifest <knowledge_dir> --directive <json> --slug <slug> [--phase <n>]
     python pk_cli.py stats <knowledge_dir>
     python pk_cli.py resolve <knowledge_dir> <backlinks...> [--json]
     python pk_cli.py read <knowledge_dir> <file> [--query Q] [--type T]
@@ -1137,7 +1137,7 @@ def main() -> None:
     p_manifest.add_argument("knowledge_dir", help="Path to knowledge directory")
     p_manifest.add_argument("--directive", required=True, help="retrieval_directive JSON (version 2)")
     p_manifest.add_argument("--slug", required=True, help="Work item slug (telemetry)")
-    p_manifest.add_argument("--phase", type=int, required=True, help="1-based phase number (telemetry)")
+    p_manifest.add_argument("--phase", type=int, default=None, help="Phase number this resolve serves (telemetry); omit for a task-addressed resolve")
     p_manifest.add_argument("--task-id", default=None, help="Task id this resolve serves (telemetry; populates manifest_load.task_id)")
     p_manifest.add_argument("--delivery-json", default=None, help="Write a per-entry delivery snapshot (render mode + trust) as JSON to this path")
     p_manifest.set_defaults(func=cmd_resolve_manifest)

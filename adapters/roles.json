@@ -5,7 +5,7 @@
   "roles": [
     {
       "id": "lead",
-      "description": "Coordinator agent that plans phases, spawns workers, and gates phase transitions on returned reports.",
+      "description": "Coordinator agent that plans a work item's tasks, spawns workers to run them, and accepts each returned report before dispatching the tasks that depend on it.",
       "call_sites": [
         "skills/spec/SKILL.md",
         "skills/implement/SKILL.md"
@@ -76,7 +76,7 @@
     },
     {
       "id": "advisor",
-      "description": "Persistent domain-consultant agent that workers query mid-task via SendMessage for guidance on a declared scope; spawned by /implement when phases declare an Advisors block.",
+      "description": "Persistent domain-consultant agent that workers query mid-task via SendMessage for guidance on a declared scope; spawned by /implement when tasks declare an Advisors block.",
       "call_sites": [
         "agents/advisor.md",
         "skills/implement/SKILL.md",

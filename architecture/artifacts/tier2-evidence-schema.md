@@ -14,7 +14,6 @@ One row per claim. JSONL — one JSON object per line. Sole writer: `evidence-ap
 | `producer_role` | string | One of `researcher`, `worker`, `advisor`, `spec-lead`, `implement-lead`. |
 | `protocol_slot` | string | Where in the protocol this was emitted (e.g. `implement-phase-1`). |
 | `task_id` | string | Task ID this claim is attached to. |
-| `phase_id` | string | Phase ID this claim is attached to. |
 | `scale` | string | One of the IDs from `scale-registry.sh get-ids`; `"unknown"` is rejected. |
 | `file` | string | Non-empty path to the file the claim anchors on. `evidence-append.sh` records it relative to the file's own git root whenever one is derivable, so the reference outlives the checkout it was captured in; an absolute path is recorded only when no git root is found. Rows written before this rule carry absolute paths and remain valid. |
 | `line_range` | string | `N-M` with `N <= M`. |
@@ -42,6 +41,14 @@ Pre-Phase-1 rows backfilled by the migration writer (`evidence-update.sh`) carry
 - MUST satisfy every other required field.
 
 `evidence-append.sh` rejects the legacy marker at the writer-path gate. Only the migration writer is sanctioned to emit it.
+
+## Optional `phase_id` (additive, non-gating)
+
+| Field | Type | Notes |
+|---|---|---|
+| `phase_id` | string | Non-empty when present. The phase a task belongs to. |
+
+Plans that group their tasks under phases supply the value the task metadata carries; plans whose tasks stand on their own omit the field rather than invent one. Both writers (`validate-tier2.sh` and `scorecard-append.sh`) type-check it when present and never require it, so rows written when the field was mandatory keep validating and no backfill is needed.
 
 ## Optional source-anchor metadata (additive, non-gating)
 

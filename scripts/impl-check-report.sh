@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # impl-check-report.sh — Mechanically verify a worker completion report
-# Usage: impl-check-report.sh <ref> --task <id> --report <file> --phase <n>
+# Usage: impl-check-report.sh <ref> --task <id> --report <file>
 #        [--transcript <file>] [--woven-norm <label>]...
 #        [--provider-status <full|partial|unavailable>] [--spawned-advisors <csv>]
 #        [--template-version <hash>] [--json]
@@ -11,11 +11,15 @@
 #      `**Tier 2 evidence:**` section must exist as a row in the canonical
 #      task-claims.jsonl. The substrate is checked, never the report's own
 #      assertion. Missing ids are named in the findings.
-#   2. Required-consultation acknowledgement (BLOCKING) — the phase brief's
-#      `**Consultations required:**` domains must each have a matching
-#      `**Consultations:**` entry whose consultation_id appears in the
-#      --transcript JSONL (one acknowledged-reply record per line, shape
-#      {consultation_id, worker, domain, handler, ...}).
+#   2. Required-consultation acknowledgement (BLOCKING) — the domains the task
+#      declares must each have a matching `**Consultations:**` entry whose
+#      consultation_id appears in the --transcript JSONL (one acknowledged-reply
+#      record per line, shape {consultation_id, worker, domain, handler, ...}).
+#      Domains are read from the task record named by --task: its
+#      `consultations_required` list, else the `**Consultations required:**`
+#      block in its description, else — for a task inside phases[] — that block
+#      in its phase's brief. Only a block heading a line declares; the literal
+#      quoted mid-sentence in prose is a mention.
 #   3. Convention-handling completeness (non-blocking) — report dispositions
 #      compared against the --woven-norm list: missing / duplicated /
 #      unrecognized labels and `none in scope` conflicts are surfaced.
@@ -53,7 +57,6 @@ VALID_PROVIDER_STATUSES="full|partial|unavailable"
 REF=""
 TASK_ID=""
 REPORT_FILE=""
-PHASE=""
 TRANSCRIPT_FILE=""
 TRANSCRIPT_SET=0
 WOVEN_NORMS=""
@@ -67,7 +70,7 @@ JSON_MODE=0
 
 usage() {
   cat >&2 <<EOF
-Usage: lore impl check-report <ref> --task <id> --report <file> --phase <n>
+Usage: lore impl check-report <ref> --task <id> --report <file>
                               [--transcript <file>] [--woven-norm <label>]...
                               [--provider-status <full|partial|unavailable>]
                               [--spawned-advisors <csv>]
@@ -78,8 +81,8 @@ cross-reference (blocking), required-consultation acknowledgement (blocking),
 convention-handling completeness (non-blocking), fabrication guard +
 advisor-impact rollup (metadata-only), one execution-log entry.
 
---transcript is required when the phase brief declares required consultation
-domains. --provider-status is required when the report carries handler: agent
+--transcript is required when the task declares required consultation domains.
+--provider-status is required when the report carries handler: agent
 consultations; full additionally requires --spawned-advisors (pass an empty
 value when none were spawned).
 
@@ -112,14 +115,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --report=*)
       REPORT_FILE="${1#--report=}"
-      shift
-      ;;
-    --phase)
-      PHASE="${2:-}"
-      shift 2
-      ;;
-    --phase=*)
-      PHASE="${1#--phase=}"
       shift
       ;;
     --transcript)
@@ -179,7 +174,7 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     --*)
-      fail "Unknown flag: $1"
+      fail "Unknown flag: $1. Accepted flags are --task, --report, --transcript, --woven-norm, --provider-status, --spawned-advisors, --template-version, and --json."
       ;;
     *)
       if [[ -z "$REF" ]]; then
@@ -207,14 +202,6 @@ fi
 
 if [[ ! -f "$REPORT_FILE" ]]; then
   fail "report file not found: $REPORT_FILE"
-fi
-
-if [[ -z "$PHASE" ]]; then
-  fail "--phase is required (the task's 1-based phase number; the required-consultation check reads the phase brief)"
-fi
-
-if ! [[ "$PHASE" =~ ^[0-9]+$ ]] || [[ "$PHASE" -lt 1 ]]; then
-  fail "--phase must be a positive integer (got '$PHASE')"
 fi
 
 if [[ $PROVIDER_SET -eq 1 ]]; then
@@ -261,13 +248,110 @@ if [[ ! -f "$ITEM_DIR/_meta.json" ]]; then
   fail "missing _meta.json for work item '$SLUG'"
 fi
 
-# --- Phase brief: source of the required-consultation domain list -----------
+# --- Required-consultation domains, keyed by the task id the caller holds ----
+# A missing tasks.json is not "no domains required" — it is an unanswerable
+# question, so it refuses rather than silently passing the blocking check.
+if [[ ! -f "$ITEM_DIR/tasks.json" ]]; then
+  fail "no tasks.json for '$SLUG', so the domains task '$TASK_ID' requires cannot be read. Generate it first: lore work tasks $SLUG"
+fi
+
 set +e
-PHASE_BRIEF=$(bash "$SCRIPT_DIR/phase-context.sh" "$SLUG" "$PHASE" 2>&1)
-BRIEF_RC=$?
+REQUIRED_DOMAINS=$(python3 - "$ITEM_DIR/tasks.json" "$SLUG" "$TASK_ID" <<'DOMAINS_PY'
+import json
+import re
+import sys
+
+tasks_file, slug, task_id = sys.argv[1:4]
+
+try:
+    with open(tasks_file, encoding="utf-8") as f:
+        data = json.load(f)
+except ValueError as e:
+    print(f"tasks.json for '{slug}' is not valid JSON: {e}", file=sys.stderr)
+    sys.exit(1)
+
+flat = data.get("tasks")
+phases = data.get("phases")
+have_flat = isinstance(flat, list)
+have_phases = isinstance(phases, list)
+if not have_flat and not have_phases:
+    print(f"tasks.json for '{slug}' declares neither a top-level tasks array nor "
+          f"a phases array, so task '{task_id}' cannot be located. Regenerate it "
+          f"with: lore work regen-tasks {slug}", file=sys.stderr)
+    sys.exit(1)
+
+# tasks[] is authoritative; phases[] is the fallback. fallback_brief holds the
+# containing phase's rendered brief, which is where a phase-shaped plan keeps
+# the block.
+task = None
+fallback_brief = ""
+if have_flat:
+    task = next((t for t in flat if t.get("id") == task_id), None)
+if task is None and have_phases:
+    for phase in phases:
+        match = next((t for t in phase.get("tasks", []) if t.get("id") == task_id), None)
+        if match is not None:
+            task = match
+            fallback_brief = phase.get("phase_context") or ""
+            break
+if task is None:
+    print(f"'{slug}' has no task '{task_id}'. Check the task id against "
+          f"tasks.json, or regenerate it with: lore work regen-tasks {slug}",
+          file=sys.stderr)
+    sys.exit(1)
+
+
+def clean_domain(raw):
+    """Strip surrounding whitespace and code-span markers from a domain label.
+
+    The marker is spelled chr(96): an unmatched literal backtick in this
+    heredoc leaves the command substitution around it unbalanced, and bash
+    then reports a syntax error hundreds of lines below.
+    """
+    return raw.strip().strip(chr(96)).strip()
+
+
+def parse_block(text):
+    """Domains from a Consultations-required block that heads its own line.
+
+    The label quoted inside a sentence is a mention of the block, not a
+    declaration of one, so the match is anchored to the line start.
+    """
+    match = re.search(
+        r"^\*\*Consultations required:\*\*[ \t]*(.*)(?:\n|$)"
+        r"((?:(?!^\*\*|\n##)- .*\n?)*)",
+        text, re.MULTILINE)
+    if not match:
+        return []
+    domains = []
+    inline = match.group(1).strip()
+    if inline:
+        domains.extend(clean_domain(d) for d in inline.split(",") if d.strip())
+    for line in match.group(2).splitlines():
+        entry = line.strip()
+        if not entry.startswith("- ") or entry.startswith("- [ ]") or entry.startswith("- [x]"):
+            continue
+        entry = clean_domain(entry[2:])
+        if not entry or (entry.startswith("<") and entry.endswith(">")):
+            continue
+        domains.append(entry)
+    return [d for d in domains if d]
+
+
+declared = task.get("consultations_required")
+if isinstance(declared, list):
+    domains = [str(d).strip() for d in declared if str(d).strip()]
+else:
+    domains = parse_block(task.get("description") or "") or parse_block(fallback_brief)
+
+for domain in domains:
+    print(domain)
+DOMAINS_PY
+)
+DOMAINS_RC=$?
 set -e
-if [[ $BRIEF_RC -ne 0 ]]; then
-  fail "could not read phase brief for '$SLUG' phase $PHASE: $PHASE_BRIEF"
+if [[ $DOMAINS_RC -ne 0 ]]; then
+  fail "$REQUIRED_DOMAINS"
 fi
 
 # --- Run the mechanical checks ----------------------------------------------
@@ -276,7 +360,7 @@ fi
 set +e
 RESULT=$(CR_REPORT_FILE="$REPORT_FILE" \
   CR_CLAIMS_FILE="$ITEM_DIR/task-claims.jsonl" \
-  CR_PHASE_BRIEF="$PHASE_BRIEF" \
+  CR_REQUIRED_DOMAINS="$REQUIRED_DOMAINS" \
   CR_TRANSCRIPT_FILE="$TRANSCRIPT_FILE" \
   CR_TRANSCRIPT_SET="$TRANSCRIPT_SET" \
   CR_WOVEN_NORMS="$WOVEN_NORMS" \
@@ -389,27 +473,13 @@ for e in entries:
         e["was_followed"] = str(e["was_followed"]).lower() == "true"
 
 # --- 2. Required-consultation acknowledgement -------------------------------
-brief = os.environ.get("CR_PHASE_BRIEF", "")
-required = []
-brief_lines = brief.splitlines()
-for i, line in enumerate(brief_lines):
-    m = re.search(r"\*\*Consultations required:\*\*\s*(.*)$", line)
-    if not m:
-        continue
-    inline = m.group(1).strip()
-    if inline:
-        required.extend(clean(d) for d in inline.split(",") if clean(d))
-    for follow in brief_lines[i + 1:]:
-        bm = re.match(r"^\s*-\s+(.+)$", follow)
-        if bm:
-            required.append(clean(bm.group(1)))
-        else:
-            break
+required = [clean(d) for d in
+            os.environ.get("CR_REQUIRED_DOMAINS", "").splitlines() if clean(d)]
 
 if required:
     if os.environ["CR_TRANSCRIPT_SET"] != "1":
         validation_error(
-            "phase brief declares required consultation domains ("
+            "this task declares required consultation domains ("
             + ", ".join(required)
             + ") — --transcript <file> is required for the acknowledgement check")
     acked = set()

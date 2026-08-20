@@ -13,10 +13,12 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
-// TasksFile is the top-level shape of tasks.json.
+// TasksFile is the top-level shape of tasks.json. A plan declares its units one
+// way or the other: Tasks for a flat plan, Phases for a phase-shaped one.
 type TasksFile struct {
 	PlanChecksum string  `json:"plan_checksum"`
 	GeneratedAt  string  `json:"generated_at"`
+	Tasks        []Task  `json:"tasks"`
 	Phases       []Phase `json:"phases"`
 }
 
@@ -28,7 +30,8 @@ type Phase struct {
 	Tasks       []Task `json:"tasks"`
 }
 
-// Task represents a single task within a phase.
+// Task represents a single task, whether declared at the top level or inside a
+// phase.
 type Task struct {
 	ID          string   `json:"id"`
 	Subject     string   `json:"subject"`
@@ -54,6 +57,7 @@ type TasksModel struct {
 	width     int
 	height    int
 	empty     bool
+	notice    string // shown in place of the list when there is nothing to draw
 }
 
 // NewTasksModel creates a tasks model by reading tasks.json from the work dir.
@@ -74,7 +78,11 @@ func NewTasksModel(workDir, slug string) TasksModel {
 
 	var tf TasksFile
 	if err := json.Unmarshal(data, &tf); err != nil {
-		return TasksModel{empty: true, expanded: -1}
+		return TasksModel{
+			empty:    true,
+			expanded: -1,
+			notice:   fmt.Sprintf("  tasks.json is not valid JSON (%s). Regenerate it with: lore work regen-tasks %s", path, slug),
+		}
 	}
 
 	return newTasksModelFromFile(tf)
@@ -84,15 +92,27 @@ func newTasksModelFromFile(tf TasksFile) TasksModel {
 	var rows []tasksRow
 	collapsed := make(map[int]bool)
 
-	for i := range tf.Phases {
-		rows = append(rows, tasksRow{isPhase: true, phase: &tf.Phases[i]})
-		for j := range tf.Phases[i].Tasks {
-			rows = append(rows, tasksRow{isPhase: false, task: &tf.Phases[i].Tasks[j]})
+	// A top-level tasks array is authoritative; phases are the fallback for a
+	// plan generated before tasks were declared directly.
+	if len(tf.Tasks) > 0 {
+		for i := range tf.Tasks {
+			rows = append(rows, tasksRow{isPhase: false, task: &tf.Tasks[i]})
+		}
+	} else {
+		for i := range tf.Phases {
+			rows = append(rows, tasksRow{isPhase: true, phase: &tf.Phases[i]})
+			for j := range tf.Phases[i].Tasks {
+				rows = append(rows, tasksRow{isPhase: false, task: &tf.Phases[i].Tasks[j]})
+			}
 		}
 	}
 
 	if len(rows) == 0 {
-		return TasksModel{empty: true, expanded: -1}
+		return TasksModel{
+			empty:    true,
+			expanded: -1,
+			notice:   "  tasks.json declares no tasks. If the plan still has unchecked tasks, regenerate it with: lore work regen-tasks <slug>",
+		}
 	}
 
 	return TasksModel{
@@ -165,6 +185,9 @@ func (m TasksModel) IsEmpty() bool {
 
 func (m TasksModel) View() string {
 	if m.empty {
+		if m.notice != "" {
+			return m.notice
+		}
 		return "  No tasks defined."
 	}
 
@@ -327,10 +350,11 @@ func (m TasksModel) visibleRows() []int {
 		if row.isPhase {
 			currentPhase = m.phaseIndexAt(i)
 			visible = append(visible, i)
-		} else {
-			if currentPhase >= 0 && !m.collapsed[currentPhase] {
-				visible = append(visible, i)
-			}
+			continue
+		}
+		// A task with no phase header above it belongs to no collapsible group.
+		if currentPhase < 0 || !m.collapsed[currentPhase] {
+			visible = append(visible, i)
 		}
 	}
 	return visible

@@ -116,22 +116,24 @@ def resolve_v2(
     knowledge_dir: str,
     directive: dict,
     slug: str,
-    phase_number: int,
+    phase_number: int | None = None,
     task_id: str | None = None,
     delivery_json_path: str | None = None,
 ) -> int:
     """Resolve a v2 directive: per-topic fan-out, sectioned render, telemetry.
 
     `task_id` populates the manifest_load record's task_id slot when the
-    caller resolves on behalf of a single task. `delivery_json_path` requests
+    caller resolves on behalf of a single task. `phase_number` is telemetry
+    only and is None when the directive was addressed by task. `delivery_json_path` requests
     a per-entry delivery snapshot (path, render_mode, trust at delivery)
     written as JSON to that path — the input packet emitters compose rows
     from; the rendered manifest on stdout is unchanged.
     """
     knowledge_dir = os.path.abspath(knowledge_dir)
+    unit = f"phase {phase_number}" if phase_number is not None else f"task {task_id}"
     topics = directive.get("topics", [])
     if not topics:
-        print(f"Error: v2 directive in phase {phase_number} of '{slug}' has empty topics list.", file=sys.stderr)
+        print(f"Error: the v2 directive for {unit} of '{slug}' has an empty topics list.", file=sys.stderr)
         return 1
 
     searcher = Searcher(knowledge_dir)

@@ -1,6 +1,7 @@
 package work
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -76,5 +77,51 @@ func TestTasksModelMouseScroll(t *testing.T) {
 	lastVisible := visible[len(visible)-1]
 	if m.cursor != lastVisible {
 		t.Errorf("cursor should clamp at last visible row (%d), got %d", lastVisible, m.cursor)
+	}
+}
+
+func TestTasksModelPrefersTopLevelTasks(t *testing.T) {
+	tf := TasksFile{
+		Tasks: []Task{
+			{ID: "task-1", Subject: "Task A"},
+			{ID: "task-2", Subject: "Task B", BlockedBy: []string{"task-1"}},
+		},
+		Phases: []Phase{
+			{PhaseNumber: 1, PhaseName: "Legacy", Tasks: []Task{{ID: "old-1", Subject: "Task Z"}}},
+		},
+	}
+
+	m := newTasksModelFromFile(tf)
+	if m.IsEmpty() {
+		t.Fatal("model is empty for a flat tasks file")
+	}
+	if len(m.rows) != 2 {
+		t.Fatalf("rows = %d, want 2 (the top-level tasks, not the phase fallback)", len(m.rows))
+	}
+	for _, row := range m.rows {
+		if row.isPhase {
+			t.Fatal("a flat tasks file rendered a phase header")
+		}
+	}
+	if got := len(m.visibleRows()); got != 2 {
+		t.Fatalf("visibleRows = %d, want 2 — flat tasks have no phase header to be hidden under", got)
+	}
+	view := m.View()
+	if !strings.Contains(view, "Task A") || !strings.Contains(view, "Task B") {
+		t.Fatalf("view omitted a flat task:\n%s", view)
+	}
+	if strings.Contains(view, "Task Z") {
+		t.Fatalf("view rendered the phase fallback alongside top-level tasks:\n%s", view)
+	}
+}
+
+func TestTasksModelNeitherShapeExplainsItself(t *testing.T) {
+	m := newTasksModelFromFile(TasksFile{})
+	if !m.IsEmpty() {
+		t.Fatal("model is not empty for a tasks file declaring no units")
+	}
+	view := m.View()
+	if !strings.Contains(view, "regen-tasks") {
+		t.Fatalf("view does not say what to do:\n%s", view)
 	}
 }

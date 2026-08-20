@@ -96,7 +96,7 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     --*)
-      fail "Unknown flag: $1"
+      fail "Unknown flag: $1. Accepted flags are --active, --template-version, and --json."
       ;;
     *)
       if [[ -z "$REF" ]]; then
@@ -151,7 +151,7 @@ KNOWLEDGE_DIR=$(resolve_knowledge_dir)
 ITEM_DIR="$KNOWLEDGE_DIR/_work/$SLUG"
 
 [[ -f "$ITEM_DIR/_meta.json" ]] || fail "missing _meta.json for work item '$SLUG'"
-[[ -f "$ITEM_DIR/plan.md" ]] || fail "No structured plan found for '$SLUG'. Run /spec first to create phases and tasks."
+[[ -f "$ITEM_DIR/plan.md" ]] || fail "No structured plan found for '$SLUG'. Run /spec first to create the plan's tasks."
 if [[ ! -f "$ITEM_DIR/tasks.json" ]]; then
   fail "no tasks.json for '$SLUG' — generate it first: lore work tasks $SLUG"
 fi
@@ -195,15 +195,28 @@ def warn(msg):
     print(f"[impl] Warning: {msg}", file=sys.stderr)
 
 
-all_tasks = []
-task_by_id = {}
-phase_of = {}
-phases = tasks_data.get("phases", [])
-for phase in phases:
-    for task in phase.get("tasks", []):
-        all_tasks.append(task)
-        task_by_id[task["id"]] = task
-        phase_of[task["id"]] = phase.get("phase_number")
+# tasks[] is authoritative when present; otherwise phases[] is flattened. A
+# document carrying neither is refused rather than read as an empty plan, which
+# would report every task complete.
+flat_tasks = tasks_data.get("tasks")
+phases = tasks_data.get("phases")
+if isinstance(flat_tasks, list):
+    all_tasks = list(flat_tasks)
+    phase_of = {t["id"]: None for t in all_tasks}
+    phases = []
+elif isinstance(phases, list):
+    all_tasks = []
+    phase_of = {}
+    for phase in phases:
+        for task in phase.get("tasks", []):
+            all_tasks.append(task)
+            phase_of[task["id"]] = phase.get("phase_number")
+else:
+    print(f"[impl] Error: tasks.json for '{slug}' declares neither a top-level "
+          f"tasks array nor a phases array, so no task list could be read. "
+          f"Regenerate it with: lore work regen-tasks {slug}", file=sys.stderr)
+    sys.exit(1)
+task_by_id = {t["id"]: t for t in all_tasks}
 
 for a in sorted(active):
     if a not in task_by_id:
@@ -322,16 +335,20 @@ else:
     status = "all-complete"
 
 # --- Lead-inline gate conditions: four separate fields, never an aggregate -----
-phase_blocks = {}
-matches = list(re.finditer(r"^### Phase (\d+):[^\n]*\n", plan, re.MULTILINE))
+# Units are keyed by the label they are addressed by downstream: the task id on
+# a flat plan, the phase number as a string on a phase-shaped one.
+_heading = r"^### Phase (\d+):[^\n]*\n" if phases else r"^### Task (\d+):[^\n]*\n"
+plan_blocks = {}
+matches = list(re.finditer(_heading, plan, re.MULTILINE))
 for i, m in enumerate(matches):
     end = matches[i + 1].start() if i + 1 < len(matches) else len(plan)
-    phase_blocks[int(m.group(1))] = plan[m.start():end]
+    number = int(m.group(1))
+    plan_blocks[str(number) if phases else f"task-{number}"] = plan[m.start():end]
 
 persistent_advisors = []
-consultations_by_phase = {}
-task_format_by_phase = {}
-for pnum, content in sorted(phase_blocks.items()):
+consultations_by_unit = {}
+task_format_by_unit = {}
+for unit_key, content in sorted(plan_blocks.items()):
     am = re.search(r"^\*\*Advisors:\*\*\s*\n((?:(?!^\*\*|\n##).*\n?)*)",
                    content, re.MULTILINE)
     if am:
@@ -340,12 +357,15 @@ for pnum, content in sorted(phase_blocks.items()):
             if line.startswith("- ") and re.search(r"\bmode\s*:\s*persistent\b", line):
                 body = line[2:].strip()
                 m = re.match(r"(\S+)\s*(?:—|--)?\s*(.*?)\.?\s*mode\s*:\s*persistent\b", body)
-                persistent_advisors.append({
+                advisor = {
                     "name": (m.group(1) if m else body.split()[0]).strip(),
                     "domain": (m.group(2).strip() if m else ""),
                     "mode": "persistent",
-                    "phase": pnum,
-                })
+                    "unit": unit_key,
+                }
+                if phases:
+                    advisor["phase"] = int(unit_key)
+                persistent_advisors.append(advisor)
     cm = re.search(r"^\*\*Consultations required:\*\*\s*\n((?:(?!^\*\*|\n##)- .*\n?)*)",
                    content, re.MULTILINE)
     if cm:
@@ -359,9 +379,9 @@ for pnum, content in sorted(phase_blocks.items()):
                 continue
             domains.append(text)
         if domains:
-            consultations_by_phase[str(pnum)] = domains
+            consultations_by_unit[unit_key] = domains
     fm = re.search(r"\*\*Task format:\*\*\s*(.*)", content)
-    task_format_by_phase[str(pnum)] = (fm.group(1).strip().lower() if fm else None)
+    task_format_by_unit[unit_key] = (fm.group(1).strip().lower() if fm else None)
 
 related_skills = []
 rm = re.search(r"^\*\*Related skills:\*\*\s*\n((?:- .*\n?)*)", plan, re.MULTILINE)
@@ -376,22 +396,26 @@ if rm:
 
 task_count = len(all_tasks)
 single_task = task_count == 1
-single_phase = phase_of[all_tasks[0]["id"]] if single_task else None
+if single_task:
+    only_id = all_tasks[0]["id"]
+    single_unit = str(phase_of[only_id]) if phases else only_id
+else:
+    single_unit = None
 prescriptive = bool(
-    single_task and task_format_by_phase.get(str(single_phase)) == "prescriptive")
+    single_task and task_format_by_unit.get(single_unit) == "prescriptive")
 
 lead_inline_conditions = {
     "single_task": single_task,
     "prescriptive": prescriptive,
     "no_persistent_advisor": not persistent_advisors,
-    "no_required_consultation": (not consultations_by_phase
+    "no_required_consultation": (not consultations_by_unit
                                  and not ceremony_skills
                                  and not related_skills),
     "detail": {
         "task_count": task_count,
-        "task_format_by_phase": task_format_by_phase,
+        "task_format_by_unit": task_format_by_unit,
         "persistent_advisors": persistent_advisors,
-        "consultations_required_by_phase": consultations_by_phase,
+        "consultations_required_by_unit": consultations_by_unit,
         "ceremony_skills": ceremony_skills,
         "related_skills": related_skills,
         "file_count_diagnostic": (
@@ -459,7 +483,8 @@ if d["batch"]:
     for t in d["batch"]:
         extract = f"  [{len(t['tier2_extract'])} Tier 2 row(s)]" if t["tier2_extract"] else ""
         cls = f"  [class: {t['judgment_class']}]" if t.get("judgment_class") else ""
-        print(f"  -  {t['local_id']} (phase {t['phase']}): {t['subject']}{cls}{extract}")
+        where = f" (phase {t['phase']})" if t.get("phase") is not None else ""
+        print(f"  -  {t['local_id']}{where}: {t['subject']}{cls}{extract}")
 else:
     print("Unblocked batch: empty")
 for blocked in d["pending_blocked"]:
