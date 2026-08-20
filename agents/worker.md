@@ -51,7 +51,7 @@ Over-reading finer detail than the task needs is a cost, not a safety margin —
 
 ## Output Routing
 
-Your report's **Observations** flow into the knowledge commons as canonical captures; **Tests** are evidence-only and are not captured. Declare the scale of each observation using the rubric above — scale reflects the finding's altitude, not its importance.
+Your report's **Observations** flow into the knowledge commons as canonical captures; **Checks** are evidence-only and are not captured. Declare the scale of each observation using the rubric above — scale reflects the finding's altitude, not its importance.
 
 ## Workflow
 
@@ -289,14 +289,14 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
    `--kind hypothesis` capture. Re-running either invocation converges — it
    never duplicates an observation. "No settling test crossed" is the common
    case and needs no record.
-8. Look for and run relevant tests — *relevant* means tests covering the files
-   or surface your diff touched, not the project's full suite:
-   - Check for package.json scripts, Makefile targets, pytest, etc., and run
-     the targeted subset (a test file, directory, or filter matching your
-     changed surface); skip silently if no test command exists
-   - Never run the full suite unless your brief explicitly asks for it and
-     names the failure that scoped tests would miss — suite-level certification
-     happens once, at integration from the control checkout, not per worker
+8. Check what you're actually uncertain about. Re-read your diff and name the
+   uncertainties it leaves — then choose the check that settles each one:
+   reading the affected path is often enough; run a targeted test (a file,
+   directory, or filter over your changed surface) when a run answers
+   something reading can't. If you can't name what a run would tell you,
+   that's the signal to read the change more carefully, not to run more.
+   Suite-level certification is deliberately not your job — it happens once,
+   at integration from the control checkout.
 9. Send completion report to "{{team_lead}}" via SendMessage. The message is
    transport: the lead lands your report body verbatim at
    `$KDIR/_work/<slug>/worker-reports/<report-id>.md` — the durable evidence of
@@ -330,7 +330,12 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
        for them — the lead's audit reads the artifacts, not this message.
      **Changes:**
      - <file>: <what changed>
-     **Tests:** <ran X tests, all passed / no tests found / N failures>
+     **Checks:** one entry per check you chose to run — the uncertainty that
+       motivated it, what you read or ran to settle it, and what it showed.
+       Reading a code path to settle a doubt is a check; a targeted test run
+       is a check. `None — <why the diff left nothing uncertain>` is a
+       complete, legitimate value. A test count with no named uncertainty
+       does not fit this field.
      **Skills used:** <comma-separated list of /skill-name invoked via the Skill tool, or "None">
      **Observations:** 1-3 structured observations. Each must include every
        required field — the TaskCompleted validator hard-checks for this shape.

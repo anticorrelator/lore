@@ -172,7 +172,7 @@ Mark the result **degraded** and write your own honest meta-report. Do **not** i
 **Status:** degraded — <brief file missing or empty (nothing enqueued) | no live instance claimed the request | session did not reach terminus within RUN_TIMEOUT | session reached terminus without a parseable report file>
 $SPEND_SECTION
 **Changes:** none confirmed (worker session did not return a parseable report)
-**Tests:** not run by chaperone
+**Checks:** none performed by chaperone
 **Observations:**
 - claim: "None"
 **Tier 2 evidence:** none

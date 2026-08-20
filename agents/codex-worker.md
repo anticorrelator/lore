@@ -90,7 +90,7 @@ $PHASE_BRIEF
 {{prior_knowledge}}
 
 ## Implement
-Read existing code first and follow codebase conventions. Self-check your change against each \`**Verification:**\` bullet in the phase context that your diff can affect before finishing. Run only tests covering the surface you changed — never the full suite; a bullet needing a full suite or surfaces you did not touch is certified downstream at integration — list it in your report as not-self-checked with one line of why.
+Read existing code first and follow codebase conventions. Self-check your change against each \`**Verification:**\` bullet in the phase context that your diff can affect before finishing. Check what you're actually uncertain about: name the uncertainties your diff leaves, and settle each with the cheapest sufficient check — reading the affected path often suffices; run a targeted test over your changed surface when a run answers something reading can't. Suite-level certification happens downstream at integration, never here; a bullet needing a full suite or surfaces you did not touch is certified there — list it in your report as not-self-checked with one line of why.
 
 ## Build your Tier 2 evidence rows
 Each time you form a claim anchored to a specific file:line_range, build one Tier 2 evidence row. The 16-field row shape and the \`normalized_snippet_hash\` recipe (\`python3 ~/.lore/scripts/snippet_normalize.py --hash\`, which you CAN run in-sandbox — it only hashes text) are documented in the worker report contract.
@@ -109,7 +109,7 @@ Print the worker report and (if any) the delimited evidence block together as yo
 
   **Task:** <subject>
   **Changes:** <file: what changed>
-  **Tests:** <ran X / none found / N failures>
+  **Checks:** <one entry per check: the uncertainty → what you read or ran → what it showed; or "none — <why the diff left nothing uncertain>">
   **Observations:** <YAML list of structured claims, or "- claim: \"None\"">
   **Tier 2 evidence:** <count of rows you emit in the block below, e.g. "3 rows below", or "none">
   **Convention handling:** <honored/diverged dispositions, or "none in scope">
@@ -235,7 +235,7 @@ Substitute `<slug>` with the literal value from step 2. `evidence-append.sh` run
   **Status:** degraded — codex exec did not return a parseable worker report
   **Spend:** harness=codex model=$CODEX_MODEL effort=${CODEX_EFFORT:-none} duration_seconds=$SPEND_DURATION_SECONDS basis=duration-only
   **Changes:** none confirmed (codex rc=$CODEX_RC; see raw output below)
-  **Tests:** not run by chaperone
+  **Checks:** none performed by chaperone
   **Observations:**
   - claim: "None"
   **Tier 2 evidence:** none
