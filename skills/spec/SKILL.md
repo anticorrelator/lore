@@ -661,6 +661,8 @@ Every `lore capture` call must carry provenance flags; for captures promoted fro
 Apply the provenance flags above on every `lore capture`.
 ```
 
+**Settle what investigation crossed.** Investigation is where open questions get answered and hypotheses meet their settling tests — a research pass that reads the code an unsettled entry is about routinely crosses the test the entry names without noticing. Before leaving this step, sweep the `### Open questions` and `### Hypotheses` sections of your session context and prefetches against what the researchers established. A question this investigation answered: capture the answer as a regular entry, then settle the question — `lore claim settle <path> --kind-status answered --source spec-lead --work-item <slug> --note "..."`, naming the answering entry in the note. A hypothesis whose settling test the research walked past: record one observation — `lore claim corroborate <path> --direction <supports|undermines> --source spec-lead --work-item <slug> --note "..."` — and settle it when the result was decisive. This is the consuming-side mirror of `/implement`'s salvage pass: capture files new unsettled claims, this sweep retires old ones. "Nothing crossed" is a complete answer.
+
 ---
 
 ### Step 5.4a: Theory of the touched subsystem

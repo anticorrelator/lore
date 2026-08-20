@@ -148,6 +148,10 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
        "X no longer exists" — recoverable from ls/diff, not a behavior
        grep-for-absence-as-audit — acceptable only when prose is the contract being verified
        task restatement — "refactored Y" is the task, not a verification criterion
+       suite-shaped bar — "all tests pass", "full suite green", "both dialects pass": suite-level
+         certification happens once, at coordinator integration from the control checkout, against
+         the composed tree. A bullet here names a behavior of THIS phase's changed surface,
+         checkable in minutes against the worker's own tree.
      Good example: "`lore prefetch` with no `--scale-set` exits non-zero with a usable error" -->
 - <observable behavior — e.g., "`lore search foo` returns ranked results from the updated index">
 **Split rationale:**

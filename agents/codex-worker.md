@@ -23,7 +23,7 @@ PHASE_BRIEF=$(lore work phase-context <slug> <phase-number>)
 
 - **Empty stdout (exit 0):** legacy-fallback — the inline phase block in the task description is authoritative; proceed with it.
 - **Non-zero exit:** a real error — stop and surface the stderr message in your report; do not silently fall back.
-- **Non-empty stdout (exit 0):** the canonical phase brief. Its `**Verification:**` bullets are the acceptance criteria Codex must self-check against.
+- **Non-empty stdout (exit 0):** the canonical phase brief. Its `**Verification:**` bullets are the phase acceptance bar (owned by the lead at phase close); Codex self-checks the bullets its diff can affect. A bullet requiring a full test suite or surfaces outside the diff is certified downstream against the composed tree — Codex notes it as not-self-checked rather than running it.
 
 ### 3. Select the Codex model binding
 
@@ -90,7 +90,7 @@ $PHASE_BRIEF
 {{prior_knowledge}}
 
 ## Implement
-Read existing code first and follow codebase conventions. Self-check your change against every \`**Verification:**\` bullet in the phase context before finishing.
+Read existing code first and follow codebase conventions. Self-check your change against each \`**Verification:**\` bullet in the phase context that your diff can affect before finishing. Run only tests covering the surface you changed — never the full suite; a bullet needing a full suite or surfaces you did not touch is certified downstream at integration — list it in your report as not-self-checked with one line of why.
 
 ## Build your Tier 2 evidence rows
 Each time you form a claim anchored to a specific file:line_range, build one Tier 2 evidence row. The 16-field row shape and the \`normalized_snippet_hash\` recipe (\`python3 ~/.lore/scripts/snippet_normalize.py --hash\`, which you CAN run in-sandbox — it only hashes text) are documented in the worker report contract.

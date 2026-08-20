@@ -526,8 +526,39 @@ if [[ -z "$CATEGORY" ]]; then
 fi
 
 # --- Generate title from the insight ---
+# For lifecycle kinds, a leading kind marker in the prose ("Hypothesis
+# (untested):", "Believed:", "Open question —", "PROSPECTIVE TRIGGER —")
+# duplicates the footer's kind/kind_status fields and bakes a status into the
+# slug that goes stale the moment the claim settles. Strip such markers from
+# title derivation only — the entry body keeps the author's phrasing. Only
+# leading markers with an explicit separator (:, —, –, or dashes) are
+# stripped, and only when --kind is hypothesis or question, so an ordinary
+# title that merely contains the word "hypothesis" is untouched.
+strip_kind_title_prefix() {
+  local text="$1" prev=""
+  local re='^[[:space:]]*(prospective[[:space:]]+trigger|open[[:space:]]+question|hypothesis([[:space:]]*\(?[a-z]+\)?)?|believed|belief|question|untested)([[:space:]]*(:|—|–)[[:space:]]*|[[:space:]]+-+[[:space:]]+)'
+  shopt -s nocasematch
+  while [[ "$text" != "$prev" ]]; do
+    prev="$text"
+    if [[ "$text" =~ $re ]]; then
+      text="${text:${#BASH_REMATCH[0]}}"
+    fi
+  done
+  shopt -u nocasematch
+  # A marker-only insight would leave an empty title; keep the original then.
+  if [[ -z "${text//[[:space:]]/}" ]]; then
+    printf '%s' "$1"
+  else
+    printf '%s' "$text"
+  fi
+}
+
 generate_title() {
-  derive_entry_title "$1"
+  local source_text="$1"
+  if [[ "$KIND" == "hypothesis" || "$KIND" == "question" ]]; then
+    source_text=$(strip_kind_title_prefix "$source_text")
+  fi
+  derive_entry_title "$source_text"
 }
 
 TITLE=$(generate_title "$INSIGHT")

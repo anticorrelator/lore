@@ -78,7 +78,12 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
      brief. Treat it as the authoritative source for Design Decisions,
      Verification objective, Reference files, and phase-level Knowledge context.
      Read the `**Verification:**` bullets in this brief carefully — you MUST
-     self-check your changes against each bullet before reporting completion.
+     self-check your changes against each bullet your diff can affect before
+     reporting completion. These bullets are the phase acceptance bar, owned by
+     the lead at phase close — not a per-worker preflight. A bullet that would
+     require running a full test suite, or exercising surfaces your diff does
+     not touch, is the lead's/coordinator's to certify against the composed
+     tree: note it in your report as not-self-checked and why; do not run it.
 5. Implement the change — read existing code first, follow codebase conventions.
 
    **Inline comments are for readers, not for thinking.** Reason at any length
@@ -249,9 +254,49 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
    the store and records branch provenance from the current directory. Ledger
    rows carry `source: worker` — that is how the system measures whether this
    step moves behavior.
-8. Look for and run relevant tests:
-   - Check for package.json scripts, Makefile targets, pytest, etc.
-   - Run tests if found; skip silently if no test command exists
+
+   **Hypotheses and open questions take a different verb.** `lore verify` is
+   for entries that assert facts. An entry that arrives under `### Hypotheses`
+   or `### Open questions` (footer `kind: hypothesis` or `kind: question`)
+   carries an unsettled claim and names the test that would settle it — and
+   your task may cross that test as a side effect of ordinary work. Each time
+   it does (you ran the experiment the entry names, or your diff produced the
+   evidence its falsifier describes), record one observation immediately, while
+   the evidence is fresh:
+
+   ```bash
+   lore claim corroborate <knowledge-path> \
+     --direction <supports|undermines> \
+     --source worker --work-item <slug> \
+     --note "<what you saw and why it counts against the entry's named settling test>"
+   ```
+
+   When the observation *completes* the settling test — the named falsifier
+   fired, or the test ran to a decisive result — settle in the same session
+   rather than leaving the status stale:
+
+   ```bash
+   lore claim settle <knowledge-path> \
+     --kind-status <supported|refuted|answered|dissolved> \
+     --source worker --work-item <slug> \
+     --note "<what settled it>"
+   ```
+
+   An undermining observation that matches the entry's named falsifier but
+   leaves `kind_status` untouched is the recorded-but-never-promoted failure
+   mode this step exists to close. If a refuted claim has a sharper surviving
+   form, name it in the settle note and file the narrowed version as a new
+   `--kind hypothesis` capture. Re-running either invocation converges — it
+   never duplicates an observation. "No settling test crossed" is the common
+   case and needs no record.
+8. Look for and run relevant tests — *relevant* means tests covering the files
+   or surface your diff touched, not the project's full suite:
+   - Check for package.json scripts, Makefile targets, pytest, etc., and run
+     the targeted subset (a test file, directory, or filter matching your
+     changed surface); skip silently if no test command exists
+   - Never run the full suite unless your brief explicitly asks for it and
+     names the failure that scoped tests would miss — suite-level certification
+     happens once, at integration from the control checkout, not per worker
 9. Send completion report to "{{team_lead}}" via SendMessage. The message is
    transport: the lead lands your report body verbatim at
    `$KDIR/_work/<slug>/worker-reports/<report-id>.md` — the durable evidence of
