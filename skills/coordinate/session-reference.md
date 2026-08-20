@@ -5,9 +5,43 @@ holds the flag semantics, exit codes, and incident-derived calibrations that bac
 
 ## Dispatch targeting and placement
 
-Every request declares exactly one placement stance — `--target`, `--prefer-dir`,
-`--prefer-cwd`, or `--anywhere` — and the CLI refuses a stanceless one (0 of 110
-pre-contract claims ever stated placement). `--anywhere` is the deliberate roulette
+Placement lives on the work item, and dispatch derives it. A work item declares
+its `source_checkout` — the checkout its sessions must start from — seeded by
+`lore work source-checkout <slug>`, which takes the value from the dispatching
+session's own recorded provenance, resolves it physically, and validates it
+against the live instance registry before writing. For a slugged request,
+`lore session request` reads that declaration and writes it as
+`required_project_dir`: a hard read-side filter, claimable only by an instance
+whose project directory equals it — every other live instance leaves the row
+pending, with no grace-window decay. The caller passes no placement flag, and
+no one resolves a branch to a clone by hand.
+
+Each way the declaration can fail refuses at enqueue with its own repair, and
+none is rewritten to an untargeted request: an item with no declaration (seed
+it with `lore work source-checkout <slug>`), a declaration resolving to no
+existing directory (fix the path), a declaration no live instance serves
+(start or re-point an instance in that checkout). The fourth refusal lands at
+claim time: `required_target_ref`, the source branch captured at enqueue, is
+compared against what the claiming instance actually has checked out and
+refuses on contradiction before anything is created on disk. The ref verifies;
+it never routes — a ref name does not say which object store holds it, which is
+why the placement axis is the directory and the ref is only ever a
+contradiction check.
+The `requested` journal row carries the complete placement stance under an
+explicit `placement_stance` token — `required_dir`, `targeted`,
+`preferred_dir`, or `any`; when axes combine, the token names the strongest in
+force, in that order. The request file is deleted on every terminal path, so
+the journal is the only durable record, and the absence of a field is never the
+encoding of a stance. Rows written before the field existed keep their old
+claim semantics: refusal gates on the stance token a new row carries, never on
+field absence. A pre-feature instance cannot see the field at all and would
+claim a declaring row anyway, so pair a declaring dispatch with `--min-vintage`
+naming the build that introduced the filter.
+
+A request with no slug has no declaration to derive from, so it declares
+exactly one placement stance explicitly — `--target`, `--prefer-dir`,
+`--prefer-cwd`, or `--anywhere` — and the CLI refuses a stanceless one.
+`--anywhere` is the deliberate roulette
 opt-in, writing no queue field: any live instance may claim, including one whose
 harness rejects your model id at launch (haiku probes claimed by a codex-framework
 instance died, 2026-07-08). When a dispatch assumes a framework, binary, or vintage,
@@ -26,10 +60,19 @@ constrain the claim:
   `<framework> @ <project_dir>`. An `unknown` in either position is a pre-feature row
   and means *can't tell*, never a default — verify some other way or pin the claim.
 
-Placement stance selects a claimant, not a writable harness cwd. `--prefer-dir
-<path>` (`--prefer-cwd` for your own checkout) is soft — a matching instance claims
+Placement stance selects a claimant, not a writable harness cwd.
+`required_project_dir` is the one hard directory filter; `--prefer-dir <path>`
+stays soft — a matching instance claims
 immediately, others defer a 15s grace window, then anyone may take it: claim timing,
-never a gate. An ordinary hosted session captures that checkout into a session-owned
+never a gate. `--prefer-cwd` is the soft preference for the dispatcher's own
+checkout. From an ordinary shell it captures the working directory; from inside
+a session it instead resolves the session's captured source checkout — the
+checkout its registry row records — because a session runs in a worktree inside
+the knowledge store, a path no instance's project directory can ever equal, so
+capturing cwd there could only stall the claim and then land anywhere. When it
+runs inside a session and no source checkout can be resolved, the flag refuses
+rather than writing an unmatchable preference.
+An ordinary hosted session captures that checkout into a session-owned
 worktree before spawn. A coordinated writer instead carries the all-or-nothing
 `--worktree-id`, `--execution-dir`, and `--worktree-identity` tuple allocated by the
 coordination manager. Both direct PTY and tmux hosting validate the tuple and run at

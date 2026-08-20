@@ -11,6 +11,13 @@
 #   Default: subsystem.
 #   Unknown values are rejected at the CLI level. Legacy work items without the field
 #   continue to work — readers treat a missing scope as `subsystem`.
+#
+# source_checkout:
+#   The checkout a session for this item must run in. Always written empty here and
+#   never derived from git: a queue-spawned session's working directory is a detached
+#   worktree, and in the bare-common-directory repository family no single checkout is
+#   recoverable from it. `lore work source-checkout <slug>` seeds the real value from
+#   the calling session's registry provenance and is the only writer of the field.
 
 set -euo pipefail
 
@@ -333,6 +340,7 @@ meta = {
     "scope": scope,
     "project": project,
     "branches": json.loads(branches_json),
+    "source_checkout": "",
     "tags": json.loads(tags_json),
     "issue": issue,
     "pr": pr,

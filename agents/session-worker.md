@@ -52,7 +52,6 @@ lore session request \
   --type worker \
   --slug "$DERIVED_SLUG" \
   --model "$WORKER_MODEL" \
-  --prefer-cwd \
   --yes \
   --initiator agent \
   --context "$BRIEF_FILE"
@@ -62,8 +61,8 @@ ENQUEUE_RC=$?
 - `--type worker` selects the worker session arm; `--slug "$DERIVED_SLUG"` is required for this type (the derived slug is the session identity, so there is no null-slug worker request).
 - `--yes` runs the session autonomously — it suppresses the session's own confirmation gates so the brief runs unattended. It does not weaken any evaluation the session performs; it only closes the interactive prompts a queue-spawned session cannot answer.
 - `--initiator agent` marks the session agent-initiated, which arms best-effort auto-close after the independent `terminus_reached` row. A later `closed` or `close_failed` is cleanup evidence, not completion.
-- `--prefer-cwd` supplies the placement stance the request now requires: every `lore session request` must carry exactly one of `--target`/`--prefer-dir`/`--prefer-cwd`/`--anywhere` or it is refused at write time. `--prefer-cwd` soft-prefers the instance whose checkout matches the chaperone's `$PWD` (the parent's checkout) — a matching instance claims immediately, any other defers a ~15s grace before it may claim — so the worker lands in the parent's checkout without hard-pinning to it. Pair it with `--min-vintage` (below) when the fleet may include pre-feature TUI builds, which ignore the preference and claim immediately.
-- If your instance fleet may include TUI builds that predate worker-session support, add `--min-vintage <commit-ish|ISO-8601>` naming the build that introduced it, so a pre-worker instance never claims a request it cannot spawn.
+- Placement needs no flag from you. A slugged request derives it from the base work item's declared source checkout (`source_checkout`, seeded by `lore work source-checkout`) and writes it as the hard `required_project_dir` filter: only an instance whose project directory equals it may claim, and every other live instance leaves the request pending. An item that cannot be placed is refused at write time with the repair named on stderr — no declaration on the item, a declared path that no longer resolves, or a checkout no live instance serves. That refusal is a non-zero `ENQUEUE_RC`: report degraded (§5) exactly as for any other write-time refusal, and leave the repair to {{team_lead}} — a placement flag added to route around the refusal defeats the declaration.
+- If your instance fleet may include TUI builds that predate worker-session support or the placement filter, add `--min-vintage <commit-ish|ISO-8601>` naming the newer of the builds that introduced them: a pre-worker instance never claims a request it cannot spawn, and a pre-placement instance cannot see `required_project_dir`, so without the floor it would claim a declaring request it should refuse.
 
 A non-zero `ENQUEUE_RC` means the request was refused at write time (a field validation error, named on stderr) — nothing was enqueued. Report degraded (§5) and stop; {{team_lead}} re-dispatches as a same-harness worker.
 

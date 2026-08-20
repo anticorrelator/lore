@@ -73,9 +73,14 @@
 #                      write time (refused when it names no existing directory).
 #                      Mutually exclusive with --prefer-cwd. Pair with --min-vintage
 #                      when an old claiming TUI must not ignore this additive field.
-#   --prefer-cwd       Like --prefer-dir but captures the caller's $PWD — the common
-#                      "route to my own checkout" case. Mutually exclusive with
-#                      --prefer-dir.
+#   --prefer-cwd       Like --prefer-dir but names the checkout the calling session
+#                      was carved from — the common "route to my own checkout" case.
+#                      Inside a session that is the source checkout recorded on the
+#                      instance registry row, NOT $PWD: a session's working directory
+#                      is a detached worktree under the knowledge store, which is no
+#                      instance's project directory and so can never match one.
+#                      Outside a session it is $PWD. Refused when a session cannot
+#                      name its own checkout. Mutually exclusive with --prefer-dir.
 #   --anywhere         Placement stance: any live instance may claim immediately.
 #                      Writes no queue field — the explicit form of what an
 #                      unstated placement used to mean, made deliberate.
@@ -87,10 +92,37 @@
 #   --kdir <path>      Knowledge-store override (test isolation).
 #   --json             Emit a JSON result object instead of a human line.
 #
+# Derived placement (no flag): a request naming a work-item slug takes its hard
+# placement from that item's declared source checkout, resolved physically here and
+# stored as required_project_dir — only an instance whose project directory equals
+# it may claim, however long the row waits. A slug naming no tracked work item
+# derives nothing. Three refusals, each with its own repair:
+#   the item declares nothing        -> run `lore work source-checkout <slug>`
+#   the declaration names no dir     -> re-declare it from the right checkout
+#   no live instance serves that dir -> start or re-point an instance there
+#
+# placement_stance records which axis actually governs and is always written, with
+# the strongest axis in force winning (required_dir > targeted > preferred_dir):
+#   required_dir   the work item's declaration governs (hard directory filter)
+#   targeted       --target governs (hard instance filter)
+#   preferred_dir  --prefer-dir/--prefer-cwd governs (claim-timing only)
+#   any            nothing constrains placement
+# A row without the token was written before the field existed and keeps the older,
+# filterless semantics: an absent token is never a stance.
+#
+# required_target_ref carries the branch the dispatching session's worktree was
+# created against, when there is a session to read it from. It never selects a
+# checkout: the claiming side compares it against what the source clone actually
+# has checked out and refuses on contradiction, before creating anything on disk.
+#
 # Prepare-and-return: writes one request file tmp+rename into requests/pending/ and
 # emits a `requested` journal event through session-event-append.sh, then exits. It
 # never spawns, waits, or touches the TUI. Field validation happens here at write
-# time (non-zero exit naming the offending field); readers never re-validate.
+# time (non-zero exit naming the offending field); readers never re-validate. The
+# `requested` event carries the whole placement stance — the token, both directory
+# fields, the vintage floor, the requester, and whether an identity was pre-declared
+# — because every terminal path deletes the pending row, leaving the journal as the
+# only durable record of what was asked for.
 #
 # Exit codes: 0 success; 1 error/refused. Codes 2 and 3 are reserved (unused here)
 # to keep the session verb family compatible with the composed-terminal-verb
@@ -152,7 +184,7 @@ while [[ $# -gt 0 ]]; do
     --confirm) SKIP_CONFIRM="false"; shift ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,83p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,129p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
       echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--target <name> | --prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--framework <claude-code|codex|opencode>] [--worktree-identity <json|file>] [--worktree-id <id> --execution-dir <path>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
@@ -170,6 +202,48 @@ fail() {
 }
 
 command -v jq &>/dev/null || fail "jq is required but not found on PATH"
+
+# The checkout the calling session belongs to, for --prefer-cwd. A session's
+# working directory is a detached worktree under the knowledge store, which is no
+# instance's project directory, so $PWD is only the right answer outside a session.
+# The registry row records the source checkout the worktree was carved from; a
+# session with no slug (a human-opened chat) still resolves through its instance's
+# own project directory. Exit 1 = not inside a session, 2 = no registry row for
+# this instance, 3 = the row names no checkout.
+session_source_checkout() {
+  local instance="${LORE_SESSION_INSTANCE:-}"
+  local slug="${LORE_SESSION_SLUG:-}"
+  local stype="${LORE_SESSION_TYPE:-}"
+  local registry checkout=""
+  [[ -n "$instance" ]] || return 1
+  registry="$KNOWLEDGE_DIR/_sessions/instances/$instance.json"
+  [[ -f "$registry" ]] || return 2
+  if [[ -n "$slug" && -n "$stype" ]]; then
+    checkout="$(jq -r --arg s "$slug" --arg t "$stype" \
+      '[.sessions[]? | select(.slug == $s and .type == $t)
+        | .worktree.captured.canonical_path // empty] | .[0] // ""' "$registry" 2>/dev/null || true)"
+  fi
+  [[ -n "$checkout" ]] || checkout="$(jq -r '.project_dir // empty' "$registry" 2>/dev/null || true)"
+  [[ -n "$checkout" ]] || return 3
+  printf '%s\n' "$checkout"
+}
+
+# The branch the calling session's worktree was created against. This never
+# selects a checkout — it travels to the claiming side, which compares it against
+# what the source clone actually has checked out and refuses on contradiction — so
+# an unidentifiable session yields nothing rather than a refusal.
+session_source_target_ref() {
+  local instance="${LORE_SESSION_INSTANCE:-}"
+  local slug="${LORE_SESSION_SLUG:-}"
+  local stype="${LORE_SESSION_TYPE:-}"
+  local registry
+  [[ -n "$instance" && -n "$slug" && -n "$stype" ]] || return 0
+  registry="$KNOWLEDGE_DIR/_sessions/instances/$instance.json"
+  [[ -f "$registry" ]] || return 0
+  jq -r --arg s "$slug" --arg t "$stype" \
+    '[.sessions[]? | select(.slug == $s and .type == $t)
+      | .worktree.target_ref // empty] | .[0] // ""' "$registry" 2>/dev/null || true
+}
 
 # --- Validate required fields at write time (sole-writer discipline) ---
 case "$TYPE" in
@@ -302,18 +376,9 @@ if [[ $ANYWHERE_PROVIDED -eq 0 && -z "$TARGET" && $PREFER_DIR_PROVIDED -eq 0 && 
 fi
 
 PREFER_PROJECT_DIR_JSON=""
+PREFER_RESOLVED=""
 if [[ $PREFER_DIR_PROVIDED -eq 1 && $PREFER_CWD_PROVIDED -eq 1 ]]; then
   fail "--prefer-dir and --prefer-cwd are mutually exclusive (both set prefer_project_dir)"
-fi
-if [[ $PREFER_CWD_PROVIDED -eq 1 ]]; then
-  PREFER_DIR="$PWD"
-  PREFER_DIR_PROVIDED=1
-fi
-if [[ $PREFER_DIR_PROVIDED -eq 1 ]]; then
-  [[ -n "$PREFER_DIR" ]] || fail "empty --prefer-dir (a directory path is required when --prefer-dir is given)"
-  PREFER_RESOLVED="$(cd "$PREFER_DIR" 2>/dev/null && pwd -P || true)"
-  [[ -n "$PREFER_RESOLVED" ]] || fail "invalid --prefer-dir: '$PREFER_DIR' (prefer_project_dir must resolve to an existing directory)"
-  PREFER_PROJECT_DIR_JSON="$(jq -n --arg d "$PREFER_RESOLVED" '$d')"
 fi
 
 # skip_confirm is a nullable bool: absent (omit-when-empty) defers to the
@@ -423,12 +488,37 @@ else
 fi
 [[ -d "$KNOWLEDGE_DIR" ]] || fail "knowledge store not found at: $KNOWLEDGE_DIR"
 
+INSTANCES_DIR="$KNOWLEDGE_DIR/_sessions/instances"
+
+# --prefer-cwd reads the instance registry to find the calling session's checkout,
+# so the preference cannot resolve until the knowledge directory is known.
+if [[ $PREFER_CWD_PROVIDED -eq 1 ]]; then
+  if PREFER_CWD_SOURCE="$(session_source_checkout)"; then
+    PREFER_DIR="$PREFER_CWD_SOURCE"
+  else
+    case $? in
+      1) PREFER_DIR="$PWD" ;;
+      2) fail "refusing --prefer-cwd: no registry row for session instance '${LORE_SESSION_INSTANCE:-}'.
+This session cannot name its own checkout, and its working directory is a session
+worktree that matches no instance. Pass --prefer-dir <checkout>, or --anywhere." ;;
+      *) fail "refusing --prefer-cwd: the registry row for '${LORE_SESSION_INSTANCE:-}' records
+no source checkout for this session. Pass --prefer-dir <checkout>, or --anywhere." ;;
+    esac
+  fi
+  PREFER_DIR_PROVIDED=1
+fi
+if [[ $PREFER_DIR_PROVIDED -eq 1 ]]; then
+  [[ -n "$PREFER_DIR" ]] || fail "empty --prefer-dir (a directory path is required when --prefer-dir is given)"
+  PREFER_RESOLVED="$(resolve_physical_dir "$PREFER_DIR" || true)"
+  [[ -n "$PREFER_RESOLVED" ]] || fail "invalid --prefer-dir: '$PREFER_DIR' (prefer_project_dir must resolve to an existing directory)"
+  PREFER_PROJECT_DIR_JSON="$(jq -n --arg d "$PREFER_RESOLVED" '$d')"
+fi
+
 # A hard target is useful only while its registry row is live. Reuse the pin
 # preflight's shared mtime-TTL rule: silently rewriting this to --anywhere would
 # change placement stance, while accepting it would create a request no live
 # instance can claim. Soft/anywhere stances remain deliberately untouched.
 if [[ -n "$TARGET" ]]; then
-  INSTANCES_DIR="$KNOWLEDGE_DIR/_sessions/instances"
   if ! TARGET_AGE="$(session_instance_age_seconds "$INSTANCES_DIR" "$TARGET")"; then
     fail "refusing --target '$TARGET': its registry row is absent (age unavailable; live window ${SESSION_INSTANCE_LIVENESS_TTL_SECONDS}s).
 Re-pin the project to a live instance and retry, or choose --anywhere explicitly."
@@ -438,6 +528,111 @@ Re-pin the project to a live instance and retry, or choose --anywhere explicitly
 Re-pin the project to a live instance and retry, or choose --anywhere explicitly."
   fi
 fi
+
+# --- Derive hard placement from the work item's declared source checkout ---
+# Placement is not a flag here: a request that names a work item takes its checkout
+# from the item, and each of the three ways that can fail gets its own repair. A
+# slug naming no tracked work item derives nothing — an unscoped chat and an ad-hoc
+# slug have no declaration to read.
+REQUIRED_PROJECT_DIR_JSON=""
+REQUIRED_RESOLVED=""
+WORK_META=""
+WORK_ITEM_SLUG=""
+if [[ -n "$SLUG" ]]; then
+  # A worker's slug is <work-item-slug>--w<n>; the declaration lives on the item.
+  WORK_ITEM_SLUG="$SLUG"
+  if [[ "$WORK_ITEM_SLUG" =~ ^(.+)--w[0-9]+$ ]]; then
+    WORK_ITEM_SLUG="${BASH_REMATCH[1]}"
+  fi
+  for candidate in "$KNOWLEDGE_DIR/_work/$WORK_ITEM_SLUG/_meta.json" \
+                   "$KNOWLEDGE_DIR/_work/_archive/$WORK_ITEM_SLUG/_meta.json"; do
+    if [[ -f "$candidate" ]]; then
+      WORK_META="$candidate"
+      break
+    fi
+  done
+fi
+
+if [[ -n "$WORK_META" ]]; then
+  DECLARED_CHECKOUT="$(jq -r '.source_checkout // empty' "$WORK_META" 2>/dev/null || true)"
+  if [[ -z "$DECLARED_CHECKOUT" ]]; then
+    fail "refusing --slug '$SLUG': work item '$WORK_ITEM_SLUG' declares no source checkout, so
+this request cannot say which clone it belongs in. Seed the declaration with:
+  lore work source-checkout $WORK_ITEM_SLUG
+Run that from a session hosted by an instance in the checkout this work belongs to."
+  fi
+  REQUIRED_RESOLVED="$(resolve_physical_dir "$DECLARED_CHECKOUT" || true)"
+  if [[ -z "$REQUIRED_RESOLVED" ]]; then
+    fail "refusing --slug '$SLUG': work item '$WORK_ITEM_SLUG' declares source checkout
+'$DECLARED_CHECKOUT', which is not an existing directory. The clone was moved or
+removed. Re-declare it with:
+  lore work source-checkout $WORK_ITEM_SLUG"
+  fi
+
+  # An unsatisfiable hard filter has to be refused here, before the row is durable.
+  # Each instance's claim loop can only decline for itself and nothing aggregates
+  # "every instance declined", so a row no instance can claim is never reported as
+  # unclaimable — it waits out the request TTL, and the sweep that enforces that TTL
+  # is TUI-hosted, so a store with no live instance never runs one. A pinned target
+  # narrows the check to that instance, since nothing else could claim the row.
+  LIVE_DIRS="$(live_instance_project_dirs "$INSTANCES_DIR" || true)"
+  SERVED=0
+  LIVE_CHECKOUTS=""
+  while IFS= read -r live_dir; do
+    [[ -n "$live_dir" ]] || continue
+    LIVE_CHECKOUTS="${LIVE_CHECKOUTS}  $live_dir
+"
+    [[ "$live_dir" == "$REQUIRED_RESOLVED" ]] && SERVED=1
+  done <<< "$LIVE_DIRS"
+  [[ -n "$LIVE_CHECKOUTS" ]] || LIVE_CHECKOUTS="  (no live instance publishes a project directory in this store)
+"
+
+  if [[ -n "$TARGET" ]]; then
+    TARGET_DIR="$(jq -r '.project_dir // empty' "$INSTANCES_DIR/$TARGET.json" 2>/dev/null || true)"
+    TARGET_RESOLVED=""
+    [[ -n "$TARGET_DIR" ]] && TARGET_RESOLVED="$(resolve_physical_dir "$TARGET_DIR" || printf '%s' "$TARGET_DIR")"
+    if [[ "$TARGET_RESOLVED" != "$REQUIRED_RESOLVED" ]]; then
+      fail "refusing --target '$TARGET' for --slug '$SLUG': work item '$WORK_ITEM_SLUG' belongs to
+'$REQUIRED_RESOLVED', which that instance does not serve. Live checkouts:
+${LIVE_CHECKOUTS}Target an instance in that checkout, or drop --target and let the
+declaration place the request."
+    fi
+  elif [[ $SERVED -eq 0 ]]; then
+    fail "refusing --slug '$SLUG': work item '$WORK_ITEM_SLUG' belongs to '$REQUIRED_RESOLVED',
+and no live instance serves that checkout. Live checkouts:
+${LIVE_CHECKOUTS}Start an instance in that checkout, or re-declare the item with:
+  lore work source-checkout $WORK_ITEM_SLUG"
+  fi
+
+  REQUIRED_PROJECT_DIR_JSON="$(jq -n --arg d "$REQUIRED_RESOLVED" '$d')"
+fi
+
+# placement_stance names the axis that actually governs, so no reader has to infer
+# a stance from which fields happen to be absent. The declaration outranks the
+# caller's flags: it is the narrowest hard filter and it is derived rather than
+# passed, so --anywhere means "I add no placement of my own", not "ignore the
+# item's".
+if [[ -n "$REQUIRED_PROJECT_DIR_JSON" ]]; then
+  PLACEMENT_STANCE="required_dir"
+elif [[ -n "$TARGET" ]]; then
+  PLACEMENT_STANCE="targeted"
+elif [[ $PREFER_DIR_PROVIDED -eq 1 ]]; then
+  PLACEMENT_STANCE="preferred_dir"
+else
+  PLACEMENT_STANCE="any"
+fi
+# The claim side gates the hard filter on the token being present, so a token
+# outside the closed set would let a declaring row through unfiltered. No shared
+# enum helper exists; the set is checked here, where it is written.
+case "$PLACEMENT_STANCE" in
+  required_dir|targeted|preferred_dir|any) ;;
+  *) fail "internal error: placement_stance '$PLACEMENT_STANCE' is outside the closed set (required_dir, targeted, preferred_dir, any)" ;;
+esac
+
+# The declared branch is verification-only: it travels to the claiming side, which
+# compares it against what the source clone has checked out. It is read from the
+# dispatching session and is absent when there is no session to read.
+REQUIRED_TARGET_REF="$(session_source_target_ref)"
 
 PENDING_DIR="$KNOWLEDGE_DIR/_sessions/requests/pending"
 mkdir -p "$PENDING_DIR"
@@ -528,6 +723,26 @@ if [[ -n "$PREFER_PROJECT_DIR_JSON" ]]; then
   ROW="$(printf '%s' "$ROW" | jq -c --argjson pd "$PREFER_PROJECT_DIR_JSON" '. + {prefer_project_dir: $pd}')"
 fi
 
+# required_project_dir is the hard directory filter derived from the work item: an
+# instance whose project dir differs may never claim, however long the row waits.
+# Omit-when-empty like every other placement field.
+if [[ -n "$REQUIRED_PROJECT_DIR_JSON" ]]; then
+  ROW="$(printf '%s' "$ROW" | jq -c --argjson rd "$REQUIRED_PROJECT_DIR_JSON" '. + {required_project_dir: $rd}')"
+fi
+
+# placement_stance is always written, and its presence is what tells a reader the
+# row came from a writer that knows about required_project_dir at all. Rows written
+# before this field keep the older, filterless semantics, so the hard filter must
+# turn on the token being present rather than on the directory being absent.
+ROW="$(printf '%s' "$ROW" | jq -c --arg ps "$PLACEMENT_STANCE" '. + {placement_stance: $ps}')"
+
+# required_target_ref is checked, never matched on: the claiming side compares it
+# against the source checkout's actual branch inside worktree creation and refuses
+# before anything is created on disk. Omit-when-empty.
+if [[ -n "$REQUIRED_TARGET_REF" ]]; then
+  ROW="$(printf '%s' "$ROW" | jq -c --arg tr "$REQUIRED_TARGET_REF" '. + {required_target_ref: $tr}')"
+fi
+
 # skip_confirm follows omit-when-empty: added only when --yes/--no-confirm or
 # --confirm forced a value, so an absent request stays absent (the Go decoder
 # reads a nil *bool → the queue-spawn autonomy default). Emitted with --argjson so
@@ -544,19 +759,39 @@ DEST="$PENDING_DIR/${REQUEST_ID}.json"
 mv "$TMP" "$DEST"
 
 # --- Emit the `requested` event through the sole journal writer ---
-# Built after the durable pending row lands. target_instance/slug follow
-# omit-when-empty; actor_instance is absent (an enqueue via the CLI is not a TUI).
+# Built after the durable pending row lands. The pending file is deleted on every
+# terminal path, so this row is the only durable record of what was asked for — it
+# therefore carries the whole placement stance, not just the fields that happened to
+# be set. The stance token, the requester, and the identity-declared flag are always
+# present so that no absence has to be read as a stance. target_instance/slug and
+# the directory fields follow omit-when-empty; actor_instance is absent (an enqueue
+# via the CLI is not a TUI).
+IDENTITY_DECLARED_JSON=false
+[[ $WORKTREE_IDENTITY_PROVIDED -eq 1 ]] && IDENTITY_DECLARED_JSON=true
 EVENT_ROW="$(jq -n \
   --arg request_id "$REQUEST_ID" \
   --arg session_type "$TYPE" \
   --arg initiator "$INITIATOR" \
+  --arg requested_by "$REQUESTED_BY" \
+  --arg placement_stance "$PLACEMENT_STANCE" \
+  --argjson identity_declared "$IDENTITY_DECLARED_JSON" \
   --argjson slug "$SLUG_JSON" \
   --argjson target "$TARGET_JSON" \
   --arg worktree_id "$WORKTREE_ID" \
   --arg execution_dir "$EXECUTION_DIR" \
-  '{event: "requested", request_id: $request_id, session_type: $session_type, initiator: $initiator}
+  --arg required_dir "$REQUIRED_RESOLVED" \
+  --arg required_ref "$REQUIRED_TARGET_REF" \
+  --arg prefer_dir "$PREFER_RESOLVED" \
+  --arg min_vintage "${MIN_VINTAGE_RESOLVED:-}" \
+  '{event: "requested", request_id: $request_id, session_type: $session_type, initiator: $initiator,
+    requested_by: $requested_by, placement_stance: $placement_stance,
+    worktree_identity_declared: $identity_declared}
    + (if $slug != null then {slug: $slug} else {} end)
    + (if $target != null then {target_instance: $target} else {} end)
+   + (if $required_dir != "" then {required_project_dir: $required_dir} else {} end)
+   + (if $required_ref != "" then {required_target_ref: $required_ref} else {} end)
+   + (if $prefer_dir != "" then {prefer_project_dir: $prefer_dir} else {} end)
+   + (if $min_vintage != "" then {min_vintage: $min_vintage} else {} end)
    + (if $worktree_id != "" then {worktree_id: $worktree_id, execution_dir: $execution_dir} else {} end)')"
 
 if ! printf '%s' "$EVENT_ROW" | bash "$SCRIPT_DIR/session-event-append.sh" --kdir "$KNOWLEDGE_DIR" >/dev/null; then
@@ -576,7 +811,11 @@ if [[ $JSON_MODE -eq 1 ]]; then
     --arg worktree_id "$WORKTREE_ID" \
     --arg execution_dir "$EXECUTION_DIR" \
     --arg path "$RELPATH" \
-    '{request_id: $request_id, type: $type, slug: $slug, target_instance: $target, path: $path, enqueued: true}
+    --arg placement_stance "$PLACEMENT_STANCE" \
+    --arg required_dir "$REQUIRED_RESOLVED" \
+    '{request_id: $request_id, type: $type, slug: $slug, target_instance: $target, path: $path,
+      placement_stance: $placement_stance, enqueued: true}
+     + (if $required_dir != "" then {required_project_dir: $required_dir} else {} end)
      + (if $worktree_id != "" then {worktree_id: $worktree_id, execution_dir: $execution_dir} else {} end)')"
   json_output "$RESULT"
 fi

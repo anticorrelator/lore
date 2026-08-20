@@ -487,6 +487,54 @@ session_instance_live() {
   (( age <= SESSION_INSTANCE_LIVENESS_TTL_SECONDS ))
 }
 
+# resolve_physical_dir <path>
+# Echo <path> with symlinks collapsed, or return 1 when it is not an existing
+# directory. `cd -P --` rather than a bare `cd`: with CDPATH set, cd to a
+# relative path echoes its destination on stdout, so the captured value would
+# carry a stray extra line. `--` keeps a leading-dash path from being read as
+# options.
+resolve_physical_dir() {
+  local dir="$1"
+  [[ -n "$dir" ]] || return 1
+  (cd -P -- "$dir" >/dev/null 2>&1 && pwd -P) || return 1
+}
+
+# live_instance_project_dirs <instances-dir> [ttl-seconds]
+# Print the project directory of every live registry row, one per line, sorted
+# and deduplicated — the checkouts a placement declaration can currently be
+# served from. The stored value is already physically resolved by its writer, so
+# it is emitted verbatim: byte equality against a resolve_physical_dir result is
+# the match the claiming side performs. Rows written before the field existed
+# carry no project_dir and are skipped rather than printed empty.
+live_instance_project_dirs() {
+  local instances_dir="$1"
+  local ttl="${2:-$SESSION_INSTANCE_LIVENESS_TTL_SECONDS}"
+  python3 - "$instances_dir" "$ttl" <<'PYEOF'
+import json, os, sys, time
+
+instances_dir, ttl = sys.argv[1], float(sys.argv[2])
+now = time.time()
+dirs = set()
+if os.path.isdir(instances_dir):
+    for name in sorted(os.listdir(instances_dir)):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(instances_dir, name)
+        try:
+            if (now - os.path.getmtime(path)) > ttl:
+                continue
+            with open(path) as f:
+                row = json.load(f)
+        except (OSError, ValueError):
+            continue
+        project_dir = (row.get("project_dir") or "").strip()
+        if project_dir:
+            dirs.add(project_dir)
+for d in sorted(dirs):
+    print(d)
+PYEOF
+}
+
 # session_request_ttl_seconds
 # The schema-declared setting is bounded to one second through seven days and
 # defaults to one hour. Runtime readers fail closed to the shipped default when

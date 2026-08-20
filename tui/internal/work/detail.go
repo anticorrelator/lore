@@ -31,6 +31,7 @@ type WorkItemDetail struct {
 	PR              string       `json:"pr"`
 	Created         string       `json:"created"`
 	Updated         string       `json:"updated"`
+	SourceCheckout  string       `json:"source_checkout,omitempty"`
 	PlanContent     *string      `json:"plan_content"`
 	NotesContent    *string      `json:"notes_content"`
 	HasExecutionLog bool         `json:"has_execution_log"`
@@ -52,21 +53,28 @@ type SearchLocation struct {
 	ScrollOffset int
 }
 
-// workItemMeta mirrors the _meta.json schema for a work item.
+// workItemMeta mirrors the _meta.json schema for a work item. It is the second
+// of two independent read paths for the same record — WorkItemDetail carries the
+// `lore work show --json` form — so a field added here needs adding there too,
+// or it stays invisible on whichever path the caller takes.
+//
+// SourceCheckout is the physically-resolved clone this item's sessions are
+// dispatched into; empty on an item that has not declared one.
 type workItemMeta struct {
-	Slug        string       `json:"slug"`
-	Title       string       `json:"title"`
-	Status      string       `json:"status"`
-	Branches    []string     `json:"branches"`
-	Tags        []string     `json:"tags"`
-	Project     string       `json:"project"`
-	RelatedWork []string     `json:"related_work"`
-	BlockedBy   []string     `json:"blocked_by"`
-	Issue       string       `json:"issue"`
-	PR          string       `json:"pr"`
-	Created     string       `json:"created"`
-	Updated     string       `json:"updated"`
-	Review      *ReviewState `json:"review"`
+	Slug           string       `json:"slug"`
+	Title          string       `json:"title"`
+	Status         string       `json:"status"`
+	Branches       []string     `json:"branches"`
+	Tags           []string     `json:"tags"`
+	Project        string       `json:"project"`
+	RelatedWork    []string     `json:"related_work"`
+	BlockedBy      []string     `json:"blocked_by"`
+	Issue          string       `json:"issue"`
+	PR             string       `json:"pr"`
+	Created        string       `json:"created"`
+	Updated        string       `json:"updated"`
+	SourceCheckout string       `json:"source_checkout"`
+	Review         *ReviewState `json:"review"`
 }
 
 // loadWorkItemDetailDirect reads work item files directly from disk,
@@ -163,19 +171,20 @@ func loadWorkItemDetailDirect(workDir, slug string) (*WorkItemDetail, error) {
 	}
 
 	detail := &WorkItemDetail{
-		Slug:        slug,
-		Title:       meta.Title,
-		Status:      meta.Status,
-		Branches:    meta.Branches,
-		Tags:        meta.Tags,
-		Project:     meta.Project,
-		RelatedWork: meta.RelatedWork,
-		BlockedBy:   meta.BlockedBy,
-		Issue:       meta.Issue,
-		PR:          meta.PR,
-		Created:     meta.Created,
-		Updated:     meta.Updated,
-		Review:      meta.Review,
+		Slug:           slug,
+		Title:          meta.Title,
+		Status:         meta.Status,
+		Branches:       meta.Branches,
+		Tags:           meta.Tags,
+		Project:        meta.Project,
+		RelatedWork:    meta.RelatedWork,
+		BlockedBy:      meta.BlockedBy,
+		Issue:          meta.Issue,
+		PR:             meta.PR,
+		Created:        meta.Created,
+		Updated:        meta.Updated,
+		SourceCheckout: meta.SourceCheckout,
+		Review:         meta.Review,
 	}
 
 	// Read optional content files — nil when absent

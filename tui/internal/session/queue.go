@@ -38,6 +38,17 @@ const (
 	ReasonIncompleteClaim = "incomplete_claim"
 )
 
+// Placement stance tokens name the strongest placement axis the enqueuing writer
+// put on a request row, in descending precedence: a row carrying both a required
+// dir and a target instance is StanceRequiredDir. The token is descriptive — the
+// claim filter keys on its presence, never on its value (see requiredDirOK).
+const (
+	StanceRequiredDir  = "required_dir"
+	StanceTargeted     = "targeted"
+	StancePreferredDir = "preferred_dir"
+	StanceAny          = "any"
+)
+
 // Request is one queue row (pending or claimed). Nullable fields are pointers so
 // an absent field, an explicit JSON null, and a present value stay distinct;
 // numeric attempts stays an int so a strict decoder rejects a quoted "0".
@@ -119,6 +130,32 @@ type Request struct {
 	// (omit-when-empty) leaves claim timing unchanged. Pointer so absent stays
 	// distinct from an explicit value.
 	PreferProjectDir *string `json:"prefer_project_dir,omitempty"`
+
+	// RequiredProjectDir is a hard placement filter: the physically-resolved
+	// project directory this session must be seeded from. An instance whose
+	// normalized project dir does not equal it may never claim the row — unlike
+	// PreferProjectDir, which only delays. It is enforced only on a row that also
+	// carries PlacementStance; see requiredDirOK. Absent (omit-when-empty) leaves
+	// claim eligibility unchanged. Pointer so absent stays distinct from an
+	// explicit value.
+	RequiredProjectDir *string `json:"required_project_dir,omitempty"`
+
+	// PlacementStance names the strongest placement axis on this row —
+	// StanceRequiredDir, StanceTargeted, StancePreferredDir or StanceAny. Its
+	// presence is what arms RequiredProjectDir: a row without it was enqueued
+	// before either field existed, and is claimed under the older rules. The value
+	// is carried for the journal, so a recorded request states its stance instead
+	// of leaving the absence of other fields to imply it. Pointer so absent stays
+	// distinct from an explicit value.
+	PlacementStance *string `json:"placement_stance,omitempty"`
+
+	// RequiredTargetRef is the branch the declared source checkout was on when the
+	// request was enqueued (a full symbolic ref, e.g. refs/heads/main). Worktree
+	// creation compares it against the branch it captures and refuses a mismatch
+	// before writing anything to disk. Verification only — it never selects which
+	// checkout a session is seeded from. Pointer so absent stays distinct from an
+	// explicit value.
+	RequiredTargetRef *string `json:"required_target_ref,omitempty"`
 
 	// SkipConfirm overrides the queue-spawn autonomy default: nil defers to that
 	// default (skip confirmation gates — autonomous), a set value forces the
@@ -221,6 +258,37 @@ func (r Request) PreferProjectDirValue() string {
 		return ""
 	}
 	return *r.PreferProjectDir
+}
+
+// RequiredProjectDirValue returns the hard project-dir requirement or "" when absent.
+func (r Request) RequiredProjectDirValue() string {
+	if r.RequiredProjectDir == nil {
+		return ""
+	}
+	return *r.RequiredProjectDir
+}
+
+// PlacementStanceValue returns the placement stance token or "" when absent.
+func (r Request) PlacementStanceValue() string {
+	if r.PlacementStance == nil {
+		return ""
+	}
+	return *r.PlacementStance
+}
+
+// HasPlacementStance reports whether the row carries a placement stance at all,
+// including an explicit empty one. This is the pre-feature discriminator: a row
+// without a stance was written before the placement fields existed.
+func (r Request) HasPlacementStance() bool {
+	return r.PlacementStance != nil
+}
+
+// RequiredTargetRefValue returns the required source branch or "" when absent.
+func (r Request) RequiredTargetRefValue() string {
+	if r.RequiredTargetRef == nil {
+		return ""
+	}
+	return *r.RequiredTargetRef
 }
 
 // ExtraContextText extracts a free-text launch context from the request's
@@ -460,8 +528,9 @@ type QueueTickResult struct {
 // (BuildTime, ISO 8601 UTC), used to filter out requests whose min_vintage this
 // instance does not meet; "" means vintage-unknown, which passes every requirement.
 // myProjectDir is this instance's normalized (physically-resolved) project dir,
-// used to honor a row's prefer_project_dir grace window; "" behaves as an
-// unknown dir that matches nothing (a preferring row defers past its grace).
+// used to honor a row's prefer_project_dir grace window and to enforce its
+// required_project_dir; "" behaves as an unknown dir that matches nothing (a
+// preferring row defers past its grace, a requiring row is never claimed).
 func QueueTick(
 	sessionsDir, myName, myVintage, myProjectDir string,
 	liveInstances map[string]bool,
@@ -540,10 +609,11 @@ func QueueTick(
 
 // claimableBy reports whether an instance may attempt this pending row: a row is
 // claimable when its target is this instance or unset (any) AND this instance's
-// vintage satisfies any min_vintage requirement AND the row's prefer_project_dir
-// grace does not currently defer this instance. Targeting is string equality,
-// vintage a temporal comparison, and the preference a timing window — all
-// read-side, no writer, no per-instance attempt state.
+// vintage satisfies any min_vintage requirement AND this instance's project dir
+// satisfies any required_project_dir AND the row's prefer_project_dir grace does
+// not currently defer this instance. Targeting is string equality, vintage a
+// temporal comparison, the requirement string equality, and the preference a
+// timing window — all read-side, no writer, no per-instance attempt state.
 func claimableBy(req Request, myName, myVintage, myProjectDir string, now time.Time) bool {
 	target := req.TargetValue()
 	if target != "" && target != myName {
@@ -552,7 +622,29 @@ func claimableBy(req Request, myName, myVintage, myProjectDir string, now time.T
 	if !vintageOK(req.MinVintageValue(), myVintage) {
 		return false
 	}
+	if !requiredDirOK(req, myProjectDir) {
+		return false
+	}
 	return preferMatchOK(req, myProjectDir, now)
+}
+
+// requiredDirOK reports whether an instance whose normalized project dir is
+// myProjectDir may claim a row carrying required_project_dir. The requirement is
+// enforced only on a row that also carries a placement stance: a row without one
+// was enqueued before either field existed, and keeping it on the old rules is
+// what stops an upgrade from stranding every request already in flight.
+//
+// Unlike the prefer_project_dir window this never expires, so a row no instance
+// matches stays pending rather than dispatching to some other checkout. Nothing
+// here reports that outcome — a greedy per-instance claim loop has no point at
+// which "every instance declined" is observable — so a requirement no live
+// instance can serve is refused at enqueue instead.
+func requiredDirOK(req Request, myProjectDir string) bool {
+	required := req.RequiredProjectDirValue()
+	if required == "" || !req.HasPlacementStance() {
+		return true
+	}
+	return required == myProjectDir
 }
 
 // preferMatchOK reports whether an instance whose normalized project dir is

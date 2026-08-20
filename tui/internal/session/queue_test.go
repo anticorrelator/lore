@@ -607,3 +607,131 @@ func ClaimRequestFixture(t *testing.T, dir string, req Request) error {
 	_, err := ClaimRequest(dir, req.RequestID)
 	return err
 }
+
+// TestQueueTickRequiredProjectDir exercises the hard required_project_dir filter:
+// only an instance whose normalized project dir equals the requirement may claim,
+// a non-matching instance is refused permanently rather than delayed, and a row
+// carrying the requirement but no placement stance predates the field and keeps
+// its original claim behavior.
+func TestQueueTickRequiredProjectDir(t *testing.T) {
+	const mine = "/work/mine"
+	const other = "/work/other"
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	iso := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05Z") }
+	recent := iso(now.Add(-2 * time.Second))
+	aged := iso(now.Add(-20 * time.Second)) // past PreferMatchGrace
+
+	// The matching instance claims a requiring row.
+	dir := t.TempDir()
+	plantPending(t, dir, Request{RequestID: "r1", Type: "spec", Slug: strp("a"), Initiator: "agent",
+		RequestedAt: recent, RequiredProjectDir: strp(mine), PlacementStance: strp(StanceRequiredDir)})
+	res, err := QueueTick(dir, "me", "", mine, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Claimed == nil || res.Claimed.RequestID != "r1" {
+		t.Fatalf("matching instance did not claim requiring row: %+v", res.Claimed)
+	}
+
+	// A non-matching instance leaves it pending, and — unlike the preference —
+	// aging past PreferMatchGrace does not release it.
+	dir = t.TempDir()
+	plantPending(t, dir, Request{RequestID: "r2", Type: "spec", Slug: strp("b"), Initiator: "agent",
+		RequestedAt: aged, RequiredProjectDir: strp(mine), PlacementStance: strp(StanceRequiredDir)})
+	res, _ = QueueTick(dir, "me", "", other, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
+	if res.Claimed != nil {
+		t.Fatalf("non-matching instance claimed a requiring row: %+v", res.Claimed)
+	}
+	if len(ScanPending(dir)) != 1 {
+		t.Fatal("requiring row should remain pending for a non-matching instance")
+	}
+
+	// An instance of unknown project dir matches nothing and is refused too.
+	dir = t.TempDir()
+	plantPending(t, dir, Request{RequestID: "r3", Type: "spec", Slug: strp("c"), Initiator: "agent",
+		RequestedAt: recent, RequiredProjectDir: strp(mine), PlacementStance: strp(StanceRequiredDir)})
+	res, _ = QueueTick(dir, "me", "", "", map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
+	if res.Claimed != nil {
+		t.Fatalf("dir-unknown instance claimed a requiring row: %+v", res.Claimed)
+	}
+
+	// A row carrying the requirement but no stance was written before the field
+	// existed: it keeps today's semantics and is claimed by any instance.
+	dir = t.TempDir()
+	plantPending(t, dir, Request{RequestID: "r4", Type: "spec", Slug: strp("d"), Initiator: "agent",
+		RequestedAt: recent, RequiredProjectDir: strp(mine)})
+	res, _ = QueueTick(dir, "me", "", other, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
+	if res.Claimed == nil || res.Claimed.RequestID != "r4" {
+		t.Fatalf("stanceless row did not keep pre-feature claim behavior: %+v", res.Claimed)
+	}
+
+	// Presence of the stance arms the filter regardless of the token's value: a
+	// mis-set or unrecognized token must not silently disable a hard filter.
+	dir = t.TempDir()
+	plantPending(t, dir, Request{RequestID: "r5", Type: "spec", Slug: strp("e"), Initiator: "agent",
+		RequestedAt: recent, RequiredProjectDir: strp(mine), PlacementStance: strp("something-else")})
+	res, _ = QueueTick(dir, "me", "", other, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
+	if res.Claimed != nil {
+		t.Fatalf("unrecognized stance token disabled the hard filter: %+v", res.Claimed)
+	}
+
+	// A stance with no requirement constrains nothing.
+	dir = t.TempDir()
+	plantPending(t, dir, Request{RequestID: "r6", Type: "spec", Slug: strp("f"), Initiator: "agent",
+		RequestedAt: recent, PlacementStance: strp(StanceAny)})
+	res, _ = QueueTick(dir, "me", "", other, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
+	if res.Claimed == nil || res.Claimed.RequestID != "r6" {
+		t.Fatalf("stance with no requirement blocked a claim: %+v", res.Claimed)
+	}
+}
+
+// TestPlacementFieldsRoundTrip guards the request-row amendment: the three
+// placement fields decode into their accessors, an absent stance stays
+// distinguishable from an explicit empty one (it is the pre-feature
+// discriminator), and absent fields are omitted on marshal.
+func TestPlacementFieldsRoundTrip(t *testing.T) {
+	var req Request
+	raw := `{"request_id":"x","type":"spec","required_project_dir":"/work/mine",` +
+		`"placement_stance":"required_dir","required_target_ref":"refs/heads/main"}`
+	if err := json.Unmarshal([]byte(raw), &req); err != nil {
+		t.Fatalf("decode placement fields: %v", err)
+	}
+	if got := req.RequiredProjectDirValue(); got != "/work/mine" {
+		t.Fatalf("RequiredProjectDirValue = %q, want the decoded path", got)
+	}
+	if got := req.PlacementStanceValue(); got != StanceRequiredDir {
+		t.Fatalf("PlacementStanceValue = %q, want %q", got, StanceRequiredDir)
+	}
+	if got := req.RequiredTargetRefValue(); got != "refs/heads/main" {
+		t.Fatalf("RequiredTargetRefValue = %q, want the decoded ref", got)
+	}
+	if !req.HasPlacementStance() {
+		t.Fatal("a decoded stance should report as present")
+	}
+
+	var absent Request
+	if err := json.Unmarshal([]byte(`{"request_id":"x","type":"spec"}`), &absent); err != nil {
+		t.Fatalf("decode absent placement fields: %v", err)
+	}
+	if absent.HasPlacementStance() {
+		t.Fatal("an absent stance must not report as present — it is the pre-feature discriminator")
+	}
+
+	var empty Request
+	if err := json.Unmarshal([]byte(`{"request_id":"x","type":"spec","placement_stance":""}`), &empty); err != nil {
+		t.Fatalf("decode empty placement stance: %v", err)
+	}
+	if !empty.HasPlacementStance() {
+		t.Fatal("an explicit empty stance is still a stance and must arm the filter")
+	}
+
+	data, err := json.Marshal(Request{RequestID: "x", Type: "spec"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{"required_project_dir", "placement_stance", "required_target_ref"} {
+		if strings.Contains(string(data), key) {
+			t.Fatalf("absent %s should be omitted on marshal, got %s", key, data)
+		}
+	}
+}

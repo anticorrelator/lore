@@ -153,6 +153,7 @@ Subcommands:
   resolve   Resolve a fuzzy work-item reference to (slug, archived)
   path      Print a work item's absolute directory (a cwd-independent Write/cp target)
   set       Set metadata fields (issue, pr, scope, project, intent anchor) on a work item
+  source-checkout  Declare the checkout sessions for this item must run in, read from the calling session
   archive   Archive a completed work item
   delete    Permanently delete a work item
   unarchive Restore an archived work item
@@ -1923,6 +1924,17 @@ cmd_work() {
       ;;
     set)
       exec "$SCRIPTS_DIR/set-work-meta.sh" "$@"
+      ;;
+    source-checkout)
+      if [[ $# -eq 0 || "$1" == --help || "$1" == -h ]]; then
+        echo "Usage: lore work source-checkout <slug> [--json]" >&2
+        echo "Declare the checkout that sessions for <slug> must run in." >&2
+        echo "The path is not a caller argument: it is read from the calling session's registry" >&2
+        echo "provenance, resolved physically, and checked against the live instances before it" >&2
+        echo "is written. Run this from inside the session working in that checkout." >&2
+        [[ $# -eq 0 ]] && return 1 || return 0
+      fi
+      exec "$SCRIPTS_DIR/set-work-meta.sh" "$@" --seed-source-checkout
       ;;
     archive)
       exec "$SCRIPTS_DIR/archive-work.sh" "$@"

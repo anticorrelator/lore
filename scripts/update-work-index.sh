@@ -122,6 +122,7 @@ for meta_path in sorted(glob.glob(os.path.join(work_dir, "*", "_meta.json"))):
         "title": str_field(meta, "title", slug),
         "status": str_field(meta, "status", "active"),
         "branches": list_field(meta, "branches", aliases=["branch"]),
+        "source_checkout": str_field(meta, "source_checkout"),
         "tags": list_field(meta, "tags"),
         "created": str_field(meta, "created"),
         "updated": str_field(meta, "updated"),
@@ -162,6 +163,7 @@ for meta_path in sorted(glob.glob(os.path.join(work_dir, "_archive", "*", "_meta
         "status": str_field(meta, "status", "archived"),
         "archived_date": archived_date,
         "project": str_field(meta, "project"),
+        "source_checkout": str_field(meta, "source_checkout"),
     })
 
 index = {

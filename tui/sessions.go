@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1019,6 +1020,38 @@ func emitSpawnFailedCmd(dir, script, kdir, requestID, reason, actor string) tea.
 	}
 }
 
+// emitWorktreeRefusedCmd deletes the claimed row and journals restore_refused.
+// A refusal is terminal for the request where a spawn failure is not: routing it
+// through emitSpawnFailedCmd instead would return the row to pending, where the
+// same instance that just declined it is free to claim it again until the
+// attempt ceiling. The delete is the durable transition and lands first.
+func emitWorktreeRefusedCmd(dir, script, kdir, requestID, reason, actor string) tea.Cmd {
+	return func() tea.Msg {
+		req, err := session.ReadClaimed(dir, requestID)
+		if err != nil {
+			return journalResultMsg{err: err}
+		}
+		if err := session.DeleteClaimed(dir, requestID); err != nil {
+			return journalResultMsg{err: err}
+		}
+		ev := session.Event{
+			Event:         session.EventRestoreRefused,
+			ActorInstance: session.StrPtr(actor),
+			Slug:          req.SessionSlug(),
+			SessionType:   req.Type,
+			Initiator:     req.Initiator,
+			RequestID:     requestID,
+			Reason:        reason,
+			Links: map[string]string{
+				"required_project_dir": req.RequiredProjectDirValue(),
+				"required_target_ref":  req.RequiredTargetRefValue(),
+				"placement_stance":     req.PlacementStanceValue(),
+			},
+		}
+		return journalResultMsg{err: session.AppendEvent(script, kdir, ev)}
+	}
+}
+
 // --- handlers ---
 
 // handleSessionSnapshot turns a registry snapshot into external-session badging
@@ -1103,7 +1136,7 @@ func (m model) handleQueueTickResult(msg queueTickResultMsg) (model, tea.Cmd) {
 // spawnFromRequest maps a claimed request onto a session descriptor and drives
 // the shared spawn path. Agent-initiated, so it never steals focus.
 func (m model) spawnFromRequest(req session.Request) (model, tea.Cmd) {
-	return m.spawnSession(descriptorFromRequest(req), req.RequestID)
+	return m.spawnSessionOnRef(descriptorFromRequest(req), req.RequestID, req.RequiredTargetRefValue())
 }
 
 // descriptorFromRequest maps a claimed queue request onto the session descriptor
@@ -1139,9 +1172,32 @@ func descriptorFromRequest(req session.Request) work.SessionDescriptor {
 }
 
 func allocateSessionWorktreeCmd(d work.SessionDescriptor, sourceDir, worktreePath, epoch string, next func(work.SessionDescriptor) tea.Msg) tea.Cmd {
+	return allocateSessionWorktreeOnRefCmd(d, sourceDir, worktreePath, epoch, "", next)
+}
+
+// allocationRefusedError marks a refusal raised while allocating a session's own
+// worktree, which handleStreamError cancels rather than retries. worktree
+// refusals also reach that handler from harness start (ValidateIdentity), and
+// those keep the retry disposition they have today — hence the marker rather
+// than a bare *worktree.RefusalError assertion.
+type allocationRefusedError struct{ refusal *worktree.RefusalError }
+
+func (e *allocationRefusedError) Error() string { return e.refusal.Error() }
+func (e *allocationRefusedError) Unwrap() error { return e.refusal }
+
+// allocateSessionWorktreeOnRefCmd is allocateSessionWorktreeCmd with a required
+// source branch. A refusal — the source is not on requiredRef — is wrapped so it
+// stays recoverable with errors.As after crossing work.StreamErrorMsg; an
+// ordinary creation error stays unmarked and returns the request to pending for
+// another attempt.
+func allocateSessionWorktreeOnRefCmd(d work.SessionDescriptor, sourceDir, worktreePath, epoch, requiredRef string, next func(work.SessionDescriptor) tea.Msg) tea.Cmd {
 	return func() tea.Msg {
-		identity, err := worktree.Create(context.Background(), sourceDir, worktreePath, epoch)
+		identity, err := worktree.CreateOnRef(context.Background(), sourceDir, worktreePath, epoch, requiredRef)
 		if err != nil {
+			var refusal *worktree.RefusalError
+			if errors.As(err, &refusal) {
+				return work.StreamErrorMsg{Slug: d.Slug, Err: fmt.Errorf("refuse session worktree: %w", &allocationRefusedError{refusal: refusal})}
+			}
 			return work.StreamErrorMsg{Slug: d.Slug, Err: fmt.Errorf("create session worktree: %w", err)}
 		}
 		d.Worktree = &identity
@@ -1155,6 +1211,14 @@ func allocateSessionWorktreeCmd(d work.SessionDescriptor, sourceDir, worktreePat
 // Cmd. Agent-initiated spawns are marked so the started handler never steals
 // focus; human spawns keep the existing modal-return-focus behavior.
 func (m model) spawnSession(d work.SessionDescriptor, requestID string) (model, tea.Cmd) {
+	return m.spawnSessionOnRef(d, requestID, "")
+}
+
+// spawnSessionOnRef is spawnSession with a required source branch, carried from
+// a claimed request's required_target_ref. It only reaches worktree allocation,
+// so it has no effect on a session that arrives with an identity already
+// allocated. A human spawn declares no branch and passes "".
+func (m model) spawnSessionOnRef(d work.SessionDescriptor, requestID, requiredRef string) (model, tea.Cmd) {
 	slug := d.Slug
 	m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: slug, Type: sessionType(d.Type)})
 	specH := m.detailPanelHeight()
@@ -1188,7 +1252,7 @@ func (m model) spawnSession(d work.SessionDescriptor, requestID string) (model, 
 		}
 		epoch := session.NewRequestID()
 		worktreePath := filepath.Join(m.config.KnowledgeDir, "_sessions", "worktrees", epoch)
-		return m, allocateSessionWorktreeCmd(d, sourceDir, worktreePath, epoch, func(allocated work.SessionDescriptor) tea.Msg {
+		return m, allocateSessionWorktreeOnRefCmd(d, sourceDir, worktreePath, epoch, requiredRef, func(allocated work.SessionDescriptor) tea.Msg {
 			return work.StartTerminalCmd(allocated, specW, specH, m.config.KnowledgeDir, env, m.tmuxEnabled)()
 		})
 	}

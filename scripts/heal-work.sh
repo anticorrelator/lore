@@ -55,7 +55,9 @@ for dir in "$WORK_DIR"/*/; do
     TIMESTAMP=$(timestamp_iso)
     # Field set must stay in sync with the canonical template in
     # create-work.sh — fields present there but missing here are silently
-    # dropped from regenerated orphans.
+    # dropped from regenerated orphans. source_checkout is scaffolded empty for
+    # the same reason it is empty at create time: only `lore work
+    # source-checkout` can establish it, from a live session's provenance.
     cat > "$dir/_meta.json" << METAEOF
 {
   "slug": "$DIRNAME",
@@ -64,6 +66,7 @@ for dir in "$WORK_DIR"/*/; do
   "scope": "subsystem",
   "project": "",
   "branches": [],
+  "source_checkout": "",
   "tags": [],
   "issue": "",
   "pr": "",

@@ -95,9 +95,28 @@ func (i Identity) CleanupEligible() bool {
 
 var validEpoch = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
+// describeRef renders a captured branch for an error message. inspectGeneration
+// leaves it empty for a detached HEAD, which has no branch name to report.
+func describeRef(ref string) string {
+	if ref == "" {
+		return "a detached HEAD"
+	}
+	return ref
+}
+
 // Create captures sourcePath and seeds a detached session-owned worktree from
 // that exact generation. It refuses a source that changes during capture.
-func Create(ctx context.Context, sourcePath, worktreePath, epoch string) (identity Identity, err error) {
+func Create(ctx context.Context, sourcePath, worktreePath, epoch string) (Identity, error) {
+	return CreateOnRef(ctx, sourcePath, worktreePath, epoch, "")
+}
+
+// CreateOnRef is Create restricted to a source checkout that is on requiredRef
+// (a full symbolic ref, e.g. refs/heads/main). A non-empty requiredRef that the
+// source's branch does not match refuses before the first filesystem mutation,
+// leaving nothing on disk. A source on a detached HEAD has no branch to compare
+// and is refused too, rather than passing the check unexamined. An empty
+// requiredRef imposes no requirement.
+func CreateOnRef(ctx context.Context, sourcePath, worktreePath, epoch, requiredRef string) (identity Identity, err error) {
 	if !validEpoch.MatchString(epoch) {
 		return Identity{}, fmt.Errorf("invalid worktree epoch %q", epoch)
 	}
@@ -108,6 +127,12 @@ func Create(ctx context.Context, sourcePath, worktreePath, epoch string) (identi
 	captured, targetRef, targetOID, err := inspectGeneration(ctx, sourcePath)
 	if err != nil {
 		return Identity{}, err
+	}
+	if requiredRef != "" && targetRef != requiredRef {
+		return Identity{}, &RefusalError{
+			Kind:   OutcomeRestoreRefused,
+			Reason: fmt.Sprintf("source checkout %s is on %s, but %s was required", sourcePath, describeRef(targetRef), requiredRef),
+		}
 	}
 	stagedPatch, err := gitOutput(ctx, sourcePath, nil, nil, "diff", "--binary", "--cached", "HEAD", "--")
 	if err != nil {

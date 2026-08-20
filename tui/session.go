@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -488,7 +489,15 @@ func (m model) handleStreamError(msg work.StreamErrorMsg) (model, tea.Cmd) {
 			if msg.Err != nil {
 				reason = compactErr("spawn", msg.Err)
 			}
-			cmds = append(cmds, emitSpawnFailedCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, meta.requestID, reason, m.instanceName))
+			// A refused worktree allocation is not a failed attempt: the request
+			// declared a placement this instance cannot satisfy, so retrying it here
+			// would re-run the same refusal. Cancel it instead of returning it.
+			var refused *allocationRefusedError
+			if errors.As(msg.Err, &refused) {
+				cmds = append(cmds, emitWorktreeRefusedCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, meta.requestID, refused.refusal.Reason, m.instanceName))
+			} else {
+				cmds = append(cmds, emitSpawnFailedCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, meta.requestID, reason, m.instanceName))
+			}
 		}
 	} else {
 		var sessCmds []tea.Cmd

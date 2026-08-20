@@ -40,6 +40,9 @@ setup() {
   command -v python3 >/dev/null 2>&1 || skip "python3 required"
   TEST_KDIR="$(mktemp -d)"
   mkdir -p "$TEST_KDIR/_sessions"
+  # These tests run inside a live session as often as not, and --prefer-cwd now
+  # reads the session identity. Clear it so each test declares its own.
+  unset LORE_SESSION_INSTANCE LORE_SESSION_SLUG LORE_SESSION_TYPE
 }
 
 worker_guidance_file() {
@@ -79,6 +82,39 @@ write_instance() {
   cat > "$TEST_KDIR/_sessions/instances/$name.json" <<EOF
 {"name":"$name","pid":4242,"repo":"lore","started":"2026-07-05T00:00:00Z","initiator_default":"human","sessions":[{"slug":"$slug","type":"implement","initiator":"human","started":"2026-07-05T00:00:00Z"}]}
 EOF
+}
+
+# Write a live registry instance publishing a project directory (the checkout it
+# serves). This is the field the hard placement filter matches against.
+write_instance_dir() {
+  local name="$1" project_dir="$2"
+  mkdir -p "$TEST_KDIR/_sessions/instances"
+  cat > "$TEST_KDIR/_sessions/instances/$name.json" <<EOF
+{"name":"$name","pid":4242,"repo":"lore","started":"2026-07-05T00:00:00Z","initiator_default":"human","project_dir":"$project_dir","sessions":[]}
+EOF
+}
+
+# Write a live registry instance hosting one session whose worktree records the
+# source checkout it was carved from — the provenance --prefer-cwd resolves.
+write_instance_with_captured() {
+  local name="$1" project_dir="$2" slug="$3" stype="$4" captured="$5"
+  mkdir -p "$TEST_KDIR/_sessions/instances"
+  cat > "$TEST_KDIR/_sessions/instances/$name.json" <<EOF
+{"name":"$name","pid":4242,"repo":"lore","started":"2026-07-05T00:00:00Z","initiator_default":"human","project_dir":"$project_dir","sessions":[{"slug":"$slug","type":"$stype","initiator":"agent","started":"2026-07-05T00:00:00Z","worktree":{"version":1,"canonical_path":"$TEST_KDIR/_sessions/worktrees/wt","captured":{"canonical_path":"$captured"},"target_ref":"${6:-refs/heads/main}","state":"active"}}]}
+EOF
+}
+
+# Write a work item, with or without a declared source checkout.
+write_work_item() {
+  local slug="$1" checkout="${2:-}"
+  mkdir -p "$TEST_KDIR/_work/$slug"
+  if [ -n "$checkout" ]; then
+    printf '{"slug":"%s","title":"t","status":"active","source_checkout":"%s"}\n' \
+      "$slug" "$checkout" > "$TEST_KDIR/_work/$slug/_meta.json"
+  else
+    printf '{"slug":"%s","title":"t","status":"active"}\n' \
+      "$slug" > "$TEST_KDIR/_work/$slug/_meta.json"
+  fi
 }
 
 # Write a live registry instance hosting one session that carries a harness
@@ -489,6 +525,253 @@ journal_boundaries() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"--anywhere contradicts"* ]]
   [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+# --- Placement declared by the work item ----------------------------------
+
+@test "request refuses a slugged request whose work item declares no source checkout" {
+  write_work_item undeclared
+  run bash "$REQUEST" --type spec --slug undeclared --anywhere --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"declares no source checkout"* ]]
+  [[ "$output" == *"lore work source-checkout undeclared"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+@test "request refuses a declaration that names no existing directory" {
+  write_work_item movedaway /nonexistent/clone/xyzzy
+  run bash "$REQUEST" --type spec --slug movedaway --anywhere --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"/nonexistent/clone/xyzzy"* ]]
+  [[ "$output" == *"not an existing directory"* ]]
+  [[ "$output" == *"lore work source-checkout movedaway"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+@test "request refuses a declaration no live instance serves and names the live checkouts" {
+  mkdir -p "$TEST_KDIR/clone-a" "$TEST_KDIR/clone-b"
+  local a b
+  a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  b="$(cd "$TEST_KDIR/clone-b" && pwd -P)"
+  write_work_item unserved "$a"
+  write_instance_dir inst-b "$b"
+  run bash "$REQUEST" --type spec --slug unserved --anywhere --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no live instance serves that checkout"* ]]
+  [[ "$output" == *"$a"* ]]
+  [[ "$output" == *"$b"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+@test "request refuses a stale instance as a server of the declared checkout" {
+  mkdir -p "$TEST_KDIR/clone-a"
+  local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  write_work_item staleserved "$a"
+  write_instance_dir inst-stale "$a"
+  touch -t 202601010000 "$TEST_KDIR/_sessions/instances/inst-stale.json"
+  run bash "$REQUEST" --type spec --slug staleserved --anywhere --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no live instance serves that checkout"* ]]
+}
+
+@test "request derives required_project_dir and the stance token from the work item" {
+  mkdir -p "$TEST_KDIR/clone-a"
+  local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  write_work_item declared "$a"
+  write_instance_dir inst-a "$a"
+  run bash "$REQUEST" --type implement --slug declared --anywhere --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg d "$a" '.required_project_dir == $d and .placement_stance == "required_dir"'
+
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e --arg d "$a" '.required_project_dir == $d and .placement_stance == "required_dir"' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request derives the declaration for a worker slug from its base work item" {
+  mkdir -p "$TEST_KDIR/clone-a"
+  local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  write_work_item declared "$a"
+  write_instance_dir inst-a "$a"
+  bash "$REQUEST" --type worker --slug "declared--w3" --initiator agent \
+    --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e --arg d "$a" '.required_project_dir == $d and .slug == "declared--w3"' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request reads the declaration of an archived work item" {
+  mkdir -p "$TEST_KDIR/clone-a" "$TEST_KDIR/_work/_archive/oldwork"
+  local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  printf '{"slug":"oldwork","status":"archived","source_checkout":"%s"}\n' "$a" \
+    > "$TEST_KDIR/_work/_archive/oldwork/_meta.json"
+  write_instance_dir inst-a "$a"
+  bash "$REQUEST" --type chat --slug oldwork --anywhere --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e --arg d "$a" '.required_project_dir == $d' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request refuses a target that does not serve the declared checkout" {
+  mkdir -p "$TEST_KDIR/clone-a" "$TEST_KDIR/clone-b"
+  local a b
+  a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  b="$(cd "$TEST_KDIR/clone-b" && pwd -P)"
+  write_work_item declared "$a"
+  write_instance_dir inst-a "$a"
+  write_instance_dir inst-b "$b"
+  run bash "$REQUEST" --type implement --slug declared --target inst-b --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"which that instance does not serve"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+
+  run bash "$REQUEST" --type implement --slug declared --target inst-a --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+}
+
+@test "request derives nothing for a slug that names no tracked work item" {
+  bash "$REQUEST" --type spec --slug not-an-item --anywhere --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e '(has("required_project_dir") | not) and .placement_stance == "any"' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "every request carries a placement_stance token naming the governing axis" {
+  mkdir -p "$TEST_KDIR/dir"
+  write_instance inst-a existing
+  bash "$REQUEST" --type chat --target inst-a --kdir "$TEST_KDIR" --json | jq -e '.placement_stance == "targeted"'
+  bash "$REQUEST" --type chat --prefer-dir "$TEST_KDIR/dir" --kdir "$TEST_KDIR" --json | jq -e '.placement_stance == "preferred_dir"'
+  bash "$REQUEST" --type chat --anywhere --kdir "$TEST_KDIR" --json | jq -e '.placement_stance == "any"'
+}
+
+@test "the requested journal row carries the full placement stance" {
+  mkdir -p "$TEST_KDIR/clone-a"
+  local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  write_work_item declared "$a"
+  write_instance_dir inst-a "$a"
+  bash "$REQUEST" --type implement --slug declared --requested-by coord-1 \
+    --min-vintage 2026-07-05T12:00:00Z --anywhere --kdir "$TEST_KDIR"
+  run jq -e --arg d "$a" 'select(.event=="requested")
+    | .placement_stance == "required_dir"
+      and .required_project_dir == $d
+      and .requested_by == "coord-1"
+      and .min_vintage == "2026-07-05T12:00:00Z"
+      and .worktree_identity_declared == false' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "the requested journal row records a soft preference and a declared identity" {
+  mkdir -p "$TEST_KDIR/dir"
+  local d; d="$(cd "$TEST_KDIR/dir" && pwd -P)"
+  bash "$REQUEST" --type implement --slug wi --prefer-dir "$TEST_KDIR/dir" \
+    --worktree-identity '{"version":1}' --kdir "$TEST_KDIR"
+  run jq -e --arg d "$d" 'select(.event=="requested")
+    | .placement_stance == "preferred_dir"
+      and .prefer_project_dir == $d
+      and .worktree_identity_declared == true
+      and (has("required_project_dir") | not)' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "request carries the dispatching session's declared branch, verification-only" {
+  mkdir -p "$TEST_KDIR/clone-a" "$TEST_KDIR/_sessions/worktrees/wt"
+  local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  write_instance_with_captured inst-a "$a" wi implement "$a" refs/heads/feature-x
+  (
+    export LORE_SESSION_INSTANCE=inst-a LORE_SESSION_SLUG=wi LORE_SESSION_TYPE=implement
+    bash "$REQUEST" --type chat --anywhere --kdir "$TEST_KDIR"
+  )
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e '.required_target_ref == "refs/heads/feature-x"' "$pending"
+  [ "$status" -eq 0 ]
+
+  # It travels but never places: the stance stays whatever the axes decided.
+  run jq -e '.placement_stance == "any"' "$pending"
+  [ "$status" -eq 0 ]
+
+  run jq -e 'select(.event=="requested") | .required_target_ref == "refs/heads/feature-x"' \
+    "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "request omits required_target_ref when there is no session to read it from" {
+  bash "$REQUEST" --type chat --anywhere --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e 'has("required_target_ref") | not' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+# --- --prefer-cwd resolves session provenance, not $PWD --------------------
+
+@test "request --prefer-cwd inside a session resolves its captured source checkout" {
+  mkdir -p "$TEST_KDIR/clone-a" "$TEST_KDIR/_sessions/worktrees/wt"
+  local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  write_instance_with_captured inst-a "$a" wi implement "$a"
+  (
+    cd "$TEST_KDIR/_sessions/worktrees/wt" || exit 1
+    export LORE_SESSION_INSTANCE=inst-a LORE_SESSION_SLUG=wi LORE_SESSION_TYPE=implement
+    bash "$REQUEST" --type chat --prefer-cwd --kdir "$TEST_KDIR"
+  )
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e --arg d "$a" '.prefer_project_dir == $d' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request --prefer-cwd falls back to the instance project dir for a slugless session" {
+  mkdir -p "$TEST_KDIR/clone-a" "$TEST_KDIR/elsewhere"
+  local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  write_instance_dir inst-a "$a"
+  (
+    cd "$TEST_KDIR/elsewhere" || exit 1
+    export LORE_SESSION_INSTANCE=inst-a
+    bash "$REQUEST" --type chat --prefer-cwd --kdir "$TEST_KDIR"
+  )
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e --arg d "$a" '.prefer_project_dir == $d' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request --prefer-cwd refuses when the session has no registry row" {
+  mkdir -p "$TEST_KDIR/elsewhere"
+  run env LORE_SESSION_INSTANCE=ghost-inst bash "$REQUEST" --type chat --prefer-cwd --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no registry row for session instance 'ghost-inst'"* ]]
+  [[ "$output" == *"--prefer-dir"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+@test "request --prefer-cwd refuses when the registry row names no checkout" {
+  mkdir -p "$TEST_KDIR/_sessions/instances"
+  printf '{"name":"bare-inst","pid":1,"sessions":[]}\n' > "$TEST_KDIR/_sessions/instances/bare-inst.json"
+  run env LORE_SESSION_INSTANCE=bare-inst bash "$REQUEST" --type chat --prefer-cwd --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"records"* ]]
+  [[ "$output" == *"no source checkout"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+@test "directory resolution ignores a set CDPATH" {
+  mkdir -p "$TEST_KDIR/sub" "$TEST_KDIR/elsewhere"
+  local physical; physical="$(cd "$TEST_KDIR/sub" && pwd -P)"
+  (
+    cd "$TEST_KDIR/elsewhere" || exit 1
+    export CDPATH="$TEST_KDIR"
+    bash "$REQUEST" --type chat --prefer-dir sub --kdir "$TEST_KDIR"
+  )
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e --arg d "$physical" '.prefer_project_dir == $d' "$pending"
+  [ "$status" -eq 0 ]
+  # A CDPATH echo would ride in as a second line rather than a wrong value.
+  run jq -r '.prefer_project_dir | split("\n") | length' "$pending"
+  [ "$output" = "1" ]
+}
+
+@test "request --help prints the whole header including its final line" {
+  run bash "$REQUEST" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--json             Emit a JSON result object"* ]]
+  [[ "$output" == *"placement_stance records which axis actually governs"* ]]
+  [[ "$output" == *"No child exit code is propagated verbatim."* ]]
 }
 
 @test "request --auto-close true writes a JSON boolean" {
