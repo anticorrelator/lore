@@ -32,3 +32,21 @@ if ! python3 "${SCRIPT_DIR}/pk_cli.py" incremental-index "$KNOWLEDGE_DIR" "${REP
   # Non-fatal: exit 0 so the hook chain continues
   exit 0
 fi
+
+# Keep the assembled instructions file fresh (same charter as the index: a
+# derived artifact rebuilt at session start, never left to a manual step).
+# --check compares the sentinel region against the fragments byte-for-byte;
+# the rebuild is deterministic, atomic, and sentinel-scoped, so running it
+# unattended cannot touch content outside the lore region. The current
+# session already loaded the old file — freshness lands next session, which
+# bounds drift at one session instead of "until someone runs lore assemble".
+ASSEMBLE="${SCRIPT_DIR}/assemble-instructions.sh"
+if [[ -f "$ASSEMBLE" ]]; then
+  if ! bash "$ASSEMBLE" --check >/dev/null 2>&1; then
+    if bash "$ASSEMBLE" >/dev/null 2>&1; then
+      echo "[auto-reindex] Assembled instructions were stale — rebuilt from fragments (takes effect next session)"
+    else
+      echo "[auto-reindex] Assembled instructions are stale and rebuild failed; run: lore assemble" >&2
+    fi
+  fi
+fi
