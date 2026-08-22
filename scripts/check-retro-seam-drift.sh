@@ -29,6 +29,15 @@ PROTECTED_READERS=(
   scripts/scorecard-read.sh
   scripts/session-events.sh
 )
+# Companion surfaces for the retro SKILL pairing beyond the readers: the retro
+# judge scores delivery straight from tasks.json, so the task-DAG generator,
+# loader, and their contract test are part of the same mutation chain as the
+# SKILL prose that describes how to read them.
+SKILL_COMPANIONS=(
+  scripts/generate-tasks.py
+  scripts/load-tasks.sh
+  tests/test_flat_task_dag_contract.sh
+)
 
 # Enforcement boundary: the checker establishes the rule. If the base predates
 # the checker, advance the base to the commit that introduced it — changes made
@@ -70,6 +79,9 @@ range_has_companion() {
         return 0
         ;;
     esac
+    if contains_path "$path" "${SKILL_COMPANIONS[@]}"; then
+      return 0
+    fi
   done
   cli_reader_changed
 }

@@ -17,6 +17,8 @@ new_repo() {
   printf 'retro skill baseline\n' > "$repo/skills/retro/SKILL.md"
   printf 'other skill baseline\n' > "$repo/skills/other/SKILL.md"
   printf 'protocol baseline\n' > "$repo/tests/test_retro_evidence_pack_protocol.sh"
+  printf 'task generator baseline\n' > "$repo/scripts/generate-tasks.py"
+  printf 'task dag contract baseline\n' > "$repo/tests/test_flat_task_dag_contract.sh"
   git -C "$repo" init -q
   git -C "$repo" config user.name "Retro Contract Test"
   git -C "$repo" config user.email "retro-contract@example.invalid"
@@ -122,6 +124,35 @@ printf 'protocol revision\n' >> "$repo/tests/test_retro_evidence_pack_protocol.s
 commit_all "$repo" "protocol companion in a sibling commit"
 expect_pass "$repo" "$base"
 
+# The retro judge scores delivery straight from tasks.json, so SKILL prose that
+# tracks a task-DAG shape change pairs with the generator/loader surface, not
+# only the retro readers.
+
+repo="$TMP/skill-task-dag-pairing"
+new_repo "$repo"
+base="$(git -C "$repo" rev-parse HEAD)"
+printf 'delivery scoring follows flat tasks\n' >> "$repo/skills/retro/SKILL.md"
+printf 'flat task emission\n' >> "$repo/scripts/generate-tasks.py"
+commit_all "$repo" "retro prose paired with task-DAG generator"
+expect_pass "$repo" "$base"
+
+repo="$TMP/skill-task-dag-contract-pairing"
+new_repo "$repo"
+base="$(git -C "$repo" rev-parse HEAD)"
+printf 'delivery scoring follows flat tasks\n' >> "$repo/skills/retro/SKILL.md"
+printf 'flat task contract case\n' >> "$repo/tests/test_flat_task_dag_contract.sh"
+commit_all "$repo" "retro prose paired with task-DAG contract test"
+expect_pass "$repo" "$base"
+
+# The companions license SKILL prose; they are not protected readers themselves.
+
+repo="$TMP/task-dag-alone"
+new_repo "$repo"
+base="$(git -C "$repo" rev-parse HEAD)"
+printf 'flat task emission\n' >> "$repo/scripts/generate-tasks.py"
+commit_all "$repo" "task-DAG change without retro surface"
+expect_pass "$repo" "$base"
+
 # A reader change reverted within the range leaves no net drift to pair.
 
 repo="$TMP/reverted-reader"
@@ -146,6 +177,8 @@ hook = (root / "githooks/pre-push").read_text()
 
 named = set(re.findall(r"^\s+(scripts/[\w./-]+)$",
                        checker.split("PROTECTED_READERS=(", 1)[1].split(")", 1)[0], re.M))
+named |= set(re.findall(r"^\s+((?:scripts|tests)/[\w./-]+)$",
+                        checker.split("SKILL_COMPANIONS=(", 1)[1].split(")", 1)[0], re.M))
 for extra in ("CONTRACT_TEST", "RETRO_SKILL"):
     named.add(re.search(rf'{extra}="([^"]+)"', checker).group(1))
 
