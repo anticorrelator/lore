@@ -438,9 +438,12 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 	t.Cleanup(func() { _ = exec.Command("tmux", "-L", "lore-tui", "kill-session", "-t", name).Run() })
 
 	plantCorpse(t, sessionsDir, "dead-inst", "my-repo", deadPID(t), []session.Session{
+		// ExecutionDir is stamped on every real registry row at spawn (the child
+		// cwd) with no WorktreeID; adoption must not read it as managed placement.
 		{Slug: "demo", Type: "spec", Initiator: "human", Started: "2026-07-06T00:00:00Z",
 			Tmux: name, RequestID: "spawn-1", SessionID: "uuid-1", Harness: "claude-code",
-			CloseRequests: []string{"term-1"}, Worktree: &identity},
+			CloseRequests: []string{"term-1"}, Worktree: &identity,
+			ExecutionDir: identity.CanonicalPath},
 	})
 	retiredPath := writeCloseRequestFixture(t, sessionsDir, session.CloseRequest{
 		RequestID: "close-dead", Slug: "demo", TargetInstance: "dead-inst", Reason: "coordinator",
@@ -532,8 +535,12 @@ func TestAdoptionScan_PublishedSessionJournalsDestinationOnce(t *testing.T) {
 	}
 
 	plantCorpse(t, sessionsDir, "dead-inst", "my-repo", deadPID(t), []session.Session{
+		// ExecutionDir mirrors a real spawn-stamped row (session cwd, no
+		// WorktreeID): the dead session must still publish + orphan, not be
+		// refused as incomplete managed placement and retained as a ghost.
 		{Slug: "demo", Type: "implement", Initiator: "agent", Started: "2026-07-06T00:00:00Z",
-			RequestID: "spawn-1", Worktree: &identity},
+			RequestID: "spawn-1", Worktree: &identity,
+			ExecutionDir: identity.CanonicalPath},
 	})
 
 	msg := m.adoptionScanCmd()().(adoptionScanMsg)

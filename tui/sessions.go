@@ -665,9 +665,14 @@ func validateAdoptionIdentity(kdir string, s session.Session) error {
 	if s.Worktree.State != worktree.StateActive && s.Worktree.State != worktree.StateTeardownPending {
 		return fmt.Errorf("worktree lifecycle %q cannot host a surviving process", s.Worktree.State)
 	}
-	managed := s.WorktreeID != "" || s.ExecutionDir != ""
+	// Manager-owned placement is named by WorktreeID alone. ExecutionDir is
+	// stamped on EVERY session's registry row at spawn (it is the child cwd),
+	// so it cannot mark managed placement — treating it as a marker refused
+	// every ordinary session at adoption ("incomplete managed worktree
+	// placement") and retained it as a permanent ghost row.
+	managed := s.WorktreeID != ""
 	if managed {
-		if s.WorktreeID == "" || s.ExecutionDir == "" {
+		if s.ExecutionDir == "" {
 			return fmt.Errorf("incomplete managed worktree placement")
 		}
 		placement, err := worktree.ValidateManagedPlacement(context.Background(), kdir, s.WorktreeID, s.ExecutionDir, s.Worktree)
@@ -834,11 +839,12 @@ func (m model) adoptionScanCmd() tea.Cmd {
 				// ordinary closed is reserved for an observed teardown.
 				a := adoptedFromRegistry(claim.Name, s)
 				ls := a.liveSession()
-				if s.WorktreeID != "" || s.ExecutionDir != "" {
+				if s.WorktreeID != "" {
 					// A coordinated tree is never published or restored by session
 					// recovery. The orphan event lands below; the manager's sweep then
-					// captures its recovery bundle before any removal.
-					if s.WorktreeID == "" || s.ExecutionDir == "" {
+					// captures its recovery bundle before any removal. WorktreeID alone
+					// names manager placement — ExecutionDir is every session's cwd.
+					if s.ExecutionDir == "" {
 						a.refusalReason = "incomplete managed worktree placement"
 						claimEvents = append(claimEvents, adoptionRefusedEvent(self, a))
 						claimRetained = append(claimRetained, a)
