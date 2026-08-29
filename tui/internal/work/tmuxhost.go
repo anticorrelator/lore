@@ -1,13 +1,19 @@
 package work
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 )
 
 // tmuxBinary is resolved from PATH by exec at spawn time; TmuxAvailable's LookPath
@@ -24,6 +30,249 @@ const tmuxServerLabel = "lore-tui"
 // recovery is an accepted loss (reattach redraws the visible screen only), so this
 // bounds pane memory rather than preserving history.
 const tmuxHistoryLimit = 5000
+
+const tmuxMirrorStateFormat = "#{cursor_x} #{cursor_y} #{pane_width} #{pane_height} #{alternate_on} #{history_size}"
+
+// TmuxMirrorPaneState is sampled immediately before a mirror's captured rows.
+type TmuxMirrorPaneState struct {
+	CursorX, CursorY int
+	Width, Height    int
+	Alternate        bool
+	HistorySize      int
+}
+
+// tmuxMirrorTransport owns only one generation's local FIFO reader. Whether
+// the corresponding tmux pipe may be detached is tracked by SessionPanelModel.
+type tmuxMirrorTransport struct {
+	dir    string
+	path   string
+	reader *os.File
+	output <-chan []byte
+	done   chan struct{}
+	once   sync.Once
+}
+
+func tmuxMirrorOpenArgs(name, fifo string) []string {
+	return []string{
+		"-L", tmuxServerLabel,
+		"display-message", "-p", "-t", name, tmuxMirrorStateFormat, ";",
+		"capture-pane", "-p", "-e", "-S", "-", "-t", name, ";",
+		"pipe-pane", "-O", "-t", name, "cat > " + fifo,
+	}
+}
+
+func tmuxMirrorGeometryArgs(name string) []string {
+	return []string{"-L", tmuxServerLabel, "display-message", "-p", "-t", name, "#{pane_width} #{pane_height}"}
+}
+
+func tmuxMirrorLiteralArgs(name, text string) []string {
+	return []string{"-L", tmuxServerLabel, "send-keys", "-t", name, "-l", text}
+}
+
+func tmuxMirrorKeyArgs(name, key string) []string {
+	return []string{"-L", tmuxServerLabel, "send-keys", "-t", name, key}
+}
+
+func tmuxMirrorDetachArgs(name string) []string {
+	return []string{"-L", tmuxServerLabel, "pipe-pane", "-t", name}
+}
+
+func parseTmuxMirrorOpenOutput(out []byte) (TmuxMirrorPaneState, []string, error) {
+	lineEnd := bytes.IndexByte(out, '\n')
+	if lineEnd < 0 {
+		return TmuxMirrorPaneState{}, nil, fmt.Errorf("tmux mirror state: missing state line")
+	}
+	var state TmuxMirrorPaneState
+	var alternate int
+	stateLine := strings.TrimSuffix(string(out[:lineEnd]), "\r")
+	if n, err := fmt.Sscanf(stateLine, "%d %d %d %d %d %d",
+		&state.CursorX, &state.CursorY, &state.Width, &state.Height, &alternate, &state.HistorySize); err != nil || n != 6 {
+		if err == nil {
+			err = fmt.Errorf("read %d fields", n)
+		}
+		return TmuxMirrorPaneState{}, nil, fmt.Errorf("parse tmux mirror state %q: %w", stateLine, err)
+	}
+	if state.Width < 1 || state.Height < 1 || state.CursorX < 0 || state.CursorY < 0 || (alternate != 0 && alternate != 1) {
+		return TmuxMirrorPaneState{}, nil, fmt.Errorf("invalid tmux mirror state %q", stateLine)
+	}
+	state.Alternate = alternate == 1
+
+	capture := strings.ReplaceAll(string(out[lineEnd+1:]), "\r\n", "\n")
+	rows := strings.Split(capture, "\n")
+	if len(rows) > 0 && rows[len(rows)-1] == "" {
+		rows = rows[:len(rows)-1]
+	}
+	return state, rows, nil
+}
+
+func openTmuxMirror(name string) (*tmuxMirrorTransport, TmuxMirrorPaneState, []string, error) {
+	if name == "" {
+		return nil, TmuxMirrorPaneState{}, nil, fmt.Errorf("open tmux mirror: empty session name")
+	}
+	dir, err := os.MkdirTemp("/tmp", "lore-tui-mirror-")
+	if err != nil {
+		return nil, TmuxMirrorPaneState{}, nil, fmt.Errorf("create tmux mirror directory: %w", err)
+	}
+	fifo := dir + "/stream"
+	cleanup := func() {
+		_ = os.Remove(fifo)
+		_ = os.Remove(dir)
+	}
+	if strings.Contains(fifo, "#{") {
+		cleanup()
+		return nil, TmuxMirrorPaneState{}, nil, fmt.Errorf("unsafe tmux mirror FIFO path %q", fifo)
+	}
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		cleanup()
+		return nil, TmuxMirrorPaneState{}, nil, fmt.Errorf("create tmux mirror FIFO: %w", err)
+	}
+
+	type readerResult struct {
+		file *os.File
+		err  error
+	}
+	readerReady := make(chan readerResult, 1)
+	go func() {
+		reader, openErr := os.Open(fifo)
+		readerReady <- readerResult{file: reader, err: openErr}
+	}()
+	unblockReader := func() readerResult {
+		for {
+			select {
+			case result := <-readerReady:
+				return result
+			default:
+			}
+			writer, _ := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+			if writer != nil {
+				_ = writer.Close()
+				return <-readerReady
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	out, err := exec.Command(tmuxBinary, tmuxMirrorOpenArgs(name, fifo)...).Output()
+	if err != nil {
+		result := unblockReader()
+		if result.file != nil {
+			_ = result.file.Close()
+		}
+		cleanup()
+		return nil, TmuxMirrorPaneState{}, nil, fmt.Errorf("tmux mirror open: %w", err)
+	}
+	var result readerResult
+	select {
+	case result = <-readerReady:
+	case <-time.After(5 * time.Second):
+		result = unblockReader()
+		if result.file != nil {
+			_ = result.file.Close()
+		}
+		cleanup()
+		return nil, TmuxMirrorPaneState{}, nil, fmt.Errorf("tmux mirror FIFO writer did not connect")
+	}
+	if result.err != nil {
+		cleanup()
+		return nil, TmuxMirrorPaneState{}, nil, fmt.Errorf("open tmux mirror FIFO: %w", result.err)
+	}
+	reader := result.file
+	state, rows, err := parseTmuxMirrorOpenOutput(out)
+	if err != nil {
+		detachErr := detachTmuxMirror(name)
+		_ = reader.Close()
+		cleanup()
+		if detachErr != nil {
+			return nil, TmuxMirrorPaneState{}, nil, errors.Join(err, detachErr)
+		}
+		return nil, TmuxMirrorPaneState{}, nil, err
+	}
+	done := make(chan struct{})
+	transport := &tmuxMirrorTransport{dir: dir, path: fifo, reader: reader, done: done}
+	transport.output = tmuxMirrorReader(reader, done)
+	return transport, state, rows, nil
+}
+
+func tmuxMirrorReader(reader io.Reader, done <-chan struct{}) <-chan []byte {
+	output := make(chan []byte, 64)
+	go func() {
+		defer close(output)
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := reader.Read(buf)
+			if n > 0 {
+				chunk := append([]byte(nil), buf[:n]...)
+				select {
+				case output <- chunk:
+				case <-done:
+					return
+				}
+			}
+			if err != nil || n == 0 {
+				return
+			}
+		}
+	}()
+	return output
+}
+
+func (t *tmuxMirrorTransport) closeLocal() {
+	if t == nil {
+		return
+	}
+	t.once.Do(func() {
+		close(t.done)
+		if t.reader != nil {
+			_ = t.reader.Close()
+		}
+		_ = os.Remove(t.path)
+		_ = os.Remove(t.dir)
+	})
+}
+
+func tmuxMirrorGeometry(name string) (int, int, error) {
+	out, err := exec.Command(tmuxBinary, tmuxMirrorGeometryArgs(name)...).Output()
+	if err != nil {
+		return 0, 0, fmt.Errorf("tmux mirror geometry: %w", err)
+	}
+	var width, height int
+	if n, scanErr := fmt.Sscanf(strings.TrimSpace(string(out)), "%d %d", &width, &height); scanErr != nil || n != 2 || width < 1 || height < 1 {
+		if scanErr == nil {
+			scanErr = fmt.Errorf("invalid dimensions")
+		}
+		return 0, 0, fmt.Errorf("parse tmux mirror geometry %q: %w", strings.TrimSpace(string(out)), scanErr)
+	}
+	return width, height, nil
+}
+
+func sendTmuxMirrorLiteral(name, text string) error {
+	if text == "" {
+		return nil
+	}
+	if err := exec.Command(tmuxBinary, tmuxMirrorLiteralArgs(name, text)...).Run(); err != nil {
+		return fmt.Errorf("tmux mirror send text: %w", err)
+	}
+	return nil
+}
+
+func sendTmuxMirrorKey(name, key string) error {
+	if key == "" {
+		return nil
+	}
+	if err := exec.Command(tmuxBinary, tmuxMirrorKeyArgs(name, key)...).Run(); err != nil {
+		return fmt.Errorf("tmux mirror send key: %w", err)
+	}
+	return nil
+}
+
+func detachTmuxMirror(name string) error {
+	if name == "" {
+		return nil
+	}
+	if err := exec.Command(tmuxBinary, tmuxMirrorDetachArgs(name)...).Run(); err != nil {
+		return fmt.Errorf("tmux mirror detach: %w", err)
+	}
+	return nil
+}
 
 // TmuxAvailable reports whether tmux hosting is active for this process and a
 // one-line detail for the startup notice. It is the D3 host-capability gate: an
@@ -258,35 +507,6 @@ func captureTmuxPaneHistory(name string) ([]string, error) {
 	}
 	out, err := exec.Command(tmuxBinary, "-L", tmuxServerLabel,
 		"capture-pane", "-p", "-e", "-S", "-", "-t", name).Output()
-	if err != nil {
-		return nil, fmt.Errorf("tmux capture-pane: %w", err)
-	}
-	text := strings.ReplaceAll(string(out), "\r\n", "\n")
-	lines := strings.Split(text, "\n")
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	return lines, nil
-}
-
-// CapturePaneScreen returns a named session's visible screen as display rows,
-// preserving ANSI attributes — the read side of the cross-instance read-only
-// mirror. It is captureTmuxPaneHistory's visible-screen sibling: it omits `-S -`,
-// so only the on-screen rows are returned (what the owning instance's client
-// currently displays), not scrollback.
-//
-// capture-pane attaches no client, so this read is size-neutral: it cannot become
-// the shared server's `window-size latest` client and resize the pane, which is
-// what corrupts the owner's screen-state contract that the injection/peek
-// signatures anchor on. This is why the mirror captures rather than attaching a
-// read-only client. Callers gate on TmuxAvailable; the tmux name is the registry
-// row's, opaque here.
-func CapturePaneScreen(name string) ([]string, error) {
-	if name == "" {
-		return nil, fmt.Errorf("capture tmux screen: empty session name")
-	}
-	out, err := exec.Command(tmuxBinary, "-L", tmuxServerLabel,
-		"capture-pane", "-p", "-e", "-t", name).Output()
 	if err != nil {
 		return nil, fmt.Errorf("tmux capture-pane: %w", err)
 	}

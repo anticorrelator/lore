@@ -2,12 +2,143 @@ package work
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
+
+func openedMirrorForTest(t *testing.T, state TmuxMirrorPaneState, rows []string) SessionPanelModel {
+	t.Helper()
+	m := NewMirrorSessionPanelModel("remote-row", "remote-tmux", 7)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 12, Height: 3})
+	output := make(chan []byte, 4)
+	transport := &tmuxMirrorTransport{output: output, done: make(chan struct{})}
+	m, cmd := m.Update(SessionMirrorOpenedMsg{
+		Slug: "remote-row", TmuxName: "remote-tmux", Generation: 7,
+		State: state, Rows: rows, transport: transport,
+	})
+	if cmd == nil {
+		t.Fatal("opening a mirror should start stream and geometry polling")
+	}
+	t.Cleanup(func() {
+		transport.closeLocal()
+		if m.backend != nil {
+			m.backend.close()
+		}
+	})
+	return m
+}
+
+func TestMirrorModeKeepsPaneGeometryAndClipsViewport(t *testing.T) {
+	m := openedMirrorForTest(t, TmuxMirrorPaneState{CursorX: 8, CursorY: 3, Width: 20, Height: 5}, []string{
+		"0123456789abcdefghij", "row-2", "row-3", "row-4", "row-5",
+	})
+	cols, _ := m.backend.term.Cols()
+	rows, _ := m.backend.term.Rows()
+	if cols != 20 || rows != 5 {
+		t.Fatalf("mirror backend = %dx%d, want pane geometry 20x5", cols, rows)
+	}
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 8, Height: 2})
+	cols, _ = m.backend.term.Cols()
+	rows, _ = m.backend.term.Rows()
+	if cols != 20 || rows != 5 {
+		t.Fatalf("viewport resize changed mirror backend to %dx%d", cols, rows)
+	}
+	viewLines := strings.Split(m.View(), "\n")
+	if len(viewLines) != 2 {
+		t.Fatalf("clipped view has %d rows, want 2: %q", len(viewLines), m.View())
+	}
+	for _, line := range viewLines {
+		if got := lipgloss.Width(line); got > 8 {
+			t.Fatalf("clipped row width = %d, want <= 8: %q", got, line)
+		}
+	}
+}
+
+func TestMirrorGenerationRejectsStaleOutputAndMarksCurrentEOFAsTakenOver(t *testing.T) {
+	m := openedMirrorForTest(t, TmuxMirrorPaneState{Width: 20, Height: 3}, []string{"seed"})
+	before := m.cachedRender
+	m, cmd := m.Update(SessionMirrorOutputMsg{Slug: "remote-row", Generation: 6, Data: []byte("stale")})
+	if cmd != nil || m.cachedRender != before {
+		t.Fatal("stale mirror output changed the current generation")
+	}
+	m, _ = m.Update(SessionMirrorEOFMsg{Slug: "remote-row", Generation: 6})
+	if m.MirrorTakenOver() {
+		t.Fatal("stale EOF marked the current generation taken over")
+	}
+	m, _ = m.Update(SessionMirrorEOFMsg{Slug: "remote-row", Generation: 7})
+	if !m.MirrorTakenOver() || m.mirrorOwned || m.backend != nil {
+		t.Fatalf("current EOF did not close local generation: taken=%v owned=%v backend=%v", m.MirrorTakenOver(), m.mirrorOwned, m.backend)
+	}
+	if got := m.View(); !strings.Contains(got, "mirror taken by another viewer") {
+		t.Fatalf("taken-over view = %q", got)
+	}
+	m, cmd = m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	if cmd == nil || m.MirrorTakenOver() || m.MirrorGeneration() != 8 {
+		t.Fatalf("re-take action = generation %d taken=%v cmd=%v", m.MirrorGeneration(), m.MirrorTakenOver(), cmd)
+	}
+}
+
+func TestMirrorSemanticKeyClasses(t *testing.T) {
+	tests := []struct {
+		msg       tea.KeyPressMsg
+		wantText  string
+		wantNamed string
+	}{
+		{tea.KeyPressMsg{Code: 'x', Text: "X"}, "X", ""},
+		{tea.KeyPressMsg{Code: tea.KeyEnter}, "", "Enter"},
+		{tea.KeyPressMsg{Code: tea.KeyEscape}, "", "Escape"},
+		{tea.KeyPressMsg{Code: tea.KeyLeft}, "", "Left"},
+		{tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}, "", "C-c"},
+		{tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModCtrl}, "", "C-Up"},
+	}
+	for _, tc := range tests {
+		text, named := sessionMirrorKey(tc.msg)
+		if text != tc.wantText || named != tc.wantNamed {
+			t.Errorf("sessionMirrorKey(%v) = (%q,%q), want (%q,%q)", tc.msg, text, named, tc.wantText, tc.wantNamed)
+		}
+	}
+}
+
+func TestMirrorCleanupDetachesOnlyOwnedPipe(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "tmux.log")
+	fake := filepath.Join(dir, "tmux")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TMUX_LOG\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX_LOG", logPath)
+
+	owned := NewMirrorSessionPanelModel("remote-row", "remote-tmux", 1)
+	owned.mirrorOwned = true
+	owned = owned.Cleanup()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); !strings.Contains(got, "-L lore-tui pipe-pane -t remote-tmux") {
+		t.Fatalf("owned cleanup did not detach pipe: %q", got)
+	}
+
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	displaced := NewMirrorSessionPanelModel("remote-row", "remote-tmux", 2)
+	displaced.mirrorTakenOver = true
+	displaced = displaced.Cleanup()
+	data, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("displaced cleanup detached another viewer's pipe: %q", data)
+	}
+}
 
 func TestQuiescenceTickEmitsNeedsInputAfterThreshold(t *testing.T) {
 	m := NewSessionPanelModel("test")

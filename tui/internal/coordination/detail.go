@@ -450,13 +450,25 @@ func (m DetailModel) targetSummary(row board.Row) string {
 	sessions := m.liveSessions(workItem)
 	switch {
 	case len(sessions) == 1:
-		return fmt.Sprintf("work item %s · packet %s · target session %s", workLabel, packet, explicit(sessions[0].Display))
+		return fmt.Sprintf("%s · work item %s · packet %s", sessionTargetSummary(sessions[0]), workLabel, packet)
 	case resolved && len(sessions) > 1:
 		return fmt.Sprintf("work item %s · packet %s · session ambiguous (%d live) · target work item", workLabel, packet, len(sessions))
 	case resolved:
 		return fmt.Sprintf("work item %s · packet %s · session unknown · target work item", workLabel, packet)
 	default:
 		return fmt.Sprintf("work item %s · packet %s · target unknown", workLabel, packet)
+	}
+}
+
+func sessionTargetSummary(row sessionview.SessionRow) string {
+	target := "target session " + explicit(row.Display)
+	switch {
+	case row.Local:
+		return "live terminal available in sessions · " + target
+	case row.Tmux != "":
+		return "live drill-in available in sessions · " + target
+	default:
+		return "live screen unavailable — tmux identity unknown · " + target
 	}
 }
 

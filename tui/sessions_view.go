@@ -77,6 +77,12 @@ func (m model) handleSessionsRefreshed(msg sessionsRefreshedMsg) (model, tea.Cmd
 
 	m.sessionRows = m.buildSessionRows(msg.instances, msg.pending, msg.claimed)
 	m.sessionsList.SetSessions(m.sessionRows)
+	if m.sessionMirrorActive {
+		row, ok := m.sessionsList.SessionByID(m.sessionMirrorRowID)
+		if !ok || row.Local || row.Tmux == "" || row.Tmux != m.sessionMirrorPanel.TmuxName() {
+			m.closeSessionMirror()
+		}
+	}
 	m.sessionsCount = m.sessionsList.Count()
 	m.sessionsNeedsInput = m.sessionsList.NeedsInputCount()
 	m.syncCoordinationSessions()
@@ -183,9 +189,8 @@ func (m model) buildSessionRows(instances []session.Instance, pending []session.
 	return rows
 }
 
-// handleSessionSelected attaches the selected session: a locally-hosted row
-// enters terminal focus on its live panel; an external or in-flight row focuses
-// the read-only card.
+// handleSessionSelected attaches an owned local panel or explicitly opens the
+// selected remote tmux mirror. Other rows remain read-only.
 func (m model) handleSessionSelected(msg sessionview.SessionSelectedMsg) (model, tea.Cmd) {
 	row, ok := m.sessionsList.SessionByID(msg.RowID)
 	if !ok {
@@ -194,11 +199,16 @@ func (m model) handleSessionSelected(msg sessionview.SessionSelectedMsg) (model,
 	m.focusedPanel = panelRight
 	m.sessionsDetail.SetSession(row, true)
 	if row.Local && m.hasSessionPanel(row.PanelKey) {
+		m.closeSessionMirror()
 		m.setPreferDetail(row.PanelKey, false)
 		m.terminalMode = true
-	} else {
-		m.terminalMode = false
+		return m, nil
 	}
+	if !row.Local && !row.InFlight && row.Tmux != "" {
+		return m.openSessionMirror(row.RowID, row.Tmux)
+	}
+	m.closeSessionMirror()
+	m.terminalMode = false
 	return m, nil
 }
 

@@ -17,6 +17,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 	libghostty "go.mitchellh.com/libghostty"
 
@@ -159,6 +160,55 @@ type TerminalDetachMsg struct {
 // presses.
 const escDetachWindow = 500 * time.Millisecond
 
+const sessionMirrorResizeInterval = 500 * time.Millisecond
+
+// SessionMirrorOpenedMsg carries one atomic state/capture/pipe generation.
+// The transport is intentionally private; the panel owns its local resources.
+type SessionMirrorOpenedMsg struct {
+	Slug       string
+	TmuxName   string
+	Generation uint64
+	State      TmuxMirrorPaneState
+	Rows       []string
+	Err        error
+	transport  *tmuxMirrorTransport
+}
+
+// SessionMirrorOutputMsg carries raw pane output for one mirror generation.
+type SessionMirrorOutputMsg struct {
+	Slug       string
+	Generation uint64
+	Data       []byte
+}
+
+// SessionMirrorEOFMsg reports that one generation's FIFO writer disappeared.
+type SessionMirrorEOFMsg struct {
+	Slug       string
+	Generation uint64
+}
+
+// SessionMirrorResizeTickMsg requests a pane-geometry sample for an active mirror.
+type SessionMirrorResizeTickMsg struct {
+	Slug       string
+	Generation uint64
+}
+
+// SessionMirrorGeometryMsg carries one client-less pane-geometry sample.
+type SessionMirrorGeometryMsg struct {
+	Slug       string
+	Generation uint64
+	Width      int
+	Height     int
+	Err        error
+}
+
+// SessionMirrorWriteMsg reports completion of one asynchronous manual write.
+type SessionMirrorWriteMsg struct {
+	Slug       string
+	Generation uint64
+	Err        error
+}
+
 // TerminalTerminateMsg is sent when user presses Ctrl+\ to kill the subprocess
 // and close the session panel entirely.
 type TerminalTerminateMsg struct {
@@ -242,6 +292,17 @@ type SessionPanelModel struct {
 	// teardown and quit-detach act on the right target.
 	tmuxName string
 	panePID  int
+
+	// mirror fields are populated only by NewMirrorSessionPanelModel. The
+	// backend remains pane-sized while width/height describe the TUI viewport.
+	mirror           bool
+	mirrorGeneration uint64
+	mirrorPaneWidth  int
+	mirrorPaneHeight int
+	mirrorTransport  *tmuxMirrorTransport
+	mirrorOwned      bool
+	mirrorTakenOver  bool
+	mirrorErr        string
 }
 
 // NewSessionPanelModel creates a session panel model for the given work item slug.
@@ -253,6 +314,60 @@ func NewSessionPanelModel(slug string) SessionPanelModel {
 		open:    true,
 		backend: newTerminalBackend(80, 24),
 	}
+}
+
+// NewMirrorSessionPanelModel creates a panel that observes and writes an
+// existing tmux session without attaching a tmux client.
+func NewMirrorSessionPanelModel(slug, tmuxName string, generation uint64) SessionPanelModel {
+	return SessionPanelModel{
+		slug:             slug,
+		open:             true,
+		tmuxName:         tmuxName,
+		mirror:           true,
+		mirrorGeneration: generation,
+	}
+}
+
+// MirrorOpenCmd atomically samples, captures, and attaches the panel's current
+// mirror generation.
+func (m SessionPanelModel) MirrorOpenCmd() tea.Cmd {
+	if !m.mirror || m.tmuxName == "" {
+		return nil
+	}
+	return OpenSessionMirrorCmd(m.slug, m.tmuxName, m.mirrorGeneration)
+}
+
+// MirrorGeneration identifies the open or pending mirror generation.
+func (m SessionPanelModel) MirrorGeneration() uint64 { return m.mirrorGeneration }
+
+// IsMirror reports whether the panel observes a remote tmux pane.
+func (m SessionPanelModel) IsMirror() bool { return m.mirror }
+
+// MirrorTakenOver reports whether the active pipe was displaced by another viewer.
+func (m SessionPanelModel) MirrorTakenOver() bool { return m.mirrorTakenOver }
+
+// MirrorError reports the latest open, sample, or manual-write failure.
+func (m SessionPanelModel) MirrorError() string { return m.mirrorErr }
+
+// RetakeMirror starts a caller-selected generation after displacement.
+func (m SessionPanelModel) RetakeMirror(generation uint64) (SessionPanelModel, tea.Cmd) {
+	if !m.mirror {
+		return m, nil
+	}
+	if m.mirrorTransport != nil {
+		m.mirrorTransport.closeLocal()
+		m.mirrorTransport = nil
+	}
+	if m.backend != nil {
+		m.backend.close()
+		m.backend = nil
+	}
+	m.mirrorGeneration = generation
+	m.mirrorOwned = false
+	m.mirrorTakenOver = false
+	m.mirrorErr = ""
+	m.cachedRender = ""
+	return m, m.MirrorOpenCmd()
 }
 
 // WithTerminalColorPair configures replies to default-color queries emitted by
@@ -520,6 +635,19 @@ func (m SessionPanelModel) SetPtmx(ptmx *os.File, cmd *exec.Cmd, output <-chan [
 // backend. Reaps the subprocess in a background goroutine so the caller is
 // never blocked. Safe to call multiple times (the backend close is idempotent).
 func (m SessionPanelModel) Cleanup() SessionPanelModel {
+	if m.mirror {
+		// Only a generation whose FIFO is still live owns the tmux pipe. EOF
+		// means another viewer displaced it, so detaching here would tear down
+		// that viewer's replacement pipe.
+		if m.mirrorOwned {
+			_ = detachTmuxMirror(m.tmuxName)
+		}
+		if m.mirrorTransport != nil {
+			m.mirrorTransport.closeLocal()
+			m.mirrorTransport = nil
+		}
+		m.mirrorOwned = false
+	}
 	if m.ptmx != nil {
 		m.ptmx.Close()
 		m.ptmx = nil
@@ -539,7 +667,158 @@ func (m SessionPanelModel) Cleanup() SessionPanelModel {
 }
 
 func (m SessionPanelModel) Init() tea.Cmd {
+	if m.mirror {
+		return m.MirrorOpenCmd()
+	}
 	return nil
+}
+
+// OpenSessionMirrorCmd creates one atomic mirror generation.
+func OpenSessionMirrorCmd(slug, tmuxName string, generation uint64) tea.Cmd {
+	return func() tea.Msg {
+		transport, state, rows, err := openTmuxMirror(tmuxName)
+		return SessionMirrorOpenedMsg{
+			Slug: slug, TmuxName: tmuxName, Generation: generation,
+			State: state, Rows: rows, Err: err, transport: transport,
+		}
+	}
+}
+
+// PollSessionMirrorCmd waits for the next raw pane-output chunk or FIFO EOF.
+func PollSessionMirrorCmd(slug string, generation uint64, output <-chan []byte) tea.Cmd {
+	return func() tea.Msg {
+		chunk, ok := <-output
+		if !ok {
+			return SessionMirrorEOFMsg{Slug: slug, Generation: generation}
+		}
+		data := append([]byte(nil), chunk...)
+		for i := 0; i < 8; i++ {
+			select {
+			case more, moreOK := <-output:
+				if !moreOK {
+					return SessionMirrorOutputMsg{Slug: slug, Generation: generation, Data: data}
+				}
+				data = append(data, more...)
+			default:
+				return SessionMirrorOutputMsg{Slug: slug, Generation: generation, Data: data}
+			}
+		}
+		return SessionMirrorOutputMsg{Slug: slug, Generation: generation, Data: data}
+	}
+}
+
+// SessionMirrorResizeTickCmd schedules the next active geometry sample.
+func SessionMirrorResizeTickCmd(slug string, generation uint64) tea.Cmd {
+	return tea.Tick(sessionMirrorResizeInterval, func(time.Time) tea.Msg {
+		return SessionMirrorResizeTickMsg{Slug: slug, Generation: generation}
+	})
+}
+
+// QuerySessionMirrorGeometryCmd samples pane dimensions without attaching a client.
+func QuerySessionMirrorGeometryCmd(slug, tmuxName string, generation uint64) tea.Cmd {
+	return func() tea.Msg {
+		width, height, err := tmuxMirrorGeometry(tmuxName)
+		return SessionMirrorGeometryMsg{Slug: slug, Generation: generation, Width: width, Height: height, Err: err}
+	}
+}
+
+func sessionMirrorWriteTextCmd(slug, tmuxName string, generation uint64, text string) tea.Cmd {
+	return func() tea.Msg {
+		return SessionMirrorWriteMsg{Slug: slug, Generation: generation, Err: sendTmuxMirrorLiteral(tmuxName, text)}
+	}
+}
+
+func sessionMirrorWriteKeyCmd(slug, tmuxName string, generation uint64, key string) tea.Cmd {
+	return func() tea.Msg {
+		return SessionMirrorWriteMsg{Slug: slug, Generation: generation, Err: sendTmuxMirrorKey(tmuxName, key)}
+	}
+}
+
+func sessionMirrorSeed(state TmuxMirrorPaneState, rows []string) []byte {
+	var seed strings.Builder
+	if state.Alternate {
+		seed.WriteString("\x1b[?1049h")
+	}
+	seed.WriteString("\x1b[?7l")
+	seed.WriteString(strings.Join(rows, "\r\n"))
+	seed.WriteString("\x1b[?7h")
+	fmt.Fprintf(&seed, "\x1b[%d;%dH", state.CursorY+1, state.CursorX+1)
+	return []byte(seed.String())
+}
+
+func sessionMirrorKey(km tea.KeyPressMsg) (text, key string) {
+	k := km.Key()
+	if k.Mod.Contains(tea.ModCtrl) {
+		switch {
+		case k.Code >= 'a' && k.Code <= 'z':
+			return "", "C-" + string(k.Code)
+		case k.Code == '\\' || k.Code == ']':
+			return "", "C-" + string(k.Code)
+		}
+	}
+	if k.Mod.Contains(tea.ModAlt) {
+		if k.Text != "" {
+			return "", "M-" + k.Text
+		}
+		if k.Code >= 0 && k.Code <= unicode.MaxRune {
+			return "", "M-" + string(k.Code)
+		}
+	}
+	switch k.Code {
+	case tea.KeyEnter:
+		return "", sessionMirrorNamedKey(k, "Enter")
+	case tea.KeyEscape:
+		return "", sessionMirrorNamedKey(k, "Escape")
+	case tea.KeyUp:
+		return "", sessionMirrorNamedKey(k, "Up")
+	case tea.KeyDown:
+		return "", sessionMirrorNamedKey(k, "Down")
+	case tea.KeyRight:
+		return "", sessionMirrorNamedKey(k, "Right")
+	case tea.KeyLeft:
+		return "", sessionMirrorNamedKey(k, "Left")
+	case tea.KeyHome:
+		return "", sessionMirrorNamedKey(k, "Home")
+	case tea.KeyEnd:
+		return "", sessionMirrorNamedKey(k, "End")
+	case tea.KeyPgUp:
+		return "", sessionMirrorNamedKey(k, "PPage")
+	case tea.KeyPgDown:
+		return "", sessionMirrorNamedKey(k, "NPage")
+	case tea.KeyDelete:
+		return "", sessionMirrorNamedKey(k, "DC")
+	case tea.KeyInsert:
+		return "", sessionMirrorNamedKey(k, "IC")
+	case tea.KeyBackspace:
+		return "", sessionMirrorNamedKey(k, "BSpace")
+	case tea.KeyTab:
+		if k.Mod.Contains(tea.ModShift) {
+			return "", "BTab"
+		}
+		return "", sessionMirrorNamedKey(k, "Tab")
+	case tea.KeySpace:
+		return " ", ""
+	}
+	if k.Text != "" {
+		return k.Text, ""
+	}
+	if k.Code >= 0 && k.Code <= unicode.MaxRune && unicode.IsPrint(k.Code) {
+		return string(k.Code), ""
+	}
+	return "", ""
+}
+
+func sessionMirrorNamedKey(key tea.Key, name string) string {
+	if key.Mod.Contains(tea.ModCtrl) {
+		name = "C-" + name
+	}
+	if key.Mod.Contains(tea.ModAlt) {
+		name = "M-" + name
+	}
+	if key.Mod.Contains(tea.ModShift) {
+		name = "S-" + name
+	}
+	return name
 }
 
 // totalLines returns the total number of lines in the terminal document
@@ -615,6 +894,99 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 		}
 	}()
 	switch msg := msg.(type) {
+	case SessionMirrorOpenedMsg:
+		validGeneration := msg.Generation == m.mirrorGeneration || (m.mirrorOwned && msg.Generation == m.mirrorGeneration+1)
+		if !m.mirror || msg.Slug != m.slug || msg.TmuxName != m.tmuxName || !validGeneration {
+			if msg.transport != nil {
+				msg.transport.closeLocal()
+			}
+			return m, nil
+		}
+		if msg.Err != nil {
+			m.mirrorErr = msg.Err.Error()
+			if m.mirrorOwned {
+				return m, SessionMirrorResizeTickCmd(m.slug, m.mirrorGeneration)
+			}
+			return m, nil
+		}
+		// The successful pipe-pane command displaced the prior generation, so
+		// only local resources may be closed while installing the new backend.
+		if m.mirrorTransport != nil {
+			m.mirrorTransport.closeLocal()
+		}
+		if m.backend != nil {
+			m.backend.close()
+		}
+		m.mirrorGeneration = msg.Generation
+		m.mirrorTransport = msg.transport
+		m.mirrorPaneWidth = msg.State.Width
+		m.mirrorPaneHeight = msg.State.Height
+		m.mirrorOwned = true
+		m.mirrorTakenOver = false
+		m.mirrorErr = ""
+		m.backend = newTerminalBackend(msg.State.Width, msg.State.Height)
+		m.backend.write(sessionMirrorSeed(msg.State, msg.Rows))
+		m.cachedRender = m.backend.renderScreen()
+		return m, tea.Batch(
+			PollSessionMirrorCmd(m.slug, m.mirrorGeneration, m.mirrorTransport.output),
+			SessionMirrorResizeTickCmd(m.slug, m.mirrorGeneration),
+		)
+
+	case SessionMirrorOutputMsg:
+		if !m.mirror || msg.Slug != m.slug || msg.Generation != m.mirrorGeneration || !m.mirrorOwned || m.backend == nil {
+			return m, nil
+		}
+		m.backend.write(msg.Data)
+		m.cachedRender = m.backend.renderScreen()
+		return m, PollSessionMirrorCmd(m.slug, m.mirrorGeneration, m.mirrorTransport.output)
+
+	case SessionMirrorEOFMsg:
+		if !m.mirror || msg.Slug != m.slug || msg.Generation != m.mirrorGeneration || !m.mirrorOwned {
+			return m, nil
+		}
+		m.mirrorOwned = false
+		m.mirrorTakenOver = true
+		m.mirrorErr = ""
+		if m.mirrorTransport != nil {
+			m.mirrorTransport.closeLocal()
+			m.mirrorTransport = nil
+		}
+		if m.backend != nil {
+			m.backend.close()
+			m.backend = nil
+		}
+		m.cachedRender = ""
+		return m, nil
+
+	case SessionMirrorResizeTickMsg:
+		if !m.mirror || msg.Slug != m.slug || msg.Generation != m.mirrorGeneration || !m.mirrorOwned {
+			return m, nil
+		}
+		return m, QuerySessionMirrorGeometryCmd(m.slug, m.tmuxName, m.mirrorGeneration)
+
+	case SessionMirrorGeometryMsg:
+		if !m.mirror || msg.Slug != m.slug || msg.Generation != m.mirrorGeneration || !m.mirrorOwned {
+			return m, nil
+		}
+		if msg.Err != nil {
+			m.mirrorErr = msg.Err.Error()
+			return m, SessionMirrorResizeTickCmd(m.slug, m.mirrorGeneration)
+		}
+		m.mirrorErr = ""
+		if msg.Width != m.mirrorPaneWidth || msg.Height != m.mirrorPaneHeight {
+			return m, OpenSessionMirrorCmd(m.slug, m.tmuxName, m.mirrorGeneration+1)
+		}
+		return m, SessionMirrorResizeTickCmd(m.slug, m.mirrorGeneration)
+
+	case SessionMirrorWriteMsg:
+		if !m.mirror || msg.Slug != m.slug || msg.Generation != m.mirrorGeneration {
+			return m, nil
+		}
+		if msg.Err != nil {
+			m.mirrorErr = msg.Err.Error()
+		}
+		return m, nil
+
 	case SessionProcessStartedMsg:
 		m.ptmx = msg.Ptmx
 		m.cmd = msg.Cmd
@@ -649,7 +1021,7 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 		// While direct-PTY scrollback is visible, keep the same content in view
 		// as the emulator document grows. Tmux-hosted panels refresh from
 		// capture-pane below because tmux owns their authoritative history.
-		if m.scrollOffset > 0 && m.tmuxName == "" {
+		if m.scrollOffset > 0 && (m.tmuxName == "" || m.mirror) {
 			if grown := m.totalLines() - prevTotal; grown > 0 {
 				m.scrollOffset += grown
 			}
@@ -658,7 +1030,7 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 				m.scrollOffset = maxOff
 			}
 		}
-		if m.scrollOffset > 0 && m.tmuxName != "" && !m.tmuxCapturePending {
+		if m.scrollOffset > 0 && m.tmuxName != "" && !m.mirror && !m.tmuxCapturePending {
 			m.tmuxCapturePending = true
 			cmds = append(cmds, captureTmuxScrollbackCmd(m.slug, m.tmuxName))
 		}
@@ -716,7 +1088,7 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 		return m, QuiescenceTickCmd(m.slug)
 
 	case tea.MouseWheelMsg:
-		if m.tmuxName != "" {
+		if m.tmuxName != "" && !m.mirror {
 			switch msg.Button {
 			case tea.MouseWheelUp:
 				m.scrollOffset += 3
@@ -749,6 +1121,9 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.mirror {
+			return m, nil
+		}
 		vpWidth := msg.Width
 		if vpWidth < 1 {
 			vpWidth = 1
@@ -779,6 +1154,12 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 		if m.done {
 			return m.refuseClosedInput("paste")
 		}
+		if m.mirror {
+			if !m.mirrorOwned || msg.Content == "" {
+				return m, nil
+			}
+			return m, sessionMirrorWriteTextCmd(m.slug, m.tmuxName, m.mirrorGeneration, msg.Content)
+		}
 		if m.ptmx != nil && msg.Content != "" {
 			if _, err := m.ptmx.Write([]byte(msg.Content)); err != nil {
 				return m.refuseClosedInput("paste")
@@ -798,6 +1179,13 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 		if msg.Code != tea.KeyEscape {
 			m.lastEscTime = time.Time{}
 		}
+		if m.mirror && m.mirrorTakenOver && msg.String() == "r" {
+			return m.RetakeMirror(m.mirrorGeneration + 1)
+		}
+		if m.mirror && msg.String() == "ctrl+\\" {
+			slug := m.slug
+			return m, func() tea.Msg { return TerminalTerminateMsg{Slug: slug} }
+		}
 
 		// Lore scrollback lives on the shifted keys, following the common
 		// terminal-emulator convention (shift+PgUp scrolls the host, plain
@@ -805,7 +1193,7 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 		// string form of modified keys varies across input protocols.
 		if msg.Mod.Contains(tea.ModShift) {
 			visH := m.visibleHeight()
-			if m.tmuxName != "" {
+			if m.tmuxName != "" && !m.mirror {
 				switch msg.Code {
 				case tea.KeyPgUp:
 					m.scrollOffset += visH / 2
@@ -844,6 +1232,29 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 				m.scrollOffset = 0
 				return m, nil
 			}
+		}
+
+		if m.mirror {
+			if !m.mirrorOwned {
+				return m, nil
+			}
+			if msg.Code == tea.KeyEscape {
+				now := time.Now()
+				if !m.lastEscTime.IsZero() && now.Sub(m.lastEscTime) < escDetachWindow {
+					m.lastEscTime = time.Time{}
+					slug := m.slug
+					return m, func() tea.Msg { return TerminalDetachMsg{Slug: slug} }
+				}
+				m.lastEscTime = now
+			}
+			text, key := sessionMirrorKey(msg)
+			if text != "" {
+				return m, sessionMirrorWriteTextCmd(m.slug, m.tmuxName, m.mirrorGeneration, text)
+			}
+			if key != "" {
+				return m, sessionMirrorWriteKeyCmd(m.slug, m.tmuxName, m.mirrorGeneration, key)
+			}
+			return m, nil
 		}
 
 		switch msg.String() {
@@ -927,7 +1338,7 @@ func (m SessionPanelModel) View() (result string) {
 
 		total := m.totalLines()
 		var history []string
-		if m.tmuxName != "" {
+		if m.tmuxName != "" && !m.mirror {
 			history = m.tmuxHistory
 			total = len(history)
 			if m.tmuxScrollError != "" {
@@ -949,7 +1360,7 @@ func (m SessionPanelModel) View() (result string) {
 		}
 
 		var source []string
-		if m.tmuxName != "" {
+		if m.tmuxName != "" && !m.mirror {
 			source = history[startIdx:endIdx]
 		} else {
 			source = m.backend.readScrollback(startIdx, endIdx)
@@ -967,6 +1378,14 @@ func (m SessionPanelModel) View() (result string) {
 		lines = append(lines, "  "+dimS.Render(indicator))
 		return strings.Join(lines, "\n")
 	}
+	if m.mirrorTakenOver {
+		dimS := lipgloss.NewStyle().Foreground(style.ColorDim)
+		return "  " + dimS.Render("mirror taken by another viewer — press r to re-take")
+	}
+	if m.mirror && m.cachedRender == "" && m.mirrorErr != "" {
+		dimS := lipgloss.NewStyle().Foreground(style.ColorDim)
+		return "  " + dimS.Render("mirror unavailable: "+m.mirrorErr)
+	}
 
 	// Live view: return the cached render (updated in Update() handlers).
 	if m.cachedRender == "" && !m.done {
@@ -974,7 +1393,24 @@ func (m SessionPanelModel) View() (result string) {
 		return dimS.Render("  Waiting for output...")
 	}
 
+	if m.mirror {
+		return clipSessionMirrorRender(m.cachedRender, m.width, m.height)
+	}
 	return m.cachedRender
+}
+
+func clipSessionMirrorRender(render string, width, height int) string {
+	if render == "" || width < 1 || height < 1 {
+		return render
+	}
+	lines := strings.Split(render, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for i := range lines {
+		lines[i] = ansi.Cut(lines[i], 0, width)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // PollTerminalCmd returns a Cmd that blocks until PTY data arrives, then drains

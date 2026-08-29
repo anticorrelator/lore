@@ -302,10 +302,10 @@ func (m model) handleCoordinationMemberSelected(msg coordination.MemberSelectedM
 
 // handleCoordinationSessionSelected carries a declared stream target into the
 // sessions workspace: it points the sessions list cursor at the row, loads its
-// detail card, applies the existing attach semantics (local live panel → terminal
-// focus; otherwise the read-only card), and records the coordination view as the
-// one-shot return target. The cursor set is paired with an explicit detail load
-// for the same reason the work path is.
+// detail card, applies the sessions workspace's local-panel or remote-mirror
+// routing, and records the coordination view as the one-shot return target. The
+// cursor set is paired with an explicit detail load for the same reason the work
+// path is.
 func (m model) handleCoordinationSessionSelected(msg coordination.SessionSelectedMsg) (model, tea.Cmd) {
 	m.state = stateSessions
 	m.returnToCoordination = true
