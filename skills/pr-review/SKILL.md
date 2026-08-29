@@ -11,7 +11,7 @@ You are running a **holistic multi-lens PR review**. This skill orchestrates the
 
 For focused single-concern analysis, use individual lens skills directly (`/pr-correctness`, `/pr-security`, etc.).
 
-This skill does not modify source code. Findings are structured and can be posted to GitHub via `post-review.sh`.
+This skill does not modify source code. Findings are structured; proposed comments are posted to GitHub only after triage, via `post-proposed-review.sh`.
 
 ## Step 1: Setup
 
@@ -587,7 +587,7 @@ After the severity groups, present the **Structural Assessment** (Step 3d's stru
 
 ### 5b-supplementary. Supplementary Reports
 
-Supplementary reports are: - **Excluded** from synthesis (Step 4) — they do not affect compound detection, severity counts, or the verdict - **Excluded** from `post-review.sh` output — they are not posted as GitHub review comments - **Included** in the followup report body (Step 6d) for record-keeping
+Supplementary reports are: - **Excluded** from synthesis (Step 4) — they do not affect compound detection, severity counts, or the verdict - **Excluded** from `proposed-comments.json` — they are never posted as GitHub review comments - **Included** in the followup report body (Step 6d) for record-keeping
 
 ### 5c. User interaction
 
@@ -824,4 +824,4 @@ The followup is this mode's sole artifact. Work-item creation is deferred to TUI
 
 ## Resuming
 
-If re-invoked on the same PR, check for existing work items (`pr-lens-review-<PR_NUMBER>` or `pr-review-<PR_NUMBER>` in `/work list`). If found: - Load existing findings from the work item - Offer to run additional lenses or re-run synthesis with new findings - Append rather than overwrite
+Each run produces an independent followup. If re-invoked on the same PR, check the knowledge store's `_followups/` directory for an existing followup for this PR. If one exists: say so, offer to run additional lenses against it or re-run synthesis with new findings, and confirm before creating a second followup — the prior followup is never modified.
