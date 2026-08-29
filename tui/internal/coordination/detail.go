@@ -9,140 +9,88 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/anticorrelator/lore/tui/internal/collection"
+	"github.com/anticorrelator/lore/tui/internal/coordination/board"
 	"github.com/anticorrelator/lore/tui/internal/render"
+	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
 	"github.com/anticorrelator/lore/tui/internal/style"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
-// Tab IDs for the coordination detail's tab host. TabReport is conditional:
-// the tab exists only while the arc's project home has a readable report.md.
+const unknown = "unknown"
+
+type DetailMode string
+
 const (
-	TabStatus   = "status"
-	TabSessions = "sessions"
-	TabItems    = "items"
-	TabLedger   = "ledger"
-	TabReport   = "report"
+	ModePrimary DetailMode = "primary"
+	ModeLedger  DetailMode = "ledger"
+	ModeReport  DetailMode = "report"
+	ModePacket  DetailMode = "packet"
 )
 
 var (
-	attentionStyle = lipgloss.NewStyle().Foreground(style.ColorAttention)
-	pinLiveStyle   = lipgloss.NewStyle().Foreground(style.ColorSuccess)
-	pinDeadStyle   = lipgloss.NewStyle().Foreground(style.ColorDanger).Bold(true)
+	holdStyle = lipgloss.NewStyle().Foreground(style.ColorAttention).Bold(true)
+	flagStyle = lipgloss.NewStyle().Foreground(style.ColorDanger).Bold(true)
 )
 
-// MemberSelectedMsg is emitted when Enter/l lands on an Items-tab member row.
-// The host carries the selection into the work detail and records the
-// coordination view as the return target.
-type MemberSelectedMsg struct {
-	Slug string
-}
+// MemberSelectedMsg asks the host to open a declared work item in the existing
+// work workspace.
+type MemberSelectedMsg struct{ Slug string }
 
-// Member is one entry of an arc's declared membership, joined against the
-// work index. A slug the index cannot resolve keeps its row with Resolved
-// false: the arc declares that member either way, and dropping it would hide
-// a membership list that has drifted from the items it names.
+// SessionSelectedMsg asks the host to open one unambiguous live session in the
+// sessions workspace, which remains the only attach-capable surface.
+type SessionSelectedMsg struct{ RowID string }
+
+// Member is one declared arc member joined against the work index. Unresolved
+// declarations remain present so an absent work item cannot disappear silently.
 type Member struct {
 	Slug     string
 	Item     work.WorkItem
 	Resolved bool
 }
 
-// SessionSelectedMsg is emitted when Enter/l lands on a Sessions-tab row. The
-// host carries the row into the sessions workspace with its existing attach
-// semantics and records the coordination view as the return target.
-type SessionSelectedMsg struct {
-	RowID string
-}
-
-// DetailModel is the coordination arc detail: a tab host over Status
-// (Brief + pin + machine state), Sessions (the arc's sessions across
-// instances), Items (arc members with status badges), and Ledger (the full
-// coordination.md). All content is pushed by the host; the model performs no
-// disk I/O, so it stays headless-testable.
+// DetailModel renders one arc. All content is host-pushed, keeping the model
+// deterministic and headless-testable.
 type DetailModel struct {
-	arc     string
-	width   int
-	height  int
-	tabHost collection.TabHost
+	arc    string
+	width  int
+	height int
+	mode   DetailMode
 
-	contentStartY int
-	contentStartX int
+	members  []Member
+	sessions []sessionview.SessionRow
 
-	members    []Member
-	itemCursor int
-	// blocked lists member slugs with at least one still-active blocker,
-	// derived from the index projection the host pushes.
-	blocked []string
+	rows        []board.Row
+	rendered    []board.RenderedRow
+	rowCursor   int
+	boardLoaded bool
+	boardErr    string
 
-	sessions      []sessionview.SessionRow
-	sessionCursor int
-	// sessionCard is the read-only session card reused from the sessions
-	// workspace; for a cross-instance tmux-hosted row it renders the live
-	// screen mirror the host captures on the poll tick.
-	sessionCard sessionview.DetailModel
-
-	pinLoaded bool
-	pinStatus PinStatus
-	pin       *Pin
-	pinErr    string
+	events []session.Event
 
 	ledgerLoaded bool
 	ledger       string
 	brief        string
 	briefFound   bool
 
-	// report holds report.md's content; reportFound is true whenever the arc
-	// has a report.md at all (an unreadable one still counts as present,
-	// rendering its own dim state). closed comes from the arc record's
-	// declared status, not from the report's presence or age: it decides
-	// which projection the Status tab leads with.
 	report      string
 	reportFound bool
 	closed      bool
 
-	statusViewport viewport.Model
-	itemsViewport  viewport.Model
-	ledgerViewport viewport.Model
-	reportViewport viewport.Model
+	packets    map[string]string
+	packetRef  string
+	packetBody string
+	viewport   viewport.Model
 }
 
-// NewDetailModel builds an empty coordination detail. A zero-value DetailModel
-// blank-renders (nil tab host); always construct through here.
 func NewDetailModel() DetailModel {
-	m := DetailModel{
-		tabHost:     collection.NewTabHost(),
-		sessionCard: sessionview.NewDetailModel(),
-	}
-	m.tabHost.SetDefaultID(TabStatus)
-	m.tabHost.SetTabs(m.buildTabs())
+	m := DetailModel{mode: ModePrimary}
+	m.refresh()
 	return m
 }
 
-// buildTabs returns the tab set: the fixed four, plus a trailing Report tab
-// whenever the arc's project home has a report.md. Descriptors carry identity
-// and label only — content dispatch stays in Update/View.
-func (m DetailModel) buildTabs() []collection.Tab {
-	tabs := []collection.Tab{
-		{ID: TabStatus, Label: "Status"},
-		{ID: TabSessions, Label: "Sessions"},
-		{ID: TabItems, Label: "Items"},
-		{ID: TabLedger, Label: "Ledger"},
-	}
-	if m.reportFound {
-		tabs = append(tabs, collection.Tab{ID: TabReport, Label: "Report"})
-	}
-	return tabs
-}
-
-// Arc returns the arc slug this detail renders, "" when none is selected.
 func (m DetailModel) Arc() string { return m.arc }
 
-// ActiveTabID returns the active tab's ID.
-func (m DetailModel) ActiveTabID() string { return m.tabHost.ActiveID() }
-
-// Title is the detail panel's border title.
 func (m DetailModel) Title() string {
 	if m.arc == "" {
 		return "Coordination"
@@ -150,24 +98,26 @@ func (m DetailModel) Title() string {
 	return m.arc
 }
 
-// SetArc points the detail at a new arc, resetting all per-arc state to
-// explicit loading states until the host's reads land. Setting the same arc
-// again is a no-op so poll-driven re-selection does not flicker.
+func (m DetailModel) Mode() DetailMode { return m.mode }
+
+func (m DetailModel) InDrillIn() bool { return m.mode != ModePrimary }
+
+// SetArc preserves every same-arc identity. A changed arc resets all derived
+// state so stale async responses cannot paint under a new selection.
 func (m *DetailModel) SetArc(arc string) {
 	if arc == m.arc {
 		return
 	}
 	m.arc = arc
+	m.mode = ModePrimary
 	m.members = nil
-	m.itemCursor = 0
-	m.blocked = nil
 	m.sessions = nil
-	m.sessionCursor = 0
-	m.sessionCard = sessionview.NewDetailModel()
-	m.pinLoaded = false
-	m.pin = nil
-	m.pinStatus = PinAbsent
-	m.pinErr = ""
+	m.rows = nil
+	m.rendered = nil
+	m.rowCursor = 0
+	m.boardLoaded = false
+	m.boardErr = ""
+	m.events = nil
 	m.ledgerLoaded = false
 	m.ledger = ""
 	m.brief = ""
@@ -175,452 +125,400 @@ func (m *DetailModel) SetArc(arc string) {
 	m.report = ""
 	m.reportFound = false
 	m.closed = false
-	m.tabHost.SetTabs(m.buildTabs())
-	m.refreshAll()
+	m.packets = nil
+	m.packetRef = ""
+	m.packetBody = ""
+	m.refresh()
 }
 
-// SetMembers replaces the arc's members. active is the ActiveSlugs set over
-// the whole index, used to derive which members are still blocked.
-func (m *DetailModel) SetMembers(members []Member, active map[string]bool) {
-	prevSlug := ""
-	if i := m.itemCursor; i >= 0 && i < len(m.members) {
-		prevSlug = m.members[i].Slug
-	}
-	m.members = members
-	m.itemCursor = 0
-	for i, mem := range members {
-		if mem.Slug == prevSlug {
-			m.itemCursor = i
-			break
-		}
-	}
-	m.blocked = nil
-	for _, mem := range members {
-		for _, b := range mem.Item.BlockedBy {
-			if active[b] {
-				m.blocked = append(m.blocked, mem.Slug)
-				break
-			}
-		}
-	}
-	m.refreshStatus()
-	m.refreshItems()
+func (m *DetailModel) SetMembers(members []Member, _ map[string]bool) {
+	m.members = append([]Member(nil), members...)
+	m.refresh()
 }
 
-// SetSessions replaces the arc's session rows (the host's read-side join),
-// preserving the cursor by RowID and re-syncing the session card.
+// SetSessions preserves no separate cursor: sessions are navigation targets
+// for the selected DAG row, not a second collection inside coordination.
 func (m *DetailModel) SetSessions(rows []sessionview.SessionRow) {
-	prevID := ""
-	if r, ok := m.CurrentSession(); ok {
-		prevID = r.RowID
-	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Display < rows[j].Display })
+	rows = append([]sessionview.SessionRow(nil), rows...)
+	sort.Slice(rows, func(i, j int) bool { return rows[i].RowID < rows[j].RowID })
 	m.sessions = rows
-	m.sessionCursor = 0
-	for i, r := range rows {
-		if r.RowID == prevID {
-			m.sessionCursor = i
-			break
-		}
-	}
-	m.syncSessionCard()
-	m.refreshStatus()
+	m.refresh()
 }
 
-// SetPin records the derived pin state (absent / live / dead) for the arc.
-func (m *DetailModel) SetPin(status PinStatus, pin *Pin) {
-	m.pinLoaded = true
-	m.pinStatus = status
-	m.pin = pin
-	m.pinErr = ""
-	m.refreshStatus()
-}
-
-// SetPinError surfaces an unreadable pin sidecar as its own explicit state —
-// never silently rendered as unpinned.
-func (m *DetailModel) SetPinError(err string) {
-	m.pinLoaded = true
-	m.pinErr = err
-	m.refreshStatus()
-}
-
-// SetLedger stores the ledger content and its extracted Brief. An empty
-// content marks the ledger unreadable; briefFound=false renders the
-// first-class "no Brief yet" state.
 func (m *DetailModel) SetLedger(content, brief string, briefFound bool) {
 	m.ledgerLoaded = true
 	m.ledger = content
 	m.brief = brief
 	m.briefFound = briefFound
-	m.refreshStatus()
-	m.refreshLedger()
+	m.refresh()
 }
 
-// SetReport records the arc's report.md content and its presence. found
-// toggles the conditional Report tab. A found report with empty content is a
-// present-but-unreadable report, rendered as an explicit dim state — never a
-// silent blank.
 func (m *DetailModel) SetReport(report string, found bool) {
 	m.report = report
 	m.reportFound = found
-	m.tabHost.SetTabs(m.buildTabs())
-	m.refreshStatus()
-	m.refreshReport()
+	if !found && m.mode == ModeReport {
+		m.mode = ModePrimary
+	}
+	m.refresh()
 }
 
-// SetClosed records the arc's closure, which the host takes from the arc
-// record's declared status. It arrives with the selection rather than with
-// the ledger read, so the Status tab leads with the right section from the
-// first frame.
 func (m *DetailModel) SetClosed(closed bool) {
 	m.closed = closed
-	m.refreshStatus()
-}
-
-// CurrentItem returns the resolved member item under the Items tab cursor.
-// An unresolved member yields false: there is no work detail to open.
-func (m DetailModel) CurrentItem() (work.WorkItem, bool) {
-	if m.itemCursor < 0 || m.itemCursor >= len(m.members) {
-		return work.WorkItem{}, false
+	if closed && m.mode == ModeReport {
+		m.mode = ModePrimary
 	}
-	mem := m.members[m.itemCursor]
-	if !mem.Resolved {
-		return work.WorkItem{}, false
+	m.refresh()
+}
+
+// SetBoard replaces the fresh status projection while preserving selection by
+// stream identity. Empty fields remain explicit at render time.
+func (m *DetailModel) SetBoard(rows []board.Row, err error) {
+	selected := m.SelectedStream()
+	m.boardLoaded = true
+	m.boardErr = ""
+	if err != nil {
+		m.boardErr = err.Error()
+		m.rows = nil
+		m.rendered = nil
+		m.rowCursor = 0
+		m.refresh()
+		return
 	}
-	return mem.Item, true
-}
-
-// CurrentSession returns the session row under the Sessions tab cursor.
-func (m DetailModel) CurrentSession() (sessionview.SessionRow, bool) {
-	if m.sessionCursor < 0 || m.sessionCursor >= len(m.sessions) {
-		return sessionview.SessionRow{}, false
+	m.rows = append([]board.Row(nil), rows...)
+	m.rebuildRendered()
+	m.rowCursor = 0
+	if selected != "" {
+		m.SelectStream(selected)
 	}
-	return m.sessions[m.sessionCursor], true
+	m.refresh()
 }
 
-// RemoteMirror reports the row the host should capture-pane on the poll tick:
-// the Sessions tab's current row when it is a cross-instance tmux-hosted
-// session and the tab is actually displayed. Visibility scoping keeps the
-// subprocess cost proportional to what the user is looking at.
-func (m DetailModel) RemoteMirror() (rowID, tmuxName string, ok bool) {
-	if m.tabHost.ActiveID() != TabSessions {
-		return "", "", false
+func (m *DetailModel) SetEvents(events []session.Event) {
+	m.events = append([]session.Event(nil), events...)
+	m.refresh()
+}
+
+func (m *DetailModel) SetReviewPackets(packets map[string]string) {
+	m.packets = make(map[string]string, len(packets))
+	for ref, body := range packets {
+		m.packets[ref] = body
 	}
-	return m.sessionCard.RemoteMirror()
+	if m.mode == ModePacket {
+		body, ok := m.packets[m.packetRef]
+		if !ok {
+			m.mode = ModePrimary
+			m.packetRef, m.packetBody = "", ""
+		} else {
+			m.packetBody = body
+		}
+	}
+	m.refresh()
 }
 
-// SetMirror forwards a captured remote screen to the session card, which
-// drops it unless it still matches the displayed row.
-func (m *DetailModel) SetMirror(rowID string, lines []string) {
-	m.sessionCard.SetMirror(rowID, lines)
+// SetContentStart is retained for the shared pane callback. The integrated
+// body has no tab bar to hit-test.
+func (m *DetailModel) SetContentStart(int, int) {}
+
+func (m DetailModel) SelectedStream() string {
+	if m.rowCursor < 0 || m.rowCursor >= len(m.rendered) {
+		return ""
+	}
+	return m.rendered[m.rowCursor].StreamID
 }
 
-// SetContentStart stores the absolute terminal coordinates of the first row
-// of the detail's output so the tab bar can mouse hit-test.
-func (m *DetailModel) SetContentStart(y, x int) {
-	m.contentStartY = y
-	m.contentStartX = x
-	m.tabHost.SetContentStart(y, x)
+func (m *DetailModel) SelectStream(streamID string) bool {
+	for i, row := range m.rendered {
+		if row.StreamID == streamID {
+			m.rowCursor = i
+			m.refresh()
+			return true
+		}
+	}
+	return false
 }
 
-// PreserveTab snapshots the active tab across a host-driven rebuild.
-func (m *DetailModel) PreserveTab() { m.tabHost.Preserve() }
+func (m DetailModel) currentRow() (board.Row, bool) {
+	if m.rowCursor < 0 || m.rowCursor >= len(m.rendered) {
+		return board.Row{}, false
+	}
+	return m.rowByID(m.rendered[m.rowCursor].StreamID)
+}
+
+func explicit(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return unknown
+	}
+	return value
+}
+
+func pointerValue(value *string) string {
+	if value == nil || strings.TrimSpace(*value) == "" {
+		return unknown
+	}
+	return *value
+}
+
+func (m *DetailModel) rebuildRendered() {
+	rows := append([]board.Row(nil), m.rows...)
+	for i := range rows {
+		rows[i].Label = explicit(rows[i].Label)
+		rows[i].Tree = explicit(rows[i].Tree)
+		rows[i].Gate = explicit(rows[i].Gate)
+		rows[i].Status = explicit(rows[i].Status)
+		rows[i].Verdict = explicit(rows[i].Verdict)
+	}
+	m.rendered = board.RenderRows(rows, m.contentWidth())
+}
 
 func (m DetailModel) contentWidth() int {
 	w := m.width - 4
 	if w < 20 {
-		w = 20
+		return 20
 	}
 	return w
 }
 
 func (m DetailModel) contentHeight() int {
-	// overhead: blank(1) + tabbar(1) + blank(1) = 3
-	h := m.height - 3
+	h := m.height - 2
 	if h < 5 {
-		h = 5
+		return 5
 	}
 	return h
 }
 
-func (m *DetailModel) syncSessionCard() {
-	if r, ok := m.CurrentSession(); ok {
-		m.sessionCard.SetSession(r, true)
-	} else {
-		m.sessionCard.SetSession(sessionview.SessionRow{}, false)
-	}
-}
-
-// refreshAll re-renders every tab's content at the current dimensions.
-func (m *DetailModel) refreshAll() {
-	m.refreshStatus()
-	m.refreshItems()
-	m.refreshLedger()
-	m.refreshReport()
-}
-
-func (m *DetailModel) refreshStatus() {
-	offset := m.statusViewport.YOffset()
+func (m *DetailModel) refresh() {
+	offset := m.viewport.YOffset()
+	m.rebuildRendered()
 	vp := viewport.New(viewport.WithWidth(m.contentWidth()), viewport.WithHeight(m.contentHeight()))
-	vp.SetContent(m.renderStatus(m.contentWidth()))
+	vp.SetContent(m.render())
 	vp.SetYOffset(offset)
-	m.statusViewport = vp
+	m.viewport = vp
 }
 
-func (m *DetailModel) refreshItems() {
-	offset := m.itemsViewport.YOffset()
-	vp := viewport.New(viewport.WithWidth(m.contentWidth()), viewport.WithHeight(m.contentHeight()))
-	vp.SetContent(m.renderItems())
-	vp.SetYOffset(offset)
-	m.itemsViewport = vp
-}
-
-func (m *DetailModel) refreshLedger() {
-	offset := m.ledgerViewport.YOffset()
-	vp := viewport.New(viewport.WithWidth(m.contentWidth()), viewport.WithHeight(m.contentHeight()))
-	vp.SetContent(m.renderLedger())
-	vp.SetYOffset(offset)
-	m.ledgerViewport = vp
-}
-
-func (m *DetailModel) refreshReport() {
-	offset := m.reportViewport.YOffset()
-	vp := viewport.New(viewport.WithWidth(m.contentWidth()), viewport.WithHeight(m.contentHeight()))
-	vp.SetContent(m.renderReport())
-	vp.SetYOffset(offset)
-	m.reportViewport = vp
-}
-
-// sectionRule renders "─ Label ────…" in the shared section-framing tokens.
 func sectionRule(label string, width int) string {
 	title := " " + label + " "
 	fill := width - lipgloss.Width(title) - 1
 	if fill < 1 {
 		fill = 1
 	}
-	return style.SectionRule.Render("─") +
-		style.SubsectionTitle.Render(title) +
+	return style.SectionRule.Render("─") + style.SubsectionTitle.Render(title) +
 		style.SectionRule.Render(strings.Repeat("─", fill))
 }
 
-// liveSessionCount counts the arc's live sessions (in-flight spawns are not
-// yet live).
-func (m DetailModel) liveSessionCount() int {
-	n := 0
-	for _, r := range m.sessions {
-		if !r.InFlight {
-			n++
-		}
-	}
-	return n
-}
-
-// renderPinLine renders the pin's three first-class states plus the two
-// transitional ones (still reading, sidecar unreadable).
-func (m DetailModel) renderPinLine() string {
-	label := style.Dim.Render("pin  ")
-	switch {
-	case m.pinErr != "":
-		return label + pinDeadStyle.Render("sidecar unreadable") + style.Dim.Render(" — "+m.pinErr)
-	case !m.pinLoaded:
-		return label + style.Dim.Render("reading…")
-	case m.pinStatus == PinLive:
-		return label + m.pin.Instance + "  " + pinLiveStyle.Render("● live")
-	case m.pinStatus == PinDead:
-		return label + m.pin.Instance + "  " + pinDeadStyle.Render("✗ dead") + style.Dim.Render(" — registry row stale; repin before dispatch")
-	case m.pinStatus == PinNoProject:
-		return label + style.Dim.Render("no project label — no pin home")
-	default:
-		return label + style.Dim.Render("none — dispatch has no standing target")
-	}
-}
-
-func (m DetailModel) renderStatus(width int) string {
+func (m DetailModel) render() string {
 	if m.arc == "" {
-		return style.Dim.Render("Select an arc.")
+		return style.Dim.Render("No arc selected.")
 	}
+	switch m.mode {
+	case ModeLedger:
+		return m.renderDocument("Ledger", m.ledger, m.ledgerLoaded, "coordination.md")
+	case ModeReport:
+		return m.renderDocument("Report", m.report, m.reportFound, "report.md")
+	case ModePacket:
+		return m.renderDocument("Review packet · "+explicit(m.packetRef), m.packetBody, true, explicit(m.packetRef))
+	default:
+		if m.closed {
+			return m.renderDocument("Report", m.report, m.reportFound, "report.md")
+		}
+		return m.renderLive()
+	}
+}
+
+func (m DetailModel) renderDocument(label, body string, found bool, filename string) string {
 	var b strings.Builder
-
-	if m.closed {
-		b.WriteString(sectionRule("Report", width))
-		b.WriteString("\n")
-		if m.report == "" {
-			b.WriteString(style.Dim.Render("report.md could not be read"))
-			b.WriteString("\n")
-		} else {
-			b.WriteString(render.Markdown(m.report, width))
-		}
-	} else {
-		b.WriteString(sectionRule("Brief", width))
-		b.WriteString("\n")
-		switch {
-		case !m.ledgerLoaded:
-			b.WriteString(style.Dim.Render("reading coordination.md…"))
-			b.WriteString("\n")
-		case m.briefFound:
-			b.WriteString(render.Markdown(m.brief, width))
-		default:
-			b.WriteString(style.Dim.Render("no Brief yet — the ledger has no ## Brief section"))
-			b.WriteString("\n")
-		}
-	}
+	b.WriteString(sectionRule(label, m.contentWidth()))
 	b.WriteString("\n")
-
-	b.WriteString(sectionRule("Machine", width))
-	b.WriteString("\n")
-	b.WriteString(m.renderPinLine())
-	b.WriteString("\n")
-	b.WriteString(style.Dim.Render("sessions  "))
-	b.WriteString(fmt.Sprintf("%d live", m.liveSessionCount()))
-	b.WriteString("\n\n")
-
-	b.WriteString(sectionRule("Attention", width))
-	b.WriteString("\n")
-	var attention []string
-	if m.pinLoaded && m.pinStatus == PinDead {
-		attention = append(attention, attentionStyle.Render("✗ pin dead: "+m.pin.Instance)+style.Dim.Render(" — dispatch would refuse"))
-	}
-	for _, slug := range m.blocked {
-		attention = append(attention, attentionStyle.Render("⧗ blocked: ")+slug)
-	}
-	for _, r := range m.sessions {
-		if r.NeedsInput {
-			attention = append(attention, attentionStyle.Render("● needs input: ")+r.Display)
-		}
-	}
-	if len(attention) == 0 {
-		b.WriteString(style.Dim.Render("nothing needs attention"))
-		b.WriteString("\n")
-	} else {
-		for _, a := range attention {
-			b.WriteString(a)
-			b.WriteString("\n")
-		}
+	switch {
+	case !found:
+		b.WriteString(style.Dim.Render(filename + " unknown — document is absent"))
+	case strings.TrimSpace(body) == "":
+		b.WriteString(style.Dim.Render(filename + " unknown — document could not be read"))
+	default:
+		b.WriteString(render.Markdown(body, m.contentWidth()))
 	}
 	return b.String()
 }
 
-// statusBadge renders "● status" through the shared status ramp.
-func statusBadge(status string) string {
-	s := style.StatusDone
-	if status == "active" {
-		s = style.StatusActive
+func (m DetailModel) renderLive() string {
+	var b strings.Builder
+	b.WriteString(sectionRule("Brief", m.contentWidth()))
+	b.WriteString("\n")
+	switch {
+	case !m.ledgerLoaded:
+		b.WriteString(style.Dim.Render("Brief unknown — coordination.md is still loading"))
+	case m.briefFound:
+		b.WriteString(render.Markdown(m.brief, m.contentWidth()))
+	default:
+		b.WriteString(style.Dim.Render("Brief unknown — coordination.md has no ## Brief section"))
 	}
-	return s.Render("● " + status)
+	b.WriteString("\n\n")
+	b.WriteString(sectionRule("Streams", m.contentWidth()))
+	b.WriteString("\n")
+	b.WriteString(m.renderBoard())
+	b.WriteString("\n\n")
+	b.WriteString(sectionRule("Recent activity", m.contentWidth()))
+	b.WriteString("\n")
+	b.WriteString(m.renderEvents())
+	return b.String()
 }
 
-func (m DetailModel) renderItems() string {
-	if m.arc == "" {
-		return style.Dim.Render("Select an arc.")
-	}
-	if len(m.members) == 0 {
-		return style.Dim.Render("no items assigned to this arc yet")
-	}
-	blocked := make(map[string]bool, len(m.blocked))
-	for _, s := range m.blocked {
-		blocked[s] = true
+func (m DetailModel) renderBoard() string {
+	switch {
+	case !m.boardLoaded:
+		return style.Dim.Render("streams unknown — reading coordination status")
+	case m.boardErr != "":
+		return style.Dim.Render("streams unknown — " + m.boardErr)
+	case len(m.rendered) == 0:
+		return style.Dim.Render("streams unknown — no declared stream rows")
 	}
 	var b strings.Builder
-	for i, mem := range m.members {
-		cursor := "  "
-		if i == m.itemCursor {
-			cursor = "▸ "
+	for i, rendered := range m.rendered {
+		prefix := "  "
+		if i == m.rowCursor {
+			prefix = "▸ "
 		}
-		b.WriteString(cursor)
-		if !mem.Resolved {
-			b.WriteString(style.Dim.Render("○ unresolved  " + mem.Slug))
-			b.WriteString("\n")
+		line := rendered.Line
+		row, _ := m.rowByID(rendered.StreamID)
+		switch row.Gate {
+		case "hold":
+			line = holdStyle.Render(line)
+		case "flag":
+			line = flagStyle.Render(line)
+		}
+		b.WriteString(prefix + line + "\n")
+		b.WriteString("    " + style.Dim.Render(m.targetSummary(row)) + "\n")
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func (m DetailModel) rowByID(id string) (board.Row, bool) {
+	for _, row := range m.rows {
+		if row.StreamID == id {
+			return row, true
+		}
+	}
+	return board.Row{}, false
+}
+
+func (m DetailModel) liveSessions(workItem string) []sessionview.SessionRow {
+	declared, _ := m.memberState(workItem)
+	if workItem == "" || workItem == unknown || !declared {
+		return nil
+	}
+	var rows []sessionview.SessionRow
+	for _, row := range m.sessions {
+		if row.InFlight {
 			continue
 		}
-		it := mem.Item
-		b.WriteString(statusBadge(it.Status))
-		b.WriteString("  ")
-		b.WriteString(it.Slug)
-		if blocked[it.Slug] {
-			b.WriteString("  ")
-			b.WriteString(attentionStyle.Render("⧗ blocked"))
+		if row.Slug == workItem || row.BaseItem == workItem {
+			rows = append(rows, row)
 		}
-		if it.Title != "" && it.Title != it.Slug {
-			b.WriteString("\n     ")
-			b.WriteString(style.Dim.Render(it.Title))
+	}
+	return rows
+}
+
+func (m DetailModel) memberState(slug string) (declared, resolved bool) {
+	for _, member := range m.members {
+		if member.Slug == slug {
+			return true, member.Resolved
 		}
-		b.WriteString("\n")
 	}
-	return b.String()
+	return false, false
 }
 
-func (m DetailModel) renderLedger() string {
+func gateRow(gate string) bool { return gate == "hold" || gate == "flag" }
+
+func (m DetailModel) targetSummary(row board.Row) string {
+	workItem := pointerValue(row.WorkItem)
+	packet := pointerValue(row.ReviewPacket)
+	declared, resolved := m.memberState(workItem)
+	workLabel := workItem
+	if workItem != unknown && !declared {
+		workLabel += " (not an arc member)"
+	} else if workItem != unknown && !resolved {
+		workLabel += " (unresolved)"
+	}
+	if gateRow(row.Gate) {
+		if _, ok := m.packets[packet]; ok {
+			return fmt.Sprintf("work item %s · packet %s · target packet", workLabel, packet)
+		}
+		if resolved {
+			return fmt.Sprintf("work item %s · packet %s · target work item", workLabel, packet)
+		}
+		return fmt.Sprintf("work item %s · packet %s · target unknown", workLabel, packet)
+	}
+	sessions := m.liveSessions(workItem)
 	switch {
-	case m.arc == "":
-		return style.Dim.Render("Select an arc.")
-	case !m.ledgerLoaded:
-		return style.Dim.Render("reading coordination.md…")
-	case m.ledger == "":
-		return style.Dim.Render("coordination.md could not be read")
+	case len(sessions) == 1:
+		return fmt.Sprintf("work item %s · packet %s · target session %s", workLabel, packet, explicit(sessions[0].Display))
+	case resolved && len(sessions) > 1:
+		return fmt.Sprintf("work item %s · packet %s · session ambiguous (%d live) · target work item", workLabel, packet, len(sessions))
+	case resolved:
+		return fmt.Sprintf("work item %s · packet %s · session unknown · target work item", workLabel, packet)
+	default:
+		return fmt.Sprintf("work item %s · packet %s · target unknown", workLabel, packet)
 	}
-	return render.Markdown(m.ledger, m.contentWidth())
 }
 
-func (m DetailModel) renderReport() string {
-	switch {
-	case m.arc == "":
-		return style.Dim.Render("Select an arc.")
-	case !m.reportFound:
-		return style.Dim.Render("no report.md for this arc")
-	case m.report == "":
-		return style.Dim.Render("report.md could not be read")
-	}
-	return render.Markdown(m.report, m.contentWidth())
-}
-
-// renderSessions renders the Sessions tab: the arc's rows with a cursor, then
-// the read-only card (or live mirror) for the selected row.
-func (m DetailModel) renderSessions() string {
-	if m.arc == "" {
-		return style.Dim.Render("Select an arc.")
-	}
-	if len(m.sessions) == 0 {
-		return style.Dim.Render("no sessions for this arc")
+func (m DetailModel) renderEvents() string {
+	if len(m.events) == 0 {
+		return style.Dim.Render("activity unknown — no matching journal events")
 	}
 	var b strings.Builder
-	for i, r := range m.sessions {
-		cursor := "  "
-		if i == m.sessionCursor {
-			cursor = "▸ "
+	for _, event := range m.events {
+		identity := explicit(event.Slug)
+		if identity == unknown && event.Links != nil {
+			identity = explicit(event.Links["work_item"])
 		}
-		badge, badgeStyle := sessionBadge(r)
-		lineText := r.Display + "  " + r.Type
-		if i == m.sessionCursor {
-			b.WriteString(cursor + lineText + "  " + badgeStyle.Render(badge))
-		} else {
-			b.WriteString(cursor + style.Dim.Render(lineText) + "  " + badgeStyle.Render(badge))
-		}
-		if !r.Local {
-			b.WriteString("  " + style.Dim.Render("@"+r.Instance))
-		}
-		b.WriteString("\n")
+		fmt.Fprintf(&b, "• %s · %s · %s\n", explicit(event.TS), explicit(event.Event), identity)
 	}
-	b.WriteString("\n")
-	b.WriteString(m.sessionCard.View())
-	return b.String()
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
-// sessionBadge mirrors the sessions list's next-action vocabulary.
-func sessionBadge(r sessionview.SessionRow) (string, lipgloss.Style) {
-	switch {
-	case r.InFlight:
-		return "spawning", style.StatusWarn
-	case r.NeedsInput:
-		return "needs input", attentionStyle
-	case r.ClosePending:
-		return "close pending", attentionStyle
-	case !r.Local:
-		return "◆ active", style.Dim
-	case r.Quiescent:
-		return "idle", style.Dim
-	default:
-		return "running", style.StatusActive
+func (m *DetailModel) openCurrent() tea.Cmd {
+	row, ok := m.currentRow()
+	if !ok {
+		return nil
 	}
+	workItem := pointerValue(row.WorkItem)
+	packet := pointerValue(row.ReviewPacket)
+	if gateRow(row.Gate) {
+		if body, readable := m.packets[packet]; readable {
+			m.mode = ModePacket
+			m.packetRef = packet
+			m.packetBody = body
+			m.viewport.SetYOffset(0)
+			m.refresh()
+			return nil
+		}
+		_, resolved := m.memberState(workItem)
+		if resolved {
+			return func() tea.Msg { return MemberSelectedMsg{Slug: workItem} }
+		}
+		return nil
+	}
+	if sessions := m.liveSessions(workItem); len(sessions) == 1 {
+		rowID := sessions[0].RowID
+		return func() tea.Msg { return SessionSelectedMsg{RowID: rowID} }
+	}
+	_, resolved := m.memberState(workItem)
+	if resolved {
+		return func() tea.Msg { return MemberSelectedMsg{Slug: workItem} }
+	}
+	return nil
+}
+
+func (m *DetailModel) openMode(mode DetailMode) {
+	switch mode {
+	case ModeLedger:
+		m.mode = mode
+	case ModeReport:
+		if !m.closed && m.reportFound {
+			m.mode = mode
+		}
+	}
+	m.viewport.SetYOffset(0)
+	m.refresh()
 }
 
 func (m DetailModel) Init() tea.Cmd { return nil }
@@ -628,95 +526,48 @@ func (m DetailModel) Init() tea.Cmd { return nil }
 func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.tabHost.SetWidth(m.contentWidth())
-		// The session card consumes forwarded inner dimensions verbatim.
-		m.sessionCard, _ = m.sessionCard.Update(tea.WindowSizeMsg{Width: m.contentWidth(), Height: m.contentHeight()})
-		m.refreshAll()
+		m.width, m.height = msg.Width, msg.Height
+		m.refresh()
 		return m, nil
-
-	case tea.MouseMsg:
-		// Tab bar click hit-test; other mouse events scroll the active tab.
-		if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
-			if click.Y == m.contentStartY+1 && len(m.tabHost.Tabs()) > 0 {
-				m.tabHost, _ = m.tabHost.Update(click)
+	case tea.KeyPressMsg:
+		if m.InDrillIn() {
+			switch msg.String() {
+			case "h", "esc":
+				m.mode = ModePrimary
+				m.packetRef, m.packetBody = "", ""
+				m.viewport.SetYOffset(0)
+				m.refresh()
 				return m, nil
 			}
+		} else if !m.closed {
+			switch msg.String() {
+			case "j", "down":
+				if m.rowCursor < len(m.rendered)-1 {
+					m.rowCursor++
+					m.refresh()
+				}
+				return m, nil
+			case "k", "up":
+				if m.rowCursor > 0 {
+					m.rowCursor--
+					m.refresh()
+				}
+				return m, nil
+			case "enter", "l":
+				return m, m.openCurrent()
+			}
 		}
-
-	case tea.KeyPressMsg:
 		switch msg.String() {
-		case "tab", "shift+tab":
-			m.tabHost, _ = m.tabHost.Update(msg)
+		case "e":
+			m.openMode(ModeLedger)
+			return m, nil
+		case "r":
+			m.openMode(ModeReport)
 			return m, nil
 		}
-		switch m.tabHost.ActiveID() {
-		case TabItems:
-			// Items tab: j/k walks the arc's members; Enter/l drills into the
-			// selected member's work detail.
-			if len(m.members) > 0 {
-				switch msg.String() {
-				case "j", "down":
-					if m.itemCursor < len(m.members)-1 {
-						m.itemCursor++
-						m.refreshItems()
-					}
-					return m, nil
-				case "k", "up":
-					if m.itemCursor > 0 {
-						m.itemCursor--
-						m.refreshItems()
-					}
-					return m, nil
-				case "enter", "l":
-					if it, ok := m.CurrentItem(); ok {
-						slug := it.Slug
-						return m, func() tea.Msg { return MemberSelectedMsg{Slug: slug} }
-					}
-					return m, nil
-				}
-			}
-		case TabSessions:
-			// Sessions tab: j/k walks the arc's session rows; Enter/l drills into
-			// the selected session's surface in the sessions workspace.
-			if len(m.sessions) > 0 {
-				switch msg.String() {
-				case "j", "down":
-					if m.sessionCursor < len(m.sessions)-1 {
-						m.sessionCursor++
-						m.syncSessionCard()
-					}
-					return m, nil
-				case "k", "up":
-					if m.sessionCursor > 0 {
-						m.sessionCursor--
-						m.syncSessionCard()
-					}
-					return m, nil
-				case "enter", "l":
-					if r, ok := m.CurrentSession(); ok {
-						id := r.RowID
-						return m, func() tea.Msg { return SessionSelectedMsg{RowID: id} }
-					}
-					return m, nil
-				}
-			}
-		}
 	}
-
-	// Forward to the active tab's viewport for scrolling.
 	var cmd tea.Cmd
-	switch m.tabHost.ActiveID() {
-	case TabStatus:
-		m.statusViewport, cmd = m.statusViewport.Update(msg)
-	case TabItems:
-		m.itemsViewport, cmd = m.itemsViewport.Update(msg)
-	case TabLedger:
-		m.ledgerViewport, cmd = m.ledgerViewport.Update(msg)
-	case TabReport:
-		m.reportViewport, cmd = m.reportViewport.Update(msg)
-	}
+	m.viewport, cmd = m.viewport.Update(msg)
 	return m, cmd
 }
 
@@ -725,21 +576,5 @@ func (m DetailModel) View() string {
 		return "\n  " + style.Dim.Render("No arc selected.") + "\n\n  " +
 			style.Dim.Render("`lore arc open` starts an arc; it appears here as its own row.") + "\n"
 	}
-	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString(m.tabHost.ViewBar())
-	b.WriteString("\n\n")
-	switch m.tabHost.ActiveID() {
-	case TabSessions:
-		b.WriteString(m.renderSessions())
-	case TabItems:
-		b.WriteString(m.itemsViewport.View())
-	case TabLedger:
-		b.WriteString(m.ledgerViewport.View())
-	case TabReport:
-		b.WriteString(m.reportViewport.View())
-	default:
-		b.WriteString(m.statusViewport.View())
-	}
-	return b.String()
+	return "\n" + m.viewport.View()
 }

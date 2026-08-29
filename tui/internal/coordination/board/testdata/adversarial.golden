@@ -4,6 +4,6 @@
  ○─╯ │     d     diamond join                            pending gate:notify verdict:—  waits: b, c
      │ ○   e     refers to ghost                         pending gate:notify verdict:—  ⚠ dep?zz
      ✕     f     abandoned path                          dropped gate:notify verdict:—
- ?         g     novel status                            parked-for-review (?) ·ro gate:notify verdict:—
+ ?         g     novel status                            parked-for-review ·ro gate:notify verdict:—
    ○       y     cycle two                               pending gate:notify verdict:—  waits: x  ⟳ cycle
    ○       x     cycle one                               pending gate:notify verdict:—  waits: y  ⟳ cycle

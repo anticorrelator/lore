@@ -380,13 +380,13 @@ LIVE="$TEST_DIR/arc-live"
 setup_store "$LIVE"
 write_arc "$LIVE" live-arc active
 cat > "$LIVE/_work/_arcs/live-arc/coordination.md" <<'EOF'
-| # | Step | Depends on | Tree | Gate | Status | Verdict |
-|---|---|---|---|---|---|---|
-| s-inflight | Live step | — | writer | notify | in-flight | — |
-| s-prefreeze | Allocated step | — | writer | flag | pending | — |
-| s-ready | Untouched step | — | writer | hold | pending | — |
-| s-readonly | Dispatched read-only step | — | read-only | notify | pending | — |
-| s-accepted | Accepted read-only step | — | read-only | notify | pending | — |
+| # | Step | Depends on | Tree | Gate | Status | Verdict | Evidence / SHA |
+|---|---|---|---|---|---|---|---|
+| s-inflight | Live step ([[work:first]], [[work:second]]) | — | writer | notify | in-flight | — | [one](one.md), [two](two.md) |
+| s-prefreeze | Allocated step | — | writer | flag | pending | — | [unsafe](../outside.md), [malformed](http://[) |
+| s-ready | Untouched step ([[work:ready-item]]) | — | writer | hold | pending | — | [owner packet](packets/owner-read.md) |
+| s-readonly | Dispatched read-only step | — | read-only | notify | pending | — | — |
+| s-accepted | Accepted read-only step | — | read-only | notify | pending | — | — |
 EOF
 write_worktree_identity "$LIVE" wt-prefreeze live-arc s-prefreeze a1
 python3 "$RECONCILE" register-attempt --kdir "$LIVE" --slug live-arc \
@@ -415,8 +415,17 @@ assert_eq "the complete stream projection preserves ledger declaration order" \
   "s-inflight,s-prefreeze,s-ready,s-readonly,s-accepted" \
   "$(jq -r '[.coordination_streams[] | select(.arc=="live-arc") | .stream_id] | join(",")' "$LIVE_JSON")"
 assert_eq "the complete stream projection carries the board's authored cells" \
-  "Untouched step|hold|—" \
+  "Untouched step ([[work:ready-item]])|hold|—" \
   "$(jq -r '[.coordination_streams[] | select(.arc=="live-arc" and .stream_id=="s-ready")][0] | [.step,.gate,.verdict] | join("|")' "$LIVE_JSON")"
+assert_eq "a unique Step backlink and arc-relative Markdown document are explicit navigation fields" \
+  "ready-item|packets/owner-read.md" \
+  "$(jq -r '[.coordination_streams[] | select(.arc=="live-arc" and .stream_id=="s-ready")][0] | [.work_item,.review_packet] | join("|")' "$LIVE_JSON")"
+assert_eq "ambiguous declared references remain null" "null|null" \
+  "$(jq -r '[.coordination_streams[] | select(.arc=="live-arc" and .stream_id=="s-inflight")][0] | [.work_item,.review_packet] | map(tostring) | join("|")' "$LIVE_JSON")"
+assert_eq "unsafe packet traversal remains null" "null" \
+  "$(jq -r '[.coordination_streams[] | select(.arc=="live-arc" and .stream_id=="s-prefreeze")][0].review_packet | tostring' "$LIVE_JSON")"
+assert_eq "every complete stream row exposes nullable navigation keys" "true" \
+  "$(jq -r 'all(.coordination_streams[]; has("work_item") and has("review_packet"))' "$LIVE_JSON")"
 assert_eq "a live stream is an active attempt" "3" \
   "$(jq -r '.coordination_dispatch.active_attempts' "$LIVE_JSON")"
 assert_eq "a read ledger with dispatchable streams names no reason" "null" \
@@ -434,8 +443,11 @@ assert_eq "a dispatched read-only attempt is never redispatched" "0" \
 assert_eq "a stream with no attempt records the absence explicitly" "false" \
   "$(jq -r '[.buckets.act_now[] | select(.observed_facts.stream_id?=="s-ready")][0].observed_facts.attempt_present' "$LIVE_JSON")"
 assert_eq "existing bucket stream facts gain step and gate without losing verdict" \
-  "Untouched step|hold|—" \
+  "Untouched step ([[work:ready-item]])|hold|—" \
   "$(jq -r '[.buckets.act_now[] | select(.observed_facts.stream_id?=="s-ready")][0].observed_facts | [.step,.gate,.verdict] | join("|")' "$LIVE_JSON")"
+assert_eq "bucket stream facts carry the same declared navigation identity" \
+  "ready-item|packets/owner-read.md" \
+  "$(jq -r '[.buckets.act_now[] | select(.observed_facts.stream_id?=="s-ready")][0].observed_facts | [.work_item,.review_packet] | join("|")' "$LIVE_JSON")"
 assert_eq "the ledger locator points into the arc record" "true" \
   "$(jq -r '[.buckets[][] | select(.evidence.locator | startswith("_work/_arcs/live-arc/coordination.md#L"))] | length > 0' "$LIVE_JSON")"
 assert_eq "a closed arc's ledger is not projected" "0" \

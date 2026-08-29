@@ -9,6 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/collection"
+	"github.com/anticorrelator/lore/tui/internal/coordination/board"
 	"github.com/anticorrelator/lore/tui/internal/style"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
@@ -19,6 +20,14 @@ type ArcSelectedMsg struct {
 	Slug string
 }
 
+// AttentionSelectedMsg is emitted when Enter lands on a cross-arc attention
+// row. The host resolves both identities without widening either one.
+type AttentionSelectedMsg struct {
+	Bucket   board.AttentionBucket
+	Arc      string
+	StreamID string
+}
+
 var listColumns = []collection.Column{
 	{Key: "arc", Title: "ARC", Width: 24, Priority: 0, Flex: true},
 	{Key: "state", Title: "STATE", Width: 8, Priority: 1},
@@ -26,6 +35,15 @@ var listColumns = []collection.Column{
 	{Key: "items", Title: "ITEMS", Width: 6, Priority: 2},
 	{Key: "project", Title: "PROJECT", Width: 18, Priority: 3},
 }
+
+var attentionColumns = []collection.Column{
+	{Key: "attention", Title: "ATTENTION", Width: 36, Priority: 0, Flex: true},
+	{Key: "status", Title: "STATUS", Width: 16, Priority: 1},
+	{Key: "gate", Title: "GATE", Width: 14, Priority: 1},
+	{Key: "verdict", Title: "VERDICT", Width: 16, Priority: 2},
+}
+
+const maxAttentionHeight = 10
 
 // noProjectCell is what an arc with no project label shows in the PROJECT
 // column. Project is a label an arc may simply not carry.
@@ -209,11 +227,28 @@ type ListModel struct {
 	// skipped counts store records the scan could not use.
 	skipped int
 	list    collection.List
+
+	attention        collection.List
+	attentionData    board.Attention
+	attentionRows    map[string]board.AttentionRow
+	staleAttentionID string
+	attentionLoaded  bool
+	attentionErr     string
+	attentionFocused bool
+	width            int
+	height           int
 }
 
 // NewListModel builds an empty arc list.
 func NewListModel() ListModel {
-	m := ListModel{list: collection.NewList(listColumns)}
+	m := ListModel{
+		list:          collection.NewList(listColumns),
+		attention:     collection.NewList(attentionColumns),
+		attentionData: make(board.Attention),
+		attentionRows: make(map[string]board.AttentionRow),
+		width:         80,
+		height:        30,
+	}
 	m.list.SetDecorator(decorateHeaderRule)
 	m.list.SetOnSelect(func(r collection.Row) tea.Cmd {
 		if r.Header || r.ID == "" {
@@ -222,7 +257,19 @@ func NewListModel() ListModel {
 		slug := r.ID
 		return func() tea.Msg { return ArcSelectedMsg{Slug: slug} }
 	})
+	m.attention.SetDecorator(decorateAttentionRow)
+	m.attention.SetOnSelect(func(r collection.Row) tea.Cmd {
+		bucket, arc, streamID, ok := parseAttentionID(r.ID)
+		if r.Header || !ok {
+			return nil
+		}
+		return func() tea.Msg {
+			return AttentionSelectedMsg{Bucket: bucket, Arc: arc, StreamID: streamID}
+		}
+	})
 	m.refreshRows()
+	m.refreshAttentionRows()
+	m.resizeLists()
 	return m
 }
 
@@ -232,6 +279,151 @@ func (m *ListModel) SetArcs(arcs []Arc, skipped int) {
 	m.arcs = arcs
 	m.skipped = skipped
 	m.refreshRows()
+}
+
+// SetAttention replaces the sparse action projection. The attention cursor is
+// preserved by bucket, arc, and stream identity independently of the arc list.
+// If its row disappeared, one stale row retains that identity until the user
+// moves elsewhere or a later refresh restores it.
+func (m *ListModel) SetAttention(attention board.Attention, err error) {
+	selectedID := m.attention.CurrentID()
+	selected, hadSelected := m.attentionRows[selectedID]
+
+	m.attentionLoaded = true
+	m.attentionErr = ""
+	m.staleAttentionID = ""
+	m.attentionData = make(board.Attention, len(board.AttentionBucketOrder))
+	m.attentionRows = make(map[string]board.AttentionRow)
+	if err != nil {
+		m.attentionErr = err.Error()
+	} else {
+		for _, bucket := range board.AttentionBucketOrder {
+			m.attentionData[bucket] = append([]board.AttentionRow(nil), attention[bucket]...)
+			for _, row := range attention[bucket] {
+				m.attentionRows[attentionID(row)] = row
+			}
+		}
+	}
+	if hadSelected {
+		if _, ok := m.attentionRows[selectedID]; !ok {
+			m.attentionRows[selectedID] = selected
+			m.attentionData[selected.Bucket] = append(m.attentionData[selected.Bucket], selected)
+			m.staleAttentionID = selectedID
+		}
+	}
+	m.refreshAttentionRows()
+}
+
+// AttentionFocused reports which collection owns j/k and Enter in the top pane.
+func (m ListModel) AttentionFocused() bool { return m.attentionFocused }
+
+// CurrentAttention returns the exact attention identity under its cursor.
+func (m ListModel) CurrentAttention() (board.AttentionBucket, string, string, bool) {
+	return parseAttentionID(m.attention.CurrentID())
+}
+
+// SetCursorBySlug moves the arc cursor only when the arc is currently visible.
+// A miss leaves the cursor unchanged so callers cannot land on a neighbor.
+func (m *ListModel) SetCursorBySlug(slug string) bool { return m.list.SetCursorByID(slug) }
+
+func attentionID(row board.AttentionRow) string {
+	return string(row.Bucket) + "\x1f" + row.Arc + "\x1f" + row.StreamID
+}
+
+func parseAttentionID(id string) (board.AttentionBucket, string, string, bool) {
+	parts := strings.SplitN(id, "\x1f", 3)
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return "", "", "", false
+	}
+	return board.AttentionBucket(parts[0]), parts[1], parts[2], true
+}
+
+func attentionBucketLabel(bucket board.AttentionBucket) string {
+	switch bucket {
+	case board.ActNow:
+		return "Act now"
+	case board.NeedsJudgment:
+		return "Needs judgment"
+	case board.Waiting:
+		return "Waiting"
+	case board.Reconcile:
+		return "Reconcile"
+	default:
+		return explicit(string(bucket))
+	}
+}
+
+func (m *ListModel) refreshAttentionRows() {
+	var rows []collection.Row
+	for _, bucket := range board.AttentionBucketOrder {
+		members := m.attentionData[bucket]
+		label := attentionBucketLabel(bucket)
+		switch {
+		case m.attentionErr != "":
+			label += " · unknown"
+		case !m.attentionLoaded:
+			label += " · loading"
+		case len(members) == 0:
+			label += " · none"
+		default:
+			label += fmt.Sprintf(" (%d)", len(members))
+		}
+		rows = append(rows, collection.Row{Header: true, Title: collection.Cell{Text: label, Style: sectionHeaderStyle}})
+		for _, row := range members {
+			rows = append(rows, attentionRow(row, m.attentionErr != "" || attentionID(row) == m.staleAttentionID))
+		}
+	}
+	m.attention.SetRows(rows)
+}
+
+func attentionRow(row board.AttentionRow, stale bool) collection.Row {
+	label := explicit(row.Label)
+	if label == unknown {
+		label = explicit(row.Title)
+	}
+	title := fmt.Sprintf("[%s] %s", explicit(row.Arc), label)
+	status := explicit(row.Status)
+	gate := explicit(row.Gate)
+	verdict := explicit(row.Verdict)
+	if stale {
+		title += " · stale/unknown target"
+	}
+	return collection.Row{
+		ID: attentionID(row),
+		Cells: []collection.Cell{
+			{Text: title},
+			{Text: "status:" + status, Style: style.Dim},
+			{Text: "gate:" + gate, Style: style.Dim},
+			{Text: "verdict:" + verdict, Style: style.Dim},
+		},
+		Title: collection.Cell{Text: title},
+		Meta: []collection.Cell{
+			{Text: "status:" + status, Style: style.Dim},
+			{Text: "gate:" + gate, Style: style.Dim},
+			{Text: "verdict:" + verdict, Style: style.Dim},
+		},
+	}
+}
+
+func decorateAttentionRow(row collection.Row, selected bool, lines []string) []string {
+	if row.Header {
+		return lines
+	}
+	gate := ""
+	if len(row.Meta) > 1 {
+		gate = strings.TrimPrefix(row.Meta[1].Text, "gate:")
+	}
+	styled := make([]string, len(lines))
+	copy(styled, lines)
+	for i, line := range styled {
+		switch gate {
+		case "hold":
+			styled[i] = holdStyle.Render(line)
+		case "flag":
+			styled[i] = flagStyle.Render(line)
+		}
+	}
+	return styled
 }
 
 // ShowArchived reports whether the archived arcs are revealed.
@@ -343,22 +535,82 @@ func arcRow(a Arc, bucket Bucket) collection.Row {
 func (m ListModel) Init() tea.Cmd { return nil }
 
 func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width, m.height = size.Width, size.Height
+		m.resizeLists()
+		return m, nil
+	}
 	if km, ok := msg.(tea.KeyPressMsg); ok {
 		switch km.String() {
+		case "a":
+			m.attentionFocused = !m.attentionFocused
+			return m, nil
 		case "ctrl+a":
 			m.showArchived = !m.showArchived
 			m.refreshRows()
 			m.list.CursorToFirstItem()
 			return m, nil
 		case "j", "down", "k", "up":
+			if m.attentionFocused {
+				attention, cmd := m.attention.Update(msg)
+				m.attention = attention
+				return m, tea.Batch(cmd, m.skipAttentionHeaders(msg))
+			}
 			l, cmd := m.list.Update(msg)
 			m.list = l
 			return m, tea.Batch(cmd, m.skipHeaders(msg))
 		}
 	}
+	if m.attentionFocused {
+		attention, cmd := m.attention.Update(msg)
+		m.attention = attention
+		return m, cmd
+	}
 	l, cmd := m.list.Update(msg)
 	m.list = l
 	return m, cmd
+}
+
+func (m *ListModel) resizeLists() {
+	available := m.height - 2 // one label for each collection
+	if available < 2 {
+		available = 2
+	}
+	attentionHeight := available / 3
+	if attentionHeight < 5 {
+		attentionHeight = 5
+	}
+	if attentionHeight > maxAttentionHeight {
+		attentionHeight = maxAttentionHeight
+	}
+	if attentionHeight >= available {
+		attentionHeight = max(1, available/2)
+	}
+	m.attention.SetSize(m.width, attentionHeight)
+	m.list.SetSize(m.width, max(1, available-attentionHeight))
+}
+
+func (m *ListModel) skipAttentionHeaders(travel tea.Msg) tea.Cmd {
+	var cmds []tea.Cmd
+	step := func(msg tea.Msg) bool {
+		before := m.attention.Cursor()
+		attention, cmd := m.attention.Update(msg)
+		m.attention = attention
+		cmds = append(cmds, cmd)
+		return m.attention.Cursor() != before
+	}
+	onHeader := func() bool {
+		row, ok := m.attention.CurrentRow()
+		return ok && row.Header
+	}
+	for onHeader() && step(travel) {
+	}
+	if onHeader() {
+		back := reverseTravel(travel)
+		for onHeader() && step(back) {
+		}
+	}
+	return tea.Batch(cmds...)
 }
 
 // skipHeaders steps the cursor off a header row and returns the commands the
@@ -407,7 +659,24 @@ func reverseTravel(msg tea.Msg) tea.Msg {
 	return msg
 }
 
-func (m ListModel) View() string { return m.list.View() }
+func (m ListModel) View() string {
+	attentionMarker, arcsMarker := "  ", "▸ "
+	if m.attentionFocused {
+		attentionMarker, arcsMarker = "▸ ", "  "
+	}
+	var b strings.Builder
+	b.WriteString(sectionHeaderStyle.Render(attentionMarker + "Attention"))
+	b.WriteString("\n")
+	if m.attentionErr != "" {
+		b.WriteString(style.Dim.Render("  Attention unknown — " + m.attentionErr))
+		b.WriteString("\n")
+	}
+	b.WriteString(m.attention.View())
+	b.WriteString(sectionHeaderStyle.Render(arcsMarker + "Arcs"))
+	b.WriteString("\n")
+	b.WriteString(m.list.View())
+	return b.String()
+}
 
 // CurrentSlug returns the arc slug under the cursor, or "" on an empty list.
 func (m ListModel) CurrentSlug() string { return m.list.CurrentID() }

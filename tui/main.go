@@ -18,16 +18,35 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
-// classifyStartupState returns stateOnboarding if the knowledge store is
-// uninitialized (manifest or work index missing), otherwise stateWork.
-func classifyStartupState(cfg config.Config) appState {
+type startupSnapshot struct {
+	state   appState
+	arcs    []coordination.Arc
+	skipped int
+}
+
+// classifyStartup returns onboarding for an uninitialized store. An initialized
+// store opens coordination only when an arc explicitly declares itself active.
+func classifyStartup(cfg config.Config) startupSnapshot {
 	if _, err := os.Stat(filepath.Join(cfg.KnowledgeDir, "_manifest.json")); err != nil {
-		return stateOnboarding
+		return startupSnapshot{state: stateOnboarding}
 	}
 	if _, err := os.Stat(filepath.Join(cfg.WorkDir, "_index.json")); err != nil {
-		return stateOnboarding
+		return startupSnapshot{state: stateOnboarding}
 	}
-	return stateWork
+
+	arcs, skipped := coordination.ScanArcs(cfg.WorkDir)
+	state := stateWork
+	for _, arc := range arcs {
+		if arc.Status == coordination.StatusActive {
+			state = stateCoordination
+			break
+		}
+	}
+	return startupSnapshot{state: state, arcs: arcs, skipped: skipped}
+}
+
+func classifyStartupState(cfg config.Config) appState {
+	return classifyStartup(cfg).state
 }
 
 // newModel constructs the root model with its list sub-models initialized.
@@ -79,13 +98,19 @@ func main() {
 	prefs := config.LoadPrefs()
 
 	startState := stateWork
+	var startupArcs []coordination.Arc
+	startupSkipped := 0
 	if errors.Is(err, config.ErrNoRepo) {
 		startState = stateNoRepo
 	} else {
-		startState = classifyStartupState(cfg)
+		startup := classifyStartup(cfg)
+		startState = startup.state
+		startupArcs = startup.arcs
+		startupSkipped = startup.skipped
 	}
 
 	m := newModel(cfg, prefs, startState)
+	m.coordinationList.SetArcs(startupArcs, startupSkipped)
 
 	// Resolve this instance's session-substrate identity. A generated word-pair
 	// name is collision-checked against live instances; an explicit

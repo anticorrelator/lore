@@ -12,6 +12,7 @@ import (
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/coordination"
+	"github.com/anticorrelator/lore/tui/internal/coordination/board"
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
 	"github.com/anticorrelator/lore/tui/internal/work"
@@ -30,9 +31,20 @@ func coordinationContractModel(t *testing.T) model {
 		{Slug: "arc-a", Status: coordination.StatusActive, Items: 1, Members: []string{"item-a"}},
 		{Slug: "arc-b", Status: coordination.StatusActive, Items: 1, Members: []string{"item-b"}},
 	}, 0)
+	m.coordinationList.SetAttention(board.Attention{
+		board.ActNow: {
+			{Bucket: board.ActNow, Arc: "arc-a", StreamID: "s1", Label: "Run item A", Gate: "hold", Status: "pending", Verdict: "unknown"},
+			{Bucket: board.ActNow, Arc: "arc-b", StreamID: "s2", Label: "Run item B", Gate: "flag", Status: "pending", Verdict: "unknown"},
+		},
+		board.NeedsJudgment: {}, board.Waiting: {}, board.Reconcile: {},
+	}, nil)
 	m.coordinationDetail.SetArc("arc-a")
+	m.syncCoordinationMembers()
 	m.coordinationDetail.SetLedger("## Brief\n\nlanded: mirror\n", "landed: mirror", true)
-	m.coordinationDetail.SetPin(coordination.PinAbsent, nil)
+	m.coordinationDetail.SetBoard([]board.Row{{
+		Arc: "arc-a", StreamID: "s1", Label: "Run item A", Gate: "notify",
+		Status: "pending", Verdict: "unknown", WorkItem: strptrMain("item-a"),
+	}}, nil)
 	m.coordinationPanelCallbacks().resize()
 	return m
 }
@@ -95,6 +107,16 @@ func TestCoordinationListStatusBarKeybindContract(t *testing.T) {
 		nm, _ = updateModel(t, nm, press('k'))
 		if nm.coordinationList.CurrentSlug() != "arc-a" {
 			t.Errorf("k should return the cursor, got %q", nm.coordinationList.CurrentSlug())
+		}
+	})
+	t.Run("a (attention focus)", func(t *testing.T) {
+		m := coordinationContractModel(t)
+		nm, _ := updateModel(t, m, press('a'))
+		if !nm.coordinationList.AttentionFocused() {
+			t.Fatal("a should move top-pane focus to attention")
+		}
+		if got := stripANSI(strings.Join(nm.statusBarHints(nm.keymapContext()), " · ")); !strings.Contains(got, "a arc list") || !strings.Contains(got, "Enter jump") {
+			t.Errorf("focused attention hints should advertise return and exact jump, got %q", got)
 		}
 	})
 	t.Run("l (detail)", func(t *testing.T) {
@@ -169,221 +191,154 @@ func TestCoordinationListStatusBarKeybindContract(t *testing.T) {
 	})
 }
 
-// TestCoordinationDetailKeybindContract verifies the arc detail's advertised
-// keys through the real Update path: tab cycling, sessions-tab j/k, the close
-// verb, and back-to-list.
+func TestCoordinationAttentionSelectionJumpsByExactIdentity(t *testing.T) {
+	m := coordinationContractModel(t)
+	m, _ = updateModel(t, m, press('a'))
+	m, _ = updateModel(t, m, press('j'))
+	_, cmd := updateModel(t, m, press(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("Enter on attention should emit an exact jump")
+	}
+	selected, ok := cmd().(coordination.AttentionSelectedMsg)
+	if !ok || selected.Arc != "arc-b" || selected.StreamID != "s2" {
+		t.Fatalf("attention selection = %#v (%T), want arc-b/s2", cmd(), cmd())
+	}
+	m, load := updateModel(t, m, selected)
+	if m.focusedPanel != panelRight || m.coordinationList.CurrentSlug() != "arc-b" || m.coordinationDetail.Arc() != "arc-b" || load == nil {
+		t.Fatalf("jump did not set exact arc and detail focus: focus=%v cursor=%q detail=%q cmd=%v", m.focusedPanel, m.coordinationList.CurrentSlug(), m.coordinationDetail.Arc(), load)
+	}
+	m, _ = updateModel(t, m, coordinationBodyReadMsg{arc: "arc-b", rows: []board.Row{
+		{Arc: "arc-b", StreamID: "neighbor", Label: "Neighbor", Gate: "notify", Status: "pending", Verdict: "unknown"},
+		{Arc: "arc-b", StreamID: "s2", Label: "Exact", Gate: "flag", Status: "pending", Verdict: "unknown"},
+	}})
+	if got := m.coordinationDetail.SelectedStream(); got != "s2" {
+		t.Fatalf("body generation selected %q, want exact stream s2", got)
+	}
+	if m.coordinationJump == nil || m.coordinationTargetIssue != "" {
+		t.Fatalf("successful exact jump did not retain its refresh guard: jump=%v issue=%q", m.coordinationJump, m.coordinationTargetIssue)
+	}
+}
+
+func TestCoordinationAttentionStaleTargetsNeverSelectNeighbors(t *testing.T) {
+	t.Run("stream disappeared", func(t *testing.T) {
+		m := coordinationContractModel(t)
+		selected := coordination.AttentionSelectedMsg{Bucket: board.ActNow, Arc: "arc-a", StreamID: "gone"}
+		m, _ = updateModel(t, m, selected)
+		m, _ = updateModel(t, m, coordinationBodyReadMsg{arc: "arc-a", rows: []board.Row{{
+			Arc: "arc-a", StreamID: "neighbor", Label: "Neighbor", Gate: "notify", Status: "pending", Verdict: "unknown",
+		}}})
+		if got := m.coordinationDetail.SelectedStream(); got != "" {
+			t.Fatalf("stale stream selected neighbor %q", got)
+		}
+		if !strings.Contains(m.coordinationTargetIssue, "stream gone is absent from arc arc-a") {
+			t.Fatalf("stale stream issue was not explicit: %q", m.coordinationTargetIssue)
+		}
+	})
+
+	t.Run("arc disappeared", func(t *testing.T) {
+		m := coordinationContractModel(t)
+		m, _ = updateModel(t, m, coordination.AttentionSelectedMsg{Bucket: board.Waiting, Arc: "gone-arc", StreamID: "s9"})
+		if m.coordinationList.CurrentSlug() != "arc-a" {
+			t.Fatalf("stale arc moved the cursor onto %q", m.coordinationList.CurrentSlug())
+		}
+		if m.coordinationDetail.Arc() != "gone-arc" || !strings.Contains(m.coordinationTargetIssue, "not in the visible arc list") {
+			t.Fatalf("stale arc was not retained explicitly: detail=%q issue=%q", m.coordinationDetail.Arc(), m.coordinationTargetIssue)
+		}
+	})
+}
+
+// TestCoordinationDetailKeybindContract verifies integrated-body selection,
+// declared-target routing, and local document drill-ins through the real host.
+
+func strptrMain(value string) *string { return &value }
+
 func TestCoordinationDetailKeybindContract(t *testing.T) {
 	detailFocused := func(t *testing.T) model {
 		m := coordinationContractModel(t)
 		m.focusedPanel = panelRight
 		return m
 	}
-	t.Run("Tab (cycle tabs)", func(t *testing.T) {
+
+	t.Run("j/k (streams)", func(t *testing.T) {
 		m := detailFocused(t)
-		if m.coordinationDetail.ActiveTabID() != coordination.TabStatus {
-			t.Fatalf("detail should open on Status, got %q", m.coordinationDetail.ActiveTabID())
-		}
-		nm, _ := updateModel(t, m, press(tea.KeyTab))
-		if nm.coordinationDetail.ActiveTabID() != coordination.TabSessions {
-			t.Errorf("Tab should cycle Status→Sessions, got %q", nm.coordinationDetail.ActiveTabID())
-		}
-	})
-	t.Run("j/k (sessions)", func(t *testing.T) {
-		m := detailFocused(t)
-		m.coordinationDetail.SetSessions([]sessionview.SessionRow{
-			{RowID: "r1", Display: "a-sess", Local: true},
-			{RowID: "r2", Display: "b-sess", Local: true},
-		})
-		m, _ = updateModel(t, m, press(tea.KeyTab)) // Status → Sessions
-		nm, _ := updateModel(t, m, press('j'))
-		if row, ok := nm.coordinationDetail.CurrentSession(); !ok || row.RowID != "r2" {
-			t.Errorf("j on the Sessions tab should move the session cursor, got %+v", row)
-		}
-	})
-	t.Run("x (close)", func(t *testing.T) {
-		m := detailFocused(t)
-		m.coordinationDetail.SetSessions([]sessionview.SessionRow{
-			{RowID: "r1", Slug: "impl-a", Display: "impl-a", SessionID: "sid1", Local: true},
-		})
-		m, _ = updateModel(t, m, press(tea.KeyTab)) // Status → Sessions
-		nm, _ := updateModel(t, m, press('x'))
-		if nm.confirmAction != "close_session" || nm.confirmSlug != "impl-a" {
-			t.Errorf("x on the Sessions tab should open the close confirm for the selected session, got %q/%q", nm.confirmAction, nm.confirmSlug)
-		}
-	})
-	t.Run("h (back to list)", func(t *testing.T) {
-		nm, _ := updateModel(t, detailFocused(t), press('h'))
-		if nm.focusedPanel != panelLeft {
-			t.Error("h should refocus the arc list")
-		}
-	})
-	// itemsTab returns a detail-focused model with two members and the Items
-	// tab active, ready for the Items-tab drill-in subtests.
-	itemsTab := func(t *testing.T) model {
-		t.Helper()
-		m := detailFocused(t)
-		m.coordinationDetail.SetMembers([]coordination.Member{
-			{Slug: "item-a", Resolved: true, Item: work.WorkItem{Slug: "item-a", Title: "Item A", Status: "active"}},
-			{Slug: "item-b", Resolved: true, Item: work.WorkItem{Slug: "item-b", Title: "Item B", Status: "active"}},
+		m.coordinationDetail.SetBoard([]board.Row{
+			{Arc: "arc-a", StreamID: "s1", Label: "First", Gate: "notify", Status: "done", Verdict: "full"},
+			{Arc: "arc-a", StreamID: "s2", Label: "Second", DependsOn: []string{"s1"}, Gate: "notify", Status: "pending", Verdict: "unknown"},
 		}, nil)
-		m, _ = updateModel(t, m, press(tea.KeyTab)) // Status → Sessions
-		m, _ = updateModel(t, m, press(tea.KeyTab)) // Sessions → Items
-		if got := stripANSI(strings.Join(m.statusBarHints(m.keymapContext()), " · ")); !strings.Contains(got, "open item") {
-			t.Fatalf("Items tab should advertise l/Enter open item, got %q", got)
-		}
-		return m
-	}
-	t.Run("j/k (items)", func(t *testing.T) {
-		m := itemsTab(t)
 		nm, _ := updateModel(t, m, press('j'))
-		if it, ok := nm.coordinationDetail.CurrentItem(); !ok || it.Slug != "item-b" {
-			t.Errorf("j on the Items tab should move the item cursor, got %+v", it)
+		if got := nm.coordinationDetail.SelectedStream(); got != "s2" {
+			t.Fatalf("j should select s2, got %q", got)
 		}
 		nm, _ = updateModel(t, nm, press('k'))
-		if it, ok := nm.coordinationDetail.CurrentItem(); !ok || it.Slug != "item-a" {
-			t.Errorf("k on the Items tab should return the item cursor, got %+v", it)
+		if got := nm.coordinationDetail.SelectedStream(); got != "s1" {
+			t.Errorf("k should return to s1, got %q", got)
 		}
 	})
-	assertOpenItem := func(t *testing.T, key tea.KeyPressMsg) {
-		t.Helper()
-		m := itemsTab(t)
-		_, cmd := updateModel(t, m, key)
-		if cmd == nil {
-			t.Fatal("open item should emit a member selection command")
-		}
-		msg := cmd()
-		sel, ok := msg.(coordination.MemberSelectedMsg)
-		if !ok || sel.Slug != "item-a" {
-			t.Fatalf("open item produced %T (%v), want coordination.MemberSelectedMsg{item-a}", msg, msg)
-		}
-		nm, _ := updateModel(t, m, msg)
-		if nm.state != stateWork {
-			t.Errorf("member selection should enter the work view, got state %d", nm.state)
-		}
-		if !nm.returnToCoordination {
-			t.Error("member drill-in should arm the coordination return")
-		}
-		if nm.list.CurrentSlug() != "item-a" {
-			t.Errorf("member drill-in should carry the work list cursor to item-a, got %q", nm.list.CurrentSlug())
-		}
-	}
-	t.Run("l (open item)", func(t *testing.T) { assertOpenItem(t, press('l')) })
-	t.Run("Enter (open item)", func(t *testing.T) { assertOpenItem(t, press(tea.KeyEnter)) })
 
-	// sessionsTab returns a detail-focused model on the Sessions tab with one
-	// row present in both the coordination detail and the sessions workspace
-	// list (the attach hand-off resolves the row there).
-	sessionsTab := func(t *testing.T) model {
-		t.Helper()
+	t.Run("l / Enter (open target)", func(t *testing.T) {
+		for _, key := range []tea.KeyPressMsg{press('l'), press(tea.KeyEnter)} {
+			m := detailFocused(t)
+			m.coordinationDetail.SetSessions([]sessionview.SessionRow{{RowID: "r1", Slug: "item-a", Display: "item-a", Local: true}})
+			m.sessionsList.SetSessions([]sessionview.SessionRow{{RowID: "r1", Slug: "item-a", PanelKey: "item-a", Display: "item-a", Local: true}})
+			_, cmd := updateModel(t, m, key)
+			if cmd == nil {
+				t.Fatal("open target should emit a session selection")
+			}
+			msg, ok := cmd().(coordination.SessionSelectedMsg)
+			if !ok || msg.RowID != "r1" {
+				t.Fatalf("open target produced %T %v", cmd(), cmd())
+			}
+			nm, _ := updateModel(t, m, msg)
+			if nm.state != stateSessions || !nm.returnToCoordination {
+				t.Errorf("session target should use the sessions workspace and arm return, state=%v return=%v", nm.state, nm.returnToCoordination)
+			}
+		}
+	})
+
+	t.Run("e (ledger drill-in)", func(t *testing.T) {
 		m := detailFocused(t)
-		m.coordinationDetail.SetSessions([]sessionview.SessionRow{
-			{RowID: "r1", Display: "impl-a", Local: true},
-		})
-		m.sessionsList.SetSessions([]sessionview.SessionRow{
-			{RowID: "r1", PanelKey: "impl-a", Display: "impl-a", Local: true},
-		})
-		m, _ = updateModel(t, m, press(tea.KeyTab)) // Status → Sessions
-		if got := stripANSI(strings.Join(m.statusBarHints(m.keymapContext()), " · ")); !strings.Contains(got, "open session") {
-			t.Fatalf("Sessions tab should advertise l/Enter open session, got %q", got)
+		nm, _ := updateModel(t, m, press('e'))
+		if nm.coordinationDetail.Mode() != coordination.ModeLedger {
+			t.Fatalf("e should open the ledger locally, got %q", nm.coordinationDetail.Mode())
 		}
-		return m
-	}
-	assertOpenSession := func(t *testing.T, key tea.KeyPressMsg) {
-		t.Helper()
-		m := sessionsTab(t)
-		_, cmd := updateModel(t, m, key)
-		if cmd == nil {
-			t.Fatal("open session should emit a session selection command")
+		if got := stripANSI(strings.Join(nm.statusBarHints(nm.keymapContext()), " · ")); !strings.Contains(got, "back to arc") {
+			t.Errorf("drill-in hint should advertise local return, got %q", got)
 		}
-		msg := cmd()
-		sel, ok := msg.(coordination.SessionSelectedMsg)
-		if !ok || sel.RowID != "r1" {
-			t.Fatalf("open session produced %T (%v), want coordination.SessionSelectedMsg{r1}", msg, msg)
+		nm, _ = updateModel(t, nm, press('h'))
+		if nm.focusedPanel != panelRight || nm.coordinationDetail.Mode() != coordination.ModePrimary {
+			t.Errorf("first h should return locally before leaving detail, focus=%v mode=%q", nm.focusedPanel, nm.coordinationDetail.Mode())
 		}
-		nm, _ := updateModel(t, m, msg)
-		if nm.state != stateSessions {
-			t.Errorf("session selection should enter the sessions workspace, got state %d", nm.state)
+		nm, _ = updateModel(t, nm, press('h'))
+		if nm.focusedPanel != panelLeft {
+			t.Error("second h should return to the arc list")
 		}
-		if !nm.returnToCoordination {
-			t.Error("session drill-in should arm the coordination return")
+	})
+
+	t.Run("r (report drill-in)", func(t *testing.T) {
+		m := detailFocused(t)
+		m.coordinationDetail.SetReport("# Report\n\nEarlier\n", true)
+		nm, _ := updateModel(t, m, press('r'))
+		if nm.coordinationDetail.Mode() != coordination.ModeReport {
+			t.Errorf("r should open a live report locally, got %q", nm.coordinationDetail.Mode())
 		}
-		if nm.focusedPanel != panelRight {
-			t.Error("session drill-in should focus the landing surface")
-		}
-	}
-	t.Run("l (open session)", func(t *testing.T) { assertOpenSession(t, press('l')) })
-	t.Run("Enter (open session)", func(t *testing.T) { assertOpenSession(t, press(tea.KeyEnter)) })
+	})
 }
 
-// TestCoordinationDrillInReturnKeybindContract pins the one-shot return: after a
-// coordination drill-in the landing surface's back hint reads "coordination" and
-// its back seam re-enters the coordination view, clearing the return target.
 func TestCoordinationDrillInReturnKeybindContract(t *testing.T) {
-	t.Run("work detail back hint reads coordination and Esc returns", func(t *testing.T) {
-		m := coordinationContractModel(t)
-		m.focusedPanel = panelRight
-		m.coordinationDetail.SetMembers([]coordination.Member{{Slug: "item-a", Resolved: true, Item: work.WorkItem{Slug: "item-a", Status: "active"}}}, nil)
-		m, _ = updateModel(t, m, press(tea.KeyTab)) // Status → Sessions
-		m, _ = updateModel(t, m, press(tea.KeyTab)) // Sessions → Items
-		_, cmd := updateModel(t, m, press(tea.KeyEnter))
-		m, _ = updateModel(t, m, cmd()) // land in the work detail
-		if m.state != stateWork || !m.returnToCoordination {
-			t.Fatalf("drill-in should land in work with the return armed, got state %d flag %v", m.state, m.returnToCoordination)
-		}
-		if got := stripANSI(strings.Join(m.statusBarHints(m.keymapContext()), " · ")); !strings.Contains(got, "coordination") {
-			t.Errorf("armed work-detail back hint should read coordination, got %q", got)
-		}
-		nm, _ := updateModel(t, m, press(tea.KeyEscape))
-		if nm.state != stateCoordination {
-			t.Fatalf("one Esc should return to coordination, got state %d", nm.state)
-		}
-		if nm.returnToCoordination {
-			t.Error("returning should clear the one-shot return target")
-		}
-		if nm.focusedPanel != panelRight {
-			t.Error("return should re-enter coordination with the detail focused")
-		}
-	})
-	t.Run("sessions list back hint reads coordination and Esc returns", func(t *testing.T) {
-		m := coordinationContractModel(t)
-		m.focusedPanel = panelRight
-		m.coordinationDetail.SetSessions([]sessionview.SessionRow{{RowID: "r1", Display: "impl-a", Local: true}})
-		m.sessionsList.SetSessions([]sessionview.SessionRow{{RowID: "r1", PanelKey: "impl-a", Display: "impl-a", Local: true}})
-		m, _ = updateModel(t, m, press(tea.KeyTab)) // Status → Sessions
-		_, cmd := updateModel(t, m, press(tea.KeyEnter))
-		m, _ = updateModel(t, m, cmd()) // land in the sessions workspace
-		if m.state != stateSessions || !m.returnToCoordination {
-			t.Fatalf("drill-in should land in sessions with the return armed, got state %d flag %v", m.state, m.returnToCoordination)
-		}
-		// The workspace-exit hint (and its coordination redirect) live on the list.
-		m.focusedPanel = panelLeft
-		if got := stripANSI(strings.Join(m.statusBarHints(m.keymapContext()), " · ")); !strings.Contains(got, "coordination") {
-			t.Errorf("armed sessions back hint should read coordination, got %q", got)
-		}
-		nm, _ := updateModel(t, m, press(tea.KeyEscape))
-		if nm.state != stateCoordination {
-			t.Fatalf("Esc from the sessions list should return to coordination, got state %d", nm.state)
-		}
-		if nm.returnToCoordination {
-			t.Error("returning should clear the one-shot return target")
-		}
-	})
-	t.Run("explicit state switch clears the pending return", func(t *testing.T) {
-		m := coordinationContractModel(t)
-		m.focusedPanel = panelRight
-		m.coordinationDetail.SetMembers([]coordination.Member{{Slug: "item-a", Resolved: true, Item: work.WorkItem{Slug: "item-a", Status: "active"}}}, nil)
-		m, _ = updateModel(t, m, press(tea.KeyTab))
-		m, _ = updateModel(t, m, press(tea.KeyTab))
-		_, cmd := updateModel(t, m, press(tea.KeyEnter))
-		m, _ = updateModel(t, m, cmd()) // land in the work detail, return armed
-		nm, _ := updateModel(t, m, press('v'))
-		if nm.state != stateSessions {
-			t.Fatalf("v should switch to the sessions view, got state %d", nm.state)
-		}
-		if nm.returnToCoordination {
-			t.Error("an explicit state switch should clear the pending coordination return")
-		}
-	})
+	m := coordinationContractModel(t)
+	m.focusedPanel = panelRight
+	_, cmd := updateModel(t, m, press(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("row work fallback should emit a selection")
+	}
+	m, _ = updateModel(t, m, cmd())
+	if m.state != stateWork || !m.returnToCoordination {
+		t.Fatalf("work fallback should arm coordination return, state=%v return=%v", m.state, m.returnToCoordination)
+	}
+	nm, _ := updateModel(t, m, press(tea.KeyEscape))
+	if nm.state != stateCoordination || nm.returnToCoordination || nm.focusedPanel != panelRight {
+		t.Errorf("Esc should return to the preserved coordination detail, state=%v return=%v focus=%v", nm.state, nm.returnToCoordination, nm.focusedPanel)
+	}
 }
 
 // TestCoordinationArcScanSyncsDetail pins the cursor-identity-driven detail
@@ -400,10 +355,31 @@ func TestCoordinationArcScanSyncsDetail(t *testing.T) {
 		t.Error("first sync should dispatch the ledger and pin reads")
 	}
 	nm2, cmd2 := updateModel(t, nm, coordinationArcsScannedMsg{arcs: []coordination.Arc{{Slug: "arc-a", Status: coordination.StatusActive, Items: 1}}})
-	if cmd2 != nil {
-		t.Error("a scan with an unchanged selection should not re-dispatch reads")
+	if cmd2 == nil {
+		t.Error("an unchanged scan should still refresh cross-arc attention")
 	}
 	_ = nm2
+}
+
+func TestCoordinationBodyReadDropsStaleArcGeneration(t *testing.T) {
+	m := coordinationContractModel(t)
+	stale := coordinationBodyReadMsg{
+		arc:  "arc-b",
+		rows: []board.Row{{Arc: "arc-b", StreamID: "wrong", Label: "Wrong arc", Gate: "notify", Status: "done", Verdict: "full"}},
+	}
+	nm, _ := updateModel(t, m, stale)
+	if got := nm.coordinationDetail.SelectedStream(); got != "s1" {
+		t.Fatalf("stale body response changed the selected arc generation to %q", got)
+	}
+
+	fresh := coordinationBodyReadMsg{
+		arc:  "arc-a",
+		rows: []board.Row{{Arc: "arc-a", StreamID: "fresh", Label: "Fresh", Gate: "notify", Status: "done", Verdict: "full"}},
+	}
+	nm, _ = updateModel(t, nm, fresh)
+	if got := nm.coordinationDetail.SelectedStream(); got != "fresh" {
+		t.Errorf("matching body response should land, got %q", got)
+	}
 }
 
 // arcStoreFixture writes an arc record under workDir/_arcs/, plus its ledger
@@ -507,7 +483,7 @@ func TestReadArcLedgerReadsTheStoreAndNeverDerivesClosure(t *testing.T) {
 
 // TestLateLedgerAppendNeverFlipsClosure is the regression the declared-status
 // cutover exists for: appending to a closed arc's ledger after its report was
-// written once flipped the Status tab back to the Brief. Closure now comes from
+// written once flipped the primary body back to the Brief. Closure now comes from
 // the record, so the append changes nothing.
 func TestLateLedgerAppendNeverFlipsClosure(t *testing.T) {
 	workDir := t.TempDir()
@@ -528,7 +504,7 @@ func TestLateLedgerAppendNeverFlipsClosure(t *testing.T) {
 	m, _ = updateModel(t, m, scan)
 	m, _ = updateModel(t, m, readArcLedgerCmd(workDir, "arc-a")())
 	if out := stripANSI(m.coordinationDetail.View()); !strings.Contains(out, "the closing report") {
-		t.Fatalf("a closed arc must lead its Status tab with the report:\n%s", out)
+		t.Fatalf("a closed arc must lead its primary body with the report:\n%s", out)
 	}
 
 	// The sanctioned late append: the ledger is now the newest file on disk.
@@ -742,41 +718,43 @@ func TestBuildSessionRowsProjectJoin(t *testing.T) {
 // base item of its derived worker slug. The project label never joins — it is
 // the label that let unrelated work look like membership.
 func TestCoordinationSessionsJoinFiltersByArc(t *testing.T) {
-	m := coordinationContractModel(t)
-	m.sessionRows = []sessionview.SessionRow{
-		{RowID: "r1", Display: "impl-a", Slug: "item-a"},
-		{RowID: "r4", Display: "worker-a", Slug: "item-a-w1", BaseItem: "item-a"},
-		{RowID: "r2", Display: "impl-b", Slug: "item-b"},
-		{RowID: "r3", Display: "stray", Project: "arc-a"},
+	assertSession := func(t *testing.T, row sessionview.SessionRow) {
+		t.Helper()
+		m := coordinationContractModel(t)
+		m.sessionRows = []sessionview.SessionRow{
+			row,
+			{RowID: "other", Display: "impl-b", Slug: "item-b"},
+			{RowID: "stray", Display: "stray", Project: "arc-a"},
+		}
+		m.syncCoordinationSessions()
+		m.focusedPanel = panelRight
+		_, cmd := updateModel(t, m, press(tea.KeyEnter))
+		if cmd == nil {
+			t.Fatal("declared member session should be a navigation target")
+		}
+		msg, ok := cmd().(coordination.SessionSelectedMsg)
+		if !ok || msg.RowID != row.RowID {
+			t.Fatalf("session join produced %T %v, want %q", cmd(), cmd(), row.RowID)
+		}
 	}
-	m.syncCoordinationSessions()
-	m.focusedPanel = panelRight
-	m, _ = updateModel(t, m, press(tea.KeyTab)) // Status → Sessions
-	out := stripANSI(m.viewContent())
-	if !strings.Contains(out, "impl-a") {
-		t.Errorf("a declared member's session must render:\n%s", out)
-	}
-	if !strings.Contains(out, "worker-a") {
-		t.Errorf("a derived worker must join through its base item:\n%s", out)
-	}
-	if strings.Contains(out, "impl-b") {
-		t.Errorf("another arc's member must not render:\n%s", out)
-	}
-	if strings.Contains(out, "stray") {
-		t.Errorf("a session carrying only the project label is not a member:\n%s", out)
-	}
+	t.Run("direct slug", func(t *testing.T) {
+		assertSession(t, sessionview.SessionRow{RowID: "direct", Display: "impl-a", Slug: "item-a"})
+	})
+	t.Run("worker base item", func(t *testing.T) {
+		assertSession(t, sessionview.SessionRow{RowID: "worker", Display: "worker-a", Slug: "item-a--w1", BaseItem: "item-a"})
+	})
 }
 
 // TestCoordinationViewComposesBothLayouts smoke-tests the compositor arm: the
 // coordination view renders through the shared split-pane in both layout
-// modes with its list title, tab row section, and detail tabs.
+// modes with its list title and integrated detail sections.
 func TestCoordinationViewComposesBothLayouts(t *testing.T) {
 	for _, layout := range []config.LayoutMode{config.LayoutLeftRight, config.LayoutTopBottom} {
 		m := coordinationContractModel(t)
 		m.layoutMode = layout
 		m.coordinationPanelCallbacks().resize()
 		out := stripANSI(m.viewContent())
-		for _, want := range []string{"Arcs", "arc-a", "coordination (2)", "Status", "Sessions", "Items", "Ledger"} {
+		for _, want := range []string{"Arcs", "arc-a", "coordination (2)", "Brief", "Streams", "Recent activity"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("layout %v: coordination view missing %q:\n%s", layout, want, out)
 			}
