@@ -1,0 +1,3 @@
+ ✓─╮       S1    spec auth                               done gate:notify verdict:—
+ ▲ │       S2    impl auth                               blocked-on-input gate:notify verdict:—
+ ○─╯       S3    integrate                               pending gate:notify verdict:—  waits: S2
