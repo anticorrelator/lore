@@ -4,18 +4,16 @@
   "ceremonies": [
     {
       "id": "spec",
-      "description": "The /spec investigation-and-planning protocol: the spec-lead and its researcher fanout. Distinct from the /spec skill name — batch-spec.sh participates in this ceremony without being the skill.",
+      "description": "The /spec investigation-and-planning protocol: the spec-lead and its researcher fanout.",
       "call_sites": [
-        "skills/spec/SKILL.md",
-        "scripts/batch-spec.sh"
+        "skills/spec/SKILL.md"
       ]
     },
     {
       "id": "implement",
       "description": "The /implement execution protocol: the implement-lead and its worker fanout that claims tasks and emits Tier 2 evidence.",
       "call_sites": [
-        "skills/implement/templates/worker-spawn.md",
-        "scripts/batch-implement.sh"
+        "skills/implement/templates/worker-spawn.md"
       ]
     },
     {
