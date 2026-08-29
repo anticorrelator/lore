@@ -19,28 +19,27 @@ type ExtraFile struct {
 // WorkItemDetail holds the full detail of a single work item, as returned by
 // `lore work show <slug> --json`.
 type WorkItemDetail struct {
-	Slug            string       `json:"slug"`
-	Title           string       `json:"title"`
-	Status          string       `json:"status"`
-	Branches        []string     `json:"branches"`
-	Tags            []string     `json:"tags"`
-	Project         string       `json:"project"`
-	RelatedWork     []string     `json:"related_work"`
-	BlockedBy       []string     `json:"blocked_by"`
-	Issue           string       `json:"issue"`
-	PR              string       `json:"pr"`
-	Created         string       `json:"created"`
-	Updated         string       `json:"updated"`
-	SourceCheckout  string       `json:"source_checkout,omitempty"`
-	PlanContent     *string      `json:"plan_content"`
-	NotesContent    *string      `json:"notes_content"`
-	HasExecutionLog bool         `json:"has_execution_log"`
-	HasTasks        bool         `json:"has_tasks"`
-	TasksContent    *TasksFile   `json:"tasks_content,omitempty"`
-	ExecLogContent  *string      `json:"exec_log_content,omitempty"`
-	ExtraFiles      []ExtraFile  `json:"extra_files,omitempty"`
-	Review          *ReviewState `json:"review,omitempty"` // nil = ungated
-	Malformed       bool         `json:"malformed,omitempty"`
+	Slug            string      `json:"slug"`
+	Title           string      `json:"title"`
+	Status          string      `json:"status"`
+	Branches        []string    `json:"branches"`
+	Tags            []string    `json:"tags"`
+	Project         string      `json:"project"`
+	RelatedWork     []string    `json:"related_work"`
+	BlockedBy       []string    `json:"blocked_by"`
+	Issue           string      `json:"issue"`
+	PR              string      `json:"pr"`
+	Created         string      `json:"created"`
+	Updated         string      `json:"updated"`
+	SourceCheckout  string      `json:"source_checkout,omitempty"`
+	PlanContent     *string     `json:"plan_content"`
+	NotesContent    *string     `json:"notes_content"`
+	HasExecutionLog bool        `json:"has_execution_log"`
+	HasTasks        bool        `json:"has_tasks"`
+	TasksContent    *TasksFile  `json:"tasks_content,omitempty"`
+	ExecLogContent  *string     `json:"exec_log_content,omitempty"`
+	ExtraFiles      []ExtraFile `json:"extra_files,omitempty"`
+	Malformed       bool        `json:"malformed,omitempty"`
 }
 
 // SearchLocation identifies a navigable position within a detail view tab.
@@ -61,20 +60,19 @@ type SearchLocation struct {
 // SourceCheckout is the physically-resolved clone this item's sessions are
 // dispatched into; empty on an item that has not declared one.
 type workItemMeta struct {
-	Slug           string       `json:"slug"`
-	Title          string       `json:"title"`
-	Status         string       `json:"status"`
-	Branches       []string     `json:"branches"`
-	Tags           []string     `json:"tags"`
-	Project        string       `json:"project"`
-	RelatedWork    []string     `json:"related_work"`
-	BlockedBy      []string     `json:"blocked_by"`
-	Issue          string       `json:"issue"`
-	PR             string       `json:"pr"`
-	Created        string       `json:"created"`
-	Updated        string       `json:"updated"`
-	SourceCheckout string       `json:"source_checkout"`
-	Review         *ReviewState `json:"review"`
+	Slug           string   `json:"slug"`
+	Title          string   `json:"title"`
+	Status         string   `json:"status"`
+	Branches       []string `json:"branches"`
+	Tags           []string `json:"tags"`
+	Project        string   `json:"project"`
+	RelatedWork    []string `json:"related_work"`
+	BlockedBy      []string `json:"blocked_by"`
+	Issue          string   `json:"issue"`
+	PR             string   `json:"pr"`
+	Created        string   `json:"created"`
+	Updated        string   `json:"updated"`
+	SourceCheckout string   `json:"source_checkout"`
 }
 
 // loadWorkItemDetailDirect reads work item files directly from disk,
@@ -184,7 +182,6 @@ func loadWorkItemDetailDirect(workDir, slug string) (*WorkItemDetail, error) {
 		Created:        meta.Created,
 		Updated:        meta.Updated,
 		SourceCheckout: meta.SourceCheckout,
-		Review:         meta.Review,
 	}
 
 	// Read optional content files — nil when absent

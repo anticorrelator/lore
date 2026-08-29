@@ -94,8 +94,6 @@ Commands:
   why              Reverse-lookup design rationale entries for a code location (file:line)
   overview         Architectural-scale framing for a subsystem + descent affordances
   knowledge-tree   Render the parent/child subtree rooted at an entry
-  batch-spec       Batch-run /spec short on eligible work items
-  batch-implement  Batch-run /implement on ready work items
   batch-capture    Capture multiple insights from a JSON array
   backlinks    Backlink management (see: lore backlinks --help)
   rebuild      Rebuild and reinstall the lore-tui binary
@@ -2504,14 +2502,6 @@ case "$1" in
   knowledge-tree)
     shift
     exec "$SCRIPTS_DIR/knowledge-tree.sh" "$@"
-    ;;
-  batch-spec)
-    shift
-    exec "$SCRIPTS_DIR/batch-spec.sh" "$@"
-    ;;
-  batch-implement)
-    shift
-    exec "$SCRIPTS_DIR/batch-implement.sh" "$@"
     ;;
   batch-capture)
     shift

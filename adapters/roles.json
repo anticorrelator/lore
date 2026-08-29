@@ -17,8 +17,7 @@
       "call_sites": [
         "agents/worker.md",
         "agents/codex-worker.md",
-        "skills/implement/SKILL.md",
-        "scripts/batch-implement.sh"
+        "skills/implement/SKILL.md"
       ]
     },
     {
@@ -46,8 +45,7 @@
       "description": "Task-iterating investigation agent that explores design space and produces synthesis reports without modifying source files.",
       "call_sites": [
         "agents/researcher.md",
-        "skills/spec/SKILL.md",
-        "scripts/batch-spec.sh"
+        "skills/spec/SKILL.md"
       ]
     },
     {

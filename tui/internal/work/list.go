@@ -59,11 +59,6 @@ type ArchiveFinishedMsg struct {
 	Err error
 }
 
-// ReleaseFinishedMsg is sent when the `lore work release` command completes.
-type ReleaseFinishedMsg struct {
-	Err error
-}
-
 // DeleteRequestMsg is sent when the user confirms a delete action.
 type DeleteRequestMsg struct {
 	Slug string
@@ -318,12 +313,6 @@ func (m ListModel) readinessCell(item WorkItem) collection.Cell {
 		}
 		return collection.Cell{Text: "◆ active", Style: style.Dim}
 	}
-	switch reviewMechanism(item) {
-	case "hold":
-		return collection.Cell{Text: "⊘ held", Style: reviewHeldStyle}
-	case "flag":
-		return collection.Cell{Text: "⚑ flagged", Style: reviewFlaggedStyle}
-	}
 	label, st := readinessLabel(item)
 	return collection.Cell{Text: label, Style: st}
 }
@@ -366,15 +355,6 @@ func sessionActiveLabel(typ string) string {
 	}
 }
 
-// reviewMechanism returns the item's active review mechanism ("hold" | "flag"),
-// or "" when ungated.
-func reviewMechanism(item WorkItem) string {
-	if item.Review == nil {
-		return ""
-	}
-	return item.Review.Mechanism
-}
-
 // stackedGlyph returns the title-line indicator prefix for the stacked
 // layout, in the same priority order as readinessCell: ● (amber) when a local
 // spec session waits for input, ◈ (amber) when another instance runs an
@@ -391,12 +371,6 @@ func (m ListModel) stackedGlyph(item WorkItem) string {
 				return "◈ "
 			}
 			return "◆ "
-		}
-		switch reviewMechanism(item) {
-		case "hold":
-			return "⊘ "
-		case "flag":
-			return "⚑ "
 		}
 	}
 	return ""
@@ -457,10 +431,6 @@ func decorateStackedGlyph(row collection.Row, selected bool, lines []string) []s
 		lines[0] = line[:2] + needsInputStyle.Render("◈") + rest[len("◈"):]
 	case strings.HasPrefix(rest, "◆ "):
 		lines[0] = line[:2] + style.Dim.Render("◆") + rest[len("◆"):]
-	case strings.HasPrefix(rest, "⊘ "):
-		lines[0] = line[:2] + reviewHeldStyle.Render("⊘") + rest[len("⊘"):]
-	case strings.HasPrefix(rest, "⚑ "):
-		lines[0] = line[:2] + reviewFlaggedStyle.Render("⚑") + rest[len("⚑"):]
 	}
 	return lines
 }
@@ -676,15 +646,6 @@ func (m ListModel) View() string {
 // rather than StatusWarn: the dot marks an active process needing a human,
 // not a readiness state. Hoisted so render paths never allocate per frame.
 var needsInputStyle = lipgloss.NewStyle().Foreground(style.ColorAttention)
-
-// reviewHeldStyle and reviewFlaggedStyle color the two review-gate badges by
-// their palette roles (style.go): a hold is ColorAttention (blocked on a
-// human), a flag is ColorModified (acted on, not yet finalized). Hoisted so
-// the list decorator and detail meta tab never allocate per frame.
-var (
-	reviewHeldStyle    = lipgloss.NewStyle().Foreground(style.ColorAttention)
-	reviewFlaggedStyle = lipgloss.NewStyle().Foreground(style.ColorModified)
-)
 
 // blockedBadgeStyle renders the work-item "⧗ after:" continuation line, reusing
 // the tasks.go blocked-by grammar (ColorDim = ANSI 8, italic) so a blocked work
