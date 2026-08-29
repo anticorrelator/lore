@@ -148,6 +148,19 @@ func readCoordinationBodyCmd(workDir, sessionsDir string, arc coordination.Arc) 
 // the coordination tab is focused.
 func (m model) handleCoordinationArcsScanned(msg coordinationArcsScannedMsg) (model, tea.Cmd) {
 	m.coordinationList.SetArcs(msg.arcs, msg.skipped)
+	var activeMembers []string
+	for _, arc := range msg.arcs {
+		if arc.Status == coordination.StatusActive {
+			activeMembers = append(activeMembers, arc.Members...)
+		}
+	}
+	// The sessions workspace is a presentation over the same in-memory arc
+	// scan. Only declared members of active arcs collapse; an empty/failed scan
+	// passes an empty set and restores the complete listing.
+	m.sessionsList.SetActiveArcMembers(activeMembers)
+	if m.state == stateSessions {
+		m.loadSessionsDetail(m.sessionsList.CurrentKey())
+	}
 	cmds := []tea.Cmd{m.startArcSweep(msg.arcs)}
 	if m.state == stateCoordination {
 		cmds = append(cmds, readCoordinationAttentionCmd())
