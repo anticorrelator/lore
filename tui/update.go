@@ -88,7 +88,7 @@ func handlePanelRouting(m *model, msg tea.Msg, cb panelCallbacks) (tea.Cmd, bool
 				m.setPreferDetail(cb.currentSlug(), true)
 				return nil, true
 			}
-			if panel, ok := cb.sessionPanelFn(); ok && (panel.Ptmx() != nil || panel.IsDone()) {
+			if panel, ok := cb.sessionPanelFn(); ok && (panel.Ptmx() != nil || panel.IsDone() || panel.IsMirror()) {
 				m.terminalMode = true
 				m.setPreferDetail(cb.currentSlug(), false)
 				return nil, true
@@ -128,6 +128,9 @@ func routePanelMsg(m *model, panel panelFocus, msg tea.Msg, cb panelCallbacks) t
 		return cmd
 	}
 	if m.terminalMode {
+		if cb.sessionPanelUpdate != nil {
+			return cb.sessionPanelUpdate(msg)
+		}
 		id := cb.currentSlug()
 		if m.sessionPanels != nil {
 			if panel, ok := m.sessionPanels[id]; ok {
@@ -757,8 +760,8 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				case stateFollowUps:
 					slug = m.followupDetail.CurrentID()
 				case stateSessions:
-					if row, ok := m.sessionsList.CurrentSession(); ok {
-						slug = row.PanelKey
+					if panel, ok := m.currentSessionsPanel(); ok {
+						slug = panel.Slug()
 					}
 				default:
 					slug = m.list.CurrentSlug()
@@ -940,6 +943,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		case "K":
 			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.prevState = m.state
+				if m.state == stateSessions {
+					m.closeSessionMirror()
+				}
 				m.state = stateKnowledge
 				m.browser = knowledge.NewBrowserModel(m.config.KnowledgeDir)
 				m.browser, _ = m.browser.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
@@ -958,6 +964,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 		case "f":
 			if (m.state == stateWork || m.state == stateSessions || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
+				if m.state == stateSessions {
+					m.closeSessionMirror()
+				}
 				m.state = stateFollowUps
 				// Preserve items already loaded by the background poll so the
 				// counter and list don't flicker to 0 while the reload is in flight.
@@ -977,6 +986,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m, cmd
 			}
 			if (m.state == stateSessions || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
+				if m.state == stateSessions {
+					m.closeSessionMirror()
+				}
 				m.state = stateWork
 				m.terminalMode = false
 				m.focusedPanel = panelLeft
@@ -1031,6 +1043,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			// explicit empty state.
 			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions) &&
 				!(m.terminalMode && m.focusedPanel == panelRight) {
+				if m.state == stateSessions {
+					m.closeSessionMirror()
+				}
 				m.state = stateCoordination
 				m.terminalMode = false
 				m.focusedPanel = panelLeft
@@ -1237,6 +1252,24 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case work.TerminalOutputMsg:
 		return m.handleTerminalOutput(msg)
 
+	case work.SessionMirrorOpenedMsg:
+		return m.handleSessionMirrorMessage(msg)
+
+	case work.SessionMirrorOutputMsg:
+		return m.handleSessionMirrorMessage(msg)
+
+	case work.SessionMirrorEOFMsg:
+		return m.handleSessionMirrorMessage(msg)
+
+	case work.SessionMirrorResizeTickMsg:
+		return m.handleSessionMirrorMessage(msg)
+
+	case work.SessionMirrorGeometryMsg:
+		return m.handleSessionMirrorMessage(msg)
+
+	case work.SessionMirrorWriteMsg:
+		return m.handleSessionMirrorMessage(msg)
+
 	case work.QuiescenceTickMsg:
 		return m.handleQuiescenceTick(msg)
 
@@ -1320,9 +1353,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case coordination.SessionSelectedMsg:
 		// Enter/l on a stream with one live session opens the sessions workspace.
 		return m.handleCoordinationSessionSelected(msg)
-
-	case sessionMirrorCapturedMsg:
-		return m.handleSessionMirrorCaptured(msg)
 
 	case sessionview.SessionSelectedMsg:
 		return m.handleSessionSelected(msg)
@@ -1592,6 +1622,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		if km, ok := msg.(tea.KeyPressMsg); ok && m.focusedPanel == panelLeft {
 			switch km.String() {
 			case "esc", "h":
+				m.closeSessionMirror()
 				if m.returnToCoordination {
 					return m.returnToCoordinationView()
 				}
@@ -1658,6 +1689,10 @@ func (m *model) resizeSessionPanels() {
 			})
 		}
 		m.sessionPanels[slug] = sm
+	}
+	if m.sessionMirrorActive {
+		sm, _ := m.sessionMirrorPanel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
+		m.sessionMirrorPanel = sm
 	}
 }
 

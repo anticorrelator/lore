@@ -324,6 +324,33 @@ func TestCoordinationDetailKeybindContract(t *testing.T) {
 	})
 }
 
+func TestCoordinationSessionDrillUsesSessionsTerminalHost(t *testing.T) {
+	m := coordinationContractModel(t)
+	m.focusedPanel = panelRight
+	remote := sessionview.SessionRow{
+		RowID: "remote", Slug: "item-a", Display: "item-a", Instance: "other",
+		Tmux: "lore-other-item-a",
+	}
+	m.coordinationDetail.SetSessions([]sessionview.SessionRow{remote})
+	m.sessionsList.SetSessions([]sessionview.SessionRow{remote})
+
+	_, cmd := updateModel(t, m, press(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("explicit coordination drill should select the remote session")
+	}
+	nm, _ := updateModel(t, m, cmd())
+	if nm.state != stateSessions || !nm.returnToCoordination || !nm.sessionMirrorActive {
+		t.Fatalf("remote drill must use the sessions mirror owner: state=%v return=%v mirror=%v", nm.state, nm.returnToCoordination, nm.sessionMirrorActive)
+	}
+	cb := nm.coordinationPanelCallbacks()
+	if cb.currentSlug() != "" {
+		t.Fatalf("coordination terminal seam exposed slug %q", cb.currentSlug())
+	}
+	if _, ok := cb.sessionPanelFn(); ok {
+		t.Fatal("coordination must not expose a terminal panel")
+	}
+}
+
 func TestCoordinationDrillInReturnKeybindContract(t *testing.T) {
 	m := coordinationContractModel(t)
 	m.focusedPanel = panelRight

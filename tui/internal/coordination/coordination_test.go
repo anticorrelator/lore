@@ -610,6 +610,34 @@ func TestDetailRowRoutingUsesSessionThenWorkWithoutGuessing(t *testing.T) {
 	}
 }
 
+func TestDetailSessionTargetsRenderExplicitLiveScreenState(t *testing.T) {
+	row := board.Row{Arc: "arc-a", StreamID: "s1", Label: "Run", Gate: "notify", Status: "pending", Verdict: "unknown", WorkItem: strptr("item-a")}
+	cases := []struct {
+		name string
+		row  sessionview.SessionRow
+		want string
+	}{
+		{"local", sessionview.SessionRow{RowID: "local", Slug: "item-a", Display: "local", Local: true}, "live terminal available in sessions"},
+		{"remote tmux", sessionview.SessionRow{RowID: "tmux", Slug: "item-a", Display: "tmux", Tmux: "lore-b-item-a"}, "live drill-in available in sessions"},
+		{"remote unknown", sessionview.SessionRow{RowID: "bare", Slug: "item-a", Display: "bare"}, "live screen unavailable — tmux identity unknown"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := sizedDetail()
+			m.SetArc("arc-a")
+			m.SetMembers([]Member{{Slug: "item-a", Resolved: true}}, nil)
+			m.SetBoard([]board.Row{row}, nil)
+			m.SetSessions([]sessionview.SessionRow{tc.row})
+			if got := m.targetSummary(row); !strings.Contains(got, tc.want) {
+				t.Fatalf("session target summary %q missing %q", got, tc.want)
+			}
+			if out := stripANSI(m.View()); !strings.Contains(out, tc.want) || !strings.Contains(out, "target session "+tc.row.Display) {
+				t.Fatalf("rendered session capability or target is absent:\n%s", out)
+			}
+		})
+	}
+}
+
 func TestDetailUndeclaredWorkTargetStaysUnknown(t *testing.T) {
 	m := sizedDetail()
 	m.SetArc("arc-a")

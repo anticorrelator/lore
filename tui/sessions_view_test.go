@@ -26,10 +26,114 @@ func sessionsContractModel(t *testing.T) model {
 		{RowID: "inst-a|impl-foo|sid1", PanelKey: "impl-foo", Slug: "impl-foo", Display: "impl-foo",
 			Type: "implement", Initiator: "human", Instance: "inst-a", Local: true, SessionID: "sid1"},
 		{RowID: "inst-b|other|sid2", Slug: "other", Display: "other",
-			Type: "spec", Initiator: "agent", Instance: "inst-b", Local: false, SessionID: "sid2"},
+			Type: "spec", Initiator: "agent", Instance: "inst-b", Local: false, SessionID: "sid2", Tmux: "other-tmux"},
 	})
 	m.sessionsPanelCallbacks().resize()
 	return m
+}
+
+func remoteMirrorContractModel(t *testing.T) model {
+	t.Helper()
+	m := minimalModel(stateSessions, nil, nil)
+	m.width, m.height = 120, 40
+	m.sessionsList.SetSessions([]sessionview.SessionRow{
+		{RowID: "inst-b|one|sid1", Slug: "one", Display: "one", Instance: "inst-b", SessionID: "sid1", Tmux: "tmux-one"},
+		{RowID: "inst-c|two|sid2", Slug: "two", Display: "two", Instance: "inst-c", SessionID: "sid2", Tmux: "tmux-two"},
+	})
+	m.sessionsPanelCallbacks().resize()
+	return m
+}
+
+func TestSessionsRemoteMirrorOwnershipContract(t *testing.T) {
+	m := remoteMirrorContractModel(t)
+	nm, cmd := updateModel(t, m, sessionview.SessionSelectedMsg{RowID: "inst-b|one|sid1"})
+	if cmd == nil {
+		t.Fatal("explicit remote drill-in should open a mirror generation")
+	}
+	if !nm.sessionMirrorActive || nm.sessionMirrorRowID != "inst-b|one|sid1" || nm.sessionMirrorGeneration != 1 {
+		t.Fatalf("remote mirror ownership = active:%v row:%q generation:%d", nm.sessionMirrorActive, nm.sessionMirrorRowID, nm.sessionMirrorGeneration)
+	}
+	panel, ok := nm.currentSessionsPanel()
+	if !ok || !panel.IsMirror() || panel.TmuxName() != "tmux-one" {
+		t.Fatalf("current sessions panel = mirror:%v tmux:%q ok:%v", panel.IsMirror(), panel.TmuxName(), ok)
+	}
+	if _, stored := nm.sessionPanels["one"]; stored {
+		t.Fatal("remote mirror must stay outside the owned-session panel map")
+	}
+
+	// Re-entering the same target reuses the generation and does not reopen it.
+	nm, cmd = updateModel(t, nm, sessionview.SessionSelectedMsg{RowID: "inst-b|one|sid1"})
+	if cmd != nil || nm.sessionMirrorGeneration != 1 {
+		t.Fatalf("same-target drill should reuse generation 1, got generation=%d cmd=%v", nm.sessionMirrorGeneration, cmd != nil)
+	}
+
+	// Cursor movement is passive: it can hide the panel but cannot acquire or
+	// replace a pipe. Only the second explicit selection switches targets.
+	nm, _ = updateModel(t, nm, press('j'))
+	if !nm.sessionMirrorActive || nm.sessionMirrorRowID != "inst-b|one|sid1" || nm.sessionMirrorGeneration != 1 {
+		t.Fatal("passive cursor movement changed the active mirror")
+	}
+	nm.sessionsList.SetCursorByID("inst-c|two|sid2")
+	nm, cmd = updateModel(t, nm, sessionview.SessionSelectedMsg{RowID: "inst-c|two|sid2"})
+	if cmd == nil || !nm.sessionMirrorActive || nm.sessionMirrorRowID != "inst-c|two|sid2" || nm.sessionMirrorGeneration != 2 {
+		t.Fatalf("target switch = active:%v row:%q generation:%d cmd:%v", nm.sessionMirrorActive, nm.sessionMirrorRowID, nm.sessionMirrorGeneration, cmd != nil)
+	}
+	if nm.sessionMirrorPanel.TmuxName() != "tmux-two" {
+		t.Fatalf("target switch opened %q, want tmux-two", nm.sessionMirrorPanel.TmuxName())
+	}
+}
+
+func TestSessionsRemoteMirrorRoutingAndCloseContract(t *testing.T) {
+	m := remoteMirrorContractModel(t)
+	m, _ = updateModel(t, m, sessionview.SessionSelectedMsg{RowID: "inst-b|one|sid1"})
+
+	t.Run("generation messages route to root panel", func(t *testing.T) {
+		nm, _ := updateModel(t, m, work.SessionMirrorOpenedMsg{
+			Slug:       "inst-b|one|sid1",
+			TmuxName:   "tmux-one",
+			Generation: 1,
+			Err:        fmt.Errorf("open failed"),
+		})
+		if got := nm.sessionMirrorPanel.MirrorError(); got != "open failed" {
+			t.Fatalf("root mirror error = %q", got)
+		}
+		if len(nm.sessionPanels) != 0 {
+			t.Fatal("mirror message mutated the owned-session panel map")
+		}
+	})
+
+	t.Run("detail toggling preserves mirror", func(t *testing.T) {
+		nm, _ := updateModel(t, m, press('t', tea.ModCtrl))
+		if nm.terminalMode || !nm.sessionMirrorActive {
+			t.Fatalf("first ctrl+t should show detail without closing mirror: terminal=%v active=%v", nm.terminalMode, nm.sessionMirrorActive)
+		}
+		nm, _ = updateModel(t, nm, press('t', tea.ModCtrl))
+		if !nm.terminalMode || !nm.sessionMirrorActive {
+			t.Fatalf("second ctrl+t should restore mirror: terminal=%v active=%v", nm.terminalMode, nm.sessionMirrorActive)
+		}
+	})
+
+	t.Run("mirror-only close leaves remote row", func(t *testing.T) {
+		nm, cmd := updateModel(t, m, work.TerminalTerminateMsg{Slug: "inst-b|one|sid1"})
+		if cmd != nil || nm.sessionMirrorActive || nm.terminalMode || nm.focusedPanel != panelLeft {
+			t.Fatalf("mirror close = cmd:%v active:%v terminal:%v focus:%v", cmd != nil, nm.sessionMirrorActive, nm.terminalMode, nm.focusedPanel)
+		}
+		if _, ok := nm.sessionsList.SessionByID("inst-b|one|sid1"); !ok {
+			t.Fatal("closing the mirror removed the remote session row")
+		}
+		if nm.confirmAction == "close_session" {
+			t.Fatal("mirror-only close entered the remote-session close flow")
+		}
+	})
+
+	t.Run("leaving sessions closes mirror", func(t *testing.T) {
+		nm, _ := updateModel(t, m, press('t', tea.ModCtrl))
+		nm.focusedPanel = panelLeft
+		nm, _ = updateModel(t, nm, press('w'))
+		if nm.state != stateWork || nm.sessionMirrorActive {
+			t.Fatalf("leaving sessions = state:%v mirror-active:%v", nm.state, nm.sessionMirrorActive)
+		}
+	})
 }
 
 // TestSessionsEntryKeybindContract pins the `v` global entry key advertised in

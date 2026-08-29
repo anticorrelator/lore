@@ -444,6 +444,31 @@ func TestResizeReflowsToRequestedRows(t *testing.T) {
 	}
 }
 
+func TestMirrorSeedPreservesExactWidthAlternateScreenAndCursor(t *testing.T) {
+	b := newTerminalBackend(5, 3)
+	t.Cleanup(b.close)
+	state := TmuxMirrorPaneState{CursorX: 4, CursorY: 2, Width: 5, Height: 3, Alternate: true}
+	b.write(sessionMirrorSeed(state, []string{"abcde", "FG", "third"}))
+
+	alt, err := b.term.ModeGet(libghostty.ModeAltScreenSave)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !alt {
+		t.Fatal("alternate-screen seed did not enter mode 1049 before captured rows")
+	}
+	snapshot, err := b.screenState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := snapshot.Rows, []string{"abcde", "FG", "third"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("seeded rows = %#v, want %#v", got, want)
+	}
+	if snapshot.CursorX != 4 || snapshot.CursorY != 2 {
+		t.Fatalf("seeded cursor = (%d,%d), want (4,2)", snapshot.CursorX, snapshot.CursorY)
+	}
+}
+
 func TestWideCharColumnAccounting(t *testing.T) {
 	m := newSizedPanel(t, 20, 3)
 	m, _ = m.Update(TerminalOutputMsg{Slug: "test", Data: []byte("好x")})

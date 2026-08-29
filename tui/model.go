@@ -164,8 +164,9 @@ type model struct {
 	detailCache    map[string]*work.WorkItemDetail
 
 	// sessionsList / sessionsDetail back the first-class sessions workspace
-	// (stateSessions): a list keyed by session identity and a read-only card
-	// for rows with no local panel to attach. sessionActivity is the running
+	// (stateSessions): a list keyed by session identity and a passive card for
+	// rows without an explicitly opened local panel or remote mirror.
+	// sessionActivity is the running
 	// journal-derived overlay (needs-input / close-pending) folded from
 	// sessionsJournalCursor forward on each substrate refresh. sessionsCount /
 	// sessionsNeedsInput feed the tab-indicator announcement and stay current
@@ -232,10 +233,17 @@ type model struct {
 	// the currently selected list item is shown in the right panel when present.
 	// Keyed by slug alone (one panel per subject): a second launch of any type
 	// attaches to the existing panel rather than replacing it.
-	sessionPanels      map[string]work.SessionPanelModel
-	terminalMode       bool
-	terminalForeground color.Color
-	terminalBackground color.Color
+	sessionPanels map[string]work.SessionPanelModel
+	// sessionMirrorPanel is the single remote tmux mirror hosted by the
+	// sessions workspace. It stays outside sessionPanels because closing a
+	// mirror must not enter the owned-session teardown path.
+	sessionMirrorPanel      work.SessionPanelModel
+	sessionMirrorRowID      string
+	sessionMirrorGeneration uint64
+	sessionMirrorActive     bool
+	terminalMode            bool
+	terminalForeground      color.Color
+	terminalBackground      color.Color
 
 	// preferDetailView records, per work slug / follow-up ID, that the user
 	// explicitly switched the right panel to the detail view (ctrl+t) while a
@@ -435,14 +443,15 @@ type model struct {
 // fan-out. Callers build this via closures that capture *model so mutations
 // are visible to the helper.
 type panelCallbacks struct {
-	currentSlug     func() string
-	loadDetail      func(id string) tea.Cmd
-	sessionPanelFn  func() (work.SessionPanelModel, bool)
-	listUpdate      func(msg tea.Msg) (tea.Cmd, string, string) // returns cmd, prevID, newID
-	detailUpdate    func(msg tea.Msg) tea.Cmd
-	setContentStart func()         // nil when the detail view does no mouse hit-testing
-	focusClick      func(x, y int) // nil = focus by host panel geometry (layoutMode split)
-	resize          func() tea.Cmd // re-apply current layout dimensions to the sub-models
+	currentSlug        func() string
+	loadDetail         func(id string) tea.Cmd
+	sessionPanelFn     func() (work.SessionPanelModel, bool)
+	sessionPanelUpdate func(msg tea.Msg) tea.Cmd
+	listUpdate         func(msg tea.Msg) (tea.Cmd, string, string) // returns cmd, prevID, newID
+	detailUpdate       func(msg tea.Msg) tea.Cmd
+	setContentStart    func()         // nil when the detail view does no mouse hit-testing
+	focusClick         func(x, y int) // nil = focus by host panel geometry (layoutMode split)
+	resize             func() tea.Cmd // re-apply current layout dimensions to the sub-models
 }
 
 // workPanelCallbacks builds the split-pane callbacks for the work list+detail
@@ -580,15 +589,16 @@ func (m *model) knowledgePanelCallbacks() panelCallbacks {
 func (m *model) sessionsPanelCallbacks() panelCallbacks {
 	return panelCallbacks{
 		currentSlug: func() string {
-			if row, ok := m.sessionsList.CurrentSession(); ok && row.Local {
-				return row.PanelKey
+			if panel, ok := m.currentSessionsPanel(); ok {
+				return panel.Slug()
 			}
 			return ""
 		},
 		loadDetail: func(rowID string) tea.Cmd {
 			return m.loadSessionsDetail(rowID)
 		},
-		sessionPanelFn: func() (work.SessionPanelModel, bool) { return m.currentSessionsPanel() },
+		sessionPanelFn:     func() (work.SessionPanelModel, bool) { return m.currentSessionsPanel() },
+		sessionPanelUpdate: func(msg tea.Msg) tea.Cmd { return m.updateCurrentSessionsPanel(msg) },
 		listUpdate: func(lmsg tea.Msg) (tea.Cmd, string, string) {
 			prev := m.sessionsList.CurrentKey()
 			lm, cmd := m.sessionsList.Update(lmsg)
@@ -657,16 +667,17 @@ func (m *model) coordinationPanelCallbacks() panelCallbacks {
 	}
 }
 
-// currentSessionsPanel returns the live panel for the sessions list's current
-// row when that row is locally hosted, mirroring currentSessionPanel for the
-// work list but routing by the row's own session key rather than a work-item
-// slug — the reachability the sessions view exists to provide.
+// currentSessionsPanel returns the panel explicitly attached to the current
+// sessions row: an owned local panel or the root-owned remote mirror.
 func (m model) currentSessionsPanel() (work.SessionPanelModel, bool) {
-	if m.sessionPanels == nil {
+	row, ok := m.sessionsList.CurrentSession()
+	if !ok {
 		return work.SessionPanelModel{}, false
 	}
-	row, ok := m.sessionsList.CurrentSession()
-	if !ok || !row.Local {
+	if !row.Local {
+		if m.sessionMirrorActive && row.RowID == m.sessionMirrorRowID {
+			return m.sessionMirrorPanel, true
+		}
 		return work.SessionPanelModel{}, false
 	}
 	panel, ok := m.sessionPanels[row.PanelKey]
@@ -679,8 +690,16 @@ func (m model) currentSessionsPanel() (work.SessionPanelModel, bool) {
 func (m *model) loadSessionsDetail(rowID string) tea.Cmd {
 	row, ok := m.sessionsList.SessionByID(rowID)
 	m.sessionsDetail.SetSession(row, ok)
-	hasPanel := ok && row.Local && m.hasSessionPanel(row.PanelKey)
-	m.terminalMode = hasPanel && !m.preferDetailView[row.PanelKey]
+	panelKey := ""
+	hasPanel := false
+	if ok && row.Local {
+		panelKey = row.PanelKey
+		hasPanel = m.hasSessionPanel(row.PanelKey)
+	} else if ok && m.sessionMirrorActive && row.RowID == m.sessionMirrorRowID {
+		panelKey = row.RowID
+		hasPanel = true
+	}
+	m.terminalMode = hasPanel && !m.preferDetailView[panelKey]
 	return nil
 }
 
@@ -752,6 +771,9 @@ func (m *model) applyTerminalColorPair() {
 	for slug, panel := range m.sessionPanels {
 		m.sessionPanels[slug] = panel.WithTerminalColorPair(pair)
 	}
+	if m.sessionMirrorActive {
+		m.sessionMirrorPanel = m.sessionMirrorPanel.WithTerminalColorPair(pair)
+	}
 }
 
 // cleanupAllSubprocesses cancels any running AI command, cleans up all spec
@@ -778,6 +800,7 @@ func (m *model) cleanupAllSubprocesses() {
 	for slug, panel := range m.sessionPanels {
 		m.sessionPanels[slug] = panel.Cleanup()
 	}
+	m.closeSessionMirror()
 	anySessionRetained := false
 	for slug, ls := range m.localSessions {
 		if ls.tmuxName != "" || ls.worktreeID != "" {

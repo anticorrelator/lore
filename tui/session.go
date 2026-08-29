@@ -13,6 +13,99 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
 
+// openSessionMirror replaces any other remote mirror and focuses the selected
+// tmux pane. Re-entering the same row reuses its generation.
+func (m model) openSessionMirror(rowID, tmuxName string) (model, tea.Cmd) {
+	if rowID == "" || tmuxName == "" {
+		return m, nil
+	}
+	if m.sessionMirrorActive && m.sessionMirrorRowID == rowID && m.sessionMirrorPanel.TmuxName() == tmuxName {
+		m.focusedPanel = panelRight
+		m.terminalMode = true
+		m.setPreferDetail(rowID, false)
+		return m, nil
+	}
+	if m.sessionMirrorActive {
+		m.closeSessionMirror()
+	}
+	if m.sessionMirrorGeneration == 0 {
+		m.sessionMirrorGeneration = 1
+	}
+	panel := work.NewMirrorSessionPanelModel(rowID, tmuxName, m.sessionMirrorGeneration)
+	if pair, ok := work.NewTerminalColorPair(m.terminalForeground, m.terminalBackground); ok {
+		panel = panel.WithTerminalColorPair(pair)
+	}
+	panel, _ = panel.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth() - 2, Height: m.detailPanelHeight()})
+	m.sessionMirrorPanel = panel
+	m.sessionMirrorRowID = rowID
+	m.sessionMirrorActive = true
+	m.focusedPanel = panelRight
+	m.terminalMode = true
+	m.setPreferDetail(rowID, false)
+	return m, panel.Init()
+}
+
+// closeSessionMirror releases only the root-owned mirror. A generation-bumped
+// tombstone remains available to reject and dispose late open results.
+func (m *model) closeSessionMirror() {
+	if !m.sessionMirrorActive {
+		return
+	}
+	panel := m.sessionMirrorPanel.Cleanup()
+	if panel.MirrorGeneration() > m.sessionMirrorGeneration {
+		m.sessionMirrorGeneration = panel.MirrorGeneration()
+	}
+	m.sessionMirrorGeneration++
+	tombstone := work.NewMirrorSessionPanelModel(panel.Slug(), panel.TmuxName(), m.sessionMirrorGeneration)
+	m.sessionMirrorPanel = tombstone
+	m.sessionMirrorRowID = ""
+	m.sessionMirrorActive = false
+	m.terminalMode = false
+}
+
+// handleSessionMirrorMessage routes generation-scoped mirror traffic to the
+// root slot, never through owned-session lifecycle or journal handlers.
+func (m model) handleSessionMirrorMessage(msg tea.Msg) (model, tea.Cmd) {
+	if !m.sessionMirrorPanel.IsMirror() {
+		return m, nil
+	}
+	sm, cmd := m.sessionMirrorPanel.Update(msg)
+	m.sessionMirrorPanel = sm
+	if generation := sm.MirrorGeneration(); generation > m.sessionMirrorGeneration {
+		m.sessionMirrorGeneration = generation
+	}
+	return m, cmd
+}
+
+// updateCurrentSessionsPanel forwards focused input to either the selected
+// owned session or the explicitly drilled remote mirror.
+func (m *model) updateCurrentSessionsPanel(msg tea.Msg) tea.Cmd {
+	row, ok := m.sessionsList.CurrentSession()
+	if !ok {
+		m.terminalMode = false
+		return nil
+	}
+	if !row.Local {
+		if !m.sessionMirrorActive || row.RowID != m.sessionMirrorRowID {
+			m.terminalMode = false
+			return nil
+		}
+		sm, cmd := m.sessionMirrorPanel.Update(msg)
+		m.sessionMirrorPanel = sm
+		if generation := sm.MirrorGeneration(); generation > m.sessionMirrorGeneration {
+			m.sessionMirrorGeneration = generation
+		}
+		return cmd
+	}
+	if panel, ok := m.sessionPanels[row.PanelKey]; ok {
+		sm, cmd := panel.Update(msg)
+		m.sessionPanels[row.PanelKey] = sm
+		return cmd
+	}
+	m.terminalMode = false
+	return nil
+}
+
 // endLocalSession drops a torn-down session from this instance's registry row
 // and returns the Cmds that persist the removal and journal `closed`. It is a
 // no-op (nil Cmds) for a slug this instance was not tracking. The `closed` row
@@ -521,6 +614,11 @@ func (m model) handleTerminalDetach(_ work.TerminalDetachMsg) (model, tea.Cmd) {
 }
 
 func (m model) handleTerminalTerminate(msg work.TerminalTerminateMsg) (model, tea.Cmd) {
+	if m.sessionMirrorActive && msg.Slug == m.sessionMirrorPanel.Slug() {
+		m.closeSessionMirror()
+		m.focusedPanel = panelLeft
+		return m, nil
+	}
 	// User killed the subprocess (Ctrl+\\) — cleanup and remove the panel.
 	// Reload list in case spec wrote files before being killed.
 	slug := msg.Slug
