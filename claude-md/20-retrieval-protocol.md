@@ -11,7 +11,7 @@
 3. **Re-declare with intent, not habit.** Reaching to broaden a scale set means your initial declaration was wrong for the task. Articulate why. "Just in case" is recall-bias asking.
 4. **Narrow results aren't a failure mode.** If your declared scope returns little, either no knowledge exists at this altitude, or your scale was mis-declared. Think about which before broadening.
 
-The full scale rubric (4 definitions + boundary tests + ±1 query pattern) lives in `/spec`, `/implement`, and `/memory` SKILL.md files.
+The full scale rubric (4 definitions + boundary tests + ±1 query pattern) lives in `skills/memory/SKILL.md` § Scale-Aware Navigation, in `skills/work/SKILL.md` under `search`, and in the shared agent templates (`agents/*.md`); `/spec` and `/implement` point there rather than carrying their own copies.
 
 ### Knowledge Retrieval (Before Grep/Glob/Explore)
 Every entry in the knowledge store carries provenance and a falsifier you can check against the code, so run `lore search "<topic>"` before Grep, Glob, or Explore agents — a verified hit is cheaper than re-deriving the same insight from source. The store documents conventions, architecture, past decisions, and gotchas that raw code exploration cannot surface; if it has a relevant entry, use it.

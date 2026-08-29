@@ -558,7 +558,7 @@ closure = {
 
 [[knowledge:architecture/plan-task-models/lore-work-check-is-not-taskcompleted-acceptance|Acceptance-layer note:]] `lore work check` (task-system layer) and the closure verdict (capability-loop layer) sit at different altitudes. The task system answers "did this artifact get produced and pass per-task checks"; the closure verdict answers "did the run deliver the capability the anchor names." The closure verdict cannot override the task-system archive precondition (a `full` verdict on a task-incomplete item is refused outright — no row is recorded at all), and the task-system precondition cannot substitute for the closure verdict (every task checked is the *input* to the verdict, not its conclusion).
 
-**Lazy audit note:** the Stop hook triggers audit of this session's promotions; `/implement` does not invoke it explicitly. Completion remains non-blocking because the audit runs opportunistically after session end.
+**Lazy audit note:** no automatic audit fires when this session ends. Promotions are audited out-of-band, at calibration time, when `scripts/audit-artifact.sh` routes producer artifacts through the judges; `/implement` does not invoke it. Completion remains non-blocking because auditing is deferred to that calibration-time pass.
 
 ### Step 7: Close the run
 

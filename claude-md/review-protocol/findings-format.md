@@ -1,6 +1,6 @@
 ### Findings Output Format
 
-Lens skills produce structured JSON findings that can be consumed by `post-review.sh`, written to work items, or presented to the user. This schema is the contract between lens skills and downstream consumers.
+Lens skills produce structured JSON findings that can be rendered into followup artifacts and proposed review comments, written to work items, or presented to the user. This schema is the contract between lens skills and downstream consumers.
 
 #### Schema
 
@@ -145,18 +145,4 @@ The sidecar is the canonical artifact for proposed inline PR comments. Review co
 - **selected** — Defaults to `true`. Controls whether the comment is included when the user confirms the proposed comments batch.
 
 Fields `side` and `confidence` are intentionally omitted from this schema.
-
-#### Output location
-
-Each lens writes its findings JSON to the shared work item at `pr-lens-review-<PR>/notes.md` under a heading for that lens. The JSON is embedded in a fenced code block:
-
-````
-## Correctness Lens
-
-```json
-{ "lens": "correctness", "pr": 42, ... }
-```
-````
-
-This structure allows multiple lenses to append findings to the same work item, and allows `post-review.sh` to extract and merge findings from all lenses.
 

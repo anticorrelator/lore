@@ -9,9 +9,9 @@ argument_description: "[PR_number_or_URL] — PR to analyze for correctness issu
 
 Focused variant. For holistic coverage, use `/pr-review`.
 
-You are running the **correctness lens** — a focused review that traces logic paths through PR changes to find bugs, boundary errors, and incorrect behavior. This lens complements the 8-point agent-code checklist in `/pr-review`; it targets general correctness concerns, not agent-specific failure modes.
+You are running the **correctness lens** — a focused review that traces logic paths through PR changes to find bugs, boundary errors, and incorrect behavior. This lens complements the other lenses in `/pr-review`'s multi-lens review; it targets general correctness concerns.
 
-Findings are structured JSON written to a shared work item. Posting to GitHub is a separate step via `post-review.sh`.
+Findings are structured JSON, presented to the user and persisted per Step 5c; posting to GitHub is a separate, user-triaged step via `post-proposed-review.sh`.
 
 ## Lens Model Routing
 
@@ -128,17 +128,20 @@ Classify each finding using the Severity Classification definitions. Default to 
 
 **5b. Present findings** to the user grouped by severity (blocking first, then suggestions, then questions). For each finding show: severity, title, file:line, body, and knowledge context. Strip internal protocol headers (`**Grounding:**`, `**Severity:**`, etc.) from user-visible output — these are internal scaffolding. The grounding content (the concrete failure scenario or improvement claim) must be preserved as the substance of the finding.
 
-**5c. Write to work item.** Create or update the shared lens review work item:
+**5c. Persist findings.** (Standalone runs only — when `/pr-review` dispatches this lens it consumes Step 3 and owns output itself.) If this review runs inside an existing work item, append the findings JSON to that item's `notes.md` under a `## Correctness Lens` heading as a fenced JSON code block. Otherwise persist through the followup pipeline, the canonical review-artifact path:
+```bash
+bash ~/.lore/scripts/create-followup.sh \
+  --title "correctness lens — PR #<PR_NUMBER>" --source pr-correctness \
+  --content "<full findings report markdown>" --lens-findings <findings.json> \
+  --pr <PR_NUMBER> --owner <OWNER> --repo <REPO> \
+  --head-sha "$(gh pr view <PR_NUMBER> --json headRefOid -q .headRefOid)" \
+  --proposed-comments <comments.json>
 ```
-/work create pr-lens-review-<PR_NUMBER>
-```
+Build `<comments.json>` from the findings that carry an honest `file` + `line` anchor, per the `proposed-comments.json` sidecar schema in `claude-md/review-protocol/findings-format.md`; findings without an anchor stay in the followup content only.
 
-If the work item already exists, load it instead of creating a duplicate. Append the findings JSON under a `## Correctness Lens` heading in `notes.md` as a fenced JSON code block.
-
-**5d. Notify about posting.** After writing findings, remind the user:
-> Findings written to work item. To post as a PR review, run:
+**5d. Notify about posting.** Nothing is posted automatically. Give the user the followup id and remind them: proposed comments are triaged in the TUI, then posted with:
 > ```bash
-> bash ~/.lore/scripts/post-review.sh <findings.json> --pr <PR_NUMBER> [--dry-run]
+> bash ~/.lore/scripts/post-proposed-review.sh <followup-id> [--dry-run]
 > ```
 
 ## Step 6: Capture
