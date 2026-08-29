@@ -380,13 +380,13 @@ LIVE="$TEST_DIR/arc-live"
 setup_store "$LIVE"
 write_arc "$LIVE" live-arc active
 cat > "$LIVE/_work/_arcs/live-arc/coordination.md" <<'EOF'
-| # | Step | Depends on | Tree | Status | Verdict |
-|---|---|---|---|---|---|
-| s-inflight | Live step | — | writer | in-flight | — |
-| s-prefreeze | Allocated step | — | writer | pending | — |
-| s-ready | Untouched step | — | writer | pending | — |
-| s-readonly | Dispatched read-only step | — | read-only | pending | — |
-| s-accepted | Accepted read-only step | — | read-only | pending | — |
+| # | Step | Depends on | Tree | Gate | Status | Verdict |
+|---|---|---|---|---|---|---|
+| s-inflight | Live step | — | writer | notify | in-flight | — |
+| s-prefreeze | Allocated step | — | writer | flag | pending | — |
+| s-ready | Untouched step | — | writer | hold | pending | — |
+| s-readonly | Dispatched read-only step | — | read-only | notify | pending | — |
+| s-accepted | Accepted read-only step | — | read-only | notify | pending | — |
 EOF
 write_worktree_identity "$LIVE" wt-prefreeze live-arc s-prefreeze a1
 python3 "$RECONCILE" register-attempt --kdir "$LIVE" --slug live-arc \
@@ -411,6 +411,12 @@ assert_eq "arc ledger under _work/_arcs is read" "1" \
   "$(jq -r '.coordination_dispatch.ledger_scan.ledgers_read' "$LIVE_JSON")"
 assert_eq "the arc ledger's stream rows are counted" "5" \
   "$(jq -r '.coordination_dispatch.ledger_scan.streams_read' "$LIVE_JSON")"
+assert_eq "the complete stream projection preserves ledger declaration order" \
+  "s-inflight,s-prefreeze,s-ready,s-readonly,s-accepted" \
+  "$(jq -r '[.coordination_streams[] | select(.arc=="live-arc") | .stream_id] | join(",")' "$LIVE_JSON")"
+assert_eq "the complete stream projection carries the board's authored cells" \
+  "Untouched step|hold|—" \
+  "$(jq -r '[.coordination_streams[] | select(.arc=="live-arc" and .stream_id=="s-ready")][0] | [.step,.gate,.verdict] | join("|")' "$LIVE_JSON")"
 assert_eq "a live stream is an active attempt" "3" \
   "$(jq -r '.coordination_dispatch.active_attempts' "$LIVE_JSON")"
 assert_eq "a read ledger with dispatchable streams names no reason" "null" \
@@ -427,6 +433,9 @@ assert_eq "a dispatched read-only attempt is never redispatched" "0" \
   "$(jq -r '[.buckets.act_now[] | select(.observed_facts.stream_id?=="s-readonly")] | length' "$LIVE_JSON")"
 assert_eq "a stream with no attempt records the absence explicitly" "false" \
   "$(jq -r '[.buckets.act_now[] | select(.observed_facts.stream_id?=="s-ready")][0].observed_facts.attempt_present' "$LIVE_JSON")"
+assert_eq "existing bucket stream facts gain step and gate without losing verdict" \
+  "Untouched step|hold|—" \
+  "$(jq -r '[.buckets.act_now[] | select(.observed_facts.stream_id?=="s-ready")][0].observed_facts | [.step,.gate,.verdict] | join("|")' "$LIVE_JSON")"
 assert_eq "the ledger locator points into the arc record" "true" \
   "$(jq -r '[.buckets[][] | select(.evidence.locator | startswith("_work/_arcs/live-arc/coordination.md#L"))] | length > 0' "$LIVE_JSON")"
 assert_eq "a closed arc's ledger is not projected" "0" \
@@ -558,6 +567,10 @@ cat > "$VOCAB/_work/_arcs/vocab-arc/coordination.md" <<'EOF'
 EOF
 VOCAB_JSON="$TEST_DIR/arc-vocab.json"
 bash "$COORDINATE" --kdir "$VOCAB" --json > "$VOCAB_JSON"
+
+assert_eq "the complete stream projection retains terminal, blocked, and invalid rows" \
+  "s-bad-status,s-bad-verdict,s-bad-tree,s-blocked-ref,s-blocked-input,s-dropped,s-ready" \
+  "$(jq -r '[.coordination_streams[] | select(.arc=="vocab-arc") | .stream_id] | join(",")' "$VOCAB_JSON")"
 
 assert_eq "a typo'd Status becomes a Reconcile row instead of vanishing" "1" \
   "$(jq -r '[.buckets.reconcile[] | select(.kind=="coordination-status-invalid" and .observed_facts.stream_id=="s-bad-status")] | length' "$VOCAB_JSON")"

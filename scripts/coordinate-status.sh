@@ -454,9 +454,15 @@ def project_arc_coordination(record):
         liveness = attempt_liveness(attempt, tree)
         facts = {
             "arc": arc, "stream_id": stream_id, "depends_on": row["depends_on"],
-            "tree": tree, "status": status, "verdict": verdict,
+            "step": row.get("step", ""), "tree": tree,
+            "gate": row.get("gate", ""), "status": status, "verdict": verdict,
             "attempt": attempt, **liveness,
         }
+        coordination_streams.append({
+            "arc": arc, "stream_id": stream_id, "step": row.get("step", ""),
+            "depends_on": row["depends_on"], "tree": tree,
+            "gate": row.get("gate", ""), "status": status, "verdict": verdict,
+        })
         if stream_id in cyclic_streams:
             buckets["reconcile"].append(make_row(
                 "reconcile", "work-index", "coordination-dependency-cycle",
@@ -565,6 +571,7 @@ def dispatch_reason(scan, ready_total):
 
 
 # --- arc coordination ledgers ---------------------------------------------
+coordination_streams = []
 arc_records, arc_scan = scan_arcs()
 # A work item coordinated by an active arc is projected as that arc's streams;
 # its own task DAG would double-count the same work. The item-local ledger check
@@ -1165,6 +1172,10 @@ projection = {
         "ledger_scan": {**arc_scan,
                         "reason": dispatch_reason(arc_scan, len(coordination_candidates))},
     },
+    # Complete ledger rows in declaration order. Buckets intentionally contain
+    # only actionable/reconcilable rows and sort those rows by identity, so they
+    # cannot serve consumers that need the whole DAG and its authored order.
+    "coordination_streams": coordination_streams,
     "buckets": buckets,
 }
 

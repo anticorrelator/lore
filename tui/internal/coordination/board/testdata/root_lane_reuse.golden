@@ -1,0 +1,3 @@
+ ✓         a     first root                              done gate:notify verdict:—
+ ✓         b     child ends its rail                     done gate:notify verdict:—
+   ○       c     next root                               pending gate:notify verdict:—

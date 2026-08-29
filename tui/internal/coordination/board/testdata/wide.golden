@@ -1,0 +1,7 @@
+ ✓─╮─╮─╮─╮  root  walking skeleton                        done gate:notify verdict:—
+ ✓ │ │ │ │  w1    worker one                              done gate:notify verdict:—
+ │ ● │ │ │  w2    worker two                              in-flight gate:notify verdict:—
+ │ │ ● │ │  w3    worker three                            in-flight gate:notify verdict:—
+ │ │ │ ○ │  w4    worker four                             pending gate:notify verdict:—
+ │ │ │ │ ▲  w5    worker five                             blocked-on-input gate:notify verdict:—
+ ○─╯─╯─╯─╯  join  assemble + verify                       pending gate:notify verdict:—  waits: w2, w3, w4, w5
