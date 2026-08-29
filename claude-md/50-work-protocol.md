@@ -16,7 +16,7 @@ Work items persist in the project's `_work/` directory (path resolved by `lore r
 
 ALL planning work MUST create durable artifacts in `_work/` — whether triggered by `/work`, a harness's builtin plan mode, or inline design discussion. **No ephemeral plans.**
 
-**If you used builtin plan mode:** On harnesses where a Stop hook is wired (capability `stop_hook=full`), it will remind you to persist. Don't wait for it — persist immediately after the user approves the plan via `/work create`. Where `stop_hook` degrades, the reminder may not fire and persistence is your responsibility.
+**If you used builtin plan mode:** No machinery reminds you to persist — persistence is your responsibility on every harness. Persist immediately after the user approves the plan via `/work create`.
 
 ### Auto-Create Work Items (Low Threshold)
 
