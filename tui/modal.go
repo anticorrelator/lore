@@ -217,11 +217,6 @@ func (m model) renderConfirmModal() string {
 		body = fmt.Sprintf("%s\n\n", s.key.Render(m.confirmTitle)) +
 			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
 			s.key.Render("n / Esc") + s.dim.Render("  cancel")
-	case "release":
-		title = "Release Review Gate"
-		body = fmt.Sprintf("Release the review gate on %s?\n\n", s.key.Render(m.confirmTitle)) +
-			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
-			s.key.Render("any key") + s.dim.Render("  cancel")
 	case "close_session":
 		title = "Close Session"
 		body = fmt.Sprintf("Request close of %s?\n\n", s.key.Render(m.confirmTitle)) +

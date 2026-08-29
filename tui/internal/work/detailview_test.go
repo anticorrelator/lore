@@ -379,54 +379,6 @@ func TestDetailModelPlanViewportTracksResize(t *testing.T) {
 	}
 }
 
-// TestReviewDwellLine pins the meta-tab review summary: a hold reads
-// "held <dwell> — <reason>", a flag reads "flagged <dwell>", and an empty
-// reason drops the separator.
-func TestReviewDwellLine(t *testing.T) {
-	held := stripListANSI(reviewDwellLine(&ReviewState{
-		Mechanism: "hold", GatedAt: "2026-06-01T00:00:00Z", Reason: "needs a human",
-	}))
-	if !strings.HasPrefix(held, "held ") {
-		t.Errorf("hold should render as 'held …', got %q", held)
-	}
-	if !strings.Contains(held, "— needs a human") {
-		t.Errorf("dwell line should carry the reason, got %q", held)
-	}
-
-	flagged := stripListANSI(reviewDwellLine(&ReviewState{
-		Mechanism: "flag", GatedAt: "2026-06-01T00:00:00Z",
-	}))
-	if !strings.HasPrefix(flagged, "flagged ") {
-		t.Errorf("flag should render as 'flagged …', got %q", flagged)
-	}
-	if strings.Contains(flagged, "—") {
-		t.Errorf("empty reason should drop the separator, got %q", flagged)
-	}
-}
-
-// TestMetaTabRendersReviewDwell verifies the meta tab shows a Review field for
-// a gated item and omits it entirely for an ungated one.
-func TestMetaTabRendersReviewDwell(t *testing.T) {
-	m := NewDetailModel("", "gated")
-	m.detail = &WorkItemDetail{
-		Slug:   "gated",
-		Status: "active",
-		Review: &ReviewState{Mechanism: "hold", GatedAt: "2026-06-01T00:00:00Z", Reason: "look at this"},
-	}
-	out := stripListANSI(m.renderMetaTab(80))
-	if !strings.Contains(out, "Review:") {
-		t.Fatalf("gated item should show a Review field, got:\n%s", out)
-	}
-	if !strings.Contains(out, "held") || !strings.Contains(out, "look at this") {
-		t.Errorf("review line should carry mechanism + reason, got:\n%s", out)
-	}
-
-	m.detail.Review = nil
-	if out := stripListANSI(m.renderMetaTab(80)); strings.Contains(out, "Review:") {
-		t.Errorf("ungated item must not show a Review field, got:\n%s", out)
-	}
-}
-
 // The meta tab lists blockers under "Blocked by:" beside "Related:" when the
 // item has blocked_by edges, and omits the line entirely when it has none.
 func TestMetaTabRendersBlockedBy(t *testing.T) {

@@ -119,7 +119,6 @@ result = {
     'related_work': meta.get('related_work', []),
     'blocked_by': meta.get('blocked_by', []),
     'ceremony_depth': meta.get('ceremony_depth'),
-    'review': meta.get('review'),
     'plan_content': read_file(plan_path),
     'notes_content': read_file(notes_path),
     'has_execution_log': os.path.isfile(exec_log_path),
@@ -153,25 +152,6 @@ ISSUE=$(json_field "issue" "$META" || true)
 PR=$(json_field "pr" "$META" || true)
 PROJECT=$(json_field "project" "$META" || true)
 INTENT_ANCHOR=$(json_field "intent_anchor" "$META" || true)
-
-# Review gate (optional nested block) — one human line, or empty when ungated.
-REVIEW_LINE=$(python3 -c '
-import json, sys
-try:
-    with open(sys.argv[1], encoding="utf-8") as f:
-        review = json.load(f).get("review")
-except Exception:
-    review = None
-if isinstance(review, dict) and review.get("mechanism") in ("flag", "hold"):
-    parts = [str(review.get("mechanism")) + " gate"]
-    if review.get("gated_at"):
-        parts.append("opened " + str(review.get("gated_at")))
-    if review.get("reason"):
-        parts.append("— " + str(review.get("reason")))
-    if review.get("packet"):
-        parts.append("(packet: " + str(review.get("packet")) + ")")
-    print(" ".join(parts))
-' "$META" || true)
 
 # Extract branches, tags, related_work, and blocked_by as comma-separated
 # display strings.
@@ -220,9 +200,6 @@ if [[ -n "$INTENT_ANCHOR" ]]; then
 fi
 if [[ -n "$CEREMONY_DEPTH" ]]; then
   echo "Ceremony depth: $CEREMONY_DEPTH"
-fi
-if [[ -n "$REVIEW_LINE" ]]; then
-  echo "Review: $REVIEW_LINE"
 fi
 echo "Created: $CREATED"
 echo "Updated: $UPDATED"
