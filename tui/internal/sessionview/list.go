@@ -49,9 +49,12 @@ type SessionRow struct {
 	Started string
 }
 
-// headerIDPrefix namespaces base-item group header rows so they never collide
-// with a session RowID.
-const headerIDPrefix = "base:"
+// Header IDs are stable cursor targets and live outside the session RowID
+// namespace.
+const (
+	headerIDPrefix   = "base:"
+	arcOwnedHeaderID = "group:arc-owned"
+)
 
 var listColumns = []collection.Column{
 	{Key: "dot", Title: " ", Width: 1, Priority: 1},
@@ -64,8 +67,10 @@ var listColumns = []collection.Column{
 // ListModel is the sessions list panel: a collection.List consumer backed by a
 // host-supplied session set.
 type ListModel struct {
-	rows []SessionRow
-	list collection.List
+	rows             []SessionRow
+	activeArcMembers map[string]bool
+	showArcOwned     bool
+	list             collection.List
 }
 
 // NewListModel builds an empty sessions list.
@@ -92,15 +97,70 @@ func (m *ListModel) SetSessions(rows []SessionRow) {
 	m.refreshRows()
 }
 
-// refreshRows groups derived-slug workers under their base work item and renders
-// standalone sessions flat below the grouped section. Deterministic ordering
-// (sorted bases, sorted members, sorted ungrouped) keeps the list stable across
-// the 5s substrate refresh so the cursor does not jump.
+// SetActiveArcMembers replaces the declared work-item membership of active
+// arcs. An empty set restores the complete flat presentation: absent arc data
+// must never hide a session.
+func (m *ListModel) SetActiveArcMembers(members []string) {
+	m.activeArcMembers = make(map[string]bool, len(members))
+	for _, slug := range members {
+		if slug != "" {
+			m.activeArcMembers[slug] = true
+		}
+	}
+	m.refreshRows()
+}
+
+// refreshRows keeps non-arc sessions in the default presentation and places
+// sessions owned by active arcs in one collapsed-by-default disclosure group.
+// Within either set, derived-slug workers retain the existing base-item
+// grouping. Unknown or unparseable ownership can match no declared member and
+// therefore stays visible. Deterministic ordering keeps the cursor stable
+// across the 5s substrate refresh.
 func (m *ListModel) refreshRows() {
+	var cur string
+	if r, ok := m.list.CurrentRow(); ok {
+		cur = r.ID
+	}
+
+	var primary, arcOwned []SessionRow
+	for _, r := range m.rows {
+		if m.activeArcMembers[r.Slug] || (r.BaseItem != "" && m.activeArcMembers[r.BaseItem]) {
+			arcOwned = append(arcOwned, r)
+			continue
+		}
+		primary = append(primary, r)
+	}
+
+	var out []collection.Row
+	out = appendSessionGroups(out, primary, false)
+	if len(arcOwned) > 0 {
+		arrow := "▶"
+		if m.showArcOwned {
+			arrow = "▼"
+		}
+		out = append(out, collection.Row{
+			ID:     arcOwnedHeaderID,
+			Header: true,
+			Title: collection.Cell{
+				Text:  fmt.Sprintf("%s arc-owned (%d)", arrow, len(arcOwned)),
+				Style: groupHeaderStyle,
+			},
+		})
+		out = appendSessionGroups(out, arcOwned, !m.showArcOwned)
+	}
+	m.list.SetRows(out)
+	if cur != "" {
+		m.list.SetCursorByID(cur)
+	}
+}
+
+// appendSessionGroups appends the established base-item groups followed by
+// standalone rows. hidden applies to the whole appended section.
+func appendSessionGroups(out []collection.Row, rows []SessionRow, hidden bool) []collection.Row {
 	grouped := map[string][]SessionRow{}
 	var bases []string
 	var ungrouped []SessionRow
-	for _, r := range m.rows {
+	for _, r := range rows {
 		if r.BaseItem != "" {
 			if _, seen := grouped[r.BaseItem]; !seen {
 				bases = append(bases, r.BaseItem)
@@ -113,23 +173,27 @@ func (m *ListModel) refreshRows() {
 	sort.Strings(bases)
 	sort.Slice(ungrouped, func(i, j int) bool { return ungrouped[i].Display < ungrouped[j].Display })
 
-	var out []collection.Row
 	for _, base := range bases {
 		members := grouped[base]
 		sort.Slice(members, func(i, j int) bool { return members[i].Display < members[j].Display })
 		out = append(out, collection.Row{
 			ID:     headerIDPrefix + base,
 			Header: true,
+			Hidden: hidden,
 			Title:  collection.Cell{Text: fmt.Sprintf("%s (%d)", base, len(members)), Style: groupHeaderStyle},
 		})
 		for _, r := range members {
-			out = append(out, sessionRowCells(r))
+			row := sessionRowCells(r)
+			row.Hidden = hidden
+			out = append(out, row)
 		}
 	}
 	for _, r := range ungrouped {
-		out = append(out, sessionRowCells(r))
+		row := sessionRowCells(r)
+		row.Hidden = hidden
+		out = append(out, row)
 	}
-	m.list.SetRows(out)
+	return out
 }
 
 // sessionRowCells maps a SessionRow to its collection row: columnar cells and
@@ -184,6 +248,13 @@ func activityBadge(r SessionRow) (string, lipgloss.Style) {
 func (m ListModel) Init() tea.Cmd { return nil }
 
 func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
+	if key, ok := msg.(tea.KeyPressMsg); ok && key.String() == "enter" {
+		if r, current := m.list.CurrentRow(); current && r.ID == arcOwnedHeaderID {
+			m.showArcOwned = !m.showArcOwned
+			m.refreshRows()
+			return m, nil
+		}
+	}
 	l, cmd := m.list.Update(msg)
 	m.list = l
 	return m, cmd

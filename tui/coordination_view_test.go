@@ -772,6 +772,30 @@ func TestCoordinationSessionsJoinFiltersByArc(t *testing.T) {
 	})
 }
 
+func TestArcScanCollapsesOnlyActiveDeclaredSessions(t *testing.T) {
+	m := minimalModel(stateSessions, nil, nil)
+	m.sessionRows = []sessionview.SessionRow{
+		{RowID: "active", Slug: "item-a", Display: "item-a"},
+		{RowID: "closed", Slug: "item-b", Display: "item-b"},
+	}
+	m.sessionsList.SetSessions(m.sessionRows)
+
+	nm, _ := m.handleCoordinationArcsScanned(coordinationArcsScannedMsg{arcs: []coordination.Arc{
+		{Slug: "live", Status: coordination.StatusActive, Members: []string{"item-a"}},
+		{Slug: "done", Status: coordination.StatusClosed, Members: []string{"item-b"}},
+	}})
+	view := nm.sessionsList.View()
+	if !strings.Contains(view, "▶ arc-owned (1)") {
+		t.Fatalf("active declared session should collapse:\n%s", view)
+	}
+	if !strings.Contains(view, "item-b") {
+		t.Fatalf("closed-arc membership must not hide a session:\n%s", view)
+	}
+	if strings.Contains(view, "item-a ") {
+		t.Fatalf("active-arc member should stay behind the disclosure:\n%s", view)
+	}
+}
+
 // TestCoordinationViewComposesBothLayouts smoke-tests the compositor arm: the
 // coordination view renders through the shared split-pane in both layout
 // modes with its list title and integrated detail sections.

@@ -60,6 +60,70 @@ func TestListGroupsWorkersUnderBase(t *testing.T) {
 	}
 }
 
+func TestListCollapsesArcOwnedSessions(t *testing.T) {
+	m := NewListModel()
+	m.SetActiveArcMembers([]string{"item-a"})
+	m.SetSessions([]SessionRow{
+		{RowID: "direct", Slug: "item-a", Display: "item-a", Local: true},
+		{RowID: "worker", Slug: "item-a--w1", Display: "item-a--w1", BaseItem: "item-a", Local: true},
+	})
+	sz(&m, 60, 20)
+
+	view := m.View()
+	if !strings.Contains(view, "▶ arc-owned (2)") {
+		t.Fatalf("collapsed arc-owned group missing:\n%s", view)
+	}
+	if strings.Contains(view, "item-a--w1") {
+		t.Fatalf("arc-owned sessions should start hidden:\n%s", view)
+	}
+	if _, ok := m.CurrentSession(); ok {
+		t.Fatal("an all-arc list should start on the disclosure header")
+	}
+
+	var cmd tea.Cmd
+	m, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatal("expanding the arc-owned group must not emit a selection")
+	}
+	view = m.View()
+	if !strings.Contains(view, "▼ arc-owned (2)") || !strings.Contains(view, "item-a--w1") {
+		t.Fatalf("expanded arc-owned group should expose every session:\n%s", view)
+	}
+}
+
+func TestListEmptyArcMembersDegradesToFullListing(t *testing.T) {
+	m := NewListModel()
+	m.SetActiveArcMembers(nil)
+	m.SetSessions([]SessionRow{
+		{RowID: "direct", Slug: "item-a", Display: "item-a", Local: true},
+		{RowID: "worker", Slug: "item-a--w1", Display: "item-a--w1", BaseItem: "item-a", Local: true},
+	})
+	sz(&m, 60, 20)
+
+	view := m.View()
+	if strings.Contains(view, "arc-owned") || !strings.Contains(view, "item-a") || !strings.Contains(view, "item-a--w1") {
+		t.Fatalf("empty arc data must preserve the full listing:\n%s", view)
+	}
+}
+
+func TestListUnknownOwnershipStaysVisible(t *testing.T) {
+	m := NewListModel()
+	m.SetActiveArcMembers([]string{"item-a"})
+	m.SetSessions([]SessionRow{
+		{RowID: "unknown", Slug: "ad-hoc-session", Display: "ad-hoc-session", Local: true},
+		{RowID: "owned", Slug: "item-a", Display: "item-a", Local: true},
+	})
+	sz(&m, 60, 20)
+
+	view := m.View()
+	if !strings.Contains(view, "ad-hoc-session") {
+		t.Fatalf("unknown ownership must stay in the visible set:\n%s", view)
+	}
+	if strings.Contains(view, "item-a ") {
+		t.Fatalf("declared arc member should remain collapsed:\n%s", view)
+	}
+}
+
 func TestListNeedsInputCount(t *testing.T) {
 	m := NewListModel()
 	m.SetSessions([]SessionRow{
