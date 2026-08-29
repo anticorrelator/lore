@@ -9,7 +9,7 @@ argument_description: "[PR_number_or_URL] — PR to analyze for correctness issu
 
 Focused variant. For holistic coverage, use `/pr-review`.
 
-You are running the **correctness lens** — a focused review that traces logic paths through PR changes to find bugs, boundary errors, and incorrect behavior. This lens complements the 8-point agent-code checklist in `/pr-review`; it targets general correctness concerns, not agent-specific failure modes.
+You are running the **correctness lens** — a focused review that traces logic paths through PR changes to find bugs, boundary errors, and incorrect behavior. This lens complements the other lenses in `/pr-review`'s multi-lens review; it targets general correctness concerns.
 
 Findings are structured JSON written to a shared work item. Posting to GitHub is a separate step via `post-review.sh`.
 

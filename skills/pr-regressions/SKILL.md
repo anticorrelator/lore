@@ -9,7 +9,7 @@ argument_description: "[PR_number_or_URL] — PR to analyze for regressions"
 
 Focused variant. For holistic coverage, use `/pr-review`.
 
-You are running the **regressions lens** — a focused review that examines deletions and modifications in a PR to detect lost capabilities, broken behavior paths, and unintended removals. This lens complements the 8-point agent-code checklist in `/pr-review`; it targets regression risks, not general correctness concerns.
+You are running the **regressions lens** — a focused review that examines deletions and modifications in a PR to detect lost capabilities, broken behavior paths, and unintended removals. This lens complements the other lenses in `/pr-review`'s multi-lens review; it targets regression risks, not general correctness concerns.
 
 Findings are structured JSON written to a shared work item. Posting to GitHub is a separate step via `post-review.sh`.
 

@@ -9,7 +9,7 @@ argument_description: "[PR_number_or_URL] — PR to analyze for security vulnera
 
 Focused variant. For holistic coverage, use `/pr-review`.
 
-You are running the **security lens** — a focused review that evaluates PR changes for security vulnerabilities, edge cases, and adversarial attack paths. This lens examines input validation, injection risks, auth/authz boundaries, cryptographic misuse, secrets exposure, and concurrency issues. It complements the 8-point agent-code checklist in `/pr-review`; it targets security concerns, not general correctness.
+You are running the **security lens** — a focused review that evaluates PR changes for security vulnerabilities, edge cases, and adversarial attack paths. This lens examines input validation, injection risks, auth/authz boundaries, cryptographic misuse, secrets exposure, and concurrency issues. It complements the other lenses in `/pr-review`'s multi-lens review; it targets security concerns, not general correctness.
 
 Findings are structured JSON written to a shared work item. Posting to GitHub is a separate step via `post-review.sh`.
 

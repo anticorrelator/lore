@@ -9,7 +9,7 @@ argument_description: "[PR_number_or_URL] — PR to analyze for impact on consum
 
 Focused variant. For holistic coverage, use `/pr-review`.
 
-You are running the **blast radius lens** — a focused review that traces the impact of PR changes on code outside the diff. This lens identifies files, modules, and consumers NOT in the PR that are affected by the changes. It complements the 8-point agent-code checklist in `/pr-review`; it targets downstream impact, not correctness of the changed code itself.
+You are running the **blast radius lens** — a focused review that traces the impact of PR changes on code outside the diff. This lens identifies files, modules, and consumers NOT in the PR that are affected by the changes. It complements the other lenses in `/pr-review`'s multi-lens review; it targets downstream impact, not correctness of the changed code itself.
 
 Findings are structured JSON written to a shared work item. Posting to GitHub is a separate step via `post-review.sh`.
 

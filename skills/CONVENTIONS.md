@@ -178,7 +178,7 @@ Skills that share behavioral rules (checklists, enrichment procedures, labeling 
 - SKILL.md files stay focused on workflow, not rule definitions
 - No duplication drift between skills
 
-Reference protocol files by their paths under `claude-md/review-protocol/` (e.g., `claude-md/review-protocol/checklist.md`). Each skill reads only the section files it needs via selective `cat` commands, reducing token footprint.
+Reference protocol files by their paths under `claude-md/review-protocol/` (e.g., `claude-md/review-protocol/severity.md`). Each skill reads only the section files it needs via selective `cat` commands, reducing token footprint.
 
 ## Protocol Mutation Chains
 

@@ -9,7 +9,7 @@ argument_description: "[PR_number_or_URL] — PR to analyze for test coverage an
 
 Focused variant. For holistic coverage, use `/pr-review`.
 
-You are running the **test quality lens** — a focused review that evaluates whether tests in a PR verify requirements rather than confirm implementation, and whether test coverage matches the scope of changes. This lens complements the 8-point agent-code checklist in `/pr-review`; it provides a more thorough and systematic analysis than checklist item 8 alone.
+You are running the **test quality lens** — a focused review that evaluates whether tests in a PR verify requirements rather than confirm implementation, and whether test coverage matches the scope of changes. This lens complements the other lenses in `/pr-review`'s multi-lens review; it gives test coverage and assertion rigor a systematic depth the general lenses do not.
 
 Findings are structured JSON written to a shared work item. Posting to GitHub is a separate step via `post-review.sh`.
 

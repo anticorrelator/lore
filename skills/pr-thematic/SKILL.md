@@ -9,7 +9,7 @@ argument_description: "[PR_number_or_URL] — PR to analyze for thematic coheren
 
 Focused variant. For holistic coverage, use `/pr-review`.
 
-You are running the **thematic lens** — a focused review that evaluates whether all changes in a PR support a coherent theme and identifies scope creep or missing pieces. This lens complements the 8-point agent-code checklist in `/pr-review`; it targets thematic coherence and scope alignment, not correctness.
+You are running the **thematic lens** — a focused review that evaluates whether all changes in a PR support a coherent theme and identifies scope creep or missing pieces. This lens complements the other lenses in `/pr-review`'s multi-lens review; it targets thematic coherence and scope alignment, not correctness.
 
 Findings are structured JSON written to a shared work item. Posting to GitHub is a separate step via `post-review.sh`.
 
