@@ -1,475 +1,72 @@
 # lore
 
-A per-project knowledge store and multi-agent protocol layer for AI coding harnesses — currently [Claude Code](https://claude.ai/claude-code) (reference baseline), [OpenCode](https://opencode.ai), and [Codex CLI](https://developers.openai.com/codex/). Captures, organizes, and retrieves reusable insights across sessions; coordinates worker fanouts for spec and implementation work.
+Lore is a working model for collaborating with coding agents, packaged as
+persistent memory and a protocol layer for agent harnesses —
+[Claude Code](https://claude.ai/claude-code) (reference baseline),
+[OpenCode](https://opencode.ai), and [Codex CLI](https://developers.openai.com/codex/).
 
-Lore branches on **capability** (does this harness expose hooks? subagents? team messaging?) rather than on framework name. The capability profile and per-harness degradation modes live in [`adapters/capabilities.json`](adapters/capabilities.json); the operator-facing matrix lives in [`docs/framework-compatibility.md`](docs/framework-compatibility.md).
-
-## What it does
-
-- **Captures** non-obvious, reusable insights during coding sessions — automatically via hooks and manually via skills
-- **Organizes** them into searchable categories (principles, architecture, conventions, workflows, gotchas, abstractions)
-- **Retrieves** relevant context at session start via hooks, and on-demand via skills and search
-- **Tracks** work items, specs, and conversational threads across sessions
-- **Reviews** PRs with knowledge-enriched analysis across multiple review lenses
-- **Coordinates** multi-agent teams for spec creation and implementation
-
-## Architecture
-
-Lore separates **logic** (this repo) from **data** (`~/.lore/`):
-
-```
-<this repo>/                    # Logic (shareable, installable)
-├── cli/lore                    # CLI dispatcher
-├── scripts/                    # Hooks, search, indexing, utilities (~68 scripts)
-├── skills/                     # Claude Code skill definitions (19 skills)
-├── agents/                     # Agent definitions for team workflows (6 agents)
-├── claude-md/                  # CLAUDE.md protocol fragments (9 numbered files)
-├── tui/                        # Terminal UI (Go) — interactive dashboard
-├── tests/                      # pytest + bash test suite
-├── install.sh                  # Setup script
-└── SELF_TEST.md                # System evaluation protocol reference
-
-~/.lore/                        # Data (per-user, persists independently)
-├── scripts -> <this repo>/scripts/   # Stable symlink
-├── claude-md -> <this repo>/claude-md/  # Protocol fragment symlink
-└── repos/                      # Per-project knowledge stores
-    └── github.com/<org>/<repo>/
-        ├── _manifest.json      # Entry metadata, keywords, backlinks
-        ├── _index.md           # Dynamic knowledge index
-        ├── _inbox.md, _inbox/  # Capture inbox
-        ├── principles/         # Core design principles
-        ├── architecture/       # System structure and patterns
-        ├── conventions/        # Cross-cutting conventions
-        ├── workflows/          # Operational procedures
-        ├── gotchas/            # Pitfalls and non-obvious behaviors
-        ├── abstractions/       # Key abstractions and models
-        ├── domains/            # Domain-specific knowledge (lazy-loaded)
-        ├── _threads/           # Conversational threads (pinned/active/dormant)
-        ├── _work/              # Work items, specs, and plans
-        ├── _meta/              # Analysis reports (staleness, usage)
-        ├── _pending_captures/  # Novel insights from previous session (auto-populated)
-        └── _capture_log.csv    # Capture activity log
-```
-
-The `~/.lore/scripts/` symlink is the portability layer — hooks reference it directly, while skills and agents use the `lore` CLI. If the logic repo moves, re-run `install.sh` to update the symlink and CLI.
-
-### Multi-harness adapters
-
-```
-adapters/
-├── capabilities.json           # Closed capability profile per harness (D1, D6, D8)
-├── capabilities-evidence.md    # Dated vendor evidence backing every non-`none` cell
-├── roles.json                  # Closed agent-role registry (lead/worker/researcher/...)
-├── README.md                   # Dual-impl contract (bash lib.sh ↔ Go config.go)
-├── agents/                     # Orchestration adapters (spawn/wait/send/collect/...)
-├── hooks/                      # Lifecycle hook installers per harness
-├── transcripts/                # Session/transcript providers (digest, novelty, ceremony)
-├── opencode/                   # OpenCode-specific plugin (lore-hooks.ts)
-└── codex/                      # Codex-specific hooks (hooks.sh)
-```
-
-Lore code branches on **capability cells** (`full | partial | fallback | none`), not on framework name. When a capability is below the threshold a skill needs, the skill either runs in degraded mode with a `[lore] degraded:` stderr notice or refuses with a documented status. See [`adapters/agents/README.md`](adapters/agents/README.md) for the orchestration contract and [`docs/framework-compatibility.md`](docs/framework-compatibility.md) for the per-skill × per-harness matrix.
-
-## Prerequisites
-
-- **Python 3** — required for search, indexing, analysis, and hooks
-- **Bash** — scripts and CLI
-- **Claude Code** — the host environment (skills, hooks, agents)
-- **Go** (optional) — for building the TUI dashboard. Install skipped if `go` is not on PATH.
+Each session starts from what previous sessions recorded — conventions,
+gotchas, architecture notes, in-flight work.
 
 ## Install
 
-```bash
-git clone git@github.com:anticorrelator/lore.git
-cd lore
-bash install.sh                          # defaults to --framework claude-code
-bash install.sh --framework opencode     # OpenCode harness
-bash install.sh --framework codex        # Codex CLI harness
-```
-
-The selected framework is persisted to `$LORE_DATA_DIR/config/framework.json`; subsequent commands resolve it via `lore config framework`. Re-run `install.sh --framework <name>` to switch active harness — role bindings and capability overrides are preserved.
-
-The installer:
-
-1. Creates `~/.lore/` data directory and persists framework selection to `$LORE_DATA_DIR/config/framework.json`.
-2. Symlinks `scripts/` and `claude-md/` into `~/.lore/`.
-3. Installs the `lore` CLI to `~/.local/bin/`.
-4. Builds and installs the TUI (`lore-tui`) if Go is available.
-5. Symlinks skills/agents into the active harness's install path (resolved via `adapters/capabilities.json::frameworks.<id>.install_paths`).
-6. Installs the harness's hook adapter (`adapters/hooks/<id>.sh` or `adapters/<id>/lore-hooks.ts`).
-7. Assembles the harness's instruction file (`CLAUDE.md` for claude-code, `AGENTS.md` for opencode/codex) from `claude-md/` fragments.
-
-If `~/.local/bin` is not on your PATH, the installer will print instructions to add it.
-
-### Per-harness install paths
-
-Each harness's destination directories come from [`adapters/capabilities.json`](adapters/capabilities.json) — Lore never hardcodes them. Run `lore framework status` to see resolved paths.
-
-| Harness     | Instructions file        | Skills dir            | Settings/permissions               |
-|-------------|--------------------------|-----------------------|-------------------------------------|
-| claude-code | `~/.claude/CLAUDE.md`    | `~/.claude/skills`    | `~/.claude/settings.json`           |
-| opencode    | `~/.config/opencode/AGENTS.md` | `~/.agents/skills`    | `~/.config/opencode/config.json`    |
-| codex       | `~/.codex/AGENTS.md`     | `~/.codex/skills`     | `~/.codex/config.toml`              |
-
-OpenCode still supports Claude-compatible fallback paths, but lore installs to OpenCode's native global instruction file and one of its documented native skill discovery paths. See [`docs/framework-compatibility.md`](docs/framework-compatibility.md) for full per-harness capability and degradation tables.
-
-### Dry run
-
-Preview what the installer would do without making changes:
+Requires bash, Python 3, and Go (builds the TUI). Go can be skipped for
+knowledge and memory use alone, but the TUI is required for `/coordinate` —
+it allows coordinator agents to manage worker sessions.
 
 ```bash
-bash install.sh --dry-run
-bash install.sh --dry-run --framework opencode
+git clone git@github.com:anticorrelator/lore.git && cd lore
+bash install.sh                # --framework claude-code (default) | opencode | codex
 ```
 
-### Configuration
-
-Set `LORE_DATA_DIR` to use a custom data directory (default: `~/.lore`):
+Then, in a project you work on:
 
 ```bash
-export LORE_DATA_DIR=/path/to/data
-bash install.sh
+cd your-project
+lore init      # create the knowledge store — or run /bootstrap in an agent session to seed it
 ```
 
-`LORE_FRAMEWORK=<id>` is honored as a per-shell override of the persisted framework selection (validated against the closed set in `adapters/capabilities.json`). Per-role model overrides use `LORE_MODEL_<ROLE>` (e.g., `LORE_MODEL_LEAD=anthropic/opus`). See [`docs/framework-compatibility.md`](docs/framework-compatibility.md) §Role Registry for the precedence chain.
+`--dry-run` previews, `--uninstall` removes (data preserved). Re-run with a
+different `--framework` to switch harnesses.
 
-### Uninstall
+## Use
 
-```bash
-bash install.sh --uninstall
-```
+Most of lore is automatic. Hooks load relevant knowledge, active work, and
+conversation threads at session start, and queue new insights for capture at
+session end. Normal coding sessions need no lore-specific commands.
 
-Removes symlinks, hooks, CLI, and TUI binary across every supported harness's install paths. Data at `~/.lore/` is preserved.
+**TUI** — `lore` with no arguments. Work items, live agent sessions in
+embedded terminals (spawn, drive, triage), knowledge browsing, review-finding
+follow-ups, and the settlement view.
 
-## TUI
+**Driving work** — slash commands in an agent session:
 
-Running `lore` with no arguments launches an interactive terminal dashboard:
+| | |
+|---|---|
+| `/coordinate` | drive a feature end-to-end across protocol sessions |
+| `/spec` → `/implement` | plan a work item, then execute the plan with worker agents |
+| `/work` | create, resume, and check status of work items |
+| `/remember` | capture insights from the current conversation |
+| `/pr-review` | multi-lens PR review (`--self` for your own branch) |
 
-```bash
-lore                             # Opens the TUI
-```
+**Ceremonies** — periodic maintenance:
 
-The TUI provides an overview of active work items, knowledge store status, and quick access to common operations. Requires Go to build (handled automatically by `install.sh`). Rebuild manually with `lore rebuild`.
+| | |
+|---|---|
+| `/bootstrap` | seed a new project's store by exploring the codebase |
+| `/retro` | score how well the system supported a finished work cycle |
+| `/evolve` | review and apply protocol suggestions accumulated by retro |
+| `/renormalize` | prune and rebalance the knowledge store |
 
-## CLI
+**Configuration** — the installer persists framework and role→model settings
+to `~/.lore/config/`. `lore config show` prints them; `lore harness
+enable|disable` toggles integration per harness.
 
-The `lore` command is the primary interface for scripts and skills:
+The wider CLI (`lore search`, `lore work`, …) is used by agents and scripts.
 
-```bash
-# Knowledge
-lore search "query"              # Search knowledge and work items
-lore search "query" --type work  # Search work items only
-lore capture --insight "..."     # Capture insight to knowledge store
-lore resolve                     # Print knowledge directory path
-lore resolve "[[backlink]]"      # Resolve backlink references
-lore prefetch "topic"            # Prefetch knowledge for agent prompts
-lore read file.py --query "..."  # Read a file with optional query filtering
-lore index                       # Show dynamic knowledge index
-lore init                        # Initialize a knowledge store for current repo
-lore heal                        # Detect and repair structural issues
-lore stats                       # Show index statistics
-lore status                      # Knowledge store health summary
-lore check-links                 # Scan for broken backlink references
-lore annotate                    # Record a retrieval friction annotation
+## Data
 
-# Work items
-lore work list                   # List active work items
-lore work create --title "name"  # Create a work item
-lore work show "slug"            # Show work item details
-lore work set "slug" --pr 123    # Set metadata (issue, pr) on a work item
-lore work archive "slug"         # Archive completed work item
-lore work unarchive "slug"       # Restore an archived work item
-lore work search "query"         # Search across work items
-lore work tasks "slug"           # Generate tasks from plan.md
-lore work load-tasks "slug"      # Validate and output tasks (for /implement)
-lore work regen-tasks "slug"     # Regenerate tasks.json from plan.md
-lore work check "slug" "task"    # Check off a plan task
-lore work heal                   # Repair work structure
-lore work ai "description"       # Create work items from natural language
-
-# Analysis
-lore analyze staleness           # Scan entries for staleness
-lore analyze usage               # Analyze entry access patterns
-lore analyze concordance         # TF-IDF similarity computation
-lore analyze merge-candidates    # Find entries worth merging
-
-# Threads
-lore thread list                 # List conversational threads
-lore thread init                 # Initialize _threads/ directory
-lore thread reindex              # Regenerate thread index
-
-# Maintenance
-lore curate                      # Pre-scan for curation issues
-lore assemble                    # Reassemble CLAUDE.md from fragments
-lore bootstrap scope             # Analyze codebase structure
-lore manifest update             # Regenerate _manifest.json
-lore backlinks generate          # Generate see-also backlinks from concordance
-lore journal                     # Effectiveness journal
-lore migrate knowledge           # Migrate to file-per-entry format
-lore migrate threads             # Migrate to directory-per-entry threads
-lore rebuild                     # Rebuild and reinstall the TUI binary
-
-# Batch operations
-lore batch-spec                  # Batch-run /spec short on eligible work items
-lore batch-implement             # Batch-run /implement on ready work items
-
-# Per-harness integration toggle
-lore harness status              # Show enabled/disabled per registered harness
-lore harness enable [<fw>]       # Enable lore integration for one harness, or all if no arg
-lore harness disable [<fw>]      # Disable lore integration for one harness, or all if no arg
-
-# Framework / harness diagnostics
-lore framework status            # Resolved harness, capabilities by support level,
-                                 #   role bindings, evidence/compat doc pointers
-lore framework doctor            # Doctor: cwd resolution chain, conflict diagnostics,
-                                 #   per-repo .lore.config diff, override ceiling check
-lore framework capability-overrides
-                                 # Inspect capability_overrides — what they shadow,
-                                 #   evidence pointer, ceiling-violation flag
-lore config framework            # Print active framework name (e.g., "opencode")
-lore config role <role>          # Print model bound to <role>
-lore config roles                # Print role->model map as JSON
-lore config show                 # Print entire framework.json as JSON
-```
-
-Run `lore --help` or `lore <command> --help` for full details.
-
-## Per-harness integration toggle
-
-`lore harness enable/disable` gives you a first-class way to turn lore's integration on or off, scoped to a single harness or fanned across all of them. State is per-harness (`harnesses.<fw>.enabled` in `~/.lore/config/settings.json`); each harness can be on or off independently. Absent ≡ enabled — a fresh install lights up every registered harness.
-
-### Per-harness scope
-
-```bash
-lore harness disable claude-code   # disable just claude-code; codex/opencode untouched
-lore harness enable claude-code    # re-enable just claude-code
-lore harness status                # one line per registered harness
-```
-
-Without a positional `<framework>` arg, `enable`/`disable` fan across every registered harness — the same gesture that the global `lore agent` command used to perform.
-
-### What `lore harness disable <fw>` does
-
-For the named framework only:
-
-- Clears the lore region in the framework's instruction file (`~/.claude/CLAUDE.md` for claude-code, `AGENTS.md` for opencode/codex). Surrounding user content is preserved via `<!-- LORE:BEGIN -->`/`<!-- LORE:END -->` sentinels.
-- Removes lore-owned skill symlinks from the harness's skills dir and agent symlinks from its agents dir. The removal manifest is appended to `~/.lore/.install-state/symlinks.json` so a later `enable` can restore the same set without touching unrelated entries from other harnesses.
-- Sets `harnesses.<fw>.enabled = false` in `~/.lore/config/settings.json`. Other harnesses' state is preserved byte-for-byte.
-
-### What `lore harness enable <fw>` does
-
-The symmetric inverse: restores skill+agent symlinks for that framework only, re-assembles its instruction file with lore content, sets `harnesses.<fw>.enabled = true`.
-
-### Per-session override
-
-For a single shell session without changing on-disk state, the legacy session kill switch still applies — and is global, not per-harness:
-
-```bash
-LORE_AGENT_DISABLED=1 lore harness status   # shows "disabled (env override)" for every harness
-```
-
-This is useful for one-off opencode invocations from a Claude-Code-active session, or vice versa.
-
-### Worked example: enable claude-code only
-
-```bash
-# Disable everything
-lore harness disable
-lore harness status
-# → Lore harness 'claude-code': disabled
-# → Lore harness 'opencode':    disabled
-# → Lore harness 'codex':       disabled
-
-# Bring up just claude-code
-lore harness enable claude-code
-lore harness status
-# → Lore harness 'claude-code': enabled
-# → Lore harness 'opencode':    disabled
-# → Lore harness 'codex':       disabled
-```
-
-> **Note:** The `lore` CLI itself is always available regardless of harness state — you can always run `lore harness enable` to restore.
-
-## Skills
-
-### Core workflow
-
-| Skill | Description |
-|-------|-------------|
-| `/work` | Create, resume, update, archive, search work items |
-| `/spec` | Technical specifications — full team investigation or `/spec short` single-pass |
-| `/implement` | Execute a spec's plan with a knowledge-aware agent team |
-| `/remember` | Capture insights to knowledge store, update threads |
-| `/memory` | Organize, search, view, curate, heal knowledge store |
-
-### Code review
-
-| Skill | Description |
-|-------|-------------|
-| `/pr-review` | Holistic multi-lens PR review with adaptive lens selection; `--self` for author self-review |
-| `/pr-correctness` | Focused lens: trace logic paths for correctness bugs |
-| `/pr-security` | Focused lens: evaluate security vulnerabilities and edge cases |
-| `/pr-blast-radius` | Focused lens: trace impact of changes on code outside the diff |
-| `/pr-regressions` | Focused lens: detect capability loss from deletions/modifications |
-| `/pr-test-quality` | Focused lens: evaluate test coverage and assertion rigor |
-| `/pr-thematic` | Focused lens: evaluate thematic coherence and scope |
-
-### System health
-
-| Skill | Description |
-|-------|-------------|
-| `/retro` | Post-work-cycle retrospective — scores 5 dimensions, writes journal entry |
-| `/renormalize` | Full knowledge store normalization — prune, merge, rebalance |
-| `/bootstrap` | Explore a new codebase and seed initial knowledge |
-
-## Agents
-
-Agent definitions in `agents/` are symlinked to `~/.claude/agents/` during install. They power the multi-agent workflows used by `/spec` and `/implement`:
-
-| Agent | Role |
-|-------|------|
-| `worker` | Executes implementation tasks with knowledge-aware context |
-| `advisor` | Provides architectural guidance to workers |
-| `researcher` | Investigates codebase areas during spec creation |
-| `classifier` | Categorizes and routes knowledge entries |
-| `crossref-scout` | Finds cross-references and related patterns |
-| `structure-analyst` | Analyzes codebase structure for bootstrapping |
-
-## Hooks
-
-Lore installs Claude Code hooks that run automatically:
-
-**SessionStart** — load context for each new session:
-- `auto-reindex.sh` — regenerate index if stale
-- `load-knowledge.sh` — load priority knowledge entries within token budget
-- `load-work.sh` — surface active work items and branch-matched context
-- `load-threads.sh` — load pinned/active thread summaries
-- `extract-session-digest.py` — extract highlights from previous session for thread updates
-
-**PreCompact / SessionEnd** — prepare for context compression:
-- `pre-compact.sh` — save state before compaction
-
-**TaskCompleted** — react to completed agent tasks:
-- `task-completed-capture-check.sh` — check if task output contains capturable insights
-
-## Protocol fragments
-
-The `claude-md/` directory contains numbered protocol fragments that assemble into `~/.claude/CLAUDE.md`:
-
-| Fragment | Purpose |
-|----------|---------|
-| `00-header.md` | Knowledge store protocol header |
-| `10-capture-protocol.md` | Capture rules, triggers, and 4-condition gate |
-| `15-agent-knowledge.md` | Agent knowledge guidance (spawning and running as agent) |
-| `20-retrieval-protocol.md` | Knowledge and work retrieval patterns |
-| `30-organization-protocol.md` | Organization, curation triggers |
-| `40-self-healing.md` | Self-healing mechanisms |
-| `50-work-protocol.md` | Work item lifecycle and persistence |
-| `60-thread-protocol.md` | Conversational thread management (pinned/active/dormant tiers) |
-| `70-review-protocol.md` | Shared review protocol for all PR review skills |
-
-Run `lore assemble` to rebuild `CLAUDE.md` after editing fragments.
-
-## Tests
-
-```bash
-python3 -m pytest tests/          # Python tests (search, concordance, tasks, staleness, etc.)
-bash tests/test_capture.sh        # Bash integration tests (run individually)
-```
-
-## Typical workflow
-
-### Starting a new feature
-
-```
-> /work create "add rate limiting to API"
-```
-
-This creates a work item in `_work/add-rate-limiting-to-api/` with metadata and a notes file. From here you can go straight to implementation or create a spec first.
-
-### Creating a spec
-
-```
-> /spec short add-rate-limiting-to-api
-```
-
-Generates a single-pass technical plan with implementation steps, written to `plan.md` in the work item directory. For larger features, use `/spec` (without `short`) to run a full team-based investigation with researcher agents.
-
-### Implementing from a spec
-
-```
-> /implement add-rate-limiting-to-api
-```
-
-Reads the plan, generates phased tasks, and spawns a team of worker agents to execute them in parallel. Workers have access to the knowledge store and coordinate through an advisor agent. Progress is tracked automatically.
-
-### Capturing knowledge
-
-Knowledge capture happens automatically — hooks detect novel insights at session end and queue them for review at the next session start. You can also capture manually at any time:
-
-```
-> /remember
-```
-
-This reviews the current conversation for uncaptured insights and persists them. Individual captures can also be done via CLI:
-
-```bash
-lore capture --insight "Rate limiter uses sliding window, not fixed window — \
-  fixed window causes burst spikes at boundaries" \
-  --category "gotchas" --confidence "high"
-```
-
-### Searching knowledge
-
-Before exploring the codebase, check the knowledge store first:
-
-```bash
-lore search "rate limiting"
-```
-
-Within Claude Code, the knowledge store is searched automatically before grep/glob exploration. You can also use the skill:
-
-```
-> /memory search rate limiting
-```
-
-### Reviewing a PR
-
-```
-> /pr-review 142
-```
-
-Runs a multi-lens review (correctness, security, blast radius, test quality, regressions, thematic coherence) on the PR, enriched with knowledge store context. For focused analysis, use an individual lens like `/pr-security 142`.
-
-Before requesting review on your own PR:
-
-```
-> /pr-review --self
-```
-
-Runs the same pipeline in self-review posture — grounded checks (tests, call-site greps, blast-radius tracing) instead of judgment re-reads, since the author can't be surprised by their own diff. Findings land in the TUI Triage tab, where you choose what becomes a work item.
-
-### Session continuity
-
-Lore maintains context across sessions automatically:
-
-1. **Knowledge** — insights captured in one session are available in all future sessions
-2. **Work items** — `/work` tracks status, plans, and progress across sessions
-3. **Threads** — conversational topics (design discussions, preferences) persist and evolve
-4. **Hooks** — session start hooks load relevant context; session end hooks capture new insights
-
-When you return to a project, run `/work` to see where things stand.
-
-### System maintenance
-
-```
-> /retro                  # Post-work retrospective with journal entry
-> /memory curate          # Deduplicate, prune stale entries, fix backlinks
-> /renormalize            # Full knowledge store normalization
-```
-
-```bash
-lore status               # Quick health summary
-lore analyze staleness    # Find entries that may need updating
-lore analyze usage        # See which entries are actually being retrieved
-```
+Everything lore keeps lives per-project under
+`~/.lore/repos/<host>/<org>/<repo>/`: knowledge entries (with provenance),
+work items and plans, conversational threads, and scorecard telemetry. Logic
+lives in this repo; data lives in `~/.lore/` and survives reinstalls.
