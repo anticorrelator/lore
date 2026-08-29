@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -8,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/coordination"
+	"github.com/anticorrelator/lore/tui/internal/coordination/board"
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
 	"github.com/anticorrelator/lore/tui/internal/work"
@@ -36,13 +39,22 @@ type coordinationLedgerReadMsg struct {
 	err         error
 }
 
-// coordinationPinReadMsg carries one arc's derived pin state. Liveness is
-// joined at read time against the registry TTL, never stored.
-type coordinationPinReadMsg struct {
-	arc    string
-	status coordination.PinStatus
-	pin    *coordination.Pin
-	err    error
+// coordinationBodyReadMsg carries one fresh board and ticker generation for
+// the selected arc. Packet bodies are present only for explicit references
+// that remained inside the arc directory and were readable at this tick.
+type coordinationBodyReadMsg struct {
+	arc      string
+	rows     []board.Row
+	boardErr error
+	events   []session.Event
+	packets  map[string]string
+}
+
+// coordinationAttentionReadMsg carries one fresh cross-arc action projection.
+// All four buckets are present on success, including empty ones.
+type coordinationAttentionReadMsg struct {
+	attention board.Attention
+	err       error
 }
 
 // scanArcStoreCmd reads the arc store off the UI thread. It is the view's
@@ -54,6 +66,15 @@ func (m model) scanArcStoreCmd() tea.Cmd {
 	return func() tea.Msg {
 		arcs, skipped := coordination.ScanArcs(workDir)
 		return coordinationArcsScannedMsg{arcs: arcs, skipped: skipped}
+	}
+}
+
+func readCoordinationAttentionCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		attention, err := board.LoadAttention(ctx)
+		return coordinationAttentionReadMsg{attention: attention, err: err}
 	}
 }
 
@@ -87,30 +108,33 @@ func readArcLedgerCmd(workDir, arc string) tea.Cmd {
 	}
 }
 
-// readArcPinCmd reads the pin sidecar for the arc's project and derives its
-// liveness by joining pin.instance against the registry's mtime TTL. The
-// sidecar is project-scoped, so an arc with no project label has no pin home
-// — reported as its own state rather than as an absent pin.
-func (m model) readArcPinCmd(arc, project string) tea.Cmd {
-	workDir := m.config.WorkDir
-	sessionsDir := m.sessionsDir
+// readCoordinationBodyCmd re-derives the integrated body without a cursor or
+// cross-tick cache. The board package owns the status join and graph identity;
+// the journal reader starts at zero so the ticker is always the requested
+// last-N history rather than only the latest delta.
+func readCoordinationBodyCmd(workDir, sessionsDir string, arc coordination.Arc) tea.Cmd {
 	return func() tea.Msg {
-		if project == "" {
-			return coordinationPinReadMsg{arc: arc, status: coordination.PinNoProject}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		rows, err := board.Load(ctx, arc.Slug)
+		events, _ := session.ReadEventsFrom(sessionsDir, 0)
+		msg := coordinationBodyReadMsg{
+			arc: arc.Slug, rows: rows, boardErr: err,
+			events:  coordination.FilterEvents(events, arc.Members, coordination.JournalLimit),
+			packets: make(map[string]string),
 		}
-		pin, err := coordination.ReadPin(work.ProjectHome(workDir, project))
 		if err != nil {
-			return coordinationPinReadMsg{arc: arc, err: err}
+			return msg
 		}
-		status := coordination.PinAbsent
-		if pin != nil {
-			if session.InstanceLive(sessionsDir, pin.Instance) {
-				status = coordination.PinLive
-			} else {
-				status = coordination.PinDead
+		for _, row := range rows {
+			if row.ReviewPacket == nil {
+				continue
+			}
+			if body, ok := coordination.ReadReviewPacket(workDir, arc.Slug, *row.ReviewPacket); ok {
+				msg.packets[*row.ReviewPacket] = body
 			}
 		}
-		return coordinationPinReadMsg{arc: arc, status: status, pin: pin}
+		return msg
 	}
 }
 
@@ -124,14 +148,28 @@ func (m model) readArcPinCmd(arc, project string) tea.Cmd {
 // the coordination tab is focused.
 func (m model) handleCoordinationArcsScanned(msg coordinationArcsScannedMsg) (model, tea.Cmd) {
 	m.coordinationList.SetArcs(msg.arcs, msg.skipped)
-	sweep := m.startArcSweep(msg.arcs)
+	cmds := []tea.Cmd{m.startArcSweep(msg.arcs)}
 	if m.state == stateCoordination {
+		cmds = append(cmds, readCoordinationAttentionCmd())
+		if target := m.coordinationJump; target != nil {
+			if _, ok := m.coordinationList.ArcBySlug(target.Arc); !ok {
+				m.coordinationTargetIssue = fmt.Sprintf("attention target stale/unknown — arc %s is absent", target.Arc)
+			}
+			m.syncCoordinationArc()
+			return m, tea.Batch(cmds...)
+		}
 		if cur := m.coordinationList.CurrentSlug(); cur != m.coordinationDetail.Arc() {
-			return m, tea.Batch(m.loadCoordinationDetail(cur), sweep)
+			cmds = append(cmds, m.loadCoordinationDetail(cur))
+			return m, tea.Batch(cmds...)
 		}
 	}
 	m.syncCoordinationArc()
-	return m, sweep
+	return m, tea.Batch(cmds...)
+}
+
+func (m model) handleCoordinationAttentionRead(msg coordinationAttentionReadMsg) (model, tea.Cmd) {
+	m.coordinationList.SetAttention(msg.attention, msg.err)
+	return m, nil
 }
 
 // arcSweepSet returns the slugs this scan makes eligible for archiving: closed
@@ -201,21 +239,55 @@ func (m model) handleCoordinationLedgerRead(msg coordinationLedgerReadMsg) (mode
 	return m, nil
 }
 
-// handleCoordinationPinRead pushes a derived pin state into the detail. An
-// unreadable sidecar surfaces as its own state, never as silently-unpinned.
-func (m model) handleCoordinationPinRead(msg coordinationPinReadMsg) (model, tea.Cmd) {
+// handleCoordinationBodyRead applies only the generation addressed to the
+// currently selected arc; a late board subprocess or journal read is dropped.
+func (m model) handleCoordinationBodyRead(msg coordinationBodyReadMsg) (model, tea.Cmd) {
 	if msg.arc != m.coordinationDetail.Arc() {
 		return m, nil
 	}
-	if msg.err != nil {
-		m.coordinationDetail.SetPinError(compactErr("pin sidecar", msg.err))
+	if target := m.coordinationJump; target != nil && target.Arc == msg.arc {
+		if msg.boardErr != nil {
+			m.coordinationDetail.SetBoard(nil, msg.boardErr)
+			m.coordinationTargetIssue = fmt.Sprintf("attention target unknown — %s/%s could not be verified", target.Arc, target.StreamID)
+		} else {
+			found := false
+			for _, row := range msg.rows {
+				if row.Arc == target.Arc && row.StreamID == target.StreamID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				m.coordinationTargetIssue = fmt.Sprintf("attention target stale/unknown — stream %s is absent from arc %s", target.StreamID, target.Arc)
+			} else {
+				m.coordinationDetail.SetBoard(msg.rows, nil)
+				if m.coordinationDetail.SelectStream(target.StreamID) {
+					m.coordinationTargetIssue = ""
+				}
+			}
+		}
+		m.coordinationDetail.SetEvents(msg.events)
+		m.coordinationDetail.SetReviewPackets(msg.packets)
 		return m, nil
 	}
-	m.coordinationDetail.SetPin(msg.status, msg.pin)
+	m.coordinationDetail.SetBoard(msg.rows, msg.boardErr)
+	m.coordinationDetail.SetEvents(msg.events)
+	m.coordinationDetail.SetReviewPackets(msg.packets)
 	return m, nil
 }
 
-// handleCoordinationMemberSelected carries an Items-tab drill-in into the work
+func (m model) handleCoordinationAttentionSelected(msg coordination.AttentionSelectedMsg) (model, tea.Cmd) {
+	m.focusedPanel = panelRight
+	m.coordinationJump = &msg
+	m.coordinationTargetIssue = ""
+	m.coordinationDetail.SetBoard(nil, nil)
+	if !m.coordinationList.SetCursorBySlug(msg.Arc) {
+		m.coordinationTargetIssue = fmt.Sprintf("attention target stale/unknown — arc %s is not in the visible arc list", msg.Arc)
+	}
+	return m, m.loadCoordinationDetail(msg.Arc)
+}
+
+// handleCoordinationMemberSelected carries a declared stream target into work
 // detail: it points the work list cursor at the member, loads its detail with
 // the detail panel focused, and records the coordination view as the one-shot
 // return target. The cursor set and the detail load are both explicit because
@@ -228,7 +300,7 @@ func (m model) handleCoordinationMemberSelected(msg coordination.MemberSelectedM
 	return m.loadDetail(msg.Slug)
 }
 
-// handleCoordinationSessionSelected carries a Sessions-tab drill-in into the
+// handleCoordinationSessionSelected carries a declared stream target into the
 // sessions workspace: it points the sessions list cursor at the row, loads its
 // detail card, applies the existing attach semantics (local live panel → terminal
 // focus; otherwise the read-only card), and records the coordination view as the
@@ -244,7 +316,7 @@ func (m model) handleCoordinationSessionSelected(msg coordination.SessionSelecte
 
 // returnToCoordinationView consumes the one-shot coordination return target:
 // it re-enters the coordination workspace with the detail focused and refreshes
-// the arc and session joins. Arc selection, active tab, and row cursors survive
+// the arc and session joins. Arc and stream selection survive
 // because they live in coordination model fields and its setters are
 // identity-preserving (SetArcs by slug, SetArc same-arc no-op).
 func (m model) returnToCoordinationView() (model, tea.Cmd) {
@@ -257,18 +329,21 @@ func (m model) returnToCoordinationView() (model, tea.Cmd) {
 
 // loadCoordinationDetail points the detail at the given arc, re-syncs the
 // joins that derive from state already in memory, and kicks the disk reads
-// (ledger + pin) so selection does not wait for the next poll tick.
+// (ledger + integrated body) so selection does not wait for the next poll tick.
 func (m *model) loadCoordinationDetail(arc string) tea.Cmd {
 	m.coordinationDetail.SetArc(arc)
 	m.syncCoordinationArc()
 	if arc == "" {
 		return nil
 	}
-	project := ""
-	if a, ok := m.coordinationList.ArcBySlug(arc); ok {
-		project = a.Project
+	selected, ok := m.coordinationList.ArcBySlug(arc)
+	if !ok {
+		return tea.Batch(readArcLedgerCmd(m.config.WorkDir, arc))
 	}
-	return tea.Batch(readArcLedgerCmd(m.config.WorkDir, arc), m.readArcPinCmd(arc, project))
+	return tea.Batch(
+		readArcLedgerCmd(m.config.WorkDir, arc),
+		readCoordinationBodyCmd(m.config.WorkDir, m.sessionsDir, selected),
+	)
 }
 
 // syncCoordinationArc pushes everything the selected arc's record decides:

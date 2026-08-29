@@ -9,6 +9,13 @@ import (
 
 const labelColumnWidth = 38
 
+// RenderedRow pairs one formatted line with the stream identity used to place it.
+type RenderedRow struct {
+	Arc      string
+	StreamID string
+	Line     string
+}
+
 type graph struct {
 	ids       []string
 	byID      map[string]Row
@@ -23,15 +30,31 @@ type graph struct {
 // cells. It is a pure projection: repeated calls with the same inputs return
 // the same lines and retain no lane state.
 func Render(rows []Row, width int) []string {
-	if width <= 0 {
-		return make([]string, len(uniqueRows(rows)))
+	rendered := RenderRows(rows, width)
+	lines := make([]string, len(rendered))
+	for i, row := range rendered {
+		lines[i] = row.Line
 	}
+	return lines
+}
+
+// RenderRows returns identities in exactly the same topological order as the
+// formatted lines, so interactive callers never reconstruct renderer order.
+func RenderRows(rows []Row, width int) []RenderedRow {
 	g := buildGraph(rows)
 	order := g.topologicalOrder()
+	if width <= 0 {
+		out := make([]RenderedRow, 0, len(order))
+		for _, id := range order {
+			row := g.byID[id]
+			out = append(out, RenderedRow{Arc: row.Arc, StreamID: id})
+		}
+		return out
+	}
 	lanes := []string{}
 	freedOnPreviousRow := map[int]bool{}
 	placed := map[string]bool{}
-	out := make([]string, 0, len(order))
+	out := make([]RenderedRow, 0, len(order))
 
 	for _, id := range order {
 		row := g.byID[id]
@@ -69,7 +92,10 @@ func Render(rows []Row, width int) []string {
 		}
 
 		rail := drawRail(lanes, col, incoming, spawned, statusGlyph(row.Status))
-		out = append(out, formatLine(rail, len(lanes), row, g, width))
+		out = append(out, RenderedRow{
+			Arc: row.Arc, StreamID: id,
+			Line: formatLine(rail, len(lanes), row, g, width),
+		})
 		placed[id] = true
 
 		freedOnPreviousRow = map[int]bool{}
@@ -237,15 +263,7 @@ func statusGlyph(status string) string {
 }
 
 func statusText(status string) string {
-	switch status {
-	case "done", "in-flight", "pending", "blocked-on-input", "dropped":
-		return status
-	default:
-		if strings.HasPrefix(status, "blocked-on:") {
-			return status
-		}
-		return status + " (?)"
-	}
+	return status
 }
 
 func drawRail(lanes []string, col int, incoming, spawned []int, glyph string) string {

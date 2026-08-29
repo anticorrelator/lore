@@ -11,9 +11,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/anticorrelator/lore/tui/internal/coordination/board"
+	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
 	"github.com/anticorrelator/lore/tui/internal/style"
-	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
@@ -88,6 +89,85 @@ func TestListModelCursorRestsOnArcsNotSectionHeaders(t *testing.T) {
 	}, 0)
 	if m.CurrentSlug() != "arc-a" {
 		t.Errorf("reload should preserve the cursor by slug, got %q", m.CurrentSlug())
+	}
+}
+
+func attentionFixture() board.Attention {
+	return board.Attention{
+		board.ActNow: {
+			{Bucket: board.ActNow, Arc: "arc-a", StreamID: "s1", Label: "Ship A", Gate: "hold", Status: "pending", Verdict: "unknown"},
+			{Bucket: board.ActNow, Arc: "arc-b", StreamID: "s2", Label: "Ship B", Gate: "flag", Status: "mystery", Verdict: "full"},
+		},
+		board.NeedsJudgment: {},
+		board.Waiting:       {},
+		board.Reconcile:     {},
+	}
+}
+
+func TestListModelAttentionIsPinnedBoundedAndExplicit(t *testing.T) {
+	m := NewListModel()
+	m.SetArcs([]Arc{{Slug: "arc-a", Status: StatusActive}, {Slug: "arc-b", Status: StatusActive}}, 0)
+	m.SetAttention(attentionFixture(), nil)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	out := stripANSI(m.View())
+
+	attentionAt, arcsAt := strings.Index(out, "Attention"), strings.Index(out, "▸ Arcs")
+	if attentionAt < 0 || arcsAt <= attentionAt {
+		t.Fatalf("attention must stay above the retained arc collection:\n%s", out)
+	}
+	if lines := strings.Count(out[:arcsAt], "\n"); lines > maxAttentionHeight+2 {
+		t.Fatalf("attention consumed %d lines before the arc collection, want at most %d:\n%s", lines, maxAttentionHeight+2, out)
+	}
+	for _, want := range []string{
+		"Act now (2)", "Needs judgment · none", "Waiting · none", "Reconcile · none",
+		"[arc-a] Ship A", "[arc-b] Ship B", "gate:hold", "gate:flag", "status:mystery",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("attention projection missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestListModelAttentionAndArcCursorsAreIndependent(t *testing.T) {
+	m := NewListModel()
+	m.SetArcs([]Arc{{Slug: "arc-a", Status: StatusActive}, {Slug: "arc-b", Status: StatusActive}}, 0)
+	m.SetAttention(attentionFixture(), nil)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if _, arc, stream, ok := m.CurrentAttention(); !ok || arc != "arc-b" || stream != "s2" {
+		t.Fatalf("attention cursor = %s/%s ok=%v, want arc-b/s2", arc, stream, ok)
+	}
+	if m.CurrentSlug() != "arc-a" {
+		t.Fatalf("attention navigation changed the arc cursor to %q", m.CurrentSlug())
+	}
+
+	refreshed := attentionFixture()
+	refreshed[board.ActNow] = []board.AttentionRow{refreshed[board.ActNow][1], refreshed[board.ActNow][0]}
+	m.SetAttention(refreshed, nil)
+	if _, arc, stream, ok := m.CurrentAttention(); !ok || arc != "arc-b" || stream != "s2" {
+		t.Fatalf("refresh did not preserve attention identity: %s/%s ok=%v", arc, stream, ok)
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if m.CurrentSlug() != "arc-b" {
+		t.Fatalf("arc navigation did not resume independently, got %q", m.CurrentSlug())
+	}
+}
+
+func TestListModelDisappearedAttentionTargetStaysStale(t *testing.T) {
+	m := NewListModel()
+	m.SetAttention(attentionFixture(), nil)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	m.SetAttention(board.Attention{
+		board.ActNow:        {attentionFixture()[board.ActNow][0]},
+		board.NeedsJudgment: {}, board.Waiting: {}, board.Reconcile: {},
+	}, nil)
+	if _, arc, stream, ok := m.CurrentAttention(); !ok || arc != "arc-b" || stream != "s2" {
+		t.Fatalf("disappeared cursor fell onto a neighbor: %s/%s ok=%v", arc, stream, ok)
+	}
+	if out := stripANSI(m.View()); !strings.Contains(out, "[arc-b] Ship B · stale/unknown target") {
+		t.Errorf("disappeared identity must render explicitly stale:\n%s", out)
 	}
 }
 
@@ -404,273 +484,194 @@ func TestListModelEnterEmitsArcSelected(t *testing.T) {
 
 // --- DetailModel first-class states ---
 
-// An arc with no project label has no pin home, which is a different fact from
-// having one and finding no pin in it.
-func TestDetailPinNoProjectIsItsOwnState(t *testing.T) {
-	m := sizedDetail()
-	m.SetArc("arc-a")
-	m.SetLedger("x", "", false)
-	m.SetPin(PinNoProject, nil)
-	out := stripANSI(m.View())
-	if !strings.Contains(out, "no project label") {
-		t.Errorf("a project-less arc must say so on the pin line:\n%s", out)
-	}
-	if strings.Contains(out, "no standing target") {
-		t.Errorf("no pin home must not read as an empty pin home:\n%s", out)
-	}
-}
-
-// A declared member the index cannot resolve keeps its row: the arc still
-// declares it, and dropping it would hide a membership list that has drifted.
-func TestDetailUnresolvedMemberRendersDimAndIsNotOpenable(t *testing.T) {
-	m := sizedDetail()
-	m.SetArc("arc-a")
-	m.SetMembers([]Member{
-		{Slug: "gone"},
-		{Slug: "here", Resolved: true, Item: work.WorkItem{Slug: "here", Status: "active"}},
-	}, nil)
-	m.tabHost.SetActiveID(TabItems)
-	out := stripANSI(m.View())
-	if !strings.Contains(out, "gone") || !strings.Contains(out, "unresolved") {
-		t.Errorf("an unresolved member must still render, marked:\n%s", out)
-	}
-	if _, ok := m.CurrentItem(); ok {
-		t.Error("an unresolved member has no work detail to open")
-	}
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
-	it, ok := m.CurrentItem()
-	if !ok || it.Slug != "here" {
-		t.Errorf("the resolved member below it should open, got %+v ok=%v", it, ok)
-	}
-}
+func strptr(value string) *string { return &value }
 
 func sizedDetail() DetailModel {
 	m := NewDetailModel()
-	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	return m
 }
 
-func TestDetailNoArcRendersExplicitEmptyState(t *testing.T) {
-	m := sizedDetail()
-	if out := stripANSI(m.View()); !strings.Contains(out, "No arc selected") {
-		t.Errorf("empty detail must render the no-arc state:\n%s", out)
-	}
-}
-
-func TestDetailStatusBriefStates(t *testing.T) {
+func integratedDetail() DetailModel {
 	m := sizedDetail()
 	m.SetArc("arc-a")
-	if out := stripANSI(m.View()); !strings.Contains(out, "reading coordination.md") {
-		t.Errorf("pre-read status must render the loading state:\n%s", out)
-	}
-	m.SetLedger("## Rows\n\nrow\n", "", false)
-	if out := stripANSI(m.View()); !strings.Contains(out, "no Brief yet") {
-		t.Errorf("ledger without ## Brief must render the first-class no-Brief state:\n%s", out)
-	}
-	m.SetLedger("## Brief\n\nlanded: the mirror\n", "landed: the mirror", true)
-	if out := stripANSI(m.View()); !strings.Contains(out, "landed: the mirror") {
-		t.Errorf("extracted Brief must render:\n%s", out)
-	}
-}
-
-func TestDetailPinThreeStates(t *testing.T) {
-	m := sizedDetail()
-	m.SetArc("arc-a")
-	m.SetLedger("x", "", false)
-
-	m.SetPin(PinAbsent, nil)
-	if out := stripANSI(m.View()); !strings.Contains(out, "none — dispatch has no standing target") {
-		t.Errorf("absent pin must render first-class:\n%s", out)
-	}
-
-	m.SetPin(PinLive, &Pin{Instance: "calm-cedar"})
-	if out := stripANSI(m.View()); !strings.Contains(out, "calm-cedar") || !strings.Contains(out, "● live") {
-		t.Errorf("live pin must name the instance and its liveness:\n%s", out)
-	}
-
-	m.SetPin(PinDead, &Pin{Instance: "swift-heron"})
-	out := stripANSI(m.View())
-	if !strings.Contains(out, "✗ dead") {
-		t.Errorf("dead pin must render distinctly from absent and live:\n%s", out)
-	}
-	if !strings.Contains(out, "pin dead: swift-heron") {
-		t.Errorf("dead pin must appear as an attention item:\n%s", out)
-	}
-}
-
-func TestDetailStatusCountsAndAttention(t *testing.T) {
-	m := sizedDetail()
-	m.SetArc("arc-a")
-	m.SetLedger("x", "", false)
-	m.SetPin(PinAbsent, nil)
 	m.SetMembers([]Member{
-		{Slug: "m1", Resolved: true, Item: work.WorkItem{Slug: "m1", Status: "active", BlockedBy: []string{"m2"}}},
-		{Slug: "m2", Resolved: true, Item: work.WorkItem{Slug: "m2", Status: "active"}},
-	}, map[string]bool{"m1": true, "m2": true})
-	m.SetSessions([]sessionview.SessionRow{
-		{RowID: "r1", Display: "m1", Type: "implement", Local: true},
-		{RowID: "r2", Display: "m2", Type: "spec", NeedsInput: true, Local: true},
-		{RowID: "r3", Display: "m3", Type: "worker", InFlight: true},
+		{Slug: "item-a", Resolved: true},
+		{Slug: "item-b", Resolved: true},
+	}, nil)
+	m.SetLedger("## Brief\n\nCompact brief\n", "Compact brief", true)
+	m.SetBoard([]board.Row{
+		{Arc: "arc-a", StreamID: "b", Label: "Second", DependsOn: []string{"a"}, Gate: "flag", Status: "pending", Verdict: "", WorkItem: strptr("item-b")},
+		{Arc: "arc-a", StreamID: "a", Label: "First", Gate: "hold", Status: "done", Verdict: "full", WorkItem: strptr("item-a"), ReviewPacket: strptr("packets/a.md")},
+	}, nil)
+	m.SetEvents([]session.Event{
+		{TS: "2026-08-29T12:00:00Z", Event: "needs_input", Slug: "item-a"},
+		{Links: map[string]string{"work_item": "item-b"}},
 	})
+	return m
+}
+
+func TestDetailIntegratedBodyOrderAndUnknowns(t *testing.T) {
+	m := integratedDetail()
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "2 live") {
-		t.Errorf("in-flight spawns must not count as live sessions:\n%s", out)
+	brief := strings.Index(out, "Brief")
+	streams := strings.Index(out, "Streams")
+	ticker := strings.Index(out, "Recent activity")
+	if !(brief >= 0 && brief < streams && streams < ticker) {
+		t.Fatalf("live body must render Brief → Streams → Recent activity:\n%s", out)
 	}
-	if !strings.Contains(out, "blocked: m1") {
-		t.Errorf("a member with an active blocker is an attention item:\n%s", out)
-	}
-	if !strings.Contains(out, "needs input: m2") {
-		t.Errorf("a needs-input session is an attention item:\n%s", out)
-	}
-}
-
-func TestDetailSessionsTabJoinAndMirrorScoping(t *testing.T) {
-	m := sizedDetail()
-	m.SetArc("arc-a")
-	m.SetSessions([]sessionview.SessionRow{
-		{RowID: "remote", Display: "impl-a", Type: "implement", Instance: "inst-b", Tmux: "lore-x"},
-		{RowID: "local", Display: "impl-b", Type: "implement", Instance: "inst-a", Local: true},
-	})
-
-	// Mirror capture is scoped to a displayed Sessions tab.
-	if _, _, ok := m.RemoteMirror(); ok {
-		t.Fatal("RemoteMirror must report nothing while the Sessions tab is hidden")
-	}
-	m.tabHost.SetActiveID(TabSessions)
-	m.syncSessionCard()
-	rowID, tmuxName, ok := m.RemoteMirror()
-	if !ok || rowID != "remote" || tmuxName != "lore-x" {
-		t.Fatalf("remote tmux row under the cursor must be mirrorable, got %q %q %v", rowID, tmuxName, ok)
-	}
-	m.SetMirror("remote", []string{"pane line one"})
-	if out := stripANSI(m.View()); !strings.Contains(out, "pane line one") {
-		t.Errorf("captured pane rows must render in the mirror card:\n%s", out)
-	}
-
-	// j moves to the local row: no mirror, card renders it as attach-less local.
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
-	if _, _, ok := m.RemoteMirror(); ok {
-		t.Error("a local row must not be mirrorable")
-	}
-}
-
-func TestDetailTabCycle(t *testing.T) {
-	m := sizedDetail()
-	m.SetArc("arc-a")
-	order := []string{TabStatus, TabSessions, TabItems, TabLedger}
-	for i, want := range order {
-		if got := m.ActiveTabID(); got != want {
-			t.Fatalf("tab %d: got %q want %q", i, got, want)
+	for _, want := range []string{"gate:flag", "verdict:unknown", "packet unknown", "unknown · unknown · item-b"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("integrated body missing explicit %q:\n%s", want, out)
 		}
-		m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	}
-	if m.ActiveTabID() != TabStatus {
-		t.Error("Tab should wrap back to Status")
-	}
-}
-
-func TestDetailLedgerRendersMarkdown(t *testing.T) {
-	m := sizedDetail()
-	m.SetArc("arc-a")
-	m.SetLedger("# Arc Ledger\n\n- row one\n", "", false)
-	m.tabHost.SetActiveID(TabLedger)
-	out := stripANSI(m.View())
-	if !strings.Contains(out, "Arc Ledger") || !strings.Contains(out, "• row one") {
-		t.Errorf("ledger tab must render the full document through the markdown pipeline:\n%s", out)
+	if holdStyle.GetForeground() == flagStyle.GetForeground() {
+		t.Error("hold and flag must use distinct treatments")
 	}
 }
 
-// TestDetailNoReportIsFourTabs pins that an arc with no report.md
-// renders exactly as today: four tabs, Brief-first Status, no Report tab.
-func TestDetailNoReportIsFourTabs(t *testing.T) {
-	m := sizedDetail()
-	m.SetArc("arc-a")
-	m.SetLedger("## Brief\n\nlive brief\n", "live brief", true)
-	m.SetReport("", false)
-	if got := len(m.tabHost.Tabs()); got != 4 {
-		t.Fatalf("an arc without report.md must render four tabs, got %d", got)
+func normalizeDetailGolden(value string) string {
+	var lines []string
+	for _, line := range strings.Split(stripANSI(value), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "─ ") {
+			line = "[" + strings.Trim(strings.TrimSpace(line), "─ ") + "]"
+		} else {
+			line = strings.Join(strings.Fields(line), " ")
+		}
+		lines = append(lines, line)
 	}
-	if m.ActiveTabID() != TabStatus {
-		t.Errorf("detail should rest on Status, got %q", m.ActiveTabID())
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func TestDetailIntegratedBodyGolden(t *testing.T) {
+	want, err := os.ReadFile(filepath.Join("testdata", "integrated_detail.golden"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if out := stripANSI(m.View()); !strings.Contains(out, "live brief") {
-		t.Errorf("Status first section must be the Brief when no report is present:\n%s", out)
+	if got := normalizeDetailGolden(integratedDetail().View()); got != string(want) {
+		t.Fatalf("integrated detail golden mismatch:\n--- got ---\n%s--- want ---\n%s", got, want)
 	}
 }
 
-// TestDetailReportTabPresenceAndClosedStatus covers the report projection: the
-// fifth tab appears whenever report.md is present, the Status first section
-// switches from Brief (live) to the whole report (closed), and the Report tab
-// renders the report whole through the markdown pipeline.
-func TestDetailReportTabPresenceAndClosedStatus(t *testing.T) {
+func TestDetailSelectionPreservesStreamIdentityAcrossRefresh(t *testing.T) {
+	m := integratedDetail()
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if got := m.SelectedStream(); got != "b" {
+		t.Fatalf("j should select the second topological stream, got %q", got)
+	}
+	m.SetBoard([]board.Row{
+		{Arc: "arc-a", StreamID: "a", Label: "First", Gate: "hold", Status: "done", Verdict: "full"},
+		{Arc: "arc-a", StreamID: "b", Label: "Second", DependsOn: []string{"a"}, Gate: "flag", Status: "pending", Verdict: "unknown"},
+	}, nil)
+	if got := m.SelectedStream(); got != "b" {
+		t.Errorf("board refresh must preserve the cursor by stream identity, got %q", got)
+	}
+}
+
+func TestDetailGatePacketAndLocalBack(t *testing.T) {
+	m := integratedDetail()
+	m.SetReviewPackets(map[string]string{"packets/a.md": "# Owner decision\n\nChoose one.\n"})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil || updated.Mode() != ModePacket {
+		t.Fatalf("readable declared packet should open locally, mode=%q cmd=%v", updated.Mode(), cmd)
+	}
+	if out := stripANSI(updated.View()); !strings.Contains(out, "Owner decision") {
+		t.Errorf("packet drill-in must render its body:\n%s", out)
+	}
+	updated, _ = updated.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if updated.Mode() != ModePrimary || !strings.Contains(stripANSI(updated.View()), "Compact brief") {
+		t.Error("Esc must return from the packet to the primary arc body")
+	}
+}
+
+func TestDetailRowRoutingUsesSessionThenWorkWithoutGuessing(t *testing.T) {
+	row := board.Row{Arc: "arc-a", StreamID: "s1", Label: "Run", Gate: "notify", Status: "pending", Verdict: "unknown", WorkItem: strptr("item-a")}
 	m := sizedDetail()
 	m.SetArc("arc-a")
-	m.SetLedger("## Brief\n\nlive brief\n", "live brief", true)
-
-	// Live successor arc: report present but not closed — five tabs, Status
-	// still shows the Brief, and the report is reachable through its tab.
-	m.SetReport("# Report\n\nthe whole report body\n", true)
-	if got := len(m.tabHost.Tabs()); got != 5 {
-		t.Fatalf("a present report must add a fifth tab, got %d tabs", got)
-	}
-	if out := stripANSI(m.View()); !strings.Contains(out, "live brief") {
-		t.Errorf("live arc Status first section must stay the Brief:\n%s", out)
-	}
-	m.tabHost.SetActiveID(TabReport)
-	if out := stripANSI(m.View()); !strings.Contains(out, "the whole report body") || !strings.Contains(out, "Report") {
-		t.Errorf("Report tab must render the whole report through markdown:\n%s", out)
+	m.SetMembers([]Member{{Slug: "item-a", Resolved: true}}, nil)
+	m.SetBoard([]board.Row{row}, nil)
+	m.SetSessions([]sessionview.SessionRow{{RowID: "one", Slug: "item-a", Display: "one"}})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if msg, ok := cmd().(SessionSelectedMsg); !ok || msg.RowID != "one" {
+		t.Fatalf("one live session should win, got %T %v", cmd(), cmd())
 	}
 
-	// Closed arc: the Status first section becomes the report, not the Brief.
-	m.tabHost.SetActiveID(TabStatus)
+	m.SetSessions([]sessionview.SessionRow{
+		{RowID: "one", Slug: "item-a", Display: "one"},
+		{RowID: "two", BaseItem: "item-a", Display: "two"},
+	})
+	_, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if msg, ok := cmd().(MemberSelectedMsg); !ok || msg.Slug != "item-a" {
+		t.Fatalf("ambiguous sessions must fall back to declared work, got %T %v", cmd(), cmd())
+	}
+}
+
+func TestDetailUndeclaredWorkTargetStaysUnknown(t *testing.T) {
+	m := sizedDetail()
+	m.SetArc("arc-a")
+	m.SetBoard([]board.Row{{
+		Arc: "arc-a", StreamID: "s1", Label: "Foreign", Gate: "notify",
+		Status: "pending", Verdict: "unknown", WorkItem: strptr("not-a-member"),
+	}}, nil)
+	m.SetSessions([]sessionview.SessionRow{{RowID: "wrong", Slug: "not-a-member", Display: "wrong"}})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatalf("undeclared target must not navigate, got %T", cmd())
+	}
+	if out := stripANSI(updated.View()); !strings.Contains(out, "not an arc member") || !strings.Contains(out, "target unknown") {
+		t.Errorf("undeclared identity must render explicitly:\n%s", out)
+	}
+}
+
+func TestDetailClosedAndLiveReportModesStayDistinct(t *testing.T) {
+	m := integratedDetail()
+	m.SetReport("# Report\n\nEarlier report\n", true)
+	if strings.Contains(stripANSI(m.View()), "Earlier report") {
+		t.Error("a live arc's present report must not replace its Brief")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	if m.Mode() != ModeReport || !strings.Contains(stripANSI(m.View()), "Earlier report") {
+		t.Error("a live report must remain reachable as a local drill-in")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	m.SetClosed(true)
-	m.SetReport("# Report\n\nclosed report body\n", true)
-	out := stripANSI(m.View())
-	if !strings.Contains(out, "closed report body") {
-		t.Errorf("closed arc Status first section must render the report whole:\n%s", out)
-	}
-	if strings.Contains(out, "live brief") {
-		t.Errorf("closed arc Status must not show the Brief in its first section:\n%s", out)
+	if out := stripANSI(m.View()); !strings.Contains(out, "Earlier report") || strings.Contains(out, "Compact brief") {
+		t.Errorf("a closed arc's primary body must be its report:\n%s", out)
 	}
 }
 
-// TestDetailReportTabIdentitySurvivesRebuild pins tab-identity preservation
-// across a SetReport rebuild and the Status fallback when the Report tab
-// vanishes.
-func TestDetailReportTabIdentitySurvivesRebuild(t *testing.T) {
-	m := sizedDetail()
-	m.SetArc("arc-a")
-	m.SetLedger("## Brief\n\nb\n", "b", true)
-	m.SetClosed(true)
-	m.SetReport("# R\n\nbody\n", true)
-
-	// A rebuild while parked on Ledger keeps the user on Ledger.
-	m.tabHost.SetActiveID(TabLedger)
-	m.SetReport("# R\n\nbody v2\n", true)
-	if m.ActiveTabID() != TabLedger {
-		t.Errorf("a SetReport rebuild must preserve the active tab by ID, got %q", m.ActiveTabID())
+func TestFilterEventsMatchesBothIdentityKeysAndBoundsTail(t *testing.T) {
+	events := []session.Event{
+		{EventID: "drop", Slug: "other"},
+		{EventID: "direct", Slug: "item-a"},
+		{EventID: "worker", Slug: "item-a--w1", Links: map[string]string{"work_item": "item-a"}},
+		{EventID: "latest", Links: map[string]string{"work_item": "item-a"}},
 	}
-
-	// Parked on Report, a vanished report falls back to Status and drops the tab.
-	m.tabHost.SetActiveID(TabReport)
-	m.SetReport("", false)
-	if got := len(m.tabHost.Tabs()); got != 4 {
-		t.Fatalf("a vanished report must drop the Report tab, got %d tabs", got)
-	}
-	if m.ActiveTabID() != TabStatus {
-		t.Errorf("a vanished Report tab must fall back to Status, got %q", m.ActiveTabID())
+	got := FilterEvents(events, []string{"item-a"}, 2)
+	if len(got) != 2 || got[0].EventID != "worker" || got[1].EventID != "latest" {
+		t.Fatalf("filter must use both keys and retain the last bounded rows, got %+v", got)
 	}
 }
 
-// TestDetailClosedReportUnreadableIsExplicit pins that a closed arc whose
-// report reads empty renders an explicit dim state, never a silent blank.
-func TestDetailClosedReportUnreadableIsExplicit(t *testing.T) {
-	m := sizedDetail()
-	m.SetArc("arc-a")
-	m.SetLedger("## Brief\n\nb\n", "b", true)
-	m.SetClosed(true)
-	m.SetReport("", true)
-	if out := stripANSI(m.View()); !strings.Contains(out, "report.md could not be read") {
-		t.Errorf("a closed arc with an unreadable report must render an explicit state:\n%s", out)
+func TestReadReviewPacketRequiresContainedMarkdown(t *testing.T) {
+	workDir := t.TempDir()
+	arcDir := ArcDir(workDir, "arc-a")
+	if err := os.MkdirAll(filepath.Join(arcDir, "packets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(arcDir, "packets", "read.md"), []byte("safe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if body, ok := ReadReviewPacket(workDir, "arc-a", "packets/read.md"); !ok || body != "safe" {
+		t.Fatalf("safe declared packet = %q,%v", body, ok)
+	}
+	for _, ref := range []string{"../outside.md", "/tmp/outside.md", "packets/read.txt", "packets/missing.md"} {
+		if _, ok := ReadReviewPacket(workDir, "arc-a", ref); ok {
+			t.Errorf("unsafe or unreadable packet %q must not open", ref)
+		}
 	}
 }

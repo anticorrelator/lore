@@ -150,6 +150,7 @@ func (m model) Init() tea.Cmd {
 		return nil
 	}
 	cmds := []tea.Cmd{
+		m.scanArcStoreCmd(),
 		loadWorkItems(m.config.WorkDir),
 		loadPRStatus(),
 		indexPollTick(),
@@ -528,6 +529,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		}
 		m.state = stateWork
 		return m, tea.Batch(
+			m.scanArcStoreCmd(),
 			loadWorkItems(m.config.WorkDir),
 			loadPRStatus(),
 			indexPollTick(),
@@ -1072,14 +1074,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			if m.state == stateSessions && !(m.terminalMode && m.focusedPanel == panelRight) {
 				return m.openSessionCloseConfirm()
 			}
-			// Same close request from the coordination detail's Sessions tab,
-			// which renders the card advertising it.
-			if m.state == stateCoordination && m.focusedPanel == panelRight &&
-				m.coordinationDetail.ActiveTabID() == coordination.TabSessions {
-				if row, ok := m.coordinationDetail.CurrentSession(); ok {
-					return m.openSessionCloseConfirmFor(row)
-				}
-			}
 		case "P":
 			if m.state == stateFollowUps && m.focusedPanel == panelRight && !m.terminalMode {
 				if m.followupDetail.ActiveTab() != followup.TabComments {
@@ -1303,20 +1297,28 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case coordinationLedgerReadMsg:
 		return m.handleCoordinationLedgerRead(msg)
 
-	case coordinationPinReadMsg:
-		return m.handleCoordinationPinRead(msg)
+	case coordinationBodyReadMsg:
+		return m.handleCoordinationBodyRead(msg)
+
+	case coordinationAttentionReadMsg:
+		return m.handleCoordinationAttentionRead(msg)
 
 	case coordination.ArcSelectedMsg:
 		// Enter on an arc row: load detail and shift focus to the right panel.
 		m.focusedPanel = panelRight
+		m.coordinationJump = nil
+		m.coordinationTargetIssue = ""
 		return m, m.loadCoordinationDetail(msg.Slug)
 
+	case coordination.AttentionSelectedMsg:
+		return m.handleCoordinationAttentionSelected(msg)
+
 	case coordination.MemberSelectedMsg:
-		// Enter/l on an Items-tab row: drill into the member's work detail.
+		// Enter/l on a stream with a declared work target opens that detail.
 		return m.handleCoordinationMemberSelected(msg)
 
 	case coordination.SessionSelectedMsg:
-		// Enter/l on a Sessions-tab row: drill into the session's workspace surface.
+		// Enter/l on a stream with one live session opens the sessions workspace.
 		return m.handleCoordinationSessionSelected(msg)
 
 	case sessionMirrorCapturedMsg:
@@ -1602,6 +1604,15 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		return m, routeFocusedPanel(&m, msg, cb)
 	case stateCoordination:
 		cb := m.coordinationPanelCallbacks()
+		// A document drill-in is local to the arc body. Give it first refusal
+		// on back keys before the shared pane router moves focus to the arc list.
+		if km, ok := msg.(tea.KeyPressMsg); ok && m.focusedPanel == panelRight &&
+			m.coordinationDetail.InDrillIn() {
+			switch km.String() {
+			case "esc", "h":
+				return m, routeFocusedPanel(&m, msg, cb)
+			}
+		}
 		if cmd, consumed := handlePanelRouting(&m, msg, cb); consumed {
 			return m, cmd
 		}

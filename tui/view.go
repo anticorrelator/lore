@@ -222,7 +222,7 @@ func (m model) viewNoRepo() string {
 }
 
 // renderTabIndicator renders a full-width section row showing
-// "work (N) · follow-ups (N) · sessions (N) · coordination (N)".
+// "coordination (N) · work (N) · follow-ups (N) · sessions (N)".
 // The active section is highlighted; every other section is prefixed with the
 // key that switches to it (w / f / v / o). The keys are routed in update.go
 // and mirrored in the status bar and help modal — do not display a key here
@@ -248,10 +248,10 @@ func renderTabIndicator(activeTab appState, workCount, followupCount, sessionsCo
 	}
 
 	line := "  " +
+		section("o", "coordination", coordinationCount, activeTab == stateCoordination) + sep +
 		section("w", "work", workCount, activeTab == stateWork) + sep +
 		section("f", "follow-ups", followupCount, activeTab == stateFollowUps) + sep +
-		sessionsSection + sep +
-		section("o", "coordination", coordinationCount, activeTab == stateCoordination)
+		sessionsSection
 	lineW := lipgloss.Width(line)
 	if identity != "" {
 		idW := lipgloss.Width(identity)

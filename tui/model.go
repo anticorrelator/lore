@@ -183,11 +183,16 @@ type model struct {
 	sessionRows []sessionview.SessionRow
 
 	// coordinationList / coordinationDetail back the coordination workspace
-	// (stateCoordination): an arc list read from the arc store and a four-tab
+	// (stateCoordination): an arc list read from the arc store and an integrated
 	// detail. The store scan rides the poll tick from any state so the
 	// tab-indicator count stays current.
 	coordinationList   coordination.ListModel
 	coordinationDetail coordination.DetailModel
+	// coordinationJump holds an exact attention-row address while that jump
+	// remains selected. The issue string is rendered above the detail when
+	// either identity becomes stale.
+	coordinationJump        *coordination.AttentionSelectedMsg
+	coordinationTargetIssue string
 	// arcSweepInFlight and arcSwept guard the automatic archiving of closed
 	// arcs that have aged past a week. The sweep rides the arc-store scan, so
 	// without them a single aged arc would be resubmitted on every poll tick
@@ -196,7 +201,7 @@ type model struct {
 	arcSweepInFlight bool
 	arcSwept         map[string]bool
 	// returnToCoordination is the one-shot return target set by a coordination
-	// drill-in (Items → work detail, Sessions → sessions workspace). While set,
+	// stream drill-in (work detail or sessions workspace). While set,
 	// the landing surface's back seam re-enters the coordination view instead of
 	// its usual back behavior, then clears it; any explicit state-switch key
 	// clears it too. Zero value (false) = no pending return.
@@ -605,9 +610,8 @@ func (m *model) sessionsPanelCallbacks() panelCallbacks {
 }
 
 // coordinationPanelCallbacks builds the split-pane callbacks for the
-// coordination workspace. No session panel ever attaches here — the detail's
-// Sessions tab renders read-only cards/mirrors — so the terminal seams are
-// inert stubs.
+// coordination workspace. No session panel ever attaches here; stream targets
+// jump to the sessions workspace, so these terminal seams stay inert.
 func (m *model) coordinationPanelCallbacks() panelCallbacks {
 	return panelCallbacks{
 		currentSlug:    func() string { return "" },
@@ -617,11 +621,20 @@ func (m *model) coordinationPanelCallbacks() panelCallbacks {
 			prev := m.coordinationList.CurrentSlug()
 			cl, cmd := m.coordinationList.Update(lmsg)
 			m.coordinationList = cl
+			if next := m.coordinationList.CurrentSlug(); next != "" && next != prev {
+				m.coordinationJump = nil
+				m.coordinationTargetIssue = ""
+			}
 			return cmd, prev, m.coordinationList.CurrentSlug()
 		},
 		detailUpdate: func(dmsg tea.Msg) tea.Cmd {
+			previousStream := m.coordinationDetail.SelectedStream()
 			var cmd tea.Cmd
 			m.coordinationDetail, cmd = m.coordinationDetail.Update(dmsg)
+			if selected := m.coordinationDetail.SelectedStream(); selected != previousStream && selected != "" {
+				m.coordinationJump = nil
+				m.coordinationTargetIssue = ""
+			}
 			return cmd
 		},
 		// Same TopBottom row arithmetic as workPanelCallbacks: detail content
@@ -834,7 +847,7 @@ func (m model) buildPaneConfig() paneConfig {
 
 	switch m.state {
 	case stateCoordination:
-		listTitle := style.TitleName.Render("Arcs")
+		listTitle := style.TitleName.Render("Coordination")
 		if n := m.coordinationList.Count(); n > 0 {
 			listTitle += " " + style.TitleCount.Render(fmt.Sprintf("(%d)", n))
 		}
@@ -845,9 +858,14 @@ func (m model) buildPaneConfig() paneConfig {
 		}
 		filterAnnot, filterAnnotW := annotArcFilter.render(filterSel)
 
+		detailView := m.coordinationDetail.View()
+		if m.coordinationTargetIssue != "" {
+			detailView = "\n  " + style.StatusWarn.Render(m.coordinationTargetIssue) + "\n" + detailView
+		}
+
 		return paneConfig{
 			listView:           m.coordinationList.View(),
-			detailView:         m.coordinationDetail.View(),
+			detailView:         detailView,
 			listTitle:          listTitle,
 			detailTitle:        m.coordinationDetail.Title(),
 			filterAnnot:        filterAnnot,

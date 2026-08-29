@@ -66,6 +66,8 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from pathlib import PurePosixPath
+from urllib.parse import unquote, urlsplit
 
 
 kdir = Path(sys.argv[1])
@@ -260,6 +262,37 @@ def parse_ledger(path):
     return [], None
 
 
+WORK_BACKLINK = re.compile(r"\[\[work:([A-Za-z0-9][A-Za-z0-9._-]*)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
+MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\((?:<([^>]+)>|([^\s)]+))(?:\s+[^)]*)?\)")
+
+
+def declared_work_item(step):
+    """Return one explicit work backlink, or None when absent/ambiguous."""
+    matches = list(dict.fromkeys(WORK_BACKLINK.findall(step or "")))
+    return matches[0] if len(matches) == 1 else None
+
+
+def declared_review_packet(evidence):
+    """Return one safe arc-relative Markdown document reference."""
+    matches = []
+    for linked, plain in MARKDOWN_LINK.findall(evidence or ""):
+        target = linked or plain
+        try:
+            parsed = urlsplit(target)
+        except ValueError:
+            continue
+        path = unquote(parsed.path)
+        if parsed.scheme or parsed.netloc or parsed.query or not path or path.startswith("/"):
+            continue
+        relative = PurePosixPath(path)
+        if relative.suffix.lower() != ".md" or any(part == ".." for part in relative.parts):
+            continue
+        normalized = str(relative)
+        if normalized not in matches:
+            matches.append(normalized)
+    return matches[0] if len(matches) == 1 else None
+
+
 def reconciliation_projection(slug):
     """Project the attempt record as the reconciler wrote it.
 
@@ -449,6 +482,8 @@ def project_arc_coordination(record):
         tree = row["tree"]
         status = row["status"]
         verdict = row["verdict"]
+        work_item = declared_work_item(row.get("step", ""))
+        review_packet = declared_review_packet(row.get("evidence / sha", ""))
         stream_state = reconciled.get(stream_id, {})
         attempt = latest_attempt(stream_state)
         liveness = attempt_liveness(attempt, tree)
@@ -456,12 +491,14 @@ def project_arc_coordination(record):
             "arc": arc, "stream_id": stream_id, "depends_on": row["depends_on"],
             "step": row.get("step", ""), "tree": tree,
             "gate": row.get("gate", ""), "status": status, "verdict": verdict,
+            "work_item": work_item, "review_packet": review_packet,
             "attempt": attempt, **liveness,
         }
         coordination_streams.append({
             "arc": arc, "stream_id": stream_id, "step": row.get("step", ""),
             "depends_on": row["depends_on"], "tree": tree,
             "gate": row.get("gate", ""), "status": status, "verdict": verdict,
+            "work_item": work_item, "review_packet": review_packet,
         })
         if stream_id in cyclic_streams:
             buckets["reconcile"].append(make_row(

@@ -125,6 +125,43 @@ func TestClassifyStartupState_BothPresent(t *testing.T) {
 	}
 }
 
+func TestClassifyStartupState_ActiveArcOpensCoordination(t *testing.T) {
+	dir := t.TempDir()
+	workDir := filepath.Join(dir, "_work")
+	os.MkdirAll(workDir, 0755)
+	os.WriteFile(filepath.Join(dir, "_manifest.json"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(workDir, "_index.json"), []byte("[]"), 0644)
+	arcStoreFixture(t, workDir, "live", coordination.StatusActive, nil, nil, time.Time{}, time.Time{})
+
+	cfg := config.Config{KnowledgeDir: dir, WorkDir: workDir}
+	startup := classifyStartup(cfg)
+	if startup.state != stateCoordination {
+		t.Fatalf("active arc: got %d, want stateCoordination (%d)", startup.state, stateCoordination)
+	}
+	if len(startup.arcs) != 1 || startup.arcs[0].Slug != "live" {
+		t.Fatalf("startup arc snapshot = %+v, want live arc", startup.arcs)
+	}
+}
+
+func TestClassifyStartupState_ClosedOnlyStaysOnWork(t *testing.T) {
+	dir := t.TempDir()
+	workDir := filepath.Join(dir, "_work")
+	os.MkdirAll(workDir, 0755)
+	os.WriteFile(filepath.Join(dir, "_manifest.json"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(workDir, "_index.json"), []byte("[]"), 0644)
+	report := "# Report\n\nclosed\n"
+	arcStoreFixture(t, workDir, "closed", coordination.StatusClosed, nil, &report, time.Time{}, time.Now())
+
+	cfg := config.Config{KnowledgeDir: dir, WorkDir: workDir}
+	startup := classifyStartup(cfg)
+	if startup.state != stateWork {
+		t.Fatalf("closed-only store: got %d, want stateWork (%d)", startup.state, stateWork)
+	}
+	if len(startup.arcs) != 1 || startup.arcs[0].Status != coordination.StatusClosed {
+		t.Fatalf("closed arc must remain available in the startup snapshot: %+v", startup.arcs)
+	}
+}
+
 func TestClassifyStartupState_ManifestMissing(t *testing.T) {
 	dir := t.TempDir()
 	workDir := filepath.Join(dir, "_work")
@@ -2018,6 +2055,25 @@ func TestStateNoRepoInitReturnsNil(t *testing.T) {
 	}
 }
 
+func TestInitScansCoordinationBeforeTheFirstPoll(t *testing.T) {
+	workDir := t.TempDir()
+	arcStoreFixture(t, workDir, "live", coordination.StatusActive, nil, nil, time.Time{}, time.Time{})
+	m := minimalModel(stateCoordination, nil, nil)
+	m.config.WorkDir = workDir
+
+	batch, ok := m.Init()().(tea.BatchMsg)
+	if !ok || len(batch) == 0 {
+		t.Fatalf("Init returned %T, want a non-empty tea.BatchMsg", m.Init()())
+	}
+	msg, ok := batch[0]().(coordinationArcsScannedMsg)
+	if !ok {
+		t.Fatalf("first startup command returned %T, want coordinationArcsScannedMsg", batch[0]())
+	}
+	if len(msg.arcs) != 1 || msg.arcs[0].Slug != "live" {
+		t.Fatalf("startup arc scan = %+v, want live arc", msg.arcs)
+	}
+}
+
 // TestStateNoRepoKeyHandling verifies that q triggers quit and other keys are
 // consumed silently (no Cmd returned, state unchanged).
 func TestStateNoRepoKeyHandling(t *testing.T) {
@@ -3027,6 +3083,15 @@ func TestTabIndicatorAdvertisesSectionKeys(t *testing.T) {
 				}
 			}
 		})
+	}
+
+	out := stripANSI(renderTabIndicator(stateWork, 1, 2, 4, 0, 5, 100, ""))
+	coordinationAt := strings.Index(out, "coordination (5)")
+	workAt := strings.Index(out, "work (1)")
+	followupsAt := strings.Index(out, "follow-ups (2)")
+	sessionsAt := strings.Index(out, "sessions (4)")
+	if !(coordinationAt >= 0 && coordinationAt < workAt && workAt < followupsAt && followupsAt < sessionsAt) {
+		t.Errorf("tab order must be coordination, work, follow-ups, sessions:\n%s", out)
 	}
 }
 

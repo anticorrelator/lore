@@ -37,15 +37,13 @@ func captureSessionMirrorCmd(rowID, tmuxName string) tea.Cmd {
 }
 
 // handleSessionMirrorCaptured pushes a fresh remote-screen snapshot into the
-// read-only card. A capture error leaves the prior frame in place rather than
-// blanking the mirror mid-session; SetMirror itself drops a stale-row snapshot,
-// so pushing to both mirror consumers is safe — at most one displays the row.
+// sessions workspace's read-only card. Coordination routes session drill-ins
+// to that workspace and never hosts a second screen or terminal path.
 func (m model) handleSessionMirrorCaptured(msg sessionMirrorCapturedMsg) (model, tea.Cmd) {
 	if msg.err != nil {
 		return m, nil
 	}
 	m.sessionsDetail.SetMirror(msg.rowID, msg.lines)
-	m.coordinationDetail.SetMirror(msg.rowID, msg.lines)
 	return m, nil
 }
 
@@ -250,17 +248,15 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 	}
 	// Coordination arcs ride this same heartbeat: the store scan is one
 	// directory walk (cheap from any state) so the tab count stays current;
-	// ledger and pin reads are scoped to the selected arc while the view is
-	// displayed, and the mirror capture to a displayed remote row.
+	// ledger, identity-bearing board, and last-N journal reads are scoped
+	// to the selected arc while the view is displayed.
 	cmds = append(cmds, m.scanArcStoreCmd())
 	if m.state == stateCoordination {
 		if arc, ok := m.coordinationList.CurrentArc(); ok {
-			cmds = append(cmds, readArcLedgerCmd(m.config.WorkDir, arc.Slug), m.readArcPinCmd(arc.Slug, arc.Project))
-		}
-		if m.tmuxEnabled {
-			if rowID, tmuxName, ok := m.coordinationDetail.RemoteMirror(); ok {
-				cmds = append(cmds, captureSessionMirrorCmd(rowID, tmuxName))
-			}
+			cmds = append(cmds,
+				readArcLedgerCmd(m.config.WorkDir, arc.Slug),
+				readCoordinationBodyCmd(m.config.WorkDir, m.sessionsDir, arc),
+			)
 		}
 	}
 	// Always poll the follow-up index so the tab indicator reflects external

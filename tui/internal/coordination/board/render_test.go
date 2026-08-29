@@ -105,3 +105,25 @@ func TestZeroWidthReturnsOneEmptyCellPerRow(t *testing.T) {
 		t.Fatalf("zero-width render = %q", got)
 	}
 }
+
+func TestRenderRowsPairsTopologicalTextWithIdentity(t *testing.T) {
+	rows := []Row{
+		row("child", "declared first", []string{"root"}, "pending", "writer"),
+		row("root", "declared second", nil, "done", "writer"),
+	}
+	rendered := RenderRows(rows, goldenWidth)
+	if len(rendered) != 2 || rendered[0].StreamID != "root" || rendered[1].StreamID != "child" {
+		t.Fatalf("render identities do not follow topological lines: %+v", rendered)
+	}
+	lines := Render(rows, goldenWidth)
+	if rendered[0].Line != lines[0] || rendered[1].Line != lines[1] {
+		t.Fatalf("identity and text render paths drifted: %+v != %q", rendered, lines)
+	}
+}
+
+func TestRenderPreservesUnknownStatusTextVerbatim(t *testing.T) {
+	line := Render([]Row{row("s", "novel status", nil, "future-status", "writer")}, goldenWidth)[0]
+	if !strings.Contains(line, "future-status") || strings.Contains(line, "future-status (?)") {
+		t.Fatalf("unknown status was rewritten: %q", line)
+	}
+}
