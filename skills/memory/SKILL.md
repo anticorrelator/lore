@@ -36,6 +36,8 @@ lore search "<query>" --type knowledge --scale-set <bucket>
 ```
 Show the script output. For top matches, briefly summarize relevant context. Declare `<bucket>` per the rubric below — this is a per-query judgment, not a default.
 
+#### Scale-Aware Navigation
+
 **Scale rubric — declare explicitly at every retrieval surface:**
 
 - **abstract** — portable principle, behavioral law, or design maxim. The claim survives generic-noun substitution: replace project-specific proper nouns with placeholders and the lesson still holds. Abstract entries make a *law*.
