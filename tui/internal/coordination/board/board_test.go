@@ -10,15 +10,23 @@ import (
 
 func TestDecodeRowsFiltersArcAndPreservesProjectionOrder(t *testing.T) {
 	raw := `{
+
+  "coordination_arcs": [
+    {"arc":"other","status":"closed"},
+    {"arc":"wanted","status":"active"}
+  ],
   "coordination_streams": [
-    {"arc":"other","stream_id":"x","step":"Other","depends_on":[],"tree":"writer","gate":"notify","status":"done","verdict":"full"},
-    {"arc":"wanted","stream_id":"b","step":"Second declaration","depends_on":["a"],"tree":"read-only","gate":"flag","status":"pending","verdict":"—","work_item":"item-b","review_packet":"packets/b.md"},
-    {"arc":"wanted","stream_id":"a","step":"Third declaration","depends_on":[],"tree":"writer","gate":"notify","status":"done","verdict":"full","work_item":null,"review_packet":null}
+    {"arc":"other","arc_status":"closed","stream_id":"x","step":"Other","depends_on":[],"tree":"writer","gate":"notify","status":"done","verdict":"full"},
+    {"arc":"wanted","arc_status":"active","stream_id":"b","step":"Second declaration","depends_on":["a"],"tree":"read-only","gate":"flag","status":"pending","verdict":"—","work_item":"item-b","review_packet":"packets/b.md"},
+    {"arc":"wanted","arc_status":"active","stream_id":"a","step":"Third declaration","depends_on":[],"tree":"writer","gate":"notify","status":"done","verdict":"full","work_item":null,"review_packet":null}
   ]
 }`
-	rows, err := decodeRows(strings.NewReader(raw), "wanted")
+	rows, found, err := decodeRows(strings.NewReader(raw), "wanted")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("wanted arc should be present in coordination_arcs")
 	}
 	if len(rows) != 2 || rows[0].StreamID != "b" || rows[1].StreamID != "a" {
 		t.Fatalf("projection order changed: %+v", rows)
@@ -26,11 +34,26 @@ func TestDecodeRowsFiltersArcAndPreservesProjectionOrder(t *testing.T) {
 	if rows[0].Label != "Second declaration" || rows[0].Gate != "flag" || rows[0].Verdict != "—" {
 		t.Errorf("authored board cells were not decoded: %+v", rows[0])
 	}
+	if rows[0].ArcStatus != "active" {
+		t.Errorf("arc lifecycle status was not decoded: %+v", rows[0])
+	}
 	if rows[0].WorkItem == nil || *rows[0].WorkItem != "item-b" || rows[0].ReviewPacket == nil || *rows[0].ReviewPacket != "packets/b.md" {
 		t.Errorf("declared navigation fields were not decoded: %+v", rows[0])
 	}
 	if rows[1].WorkItem != nil || rows[1].ReviewPacket != nil {
 		t.Errorf("nullable navigation fields changed meaning: %+v", rows[1])
+	}
+}
+
+func TestDecodeRowsDistinguishesPresentEmptyAndAbsent(t *testing.T) {
+	raw := `{"coordination_arcs":[{"arc":"empty","status":"active"}],"coordination_streams":[]}`
+	rows, found, err := decodeRows(strings.NewReader(raw), "empty")
+	if err != nil || !found || len(rows) != 0 {
+		t.Fatalf("present empty arc = rows:%+v found:%v err:%v", rows, found, err)
+	}
+	rows, found, err = decodeRows(strings.NewReader(raw), "absent")
+	if err != nil || found || len(rows) != 0 {
+		t.Fatalf("absent arc = rows:%+v found:%v err:%v", rows, found, err)
 	}
 }
 
@@ -74,13 +97,16 @@ func TestDecodeAttentionRequiresEveryNamedBucket(t *testing.T) {
 }
 
 func TestDecodeRowsRequiresCompleteStreamProjection(t *testing.T) {
-	if _, err := decodeRows(strings.NewReader(`{"buckets":{}}`), "arc"); err == nil || !strings.Contains(err.Error(), "missing coordination_streams") {
+	if _, _, err := decodeRows(strings.NewReader(`{"coordination_arcs":[]}`), "arc"); err == nil || !strings.Contains(err.Error(), "missing coordination_streams") {
 		t.Fatalf("missing full projection should be explicit, got %v", err)
+	}
+	if _, _, err := decodeRows(strings.NewReader(`{"coordination_streams":[]}`), "arc"); err == nil || !strings.Contains(err.Error(), "missing coordination_arcs") {
+		t.Fatalf("missing arc projection should be explicit, got %v", err)
 	}
 }
 
 func TestDecodeRowsRejectsMalformedJSON(t *testing.T) {
-	if _, err := decodeRows(strings.NewReader(`{"coordination_streams":`), "arc"); err == nil {
+	if _, _, err := decodeRows(strings.NewReader(`{"coordination_streams":`), "arc"); err == nil {
 		t.Fatal("malformed status JSON must return an error")
 	}
 }
@@ -93,16 +119,19 @@ if [ "$*" != "coordinate status --json" ]; then
   echo "unexpected arguments: $*" >&2
   exit 9
 fi
-printf '%s\n' '{"coordination_streams":[{"arc":"wanted","stream_id":"s1","step":"Joined","depends_on":[],"tree":"writer","gate":"notify","status":"done","verdict":"full"}]}'
+printf '%s\n' '{"coordination_arcs":[{"arc":"wanted","status":"active"}],"coordination_streams":[{"arc":"wanted","arc_status":"active","stream_id":"s1","step":"Joined","depends_on":[],"tree":"writer","gate":"notify","status":"done","verdict":"full"}]}'
 `
 	if err := os.WriteFile(command, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	rows, err := Load(context.Background(), "wanted")
+	rows, found, err := Load(context.Background(), "wanted")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("Load lost the declared arc identity")
 	}
 	if len(rows) != 1 || rows[0].StreamID != "s1" || rows[0].Label != "Joined" {
 		t.Fatalf("Load returned %+v", rows)

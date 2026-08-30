@@ -262,10 +262,6 @@ func statusGlyph(status string) string {
 	}
 }
 
-func statusText(status string) string {
-	return status
-}
-
 func drawRail(lanes []string, col int, incoming, spawned []int, glyph string) string {
 	touched := map[int]bool{col: true}
 	for _, lane := range incoming {
@@ -335,7 +331,7 @@ func formatLine(rail string, laneCount int, row Row, g graph, width int) string 
 	prefix := " " + runewidth.FillRight(rail, gutterWidth) + "  " +
 		runewidth.FillRight(row.StreamID, 5) + " "
 
-	suffix := "  " + statusText(row.Status)
+	suffix := "  " + row.Status
 	if row.Tree == "read-only" {
 		suffix += " ·ro"
 	}

@@ -444,22 +444,38 @@ def scan_arcs():
     return records, scan
 
 
-def project_arc_coordination(record):
-    """Project one active arc's ledger into the dispatch buckets."""
+def project_arc_coordination(record, dispatch):
+    """Project one arc's ledger, with dispatch joins reserved for active arcs."""
     arc = record["arc"]
     ledger_locator = f"{ARC_ROOT}/{arc}/coordination.md"
     ledger_rows, ledger_error = parse_ledger(record["ledger_path"])
     if ledger_error:
-        buckets["reconcile"].append(make_row(
-            "reconcile", "work-index", "coordination-ledger-invalid",
-            f"{arc}: coordination ledger is malformed",
-            {"arc": arc, "error": ledger_error}, ledger_locator,
-            [arc, ledger_error], "reconcile.work.action-evidence-gap",
-        ))
+        if dispatch:
+            buckets["reconcile"].append(make_row(
+                "reconcile", "work-index", "coordination-ledger-invalid",
+                f"{arc}: coordination ledger is malformed",
+                {"arc": arc, "error": ledger_error}, ledger_locator,
+                [arc, ledger_error], "reconcile.work.action-evidence-gap",
+            ))
         return
-    arc_scan["ledgers_read"] += 1
-    arc_scan["streams_read"] += len(ledger_rows)
+    if dispatch:
+        arc_scan["ledgers_read"] += 1
+        arc_scan["streams_read"] += len(ledger_rows)
     if not ledger_rows:
+        return
+
+    for row in ledger_rows:
+        coordination_streams.append({
+            "arc": arc, "arc_status": record["status"],
+            "stream_id": row["stream_id"], "step": row.get("step", ""),
+            "depends_on": row["depends_on"], "tree": row["tree"],
+            "gate": row.get("gate", ""), "status": row["status"],
+            "verdict": row["verdict"],
+            "work_item": declared_work_item(row.get("step", "")),
+            "review_packet": declared_review_packet(row.get("evidence / sha", "")),
+        })
+
+    if not dispatch:
         return
 
     # The lifecycle record is keyed by the same identity as the ledger it
@@ -494,12 +510,6 @@ def project_arc_coordination(record):
             "work_item": work_item, "review_packet": review_packet,
             "attempt": attempt, **liveness,
         }
-        coordination_streams.append({
-            "arc": arc, "stream_id": stream_id, "step": row.get("step", ""),
-            "depends_on": row["depends_on"], "tree": tree,
-            "gate": row.get("gate", ""), "status": status, "verdict": verdict,
-            "work_item": work_item, "review_packet": review_packet,
-        })
         if stream_id in cyclic_streams:
             buckets["reconcile"].append(make_row(
                 "reconcile", "work-index", "coordination-dependency-cycle",
@@ -610,6 +620,10 @@ def dispatch_reason(scan, ready_total):
 # --- arc coordination ledgers ---------------------------------------------
 coordination_streams = []
 arc_records, arc_scan = scan_arcs()
+coordination_arcs = [
+    {"arc": record["arc"], "status": record["status"]}
+    for record in arc_records
+]
 # A work item coordinated by an active arc is projected as that arc's streams;
 # its own task DAG would double-count the same work. The item-local ledger check
 # keeps the same suppression for a store whose ledgers have not been migrated.
@@ -619,8 +633,8 @@ arc_coordinated_items = {
     for member in record["members"]
 }
 for record in arc_records:
-    if record["status"] == "active" and record["has_ledger"]:
-        project_arc_coordination(record)
+    if record["status"] in {"active", "closed"} and record["has_ledger"]:
+        project_arc_coordination(record, dispatch=record["status"] == "active")
 
 
 # --- work-index -----------------------------------------------------------
@@ -1209,7 +1223,10 @@ projection = {
         "ledger_scan": {**arc_scan,
                         "reason": dispatch_reason(arc_scan, len(coordination_candidates))},
     },
-    # Complete ledger rows in declaration order. Buckets intentionally contain
+    # Every readable arc record, including records whose ledger has zero rows.
+    # This keeps an empty declared plan distinct from an absent arc identity.
+    "coordination_arcs": coordination_arcs,
+    # Complete active and closed ledger rows in declaration order. Buckets intentionally contain
     # only actionable/reconcilable rows and sort those rows by identity, so they
     # cannot serve consumers that need the whole DAG and its authored order.
     "coordination_streams": coordination_streams,

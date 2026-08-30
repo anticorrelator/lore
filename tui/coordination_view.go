@@ -44,12 +44,13 @@ type coordinationLedgerReadMsg struct {
 // Packet bodies are present only for explicit references that remained inside
 // the arc directory and were readable at this tick.
 type coordinationBodyReadMsg struct {
-	arc      string
-	rows     []board.Row
-	boardErr error
-	events   []session.Event
-	activity map[string]string
-	packets  map[string]string
+	arc        string
+	rows       []board.Row
+	boardFound bool
+	boardErr   error
+	events     []session.Event
+	activity   map[string]string
+	packets    map[string]string
 }
 
 // coordinationAttentionReadMsg carries one fresh cross-arc action projection.
@@ -118,10 +119,10 @@ func readCoordinationBodyCmd(workDir, sessionsDir string, arc coordination.Arc, 
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		rows, err := board.Load(ctx, arc.Slug)
+		rows, found, err := board.Load(ctx, arc.Slug)
 		events, _ := session.ReadEventsFrom(sessionsDir, 0)
 		msg := coordinationBodyReadMsg{
-			arc: arc.Slug, rows: rows, boardErr: err,
+			arc: arc.Slug, rows: rows, boardFound: found, boardErr: err,
 			events:   coordination.FilterEvents(events, arc.Members, coordination.JournalLimit),
 			activity: coordination.LatestEventTimes(events, arcs),
 			packets:  make(map[string]string),
@@ -264,7 +265,7 @@ func (m model) handleCoordinationBodyRead(msg coordinationBodyReadMsg) (model, t
 	}
 	if target := m.coordinationJump; target != nil && target.Arc == msg.arc {
 		if msg.boardErr != nil {
-			m.coordinationDetail.SetBoard(nil, msg.boardErr)
+			m.coordinationDetail.SetBoard(nil, false, msg.boardErr)
 			m.coordinationTargetIssue = fmt.Sprintf("attention target unknown — %s/%s could not be verified", target.Arc, target.StreamID)
 		} else {
 			found := false
@@ -275,9 +276,12 @@ func (m model) handleCoordinationBodyRead(msg coordinationBodyReadMsg) (model, t
 				}
 			}
 			if !found {
+				if len(msg.rows) == 0 {
+					m.coordinationDetail.SetBoard(nil, msg.boardFound, nil)
+				}
 				m.coordinationTargetIssue = fmt.Sprintf("attention target stale/unknown — stream %s is absent from arc %s", target.StreamID, target.Arc)
 			} else {
-				m.coordinationDetail.SetBoard(msg.rows, nil)
+				m.coordinationDetail.SetBoard(msg.rows, msg.boardFound, nil)
 				if m.coordinationDetail.SelectStream(target.StreamID) {
 					m.coordinationTargetIssue = ""
 				}
@@ -287,7 +291,7 @@ func (m model) handleCoordinationBodyRead(msg coordinationBodyReadMsg) (model, t
 		m.coordinationDetail.SetReviewPackets(msg.packets)
 		return m, nil
 	}
-	m.coordinationDetail.SetBoard(msg.rows, msg.boardErr)
+	m.coordinationDetail.SetBoard(msg.rows, msg.boardFound, msg.boardErr)
 	m.coordinationDetail.SetEvents(msg.events)
 	m.coordinationDetail.SetReviewPackets(msg.packets)
 	return m, nil
@@ -298,7 +302,7 @@ func (m model) handleCoordinationAttentionSelected(msg coordination.AttentionSel
 	m.coordinationList.ShowArcs()
 	m.coordinationJump = &msg
 	m.coordinationTargetIssue = ""
-	m.coordinationDetail.SetBoard(nil, nil)
+	m.coordinationDetail.SetBoard(nil, false, nil)
 	if !m.coordinationList.SetCursorBySlug(msg.Arc) {
 		m.coordinationTargetIssue = fmt.Sprintf("attention target stale/unknown — arc %s is not in the visible arc list", msg.Arc)
 	}
