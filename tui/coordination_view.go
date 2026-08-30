@@ -40,13 +40,15 @@ type coordinationLedgerReadMsg struct {
 }
 
 // coordinationBodyReadMsg carries one fresh board and ticker generation for
-// the selected arc. Packet bodies are present only for explicit references
-// that remained inside the arc directory and were readable at this tick.
+// the selected arc, plus per-arc activity derived from that same journal read.
+// Packet bodies are present only for explicit references that remained inside
+// the arc directory and were readable at this tick.
 type coordinationBodyReadMsg struct {
 	arc      string
 	rows     []board.Row
 	boardErr error
 	events   []session.Event
+	activity map[string]string
 	packets  map[string]string
 }
 
@@ -110,9 +112,9 @@ func readArcLedgerCmd(workDir, arc string) tea.Cmd {
 
 // readCoordinationBodyCmd re-derives the integrated body without a cursor or
 // cross-tick cache. The board package owns the status join and graph identity;
-// the journal reader starts at zero so the ticker is always the requested
-// last-N history rather than only the latest delta.
-func readCoordinationBodyCmd(workDir, sessionsDir string, arc coordination.Arc) tea.Cmd {
+// one full journal generation supplies both the selected arc's last-N detail
+// and the latest activity instant used by every attention row.
+func readCoordinationBodyCmd(workDir, sessionsDir string, arc coordination.Arc, arcs []coordination.Arc) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -120,8 +122,9 @@ func readCoordinationBodyCmd(workDir, sessionsDir string, arc coordination.Arc) 
 		events, _ := session.ReadEventsFrom(sessionsDir, 0)
 		msg := coordinationBodyReadMsg{
 			arc: arc.Slug, rows: rows, boardErr: err,
-			events:  coordination.FilterEvents(events, arc.Members, coordination.JournalLimit),
-			packets: make(map[string]string),
+			events:   coordination.FilterEvents(events, arc.Members, coordination.JournalLimit),
+			activity: coordination.LatestEventTimes(events, arcs),
+			packets:  make(map[string]string),
 		}
 		if err != nil {
 			return msg
@@ -255,6 +258,7 @@ func (m model) handleCoordinationLedgerRead(msg coordinationLedgerReadMsg) (mode
 // handleCoordinationBodyRead applies only the generation addressed to the
 // currently selected arc; a late board subprocess or journal read is dropped.
 func (m model) handleCoordinationBodyRead(msg coordinationBodyReadMsg) (model, tea.Cmd) {
+	m.coordinationList.SetAttentionActivity(msg.activity)
 	if msg.arc != m.coordinationDetail.Arc() {
 		return m, nil
 	}
@@ -291,6 +295,7 @@ func (m model) handleCoordinationBodyRead(msg coordinationBodyReadMsg) (model, t
 
 func (m model) handleCoordinationAttentionSelected(msg coordination.AttentionSelectedMsg) (model, tea.Cmd) {
 	m.focusedPanel = panelRight
+	m.coordinationList.ShowArcs()
 	m.coordinationJump = &msg
 	m.coordinationTargetIssue = ""
 	m.coordinationDetail.SetBoard(nil, nil)
@@ -355,7 +360,7 @@ func (m *model) loadCoordinationDetail(arc string) tea.Cmd {
 	}
 	return tea.Batch(
 		readArcLedgerCmd(m.config.WorkDir, arc),
-		readCoordinationBodyCmd(m.config.WorkDir, m.sessionsDir, selected),
+		readCoordinationBodyCmd(m.config.WorkDir, m.sessionsDir, selected, m.coordinationList.Arcs()),
 	)
 }
 

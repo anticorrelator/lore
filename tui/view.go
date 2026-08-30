@@ -358,8 +358,12 @@ func (m model) viewSideBySide(cfg paneConfig) string {
 		rightBorderTitle = renderBorderTitle(rightTitleRendered, rightInner, rightBS)
 	}
 
+	leftTitle := cfg.listTitle
+	if maxTitleW := leftInner - cfg.filterAnnotW - 6; maxTitleW > 3 {
+		leftTitle = style.Truncate(leftTitle, maxTitleW)
+	}
 	topRow := leftBS.Render(style.DockBorder.TopLeft) +
-		renderBorderTitleWithAnnot(cfg.listTitle, leftInner, leftBS, cfg.filterAnnot, cfg.filterAnnotW) +
+		renderBorderTitleWithAnnot(leftTitle, leftInner, leftBS, cfg.filterAnnot, cfg.filterAnnotW) +
 		leftBS.Render(style.DockBorder.TopRight) +
 		rightBS.Render(style.DockBorder.TopLeft) +
 		rightBorderTitle +
@@ -503,8 +507,12 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 	b.WriteString("\n")
 
 	// === Top panel (list) ===
+	topTitle := cfg.listTitle
+	if maxTitleW := panelW - cfg.filterAnnotW - 6; maxTitleW > 3 {
+		topTitle = style.Truncate(topTitle, maxTitleW)
+	}
 	b.WriteString(topBS.Render(style.DockBorder.TopLeft))
-	b.WriteString(renderBorderTitleWithAnnot(cfg.listTitle, panelW, topBS, cfg.filterAnnot, cfg.filterAnnotW))
+	b.WriteString(renderBorderTitleWithAnnot(topTitle, panelW, topBS, cfg.filterAnnot, cfg.filterAnnotW))
 	b.WriteString(topBS.Render(style.DockBorder.TopRight))
 	b.WriteString("\n")
 	for i := 0; i < topH; i++ {

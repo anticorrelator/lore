@@ -870,16 +870,16 @@ func (m model) buildPaneConfig() paneConfig {
 
 	switch m.state {
 	case stateCoordination:
-		listTitle := style.TitleName.Render("Coordination")
-		if n := m.coordinationList.Count(); n > 0 {
-			listTitle += " " + style.TitleCount.Render(fmt.Sprintf("(%d)", n))
-		}
+		listTitle := style.TitleName.Render(m.coordinationList.Title())
 
 		filterSel := 0
 		if m.coordinationList.ShowArchived() {
 			filterSel = 1
 		}
 		filterAnnot, filterAnnotW := annotArcFilter.render(filterSel)
+		if m.coordinationList.AttentionFocused() {
+			filterAnnot, filterAnnotW = "", 0
+		}
 
 		detailView := m.coordinationDetail.View()
 		if m.coordinationTargetIssue != "" {

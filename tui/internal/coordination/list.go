@@ -40,10 +40,16 @@ var attentionColumns = []collection.Column{
 	{Key: "attention", Title: "ATTENTION", Width: 36, Priority: 0, Flex: true},
 	{Key: "status", Title: "STATUS", Width: 16, Priority: 1},
 	{Key: "gate", Title: "GATE", Width: 14, Priority: 1},
+}
+
+var attentionColumnsWithVerdict = []collection.Column{
+	{Key: "attention", Title: "ATTENTION", Width: 36, Priority: 0, Flex: true},
+	{Key: "status", Title: "STATUS", Width: 16, Priority: 1},
+	{Key: "gate", Title: "GATE", Width: 14, Priority: 1},
 	{Key: "verdict", Title: "VERDICT", Width: 16, Priority: 2},
 }
 
-const maxAttentionHeight = 10
+const staleAttentionAfter = 7 * 24 * time.Hour
 
 // noProjectCell is what an arc with no project label shows in the PROJECT
 // column. Project is a label an arc may simply not carry.
@@ -228,26 +234,31 @@ type ListModel struct {
 	skipped int
 	list    collection.List
 
-	attention        collection.List
-	attentionData    board.Attention
-	attentionRows    map[string]board.AttentionRow
-	staleAttentionID string
-	attentionLoaded  bool
-	attentionErr     string
-	attentionFocused bool
-	width            int
-	height           int
+	attention               collection.List
+	attentionData           board.Attention
+	attentionRows           map[string]board.AttentionRow
+	staleAttentionID        string
+	attentionLoaded         bool
+	attentionErr            string
+	attentionFocused        bool
+	attentionActivity       map[string]string
+	attentionActivityLoaded bool
+	staleExpanded           map[board.AttentionBucket]bool
+	width                   int
+	height                  int
 }
 
 // NewListModel builds an empty arc list.
 func NewListModel() ListModel {
 	m := ListModel{
-		list:          collection.NewList(listColumns),
-		attention:     collection.NewList(attentionColumns),
-		attentionData: make(board.Attention),
-		attentionRows: make(map[string]board.AttentionRow),
-		width:         80,
-		height:        30,
+		list:              collection.NewList(listColumns),
+		attention:         collection.NewList(attentionColumns),
+		attentionData:     make(board.Attention),
+		attentionRows:     make(map[string]board.AttentionRow),
+		attentionActivity: make(map[string]string),
+		staleExpanded:     make(map[board.AttentionBucket]bool),
+		width:             80,
+		height:            30,
 	}
 	m.list.SetDecorator(decorateHeaderRule)
 	m.list.SetOnSelect(func(r collection.Row) tea.Cmd {
@@ -314,8 +325,46 @@ func (m *ListModel) SetAttention(attention board.Attention, err error) {
 	m.refreshAttentionRows()
 }
 
+// SetAttentionActivity supplies the latest journal instant for each arc from
+// the host's existing coordination-body journal read. A missing arc key is an
+// explicit no-event state once this setter has been called.
+func (m *ListModel) SetAttentionActivity(activity map[string]string) {
+	m.attentionActivityLoaded = true
+	m.attentionActivity = make(map[string]string, len(activity))
+	for arc, instant := range activity {
+		m.attentionActivity[arc] = instant
+	}
+	m.refreshAttentionRows()
+}
+
 // AttentionFocused reports which collection owns j/k and Enter in the top pane.
 func (m ListModel) AttentionFocused() bool { return m.attentionFocused }
+
+// ShowArcs returns the top pane to its primary arc listing without changing
+// either collection's cursor.
+func (m *ListModel) ShowArcs() { m.attentionFocused = false }
+
+// Title is the top pane's title. The default arc-list state carries the sparse
+// attention rollup at zero row cost; the swapped state names its own listing.
+func (m ListModel) Title() string {
+	if m.attentionFocused {
+		return "Attention"
+	}
+	labels := map[board.AttentionBucket]string{
+		board.ActNow: "act now", board.NeedsJudgment: "judgment",
+		board.Waiting: "waiting", board.Reconcile: "reconcile",
+	}
+	var parts []string
+	for _, bucket := range board.AttentionBucketOrder {
+		if n := len(m.attentionData[bucket]); n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", n, labels[bucket]))
+		}
+	}
+	if len(parts) == 0 {
+		return "Coordination"
+	}
+	return "Coordination — ⚠ " + strings.Join(parts, " · ")
+}
 
 // CurrentAttention returns the exact attention identity under its cursor.
 func (m ListModel) CurrentAttention() (board.AttentionBucket, string, string, bool) {
@@ -353,8 +402,11 @@ func attentionBucketLabel(bucket board.AttentionBucket) string {
 	}
 }
 
-func (m *ListModel) refreshAttentionRows() {
+func (m *ListModel) refreshAttentionRows() { m.refreshAttentionRowsAt(time.Now()) }
+
+func (m *ListModel) refreshAttentionRowsAt(now time.Time) {
 	var rows []collection.Row
+	showVerdict := false
 	for _, bucket := range board.AttentionBucketOrder {
 		members := m.attentionData[bucket]
 		label := attentionBucketLabel(bucket)
@@ -369,39 +421,106 @@ func (m *ListModel) refreshAttentionRows() {
 			label += fmt.Sprintf(" (%d)", len(members))
 		}
 		rows = append(rows, collection.Row{Header: true, Title: collection.Cell{Text: label, Style: sectionHeaderStyle}})
+		var stale []board.AttentionRow
 		for _, row := range members {
-			rows = append(rows, attentionRow(row, m.attentionErr != "" || attentionID(row) == m.staleAttentionID))
+			if m.attentionRowIsStale(row, now) {
+				stale = append(stale, row)
+				continue
+			}
+			if strings.TrimSpace(row.Verdict) != "" {
+				showVerdict = true
+			}
+			rows = append(rows, m.attentionRow(row, m.attentionErr != "" || attentionID(row) == m.staleAttentionID, false))
 		}
+		if len(stale) > 0 {
+			expanded := m.staleExpanded[bucket]
+			glyph := "▸"
+			if expanded {
+				glyph = "▾"
+			}
+			rows = append(rows, collection.Row{
+				ID: staleFoldID(bucket), Title: collection.Cell{Text: fmt.Sprintf("%s stale (%d)", glyph, len(stale)), Style: style.Dim},
+				Cells: []collection.Cell{{Text: fmt.Sprintf("%s stale (%d)", glyph, len(stale)), Style: style.Dim}},
+			})
+			if expanded {
+				for _, row := range stale {
+					if strings.TrimSpace(row.Verdict) != "" {
+						showVerdict = true
+					}
+					rows = append(rows, m.attentionRow(row, m.attentionErr != "" || attentionID(row) == m.staleAttentionID, true))
+				}
+			}
+		}
+	}
+	if showVerdict {
+		for i := range rows {
+			if _, _, _, ok := parseAttentionID(rows[i].ID); ok && len(rows[i].Cells) == len(attentionColumns) {
+				rows[i].Cells = append(rows[i].Cells, collection.Cell{Text: unknown, Style: style.Dim})
+				rows[i].Meta = append(rows[i].Meta, collection.Cell{Text: unknown, Style: style.Dim})
+			}
+		}
+		m.attention.SetColumns(attentionColumnsWithVerdict)
+	} else {
+		m.attention.SetColumns(attentionColumns)
 	}
 	m.attention.SetRows(rows)
 }
 
-func attentionRow(row board.AttentionRow, stale bool) collection.Row {
+func staleFoldID(bucket board.AttentionBucket) string { return "stale\x1f" + string(bucket) }
+
+func parseStaleFoldID(id string) (board.AttentionBucket, bool) {
+	if !strings.HasPrefix(id, "stale\x1f") {
+		return "", false
+	}
+	bucket := board.AttentionBucket(strings.TrimPrefix(id, "stale\x1f"))
+	return bucket, bucket != ""
+}
+
+func (m ListModel) attentionRowIsStale(row board.AttentionRow, now time.Time) bool {
+	if !m.attentionActivityLoaded {
+		return false
+	}
+	at, ok := parseInstant(m.attentionActivity[row.Arc])
+	return !ok || at.Before(now.Add(-staleAttentionAfter))
+}
+
+func (m ListModel) attentionAge(arc string) string {
+	if !m.attentionActivityLoaded {
+		return "loading"
+	}
+	instant := m.attentionActivity[arc]
+	if _, ok := parseInstant(instant); !ok {
+		return unknown
+	}
+	return work.FormatRelativeTime(instant)
+}
+
+func (m ListModel) attentionRow(row board.AttentionRow, missing, dormant bool) collection.Row {
 	label := explicit(row.Label)
 	if label == unknown {
 		label = explicit(row.Title)
 	}
-	title := fmt.Sprintf("[%s] %s", explicit(row.Arc), label)
+	title := fmt.Sprintf("%s · %s · %s", label, explicit(row.Arc), m.attentionAge(row.Arc))
 	status := explicit(row.Status)
 	gate := explicit(row.Gate)
 	verdict := explicit(row.Verdict)
-	if stale {
+	if missing {
 		title += " · stale/unknown target"
 	}
+	if dormant {
+		title += " · stale"
+	}
+	cells := []collection.Cell{{Text: title}, {Text: status, Style: style.Dim}, {Text: gate, Style: style.Dim}}
+	meta := []collection.Cell{{Text: status, Style: style.Dim}, {Text: gate, Style: style.Dim}}
+	if strings.TrimSpace(row.Verdict) != "" {
+		cells = append(cells, collection.Cell{Text: verdict, Style: style.Dim})
+		meta = append(meta, collection.Cell{Text: verdict, Style: style.Dim})
+	}
 	return collection.Row{
-		ID: attentionID(row),
-		Cells: []collection.Cell{
-			{Text: title},
-			{Text: "status:" + status, Style: style.Dim},
-			{Text: "gate:" + gate, Style: style.Dim},
-			{Text: "verdict:" + verdict, Style: style.Dim},
-		},
+		ID:    attentionID(row),
+		Cells: cells,
 		Title: collection.Cell{Text: title},
-		Meta: []collection.Cell{
-			{Text: "status:" + status, Style: style.Dim},
-			{Text: "gate:" + gate, Style: style.Dim},
-			{Text: "verdict:" + verdict, Style: style.Dim},
-		},
+		Meta:  meta,
 	}
 }
 
@@ -411,7 +530,7 @@ func decorateAttentionRow(row collection.Row, selected bool, lines []string) []s
 	}
 	gate := ""
 	if len(row.Meta) > 1 {
-		gate = strings.TrimPrefix(row.Meta[1].Text, "gate:")
+		gate = row.Meta[1].Text
 	}
 	styled := make([]string, len(lines))
 	copy(styled, lines)
@@ -421,6 +540,16 @@ func decorateAttentionRow(row collection.Row, selected bool, lines []string) []s
 			styled[i] = holdStyle.Render(line)
 		case "flag":
 			styled[i] = flagStyle.Render(line)
+		}
+		if !selected {
+			_, arc, _, ok := parseAttentionID(row.ID)
+			if ok {
+				suffixAt := strings.Index(row.Title.Text, " · "+arc+" · ")
+				if suffixAt >= 0 {
+					suffix := row.Title.Text[suffixAt:]
+					styled[i] = strings.Replace(styled[i], suffix, style.Dim.Render(suffix), 1)
+				}
+			}
 		}
 	}
 	return styled
@@ -545,6 +674,19 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 		case "a":
 			m.attentionFocused = !m.attentionFocused
 			return m, nil
+		case "h", "esc":
+			if m.attentionFocused {
+				m.attentionFocused = false
+				return m, nil
+			}
+		case "enter":
+			if m.attentionFocused {
+				if bucket, ok := parseStaleFoldID(m.attention.CurrentID()); ok {
+					m.staleExpanded[bucket] = !m.staleExpanded[bucket]
+					m.refreshAttentionRows()
+					return m, nil
+				}
+			}
 		case "ctrl+a":
 			m.showArchived = !m.showArchived
 			m.refreshRows()
@@ -572,22 +714,8 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 }
 
 func (m *ListModel) resizeLists() {
-	available := m.height - 2 // one label for each collection
-	if available < 2 {
-		available = 2
-	}
-	attentionHeight := available / 3
-	if attentionHeight < 5 {
-		attentionHeight = 5
-	}
-	if attentionHeight > maxAttentionHeight {
-		attentionHeight = maxAttentionHeight
-	}
-	if attentionHeight >= available {
-		attentionHeight = max(1, available/2)
-	}
-	m.attention.SetSize(m.width, attentionHeight)
-	m.list.SetSize(m.width, max(1, available-attentionHeight))
+	m.attention.SetSize(m.width, max(1, m.height))
+	m.list.SetSize(m.width, max(1, m.height))
 }
 
 func (m *ListModel) skipAttentionHeaders(travel tea.Msg) tea.Cmd {
@@ -660,22 +788,13 @@ func reverseTravel(msg tea.Msg) tea.Msg {
 }
 
 func (m ListModel) View() string {
-	attentionMarker, arcsMarker := "  ", "▸ "
 	if m.attentionFocused {
-		attentionMarker, arcsMarker = "▸ ", "  "
+		if m.attentionErr != "" {
+			return style.Dim.Render("  Attention unknown — "+m.attentionErr) + "\n" + m.attention.View()
+		}
+		return m.attention.View()
 	}
-	var b strings.Builder
-	b.WriteString(sectionHeaderStyle.Render(attentionMarker + "Attention"))
-	b.WriteString("\n")
-	if m.attentionErr != "" {
-		b.WriteString(style.Dim.Render("  Attention unknown — " + m.attentionErr))
-		b.WriteString("\n")
-	}
-	b.WriteString(m.attention.View())
-	b.WriteString(sectionHeaderStyle.Render(arcsMarker + "Arcs"))
-	b.WriteString("\n")
-	b.WriteString(m.list.View())
-	return b.String()
+	return m.list.View()
 }
 
 // CurrentSlug returns the arc slug under the cursor, or "" on an empty list.
