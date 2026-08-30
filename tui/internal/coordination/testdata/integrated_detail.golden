@@ -1,10 +1,10 @@
+[Streams]
+▸ ✓ a First done · hold · full
+work item item-a · packet packets/a.md · target work item
+○ b Second pending · flag · unknown
+work item item-b · packet unknown · target work item
 [Brief]
 Compact brief
-[Streams]
-▸ ✓ a First done gate:hold verdict:full
-work item item-a · packet packets/a.md · target work item
-○ b Second pending gate:flag verdict:unknown
-work item item-b · packet unknown · target work item
 [Recent activity]
 • 2026-08-29T12:00:00Z · needs_input · item-a
 • unknown · unknown · item-b

@@ -32,8 +32,16 @@ var renderFixtures = map[string][]Row{
 	},
 	"minimal": {
 		row("S1", "spec auth", nil, "done", "writer"),
-		row("S2", "impl auth", []string{"S1"}, "blocked-on-input", "writer"),
-		row("S3", "integrate", []string{"S1", "S2"}, "pending", "writer"),
+		func() Row {
+			r := row("S2", "impl auth", []string{"S1"}, "blocked-on-input", "writer")
+			r.Gate = "hold"
+			return r
+		}(),
+		func() Row {
+			r := row("S3", "integrate", []string{"S1", "S2"}, "pending", "writer")
+			r.Gate, r.Verdict = "flag", "full"
+			return r
+		}(),
 	},
 	"adversarial": {
 		row("a", "schema", nil, "done", "writer"),
@@ -60,10 +68,13 @@ var renderFixtures = map[string][]Row{
 		row("b", "child ends its rail", []string{"a"}, "done", "writer"),
 		row("c", "next root", nil, "pending", "writer"),
 	},
+	"wrapped": {
+		row("long", "capture protocol evolution guidance without truncating any part of the authored step description even when it needs a continuation line", nil, "in-flight", "writer"),
+	},
 }
 
 func TestRenderGoldenFixtures(t *testing.T) {
-	for _, name := range []string{"real", "minimal", "adversarial", "wide", "root_lane_reuse"} {
+	for _, name := range []string{"real", "minimal", "adversarial", "wide", "root_lane_reuse", "wrapped"} {
 		t.Run(name, func(t *testing.T) {
 			got := strings.Join(Render(renderFixtures[name], goldenWidth), "\n") + "\n"
 			path := filepath.Join("testdata", name+".golden")
@@ -116,8 +127,21 @@ func TestRenderRowsPairsTopologicalTextWithIdentity(t *testing.T) {
 		t.Fatalf("render identities do not follow topological lines: %+v", rendered)
 	}
 	lines := Render(rows, goldenWidth)
-	if rendered[0].Line != lines[0] || rendered[1].Line != lines[1] {
+	if rendered[0].Lines[0].Text != lines[0] || rendered[1].Lines[0].Text != lines[1] {
 		t.Fatalf("identity and text render paths drifted: %+v != %q", rendered, lines)
+	}
+}
+
+func TestWrappedDescriptionRemainsOneNavigationRow(t *testing.T) {
+	rendered := RenderRows(renderFixtures["wrapped"], goldenWidth)
+	if len(rendered) != 1 || len(rendered[0].Lines) < 2 {
+		t.Fatalf("wrapped node must remain one semantic row with continuation lines: %+v", rendered)
+	}
+	joined := strings.Join(Render(renderFixtures["wrapped"], goldenWidth), "\n")
+	for _, want := range []string{"capture protocol evolution guidance", "continuation line", "in-flight"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("wrapped node lost %q:\n%s", want, joined)
+		}
 	}
 }
 

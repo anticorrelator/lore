@@ -7,13 +7,20 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-const labelColumnWidth = 38
+// RenderedLine is one physical line of a rendered stream. MetadataAt is the
+// byte offset where the compact metadata suffix begins, or -1 when the line is
+// entirely structural rail/identity/description text.
+type RenderedLine struct {
+	Text       string
+	MetadataAt int
+}
 
-// RenderedRow pairs one formatted line with the stream identity used to place it.
+// RenderedRow pairs one stream identity with all of its physical lines. A
+// wrapped description therefore remains one navigation target.
 type RenderedRow struct {
 	Arc      string
 	StreamID string
-	Line     string
+	Lines    []RenderedLine
 }
 
 type graph struct {
@@ -31,9 +38,11 @@ type graph struct {
 // the same lines and retain no lane state.
 func Render(rows []Row, width int) []string {
 	rendered := RenderRows(rows, width)
-	lines := make([]string, len(rendered))
-	for i, row := range rendered {
-		lines[i] = row.Line
+	var lines []string
+	for _, row := range rendered {
+		for _, line := range row.Lines {
+			lines = append(lines, line.Text)
+		}
 	}
 	return lines
 }
@@ -47,7 +56,10 @@ func RenderRows(rows []Row, width int) []RenderedRow {
 		out := make([]RenderedRow, 0, len(order))
 		for _, id := range order {
 			row := g.byID[id]
-			out = append(out, RenderedRow{Arc: row.Arc, StreamID: id})
+			out = append(out, RenderedRow{
+				Arc: row.Arc, StreamID: id,
+				Lines: []RenderedLine{{Text: "", MetadataAt: -1}},
+			})
 		}
 		return out
 	}
@@ -94,7 +106,7 @@ func RenderRows(rows []Row, width int) []RenderedRow {
 		rail := drawRail(lanes, col, incoming, spawned, statusGlyph(row.Status))
 		out = append(out, RenderedRow{
 			Arc: row.Arc, StreamID: id,
-			Line: formatLine(rail, len(lanes), row, g, width),
+			Lines: formatLines(rail, len(lanes), row, g, width),
 		})
 		placed[id] = true
 
@@ -326,34 +338,101 @@ func indexSet(indexes []int) map[int]bool {
 	return set
 }
 
-func formatLine(rail string, laneCount int, row Row, g graph, width int) string {
+func formatLines(rail string, laneCount int, row Row, g graph, width int) []RenderedLine {
 	gutterWidth := max(2*laneCount-1, 8)
 	prefix := " " + runewidth.FillRight(rail, gutterWidth) + "  " +
 		runewidth.FillRight(row.StreamID, 5) + " "
+	if runewidth.StringWidth(prefix) >= width {
+		prefix = runewidth.Truncate(prefix, max(0, width-1), "")
+	}
+	indent := strings.Repeat(" ", runewidth.StringWidth(prefix))
+	textWidth := max(1, width-runewidth.StringWidth(prefix))
 
-	suffix := "  " + row.Status
+	metadata := []string{row.Status}
 	if row.Tree == "read-only" {
-		suffix += " ·ro"
+		metadata = append(metadata, "ro")
 	}
-	if row.Gate != "" {
-		suffix += " gate:" + row.Gate
+	if row.Gate != "" && row.Gate != "notify" {
+		metadata = append(metadata, row.Gate)
 	}
-	if row.Verdict != "" {
-		suffix += " verdict:" + row.Verdict
+	if row.Verdict != "" && row.Verdict != "—" {
+		metadata = append(metadata, row.Verdict)
 	}
 	if waits := unresolvedDependencies(row, g.byID); len(waits) > 0 {
-		suffix += "  waits: " + strings.Join(waits, ", ")
+		metadata = append(metadata, "waits: "+strings.Join(waits, ", "))
 	}
 	for _, dependency := range g.dangling[row.StreamID] {
-		suffix += "  ⚠ dep?" + dependency
+		metadata = append(metadata, "⚠ dep?"+dependency)
 	}
 	if g.cyclic[row.StreamID] {
-		suffix += "  ⟳ cycle"
+		metadata = append(metadata, "⟳ cycle")
 	}
+	suffix := strings.Join(metadata, " · ")
 
-	labelWidth := min(labelColumnWidth, max(0, width-runewidth.StringWidth(prefix)-runewidth.StringWidth(suffix)))
-	label := runewidth.FillRight(runewidth.Truncate(row.Label, labelWidth, ""), labelWidth)
-	return runewidth.Truncate(prefix+label+suffix, width, "")
+	labels := wrapCells(row.Label, textWidth)
+	lines := make([]RenderedLine, 0, len(labels)+1)
+	for i, label := range labels {
+		lead := indent
+		if i == 0 {
+			lead = prefix
+		}
+		lines = append(lines, RenderedLine{Text: lead + label, MetadataAt: -1})
+	}
+	last := &lines[len(lines)-1]
+	if suffix == "" {
+		return lines
+	}
+	if runewidth.StringWidth(last.Text)+2+runewidth.StringWidth(suffix) <= width {
+		last.Text += "  "
+		last.MetadataAt = len(last.Text)
+		last.Text += suffix
+		return lines
+	}
+	for _, metadataLine := range wrapCells(suffix, textWidth) {
+		lines = append(lines, RenderedLine{
+			Text: indent + metadataLine, MetadataAt: len(indent),
+		})
+	}
+	return lines
+}
+
+// wrapCells keeps every display cell while preferring word boundaries. Words
+// wider than the available column are split by runewidth.Wrap, which keeps the
+// result deterministic for wide Unicode glyphs as well as ASCII.
+func wrapCells(text string, width int) []string {
+	if text == "" {
+		return []string{""}
+	}
+	var lines []string
+	for _, paragraph := range strings.Split(text, "\n") {
+		words := strings.Fields(paragraph)
+		if len(words) == 0 {
+			lines = append(lines, "")
+			continue
+		}
+		current := ""
+		for _, word := range words {
+			candidate := word
+			if current != "" {
+				candidate = current + " " + word
+			}
+			if runewidth.StringWidth(candidate) <= width {
+				current = candidate
+				continue
+			}
+			if current != "" {
+				lines = append(lines, current)
+				current = ""
+			}
+			parts := strings.Split(runewidth.Wrap(word, width), "\n")
+			lines = append(lines, parts[:len(parts)-1]...)
+			current = parts[len(parts)-1]
+		}
+		if current != "" {
+			lines = append(lines, current)
+		}
+	}
+	return lines
 }
 
 func unresolvedDependencies(row Row, byID map[string]Row) []string {

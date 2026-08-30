@@ -427,7 +427,7 @@ func (m *ListModel) refreshAttentionRowsAt(now time.Time) {
 				stale = append(stale, row)
 				continue
 			}
-			if strings.TrimSpace(row.Verdict) != "" {
+			if verdictRevealsColumn(row.Verdict) {
 				showVerdict = true
 			}
 			rows = append(rows, m.attentionRow(row, m.attentionErr != "" || attentionID(row) == m.staleAttentionID, false))
@@ -444,7 +444,7 @@ func (m *ListModel) refreshAttentionRowsAt(now time.Time) {
 			})
 			if expanded {
 				for _, row := range stale {
-					if strings.TrimSpace(row.Verdict) != "" {
+					if verdictRevealsColumn(row.Verdict) {
 						showVerdict = true
 					}
 					rows = append(rows, m.attentionRow(row, m.attentionErr != "" || attentionID(row) == m.staleAttentionID, true))
@@ -461,9 +461,20 @@ func (m *ListModel) refreshAttentionRowsAt(now time.Time) {
 		}
 		m.attention.SetColumns(attentionColumnsWithVerdict)
 	} else {
+		for i := range rows {
+			if _, _, _, ok := parseAttentionID(rows[i].ID); ok {
+				rows[i].Cells = rows[i].Cells[:min(len(rows[i].Cells), len(attentionColumns))]
+				rows[i].Meta = rows[i].Meta[:min(len(rows[i].Meta), len(attentionColumns)-1)]
+			}
+		}
 		m.attention.SetColumns(attentionColumns)
 	}
 	m.attention.SetRows(rows)
+}
+
+func verdictRevealsColumn(verdict string) bool {
+	verdict = strings.TrimSpace(verdict)
+	return verdict != "" && verdict != "—"
 }
 
 func staleFoldID(bucket board.AttentionBucket) string { return "stale\x1f" + string(bucket) }
