@@ -1,6 +1,7 @@
 package coordination
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -584,7 +585,7 @@ func integratedDetail() DetailModel {
 	m.SetBoard([]board.Row{
 		{Arc: "arc-a", StreamID: "b", Label: "Second", DependsOn: []string{"a"}, Gate: "flag", Status: "pending", Verdict: "", WorkItem: strptr("item-b")},
 		{Arc: "arc-a", StreamID: "a", Label: "First", Gate: "hold", Status: "done", Verdict: "full", WorkItem: strptr("item-a"), ReviewPacket: strptr("packets/a.md")},
-	}, nil)
+	}, true, nil)
 	m.SetEvents([]session.Event{
 		{TS: "2026-08-29T12:00:00Z", Event: "needs_input", Slug: "item-a"},
 		{Links: map[string]string{"work_item": "item-b"}},
@@ -608,6 +609,26 @@ func TestDetailIntegratedBodyOrderAndUnknowns(t *testing.T) {
 	}
 	if holdStyle.GetForeground() == flagStyle.GetForeground() {
 		t.Error("hold and flag must use distinct treatments")
+	}
+}
+
+func TestDetailBoardProjectionStatesStayDistinct(t *testing.T) {
+	m := sizedDetail()
+	m.SetArc("arc-a")
+
+	m.SetBoard(nil, true, nil)
+	if out := stripANSI(m.View()); !strings.Contains(out, "empty plan — no declared stream rows") {
+		t.Fatalf("present empty arc did not render as an empty plan:\n%s", out)
+	}
+
+	m.SetBoard(nil, false, nil)
+	if out := stripANSI(m.View()); !strings.Contains(out, "arc is absent from the coordination projection") {
+		t.Fatalf("absent arc did not render as unknown:\n%s", out)
+	}
+
+	m.SetBoard(nil, false, errors.New("status unavailable"))
+	if out := stripANSI(m.View()); !strings.Contains(out, "streams unknown — status unavailable") {
+		t.Fatalf("load error did not remain distinct from absence:\n%s", out)
 	}
 }
 
@@ -647,7 +668,7 @@ func TestDetailSelectionPreservesStreamIdentityAcrossRefresh(t *testing.T) {
 	m.SetBoard([]board.Row{
 		{Arc: "arc-a", StreamID: "a", Label: "First", Gate: "hold", Status: "done", Verdict: "full"},
 		{Arc: "arc-a", StreamID: "b", Label: "Second", DependsOn: []string{"a"}, Gate: "flag", Status: "pending", Verdict: "unknown"},
-	}, nil)
+	}, true, nil)
 	if got := m.SelectedStream(); got != "b" {
 		t.Errorf("board refresh must preserve the cursor by stream identity, got %q", got)
 	}
@@ -674,7 +695,7 @@ func TestDetailRowRoutingUsesSessionThenWorkWithoutGuessing(t *testing.T) {
 	m := sizedDetail()
 	m.SetArc("arc-a")
 	m.SetMembers([]Member{{Slug: "item-a", Resolved: true}}, nil)
-	m.SetBoard([]board.Row{row}, nil)
+	m.SetBoard([]board.Row{row}, true, nil)
 	m.SetSessions([]sessionview.SessionRow{{RowID: "one", Slug: "item-a", Display: "one"}})
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if msg, ok := cmd().(SessionSelectedMsg); !ok || msg.RowID != "one" {
@@ -707,7 +728,7 @@ func TestDetailSessionTargetsRenderExplicitLiveScreenState(t *testing.T) {
 			m := sizedDetail()
 			m.SetArc("arc-a")
 			m.SetMembers([]Member{{Slug: "item-a", Resolved: true}}, nil)
-			m.SetBoard([]board.Row{row}, nil)
+			m.SetBoard([]board.Row{row}, true, nil)
 			m.SetSessions([]sessionview.SessionRow{tc.row})
 			if got := m.targetSummary(row); !strings.Contains(got, tc.want) {
 				t.Fatalf("session target summary %q missing %q", got, tc.want)
@@ -725,7 +746,7 @@ func TestDetailUndeclaredWorkTargetStaysUnknown(t *testing.T) {
 	m.SetBoard([]board.Row{{
 		Arc: "arc-a", StreamID: "s1", Label: "Foreign", Gate: "notify",
 		Status: "pending", Verdict: "unknown", WorkItem: strptr("not-a-member"),
-	}}, nil)
+	}}, true, nil)
 	m.SetSessions([]sessionview.SessionRow{{RowID: "wrong", Slug: "not-a-member", Display: "wrong"}})
 	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil {
@@ -748,8 +769,15 @@ func TestDetailClosedAndLiveReportModesStayDistinct(t *testing.T) {
 	}
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	m.SetClosed(true)
-	if out := stripANSI(m.View()); !strings.Contains(out, "Earlier report") || strings.Contains(out, "Compact brief") {
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "Earlier report") || strings.Contains(out, "Compact brief") {
 		t.Errorf("a closed arc's primary body must be its report:\n%s", out)
+	}
+	report := strings.Index(out, "Report")
+	streams := strings.Index(out, "Final streams")
+	graph := strings.Index(out, "First")
+	if !(report >= 0 && report < streams && streams < graph) {
+		t.Errorf("a closed arc must render Report then its final DAG:\n%s", out)
 	}
 }
 

@@ -64,6 +64,7 @@ type DetailModel struct {
 	rendered    []board.RenderedRow
 	rowCursor   int
 	boardLoaded bool
+	boardFound  bool
 	boardErr    string
 
 	events []session.Event
@@ -116,6 +117,7 @@ func (m *DetailModel) SetArc(arc string) {
 	m.rendered = nil
 	m.rowCursor = 0
 	m.boardLoaded = false
+	m.boardFound = false
 	m.boardErr = ""
 	m.events = nil
 	m.ledgerLoaded = false
@@ -172,9 +174,10 @@ func (m *DetailModel) SetClosed(closed bool) {
 
 // SetBoard replaces the fresh status projection while preserving selection by
 // stream identity. Empty fields remain explicit at render time.
-func (m *DetailModel) SetBoard(rows []board.Row, err error) {
+func (m *DetailModel) SetBoard(rows []board.Row, found bool, err error) {
 	selected := m.SelectedStream()
 	m.boardLoaded = true
+	m.boardFound = found
 	m.boardErr = ""
 	if err != nil {
 		m.boardErr = err.Error()
@@ -318,10 +321,20 @@ func (m DetailModel) render() string {
 		return m.renderDocument("Review packet · "+explicit(m.packetRef), m.packetBody, true, explicit(m.packetRef))
 	default:
 		if m.closed {
-			return m.renderDocument("Report", m.report, m.reportFound, "report.md")
+			return m.renderClosed()
 		}
 		return m.renderLive()
 	}
+}
+
+func (m DetailModel) renderClosed() string {
+	var b strings.Builder
+	b.WriteString(m.renderDocument("Report", m.report, m.reportFound, "report.md"))
+	b.WriteString("\n\n")
+	b.WriteString(sectionRule("Final streams", m.contentWidth()))
+	b.WriteString("\n")
+	b.WriteString(m.renderBoard())
+	return b.String()
 }
 
 func (m DetailModel) renderDocument(label, body string, found bool, filename string) string {
@@ -368,25 +381,31 @@ func (m DetailModel) renderBoard() string {
 		return style.Dim.Render("streams unknown — reading coordination status")
 	case m.boardErr != "":
 		return style.Dim.Render("streams unknown — " + m.boardErr)
+	case !m.boardFound:
+		return style.Dim.Render("streams unknown — arc is absent from the coordination projection")
 	case len(m.rendered) == 0:
-		return style.Dim.Render("streams unknown — no declared stream rows")
+		return style.Dim.Render("empty plan — no declared stream rows")
 	}
 	var b strings.Builder
 	for i, rendered := range m.rendered {
 		prefix := "  "
-		if i == m.rowCursor {
+		if !m.closed && i == m.rowCursor {
 			prefix = "▸ "
 		}
 		line := rendered.Line
 		row, _ := m.rowByID(rendered.StreamID)
-		switch row.Gate {
-		case "hold":
-			line = holdStyle.Render(line)
-		case "flag":
-			line = flagStyle.Render(line)
+		if !m.closed {
+			switch row.Gate {
+			case "hold":
+				line = holdStyle.Render(line)
+			case "flag":
+				line = flagStyle.Render(line)
+			}
 		}
 		b.WriteString(prefix + line + "\n")
-		b.WriteString("    " + style.Dim.Render(m.targetSummary(row)) + "\n")
+		if !m.closed {
+			b.WriteString("    " + style.Dim.Render(m.targetSummary(row)) + "\n")
+		}
 	}
 	return strings.TrimSuffix(b.String(), "\n")
 }

@@ -16,6 +16,7 @@ import (
 // Row is one authored stream in an arc's coordination ledger.
 type Row struct {
 	Arc          string   `json:"arc"`
+	ArcStatus    string   `json:"arc_status"`
 	StreamID     string   `json:"stream_id"`
 	Label        string   `json:"step"`
 	DependsOn    []string `json:"depends_on"`
@@ -28,8 +29,14 @@ type Row struct {
 }
 
 type statusProjection struct {
+	CoordinationArcs    json.RawMessage `json:"coordination_arcs"`
 	CoordinationStreams json.RawMessage `json:"coordination_streams"`
 	Buckets             statusBuckets   `json:"buckets"`
+}
+
+type statusArc struct {
+	Arc    string `json:"arc"`
+	Status string `json:"status"`
 }
 
 // AttentionBucket names one sparse action projection in display order.
@@ -84,11 +91,13 @@ type statusBucketRow struct {
 }
 
 // Load returns the complete stream rows for arc in ledger declaration order.
-// It derives a fresh board on every call and keeps no cache or layout state.
-func Load(ctx context.Context, arc string) ([]Row, error) {
+// found distinguishes a declared arc with zero rows from an arc absent from the
+// projection. Load derives a fresh board on every call and keeps no cache or
+// layout state.
+func Load(ctx context.Context, arc string) ([]Row, bool, error) {
 	out, err := loadStatus(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	return decodeRows(bytes.NewReader(out), arc)
 }
@@ -116,19 +125,34 @@ func loadStatus(ctx context.Context) ([]byte, error) {
 	return nil, fmt.Errorf("lore coordinate status --json: %w: %s", err, detail)
 }
 
-func decodeRows(r io.Reader, arc string) ([]Row, error) {
+func decodeRows(r io.Reader, arc string) ([]Row, bool, error) {
 	var projection statusProjection
 	decoder := json.NewDecoder(r)
 	if err := decoder.Decode(&projection); err != nil {
-		return nil, fmt.Errorf("decode coordinate status: %w", err)
+		return nil, false, fmt.Errorf("decode coordinate status: %w", err)
+	}
+	if len(projection.CoordinationArcs) == 0 {
+		return nil, false, fmt.Errorf("decode coordinate status: missing coordination_arcs")
 	}
 	if len(projection.CoordinationStreams) == 0 {
-		return nil, fmt.Errorf("decode coordinate status: missing coordination_streams")
+		return nil, false, fmt.Errorf("decode coordinate status: missing coordination_streams")
+	}
+
+	var arcs []statusArc
+	if err := json.Unmarshal(projection.CoordinationArcs, &arcs); err != nil {
+		return nil, false, fmt.Errorf("decode coordinate arcs: %w", err)
+	}
+	found := false
+	for _, candidate := range arcs {
+		if candidate.Arc == arc {
+			found = true
+			break
+		}
 	}
 
 	var all []Row
 	if err := json.Unmarshal(projection.CoordinationStreams, &all); err != nil {
-		return nil, fmt.Errorf("decode coordinate streams: %w", err)
+		return nil, false, fmt.Errorf("decode coordinate streams: %w", err)
 	}
 	rows := make([]Row, 0, len(all))
 	for _, row := range all {
@@ -136,7 +160,10 @@ func decodeRows(r io.Reader, arc string) ([]Row, error) {
 			rows = append(rows, row)
 		}
 	}
-	return rows, nil
+	if len(rows) > 0 && !found {
+		return nil, false, fmt.Errorf("decode coordinate status: arc %q has stream rows but no coordination_arcs entry", arc)
+	}
+	return rows, found, nil
 }
 
 func decodeAttention(r io.Reader) (Attention, error) {

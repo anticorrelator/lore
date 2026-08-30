@@ -417,6 +417,14 @@ assert_eq "the complete stream projection preserves ledger declaration order" \
 assert_eq "the complete stream projection carries the board's authored cells" \
   "Untouched step ([[work:ready-item]])|hold|—" \
   "$(jq -r '[.coordination_streams[] | select(.arc=="live-arc" and .stream_id=="s-ready")][0] | [.step,.gate,.verdict] | join("|")' "$LIVE_JSON")"
+assert_eq "active stream rows declare their arc lifecycle status" "active" \
+  "$(jq -r '[.coordination_streams[] | select(.arc=="live-arc")][0].arc_status' "$LIVE_JSON")"
+assert_eq "closed arc ledgers join the display projection with lifecycle status" \
+  "s-closed|closed" \
+  "$(jq -r '[.coordination_streams[] | select(.arc=="closed-arc")][0] | [.stream_id,.arc_status] | join("|")' "$LIVE_JSON")"
+assert_eq "the arc index carries both live and closed identities" \
+  "closed-arc:closed,live-arc:active" \
+  "$(jq -r '[.coordination_arcs[] | "\(.arc):\(.status)"] | sort | join(",")' "$LIVE_JSON")"
 assert_eq "a unique Step backlink and arc-relative Markdown document are explicit navigation fields" \
   "ready-item|packets/owner-read.md" \
   "$(jq -r '[.coordination_streams[] | select(.arc=="live-arc" and .stream_id=="s-ready")][0] | [.work_item,.review_packet] | join("|")' "$LIVE_JSON")"
@@ -450,7 +458,7 @@ assert_eq "bucket stream facts carry the same declared navigation identity" \
   "$(jq -r '[.buckets.act_now[] | select(.observed_facts.stream_id?=="s-ready")][0].observed_facts | [.work_item,.review_packet] | join("|")' "$LIVE_JSON")"
 assert_eq "the ledger locator points into the arc record" "true" \
   "$(jq -r '[.buckets[][] | select(.evidence.locator | startswith("_work/_arcs/live-arc/coordination.md#L"))] | length > 0' "$LIVE_JSON")"
-assert_eq "a closed arc's ledger is not projected" "0" \
+assert_eq "a closed arc's ledger is not projected into action buckets" "0" \
   "$(jq -r '[.buckets[][] | select(.observed_facts.stream_id?=="s-closed")] | length' "$LIVE_JSON")"
 assert_contains "human render names the ledger scan" \
   "$(bash "$COORDINATE" --kdir "$LIVE")" "Coordination dispatch"
@@ -500,6 +508,8 @@ NO_DIR_JSON="$TEST_DIR/arc-absent.json"
 bash "$COORDINATE" --kdir "$NO_DIR" --json > "$NO_DIR_JSON"
 assert_eq "an absent arc directory is named as unread" "absent" \
   "$(jq -r '.coordination_dispatch.ledger_scan.read_status' "$NO_DIR_JSON")"
+assert_eq "an absent arc directory projects no arc identities" "0" \
+  "$(jq -r '.coordination_arcs | length' "$NO_DIR_JSON")"
 assert_contains "an absent arc directory names its locator in the reason" \
   "$(jq -r '.coordination_dispatch.ledger_scan.reason' "$NO_DIR_JSON")" "_work/_arcs"
 
@@ -527,6 +537,10 @@ EMPTY_JSON="$TEST_DIR/arc-empty-ledger.json"
 bash "$COORDINATE" --kdir "$EMPTY_LEDGER" --json > "$EMPTY_JSON"
 assert_eq "a ledger with no stream table is read" "1" \
   "$(jq -r '.coordination_dispatch.ledger_scan.ledgers_read' "$EMPTY_JSON")"
+assert_eq "an empty plan remains present in the arc projection" "active" \
+  "$(jq -r '[.coordination_arcs[] | select(.arc=="empty-arc")][0].status' "$EMPTY_JSON")"
+assert_eq "an empty plan has zero projected stream rows" "0" \
+  "$(jq -r '[.coordination_streams[] | select(.arc=="empty-arc")] | length' "$EMPTY_JSON")"
 assert_contains "an empty ledger reads differently from an unread one" \
   "$(jq -r '.coordination_dispatch.ledger_scan.reason' "$EMPTY_JSON")" "no stream rows"
 assert_eq "the four zero-ready reasons are four different strings" "4" \

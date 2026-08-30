@@ -44,7 +44,7 @@ func coordinationContractModel(t *testing.T) model {
 	m.coordinationDetail.SetBoard([]board.Row{{
 		Arc: "arc-a", StreamID: "s1", Label: "Run item A", Gate: "notify",
 		Status: "pending", Verdict: "unknown", WorkItem: strptrMain("item-a"),
-	}}, nil)
+	}}, true, nil)
 	m.coordinationPanelCallbacks().resize()
 	return m
 }
@@ -220,7 +220,7 @@ func TestCoordinationAttentionSelectionJumpsByExactIdentity(t *testing.T) {
 	if m.focusedPanel != panelRight || m.coordinationList.AttentionFocused() || m.coordinationList.CurrentSlug() != "arc-b" || m.coordinationDetail.Arc() != "arc-b" || load == nil {
 		t.Fatalf("jump did not set exact arc and detail focus: focus=%v cursor=%q detail=%q cmd=%v", m.focusedPanel, m.coordinationList.CurrentSlug(), m.coordinationDetail.Arc(), load)
 	}
-	m, _ = updateModel(t, m, coordinationBodyReadMsg{arc: "arc-b", rows: []board.Row{
+	m, _ = updateModel(t, m, coordinationBodyReadMsg{arc: "arc-b", boardFound: true, rows: []board.Row{
 		{Arc: "arc-b", StreamID: "neighbor", Label: "Neighbor", Gate: "notify", Status: "pending", Verdict: "unknown"},
 		{Arc: "arc-b", StreamID: "s2", Label: "Exact", Gate: "flag", Status: "pending", Verdict: "unknown"},
 	}})
@@ -237,7 +237,7 @@ func TestCoordinationAttentionStaleTargetsNeverSelectNeighbors(t *testing.T) {
 		m := coordinationContractModel(t)
 		selected := coordination.AttentionSelectedMsg{Bucket: board.ActNow, Arc: "arc-a", StreamID: "gone"}
 		m, _ = updateModel(t, m, selected)
-		m, _ = updateModel(t, m, coordinationBodyReadMsg{arc: "arc-a", rows: []board.Row{{
+		m, _ = updateModel(t, m, coordinationBodyReadMsg{arc: "arc-a", boardFound: true, rows: []board.Row{{
 			Arc: "arc-a", StreamID: "neighbor", Label: "Neighbor", Gate: "notify", Status: "pending", Verdict: "unknown",
 		}}})
 		if got := m.coordinationDetail.SelectedStream(); got != "" {
@@ -277,7 +277,7 @@ func TestCoordinationDetailKeybindContract(t *testing.T) {
 		m.coordinationDetail.SetBoard([]board.Row{
 			{Arc: "arc-a", StreamID: "s1", Label: "First", Gate: "notify", Status: "done", Verdict: "full"},
 			{Arc: "arc-a", StreamID: "s2", Label: "Second", DependsOn: []string{"s1"}, Gate: "notify", Status: "pending", Verdict: "unknown"},
-		}, nil)
+		}, true, nil)
 		nm, _ := updateModel(t, m, press('j'))
 		if got := nm.coordinationDetail.SelectedStream(); got != "s2" {
 			t.Fatalf("j should select s2, got %q", got)
@@ -404,7 +404,7 @@ func TestCoordinationArcScanSyncsDetail(t *testing.T) {
 func TestCoordinationBodyReadDropsStaleArcGeneration(t *testing.T) {
 	m := coordinationContractModel(t)
 	stale := coordinationBodyReadMsg{
-		arc:  "arc-b",
+		arc: "arc-b", boardFound: true,
 		rows: []board.Row{{Arc: "arc-b", StreamID: "wrong", Label: "Wrong arc", Gate: "notify", Status: "done", Verdict: "full"}},
 	}
 	nm, _ := updateModel(t, m, stale)
@@ -413,7 +413,7 @@ func TestCoordinationBodyReadDropsStaleArcGeneration(t *testing.T) {
 	}
 
 	fresh := coordinationBodyReadMsg{
-		arc:  "arc-a",
+		arc: "arc-a", boardFound: true,
 		rows: []board.Row{{Arc: "arc-a", StreamID: "fresh", Label: "Fresh", Gate: "notify", Status: "done", Verdict: "full"}},
 	}
 	nm, _ = updateModel(t, nm, fresh)
