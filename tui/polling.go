@@ -206,14 +206,15 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 	}
 	// Coordination arcs ride this same heartbeat: the store scan is one
 	// directory walk (cheap from any state) so the tab count stays current;
-	// ledger, identity-bearing board, and last-N journal reads are scoped
-	// to the selected arc while the view is displayed.
+	// ledger and identity-bearing board reads are scoped to the selected arc
+	// while the view is displayed. Its existing journal generation also derives
+	// cross-arc activity ages for the attention listing.
 	cmds = append(cmds, m.scanArcStoreCmd())
 	if m.state == stateCoordination {
 		if arc, ok := m.coordinationList.CurrentArc(); ok {
 			cmds = append(cmds,
 				readArcLedgerCmd(m.config.WorkDir, arc.Slug),
-				readCoordinationBodyCmd(m.config.WorkDir, m.sessionsDir, arc),
+				readCoordinationBodyCmd(m.config.WorkDir, m.sessionsDir, arc, m.coordinationList.Arcs()),
 			)
 		}
 	}

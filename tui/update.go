@@ -1635,6 +1635,16 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		return m, routeFocusedPanel(&m, msg, cb)
 	case stateCoordination:
 		cb := m.coordinationPanelCallbacks()
+		// Back keys close the swapped attention listing before they leave the
+		// coordination workspace. The list model owns the swap and preserves both
+		// collection cursors.
+		if km, ok := msg.(tea.KeyPressMsg); ok && m.focusedPanel == panelLeft &&
+			m.coordinationList.AttentionFocused() {
+			switch km.String() {
+			case "esc", "h":
+				return m, routeFocusedPanel(&m, msg, cb)
+			}
+		}
 		// A document drill-in is local to the arc body. Give it first refusal
 		// on back keys before the shared pane router moves focus to the arc list.
 		if km, ok := msg.(tea.KeyPressMsg); ok && m.focusedPanel == panelRight &&

@@ -104,27 +104,78 @@ func attentionFixture() board.Attention {
 	}
 }
 
-func TestListModelAttentionIsPinnedBoundedAndExplicit(t *testing.T) {
+func setFreshAttentionActivity(m *ListModel) {
+	m.SetAttentionActivity(map[string]string{
+		"arc-a": iso(time.Now().Add(-2 * time.Hour)),
+		"arc-b": iso(time.Now().Add(-3 * time.Hour)),
+	})
+}
+
+func TestListModelAttentionSwapsAtFullHeightAndRendersDenoisedRows(t *testing.T) {
 	m := NewListModel()
 	m.SetArcs([]Arc{{Slug: "arc-a", Status: StatusActive}, {Slug: "arc-b", Status: StatusActive}}, 0)
 	m.SetAttention(attentionFixture(), nil)
+	setFreshAttentionActivity(&m)
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	if out := stripANSI(m.View()); strings.Contains(out, "ATTENTION") || strings.Contains(out, "Ship A") {
+		t.Fatalf("collapsed attention must consume zero listing rows:\n%s", out)
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	out := stripANSI(m.View())
-
-	attentionAt, arcsAt := strings.Index(out, "Attention"), strings.Index(out, "▸ Arcs")
-	if attentionAt < 0 || arcsAt <= attentionAt {
-		t.Fatalf("attention must stay above the retained arc collection:\n%s", out)
-	}
-	if lines := strings.Count(out[:arcsAt], "\n"); lines > maxAttentionHeight+2 {
-		t.Fatalf("attention consumed %d lines before the arc collection, want at most %d:\n%s", lines, maxAttentionHeight+2, out)
-	}
 	for _, want := range []string{
 		"Act now (2)", "Needs judgment · none", "Waiting · none", "Reconcile · none",
-		"[arc-a] Ship A", "[arc-b] Ship B", "gate:hold", "gate:flag", "status:mystery",
+		"Ship A · arc-a · 2h ago", "Ship B · arc-b · 3h ago", "hold", "flag", "mystery",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("attention projection missing %q:\n%s", want, out)
 		}
+	}
+	for _, noise := range []string{"status:", "gate:", "verdict:", "[arc-a]", "▸ Attention", "▸ Arcs"} {
+		if strings.Contains(out, noise) {
+			t.Errorf("attention projection retained noisy %q:\n%s", noise, out)
+		}
+	}
+	if lines := strings.Count(out, "\n"); lines < 7 {
+		t.Fatalf("attention should own the full listing viewport, got %d lines:\n%s", lines, out)
+	}
+}
+
+func TestListModelAttentionHidesVerdictColumnWhenVisibleRowsAreEmpty(t *testing.T) {
+	m := NewListModel()
+	attention := attentionFixture()
+	for i := range attention[board.ActNow] {
+		attention[board.ActNow][i].Verdict = ""
+	}
+	m.SetAttention(attention, nil)
+	setFreshAttentionActivity(&m)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	if out := stripANSI(m.View()); strings.Contains(out, "VERDICT") {
+		t.Fatalf("empty verdict column must be hidden:\n%s", out)
+	}
+
+	attention[board.ActNow][1].Verdict = "future-verdict"
+	m.SetAttention(attention, nil)
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "VERDICT") || !strings.Contains(out, "future-verdict") || !strings.Contains(out, "unknown") {
+		t.Fatalf("a populated verdict must reveal the column and keep absent peers explicit:\n%s", out)
+	}
+}
+
+func TestListModelTitleRollupOmitsEmptyBuckets(t *testing.T) {
+	m := NewListModel()
+	m.SetAttention(board.Attention{
+		board.ActNow:        {{Bucket: board.ActNow, Arc: "a", StreamID: "s1"}, {Bucket: board.ActNow, Arc: "b", StreamID: "s2"}},
+		board.NeedsJudgment: {},
+		board.Waiting:       {{Bucket: board.Waiting, Arc: "c", StreamID: "s3"}},
+		board.Reconcile:     {},
+	}, nil)
+	if got, want := m.Title(), "Coordination — ⚠ 2 act now · 1 waiting"; got != want {
+		t.Fatalf("title = %q, want %q", got, want)
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	if got := m.Title(); got != "Attention" {
+		t.Fatalf("swapped title = %q, want Attention", got)
 	}
 }
 
@@ -132,6 +183,7 @@ func TestListModelAttentionAndArcCursorsAreIndependent(t *testing.T) {
 	m := NewListModel()
 	m.SetArcs([]Arc{{Slug: "arc-a", Status: StatusActive}, {Slug: "arc-b", Status: StatusActive}}, 0)
 	m.SetAttention(attentionFixture(), nil)
+	setFreshAttentionActivity(&m)
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if _, arc, stream, ok := m.CurrentAttention(); !ok || arc != "arc-b" || stream != "s2" {
@@ -156,7 +208,9 @@ func TestListModelAttentionAndArcCursorsAreIndependent(t *testing.T) {
 
 func TestListModelDisappearedAttentionTargetStaysStale(t *testing.T) {
 	m := NewListModel()
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 140, Height: 30})
 	m.SetAttention(attentionFixture(), nil)
+	setFreshAttentionActivity(&m)
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	m.SetAttention(board.Attention{
@@ -166,8 +220,35 @@ func TestListModelDisappearedAttentionTargetStaysStale(t *testing.T) {
 	if _, arc, stream, ok := m.CurrentAttention(); !ok || arc != "arc-b" || stream != "s2" {
 		t.Fatalf("disappeared cursor fell onto a neighbor: %s/%s ok=%v", arc, stream, ok)
 	}
-	if out := stripANSI(m.View()); !strings.Contains(out, "[arc-b] Ship B · stale/unknown target") {
+	if out := stripANSI(m.View()); !strings.Contains(out, "Ship B · arc-b · 3h ago · stale/unknown target") {
 		t.Errorf("disappeared identity must render explicitly stale:\n%s", out)
+	}
+}
+
+func TestListModelStaleAttentionFoldsPerBucketAndExpands(t *testing.T) {
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.Local)
+	m := NewListModel()
+	m.SetAttention(attentionFixture(), nil)
+	m.attentionActivityLoaded = true
+	m.attentionActivity = map[string]string{
+		"arc-a": iso(now.Add(-2 * time.Hour)),
+		"arc-b": iso(now.Add(-8 * 24 * time.Hour)),
+	}
+	m.refreshAttentionRowsAt(now)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "Ship A · arc-a") || !strings.Contains(out, "▸ stale (1)") || strings.Contains(out, "Ship B · arc-b") {
+		t.Fatalf("stale entry was not collapsed beneath its bucket:\n%s", out)
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if _, ok := parseStaleFoldID(m.attention.CurrentID()); !ok {
+		t.Fatalf("cursor did not land on stale disclosure, id=%q", m.attention.CurrentID())
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	out = stripANSI(m.View())
+	if !strings.Contains(out, "▾ stale (1)") || !strings.Contains(out, "Ship B · arc-b · 8d ago · stale") {
+		t.Fatalf("Enter did not expand the stale fold:\n%s", out)
 	}
 }
 
@@ -682,6 +763,25 @@ func TestFilterEventsMatchesBothIdentityKeysAndBoundsTail(t *testing.T) {
 	got := FilterEvents(events, []string{"item-a"}, 2)
 	if len(got) != 2 || got[0].EventID != "worker" || got[1].EventID != "latest" {
 		t.Fatalf("filter must use both keys and retain the last bounded rows, got %+v", got)
+	}
+}
+
+func TestLatestEventTimesUsesExistingJournalGenerationForEveryArc(t *testing.T) {
+	events := []session.Event{
+		{TS: "2026-08-20T10:00:00Z", Slug: "item-a"},
+		{TS: "2026-08-21T10:00:00Z", Slug: "item-a--w1", Links: map[string]string{"work_item": "item-a"}},
+		{TS: "not-an-instant", Slug: "item-b"},
+		{TS: "2026-08-22T10:00:00Z", Slug: "unrelated"},
+	}
+	got := LatestEventTimes(events, []Arc{
+		{Slug: "arc-a", Members: []string{"item-a"}},
+		{Slug: "arc-b", Members: []string{"item-b"}},
+	})
+	if got["arc-a"] != "2026-08-21T10:00:00Z" {
+		t.Fatalf("arc-a latest = %q, want worker-linked latest event", got["arc-a"])
+	}
+	if _, ok := got["arc-b"]; ok {
+		t.Fatalf("unparseable timestamps must remain absent, got %#v", got)
 	}
 }
 

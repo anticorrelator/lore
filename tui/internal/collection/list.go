@@ -81,6 +81,11 @@ func NewList(columns []Column) List {
 // SetStackedBelow overrides the width threshold for the stacked layout.
 func (l *List) SetStackedBelow(w int) { l.stackedBelow = w }
 
+// SetColumns replaces the column definition used by the responsive renderer.
+// Rows keep their stable identities and cursor; consumers use this when an
+// optional column is meaningful only for the current visible row set.
+func (l *List) SetColumns(columns []Column) { l.columns = columns }
+
 // SetEmptyText sets the message shown when no rows are visible.
 func (l *List) SetEmptyText(s string) { l.emptyText = s }
 

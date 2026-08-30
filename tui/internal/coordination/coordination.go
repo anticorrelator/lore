@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/anticorrelator/lore/tui/internal/session"
 )
@@ -87,6 +88,47 @@ func FilterEvents(events []session.Event, members []string, limit int) []session
 		matched = matched[len(matched)-limit:]
 	}
 	return matched
+}
+
+// LatestEventTimes derives each arc's most recent journal instant from the
+// same event generation used by the selected arc detail. Membership follows
+// FilterEvents: direct sessions identify through Slug and workers through
+// links.work_item. Unparseable and absent timestamps remain absent rather than
+// being invented from record mtimes or arc lifecycle fields.
+func LatestEventTimes(events []session.Event, arcs []Arc) map[string]string {
+	memberArcs := make(map[string][]string)
+	for _, arc := range arcs {
+		for _, member := range arc.Members {
+			memberArcs[member] = append(memberArcs[member], arc.Slug)
+		}
+	}
+
+	latest := make(map[string]string)
+	latestAt := make(map[string]time.Time)
+	for _, event := range events {
+		keys := []string{event.Slug}
+		if event.Links != nil && event.Links["work_item"] != "" && event.Links["work_item"] != event.Slug {
+			keys = append(keys, event.Links["work_item"])
+		}
+		at, err := time.Parse(time.RFC3339, event.TS)
+		if err != nil {
+			continue
+		}
+		seen := make(map[string]bool)
+		for _, key := range keys {
+			for _, arc := range memberArcs[key] {
+				if seen[arc] {
+					continue
+				}
+				seen[arc] = true
+				if previous, ok := latestAt[arc]; !ok || at.After(previous) {
+					latestAt[arc] = at
+					latest[arc] = event.TS
+				}
+			}
+		}
+	}
+	return latest
 }
 
 // ReadReviewPacket opens one explicit arc-relative Markdown reference. Both

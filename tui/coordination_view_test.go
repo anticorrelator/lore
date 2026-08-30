@@ -118,6 +118,19 @@ func TestCoordinationListStatusBarKeybindContract(t *testing.T) {
 		if got := stripANSI(strings.Join(nm.statusBarHints(nm.keymapContext()), " · ")); !strings.Contains(got, "a arc list") || !strings.Contains(got, "Enter jump") {
 			t.Errorf("focused attention hints should advertise return and exact jump, got %q", got)
 		}
+		if got := stripANSI(nm.buildPaneConfig().listTitle); got != "Attention" {
+			t.Errorf("swapped pane title = %q, want Attention", got)
+		}
+	})
+	t.Run("h/Esc close attention before leaving coordination", func(t *testing.T) {
+		for _, key := range []tea.KeyPressMsg{press('h'), press(tea.KeyEscape)} {
+			m := coordinationContractModel(t)
+			m, _ = updateModel(t, m, press('a'))
+			nm, _ := updateModel(t, m, key)
+			if nm.state != stateCoordination || nm.coordinationList.AttentionFocused() {
+				t.Errorf("%s should restore the arc listing in place: state=%v attention=%v", key.String(), nm.state, nm.coordinationList.AttentionFocused())
+			}
+		}
 	})
 	t.Run("l (detail)", func(t *testing.T) {
 		nm, _ := updateModel(t, coordinationContractModel(t), press('l'))
@@ -204,7 +217,7 @@ func TestCoordinationAttentionSelectionJumpsByExactIdentity(t *testing.T) {
 		t.Fatalf("attention selection = %#v (%T), want arc-b/s2", cmd(), cmd())
 	}
 	m, load := updateModel(t, m, selected)
-	if m.focusedPanel != panelRight || m.coordinationList.CurrentSlug() != "arc-b" || m.coordinationDetail.Arc() != "arc-b" || load == nil {
+	if m.focusedPanel != panelRight || m.coordinationList.AttentionFocused() || m.coordinationList.CurrentSlug() != "arc-b" || m.coordinationDetail.Arc() != "arc-b" || load == nil {
 		t.Fatalf("jump did not set exact arc and detail focus: focus=%v cursor=%q detail=%q cmd=%v", m.focusedPanel, m.coordinationList.CurrentSlug(), m.coordinationDetail.Arc(), load)
 	}
 	m, _ = updateModel(t, m, coordinationBodyReadMsg{arc: "arc-b", rows: []board.Row{
@@ -805,10 +818,22 @@ func TestCoordinationViewComposesBothLayouts(t *testing.T) {
 		m.layoutMode = layout
 		m.coordinationPanelCallbacks().resize()
 		out := stripANSI(m.viewContent())
-		for _, want := range []string{"Arcs", "arc-a", "coordination (2)", "Brief", "Streams", "Recent activity"} {
+		for _, want := range []string{"arc-a", "coordination (2)", "Brief", "Streams", "Recent activity"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("layout %v: coordination view missing %q:\n%s", layout, want, out)
 			}
 		}
+	}
+}
+
+func TestCoordinationPaneTitleRollupOmitsEmptyBuckets(t *testing.T) {
+	m := coordinationContractModel(t)
+	if got, want := stripANSI(m.buildPaneConfig().listTitle), "Coordination — ⚠ 2 act now"; got != want {
+		t.Fatalf("coordination pane title = %q, want %q", got, want)
+	}
+	m.layoutMode = config.LayoutTopBottom
+	m.coordinationPanelCallbacks().resize()
+	if got := stripANSI(m.viewContent()); !strings.Contains(got, "Coordination — ⚠ 2 act now") {
+		t.Fatalf("top-bottom frame did not render the attention rollup title:\n%s", got)
 	}
 }

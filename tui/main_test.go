@@ -16,6 +16,7 @@ import (
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/coordination"
+	"github.com/anticorrelator/lore/tui/internal/coordination/board"
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
@@ -522,6 +523,25 @@ func minimalModel(state appState, workItems []work.WorkItem, fuItems []followup.
 		sessionsDetail:     sessionview.NewDetailModel(),
 		coordinationList:   coordination.NewListModel(),
 		coordinationDetail: coordination.NewDetailModel(),
+	}
+}
+
+func TestBuildPaneConfigStateCoordinationUsesSparseAttentionRollup(t *testing.T) {
+	m := minimalModel(stateCoordination, nil, nil)
+	m.coordinationList.SetArcs([]coordination.Arc{{Slug: "arc-a", Status: coordination.StatusActive}}, 0)
+	m.coordinationList.SetAttention(board.Attention{
+		board.ActNow:        {{Bucket: board.ActNow, Arc: "arc-a", StreamID: "s1"}},
+		board.NeedsJudgment: {},
+		board.Waiting:       {{Bucket: board.Waiting, Arc: "arc-a", StreamID: "s2"}},
+		board.Reconcile:     {},
+	}, nil)
+
+	cfg := m.buildPaneConfig()
+	if got, want := stripANSI(cfg.listTitle), "Coordination — ⚠ 1 act now · 1 waiting"; got != want {
+		t.Fatalf("listTitle = %q, want %q", got, want)
+	}
+	if strings.Contains(stripANSI(cfg.listTitle), "judgment") || strings.Contains(stripANSI(cfg.listTitle), "reconcile") {
+		t.Fatalf("empty attention buckets must be omitted from the title: %q", stripANSI(cfg.listTitle))
 	}
 }
 

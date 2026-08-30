@@ -308,7 +308,7 @@ var keymapRegistry = []keymapSection{
 				}
 				return "attention"
 			},
-			helpLabel: "toggle attention / arc focus", ownerLayers: []ownerLayer{ownerSubModel},
+			helpLabel: "swap attention / arc listing", ownerLayers: []ownerLayer{ownerSubModel},
 			test: "TestCoordinationListStatusBarKeybindContract/a (attention focus)"},
 		{key: "l", label: "detail", surfaces: surfStatusBar | surfHelp, helpLabel: "focus arc detail",
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestCoordinationListStatusBarKeybindContract/l (detail)"},
@@ -329,8 +329,14 @@ var keymapRegistry = []keymapSection{
 		{key: "ctrl+a", label: "live · +archived", surfaces: surfHelp | surfAnnot, role: roleAnnot, helpLabel: "reveal archived arcs",
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestCoordinationListStatusBarKeybindContract/ctrl+a (live · +archived)",
 			annot: &annotArcFilter},
-		{key: "h/Esc", label: "back", surfaces: surfStatusBar | surfHelp, helpKey: "h / Esc", helpLabel: "back to work",
-			ownerLayers: []ownerLayer{ownerRouter},
+		{key: "h/Esc", label: "back", surfaces: surfStatusBar | surfHelp, helpKey: "h / Esc", helpLabel: "back to arc listing / work",
+			labelFn: func(m model) string {
+				if m.coordinationList.AttentionFocused() {
+					return "arc list"
+				}
+				return "back"
+			},
+			ownerLayers: []ownerLayer{ownerSubModel, ownerRouter},
 			test:        "TestCoordinationListStatusBarKeybindContract/h (back), …/Esc (back)"},
 		{key: "q", label: "quit", surfaces: surfStatusBar,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestGlobalQuitKeybindContract"},
