@@ -1,8 +1,8 @@
- ✓         1     fix session-start delivery race         done gate:notify verdict:—
-   ✓       2     capture settlement experiment           done gate:notify verdict:—
- ✓ │       6     capture hardening: sibling-store refus  done gate:notify verdict:—
- ╭─✓─╮     3     /spec full: orientation rewrite         done gate:notify verdict:—
- │ ● │     7     implement rewrite; STOP at owner gate   in-flight gate:notify verdict:—
- │   │ ✓   8     age-gate transient modal wakes          done gate:notify verdict:—
- ○   │     4     vocabulary sweep: courtroom register    pending gate:notify verdict:—
-     ○     5     protocol-layer sorting                  pending ·ro gate:notify verdict:—
+ ✓         1     fix session-start delivery race  done
+   ✓       2     capture settlement experiment  done
+ ✓ │       6     capture hardening: sibling-store refusal  done
+ ╭─✓─╮     3     /spec full: orientation rewrite  done
+ │ ● │     7     implement rewrite; STOP at owner gate  in-flight
+ │   │ ✓   8     age-gate transient modal wakes  done
+ ○   │     4     vocabulary sweep: courtroom register  pending
+     ○     5     protocol-layer sorting  pending · ro

@@ -329,11 +329,11 @@ func (m DetailModel) render() string {
 
 func (m DetailModel) renderClosed() string {
 	var b strings.Builder
-	b.WriteString(m.renderDocument("Report", m.report, m.reportFound, "report.md"))
-	b.WriteString("\n\n")
 	b.WriteString(sectionRule("Final streams", m.contentWidth()))
 	b.WriteString("\n")
 	b.WriteString(m.renderBoard())
+	b.WriteString("\n\n")
+	b.WriteString(m.renderDocument("Report", m.report, m.reportFound, "report.md"))
 	return b.String()
 }
 
@@ -354,6 +354,10 @@ func (m DetailModel) renderDocument(label, body string, found bool, filename str
 
 func (m DetailModel) renderLive() string {
 	var b strings.Builder
+	b.WriteString(sectionRule("Streams", m.contentWidth()))
+	b.WriteString("\n")
+	b.WriteString(m.renderBoard())
+	b.WriteString("\n\n")
 	b.WriteString(sectionRule("Brief", m.contentWidth()))
 	b.WriteString("\n")
 	switch {
@@ -364,10 +368,6 @@ func (m DetailModel) renderLive() string {
 	default:
 		b.WriteString(style.Dim.Render("Brief unknown — coordination.md has no ## Brief section"))
 	}
-	b.WriteString("\n\n")
-	b.WriteString(sectionRule("Streams", m.contentWidth()))
-	b.WriteString("\n")
-	b.WriteString(m.renderBoard())
 	b.WriteString("\n\n")
 	b.WriteString(sectionRule("Recent activity", m.contentWidth()))
 	b.WriteString("\n")
@@ -388,26 +388,38 @@ func (m DetailModel) renderBoard() string {
 	}
 	var b strings.Builder
 	for i, rendered := range m.rendered {
-		prefix := "  "
-		if !m.closed && i == m.rowCursor {
-			prefix = "▸ "
-		}
-		line := rendered.Line
 		row, _ := m.rowByID(rendered.StreamID)
-		if !m.closed {
-			switch row.Gate {
-			case "hold":
-				line = holdStyle.Render(line)
-			case "flag":
-				line = flagStyle.Render(line)
+		for lineIndex, renderedLine := range rendered.Lines {
+			prefix := "  "
+			if !m.closed && i == m.rowCursor && lineIndex == 0 {
+				prefix = "▸ "
 			}
+			b.WriteString(prefix + styleBoardLine(renderedLine, row.Gate, !m.closed) + "\n")
 		}
-		b.WriteString(prefix + line + "\n")
 		if !m.closed {
 			b.WriteString("    " + style.Dim.Render(m.targetSummary(row)) + "\n")
 		}
 	}
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func styleBoardLine(line board.RenderedLine, gate string, emphasize bool) string {
+	lead, metadata := line.Text, ""
+	if line.MetadataAt >= 0 {
+		lead, metadata = line.Text[:line.MetadataAt], line.Text[line.MetadataAt:]
+	}
+	if emphasize {
+		switch gate {
+		case "hold":
+			lead = holdStyle.Render(lead)
+		case "flag":
+			lead = flagStyle.Render(lead)
+		}
+	}
+	if metadata != "" {
+		metadata = style.Dim.Render(metadata)
+	}
+	return lead + metadata
 }
 
 func (m DetailModel) rowByID(id string) (board.Row, bool) {

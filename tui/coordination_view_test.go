@@ -543,8 +543,8 @@ func TestLateLedgerAppendNeverFlipsClosure(t *testing.T) {
 	}
 	m, _ = updateModel(t, m, scan)
 	m, _ = updateModel(t, m, readArcLedgerCmd(workDir, "arc-a")())
-	if out := stripANSI(m.coordinationDetail.View()); !strings.Contains(out, "the closing report") {
-		t.Fatalf("a closed arc must lead its primary body with the report:\n%s", out)
+	if out := stripANSI(m.coordinationDetail.View()); !strings.Contains(out, "Final streams") || !strings.Contains(out, "Report") || strings.Contains(out, "the brief") {
+		t.Fatalf("a closed arc must render its final DAG before the report without returning to the Brief:\n%s", out)
 	}
 
 	// The sanctioned late append: the ledger is now the newest file on disk.
@@ -560,7 +560,7 @@ func TestLateLedgerAppendNeverFlipsClosure(t *testing.T) {
 	m, _ = updateModel(t, m, scan2)
 	m, _ = updateModel(t, m, readArcLedgerCmd(workDir, "arc-a")())
 	out := stripANSI(m.coordinationDetail.View())
-	if !strings.Contains(out, "the closing report") {
+	if !strings.Contains(out, "Final streams") || !strings.Contains(out, "Report") || strings.Contains(out, "the brief") {
 		t.Errorf("a late ledger append must not flip a closed arc back to its Brief:\n%s", out)
 	}
 }

@@ -145,21 +145,21 @@ func TestListModelAttentionHidesVerdictColumnWhenVisibleRowsAreEmpty(t *testing.
 	m := NewListModel()
 	attention := attentionFixture()
 	for i := range attention[board.ActNow] {
-		attention[board.ActNow][i].Verdict = ""
+		attention[board.ActNow][i].Verdict = "—"
 	}
 	m.SetAttention(attention, nil)
 	setFreshAttentionActivity(&m)
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	if out := stripANSI(m.View()); strings.Contains(out, "VERDICT") {
-		t.Fatalf("empty verdict column must be hidden:\n%s", out)
+		t.Fatalf("all-dash verdict column must be hidden:\n%s", out)
 	}
 
 	attention[board.ActNow][1].Verdict = "future-verdict"
 	m.SetAttention(attention, nil)
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "VERDICT") || !strings.Contains(out, "future-verdict") || !strings.Contains(out, "unknown") {
-		t.Fatalf("a populated verdict must reveal the column and keep absent peers explicit:\n%s", out)
+	if !strings.Contains(out, "VERDICT") || !strings.Contains(out, "future-verdict") || !strings.Contains(out, "—") {
+		t.Fatalf("a populated verdict must reveal the column and keep dash peers explicit:\n%s", out)
 	}
 }
 
@@ -599,10 +599,10 @@ func TestDetailIntegratedBodyOrderAndUnknowns(t *testing.T) {
 	brief := strings.Index(out, "Brief")
 	streams := strings.Index(out, "Streams")
 	ticker := strings.Index(out, "Recent activity")
-	if !(brief >= 0 && brief < streams && streams < ticker) {
-		t.Fatalf("live body must render Brief → Streams → Recent activity:\n%s", out)
+	if !(streams >= 0 && streams < brief && brief < ticker) {
+		t.Fatalf("live body must render Streams → Brief → Recent activity:\n%s", out)
 	}
-	for _, want := range []string{"gate:flag", "verdict:unknown", "packet unknown", "unknown · unknown · item-b"} {
+	for _, want := range []string{"flag", "unknown", "packet unknown", "unknown · unknown · item-b"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("integrated body missing explicit %q:\n%s", want, out)
 		}
@@ -776,8 +776,8 @@ func TestDetailClosedAndLiveReportModesStayDistinct(t *testing.T) {
 	report := strings.Index(out, "Report")
 	streams := strings.Index(out, "Final streams")
 	graph := strings.Index(out, "First")
-	if !(report >= 0 && report < streams && streams < graph) {
-		t.Errorf("a closed arc must render Report then its final DAG:\n%s", out)
+	if !(streams >= 0 && streams < graph && graph < report) {
+		t.Errorf("a closed arc must render its final DAG then Report:\n%s", out)
 	}
 }
 
