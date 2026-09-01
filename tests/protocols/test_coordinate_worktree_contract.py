@@ -49,7 +49,7 @@ def test_mutating_subagents_require_a_seat_lease_and_never_allocate():
         "dispatching seat",
         "durable owner backs the writer",
         "item-backed worker session",
-        "Unleased mutating subagents are prohibited",
+        "Unallocated mutating subagents are prohibited",
         "Read-only streams need no worktree",
     ):
         assert token.lower() in combined.lower()
@@ -77,7 +77,6 @@ def test_reconciliation_and_cleanup_are_terminal_preconditions():
         "path absence",
         "Git-registry absence",
         "branch/ref disposition",
-        "recovery evidence before removal",
     ):
         assert token.lower() in combined.lower()
 

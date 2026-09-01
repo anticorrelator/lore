@@ -290,14 +290,33 @@ removing the hook stops future windows from opening, but the window already
 running ends at its own deadline and delivers its wake.
 
 Per-harness wake support is declared in `adapters/capabilities.json`; branch on
-the support flag, never the framework name. Async: claude-code —
-interactive/TUI-hosted sessions only; headless `claude -p` runs hooks
-synchronously (stream-json input is the headless exception). Sync-only: codex —
-the Stop continuation channel exists (exit 2 + stderr) but async hooks are
-refused at load, so windows are seat-owned; a short synchronous stop-check with a
-turn-friendly `timeoutSec` is the optional middle ground. None: opencode —
-seat-owned windows; the server-API wake (`session.promptAsync`) is a recorded
-lead, not a shipped path.
+the support flag, never the framework name.
+
+| Harness | Wake capability | Loop shape |
+|---|---|---|
+| claude-code | async — the harness re-opens the window at every turn boundary | arm once at seat open; the seat parks idle while the eye runs. Interactive/TUI-hosted sessions only — headless `claude -p` runs hooks synchronously |
+| codex | sync-only — a continuation channel without async hooks | seat-owned windows: same watch verb, same wake contract, each window opened by the seat; a short turn-friendly synchronous stop-check is the optional middle ground |
+| opencode | none — no hook-return continuation | seat-owned windows, as codex |
+
+Headless `claude -p` runs hooks synchronously (stream-json input is the headless
+exception). On codex the Stop continuation channel exists (exit 2 + stderr) but
+async hooks are refused at load. On opencode the server-API wake
+(`session.promptAsync`) is a recorded lead, not a shipped path.
+
+Watcher entries are identity-scoped, and the default install surface is
+project-local. `lore arc open` auto-arms into the repo-local
+`.claude/settings.local.json`; the user-global file takes an entry only when
+`--install` points at it deliberately. A settings file may hold many watcher
+entries, each carrying its full identity — canonical store path, owner handle,
+arc set — on its own command line: install replaces only an entry with the
+caller's exact identity, disarm removes only entries it can attribute, and both
+name the identity they touched, so read that line rather than the count — a
+count-only reading caused a live misattribution once. An entry with no complete
+identity is legacy: reported, left in place, removed only by an explicit
+`--legacy-sweep`. A firing whose store is gone, whose arcs are missing or closed,
+or whose owner it cannot prove in its own ancestry exits quietly; arc close finds
+the exact file its arc open armed through the arc record, from any working
+directory.
 
 ## Watch mechanics
 
@@ -373,12 +392,21 @@ with exact slug, event, and field inspection only until the replacement contract
 are green. That raw-poll posture is scoped to the migration window, not standing
 guidance.
 
-## Calibrations (session-queues arc, 2026-07-16; n=1 each, ~1h wall clock lost)
+## Calibrations
+
+The evidence log behind the skill's rules. A rule lives in SKILL.md clean — no
+date, no incident; the row here holds what produced it, so a later seat can
+check the rule against its origin. Each row names its status: **in skill**
+(prose carries it), **mechanized** (a verb enforces it; the prose retired or
+reduced to a habit), or **retired** (stopped doing work). Rows leave the log by
+the lifecycle stated in § The role of the skill.
+
+### Session-queues arc, 2026-07-16 (n=1 each, ~1h wall clock lost)
 
 1. **Amending plan.md after spec finalization invalidates tasks.json's checksum** —
    run `lore work regen-tasks <slug>` in the same act as the amendment, or the next
    /implement session stalls at its mandatory gate asking permission the seat may
-   not be able to grant (codex `send` refused `no-signature`).
+   not be able to grant (codex `send` refused `no-signature`). *In skill.*
 2. **A refused steer is not health evidence — peek is the direct read.** Current Codex
    may insert optional badges before its footer separator (`high fast · <cwd>`), so
    readiness keys on the bottom-region separator+cwd suffix and nearby composer row,
@@ -390,7 +418,39 @@ guidance.
    fixture instead of retrying the body. Rechecked on codex-cli 0.144.3 (2026-07-21):
    the fast-badge footer classified ready at idle, refused `generating` during a
    running tool call without placing the nonce in the transcript, and accepted a
-   different nonce after returning idle.
+   different nonce after returning idle. *In skill.*
+
+### Rows folded out of SKILL.md prose, 2026-09-01
+
+3. **2026-07-28, 2026-08-11 (twice) — harness-native spawns omitting a model inherited
+   the seat's tier and billed it.** Rule: state the model on every spawn.
+   *Mechanized* — `validate-dispatch-guidance.sh` injects the resolver default when an
+   `Agent` launch omits one; the skill keeps only the habit of stating the call.
+4. **2026-08-11 — owner calibration: protocol text never quotes the human; rules are
+   written in the skill's own voice.** *In skill* (§ The role).
+5. **2026-08-13 — a rung-2 worker ran `lore impl start` against a spec-less item and
+   parked at `needs_input` recommending /spec.** Rule: rung-1/2 briefs name the
+   ceremony negatively as well as positively. *In skill* (§ Dispatching).
+6. **2026-08-13 — watcher entries became identity-scoped with a project-local install
+   default.** Contract documented above under Arm mechanics. *Mechanized.*
+7. **2026-08-17 — a weekend of ten-minute quiet wakes against a two-input human gate,
+   every one a no-op.** Rule: park the eye when the board is wholly human-gated.
+   *In skill* (§ Monitoring).
+8. **2026-08-20 — two ceremony dispatches rode a prior arc's `--framework claude-code`
+   onto all-opus bindings unjustified.** Rule: a framework override needs a live,
+   ledgered reason per dispatch. *In skill* (§ Dispatching, routing floor).
+9. **2026-08-20 — archived-item distribution 2026-06→08 averaged ~2.7 tasks with ~40%
+   single-task plans after the merge-default rules landed.** Rule: underfill is priced
+   like over-ceremony. *In skill* (§ Open the arc).
+10. **2026-08-26 — delegated spec agents made well-justified but needless architecture
+    decisions; partial views inflate a part's importance.** Rules: the seat holds
+    conceptual integrity; rung-3 specs carry a coordinator strawman. *In skill*
+    (§ The role, § Open the arc).
+11. **2026-09-01 — the cost-model paragraph assumed a short provider cache window; the
+    current claude-code seat runs on a one-hour window.** Rule rewritten to read the
+    window from the harness in force. The subagent-observability paragraph likewise
+    asserted a fixed capability set the harness has since outgrown; rewritten as a
+    capability probe. *In skill* (§ Monitoring, § Dispatching).
 
 ## Shipped verb history
 
