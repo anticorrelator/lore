@@ -261,20 +261,36 @@ func observeSend(framework string, quiescent bool, snap work.ScreenSnapshot) sen
 	return obsUnobservable
 }
 
-// sendReadiness is the strict injection gate (D2): ready only when the session is
-// quiescent AND the composer signature matches AND the interactive-prompt
-// signature does not. reason is "" when ready; otherwise one of generating|
-// modal|no-signature|no-contract. needs_input is the quiescence edge and is NOT treated as a
-// stronger signal than quiescent — both are the same timer edge, so the screen
-// check (not the idle flag) is what distinguishes composer-idle from modal-idle.
-func sendReadiness(framework string, quiescent, hasContract bool, snap work.ScreenSnapshot) (bool, string) {
+// sendReadiness is the injection gate (D2). reason is "" when ready; otherwise
+// one of generating|modal|no-signature|no-contract.
+//
+// The screen checks always run: the interactive-prompt signature must not match
+// (injected text could answer a modal) and the composer signature must, with no
+// held or pending payload. needs_input is the quiescence edge and is NOT treated
+// as a stronger signal than quiescent — both are the same timer edge, so the
+// screen check (not the idle flag) is what distinguishes composer-idle from
+// modal-idle.
+//
+// Whether quiescence is required at all is the harness's probed
+// mid_generation_semantics, passed in as queuesMidGeneration. On a
+// queued-autosubmit harness (claude-code, opencode) a mid-generation inject is
+// held by the harness and delivered at its own next boundary, so the gate admits
+// on screen state alone and never refuses `generating`. That also keeps the gate
+// honest against chrome that animates while the composer is idle: claude-code's
+// background-agents panel sits below the composer band and repaints every
+// second, so the output-quiescence timer (quiescenceThreshold, sessionpanel.go)
+// never fires while a subagent runs — a gate keyed on that timer refused for the
+// subagent's whole lifetime what the harness would have accepted at once. On a
+// buffered-draft harness (codex) a mid-turn paste lands as an unsent draft, so
+// the quiescence wait stays and `generating` remains the truthful refusal.
+func sendReadiness(framework string, quiescent, hasContract, queuesMidGeneration bool, snap work.ScreenSnapshot) (bool, string) {
 	if !hasContract {
 		return false, sendReasonNoContract
 	}
 	if _, ok := screenMatchers[framework]; !ok {
 		return false, sendReasonNoContract
 	}
-	if !quiescent {
+	if !quiescent && !queuesMidGeneration {
 		return false, sendReasonGenerating
 	}
 	state, _ := classifyScreen(framework, snap)

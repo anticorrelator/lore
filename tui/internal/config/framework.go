@@ -293,6 +293,59 @@ func HarnessSubmitSequence(framework string) (string, bool, error) {
 	return row.Sequence, true, nil
 }
 
+// midGenerationQueuedAutosubmit is the mid_generation_semantics token for a
+// harness that holds bytes injected mid-generation and delivers them itself at
+// its next boundary (claude-code, opencode). It is the one value under which the
+// send gate admits a mid-generation inject; every other token keeps the gate
+// waiting for quiescence.
+const midGenerationQueuedAutosubmit = "queued-autosubmit"
+
+// HarnessMidGenerationSemantics returns a framework's probed mid-generation
+// injection semantics from adapters/capabilities.json
+// `.frameworks[<id>].interaction.mid_generation_semantics.value` — one of the
+// closed vocabulary {queued-autosubmit, buffered-draft, dropped, interrupts} —
+// and whether the framework supplies a usable row. The send gate consults it to
+// decide whether a quiescence wait is required at all: a queued-autosubmit
+// harness delivers a mid-generation inject at its own next boundary, so the
+// gate admits on screen state alone. Degrades to ("", false, nil) for an
+// unprobed or unknown framework (the gate then keeps the strict quiescence
+// requirement); branch on the support flag, never on the framework name. Errors
+// only on unreadable capabilities.json.
+func HarnessMidGenerationSemantics(framework string) (string, bool, error) {
+	if framework == "" {
+		return "", false, fmt.Errorf("harness_mid_generation_semantics requires a framework")
+	}
+	caps, err := loadCapabilitiesFile()
+	if err != nil {
+		return "", false, err
+	}
+	prof, ok := caps.Frameworks[framework]
+	if !ok {
+		return "", false, nil
+	}
+	row := prof.Interaction.MidGenerationSemantics
+	if row.Support == "none" || len(row.Value) == 0 {
+		return "", false, nil
+	}
+	var value string
+	if err := json.Unmarshal(row.Value, &value); err != nil || strings.TrimSpace(value) == "" {
+		return "", false, nil
+	}
+	return value, true, nil
+}
+
+// HarnessQueuesMidGeneration reports whether a framework's probed
+// mid_generation_semantics is queued-autosubmit — the only semantics under which
+// a mid-generation send is delivered by the harness itself. False for every other
+// token and for an unprobed framework.
+func HarnessQueuesMidGeneration(framework string) (bool, error) {
+	value, ok, err := HarnessMidGenerationSemantics(framework)
+	if err != nil || !ok {
+		return false, err
+	}
+	return value == midGenerationQueuedAutosubmit, nil
+}
+
 // HarnessSignatureContract reports whether a framework has a usable screen-state
 // signature contract for the send/peek readiness gate: BOTH the composer and the
 // permission-prompt signature rows must be present (support != "none", non-empty

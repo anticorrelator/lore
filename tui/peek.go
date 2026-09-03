@@ -77,9 +77,13 @@ func (m model) handlePeekRequestScan(msg peekRequestScanMsg) (model, tea.Cmd) {
 	}
 	framework, ferr := config.ResolveTUILaunchFramework()
 	hasContract := false
+	queuesMidGen := false
 	if ferr == nil {
 		if ok, err := config.HarnessSignatureContract(framework); err == nil {
 			hasContract = ok
+		}
+		if ok, err := config.HarnessQueuesMidGeneration(framework); err == nil {
+			queuesMidGen = ok
 		}
 	}
 	var cmds []tea.Cmd
@@ -110,7 +114,7 @@ func (m model) handlePeekRequestScan(msg peekRequestScanMsg) (model, tea.Cmd) {
 		} else {
 			ready, reason := false, sendReasonNoContract
 			if ferr == nil {
-				ready, reason = sendReadiness(framework, panel.NeedsInput(), hasContract, snap)
+				ready, reason = sendReadiness(framework, panel.NeedsInput(), hasContract, queuesMidGen, snap)
 			}
 			resp.Ready = ready
 			resp.BlockedReason = reason

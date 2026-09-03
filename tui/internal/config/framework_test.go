@@ -395,6 +395,42 @@ func TestHarnessGracefulExitSequence_UnknownDegrades(t *testing.T) {
 	}
 }
 
+// The send gate branches on the probed mid-generation semantics, not the
+// framework name: queued-autosubmit harnesses admit a mid-generation send (the
+// harness delivers it at its own boundary), buffered-draft ones do not.
+func TestHarnessMidGenerationSemantics(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", nil)
+	cases := []struct {
+		framework  string
+		wantValue  string
+		wantOK     bool
+		wantQueues bool
+	}{
+		{"claude-code", "queued-autosubmit", true, true},
+		{"opencode", "queued-autosubmit", true, true},
+		{"codex", "buffered-draft", true, false},
+		{"bogus", "", false, false},
+	}
+	for _, c := range cases {
+		value, ok, err := HarnessMidGenerationSemantics(c.framework)
+		if err != nil {
+			t.Errorf("HarnessMidGenerationSemantics(%q): %v", c.framework, err)
+			continue
+		}
+		if value != c.wantValue || ok != c.wantOK {
+			t.Errorf("HarnessMidGenerationSemantics(%q) = (%q, %v), want (%q, %v)", c.framework, value, ok, c.wantValue, c.wantOK)
+		}
+		queues, err := HarnessQueuesMidGeneration(c.framework)
+		if err != nil {
+			t.Errorf("HarnessQueuesMidGeneration(%q): %v", c.framework, err)
+			continue
+		}
+		if queues != c.wantQueues {
+			t.Errorf("HarnessQueuesMidGeneration(%q) = %v, want %v", c.framework, queues, c.wantQueues)
+		}
+	}
+}
+
 func TestHarnessSpendTelemetry(t *testing.T) {
 	setupFakeLoreData(t, "claude-code", nil)
 	cases := []struct {

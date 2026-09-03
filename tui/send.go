@@ -109,10 +109,14 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 	}
 	framework, ferr := config.ResolveTUILaunchFramework()
 	hasContract := false
+	queuesMidGen := false
 	submitSeq := ""
 	if ferr == nil {
 		if ok, err := config.HarnessSignatureContract(framework); err == nil {
 			hasContract = ok
+		}
+		if ok, err := config.HarnessQueuesMidGeneration(framework); err == nil {
+			queuesMidGen = ok
 		}
 		if seq, ok, err := config.HarnessSubmitSequence(framework); err == nil && ok {
 			submitSeq = seq
@@ -146,7 +150,7 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 			reason = sendReasonInternal
 		} else {
 			var ready bool
-			ready, reason = sendReadiness(framework, panel.NeedsInput(), hasContract, snap)
+			ready, reason = sendReadiness(framework, panel.NeedsInput(), hasContract, queuesMidGen, snap)
 			if ready {
 				if err := panel.InjectMessage(sr.Body, submitSeq, snap.BracketedPaste); err != nil {
 					if errors.Is(err, work.ErrUnsafePayload) {

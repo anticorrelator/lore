@@ -102,9 +102,12 @@ EOF
       ;;
     generating)
       cat <<EOF
-  The session is mid-generation, so a send now would be refused by the readiness
-  gate — nothing is wrong with it. It becomes eligible at the next quiescent
-  boundary, which 'lore session wait $SLUG' blocks until.
+  The session is mid-generation on a harness that buffers mid-turn input as an
+  unsent draft, so a send now would be refused by the readiness gate — nothing is
+  wrong with it. It becomes eligible at the next quiescent boundary, which
+  'lore session wait $SLUG' blocks until. (A queued-autosubmit harness such as
+  claude-code never reports this: its gate admits mid-generation and the harness
+  delivers at its own next boundary.)
 EOF
       ;;
     no-signature)

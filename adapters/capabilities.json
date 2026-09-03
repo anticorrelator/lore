@@ -206,7 +206,7 @@
           "support": "full",
           "evidence": "claude-code-interaction",
           "value": "queued-autosubmit",
-          "notes": "Type-ahead: bytes injected mid-generation auto-submit as the next turn once the current generation ends — so the readiness gate must be strict (never inject mid-generation). Probed in raw/claude-code/p5_midgen.log."
+          "notes": "Type-ahead: bytes injected mid-generation are held by the harness and delivered at its next boundary (current builds surface them inside the running turn, alongside the next tool result; older builds auto-submitted them as the next turn). The send gate reads this row: on queued-autosubmit it admits on screen state alone (composer signature present, no modal, no held input) and never refuses `generating` — the harness is the at-next-boundary delivery. Required because claude-code chrome animates while the composer is idle (the background-agents panel below the composer band repaints every second), so a timer-keyed gate refused for a subagent's whole lifetime what the harness accepted at once (observed 2026-09-03). Probed in raw/claude-code/p5_midgen.log."
         },
         "graceful_exit_sequence": {
           "support": "full",
@@ -379,7 +379,7 @@
           "support": "full",
           "evidence": "opencode-interaction",
           "value": "queued-autosubmit",
-          "notes": "Queued: text injected mid-generation is held (native QUEUED badge) and auto-sent as the next message once generation finishes. Probed in raw/opencode/p5_mid_generation.raw."
+          "notes": "Queued: text injected mid-generation is held (native QUEUED badge) and auto-sent as the next message once generation finishes. The send gate reads this row and admits mid-generation on screen state alone, as for claude-code. Probed in raw/opencode/p5_mid_generation.raw."
         },
         "graceful_exit_sequence": {
           "support": "full",

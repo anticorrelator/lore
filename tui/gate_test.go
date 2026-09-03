@@ -277,34 +277,62 @@ func TestSendReadiness(t *testing.T) {
 		"  ? for shortcuts",
 	}}
 
+	// Live regression (2026-09-03, claude-code lead with a background subagent):
+	// the composer band is idle but the agents panel below it repaints its
+	// elapsed-time counter every second, so the output-quiescence timer never
+	// fires. The gate must key on the composer band, not the timer, for a
+	// harness that queues mid-generation input.
+	snapAgentsPanel := work.ScreenSnapshot{Rows: []string{
+		"  One thing worth your call: I also asked it to normalize the commit trailers.",
+		rule,
+		"❯ ",
+		rule,
+		"  ctx 24%                                                                        /",
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+		"",
+		"  ⏺ main",
+		"  ◯ worker-task-1  <!-- lore-dispatch-guidance:v1:begin -->      42m 29s · ↓ 324.3k tokens",
+		"                   Schema-Ve...",
+	}}
+
+	// queues is the harness's probed mid_generation_semantics == queued-autosubmit
+	// (claude-code and opencode today; codex is buffered-draft). The gate takes it
+	// as an input rather than resolving it, so both branches are exercised for
+	// every framework regardless of what capabilities.json currently says.
 	cases := []struct {
 		name       string
 		framework  string
 		quiescent  bool
 		hasCon     bool
+		queues     bool
 		snap       work.ScreenSnapshot
 		wantReady  bool
 		wantReason string
 	}{
-		{"ready", "claude-code", true, true, snapComposer, true, ""},
-		{"ready-nbsp-live-composer", "claude-code", true, true, snapNBSP, true, ""},
-		{"mid-generation", "claude-code", false, true, snapComposer, false, sendReasonGenerating},
-		{"permission-modal", "claude-code", true, true, snapModal, false, sendReasonModal},
-		{"option-select-modal", "claude-code", true, true, snapOptionSelect, false, sendReasonModal},
-		{"faint-placeholder-ready", "claude-code", true, true, snapGhost, true, ""},
-		{"real-held-input-not-ready", "claude-code", true, true, snapHeld, false, sendReasonNoSignature},
-		{"no-composer-signature", "claude-code", true, true, snapOther, false, sendReasonNoSignature},
-		{"no-contract", "claude-code", true, false, snapComposer, false, sendReasonNoContract},
-		{"unknown-framework", "ghostwriter", true, true, snapComposer, false, sendReasonNoContract},
-		{"codex-current-fast-footer", "codex", true, true, snapCodexComposer, true, ""},
-		{"codex-current-fast-footer-generating", "codex", false, true, snapCodexComposer, false, sendReasonGenerating},
-		{"codex-permission-modal", "codex", true, true, snapCodexModal, false, sendReasonModal},
-		{"codex-partial-modal-repaint", "codex", true, true, snapCodexPartial, false, sendReasonModal},
-		{"codex-footer-outside-bottom-region", "codex", true, true, snapCodexOldFooter, false, sendReasonNoSignature},
-		{"codex-no-contract", "codex", true, false, snapCodexComposer, false, sendReasonNoContract},
+		{"ready", "claude-code", true, true, true, snapComposer, true, ""},
+		{"ready-nbsp-live-composer", "claude-code", true, true, true, snapNBSP, true, ""},
+		{"mid-generation-queued-admits", "claude-code", false, true, true, snapComposer, true, ""},
+		{"mid-generation-strict-refuses", "claude-code", false, true, false, snapComposer, false, sendReasonGenerating},
+		{"idle-composer-agents-panel-animating", "claude-code", false, true, true, snapAgentsPanel, true, ""},
+		{"mid-generation-queued-still-refuses-modal", "claude-code", false, true, true, snapModal, false, sendReasonModal},
+		{"mid-generation-queued-still-refuses-held-input", "claude-code", false, true, true, snapHeld, false, sendReasonNoSignature},
+		{"mid-generation-queued-still-needs-composer", "claude-code", false, true, true, snapOther, false, sendReasonNoSignature},
+		{"permission-modal", "claude-code", true, true, true, snapModal, false, sendReasonModal},
+		{"option-select-modal", "claude-code", true, true, true, snapOptionSelect, false, sendReasonModal},
+		{"faint-placeholder-ready", "claude-code", true, true, true, snapGhost, true, ""},
+		{"real-held-input-not-ready", "claude-code", true, true, true, snapHeld, false, sendReasonNoSignature},
+		{"no-composer-signature", "claude-code", true, true, true, snapOther, false, sendReasonNoSignature},
+		{"no-contract", "claude-code", true, false, true, snapComposer, false, sendReasonNoContract},
+		{"unknown-framework", "ghostwriter", true, true, true, snapComposer, false, sendReasonNoContract},
+		{"codex-current-fast-footer", "codex", true, true, false, snapCodexComposer, true, ""},
+		{"codex-current-fast-footer-generating", "codex", false, true, false, snapCodexComposer, false, sendReasonGenerating},
+		{"codex-permission-modal", "codex", true, true, false, snapCodexModal, false, sendReasonModal},
+		{"codex-partial-modal-repaint", "codex", true, true, false, snapCodexPartial, false, sendReasonModal},
+		{"codex-footer-outside-bottom-region", "codex", true, true, false, snapCodexOldFooter, false, sendReasonNoSignature},
+		{"codex-no-contract", "codex", true, false, false, snapCodexComposer, false, sendReasonNoContract},
 	}
 	for _, c := range cases {
-		ready, reason := sendReadiness(c.framework, c.quiescent, c.hasCon, c.snap)
+		ready, reason := sendReadiness(c.framework, c.quiescent, c.hasCon, c.queues, c.snap)
 		if ready != c.wantReady || reason != c.wantReason {
 			t.Errorf("%s: got (ready=%v reason=%q), want (ready=%v reason=%q)",
 				c.name, ready, reason, c.wantReady, c.wantReason)
@@ -365,7 +393,7 @@ func TestGateNormalizesUnicodeSpace(t *testing.T) {
 	if ccComposerReady(nbsp) {
 		t.Fatal("expected raw ccComposerReady to miss the NBSP prompt (Go \\s is ASCII-only)")
 	}
-	if ready, reason := sendReadiness("claude-code", true, true, work.ScreenSnapshot{Rows: nbsp}); !ready || reason != "" {
+	if ready, reason := sendReadiness("claude-code", true, true, false, work.ScreenSnapshot{Rows: nbsp}); !ready || reason != "" {
 		t.Fatalf("gate should read the NBSP composer as ready; got ready=%v reason=%q", ready, reason)
 	}
 	if got := gateRows([]string{"❯ x"})[0]; got != "❯ x" {

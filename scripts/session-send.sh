@@ -17,9 +17,14 @@
 # A send enqueues _sessions/send-requests/<request_id>.json (tmp + atomic rename)
 # for the one live instance running <slug> — resolved by the same registry walk
 # session-close.sh uses. That instance consumes the row on its poll tick, runs
-# the strict readiness gate (session idle at its composer AND no permission
-# modal), and pastes+submits the message. Otherwise it refuses (send_refused with
-# a reason) and no bytes reach the PTY. The message is always pasted via bracketed
+# the readiness gate and pastes+submits the message, or refuses (send_refused
+# with a reason) and no bytes reach the PTY. The gate always requires the
+# composer signature with no modal and no held input; whether it also waits for
+# quiescence is the harness's probed mid_generation_semantics: a
+# queued-autosubmit harness (claude-code, opencode) holds a mid-generation send
+# and delivers it at its own next boundary, so the gate admits it at once; a
+# buffered-draft harness (codex) would leave it as an unsent draft, so the gate
+# refuses `generating` until the session idles. The message is always pasted via bracketed
 # paste, never written raw. See docs/session-substrate.md.
 #
 # Exit codes:
@@ -146,9 +151,12 @@ EOF
       cat <<EOF
   The readiness gate declined, not the harness: the session was mid-generation
   rather than idle at its composer, so no bytes reached the PTY and nothing was
-  queued for later. Retry after the next observation boundary — the gate re-runs
-  on the owning instance's poll tick, and the session becomes eligible the moment
-  it goes quiescent:
+  queued for later. Only a harness whose mid-generation semantics are
+  buffered-draft (codex) refuses this way — a queued-autosubmit harness
+  (claude-code, opencode) admits mid-generation and delivers at its own next
+  boundary. Retry after the next observation boundary — the gate re-runs on the
+  owning instance's poll tick, and the session becomes eligible the moment it
+  goes quiescent:
     lore session wait $SLUG      # blocks until the next boundary
     lore session peek $SLUG      # reports readiness right now
 EOF
@@ -270,8 +278,9 @@ if [[ $WAIT -eq 0 ]]; then
   cat >&2 <<EOF
 [session] advisory: enqueued is not delivered, and this exit 0 says nothing about
   whether the message lands. Instance $TARGET_INSTANCE runs the readiness gate on its
-  next poll tick and may refuse it (a modal holding the composer, mid-generation, no
-  composer signature); that refusal is written to the journal after this command has
+  next poll tick and may refuse it (a modal holding the composer, no composer
+  signature, or mid-generation on a harness that buffers rather than queues
+  mid-turn input); that refusal is written to the journal after this command has
   exited, so nothing here will report it. Either pass --wait to have the outcome
   decide the exit code, or read the outcome row for request $REQUEST_ID later:
     lore session events        # a 'sent' or 'send_refused' row carrying that request_id
