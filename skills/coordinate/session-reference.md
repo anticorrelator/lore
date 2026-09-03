@@ -303,6 +303,13 @@ exception). On codex the Stop continuation channel exists (exit 2 + stderr) but
 async hooks are refused at load. On opencode the server-API wake
 (`session.promptAsync`) is a recorded lead, not a shipped path.
 
+When the declared capability tier is unavailable where it should work, degrade
+down the ladder — seat-owned watch windows → raw byte-offset journal poll
+(`lore session events --since <cursor>`) → harness-native persistent monitor — and
+ledger the mode in force so a fresh seat inherits a working eye rather than a dead
+one. Machine suspension freezes a running window silently while the sessions run
+on, so any resume re-joins the board before trusting quiet.
+
 Watcher entries are identity-scoped, and the default install surface is
 project-local. `lore arc open` auto-arms into the repo-local
 `.claude/settings.local.json`; the user-global file takes an entry only when
@@ -468,6 +475,23 @@ the lifecycle stated in § The role of the skill.
     bounded by a ledger row and `regen-tasks` after plan amendments. *In skill*
     (§ The role, hard edge 2). n=1, stated at the open of the trace-evaluators arc.
 
+14. **2026-09-03 — a claude-code lead with a running background subagent refused
+    every steer as `generating` for ~90 min while its composer was idle.** The gate
+    keyed on the output-quiescence timer, and the agents panel below the composer band
+    repaints its elapsed-time counter every second, so the timer never fired; the
+    harness itself accepted the same bytes at once. Same lesson as row 2 (Codex footer
+    badges): anchor on the composer band, never on "anything animating on screen".
+    *Mechanized* — the gate now reads the harness's probed `mid_generation_semantics`
+    and, on a queued-autosubmit harness, admits on screen state alone. Same day, the
+    codex row was re-probed on 0.148.0 with a held turn and lore's real transport
+    (bracketed paste + CR): codex steers too — the message is held as "to be
+    submitted after next tool call" and lands inside the turn; Tab is its separate
+    queue-for-next-turn. The July `buffered-draft` reading was a probe artifact (raw
+    nonce + CR in one burst, which codex treats as a paste). All three harnesses now
+    admit mid-generation; `generating` only fires on a stale row. Open want:
+    `needs_input` / `session wait` still key on the same timer.
+    *In skill* (§ Dispatching, steerable mid-stream).
+
 15. **2026-09-03 — owner calibration, second statement of the same intent as rows 12–13:
     the seat should feel free to act directly when its judgment says the action is
     justified — amending a spec, landing a small fix when several streams converge on
@@ -479,6 +503,20 @@ the lifecycle stated in § The role of the skill.
     costs more than the edit; delegate when the work needs a working set the seat
     should not load or evidence machinery it cannot produce inline); the rung sentence
     retired. n=2. *In skill* (§ The role, hard edge 2; § Ceremony rung).
+
+16. **2026-09-03 — owner calibration: the skill is the seat's own document, and
+    guidance that has outlived the seat's understanding changes; the system must not
+    exert the kind of control that keeps an agent from exercising creativity or
+    flexibility in a novel situation.** Read against the text: 64 "never"s in 8,200
+    words, closure duties with no size clause, a third of the file restating watch
+    and arm mechanics this reference already holds, and a theory-page clause that
+    contradicted hard edge 2. Pass: the opening now says a situation the file does
+    not name is the ordinary case and the arc wins over a default; closure is sized
+    to the arc, with silent skipping (not skipping) the defect; mechanism-"never"s
+    became plain statements or moved here; the theory-page clause defers to edge 2;
+    the monitoring section keeps stance and points here for mechanics. 8,200 → 6,900 words; 64 → 20 "never"s.
+    *In skill* (throughout). n=1; the friction read is textual — retro evidence on
+    whether seats actually park or over-ceremony under the old text is still owed.
 
 ## Shipped verb history
 
