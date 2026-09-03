@@ -453,6 +453,33 @@ the lifecycle stated in § The role of the skill.
     asserted a fixed capability set the harness has since outgrown; rewritten as a
     capability probe. *In skill* (§ Monitoring, § Dispatching).
 
+12. **2026-09-01 — owner calibration: the seat may take a stream over and write source
+    when a standing directive routes the class to the lead or a dispatched agent is
+    reading the picture narrower than the seat can see.** Precedent the same arc
+    already set: the 2026-08-29 simplicity fix wave was implemented at the seat under
+    the UI-lead directive, ledgered as a step, reviewed independently. Rule: hard edge 2
+    now carries the exception, bounded by ledger row + item commit + control verify +
+    independent review. *In skill* (§ The role, hard edge 2).
+
+13. **2026-09-03 — owner calibration: small corrections the seat is confident in —
+    tweaking a mostly-right spec before implement, correcting another agent's faulty
+    assumption — are the seat's to make directly, not to route through a dispatch.**
+    Rule: hard edge 2 gains a seat-scale correction tier below stream takeover,
+    bounded by a ledger row and `regen-tasks` after plan amendments. *In skill*
+    (§ The role, hard edge 2). n=1, stated at the open of the trace-evaluators arc.
+
+15. **2026-09-03 — owner calibration, second statement of the same intent as rows 12–13:
+    the seat should feel free to act directly when its judgment says the action is
+    justified — amending a spec, landing a small fix when several streams converge on
+    the same mistake.** Rows 12–13 had added the permissions but left the stance as an
+    exception ("executor of last resort", "by default never repo source"), and § Ceremony
+    rung still read "never-write-source holds at every rung". Rule: hard edge 2 rewritten
+    as a judgment with a test (act when you can write the rationale row now; two
+    mechanism-shaped signals — the fix needs the whole-feature view, or the round-trip
+    costs more than the edit; delegate when the work needs a working set the seat
+    should not load or evidence machinery it cannot produce inline); the rung sentence
+    retired. n=2. *In skill* (§ The role, hard edge 2; § Ceremony rung).
+
 ## Shipped verb history
 
 Moved from the SKILL's "Verbs this role wants" evidence log as each want shipped;
