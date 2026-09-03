@@ -548,14 +548,14 @@
         "mid_generation_semantics": {
           "support": "full",
           "evidence": "codex-interaction",
-          "value": "buffered-draft",
-          "notes": "Buffered: text injected mid-turn lands in the composer as an unsent draft (the trailing CR does NOT submit while a turn is active); a fresh CR when idle submits it. Probed in raw/codex/p5_midgen.log."
+          "value": "queued-autosubmit",
+          "notes": "Steer: a bracketed paste + CR while a turn is running is held under `Messages to be submitted after next tool call (press esc to interrupt and send immediately)` and delivered inside the running turn; Tab instead of CR is codex's separate queue-for-next-turn action (`Queued follow-up inputs`, delivered after the turn ends). Re-probed 2026-09-03 on codex-cli 0.148.0 with a shell `sleep` holding the turn open. The 2026-07-05 `buffered-draft` reading was a probe artifact: that probe wrote the nonce and CR raw in one burst (no bracketed paste), which codex's paste-burst heuristic inserts as a newline rather than submitting — a path lore's send never uses. The send gate reads this row and admits mid-generation on screen state alone, as for claude-code. Probed in raw/codex/p5_midgen.log."
         },
         "graceful_exit_sequence": {
           "support": "full",
           "evidence": "codex-interaction",
           "sequence": "\u0003",
-          "notes": "Single Ctrl-C from an idle empty composer exits (with text present the first Ctrl-C clears it, so up to two). The close ladder writes this byte to the PTY master before SIGTERM. Probed in raw/codex/p1_composer_launch{1,2}.log."
+          "notes": "Single Ctrl-C from an idle empty composer exits (with text present the first Ctrl-C clears it, so up to two). Re-verified 2026-09-03 on codex-cli 0.148.0: exit banner and process exit within 1s of one Ctrl-C from an idle session with history. The close ladder writes this byte to the PTY master before SIGTERM. Probed in raw/codex/p1_composer_launch{1,2}.log."
         }
       },
       "spend_telemetry": {

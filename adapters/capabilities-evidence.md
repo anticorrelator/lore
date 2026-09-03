@@ -740,9 +740,10 @@ the exact binary version probed; refresh when the harness is upgraded.
 - **URL / path:** `tests/probes/session_injection/observations/codex.json`
   and the raw byte logs under
   `tests/probes/session_injection/observations/raw/codex/`.
-- **Retrieved:** 2026-07-05; composer footer compatibility rechecked 2026-07-21.
+- **Retrieved:** 2026-07-05; composer footer compatibility rechecked 2026-07-21;
+  `mid_generation_semantics` re-probed 2026-09-03.
 - **Product / version:** codex-cli 0.142.5 probe suite; codex-cli 0.144.3
-  fast-badge composer recheck.
+  fast-badge composer recheck; codex-cli 0.148.0 mid-generation re-probe.
 - **Claim:** Per-row raw-log backing — `composer_signature` (bottom-region
   middot+working-directory suffix plus input-row anchor) ←
   `raw/codex/p1_composer_launch{1,2}.log`; the current
@@ -752,9 +753,13 @@ the exact binary version probed; refresh when the harness is upgraded.
   `p3_submit.log`; `newline_sequence` (Ctrl-J LF inserts) ←
   `p3_newline_0_ctrl-j-n-0x0a-.log`; `honors_bracketed_paste` and
   `paste_multiline_semantics` (held, needs trailing CR) ←
-  `p4_bracketed_paste.log`; `mid_generation_semantics` (buffered draft, needs
-  fresh CR when idle) ← `p5_midgen.log`; `graceful_exit_sequence` (single
-  Ctrl-C from idle) ← `p1_composer_launch{1,2}.log`.
+  `p4_bracketed_paste.log`; `mid_generation_semantics` (queued-autosubmit: a
+  bracketed paste + CR mid-turn is held as "to be submitted after next tool
+  call" and delivered inside the running turn; Tab queues for the next turn
+  instead) ← `p5_midgen.log` re-recorded 2026-09-03 on 0.148.0 with a `sleep`-held
+  turn — the 2026-07-05 buffered-draft reading came from a raw nonce+CR burst
+  with no bracketed paste, which codex treats as a paste; `graceful_exit_sequence` (single
+  Ctrl-C from idle; re-verified 2026-09-03 on 0.148.0) ← `p1_composer_launch{1,2}.log`.
 - **Consumed by:** every row of `codex.interaction`.
 
 ### claude-code-spend-telemetry

@@ -650,15 +650,17 @@ the rendered screen with no held or pending payload AND the
 composer-idle session from one paused on a permission modal (injected text could
 *answer* the modal). Whether the gate additionally waits for quiescence is the
 harness's probed `mid_generation_semantics`. On a `queued-autosubmit` harness
-(claude-code, opencode) a mid-generation send is held by the harness and
-delivered at its own next boundary, so the gate admits on screen state alone and
-never refuses `generating`; this is also what keeps it honest against chrome that
+(claude-code, opencode, and codex ≥0.148 — all three steer a mid-turn message into
+the running turn) a mid-generation send is held by the harness and delivered at
+its own next boundary, so the gate admits on screen state alone and never refuses
+`generating`; this is also what keeps it honest against chrome that
 animates while the composer is idle — claude-code's background-agents panel sits
 below the composer band and repaints every second, so the output-quiescence timer
 never fires while a subagent runs, and a timer-keyed gate refused for the
-subagent's whole lifetime what the harness accepted at once. On a
-`buffered-draft` harness (codex) a mid-turn paste lands as an unsent draft, so
-the quiescence wait stays and `generating` is the truthful refusal. Any other
+subagent's whole lifetime what the harness accepted at once. The quiescence
+wait survives only for a harness whose probed token is `buffered-draft`,
+`dropped`, or `interrupts` (none of the three today), where `generating` is the
+truthful refusal. Any other
 state is a refusal (`send_refused` with a reason: `generating`, `modal`,
 `no-signature`, `no-contract`, `unsafe-payload`, or `error`) and **no bytes reach
 the PTY**. A send to a harness with no probed `interaction` contract refuses with

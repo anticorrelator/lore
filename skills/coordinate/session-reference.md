@@ -418,7 +418,8 @@ the lifecycle stated in § The role of the skill.
    fixture instead of retrying the body. Rechecked on codex-cli 0.144.3 (2026-07-21):
    the fast-badge footer classified ready at idle, refused `generating` during a
    running tool call without placing the nonce in the transcript, and accepted a
-   different nonce after returning idle. *In skill.*
+   different nonce after returning idle. *In skill.* Addendum 2026-09-03: the
+   `generating` refusal this row describes no longer occurs on codex — see row 14.
 
 ### Rows folded out of SKILL.md prose, 2026-09-01
 

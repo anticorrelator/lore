@@ -296,7 +296,7 @@ func TestSendReadiness(t *testing.T) {
 	}}
 
 	// queues is the harness's probed mid_generation_semantics == queued-autosubmit
-	// (claude-code and opencode today; codex is buffered-draft). The gate takes it
+	// (all three probed harnesses as of 2026-09-03). The gate takes it
 	// as an input rather than resolving it, so both branches are exercised for
 	// every framework regardless of what capabilities.json currently says.
 	cases := []struct {

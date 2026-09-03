@@ -18,6 +18,8 @@ single Ctrl-C.
 
 import os
 import re
+import subprocess
+import tempfile
 import time
 from datetime import datetime, timezone
 
@@ -36,13 +38,21 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RAW_DIR = os.path.join(HERE, "observations", "raw", "codex")
 
 COLS, ROWS = d.COLS, d.ROWS
-MODEL = "gpt-5.4-mini"
+# gpt-5.4-mini (the 2026-07 probe model) now raises a deprecation modal at launch
+# that hides the composer; override with LORE_PROBE_CODEX_MODEL when it rotates.
+MODEL = os.environ.get("LORE_PROBE_CODEX_MODEL", "gpt-5.6-sol")
 REASONING = "low"
-SANDBOX = os.environ.get(
-    "LORE_PROBE_SANDBOX",
-    "/private/tmp/claude-501/-Users-dustinqngo-work-lore/"
-    "618e24b6-58ad-4aa7-a3e7-60c6b2023092/scratchpad/probe-env-codex",
-)
+
+
+def _default_sandbox():
+    # A fresh git-initialised scratch dir: codex refuses a missing -C target, and
+    # a non-git dir raises the trust prompt before the initial prompt runs.
+    path = tempfile.mkdtemp(prefix="lore-probe-env-codex-")
+    subprocess.run(["git", "init", "-q", path], check=False)
+    return path
+
+
+SANDBOX = os.environ.get("LORE_PROBE_SANDBOX") or _default_sandbox()
 CODEX_BIN = os.environ.get("LORE_PROBE_CODEX_BIN", "codex")
 
 
@@ -157,12 +167,20 @@ class Session:
             self._shutdown()
             return
         # With text in the composer the first Ctrl-C clears it, so allow a retry.
+        # Poll for the exit rather than sampling once: 0.148.0 exits well under a
+        # second from an idle composer, but a single sample after a fixed drain
+        # is a race, not a measurement.
+        exited = False
         for _ in range(2):
             self.send(seq)
-            self.drain(2.0)
-            if not self.child.isalive():
+            deadline = time.time() + 6.0
+            while time.time() < deadline:
+                self.drain(0.5)
+                if not self.child.isalive():
+                    exited = True
+                    break
+            if exited:
                 break
-        exited = not self.child.isalive()
         self._shutdown()
         # CONTRACT: graceful_exit_sequence feeds the exit ladder's first rung.
         assert exited, f"graceful_exit_sequence {_brepr(seq)} did not terminate codex"
@@ -385,43 +403,72 @@ def test_p4_bracketed_paste():
 # P5 — mid-generation inject
 # =========================================================================== #
 def test_p5_mid_generation_inject():
+    """Mid-turn injection semantics, probed the way lore actually sends: a
+    bracketed paste followed by the submit sequence, while the turn is provably
+    still running. A shell `sleep` holds the turn open so the inject cannot race
+    the turn's end. (The 2026-07 recording used a count-to-40 prompt that a fast
+    model finished before the injector looked, and wrote the nonce and CR raw in
+    one burst — which codex's paste-burst heuristic inserts as a newline instead
+    of submitting. That produced a spurious buffered-draft reading.)"""
     sess = Session(
         _raw_path("p5_midgen"),
-        prompt="Count from 1 to 40, one number per line, no other text.",
+        prompt=(
+            "Use the shell tool to run exactly this command: sleep 40. "
+            "When it finishes, reply with exactly the word DONE and nothing else."
+        ),
+        extra_args=["-a", "never", "-s", "workspace-write"],
     )
     try:
-        assert wait_for_composer(sess), "composer never became ready"
-        sess.marker("wait for generation to start")
-        deadline = time.time() + 25
+        sess.marker("wait for the turn to be running")
+        deadline = time.time() + 60
+        running = False
         while time.time() < deadline:
-            sess.drain(0.5)
+            sess.drain(0.4)
             txt = sess.oracle.text()
-            if re.search(r"\b[1-9]\b", txt) and (
-                "\n2\n" in txt or "\n3\n" in txt or re.search(r"^\s*[1-9]\s*$", txt, re.M)
-            ):
+            if TRUST_RE.search(txt):
+                # The directory-trust prompt precedes the initial prompt's turn on
+                # some launches; option 1 ("Yes, continue") is preselected.
+                sess.send(b"\r")
+                continue
+            if "esc to interrupt" in txt:
+                running = True
                 break
             if not sess.child.isalive():
                 break
+        assert running, "turn never showed as running (no 'esc to interrupt' footer)"
+        sess.drain(1.5)
 
-        sess.marker("INJECT mid-generation")
-        sess.send(b"PING-MIDGEN" + d.sequence_bytes(FRAMEWORK, "submit_sequence"))
-        sess.wait_idle(stable_secs=3.0, timeout=90)
+        sess.marker("INJECT mid-generation: bracketed paste + submit_sequence")
+        sess.send(d.paste_encode(b"PING-MIDGEN"))
+        time.sleep(0.3)
+        sess.send(d.sequence_bytes(FRAMEWORK, "submit_sequence"))
+        sess.drain(3.0)
+        mid_text = sess.oracle.text()
+        assert "esc to interrupt" in mid_text, "turn ended before the inject was observed"
+        steer_banner = "submitted after next tool call" in mid_text
+        ping_in_composer_mid = "PING-MIDGEN" in (_composer_text(sess.oracle) or "")
+
+        sess.marker("wait for the turn boundary")
+        sess.wait_idle(stable_secs=4.0, timeout=150)
         final_text = sess.oracle.text()
         composer_after = _composer_text(sess.oracle) or ""
-
         ping_in_composer = "PING-MIDGEN" in composer_after
-        ping_submitted = ("PING-MIDGEN" in final_text) and not ping_in_composer
-        if ping_submitted:
+        ping_delivered = ("PING-MIDGEN" in final_text) and not ping_in_composer
+        if ping_delivered or steer_banner:
             observed = "queued-autosubmit"
-        elif ping_in_composer:
+        elif ping_in_composer or ping_in_composer_mid:
             observed = "buffered-draft"
         else:
             observed = "dropped"
         # CONTRACT: mid_generation_semantics matches the observed mid-stream effect.
-        # codex buffers the injected draft (trailing CR does NOT submit while a turn
-        # is active), so the readiness gate must be strict.
+        # codex 0.148+ steers: Enter mid-turn is held under "Messages to be
+        # submitted after next tool call" and lands inside the running turn (Tab is
+        # the separate queue-for-next-turn action). The readiness gate reads this
+        # row and admits mid-generation sends on it.
         assert observed == d.interaction_row(FRAMEWORK, "mid_generation_semantics")["value"], (
-            f"mid-generation semantics observed {observed!r}"
+            f"mid-generation semantics observed {observed!r} "
+            f"(steer_banner={steer_banner}, in_composer_mid={ping_in_composer_mid}, "
+            f"in_composer_after={ping_in_composer})"
         )
         if ping_in_composer and sess.child.isalive():
             _interrupt_turn(sess)

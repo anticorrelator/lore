@@ -23,6 +23,11 @@ import pytest
 
 
 def pytest_collect_file(parent, file_path):
+    # A probe file named explicitly on the command line is already collected by
+    # pytest's own arg handling; collecting it here too yields two identical
+    # nodeids and launches the harness twice per live test.
+    if parent.session.isinitpath(file_path):
+        return None
     if file_path.suffix == ".py" and file_path.name.startswith("probe_"):
         return pytest.Module.from_parent(parent, path=file_path)
     return None

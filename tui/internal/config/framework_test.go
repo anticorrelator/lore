@@ -397,7 +397,8 @@ func TestHarnessGracefulExitSequence_UnknownDegrades(t *testing.T) {
 
 // The send gate branches on the probed mid-generation semantics, not the
 // framework name: queued-autosubmit harnesses admit a mid-generation send (the
-// harness delivers it at its own boundary), buffered-draft ones do not.
+// harness delivers it at its own boundary — all three probed harnesses today),
+// any other token does not.
 func TestHarnessMidGenerationSemantics(t *testing.T) {
 	setupFakeLoreData(t, "claude-code", nil)
 	cases := []struct {
@@ -408,7 +409,7 @@ func TestHarnessMidGenerationSemantics(t *testing.T) {
 	}{
 		{"claude-code", "queued-autosubmit", true, true},
 		{"opencode", "queued-autosubmit", true, true},
-		{"codex", "buffered-draft", true, false},
+		{"codex", "queued-autosubmit", true, true},
 		{"bogus", "", false, false},
 	}
 	for _, c := range cases {

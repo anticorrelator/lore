@@ -21,10 +21,10 @@
 # with a reason) and no bytes reach the PTY. The gate always requires the
 # composer signature with no modal and no held input; whether it also waits for
 # quiescence is the harness's probed mid_generation_semantics: a
-# queued-autosubmit harness (claude-code, opencode) holds a mid-generation send
-# and delivers it at its own next boundary, so the gate admits it at once; a
-# buffered-draft harness (codex) would leave it as an unsent draft, so the gate
-# refuses `generating` until the session idles. The message is always pasted via bracketed
+# queued-autosubmit harness (claude-code, opencode, codex — all three today)
+# holds a mid-generation send and delivers it at its own next boundary, so the
+# gate admits it at once; only a harness probed as buffered-draft/dropped/
+# interrupts is refused `generating` until the session idles. The message is always pasted via bracketed
 # paste, never written raw. See docs/session-substrate.md.
 #
 # Exit codes:
@@ -151,10 +151,11 @@ EOF
       cat <<EOF
   The readiness gate declined, not the harness: the session was mid-generation
   rather than idle at its composer, so no bytes reached the PTY and nothing was
-  queued for later. Only a harness whose mid-generation semantics are
-  buffered-draft (codex) refuses this way — a queued-autosubmit harness
-  (claude-code, opencode) admits mid-generation and delivers at its own next
-  boundary. Retry after the next observation boundary — the gate re-runs on the
+  queued for later. Only a harness whose probed mid-generation semantics do not
+  queue refuses this way — claude-code, opencode, and codex all admit
+  mid-generation and deliver at their own next boundary, so on those this
+  reason means the capability row is stale. Retry after the next observation
+  boundary — the gate re-runs on the
   owning instance's poll tick, and the session becomes eligible the moment it
   goes quiescent:
     lore session wait $SLUG      # blocks until the next boundary

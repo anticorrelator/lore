@@ -273,16 +273,18 @@ func observeSend(framework string, quiescent bool, snap work.ScreenSnapshot) sen
 //
 // Whether quiescence is required at all is the harness's probed
 // mid_generation_semantics, passed in as queuesMidGeneration. On a
-// queued-autosubmit harness (claude-code, opencode) a mid-generation inject is
-// held by the harness and delivered at its own next boundary, so the gate admits
-// on screen state alone and never refuses `generating`. That also keeps the gate
-// honest against chrome that animates while the composer is idle: claude-code's
-// background-agents panel sits below the composer band and repaints every
-// second, so the output-quiescence timer (quiescenceThreshold, sessionpanel.go)
-// never fires while a subagent runs — a gate keyed on that timer refused for the
-// subagent's whole lifetime what the harness would have accepted at once. On a
-// buffered-draft harness (codex) a mid-turn paste lands as an unsent draft, so
-// the quiescence wait stays and `generating` remains the truthful refusal.
+// queued-autosubmit harness a mid-generation inject is held by the harness and
+// delivered at its own next boundary (claude-code, opencode, and codex ≥0.148
+// all steer it into the running turn), so the gate admits on screen state alone
+// and never refuses `generating`. That also keeps the gate honest against chrome
+// that animates while the composer is idle: claude-code's background-agents
+// panel sits below the composer band and repaints every second, so the
+// output-quiescence timer (quiescenceThreshold, sessionpanel.go) never fires
+// while a subagent runs — a gate keyed on that timer refused for the subagent's
+// whole lifetime what the harness would have accepted at once. The quiescence
+// wait survives only for a harness whose probed token is buffered-draft,
+// dropped, or interrupts (none of the three today), where `generating` is the
+// truthful refusal.
 func sendReadiness(framework string, quiescent, hasContract, queuesMidGeneration bool, snap work.ScreenSnapshot) (bool, string) {
 	if !hasContract {
 		return false, sendReasonNoContract
