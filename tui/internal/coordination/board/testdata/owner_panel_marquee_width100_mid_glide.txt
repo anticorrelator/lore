@@ -1,0 +1,2 @@
+ ●         long  …edger headline is intentionally long enough to move across the shared ma…  running
+   ✓       fit   Short headline stays put                                                       done

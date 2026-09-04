@@ -24,11 +24,11 @@ type coordinationArcsScannedMsg struct {
 }
 
 // coordinationLedgerReadMsg carries one arc's coordination.md content plus the
-// extracted ## Brief section, and — from the same read — the arc's report.md
-// content. err leaves content empty so the Ledger tab renders the unreadable
-// state explicitly; reportFound is true whenever report.md is present, even if
-// unreadable. Closure is not part of this message: it is the arc record's
-// declared status, which the host already holds.
+// extracted ## Brief section, and — from the same read — digest.md and
+// report.md. err leaves content empty so the Ledger tab renders the unreadable
+// state explicitly; document found flags remain true for present-but-unreadable
+// files. Closure is not part of this message: it is the arc record's declared
+// status, which the host already holds.
 type coordinationLedgerReadMsg struct {
 	arc         string
 	content     string
@@ -36,6 +36,8 @@ type coordinationLedgerReadMsg struct {
 	briefFound  bool
 	report      string
 	reportFound bool
+	digest      string
+	digestFound bool
 	err         error
 }
 
@@ -81,11 +83,10 @@ func readCoordinationAttentionCmd() tea.Cmd {
 	}
 }
 
-// readArcLedgerCmd reads an arc's coordination.md and report.md off the UI
-// thread and extracts the ledger's Brief. Reading both in one command yields a
-// consistent snapshot. A present-but-unreadable report still reports
-// reportFound so the detail renders its absence as a first-class dim state
-// rather than dropping the tab.
+// readArcLedgerCmd reads an arc's coordination.md, digest.md, and report.md off
+// the UI thread and extracts the ledger's Brief. Reading all three in one
+// command yields a consistent snapshot. Present-but-unreadable documents keep
+// their found flag so detail can distinguish them from absent files.
 func readArcLedgerCmd(workDir, arc string) tea.Cmd {
 	return func() tea.Msg {
 		dir := coordination.ArcDir(workDir, arc)
@@ -106,6 +107,15 @@ func readArcLedgerCmd(workDir, arc string) tea.Cmd {
 			msg.report = string(reportData)
 		case !os.IsNotExist(reportErr):
 			msg.reportFound = true
+		}
+
+		digestData, digestErr := os.ReadFile(filepath.Join(dir, "digest.md"))
+		switch {
+		case digestErr == nil:
+			msg.digestFound = true
+			msg.digest = string(digestData)
+		case !os.IsNotExist(digestErr):
+			msg.digestFound = true
 		}
 		return msg
 	}
@@ -253,6 +263,7 @@ func (m model) handleCoordinationLedgerRead(msg coordinationLedgerReadMsg) (mode
 		m.coordinationDetail.SetLedger(msg.content, msg.brief, msg.briefFound)
 	}
 	m.coordinationDetail.SetReport(msg.report, msg.reportFound)
+	m.coordinationDetail.SetDigest(msg.digest, msg.digestFound)
 	return m, nil
 }
 
@@ -289,12 +300,12 @@ func (m model) handleCoordinationBodyRead(msg coordinationBodyReadMsg) (model, t
 		}
 		m.coordinationDetail.SetEvents(msg.events)
 		m.coordinationDetail.SetReviewPackets(msg.packets)
-		return m, nil
+		return m, m.coordinationDetail.StartMarquee()
 	}
 	m.coordinationDetail.SetBoard(msg.rows, msg.boardFound, msg.boardErr)
 	m.coordinationDetail.SetEvents(msg.events)
 	m.coordinationDetail.SetReviewPackets(msg.packets)
-	return m, nil
+	return m, m.coordinationDetail.StartMarquee()
 }
 
 func (m model) handleCoordinationAttentionSelected(msg coordination.AttentionSelectedMsg) (model, tea.Cmd) {
@@ -315,6 +326,7 @@ func (m model) handleCoordinationAttentionSelected(msg coordination.AttentionSel
 // return target. The cursor set and the detail load are both explicit because
 // the programmatic cursor move fires no onCursorChange hook.
 func (m model) handleCoordinationMemberSelected(msg coordination.MemberSelectedMsg) (model, tea.Cmd) {
+	m.coordinationDetail.StopMarquee()
 	m.state = stateWork
 	m.focusedPanel = panelRight
 	m.returnToCoordination = true
@@ -329,6 +341,7 @@ func (m model) handleCoordinationMemberSelected(msg coordination.MemberSelectedM
 // cursor set is paired with an explicit detail load for the same reason the work
 // path is.
 func (m model) handleCoordinationSessionSelected(msg coordination.SessionSelectedMsg) (model, tea.Cmd) {
+	m.coordinationDetail.StopMarquee()
 	m.state = stateSessions
 	m.returnToCoordination = true
 	m.sessionsList.SetCursorByID(msg.RowID)
@@ -346,7 +359,7 @@ func (m model) returnToCoordinationView() (model, tea.Cmd) {
 	m.state = stateCoordination
 	m.terminalMode = false
 	m.focusedPanel = panelRight
-	return m, tea.Batch(m.scanArcStoreCmd(), m.sessionsRefreshCmd())
+	return m, tea.Batch(m.scanArcStoreCmd(), m.sessionsRefreshCmd(), m.coordinationDetail.StartMarquee())
 }
 
 // loadCoordinationDetail points the detail at the given arc, re-syncs the

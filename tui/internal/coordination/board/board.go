@@ -26,6 +26,7 @@ type Row struct {
 	Verdict      string   `json:"verdict"`
 	WorkItem     *string  `json:"work_item"`
 	ReviewPacket *string  `json:"review_packet"`
+	Live         bool     `json:"-"`
 }
 
 type statusProjection struct {

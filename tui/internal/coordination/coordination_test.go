@@ -227,7 +227,7 @@ func TestListModelDisappearedAttentionTargetStaysStale(t *testing.T) {
 }
 
 func TestListModelStaleAttentionFoldsPerBucketAndExpands(t *testing.T) {
-	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.Local)
+	now := time.Now()
 	m := NewListModel()
 	m.SetAttention(attentionFixture(), nil)
 	m.attentionActivityLoaded = true
@@ -582,6 +582,7 @@ func integratedDetail() DetailModel {
 		{Slug: "item-b", Resolved: true},
 	}, nil)
 	m.SetLedger("## Brief\n\nCompact brief\n", "Compact brief", true)
+	m.SetDigest("A decision the owner can scan.\n", true)
 	m.SetBoard([]board.Row{
 		{Arc: "arc-a", StreamID: "b", Label: "Second", DependsOn: []string{"a"}, Gate: "flag", Status: "pending", Verdict: "", WorkItem: strptr("item-b")},
 		{Arc: "arc-a", StreamID: "a", Label: "First", Gate: "hold", Status: "done", Verdict: "full", WorkItem: strptr("item-a"), ReviewPacket: strptr("packets/a.md")},
@@ -596,13 +597,14 @@ func integratedDetail() DetailModel {
 func TestDetailIntegratedBodyOrderAndUnknowns(t *testing.T) {
 	m := integratedDetail()
 	out := stripANSI(m.View())
+	digest := strings.Index(out, "Since you left")
 	brief := strings.Index(out, "Brief")
 	streams := strings.Index(out, "Streams")
 	ticker := strings.Index(out, "Recent activity")
-	if !(streams >= 0 && streams < brief && brief < ticker) {
-		t.Fatalf("live body must render Streams → Brief → Recent activity:\n%s", out)
+	if !(digest >= 0 && digest < streams && streams < brief && brief < ticker) {
+		t.Fatalf("live body must render Since you left → Streams → Brief → Recent activity:\n%s", out)
 	}
-	for _, want := range []string{"flag", "unknown", "packet unknown", "unknown · unknown · item-b"} {
+	for _, want := range []string{"flagged for your review", "A decision the owner can scan.", "unknown · unknown · item-b"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("integrated body missing explicit %q:\n%s", want, out)
 		}
@@ -629,6 +631,67 @@ func TestDetailBoardProjectionStatesStayDistinct(t *testing.T) {
 	m.SetBoard(nil, false, errors.New("status unavailable"))
 	if out := stripANSI(m.View()); !strings.Contains(out, "streams unknown — status unavailable") {
 		t.Fatalf("load error did not remain distinct from absence:\n%s", out)
+	}
+}
+
+func TestDetailDigestStatesAndClosedOrder(t *testing.T) {
+	m := sizedDetail()
+	m.SetArc("arc-a")
+	m.SetBoard([]board.Row{rowForDetail("a", "One")}, true, nil)
+
+	m.SetDigest("", false)
+	if out := stripANSI(m.View()); !strings.Contains(out, "no decisions recorded yet") {
+		t.Fatalf("absent digest state missing:\n%s", out)
+	}
+	m.SetDigest("", true)
+	if out := stripANSI(m.View()); !strings.Contains(out, "digest.md unknown — document could not be read") {
+		t.Fatalf("unreadable digest state missing:\n%s", out)
+	}
+	m.SetDigest("**Decision:** keep the rail continuous.", true)
+	m.SetClosed(true)
+	out := stripANSI(m.View())
+	digest := strings.Index(out, "Since you left")
+	streams := strings.Index(out, "Final streams")
+	if !(digest >= 0 && digest < streams) || !strings.Contains(out, "Decision:") {
+		t.Fatalf("closed digest must precede final streams:\n%s", out)
+	}
+}
+
+func rowForDetail(id, label string) board.Row {
+	return board.Row{Arc: "arc-a", StreamID: id, Label: label, Tree: "writer", Gate: "notify", Status: "done", Verdict: "full"}
+}
+
+func TestDetailMarqueeTicksOnlyForOverflowAndResetsOnArcChange(t *testing.T) {
+	m := sizedDetail()
+	m.SetArc("arc-a")
+	m.SetBoard([]board.Row{rowForDetail("fit", "short")}, true, nil)
+	if cmd := m.StartMarquee(); cmd != nil {
+		t.Fatal("a fitting board must not arm a marquee tick")
+	}
+
+	m.SetBoard([]board.Row{rowForDetail("long", strings.Repeat("long label ", 20))}, true, nil)
+	start := m.rendered[0].Lines[0].Text
+	if cmd := m.StartMarquee(); cmd == nil || !m.marqueeTicking {
+		t.Fatal("an overflowing board must arm one marquee tick")
+	}
+	for i := 0; i <= 15; i++ {
+		generation := m.marqueeGeneration
+		m, _ = m.Update(MarqueeTickMsg{arc: "arc-a", generation: generation})
+	}
+	if got := m.rendered[0].Lines[0].Text; got == start {
+		t.Fatalf("row did not move after the start dwell:\n%s\n%s", start, got)
+	}
+	m.openMode(ModeLedger)
+	if m.marqueeTicking || m.StartMarquee() != nil {
+		t.Fatal("a document drill-in must stop and suppress marquee ticks")
+	}
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if cmd == nil || !m.marqueeTicking {
+		t.Fatal("returning to the visible overflowing board must re-arm the marquee")
+	}
+	m.SetArc("arc-b")
+	if m.marqueePhase != 0 || m.marqueeTicking {
+		t.Fatalf("arc change did not reset marquee state: phase=%d ticking=%v", m.marqueePhase, m.marqueeTicking)
 	}
 }
 
@@ -733,8 +796,13 @@ func TestDetailSessionTargetsRenderExplicitLiveScreenState(t *testing.T) {
 			if got := m.targetSummary(row); !strings.Contains(got, tc.want) {
 				t.Fatalf("session target summary %q missing %q", got, tc.want)
 			}
-			if out := stripANSI(m.View()); !strings.Contains(out, tc.want) || !strings.Contains(out, "target session "+tc.row.Display) {
-				t.Fatalf("rendered session capability or target is absent:\n%s", out)
+			out := stripANSI(m.View())
+			wantLive := tc.row.Tmux != ""
+			if strings.Contains(out, " · live") != wantLive {
+				t.Fatalf("pinned live status mismatch (want %v):\n%s", wantLive, out)
+			}
+			if strings.Contains(out, "target session") {
+				t.Fatalf("per-row target summary must not render:\n%s", out)
 			}
 		})
 	}
@@ -752,8 +820,11 @@ func TestDetailUndeclaredWorkTargetStaysUnknown(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("undeclared target must not navigate, got %T", cmd())
 	}
-	if out := stripANSI(updated.View()); !strings.Contains(out, "not an arc member") || !strings.Contains(out, "target unknown") {
-		t.Errorf("undeclared identity must render explicitly:\n%s", out)
+	if got := updated.targetSummary(updated.rows[0]); !strings.Contains(got, "not an arc member") || !strings.Contains(got, "target unknown") {
+		t.Errorf("undeclared resolution must stay explicit off-screen: %s", got)
+	}
+	if out := stripANSI(updated.View()); strings.Contains(out, "target unknown") {
+		t.Errorf("per-row target summary must be absent from the board:\n%s", out)
 	}
 }
 
@@ -770,14 +841,18 @@ func TestDetailClosedAndLiveReportModesStayDistinct(t *testing.T) {
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	m.SetClosed(true)
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "Earlier report") || strings.Contains(out, "Compact brief") {
-		t.Errorf("a closed arc's primary body must be its report:\n%s", out)
+	if strings.Contains(out, "Earlier report") || strings.Contains(out, "Compact brief") {
+		t.Errorf("a closed arc's primary body must omit inline report and Brief:\n%s", out)
 	}
-	report := strings.Index(out, "Report")
+	digest := strings.Index(out, "Since you left")
 	streams := strings.Index(out, "Final streams")
 	graph := strings.Index(out, "First")
-	if !(streams >= 0 && streams < graph && graph < report) {
-		t.Errorf("a closed arc must render its final DAG then Report:\n%s", out)
+	if !(digest >= 0 && digest < streams && streams < graph) {
+		t.Errorf("a closed arc must render its digest then final DAG:\n%s", out)
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	if m.Mode() != ModeReport || !strings.Contains(stripANSI(m.View()), "Earlier report") {
+		t.Error("a closed report must remain reachable as a local drill-in")
 	}
 }
 

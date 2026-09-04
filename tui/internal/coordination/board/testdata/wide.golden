@@ -1,7 +1,7 @@
- ✓─╮─╮─╮─╮  root  walking skeleton  done
- ✓ │ │ │ │  w1    worker one  done
- │ ● │ │ │  w2    worker two  in-flight
- │ │ ● │ │  w3    worker three  in-flight
- │ │ │ ○ │  w4    worker four  pending
- │ │ │ │ ▲  w5    worker five  blocked-on-input
- ○─╯─╯─╯─╯  join  assemble + verify  pending · waits: w2, w3, w4, w5
+ ✓─╮─╮─╮─╮  root  walking skeleton                                                                                  done
+ ✓ │ │ │ │  w1    worker one                                                                                        done
+ │ ● │ │ │  w2    worker two                                                                                     running
+ │ │ ● │ │  w3    worker three                                                                                   running
+ │ │ │ ○ │  w4    worker four                                                                                     queued
+ │ │ │ │ ▲  w5    worker five                                                                                  needs you
+ ○─╯─╯─╯─╯  join  assemble + verify                                                            waiting on w2, w3, w4, w5

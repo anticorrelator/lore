@@ -1,3 +1,3 @@
- ✓         a     first root  done
- ✓         b     child ends its rail  done
-   ○       c     next root  pending
+ ✓         a     first root                                                                                         done
+ ✓         b     child ends its rail                                                                                done
+   ○       c     next root                                                                                        queued

@@ -380,13 +380,14 @@ LIVE="$TEST_DIR/arc-live"
 setup_store "$LIVE"
 write_arc "$LIVE" live-arc active
 cat > "$LIVE/_work/_arcs/live-arc/coordination.md" <<'EOF'
-| # | Step | Depends on | Tree | Gate | Status | Verdict | Evidence / SHA |
-|---|---|---|---|---|---|---|---|
-| s-inflight | Live step ([[work:first]], [[work:second]]) | — | writer | notify | in-flight | — | [one](one.md), [two](two.md) |
-| s-prefreeze | Allocated step | — | writer | flag | pending | — | [unsafe](../outside.md), [malformed](http://[) |
-| s-ready | Untouched step ([[work:ready-item]]) | — | writer | hold | pending | — | [owner packet](packets/owner-read.md) |
-| s-readonly | Dispatched read-only step | — | read-only | notify | pending | — | — |
-| s-accepted | Accepted read-only step | — | read-only | notify | pending | — | — |
+| # | Step | Depends on | Tree | Call + one-line rationale | Gate | Status | Verdict | Evidence / SHA |
+|---|---|---|---|---|---|---|---|---|
+| s-inflight | Live step ([[work:first]], [[work:second]]) | — | writer | — | notify | in-flight | — | [one](one.md), [two](two.md) |
+| s-prefreeze | Allocated step | — | writer | — | flag | pending | — | [unsafe](../outside.md), [malformed](http://[) |
+| s-ready | Untouched step ([[work:ready-item]]) | — | writer | — | hold | pending | — | [owner packet](packets/owner-read.md) |
+| s-readonly | Dispatched read-only step | — | read-only | — | notify | pending | — | — |
+| s-accepted | Accepted read-only step | — | read-only | — | notify | pending | — | — |
+| s-rationale | Rationale-linked step | — | writer | Tracked in [[work:rationale-item]] | notify | done | full | — |
 EOF
 write_worktree_identity "$LIVE" wt-prefreeze live-arc s-prefreeze a1
 python3 "$RECONCILE" register-attempt --kdir "$LIVE" --slug live-arc \
@@ -409,10 +410,10 @@ LIVE_JSON="$TEST_DIR/arc-live.json"
 bash "$COORDINATE" --kdir "$LIVE" --json > "$LIVE_JSON"
 assert_eq "arc ledger under _work/_arcs is read" "1" \
   "$(jq -r '.coordination_dispatch.ledger_scan.ledgers_read' "$LIVE_JSON")"
-assert_eq "the arc ledger's stream rows are counted" "5" \
+assert_eq "the arc ledger's stream rows are counted" "6" \
   "$(jq -r '.coordination_dispatch.ledger_scan.streams_read' "$LIVE_JSON")"
 assert_eq "the complete stream projection preserves ledger declaration order" \
-  "s-inflight,s-prefreeze,s-ready,s-readonly,s-accepted" \
+  "s-inflight,s-prefreeze,s-ready,s-readonly,s-accepted,s-rationale" \
   "$(jq -r '[.coordination_streams[] | select(.arc=="live-arc") | .stream_id] | join(",")' "$LIVE_JSON")"
 assert_eq "the complete stream projection carries the board's authored cells" \
   "Untouched step ([[work:ready-item]])|hold|—" \
@@ -428,6 +429,9 @@ assert_eq "the arc index carries both live and closed identities" \
 assert_eq "a unique Step backlink and arc-relative Markdown document are explicit navigation fields" \
   "ready-item|packets/owner-read.md" \
   "$(jq -r '[.coordination_streams[] | select(.arc=="live-arc" and .stream_id=="s-ready")][0] | [.work_item,.review_packet] | join("|")' "$LIVE_JSON")"
+assert_eq "a unique rationale backlink resolves the navigation work item" \
+  "rationale-item" \
+  "$(jq -r '[.coordination_streams[] | select(.arc=="live-arc" and .stream_id=="s-rationale")][0].work_item' "$LIVE_JSON")"
 assert_eq "ambiguous declared references remain null" "null|null" \
   "$(jq -r '[.coordination_streams[] | select(.arc=="live-arc" and .stream_id=="s-inflight")][0] | [.work_item,.review_packet] | map(tostring) | join("|")' "$LIVE_JSON")"
 assert_eq "unsafe packet traversal remains null" "null" \

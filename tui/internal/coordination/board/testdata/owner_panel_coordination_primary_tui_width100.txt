@@ -1,0 +1,5 @@
+ ✓         1     pipe-pane live-mirror spike: capture-pane history + pipe-pane stream splice …  done
+ │ ✓       2     DAG board package: Go renderer of coordinate-status --json stream rows (rail…  done
+ │ ✓       3     coordination view restructure: landing state, deta…  done · flagged for your review
+ ✓ │       4     live writable drill-in: capture+pipe-pane into the ghostty-backed panel + se…  done
+ ✓─╯       5     narrow top-level sessions view to non-arc sessions (chat, ad-hoc, orphans); …  done

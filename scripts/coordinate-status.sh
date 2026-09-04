@@ -266,9 +266,10 @@ WORK_BACKLINK = re.compile(r"\[\[work:([A-Za-z0-9][A-Za-z0-9._-]*)(?:#[^\]|]+)?(
 MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\((?:<([^>]+)>|([^\s)]+))(?:\s+[^)]*)?\)")
 
 
-def declared_work_item(step):
-    """Return one explicit work backlink, or None when absent/ambiguous."""
-    matches = list(dict.fromkeys(WORK_BACKLINK.findall(step or "")))
+def declared_work_item(step, rationale=""):
+    """Return one unique backlink across the display and rationale cells."""
+    matches = list(dict.fromkeys(
+        WORK_BACKLINK.findall((step or "") + "\n" + (rationale or ""))))
     return matches[0] if len(matches) == 1 else None
 
 
@@ -471,7 +472,8 @@ def project_arc_coordination(record, dispatch):
             "depends_on": row["depends_on"], "tree": row["tree"],
             "gate": row.get("gate", ""), "status": row["status"],
             "verdict": row["verdict"],
-            "work_item": declared_work_item(row.get("step", "")),
+            "work_item": declared_work_item(
+                row.get("step", ""), row.get("call + one-line rationale", "")),
             "review_packet": declared_review_packet(row.get("evidence / sha", "")),
         })
 
@@ -498,7 +500,8 @@ def project_arc_coordination(record, dispatch):
         tree = row["tree"]
         status = row["status"]
         verdict = row["verdict"]
-        work_item = declared_work_item(row.get("step", ""))
+        work_item = declared_work_item(
+            row.get("step", ""), row.get("call + one-line rationale", ""))
         review_packet = declared_review_packet(row.get("evidence / sha", ""))
         stream_state = reconciled.get(stream_id, {})
         attempt = latest_attempt(stream_state)
