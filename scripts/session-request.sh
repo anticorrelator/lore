@@ -558,8 +558,9 @@ if [[ -n "$WORK_META" ]]; then
   if [[ -z "$DECLARED_CHECKOUT" ]]; then
     fail "refusing --slug '$SLUG': work item '$WORK_ITEM_SLUG' declares no source checkout, so
 this request cannot say which clone it belongs in. Seed the declaration with:
-  lore work source-checkout $WORK_ITEM_SLUG
-Run that from a session hosted by an instance in the checkout this work belongs to."
+  lore work source-checkout $WORK_ITEM_SLUG --from-instance <live-instance-name>
+Choose the instance with 'lore session list', or omit --from-instance and run the
+command from a session hosted in the checkout this work belongs to."
   fi
   REQUIRED_RESOLVED="$(resolve_physical_dir "$DECLARED_CHECKOUT" || true)"
   if [[ -z "$REQUIRED_RESOLVED" ]]; then

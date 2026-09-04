@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # set-work-meta.sh — Set metadata fields on an existing work item
-# Usage: bash set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--project <name>] [--reuse-project] [--intent-anchor <text>] [--related-work <slug>] [--blocked-by <slug>] [--ceremony-depth <1-3|"">] [--seed-source-checkout]
+# Usage: bash set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--project <name>] [--reuse-project] [--intent-anchor <text>] [--related-work <slug>] [--blocked-by <slug>] [--ceremony-depth <1-3|"">] [--seed-source-checkout] [--from-instance <name>]
 # Updates the specified fields in _meta.json, touches the timestamp, and rebuilds the index.
 #
 # --scope (Phase 2 — work item 02-durable-signal-foundation):
@@ -11,9 +11,10 @@
 # --seed-source-checkout (exposed as `lore work source-checkout <slug>`):
 #   Declares source_checkout — the checkout a session for this item must run in.
 #   This is the field's only writer, and it takes no path from the caller: the value
-#   comes from the calling session's own registry row, is resolved physically, and
-#   must match a live instance's project directory before it is written. Everything
-#   downstream treats the declaration as authoritative and never re-validates it.
+#   comes from either the calling session's provenance or an explicitly named live
+#   instance's registry row, is resolved physically, and must match a live instance's
+#   project directory before it is written. Everything downstream treats the
+#   declaration as authoritative and never re-validates it.
 
 set -euo pipefail
 
@@ -50,6 +51,11 @@ HAS_CEREMONY_DEPTH=0
 # provenance. Takes no value — a path from the caller is exactly what this field
 # must not accept.
 SEED_SOURCE_CHECKOUT=0
+# --from-instance: when seeding, select the checkout from this live instance's
+# registry row instead of from the calling session. The explicit selector wins
+# when both it and calling-session provenance are present.
+FROM_INSTANCE=""
+HAS_FROM_INSTANCE=0
 
 # Valid work-item scope values (Phase 2 capture-scale anchor).
 VALID_SCOPES=(architectural subsystem implementation granular-fix cross-cycle-meta)
@@ -77,7 +83,7 @@ seed_fail() {
 
 if [[ $# -lt 1 ]]; then
   echo "[work] Error: Missing required argument: slug" >&2
-  echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--intent-anchor <text>] [--related-work <slug>] [--blocked-by <slug>] [--ceremony-depth <1-3|\"\">] [--seed-source-checkout] [--detect-pr] [--json]" >&2
+  echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--intent-anchor <text>] [--related-work <slug>] [--blocked-by <slug>] [--ceremony-depth <1-3|\"\">] [--seed-source-checkout] [--from-instance <name>] [--detect-pr] [--json]" >&2
   exit 1
 fi
 
@@ -140,13 +146,27 @@ while [[ $# -gt 0 ]]; do
       SEED_SOURCE_CHECKOUT=1
       shift
       ;;
+    --from-instance)
+      if [[ $# -lt 2 || -z "${2:-}" || "$2" == --* ]]; then
+        echo "[work] Error: --from-instance requires an instance name" >&2
+        exit 1
+      fi
+      FROM_INSTANCE="$2"
+      HAS_FROM_INSTANCE=1
+      shift 2
+      ;;
     *)
       echo "[work] Error: Unknown flag '$1'" >&2
-      echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--project <name>] [--reuse-project] [--intent-anchor <text>] [--related-work <slug>] [--blocked-by <slug>] [--ceremony-depth <1-3|\"\">] [--seed-source-checkout] [--detect-pr] [--json]" >&2
+      echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--project <name>] [--reuse-project] [--intent-anchor <text>] [--related-work <slug>] [--blocked-by <slug>] [--ceremony-depth <1-3|\"\">] [--seed-source-checkout] [--from-instance <name>] [--detect-pr] [--json]" >&2
       exit 1
       ;;
   esac
 done
+
+if [[ "$HAS_FROM_INSTANCE" -eq 1 && "$SEED_SOURCE_CHECKOUT" -eq 0 ]]; then
+  seed_fail "--from-instance is only valid when declaring a source checkout.
+Run 'lore work source-checkout $SLUG --from-instance $FROM_INSTANCE'."
+fi
 
 if [[ "$HAS_ISSUE" -eq 0 && "$HAS_PR" -eq 0 && "$HAS_SCOPE" -eq 0 && "$HAS_PROJECT" -eq 0 && "$HAS_INTENT_ANCHOR" -eq 0 && "$DETECT_PR" -eq 0 && ${#RELATED_WORK_SLUGS[@]} -eq 0 && ${#BLOCKED_BY_SLUGS[@]} -eq 0 && "$HAS_CEREMONY_DEPTH" -eq 0 && "$SEED_SOURCE_CHECKOUT" -eq 0 ]]; then
   if [[ $JSON_MODE -eq 1 ]]; then
@@ -222,43 +242,74 @@ fi
 # restart the instance, restore the path, or start an instance in that checkout.
 SOURCE_CHECKOUT=""
 if [[ "$SEED_SOURCE_CHECKOUT" -eq 1 ]]; then
-  SESSION_INSTANCE="${LORE_SESSION_INSTANCE:-}"
-  SESSION_SLUG="${LORE_SESSION_SLUG:-}"
-  SESSION_TYPE="${LORE_SESSION_TYPE:-}"
-  if [[ -z "$SESSION_INSTANCE" || -z "$SESSION_SLUG" || -z "$SESSION_TYPE" ]]; then
-    seed_fail "cannot identify the calling session: LORE_SESSION_INSTANCE, LORE_SESSION_SLUG, and LORE_SESSION_TYPE must all be set.
-Run 'lore work source-checkout $SLUG' from inside a lore-spawned session, which exports all three."
-  fi
-
-  REGISTRY="$KNOWLEDGE_DIR/_sessions/instances/$SESSION_INSTANCE.json"
-  if [[ ! -f "$REGISTRY" ]]; then
-    seed_fail "no registry row for instance '$SESSION_INSTANCE' at $REGISTRY.
-The instance that spawned this session is gone; re-run from a session on a live instance."
-  fi
-
-  # The session's own row carries its provenance: the checkout the worktree guard
-  # captured when the session worktree was allocated. A session that runs without
-  # a worktree has no such capture, and its checkout is the hosting instance's
-  # project directory — set once at process start and immutable for its life.
-  # Neither value is inferred from git or from the working directory, both of
-  # which describe the session worktree rather than the checkout behind it.
-  if ! SOURCE_CHECKOUT_RAW="$(jq -er \
-      --arg instance "$SESSION_INSTANCE" --arg slug "$SESSION_SLUG" --arg type "$SESSION_TYPE" '
-        select(.name == $instance)
-        | (.project_dir // "") as $instance_dir
-        | [.sessions[]? | select(.slug == $slug and .type == $type)]
-        | if length == 1
-          then ((.[0].worktree.captured.canonical_path // "")
-                | if . == "" then $instance_dir else . end)
-          else error("no unique session row") end
+  INSTANCES_DIR="$KNOWLEDGE_DIR/_sessions/instances"
+  if [[ "$HAS_FROM_INSTANCE" -eq 1 ]]; then
+    if [[ "$FROM_INSTANCE" == */* ]]; then
+      seed_fail "unknown instance '$FROM_INSTANCE'.
+Choose a live instance name from 'lore session list' and re-run."
+    fi
+    REGISTRY="$INSTANCES_DIR/$FROM_INSTANCE.json"
+    if [[ ! -f "$REGISTRY" ]]; then
+      seed_fail "unknown instance '$FROM_INSTANCE': no registry row exists at $REGISTRY.
+Choose a live instance name from 'lore session list' and re-run."
+    fi
+    if ! INSTANCE_AGE="$(session_instance_age_seconds "$INSTANCES_DIR" "$FROM_INSTANCE")"; then
+      seed_fail "cannot determine whether instance '$FROM_INSTANCE' is live.
+Restart that instance, or choose a live instance name from 'lore session list' and re-run."
+    fi
+    if (( INSTANCE_AGE > SESSION_INSTANCE_LIVENESS_TTL_SECONDS )); then
+      seed_fail "instance '$FROM_INSTANCE' is stale: its registry row is ${INSTANCE_AGE}s old (live window ${SESSION_INSTANCE_LIVENESS_TTL_SECONDS}s).
+Restart that instance, or choose a live instance name from 'lore session list' and re-run."
+    fi
+    if ! SOURCE_CHECKOUT_RAW="$(jq -er --arg instance "$FROM_INSTANCE" '
+        select(.name == $instance) | (.project_dir // "")
       ' "$REGISTRY" 2>/dev/null)"; then
-    seed_fail "no unique row for session '$SESSION_TYPE:$SESSION_SLUG' on instance '$SESSION_INSTANCE'.
-The seeding verb reads its own session's provenance and cannot guess; re-run it from the session that owns this work item."
-  fi
+      seed_fail "registry row for instance '$FROM_INSTANCE' is invalid or names a different instance.
+Restart that instance so it publishes a fresh registry row, then re-run."
+    fi
+    if [[ -z "$SOURCE_CHECKOUT_RAW" ]]; then
+      seed_fail "instance '$FROM_INSTANCE' records no checkout path (project_dir).
+Restart that instance so it publishes checkout provenance, then re-run."
+    fi
+  else
+    SESSION_INSTANCE="${LORE_SESSION_INSTANCE:-}"
+    SESSION_SLUG="${LORE_SESSION_SLUG:-}"
+    SESSION_TYPE="${LORE_SESSION_TYPE:-}"
+    if [[ -z "$SESSION_INSTANCE" || -z "$SESSION_SLUG" || -z "$SESSION_TYPE" ]]; then
+      seed_fail "cannot identify the calling session: LORE_SESSION_INSTANCE, LORE_SESSION_SLUG, and LORE_SESSION_TYPE must all be set.
+Run 'lore work source-checkout $SLUG' from inside a lore-spawned session, which exports all three, or pass '--from-instance <name>' for a live instance shown by 'lore session list'."
+    fi
 
-  if [[ -z "$SOURCE_CHECKOUT_RAW" ]]; then
-    seed_fail "session '$SESSION_TYPE:$SESSION_SLUG' on '$SESSION_INSTANCE' records no source checkout — neither a captured worktree nor a project directory.
+    REGISTRY="$INSTANCES_DIR/$SESSION_INSTANCE.json"
+    if [[ ! -f "$REGISTRY" ]]; then
+      seed_fail "no registry row for instance '$SESSION_INSTANCE' at $REGISTRY.
+The instance that spawned this session is gone; re-run from a session on a live instance."
+    fi
+
+    # The session's own row carries its provenance: the checkout the worktree guard
+    # captured when the session worktree was allocated. A session that runs without
+    # a worktree has no such capture, and its checkout is the hosting instance's
+    # project directory — set once at process start and immutable for its life.
+    # Neither value is inferred from git or from the working directory, both of
+    # which describe the session worktree rather than the checkout behind it.
+    if ! SOURCE_CHECKOUT_RAW="$(jq -er \
+        --arg instance "$SESSION_INSTANCE" --arg slug "$SESSION_SLUG" --arg type "$SESSION_TYPE" '
+          select(.name == $instance)
+          | (.project_dir // "") as $instance_dir
+          | [.sessions[]? | select(.slug == $slug and .type == $type)]
+          | if length == 1
+            then ((.[0].worktree.captured.canonical_path // "")
+                  | if . == "" then $instance_dir else . end)
+            else error("no unique session row") end
+        ' "$REGISTRY" 2>/dev/null)"; then
+      seed_fail "no unique row for session '$SESSION_TYPE:$SESSION_SLUG' on instance '$SESSION_INSTANCE'.
+The seeding verb reads its own session's provenance and cannot guess; re-run it from the session that owns this work item."
+    fi
+
+    if [[ -z "$SOURCE_CHECKOUT_RAW" ]]; then
+      seed_fail "session '$SESSION_TYPE:$SESSION_SLUG' on '$SESSION_INSTANCE' records no source checkout — neither a captured worktree nor a project directory.
 Its instance predates checkout provenance; restart the instance and re-run."
+    fi
   fi
 
   if ! SOURCE_CHECKOUT="$(resolve_physical_dir "$SOURCE_CHECKOUT_RAW")"; then
@@ -269,7 +320,7 @@ Restore that checkout, or re-run from a session in the clone this item should bu
   # Validate against the live registry before writing — the same preflight every
   # other declared placement field gets. A declaration no instance serves would
   # be authoritative and unclaimable, and nothing downstream re-validates it.
-  LIVE_DIRS="$(live_instance_project_dirs "$KNOWLEDGE_DIR/_sessions/instances")"
+  LIVE_DIRS="$(live_instance_project_dirs "$INSTANCES_DIR")"
   if ! printf '%s\n' "$LIVE_DIRS" | grep -qxF -- "$SOURCE_CHECKOUT"; then
     if [[ -n "$LIVE_DIRS" ]]; then
       seed_fail "no live instance is running in '$SOURCE_CHECKOUT'.
