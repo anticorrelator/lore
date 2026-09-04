@@ -558,10 +558,37 @@ the lifecycle stated in § The role of the skill.
     closing, the closure sequence). n=1. Evidence: arc `trace-project-evaluators`
     ledger, post-close rows; item 1's `closure-conformance.md` rows 59–93.
 
+### Coordinator agency dry run, 2026-09-04
+
+19. **A cold read found the current skill granting direct authorship while the
+    architecture guide still prohibited it, and requesting installation read-back
+    already implemented by the arm verb.** Reconciled both with the current
+    contracts. The skill's decision criterion now asks for evidence and authority,
+    rather than the ability to write a rationale; explained uncertainty and a
+    reasoned no-change decision are explicit outcomes. Genuine intent forks pause
+    dependent work at any point, while reversible design calls within agreed
+    authority continue with a flag. Routine reads need no ledger row. The revision
+    guidance describes circumstances and reasons without attributing motives to
+    agents, and permits challenging a rule's premise. *In skill* (§ The role,
+    § The loop, § Monitoring, § What escalates). Evidence: arc
+    `coordinator-agency-dry-run`; work item
+    `coordinate-skill-prose-reduction-classify-mechaniz`; the independent peer read
+    recorded in `implement-spec-reshape-agent-s-interaction-commons` supplied
+    convergent reasoning, not a verdict binding this read. n=1 dry run; effects on
+    sustained coordination have not been measured.
+
 ## Shipped verb history
 
 Moved from the SKILL's "Verbs this role wants" evidence log as each want shipped;
 kept for provenance. Live wants stay in SKILL.md.
+
+- Arm installation read-back — verified in the working tree 2026-09-04:
+  `coordinate-arm.sh` requires `--install` or `--render` and checks the exact
+  installed command through `installed_entry_present`; a missing entry fails.
+  If Python is unavailable, the command reports that read-back was not performed.
+  This retires the skill's installation-verification want. A delivered wake still
+  verifies a different boundary: the harness actually ran the installed hook and
+  returned its result. See [[work:coordinate-arm-renders-without-installing-reads-as]].
 
 - `--track` / `--model` / `--yes` on `lore session request` — SHIPPED 2026-07-06: the
   three kernel dispatch judgments (depth, lead model, autonomy) became request fields.
