@@ -287,6 +287,39 @@ print(type(value).__name__, value)
 
 # --- close -----------------------------------------------------------------
 
+@test "close does not inspect general settings on a harness without watcher hooks" {
+  open_arc --title "Arc one" --anchor "one" >/dev/null
+  printf 'model = "test-model"\n' > "$TEST_KDIR/config.toml"
+  mkdir "$TEST_KDIR/bin"
+  cat > "$TEST_KDIR/bin/jq" <<'EOF'
+#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+if any(args[i:i+3] == ['--arg', 'k', 'settings'] for i in range(len(args))):
+    print(os.environ['LORE_TEST_SETTINGS'])
+else:
+    os.execv(os.environ['LORE_TEST_JQ'], [os.environ['LORE_TEST_JQ'], *args])
+EOF
+  chmod +x "$TEST_KDIR/bin/jq"
+  run env LORE_FRAMEWORK=codex LORE_TEST_SETTINGS="$TEST_KDIR/config.toml" \
+    LORE_TEST_JQ="$(command -v jq)" PATH="$TEST_KDIR/bin:$PATH" \
+    bash "$CLOSE" --kdir "$TEST_KDIR" arc-one
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"could not read"* ]] || return 1
+  [[ "$output" != *"still armed"* ]] || return 1
+  [ "$(field_of arc-one status)" = closed ] || return 1
+  [ "$(cat "$TEST_KDIR/config.toml")" = 'model = "test-model"' ] || return 1
+}
+
+@test "close from a manual-watcher harness disarms a recorded watcher" {
+  open_arc_arming --title "Arc one" --anchor "one" >/dev/null 2>&1
+  [ -n "$(armed_command)" ] || return 1
+  run env LORE_FRAMEWORK=codex bash "$CLOSE" --kdir "$TEST_KDIR" arc-one
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$(armed_command)" ] || return 1
+  [ "$(field_of arc-one status)" = closed ] || return 1
+}
+
 @test "close warns about a missing report and still succeeds" {
   open_arc --title "Arc one" --anchor "one" >/dev/null
   run bash "$CLOSE" --kdir "$TEST_KDIR" arc-one

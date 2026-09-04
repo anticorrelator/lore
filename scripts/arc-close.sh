@@ -113,10 +113,13 @@ if [[ -z "$EYE_SETTINGS_FILE" ]]; then
   CLOSE_FRAMEWORK="$(resolve_active_framework 2>/dev/null)" || CLOSE_FRAMEWORK=""
   if [[ -n "$CLOSE_FRAMEWORK" ]]; then
     # Records predating watcher_settings_path were armed through the old
-    # framework settings default (user-global on Claude Code). This fallback is
-    # migration discovery only; new installs use watcher_settings and persist it.
-    EYE_SETTINGS_FILE="$(resolve_harness_install_path settings "$CLOSE_FRAMEWORK" 2>/dev/null)" || EYE_SETTINGS_FILE=""
-    [[ "$EYE_SETTINGS_FILE" == "unsupported" ]] && EYE_SETTINGS_FILE=""
+    # framework settings default. A harness without watcher hooks may use an
+    # unrelated format there, such as Codex's TOML configuration.
+    CLOSE_REWAKE="$(framework_capability turn_boundary_rewake "$CLOSE_FRAMEWORK" 2>/dev/null)" || CLOSE_REWAKE="none"
+    if [[ "$CLOSE_REWAKE" == "full" ]]; then
+      EYE_SETTINGS_FILE="$(resolve_harness_install_path settings "$CLOSE_FRAMEWORK" 2>/dev/null)" || EYE_SETTINGS_FILE=""
+      [[ "$EYE_SETTINGS_FILE" == "unsupported" ]] && EYE_SETTINGS_FILE=""
+    fi
   fi
 fi
 
