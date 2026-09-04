@@ -664,6 +664,7 @@ def summarize_work_evidence(slug, item_dir):
                         "revision": evidence["revision"],
                         "result_summary": evidence["result_summary"],
                         "packet_summary": evidence["packet_summary"],
+                        "review_summary": evidence["review_summary"],
                         "sources": {name: {key: value for key, value in source.items()
                                              if key in ("state", "reason", "path", "sha256")}
                                     for name, source in evidence["sources"].items()}})

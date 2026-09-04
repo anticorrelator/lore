@@ -2221,12 +2221,14 @@ cmd_plan() {
   [[ $# -eq 0 ]] || shift
   case "$subcmd" in
     revise) exec "$SCRIPTS_DIR/plan-revise.sh" "$@" ;;
+    review) exec "$SCRIPTS_DIR/plan-review.sh" "$@" ;;
     --help|-h)
       printf '%s\n' 'Usage: lore plan revise <slug> [--reason TEXT] [--author-role ROLE]' \
         '  [--kind auto|semantic|progress] [--expected-predecessor RID|none]' \
         '  [--decisions FILE] [--json]' \
         '  Decision only: --decision-for RID --decision-id TOKEN --decisions FILE' \
-        '  Recovery: --reconcile repairs adopted items and adopts legacy checksum drift.'
+        '  Recovery: --reconcile repairs adopted items and adopts legacy checksum drift.' \
+        '  review        Prepare immutable review input for a revision, or seal a reviewed attempt (see: lore plan review prepare|seal --help)'
       ;;
     *) echo "Error: unknown plan subcommand '$subcmd'" >&2; return 1 ;;
   esac

@@ -680,6 +680,8 @@ row = next(row for row in json.loads(pathlib.Path(sys.argv[3]).read_text())['wor
 assert row['reader_contract_version'] == '2'
 assert row['result_summary'] == evidence['result_summary']
 assert row['packet_summary'] == evidence['packet_summary']
+assert row['review_summary'] == evidence['review_summary']
+assert row['revision']['review_requirement'] == evidence['revision']['review_requirement']
 assert row['revision'] == evidence['revision']
 assert row['sources']['reports']['sha256'] == evidence['sources']['reports']['sha256']
 assert row['result_summary'][0]['freshness']['state'] == 'unknown'

@@ -119,7 +119,7 @@ def read_ledger(path, root, versions=None, *, select=None, prefix=None):
     return result
 
 
-def read_directory(path, root, *, reports=False):
+def read_directory(path, root, *, reports=False, versions=None):
     path = Path(path)
     result = envelope(os.path.relpath(path, root))
     result["entries"] = []
@@ -140,7 +140,7 @@ def read_directory(path, root, *, reports=False):
             dirs[:] = sorted(d for d in dirs if not (Path(directory) / d).is_symlink())
             for name in sorted(files):
                 child = Path(directory) / name
-                entry = read_file(child, root, json_file=child.suffix == ".json", versions={"1"})
+                entry = read_file(child, root, json_file=child.suffix == ".json", versions=versions or {"1"})
                 if reports:
                     text = entry.get("content") or ""
                     def header(key):
@@ -514,6 +514,204 @@ def result_freshness(row, revision, criteria, artifacts, item, cache):
             "reasons": sorted(set(stale + unknown))}
 
 
+REVIEW_PURPOSES = {"criterion-adequacy", "integration"}
+REVIEW_EVALUATOR_FIELDS = {"evaluator_locator", "evaluator_template_version", "framework", "model", "final_round"}
+
+
+def review_json(item, relative, expected=None):
+    source = read_file(Path(item) / relative, item, json_file=True, versions={"1", "2"})
+    if source["state"] != "read" or (expected is not None and source["sha256"] != expected):
+        raise ValueError("review artifact unavailable or hash mismatch: " + relative)
+    return source["data"]
+
+
+def validate_review_judgments(data, purpose):
+    if not isinstance(data, dict) or set(data) != {"schema_version", "outcome", "verdict", "reason", "judgments", "dispositions"}:
+        raise ValueError("dispositions must contain only schema_version, outcome, verdict, reason, judgments, dispositions")
+    if type(data["schema_version"]) is not int or data["schema_version"] != 1:
+        raise ValueError("dispositions schema_version must be 1")
+    if data["outcome"] not in {"completed", "failed", "skipped", "needs-decision"}:
+        raise ValueError("invalid review outcome")
+    if not isinstance(data["verdict"], str) or not data["verdict"].strip():
+        raise ValueError("review verdict is required")
+    if data["outcome"] in {"skipped", "needs-decision"}:
+        if not isinstance(data["reason"], str) or not data["reason"].strip():
+            raise ValueError("this review outcome requires a reason")
+    elif data["reason"] is not None:
+        raise ValueError("completed/failed review reason must be null")
+    if not isinstance(data["judgments"], list) or not data["judgments"]:
+        raise ValueError("at least one authored judgment is required")
+    purposes = set()
+    for judgment in data["judgments"]:
+        if not isinstance(judgment, dict) or set(judgment) != {"purpose", "judgment", "rationale", "result_ids"}:
+            raise ValueError("judgments accept purpose, judgment, rationale, result_ids only; command results belong to the executor")
+        if judgment["purpose"] not in REVIEW_PURPOSES or judgment["purpose"] in purposes:
+            raise ValueError("judgment purposes must be distinct supported purposes")
+        purposes.add(judgment["purpose"])
+        if any(not isinstance(judgment[k], str) or not judgment[k].strip() for k in ("judgment", "rationale")):
+            raise ValueError("judgment and rationale must be authored text")
+        ids = judgment["result_ids"]
+        if not isinstance(ids, list) or any(not isinstance(r, str) or not r.strip() for r in ids) or len(ids) != len(set(ids)):
+            raise ValueError("result_ids must be distinct nonempty references")
+    if purpose not in purposes:
+        raise ValueError("judgments must address the prepared purpose")
+    if not isinstance(data["dispositions"], list):
+        raise ValueError("dispositions must be an array")
+    for disposition in data["dispositions"]:
+        if not isinstance(disposition, dict) or set(disposition) != {"finding", "disposition", "reason"} or any(
+                not isinstance(v, str) or not v.strip() for v in disposition.values()):
+            raise ValueError("each disposition requires authored finding, disposition, reason")
+    return data
+
+
+def validate_review_evaluator(data):
+    if not isinstance(data, dict) or set(data) != REVIEW_EVALUATOR_FIELDS:
+        raise ValueError("evaluator manifest must declare exactly " + ", ".join(sorted(REVIEW_EVALUATOR_FIELDS)))
+    if any(not isinstance(data[k], str) or not data[k].strip() for k in REVIEW_EVALUATOR_FIELDS - {"final_round"}):
+        raise ValueError("evaluator identity fields must be nonempty text")
+    if not re.fullmatch(r"[0-9a-f]{12}", data["evaluator_template_version"]):
+        raise ValueError("evaluator template version must be 12 lowercase hex")
+    if type(data["final_round"]) is not int or data["final_round"] < 1:
+        raise ValueError("final_round must be a positive integer")
+    return data
+
+
+def review_prepared(item, attempt):
+    if not isinstance(attempt, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", attempt):
+        raise ValueError("invalid review attempt id")
+    base = "reviews/" + attempt
+    prepared = review_json(item, base + "/prepared.json")
+    if prepared.get("schema_version") != 1 or prepared.get("record_type") != "review-input" or prepared.get("attempt_id") != attempt:
+        raise ValueError("invalid prepared review identity")
+    if prepared.get("ceremony") not in {"spec-design", "spec-post-plan"} or prepared.get("purpose") not in REVIEW_PURPOSES:
+        raise ValueError("invalid prepared ceremony or purpose")
+    if not isinstance(prepared.get("revision_id"), str) or not re.fullmatch(r"[0-9a-f]{12}", prepared["revision_id"]):
+        raise ValueError("invalid prepared revision")
+    for name, filename in (("plan", "plan.md"), ("tasks", "tasks.json"), ("anchor", "anchor.md")):
+        if prepared.get(name + "_path") != base + "/" + filename:
+            raise ValueError("invalid prepared snapshot reference")
+        source = read_file(Path(item) / prepared[name + "_path"], item)
+        if source["state"] != "read" or source["sha256"] != prepared.get(name + "_sha256"):
+            raise ValueError("prepared " + name + " snapshot hash mismatch")
+    history = read_ledger(Path(item) / "revisions.jsonl", item, {"1"})
+    validate_records(history, "revisions")
+    if history["state"] != "read":
+        raise ValueError("review revision history unavailable")
+    row = next((r for r in history["rows"] if r.get("record_type", "revision") == "revision" and r.get("revision_id") == prepared["revision_id"]), None)
+    if row is None or any(row.get(k + "_sha256") != prepared[k + "_sha256"] for k in ("plan", "tasks")):
+        raise ValueError("prepared snapshot does not match committed revision")
+    source = prepared.get("source_identity")
+    if prepared["purpose"] == "integration" and (not isinstance(source, dict) or source.get("state") != "read" or not source.get("head") or not source.get("digest")):
+        raise ValueError("integration review requires frozen source identity")
+    return prepared
+
+
+def review_sealed(item, attempt):
+    prepared = review_prepared(item, attempt)
+    base = "reviews/" + attempt
+    sealed = review_json(item, base + "/sealed/seal.json")
+    if sealed.get("schema_version") != 1 or sealed.get("record_type") != "review-seal" or sealed.get("attempt_id") != attempt:
+        raise ValueError("invalid review seal identity")
+    if any(sealed.get(k) != prepared[k] for k in ("revision_id", "ceremony", "purpose")):
+        raise ValueError("review seal does not match prepared identity")
+    for name, path in (("prepared", base + "/prepared.json"), ("output", base + "/sealed/output.md"),
+                       ("disposition_ledger", base + "/sealed/dispositions.json"),
+                       ("cited_results", base + "/sealed/cited-results.json")):
+        if sealed.get(name + "_path") != path:
+            raise ValueError("invalid seal artifact reference")
+        source = read_file(Path(item) / path, item)
+        if source["state"] != "read" or source["sha256"] != sealed.get(name + "_sha256"):
+            raise ValueError("sealed " + name + " hash mismatch")
+    judgments = validate_review_judgments(review_json(item, sealed["disposition_ledger_path"]), prepared["purpose"])
+    validate_review_evaluator(sealed.get("evaluator"))
+    frozen = review_json(item, sealed["cited_results_path"])
+    ids = sorted({rid for j in judgments["judgments"] for rid in j["result_ids"]})
+    if frozen.get("schema_version") != 1 or frozen.get("result_ids") != ids or not isinstance(frozen.get("results"), list) or sorted(
+            r.get("row", {}).get("result_id", "") for r in frozen["results"]) != ids:
+        raise ValueError("frozen result citations differ from review judgments")
+    return prepared, sealed, judgments
+
+
+def review_evidence(item, attempt):
+    prepared, sealed, judgments = review_sealed(item, attempt)
+    path = "reviews/" + attempt + "/sealed/seal.json"
+    manifest = {"schema_version": 2, **sealed["evaluator"], "revision_id": prepared["revision_id"],
+                "purpose": prepared["purpose"], "source_plan_sha256": prepared["plan_sha256"],
+                "source_tasks_sha256": prepared["tasks_sha256"],
+                "disposition_ledger_sha256": sealed["disposition_ledger_sha256"],
+                "review_path": path, "review_sha256": sha256((Path(item) / path).read_bytes())}
+    return manifest, prepared, sealed, judgments
+
+
+def review_projection(item, root, revision, sources):
+    summary = []
+    attempts = sorted({Path(e["path"]).relative_to(Path(item).relative_to(root)).parts[1]
+                       for e in sources["reviews"]["entries"]
+                       if len(Path(e["path"]).relative_to(Path(item).relative_to(root)).parts) >= 3})
+    attempts = sorted(set(attempts) | {r["attempt_id"] for r in sources["outcomes"]["rows"]
+                                     if str(r.get("schema_version")) == "2" and isinstance(r.get("attempt_id"), str)})
+    for attempt in attempts:
+        if attempt.startswith("."):
+            continue
+        row = {"attempt_id": attempt, "state": "unreadable", "reason": None,
+               "revision_id": None, "purpose": None, "ceremony": None,
+               "binding": {"state": "unknown", "reason": "review-input-unavailable"},
+               "result_ids": [], "outcomes": [], "prepared_path": "reviews/" + attempt + "/prepared.json"}
+        try:
+            if not (item / "reviews" / attempt / "prepared.json").exists():
+                row.update(state="missing", reason="prepared-review-unavailable")
+                summary.append(row)
+                continue
+            prepared = review_prepared(item, attempt)
+            row.update({k: prepared[k] for k in ("revision_id", "purpose", "ceremony")})
+            row.update(binding=binding(prepared, revision), state="unsealed", reason="review-output-not-sealed")
+            if (item / "reviews" / attempt / "sealed").exists():
+                _, sealed, judgments = review_sealed(item, attempt)
+                row.update(state="sealed", reason=None, seal_path="reviews/" + attempt + "/sealed/seal.json",
+                           outcome=judgments["outcome"], verdict=judgments["verdict"],
+                           execution_evidence="cited" if any(j["result_ids"] for j in judgments["judgments"]) else "none",
+                           result_ids=sorted({rid for j in judgments["judgments"] for rid in j["result_ids"]}))
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            row.update(state="unreadable", reason=str(exc))
+        summary.append(row)
+    return summary
+
+
+def _review_requirement_projection(history, revision):
+    head = revision.get("head")
+    result = {"state": "absent", "reason": "no-revision", "value": None,
+              "revision_id": None, "decision_id": None, "inherited_from_revision": None}
+    if history["state"] not in {"read", "absent"}:
+        result.update(state="unreadable", reason=history["reason"])
+    elif head:
+        states = {}
+        for row in history["rows"]:
+            rid = row["revision_id"]
+            if row.get("record_type", "revision") == "revision":
+                inherited = row.get("inherited_from_revision")
+                source = states.get(inherited, {}) if "review_requirement" not in row.get("decision_overrides", {}) else {}
+                states[rid] = {"state": "read", "reason": None, "value": row.get("review_requirement"),
+                               "revision_id": source.get("revision_id", rid), "decision_id": source.get("decision_id"),
+                               "inherited_from_revision": inherited if source else None}
+            elif "review_requirement" in row and rid in states:
+                states[rid].update(value=row["review_requirement"], revision_id=rid,
+                                   decision_id=row.get("decision_id"), inherited_from_revision=None)
+        result = states[head["revision_id"]]
+        value = result["value"]
+        if not isinstance(value, dict) or value.get("disposition") not in {"required", "not-required", "pending"} or any(
+                (not isinstance(value.get(k), str) or not value[k].strip()) and not (k == "by" and value.get("disposition") == "pending" and value.get(k) is None) for k in ("by", "note")):
+            result.update(state="unreadable", reason="missing-or-invalid-authored-review-requirement")
+    return result
+
+
+def review_requirement_projection(history, revision):
+    try:
+        return _review_requirement_projection(history, revision)
+    except (KeyError, TypeError, ValueError):
+        return {"state": "unreadable", "reason": "invalid-authored-review-requirement",
+                "value": None, "revision_id": None, "decision_id": None, "inherited_from_revision": None}
+
+
 def project(item_dir, knowledge_dir):
     item, root = Path(item_dir).absolute(), Path(knowledge_dir).absolute()
     tasks = read_file(item / "tasks.json", root, json_file=True, versions={"1"})
@@ -533,7 +731,7 @@ def project(item_dir, knowledge_dir):
         "packets": read_ledger(root / "_packets" / "packets.jsonl", root, {"1", "2"},
                                select=lambda row: row.get("work_item") == item.name),
         "outcomes": read_ledger(item / "execution-log.md", root, {"1", "2"}, prefix="Spec-outcome-record: "),
-        "reviews": read_directory(item / "reviews", root),
+        "reviews": read_directory(item / "reviews", root, versions={"1", "2"}),
         "reports": read_directory(item / "worker-reports", root, reports=True),
         "claims": read_ledger(item / "task-claims.jsonl", root),
         "bundle": read_file(item / "retro-bundle.json", root, json_file=True, versions={"0"}),
@@ -562,6 +760,10 @@ def project(item_dir, knowledge_dir):
         if any(a["state"] != "read" for a in artifacts):
             revision.update(publication_state="incomplete", reason="revision-snapshot-unavailable")
     revision["dispatch"] = dispatch_projection(revisions, item, root)
+    revision["review_requirement"] = review_requirement_projection(revisions, revision)
+    review_summary = review_projection(item, root, revision, sources)
+    if any(r["state"] == "unreadable" for r in review_summary):
+        mark(sources["reviews"], "unreadable", "invalid-review-artifacts")
     for entry in sources["reviews"]["entries"]:
         if isinstance(entry.get("data"), dict) and entry["data"].get("revision_id"):
             entry["binding"] = binding(entry["data"], revision)
@@ -586,6 +788,24 @@ def project(item_dir, knowledge_dir):
                 record["receipt"] = "delivered" if row.get("delivery_stage") == "delivered" else "unknown"
                 if index in source["invalid_rows"]:
                     record["binding"] = {"state": "invalid", "reason": "invalid-packet-attribution"}
+            if name == "outcomes":
+                if str(row.get("schema_version")) == "1":
+                    record["binding"] = {"state": "legacy-unbound", "reason": "schema-1-outcome"}
+                elif str(row.get("schema_version")) == "2":
+                    try:
+                        manifest, prepared, _, judgments = review_evidence(item, row.get("attempt_id"))
+                        if row.get("evidence") != manifest or any(row.get(k) != prepared[k] for k in ("revision_id", "ceremony", "purpose")) or any(
+                                row.get(k) != judgments[k] for k in ("outcome", "verdict", "reason")):
+                            raise ValueError("outcome differs from sealed review")
+                        artifacts.extend(references(prepared, item, root))
+                        artifacts.extend(references(manifest, item, root))
+                    except (ValueError, OSError, TypeError, KeyError) as exc:
+                        record["binding"] = {"state": "invalid", "reason": str(exc)}
+                        mark(source, "unreadable", "invalid-bound-outcome")
+                for review in review_summary:
+                    if review["attempt_id"] == row.get("attempt_id"):
+                        review["outcomes"].append({"outcome_id": row.get("outcome_id"), "outcome": row.get("outcome"),
+                                                   "binding": record["binding"]})
             if name == "results":
                 invalid = index in source["invalid_rows"]
                 freshness = ({"state": "unknown", "reasons": ["invalid-result-record"]} if invalid else
@@ -605,7 +825,7 @@ def project(item_dir, knowledge_dir):
         for summary in latest.values():
             summary["freshness"] = {"state": "unknown", "reasons": ["result-history-" + sources["results"]["state"]]}
     return {"schema_version": EVIDENCE_SCHEMA_VERSION, "reader_contract_version": READER_CONTRACT_VERSION,
-            "sources": sources, "revision": revision,
+            "sources": sources, "revision": revision, "review_summary": review_summary,
             "packet_summary": [{"packet_id": row.get("packet_id"), "task_id": row.get("task_id"),
                                 "dispatch_attempt_id": row.get("dispatch_attempt_id"),
                                 "revision_id": row.get("revision_id"),

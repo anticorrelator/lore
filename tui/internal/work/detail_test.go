@@ -475,6 +475,9 @@ func TestCanonicalEvidenceAndDeletion(t *testing.T) {
 	if string(canonicalCLI) != string(canonicalGo) || detail.ReaderContractVersion != "2" {
 		t.Fatal("TUI evidence differs from shared projection")
 	}
+	if !strings.Contains(string(detail.Evidence), "review_summary") || !strings.Contains(string(detail.Evidence), "review_requirement") {
+		t.Fatal("TUI omitted shared review summaries")
+	}
 	if !strings.Contains(string(detail.Evidence), "code-unavailable") {
 		t.Fatalf("unknown code freshness omitted: %s", detail.Evidence)
 	}
@@ -524,5 +527,54 @@ func TestEvidenceReaderUnavailable(t *testing.T) {
 	loadEvidence(d, t.TempDir(), t.TempDir())
 	if !strings.Contains(string(d.Evidence), `"state":"unreadable"`) {
 		t.Fatalf("reader failure disappeared: %s", d.Evidence)
+	}
+}
+
+func TestCanonicalReviewDecisions(t *testing.T) {
+	kdir, item, repo := evidenceFixture(t)
+	t.Setenv("LORE_KNOWLEDGE_DIR", kdir)
+	cmd := exec.Command("bash", "-c", `REPO_DIR="$1"
+source "$REPO_DIR/tests/helpers/packet_revision.bash"
+packet_revision_fixture "$2" fixture
+rid=$(jq -r '.revision_id' "$2/tasks.json")
+bash "$REPO_DIR/scripts/plan-review.sh" prepare fixture --attempt-id review-ui --revision "$rid" --ceremony spec-post-plan --purpose criterion-adequacy >/dev/null
+printf '\nNew reviewed scope.\n' >> "$2/plan.md"
+bash "$REPO_DIR/scripts/plan-revise.sh" fixture >/dev/null`, "review-fixture", repo, item)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("review fixture: %s: %v", out, err)
+	}
+	detail, err := LoadWorkItemDetail(filepath.Join(kdir, "_work"), "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command("python3", "-B", filepath.Join(repo, "scripts", "work-evidence.py"), "--item-dir", item, "--knowledge-dir", kdir).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fromCLI, fromGo map[string]any
+	if err := json.Unmarshal(output, &fromCLI); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(detail.Evidence, &fromGo); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"review_summary", "revision"} {
+		want, _ := json.Marshal(fromCLI[key])
+		got, _ := json.Marshal(fromGo[key])
+		if string(want) != string(got) {
+			t.Fatalf("TUI changed shared %s", key)
+		}
+	}
+	review := fromGo["review_summary"].([]any)[0].(map[string]any)
+	if review["state"] != "unsealed" || review["binding"].(map[string]any)["state"] != "stale" {
+		t.Fatalf("review history lost: %#v", review)
+	}
+	revision := fromGo["revision"].(map[string]any)
+	obligation := revision["review_requirement"].(map[string]any)
+	if obligation["state"] != "read" || obligation["value"].(map[string]any)["disposition"] != "pending" {
+		t.Fatalf("pending review obligation lost: %#v", obligation)
+	}
+	if len(revision["dispatch"].(map[string]any)["blocked"].(map[string]any)) == 0 {
+		t.Fatal("TUI lost missing authored dispatch decision")
 	}
 }

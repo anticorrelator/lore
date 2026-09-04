@@ -6,6 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
+ORIGINAL_ARGS=("$@")
 REF=""; SLUG=""; CEREMONY=""; ADVISOR=""; ATTEMPT_ID=""; OUTCOME=""; VERDICT=""
 EVIDENCE_FILE=""; REASON=""; JSON_MODE=0
 
@@ -96,23 +97,51 @@ ARCHIVED=$(printf '%s\n' "$RESOLVED" | sed -n '2p')
 
 KDIR=$(resolve_knowledge_dir)
 ITEM_DIR="$KDIR/_work/$SLUG"
+# Serialize collision checking with filing; the existing log writer still owns the file.
+if [[ "${LORE_SPEC_OUTCOME_LOCK_ITEM:-}" != "$ITEM_DIR" ]]; then
+  exec python3 - "$ITEM_DIR" "$SCRIPT_DIR/spec-outcome.sh" "${ORIGINAL_ARGS[@]}" <<'LOCKPY'
+import fcntl, os, subprocess, sys
+item, script = sys.argv[1:3]
+fd = os.open(item, os.O_RDONLY)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    env = dict(os.environ, LORE_SPEC_OUTCOME_LOCK_ITEM=item)
+    raise SystemExit(subprocess.call(["bash", script, *sys.argv[3:]], env=env))
+finally:
+    os.close(fd)
+LOCKPY
+fi
 LOG_FILE="$ITEM_DIR/execution-log.md"
 ROWS_FILE="$KDIR/_scorecards/rows.jsonl"
 LEAD_TEMPLATE_VERSION=$(bash "$SCRIPT_DIR/template-version.sh" "$LORE_REPO_DIR/skills/spec/SKILL.md" 2>/dev/null) \
   || emit refused "" "spec lead template version could not be resolved" 1
 
 set +e
-VALIDATED=$(python3 - "$EVIDENCE_FILE" "$SLUG" "$CEREMONY" "$ADVISOR" "$ATTEMPT_ID" "$OUTCOME" "$VERDICT" "$REASON" <<'PY'
-import hashlib, json, sys
-path, slug, ceremony, advisor, attempt, outcome, verdict, reason = sys.argv[1:]
+VALIDATED=$(python3 - "$EVIDENCE_FILE" "$SLUG" "$CEREMONY" "$ADVISOR" "$ATTEMPT_ID" "$OUTCOME" "$VERDICT" "$REASON" "$SCRIPT_DIR" "$ITEM_DIR" <<'PY'
+import hashlib, json, sys, runpy
+path, slug, ceremony, advisor, attempt, outcome, verdict, reason, scripts, item = sys.argv[1:]
 allowed = {"schema_version", "evaluator_locator", "evaluator_template_version", "framework", "model",
            "final_round", "disposition_ledger_sha256", "source_plan_sha256"}
 try: evidence = json.load(open(path, encoding="utf-8"))
 except Exception as exc:
     print(f"invalid evidence manifest: {exc}", file=sys.stderr); raise SystemExit(1)
+bound = isinstance(evidence, dict) and type(evidence.get("schema_version")) is int and evidence["schema_version"] == 2
+prepared = None
+if bound:
+    try:
+        api = runpy.run_path(scripts + "/work-evidence.py")
+        expected, prepared, sealed, judgments = api["review_evidence"](item, attempt)
+        if evidence != expected:
+            raise ValueError("evidence manifest differs from sealed review hashes or identity")
+        if ceremony != prepared["ceremony"] or any(judgments[k] != v for k, v in (
+                ("outcome", outcome), ("verdict", verdict), ("reason", reason or None))):
+            raise ValueError("ceremony or outcome differs from sealed review judgment")
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        print(str(exc), file=sys.stderr); raise SystemExit(1)
+    allowed |= {"revision_id", "purpose", "source_tasks_sha256", "review_path", "review_sha256"}
 if not isinstance(evidence, dict) or set(evidence) != allowed:
     print("evidence manifest must declare exactly: " + ", ".join(sorted(allowed)), file=sys.stderr); raise SystemExit(1)
-if evidence.get("schema_version") != 1:
+if not bound and evidence.get("schema_version") != 1:
     print("evidence schema_version must be the integer 1", file=sys.stderr); raise SystemExit(1)
 if outcome in {"completed", "failed"}:
     missing = [k for k in allowed - {"schema_version"} if evidence.get(k) is None or evidence.get(k) == ""]
@@ -136,8 +165,10 @@ def canonical(value): return json.dumps(value, ensure_ascii=False, sort_keys=Tru
 evidence_hash = hashlib.sha256(canonical(evidence)).hexdigest()
 semantic = {"slug":slug, "ceremony":ceremony, "advisor":advisor, "attempt_id":attempt,
             "outcome":outcome, "verdict":verdict, "evidence_manifest_sha256":evidence_hash}
+if bound:
+    semantic.update(reason=reason or None, revision_id=prepared["revision_id"], purpose=prepared["purpose"])
 outcome_id = hashlib.sha256(canonical(semantic)).hexdigest()
-record = {"schema_version":1, "outcome_id":outcome_id, **semantic,
+record = {"schema_version":2 if bound else 1, "outcome_id":outcome_id, **semantic,
           "reason": reason or None, "evidence": evidence}
 print(json.dumps({"outcome_id":outcome_id, "evidence_hash":evidence_hash,
                   "record":record}, ensure_ascii=False, separators=(",", ":")))

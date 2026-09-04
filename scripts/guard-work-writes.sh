@@ -35,4 +35,9 @@ if [[ "$FILE_PATH" == */_work/*/revisions.jsonl || "$FILE_PATH" == */_work/*/rev
   exit 0
 fi
 
+if [[ "$FILE_PATH" == */_work/*/reviews/* ]]; then
+  printf '{"decision":"block","reason":"Use lore plan review prepare or seal for immutable review evidence."}\n'
+  exit 0
+fi
+
 printf '{"decision":"approve"}\n'

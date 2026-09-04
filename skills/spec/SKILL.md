@@ -336,10 +336,77 @@ Synthesis organizes the itemized findings; it does not narrate over them. Keep e
 
 ### Ceremony outcome filing contract
 
-Apply this contract after every terminal evaluator attempt in Steps 5a and 5.5. The evaluator supplies evidence; the lead decides the normalized protocol outcome. Never parse evaluator prose into a disposition.
+Apply this contract after every terminal evaluator attempt in Steps 5a and 5.5. The evaluator supplies evidence; the lead decides the normalized protocol outcome. Never parse evaluator prose into a disposition. The two registered ceremonies stay distinct: an attempt names `spec-design` or `spec-post-plan`, and a review prepared under one ceremony never files under the other. Filing an outcome confers no authority the protocol did not already grant: acceptance, checkoff, and close keep their existing owners, and no review outcome gates dispatch on its own.
 
-1. Choose exactly one outcome: `completed | failed | skipped | needs-decision`. Preserve the evaluator's raw verdict byte-for-byte as `--verdict`. `skipped` and `needs-decision` require a reason; `completed` and `failed` forbid one. A registered evaluator that cannot execute is a filed `skipped` attempt, never a silent omission.
-2. Build a version-1 evidence manifest with exactly these fields:
+**Bound attempts (schema 2).** When the plan has a committed revision, prepare the review input before the evaluator reads anything. The reviewer then judges exact immutable bytes, and the filed outcome records the revision that was actually reviewed rather than whatever head is live at filing time.
+
+1. Prepare the review input:
+
+   ```bash
+   lore plan review prepare "$SLUG" --attempt-id "$ATTEMPT_ID" \
+     --ceremony <spec-design|spec-post-plan> \
+     --revision "$REVISION_ID" \
+     --purpose <criterion-adequacy|integration> \
+     [--execution-worktree "$WORKTREE"]
+   ```
+
+   Prepare copies the named revision's plan and tasks, together with the original anchor, under `reviews/<attempt-id>/` and publishes the directory in one rename. `--revision` may name a historical revision explicitly; that revision is the one the outcome binds to. The `integration` purpose requires an execution worktree that can still be inspected, because its code identity is frozen into the prepared record. That digest covers the execution worktree and nothing outside it: earlier review evidence enters the identity only when it lives inside that worktree, and the knowledge store is not code identity. The one exclusion is this attempt's own review directory, listed under `source_exclusions`. A prepare interrupted before the rename leaves no accepted attempt and a retry may publish; once the rename lands, the accepted attempt stays and an exact retry verifies it. An exact retry compares the request against the committed record and keeps the frozen source identity even when the worktree has moved on. Direct the evaluator at the prepared copies, never at the live plan.
+
+2. The reviewer authors judgments and findings. Criterion adequacy and integration against the original anchor are the reviewer's to judge. Task acceptance and execution records are not: acceptance stays with the lead, and execution evidence lives in results. The reviewer may read code, run commands, and describe in prose what a command does, but the ledger has no fields for executor state, exit codes, or argv, and a judgment never creates a result row; execution evidence the review relies on is cited by result ID. Each purpose gets its own judgment, the prepared purpose must appear, and an integration review may add a separate criterion-adequacy judgment. An empty `result_ids` list states that no execution evidence was cited; it is not a claim that none was consulted, so the judgment prose should say what the citations leave unverified.
+
+3. The lead normalizes. Choose exactly one outcome: `completed | failed | skipped | needs-decision`. Preserve the evaluator's raw verdict byte-for-byte. `skipped` and `needs-decision` require a reason; `completed` and `failed` forbid one. Record this normalization in the dispositions ledger before sealing, so the sealed bytes carry the decision beside the review it was made from:
+
+   ```json
+   {
+     "schema_version": 1,
+     "outcome": "completed",
+     "verdict": "<raw evaluator verdict>",
+     "reason": null,
+     "judgments": [
+       {"purpose": "criterion-adequacy", "judgment": "<authored>", "rationale": "<authored>", "result_ids": []}
+     ],
+     "dispositions": [
+       {"finding": "<text>", "disposition": "<text>", "reason": "<text>"}
+     ]
+   }
+   ```
+
+   The evaluator manifest names exactly the evaluator identity and nothing else:
+
+   ```json
+   {
+     "evaluator_locator": "<skill or agent locator>",
+     "evaluator_template_version": "<12 lowercase hex>",
+     "framework": "<active framework>",
+     "model": "<effective evaluator model>",
+     "final_round": 2
+   }
+   ```
+
+4. Seal once, then extract the evidence manifest to a file outside `reviews/`:
+
+   ```bash
+   lore plan review seal "$SLUG" --attempt-id "$ATTEMPT_ID" \
+     --output "$REVIEW_OUTPUT" --dispositions "$DISPOSITIONS_JSON" \
+     --evaluator-manifest "$EVALUATOR_JSON" > "$SEAL_RESULT"
+   jq '.evidence_manifest' "$SEAL_RESULT" > "$EVIDENCE_JSON"
+   ```
+
+   Seal checks every cited result ID against its canonical results row and refuses missing, ambiguous, or malformed IDs and wrong output hashes. It freezes the cited rows with their full output envelopes into `cited-results.json`; those copies are review evidence, never result appends, and later replays verify the frozen citations instead of rereading live results. The whole sealed directory publishes in one rename. A failure before that rename leaves no accepted artifact and a retry may publish; after it, a retry verifies the immutable bytes and refuses a changed output, ledger, or evaluator under the same attempt id. The manifest is returned in the seal's JSON result and is not written under the review; extracting it is the caller's only step, and no identity field is hand-composed. The schema 2 manifest carries the evaluator fields plus the review path and hash, the revision, the purpose, and source hashes derived from the sealed bytes.
+
+5. File the already-made judgment with the unchanged arguments:
+
+   ```bash
+   lore spec outcome "$SLUG" \
+     --ceremony <spec-design|spec-post-plan> \
+     --advisor "$EVALUATOR" --attempt-id "$ATTEMPT_ID" \
+     --outcome "$NORMALIZED_OUTCOME" --verdict "$RAW_VERDICT" \
+     --evidence-manifest "$EVIDENCE_JSON" [--reason "$REASON"]
+   ```
+
+   With a schema 2 manifest, filing revalidates the complete prepared, sealed, and citation bytes and checks that ceremony, attempt, outcome, verdict, and reason match the sealed ledger; a conflicting identity is refused rather than reconciled. The recorded revision is the reviewed one, not the live head. Exact replay is idempotent; reusing an attempt id for different semantics is a refused collision. `needs-decision` may return `status=partial` when its auxiliary resolution row fails to append; exact retry recovers only that sink without duplicating the outcome.
+
+**Unbound attempts (schema 1).** When no prepared revision exists, because the item predates revision publishing or because a registered evaluator could not run, file with the version-1 manifest instead:
 
    ```json
    {
@@ -354,18 +421,7 @@ Apply this contract after every terminal evaluator attempt in Steps 5a and 5.5. 
    }
    ```
 
-   `completed` and `failed` require every evidence field. `skipped` and `needs-decision` keep every field present but may use explicit `null` when evidence is unavailable. Missing fields are errors, never defaults.
-3. File the already-made judgment:
-
-   ```bash
-   lore spec outcome "$SLUG" \
-     --ceremony <spec-design|spec-post-plan> \
-     --advisor "$EVALUATOR" --attempt-id "$ATTEMPT_ID" \
-     --outcome "$NORMALIZED_OUTCOME" --verdict "$RAW_VERDICT" \
-     --evidence-manifest "$EVIDENCE_JSON" [--reason "$REASON"]
-   ```
-
-   Exact replay is idempotent; reusing an attempt id for different semantics is a refused collision. `needs-decision` may return `status=partial` when its auxiliary resolution row fails to append; exact retry recovers only that sink.
+   `completed` and `failed` require every evidence field. `skipped` and `needs-decision` keep every field present but may use explicit `null` when evidence is unavailable. Missing fields are errors, never defaults. Schema 1 outcomes stay legacy and unbound in every reader because no revision was recorded when the evidence was filed. A registered evaluator that cannot execute is a filed `skipped` attempt, never a silent omission.
 
 ### Step 5a: Design ceremony evaluation
 

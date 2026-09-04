@@ -113,17 +113,12 @@ def mixed(store, code):
          "revision_id": second["revision_id"], "dispatch_attempt_id": "dispatch-1", "source_head": "a" * 40,
          "delivery_stage": "delivered", "delivered_entries": [], "empty_reason": "No relevant entries"},
         {"schema_version": "2", "packet_id": "other", "work_item": "another", "delivery_stage": "assembled"}])
-    review = {"schema_version": 1, "ceremony": "spec-design", "attempt_id": "review-1",
-              "revision_id": first["revision_id"], "purpose": "design", "plan_sha256": first["plan_sha256"],
-              "tasks_sha256": first["tasks_sha256"], "input_path": "reviews/review-1/input.md",
-              "output_path": "reviews/review-1/output.md", "disposition_path": "reviews/review-1/disposition.json"}
-    write(item / "reviews/review-1/manifest.json", review)
-    write(item / "reviews/review-1/input.md", "Immutable review input\n")
-    write(item / "reviews/review-1/output.md", "The two criteria cover separate requirements.\n")
-    write(item / "reviews/review-1/disposition.json", {"findings": [], "decision": "accepted"})
+    prepared_review(item, first)
+    manifest, judgments = sealed_review(item)
     old_outcome = {"schema_version": 1, "outcome_id": "old-outcome", "ceremony": "spec-post-plan", "outcome": "completed"}
-    outcome = {"schema_version": 2, "outcome_id": "outcome-1", "ceremony": "spec-design", "attempt_id": "review-1",
-               "revision_id": first["revision_id"], "outcome": "completed", "review_path": "reviews/review-1/manifest.json"}
+    outcome = {"schema_version": 2, "outcome_id": "outcome-1", "ceremony": "spec-post-plan", "attempt_id": "review-1",
+               "revision_id": first["revision_id"], "purpose": "criterion-adequacy", "outcome": "completed",
+               "verdict": "PASS", "reason": None, "evidence": manifest}
     write(item / "execution-log.md", "## 2026-09-04T20:00:00Z | source: spec-verb\nLegacy log delivery\n" +
           "\n".join("Spec-outcome-record: " + json.dumps(row) for row in [old_outcome, outcome]) + "\n")
     write(item / "worker-reports/deep/report.md", "Report-schema: 1\nReport-id: report-1\nStatus: completed\n\nFull report body.\n")
@@ -423,3 +418,117 @@ def test_packet_source_identity_requires_explicit_string_or_null(mixed, source_h
     assert packets['state'] == ('read' if valid else 'unreadable')
     if not valid:
         assert packets['records'][0]['binding']['state'] == 'invalid'
+
+
+def prepared_review(item, row, attempt="review-1"):
+    base = f"reviews/{attempt}"
+    paths = {"plan": "plan.md", "tasks": "tasks.json", "anchor": "anchor.md"}
+    values = {"plan": (item / row["plan_path"]).read_text(),
+              "tasks": (item / row["tasks_path"]).read_text(), "anchor": "Original intent.\n"}
+    prepared = {"schema_version": 1, "record_type": "review-input", "attempt_id": attempt,
+                "revision_id": row["revision_id"], "ceremony": "spec-post-plan", "purpose": "criterion-adequacy",
+                "source_identity": None}
+    for key, filename in paths.items():
+        write(item / base / filename, values[key])
+        prepared[key + "_path"] = base + "/" + filename
+        prepared[key + "_sha256"] = sha256((item / base / filename).read_bytes())
+    write(item / base / "prepared.json", prepared)
+    return prepared
+
+
+def test_prepared_review_and_obligation_stay_on_authored_revision(store):
+    root, item = store
+    first = revision(item, "111111111111")
+    prepared_review(item, first)
+    write(item / "plan.md", "A later plan.\n")
+    second = revision(item, "222222222222", first["revision_id"])
+    decision = {"schema_version": 1, "record_type": "decision", "revision_id": second["revision_id"],
+                "decision_id": "review-required", "review_requirement": {
+                    "disposition": "required", "by": "designer", "note": "New scope needs review.", "prior_review_refs": []}}
+    ledger(item / "revisions.jsonl", [first, second, decision])
+    view = project(item, root)
+    review = view["review_summary"][0]
+    assert review["state"] == "unsealed"
+    assert review["revision_id"] == first["revision_id"]
+    assert review["binding"]["state"] == "stale"
+    assert view["revision"]["review_requirement"]["decision_id"] == "review-required"
+    assert view["revision"]["dispatch"]["blocked"]["task-1"] == "missing authored dispatch decision"
+    write(item / "reviews/review-1/plan.md", "tampered")
+    assert project(item, root)["review_summary"][0]["state"] == "unreadable"
+
+
+def test_schema_two_outcome_cannot_claim_binding_without_sealed_artifacts(store):
+    root, item = store
+    row = revision(item, "111111111111")
+    ledger(item / "revisions.jsonl", [row])
+    outcome = {"schema_version": 2, "attempt_id": "absent", "revision_id": row["revision_id"]}
+    write(item / "execution-log.md", "Spec-outcome-record: " + json.dumps(outcome) + "\n")
+    view = project(item, root)
+    assert view["sources"]["outcomes"]["state"] == "unreadable"
+    assert view["sources"]["outcomes"]["records"][0]["binding"]["state"] == "invalid"
+
+
+def test_automatic_pending_review_obligation_is_readable_without_authorship(store):
+    root, item = store
+    row = revision(item, "111111111111")
+    row["review_requirement"] = {"disposition": "pending", "by": None, "note": "Authored decision pending.", "prior_review_refs": []}
+    ledger(item / "revisions.jsonl", [row])
+    view = project(item, root)
+    obligation = view["revision"]["review_requirement"]
+    assert obligation["state"] == "read"
+    assert obligation["value"]["disposition"] == "pending"
+    assert obligation["value"]["by"] is None
+    assert obligation["revision_id"] == row["revision_id"]
+    assert view["revision"]["dispatch"]["blocked"]
+
+
+def sealed_review(item):
+    base = "reviews/review-1"
+    prepared = json.loads((item / base / "prepared.json").read_text())
+    judgments = {"schema_version": 1, "outcome": "completed", "verdict": "PASS", "reason": None,
+                 "judgments": [{"purpose": "criterion-adequacy", "judgment": "adequate", "rationale": "Two requirements covered.", "result_ids": []}],
+                 "dispositions": []}
+    evaluator = {"evaluator_locator": "skill://review", "evaluator_template_version": "a" * 12,
+                 "framework": "codex", "model": "review-model", "final_round": 1}
+    frozen = {"schema_version": 1, "result_ids": [], "execution_evidence": "none", "results": []}
+    sealed = {"schema_version": 1, "record_type": "review-seal", "attempt_id": "review-1",
+              "revision_id": prepared["revision_id"], "ceremony": prepared["ceremony"], "purpose": prepared["purpose"],
+              "evaluator": evaluator, "prepared_path": base + "/prepared.json",
+              "prepared_sha256": sha256((item / base / "prepared.json").read_bytes())}
+    for key, filename, value in (("output", "output.md", "The two criteria cover separate requirements.\n"),
+                                 ("disposition_ledger", "dispositions.json", judgments), ("cited_results", "cited-results.json", frozen)):
+        path = base + "/sealed/" + filename
+        write(item / path, value)
+        sealed[key + "_path"] = path
+        sealed[key + "_sha256"] = sha256((item / path).read_bytes())
+    write(item / base / "sealed/seal.json", sealed)
+    return API["review_evidence"](item, "review-1")[0], judgments
+
+
+def test_progress_review_requirement_preserves_actual_decision_provenance(store):
+    root, item = store
+    first = revision(item, "111111111111")
+    value = {"disposition": "required", "by": "designer", "note": "Need the original scope reviewed.", "prior_review_refs": []}
+    decision = {"schema_version": 1, "record_type": "decision", "revision_id": first["revision_id"],
+                "decision_id": "original-obligation", "review_requirement": value}
+    second = revision(item, "222222222222", first["revision_id"])
+    second.update(kind="progress", inherited_from_revision=first["revision_id"], review_requirement=value)
+    later = {**decision, "decision_id": "later-old-revision-decision", "review_requirement": {
+        "disposition": "not-required", "by": "designer", "note": "Later assessment of old scope.", "prior_review_refs": []}}
+    ledger(item / "revisions.jsonl", [first, decision, second, later])
+    projected = project(item, root)["revision"]["review_requirement"]
+    assert projected["value"] == value
+    assert projected["revision_id"] == first["revision_id"]
+    assert projected["decision_id"] == "original-obligation"
+    assert projected["inherited_from_revision"] == first["revision_id"]
+
+
+@pytest.mark.parametrize("value", [None, {}, {"disposition": []}, {"disposition": "required", "by": None, "note": "Missing author."}])
+def test_malformed_review_obligation_is_visible_without_losing_other_evidence(store, value):
+    root, item = store
+    row = revision(item, "111111111111")
+    row["review_requirement"] = value
+    ledger(item / "revisions.jsonl", [row])
+    view = project(item, root)
+    assert view["revision"]["review_requirement"]["state"] == "unreadable"
+    assert view["sources"]["tasks"]["state"] == "read"
