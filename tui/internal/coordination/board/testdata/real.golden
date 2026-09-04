@@ -1,8 +1,8 @@
- ✓         1     fix session-start delivery race  done
-   ✓       2     capture settlement experiment  done
- ✓ │       6     capture hardening: sibling-store refusal  done
- ╭─✓─╮     3     /spec full: orientation rewrite  done
- │ ● │     7     implement rewrite; STOP at owner gate  in-flight
- │   │ ✓   8     age-gate transient modal wakes  done
- ○   │     4     vocabulary sweep: courtroom register  pending
-     ○     5     protocol-layer sorting  pending · ro
+ ✓         1     fix session-start delivery race                                                                    done
+   ✓       2     capture settlement experiment                                                                      done
+ ✓ │       6     capture hardening: sibling-store refusal                                                           done
+ ╭─✓─╮     3     /spec full: orientation rewrite                                                                    done
+ │ ● │     7     implement rewrite; STOP at owner gate                                                           running
+ │   │ ✓   8     age-gate transient modal wakes                                                                     done
+ ○   │     4     vocabulary sweep: courtroom register                                                             queued
+     ○     5     protocol-layer sorting                                                                           queued

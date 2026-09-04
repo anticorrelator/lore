@@ -1,9 +1,9 @@
- ✓─╮─╮     a     schema  done
- ● │ │     b     left leg  in-flight
- │ ◈ │     c     right leg  blocked-on:b
- ○─╯ │     d     diamond join  pending · waits: b, c
-     │ ○   e     refers to ghost  pending · ⚠ dep?zz
-     ✕     f     abandoned path  dropped
- ?         g     novel status  parked-for-review · ro
-   ○       y     cycle two  pending · waits: x · ⟳ cycle
-   ○       x     cycle one  pending · waits: y · ⟳ cycle
+ ✓─╮─╮     a     schema                                                                                             done
+ ● │ │     b     left leg                                                                                        running
+ │ ◈ │     c     right leg                                                                                  waiting on b
+ ○─╯ │     d     diamond join                                                                            waiting on b, c
+     │ ○   e     refers to ghost                                                              queued · ⚠ unknown step zz
+     ✕     f     abandoned path                                                                                  dropped
+ ?         g     novel status                                                                          parked-for-review
+   ○       y     cycle two                                                                        waiting on x · ⟳ cycle
+   ○       x     cycle one                                                                        waiting on y · ⟳ cycle

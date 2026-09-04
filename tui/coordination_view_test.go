@@ -461,6 +461,7 @@ func arcStoreFixture(t *testing.T, workDir, arc, status string, ledger, report *
 func TestReadArcLedgerReadsTheStoreAndNeverDerivesClosure(t *testing.T) {
 	ledger := "## Brief\n\nthe brief\n"
 	report := "# Report\n\nthe report\n"
+	digest := "# Decisions\n\nthe digest\n"
 	early := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
 	late := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
 
@@ -478,12 +479,15 @@ func TestReadArcLedgerReadsTheStoreAndNeverDerivesClosure(t *testing.T) {
 	t.Run("both documents arrive in one message", func(t *testing.T) {
 		msg := run(t, func(t *testing.T, wd string) {
 			arcStoreFixture(t, wd, "arc-a", "closed", &ledger, &report, early, late)
+			if err := os.WriteFile(filepath.Join(coordination.ArcDir(wd, "arc-a"), "digest.md"), []byte(digest), 0o644); err != nil {
+				t.Fatal(err)
+			}
 		})
-		if msg.report != report || msg.brief != "the brief" || !msg.briefFound {
-			t.Errorf("both documents must be delivered in one message: %+v", msg)
+		if msg.report != report || msg.digest != digest || msg.brief != "the brief" || !msg.briefFound {
+			t.Errorf("all body documents must be delivered in one message: %+v", msg)
 		}
-		if !msg.reportFound {
-			t.Errorf("a present report must be reported found: %+v", msg)
+		if !msg.reportFound || !msg.digestFound {
+			t.Errorf("present body documents must be reported found: %+v", msg)
 		}
 	})
 
@@ -505,6 +509,24 @@ func TestReadArcLedgerReadsTheStoreAndNeverDerivesClosure(t *testing.T) {
 		})
 		if msg.reportFound {
 			t.Errorf("an arc without report.md must report no report: %+v", msg)
+		}
+	})
+
+	t.Run("missing digest stays distinct from unreadable", func(t *testing.T) {
+		missing := run(t, func(t *testing.T, wd string) {
+			arcStoreFixture(t, wd, "arc-a", "active", &ledger, nil, early, time.Time{})
+		})
+		if missing.digestFound {
+			t.Fatalf("missing digest must remain absent: %+v", missing)
+		}
+		unreadable := run(t, func(t *testing.T, wd string) {
+			arcStoreFixture(t, wd, "arc-a", "active", &ledger, nil, early, time.Time{})
+			if err := os.Mkdir(filepath.Join(coordination.ArcDir(wd, "arc-a"), "digest.md"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if !unreadable.digestFound || unreadable.digest != "" {
+			t.Fatalf("unreadable digest must remain present with no body: %+v", unreadable)
 		}
 	})
 
@@ -543,8 +565,8 @@ func TestLateLedgerAppendNeverFlipsClosure(t *testing.T) {
 	}
 	m, _ = updateModel(t, m, scan)
 	m, _ = updateModel(t, m, readArcLedgerCmd(workDir, "arc-a")())
-	if out := stripANSI(m.coordinationDetail.View()); !strings.Contains(out, "Final streams") || !strings.Contains(out, "Report") || strings.Contains(out, "the brief") {
-		t.Fatalf("a closed arc must render its final DAG before the report without returning to the Brief:\n%s", out)
+	if out := stripANSI(m.coordinationDetail.View()); !strings.Contains(out, "Since you left") || !strings.Contains(out, "Final streams") || strings.Contains(out, "Report") || strings.Contains(out, "the brief") {
+		t.Fatalf("a closed arc must render its digest state and final DAG without inline Report or Brief:\n%s", out)
 	}
 
 	// The sanctioned late append: the ledger is now the newest file on disk.
@@ -560,8 +582,8 @@ func TestLateLedgerAppendNeverFlipsClosure(t *testing.T) {
 	m, _ = updateModel(t, m, scan2)
 	m, _ = updateModel(t, m, readArcLedgerCmd(workDir, "arc-a")())
 	out := stripANSI(m.coordinationDetail.View())
-	if !strings.Contains(out, "Final streams") || !strings.Contains(out, "Report") || strings.Contains(out, "the brief") {
-		t.Errorf("a late ledger append must not flip a closed arc back to its Brief:\n%s", out)
+	if !strings.Contains(out, "Since you left") || !strings.Contains(out, "Final streams") || strings.Contains(out, "Report") || strings.Contains(out, "the brief") {
+		t.Errorf("a late ledger append must not flip a closed arc back to inline Report or Brief:\n%s", out)
 	}
 }
 

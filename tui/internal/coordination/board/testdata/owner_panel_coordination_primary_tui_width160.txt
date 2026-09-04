@@ -1,0 +1,5 @@
+ ✓         1     pipe-pane live-mirror spike: capture-pane history + pipe-pane stream splice fidelity, send-keys round-trip, size-neutrality proof          done
+ │ ✓       2     DAG board package: Go renderer of coordinate-status --json stream rows (rails layout, pinned rules from prototype), plus the data layer …  done
+ │ ✓       3     coordination view restructure: landing state, detail-tab collapse (Brief + DAG + ticker; ledger/report as dril…  done · flagged for your review
+ ✓ │       4     live writable drill-in: capture+pipe-pane into the ghostty-backed panel + send-keys write path; retire 5s snapshot mirrors                 done
+ ✓─╯       5     narrow top-level sessions view to non-arc sessions (chat, ad-hoc, orphans); arc-owned sessions navigate via DAG rows                       done

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -18,6 +19,21 @@ import (
 )
 
 const unknown = "unknown"
+
+const marqueeTickInterval = 200 * time.Millisecond
+
+// MarqueeTickMsg advances one visible coordination board sweep. Arc and
+// generation keep an already-scheduled tick from moving a newly selected arc.
+type MarqueeTickMsg struct {
+	arc        string
+	generation uint64
+}
+
+func marqueeTick(arc string, generation uint64) tea.Cmd {
+	return tea.Tick(marqueeTickInterval, func(time.Time) tea.Msg {
+		return MarqueeTickMsg{arc: arc, generation: generation}
+	})
+}
 
 type DetailMode string
 
@@ -74,9 +90,16 @@ type DetailModel struct {
 	brief        string
 	briefFound   bool
 
-	report      string
-	reportFound bool
-	closed      bool
+	report       string
+	reportFound  bool
+	digest       string
+	digestFound  bool
+	digestLoaded bool
+	closed       bool
+
+	marqueePhase      int
+	marqueeTicking    bool
+	marqueeGeneration uint64
 
 	packets    map[string]string
 	packetRef  string
@@ -126,7 +149,13 @@ func (m *DetailModel) SetArc(arc string) {
 	m.briefFound = false
 	m.report = ""
 	m.reportFound = false
+	m.digest = ""
+	m.digestFound = false
+	m.digestLoaded = false
 	m.closed = false
+	m.marqueePhase = 0
+	m.marqueeTicking = false
+	m.marqueeGeneration++
 	m.packets = nil
 	m.packetRef = ""
 	m.packetBody = ""
@@ -164,11 +193,15 @@ func (m *DetailModel) SetReport(report string, found bool) {
 	m.refresh()
 }
 
+func (m *DetailModel) SetDigest(digest string, found bool) {
+	m.digest = digest
+	m.digestFound = found
+	m.digestLoaded = true
+	m.refresh()
+}
+
 func (m *DetailModel) SetClosed(closed bool) {
 	m.closed = closed
-	if closed && m.mode == ModeReport {
-		m.mode = ModePrimary
-	}
 	m.refresh()
 }
 
@@ -269,8 +302,42 @@ func (m *DetailModel) rebuildRendered() {
 		rows[i].Gate = explicit(rows[i].Gate)
 		rows[i].Status = explicit(rows[i].Status)
 		rows[i].Verdict = explicit(rows[i].Verdict)
+		sessions := m.liveSessions(pointerValue(rows[i].WorkItem))
+		rows[i].Live = len(sessions) == 1 && sessions[0].Tmux != ""
 	}
-	m.rendered = board.RenderRows(rows, m.contentWidth())
+	// renderBoard adds the two-cell selection prefix outside the board package.
+	m.rendered = board.RenderRows(rows, m.contentWidth()-2, m.marqueePhase)
+}
+
+func (m DetailModel) hasOverflow() bool {
+	for _, row := range m.rendered {
+		if row.Overflow {
+			return true
+		}
+	}
+	return false
+}
+
+// StartMarquee arms one tick only when this visible detail has moving labels.
+// The tick handler re-arms the next beat after rendering it.
+func (m *DetailModel) StartMarquee() tea.Cmd {
+	if m.mode != ModePrimary || !m.hasOverflow() {
+		m.StopMarquee()
+		return nil
+	}
+	if m.marqueeTicking {
+		return nil
+	}
+	m.marqueeTicking = true
+	m.marqueeGeneration++
+	return marqueeTick(m.arc, m.marqueeGeneration)
+}
+
+func (m *DetailModel) StopMarquee() {
+	if m.marqueeTicking {
+		m.marqueeGeneration++
+	}
+	m.marqueeTicking = false
 }
 
 func (m DetailModel) contentWidth() int {
@@ -329,11 +396,28 @@ func (m DetailModel) render() string {
 
 func (m DetailModel) renderClosed() string {
 	var b strings.Builder
+	b.WriteString(m.renderDigest())
+	b.WriteString("\n\n")
 	b.WriteString(sectionRule("Final streams", m.contentWidth()))
 	b.WriteString("\n")
 	b.WriteString(m.renderBoard())
-	b.WriteString("\n\n")
-	b.WriteString(m.renderDocument("Report", m.report, m.reportFound, "report.md"))
+	return b.String()
+}
+
+func (m DetailModel) renderDigest() string {
+	var b strings.Builder
+	b.WriteString(sectionRule("Since you left", m.contentWidth()))
+	b.WriteString("\n")
+	switch {
+	case !m.digestLoaded:
+		b.WriteString(style.Dim.Render("digest.md unknown — document is still loading"))
+	case !m.digestFound:
+		b.WriteString(style.Dim.Render("no decisions recorded yet"))
+	case strings.TrimSpace(m.digest) == "":
+		b.WriteString(style.Dim.Render("digest.md unknown — document could not be read"))
+	default:
+		b.WriteString(render.Markdown(m.digest, m.contentWidth()))
+	}
 	return b.String()
 }
 
@@ -354,6 +438,8 @@ func (m DetailModel) renderDocument(label, body string, found bool, filename str
 
 func (m DetailModel) renderLive() string {
 	var b strings.Builder
+	b.WriteString(m.renderDigest())
+	b.WriteString("\n\n")
 	b.WriteString(sectionRule("Streams", m.contentWidth()))
 	b.WriteString("\n")
 	b.WriteString(m.renderBoard())
@@ -389,15 +475,12 @@ func (m DetailModel) renderBoard() string {
 	var b strings.Builder
 	for i, rendered := range m.rendered {
 		row, _ := m.rowByID(rendered.StreamID)
-		for lineIndex, renderedLine := range rendered.Lines {
+		for _, renderedLine := range rendered.Lines {
 			prefix := "  "
-			if !m.closed && i == m.rowCursor && lineIndex == 0 {
+			if !m.closed && i == m.rowCursor {
 				prefix = "▸ "
 			}
 			b.WriteString(prefix + styleBoardLine(renderedLine, row.Gate, !m.closed) + "\n")
-		}
-		if !m.closed {
-			b.WriteString("    " + style.Dim.Render(m.targetSummary(row)) + "\n")
 		}
 	}
 	return strings.TrimSuffix(b.String(), "\n")
@@ -527,6 +610,7 @@ func (m *DetailModel) openCurrent() tea.Cmd {
 	packet := pointerValue(row.ReviewPacket)
 	if gateRow(row.Gate) {
 		if body, readable := m.packets[packet]; readable {
+			m.StopMarquee()
 			m.mode = ModePacket
 			m.packetRef = packet
 			m.packetBody = body
@@ -554,9 +638,11 @@ func (m *DetailModel) openCurrent() tea.Cmd {
 func (m *DetailModel) openMode(mode DetailMode) {
 	switch mode {
 	case ModeLedger:
+		m.StopMarquee()
 		m.mode = mode
 	case ModeReport:
-		if !m.closed && m.reportFound {
+		if m.reportFound {
+			m.StopMarquee()
 			m.mode = mode
 		}
 	}
@@ -571,7 +657,18 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.refresh()
-		return m, nil
+		return m, m.StartMarquee()
+	case MarqueeTickMsg:
+		if msg.arc != m.arc || msg.generation != m.marqueeGeneration || !m.marqueeTicking {
+			return m, nil
+		}
+		m.marqueeTicking = false
+		if !m.hasOverflow() {
+			return m, nil
+		}
+		m.marqueePhase++
+		m.refresh()
+		return m, m.StartMarquee()
 	case tea.KeyPressMsg:
 		if m.InDrillIn() {
 			switch msg.String() {
@@ -580,7 +677,7 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 				m.packetRef, m.packetBody = "", ""
 				m.viewport.SetYOffset(0)
 				m.refresh()
-				return m, nil
+				return m, m.StartMarquee()
 			}
 		} else if !m.closed {
 			switch msg.String() {

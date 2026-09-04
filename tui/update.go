@@ -605,6 +605,15 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case indexPollTickMsg:
 		return m.handleIndexPollTick()
 
+	case coordination.MarqueeTickMsg:
+		if m.state != stateCoordination {
+			m.coordinationDetail.StopMarquee()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.coordinationDetail, cmd = m.coordinationDetail.Update(msg)
+		return m, cmd
+
 	case indexMtimeCheckedMsg:
 		return m.handleIndexMtimeChecked(msg)
 
@@ -740,6 +749,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			// Enter the sessions workspace. Focus-conjunct guarded so a
 			// terminal-focused session still forwards `v` to its PTY.
 			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
+				if m.state == stateCoordination {
+					m.coordinationDetail.StopMarquee()
+				}
 				m.state = stateSessions
 				m.terminalMode = false
 				m.focusedPanel = panelLeft
@@ -943,6 +955,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		case "K":
 			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.prevState = m.state
+				if m.state == stateCoordination {
+					m.coordinationDetail.StopMarquee()
+				}
 				if m.state == stateSessions {
 					m.closeSessionMirror()
 				}
@@ -964,6 +979,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 		case "f":
 			if (m.state == stateWork || m.state == stateSessions || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
+				if m.state == stateCoordination {
+					m.coordinationDetail.StopMarquee()
+				}
 				if m.state == stateSessions {
 					m.closeSessionMirror()
 				}
@@ -986,6 +1004,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m, cmd
 			}
 			if (m.state == stateSessions || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
+				if m.state == stateCoordination {
+					m.coordinationDetail.StopMarquee()
+				}
 				if m.state == stateSessions {
 					m.closeSessionMirror()
 				}
@@ -1050,7 +1071,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.terminalMode = false
 				m.focusedPanel = panelLeft
 				m.returnToCoordination = false
-				return m, tea.Batch(m.scanArcStoreCmd(), m.sessionsRefreshCmd())
+				return m, tea.Batch(m.scanArcStoreCmd(), m.sessionsRefreshCmd(), m.coordinationDetail.StartMarquee())
 			}
 		case "p":
 			if m.state == stateFollowUps && m.focusedPanel == panelRight && !m.terminalMode {
@@ -1662,6 +1683,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		if km, ok := msg.(tea.KeyPressMsg); ok && m.focusedPanel == panelLeft {
 			switch km.String() {
 			case "esc", "h":
+				m.coordinationDetail.StopMarquee()
 				m.state = stateWork
 				m.terminalMode = false
 				m.focusedPanel = panelLeft

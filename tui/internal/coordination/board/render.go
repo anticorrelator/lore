@@ -1,6 +1,7 @@
 package board
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 
@@ -15,12 +16,12 @@ type RenderedLine struct {
 	MetadataAt int
 }
 
-// RenderedRow pairs one stream identity with all of its physical lines. A
-// wrapped description therefore remains one navigation target.
+// RenderedRow pairs one stream identity with its single physical line.
 type RenderedRow struct {
 	Arc      string
 	StreamID string
 	Lines    []RenderedLine
+	Overflow bool
 }
 
 type graph struct {
@@ -37,7 +38,7 @@ type graph struct {
 // cells. It is a pure projection: repeated calls with the same inputs return
 // the same lines and retain no lane state.
 func Render(rows []Row, width int) []string {
-	rendered := RenderRows(rows, width)
+	rendered := RenderRows(rows, width, 0)
 	var lines []string
 	for _, row := range rendered {
 		for _, line := range row.Lines {
@@ -47,9 +48,22 @@ func Render(rows []Row, width int) []string {
 	return lines
 }
 
+type preparedRow struct {
+	row       Row
+	rail      string
+	laneCount int
+}
+
+const (
+	marqueeStartDwellTicks = 15 // 3s at the detail model's 200ms cadence
+	marqueeEndDwellTicks   = 10 // 2s at the detail model's 200ms cadence
+)
+
 // RenderRows returns identities in exactly the same topological order as the
 // formatted lines, so interactive callers never reconstruct renderer order.
-func RenderRows(rows []Row, width int) []RenderedRow {
+// Phase is elapsed 200ms ticks in the current marquee sweep. The renderer
+// retains no lane or scroll state.
+func RenderRows(rows []Row, width, phase int) []RenderedRow {
 	g := buildGraph(rows)
 	order := g.topologicalOrder()
 	if width <= 0 {
@@ -66,7 +80,7 @@ func RenderRows(rows []Row, width int) []RenderedRow {
 	lanes := []string{}
 	freedOnPreviousRow := map[int]bool{}
 	placed := map[string]bool{}
-	out := make([]RenderedRow, 0, len(order))
+	prepared := make([]preparedRow, 0, len(order))
 
 	for _, id := range order {
 		row := g.byID[id]
@@ -104,10 +118,7 @@ func RenderRows(rows []Row, width int) []RenderedRow {
 		}
 
 		rail := drawRail(lanes, col, incoming, spawned, statusGlyph(row.Status))
-		out = append(out, RenderedRow{
-			Arc: row.Arc, StreamID: id,
-			Lines: formatLines(rail, len(lanes), row, g, width),
-		})
+		prepared = append(prepared, preparedRow{row: row, rail: rail, laneCount: len(lanes)})
 		placed[id] = true
 
 		freedOnPreviousRow = map[int]bool{}
@@ -117,7 +128,34 @@ func RenderRows(rows []Row, width int) []RenderedRow {
 			}
 		}
 	}
+
+	maxOverflow := 0
+	for _, item := range prepared {
+		_, overflow := formatLine(item.rail, item.laneCount, item.row, g, width, 0)
+		maxOverflow = max(maxOverflow, overflow)
+	}
+	progress := marqueeProgress(phase, maxOverflow)
+	out := make([]RenderedRow, 0, len(prepared))
+	for _, item := range prepared {
+		line, overflow := formatLine(item.rail, item.laneCount, item.row, g, width, progress)
+		out = append(out, RenderedRow{
+			Arc: item.row.Arc, StreamID: item.row.StreamID,
+			Lines: []RenderedLine{line}, Overflow: overflow > 0,
+		})
+	}
 	return out
+}
+
+func marqueeProgress(phase, maxOverflow int) int {
+	if phase < 0 || maxOverflow <= 0 {
+		return 0
+	}
+	cycle := marqueeStartDwellTicks + maxOverflow + marqueeEndDwellTicks
+	position := phase % cycle
+	if position <= marqueeStartDwellTicks {
+		return 0
+	}
+	return min(position-marqueeStartDwellTicks, maxOverflow)
 }
 
 func uniqueRows(rows []Row) []Row {
@@ -338,101 +376,136 @@ func indexSet(indexes []int) map[int]bool {
 	return set
 }
 
-func formatLines(rail string, laneCount int, row Row, g graph, width int) []RenderedLine {
+var (
+	wikilinkPattern        = regexp.MustCompile(`\[\[[^\]]+\]\]`)
+	emptyLinkParensPattern = regexp.MustCompile(`\(\s*(?:,\s*)*\)`)
+)
+
+func displayLabel(label string) string {
+	label = wikilinkPattern.ReplaceAllString(label, "")
+	label = emptyLinkParensPattern.ReplaceAllString(label, "")
+	return strings.Join(strings.Fields(label), " ")
+}
+
+func formatLine(rail string, laneCount int, row Row, g graph, width, offset int) (RenderedLine, int) {
 	gutterWidth := max(2*laneCount-1, 8)
 	prefix := " " + runewidth.FillRight(rail, gutterWidth) + "  " +
 		runewidth.FillRight(row.StreamID, 5) + " "
 	if runewidth.StringWidth(prefix) >= width {
-		prefix = runewidth.Truncate(prefix, max(0, width-1), "")
+		return RenderedLine{Text: runewidth.Truncate(prefix, max(0, width), ""), MetadataAt: -1}, 0
 	}
-	indent := strings.Repeat(" ", runewidth.StringWidth(prefix))
-	textWidth := max(1, width-runewidth.StringWidth(prefix))
-
-	metadata := []string{row.Status}
-	if row.Tree == "read-only" {
-		metadata = append(metadata, "ro")
-	}
-	if row.Gate != "" && row.Gate != "notify" {
-		metadata = append(metadata, row.Gate)
-	}
-	if row.Verdict != "" && row.Verdict != "—" {
-		metadata = append(metadata, row.Verdict)
-	}
-	if waits := unresolvedDependencies(row, g.byID); len(waits) > 0 {
-		metadata = append(metadata, "waits: "+strings.Join(waits, ", "))
-	}
-	for _, dependency := range g.dangling[row.StreamID] {
-		metadata = append(metadata, "⚠ dep?"+dependency)
-	}
-	if g.cyclic[row.StreamID] {
-		metadata = append(metadata, "⟳ cycle")
-	}
-	suffix := strings.Join(metadata, " · ")
-
-	labels := wrapCells(row.Label, textWidth)
-	lines := make([]RenderedLine, 0, len(labels)+1)
-	for i, label := range labels {
-		lead := indent
-		if i == 0 {
-			lead = prefix
-		}
-		lines = append(lines, RenderedLine{Text: lead + label, MetadataAt: -1})
-	}
-	last := &lines[len(lines)-1]
+	prefixWidth := runewidth.StringWidth(prefix)
+	suffix := strings.Join(statusWords(row, g), " · ")
 	if suffix == "" {
-		return lines
+		window := max(0, width-prefixWidth)
+		label, overflow := marqueeWindow(displayLabel(row.Label), window, offset)
+		return RenderedLine{Text: prefix + label, MetadataAt: -1}, overflow
 	}
-	if runewidth.StringWidth(last.Text)+2+runewidth.StringWidth(suffix) <= width {
-		last.Text += "  "
-		last.MetadataAt = len(last.Text)
-		last.Text += suffix
-		return lines
+
+	remaining := width - prefixWidth
+	suffixWidth := runewidth.StringWidth(suffix)
+	if remaining <= 3 {
+		suffix = runewidth.Truncate(suffix, remaining, "…")
+		return RenderedLine{Text: prefix + suffix, MetadataAt: len(prefix)}, 0
 	}
-	for _, metadataLine := range wrapCells(suffix, textWidth) {
-		lines = append(lines, RenderedLine{
-			Text: indent + metadataLine, MetadataAt: len(indent),
-		})
+	if suffixWidth+3 > remaining {
+		suffix = runewidth.Truncate(suffix, max(1, remaining-3), "…")
+		suffixWidth = runewidth.StringWidth(suffix)
 	}
-	return lines
+	labelWidth := max(1, remaining-suffixWidth-2)
+	label, overflow := marqueeWindow(displayLabel(row.Label), labelWidth, offset)
+	lead := prefix + runewidth.FillRight(label, labelWidth) + "  "
+	return RenderedLine{Text: lead + suffix, MetadataAt: len(lead)}, overflow
 }
 
-// wrapCells keeps every display cell while preferring word boundaries. Words
-// wider than the available column are split by runewidth.Wrap, which keeps the
-// result deterministic for wide Unicode glyphs as well as ASCII.
-func wrapCells(text string, width int) []string {
-	if text == "" {
-		return []string{""}
+func statusWords(row Row, g graph) []string {
+	var words []string
+	waits := unresolvedDependencies(row, g.byID)
+	switch {
+	case row.Status == "done":
+		words = append(words, "done")
+		switch row.Verdict {
+		case "", "—", "-", "full":
+		case "partial":
+			words = append(words, "partial")
+		case "none":
+			words = append(words, "nothing landed")
+		default:
+			words = append(words, row.Verdict)
+		}
+	case row.Status == "in-flight":
+		words = append(words, "running")
+	case row.Status == "pending" && len(waits) > 0:
+		words = append(words, "waiting on "+strings.Join(waits, ", "))
+	case row.Status == "pending":
+		words = append(words, "queued")
+	case row.Status == "blocked-on-input":
+		words = append(words, "needs you")
+	case strings.HasPrefix(row.Status, "blocked-on:"):
+		ref := strings.TrimSpace(strings.TrimPrefix(row.Status, "blocked-on:"))
+		if ref == "" {
+			ref = "unknown"
+		}
+		words = append(words, "waiting on "+ref)
+	case row.Status == "dropped":
+		words = append(words, "dropped")
+	default:
+		words = append(words, row.Status)
 	}
-	var lines []string
-	for _, paragraph := range strings.Split(text, "\n") {
-		words := strings.Fields(paragraph)
-		if len(words) == 0 {
-			lines = append(lines, "")
-			continue
-		}
-		current := ""
-		for _, word := range words {
-			candidate := word
-			if current != "" {
-				candidate = current + " " + word
-			}
-			if runewidth.StringWidth(candidate) <= width {
-				current = candidate
-				continue
-			}
-			if current != "" {
-				lines = append(lines, current)
-				current = ""
-			}
-			parts := strings.Split(runewidth.Wrap(word, width), "\n")
-			lines = append(lines, parts[:len(parts)-1]...)
-			current = parts[len(parts)-1]
-		}
-		if current != "" {
-			lines = append(lines, current)
+
+	switch row.Gate {
+	case "", "notify":
+	case "hold":
+		words = appendUnique(words, "needs you")
+	case "flag":
+		words = appendUnique(words, "flagged for your review")
+	default:
+		words = appendUnique(words, row.Gate)
+	}
+	for _, dependency := range g.dangling[row.StreamID] {
+		words = append(words, "⚠ unknown step "+dependency)
+	}
+	if g.cyclic[row.StreamID] {
+		words = append(words, "⟳ cycle")
+	}
+	if row.Live {
+		words = appendUnique(words, "live")
+	}
+	return words
+}
+
+func appendUnique(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
 		}
 	}
-	return lines
+	return append(values, value)
+}
+
+func marqueeWindow(text string, width, offset int) (string, int) {
+	textWidth := runewidth.StringWidth(text)
+	if textWidth <= width {
+		return text, 0
+	}
+	if width <= 0 {
+		return "", textWidth
+	}
+	if width == 1 {
+		return "…", textWidth
+	}
+	overflow := textWidth - width + 1
+	offset = min(max(0, offset), overflow)
+	switch offset {
+	case 0:
+		return runewidth.Truncate(text, width-1, "") + "…", overflow
+	case overflow:
+		return "…" + runewidth.TruncateLeft(text, textWidth-(width-1), ""), overflow
+	default:
+		middle := runewidth.TruncateLeft(text, offset, "")
+		middle = runewidth.Truncate(middle, max(0, width-2), "")
+		return "…" + middle + "…", overflow
+	}
 }
 
 func unresolvedDependencies(row Row, byID map[string]Row) []string {

@@ -1,8 +1,8 @@
+[Since you left]
+A decision the owner can scan.
 [Streams]
-▸ ✓ a First done · hold · full
-work item item-a · packet packets/a.md · target work item
-○ b Second pending · flag · unknown
-work item item-b · packet unknown · target work item
+▸ ✓ a First done · needs you
+○ b Second queued · flagged for your review
 [Brief]
 Compact brief
 [Recent activity]
