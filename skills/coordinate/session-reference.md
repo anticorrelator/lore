@@ -534,6 +534,30 @@ the lifecycle stated in § The role of the skill.
     (§ The ledger; § Verifying and closing; § Close the arc; the template's Step Ledger).
     n=1. Evidence: [[work:coordination-panel-owner-plain-headlines-marquee-r]], design.md.
 
+### Trace-evaluator arc, 2026-09-04
+
+18. **2026-09-04 — the owner opened the first PR of a seven-PR stack and found it about
+    a fifth comment lines, and asked whether the preferences had been applied.** They
+    had been *transmitted*: every brief carried "Comments minimal and reader-facing;
+    no lore/plan vocabulary in source." What did not travel was the preference's test
+    — default no comment, delete-by-default for correctness narration — so three
+    implement and fix streams each wrote tidy, short justifications and the conformance
+    aggregate recorded them as honored on the worker's own reading ("the descriptor's
+    docstring is two lines for eight fields"); the second item's aggregate did not
+    render at all and nothing asked why. The closure-time read the 2026-07-06 owner
+    directive named ("seat reads norm adherence at every stream close") had left the
+    skill on 2026-07-21 when the aggregate's mechanism moved into `/implement`'s
+    close; the mechanism moved, the seat's reading of it did not come along. Two
+    rules: a preference travels as the test it is checked by, never as its title or
+    the seat's paraphrase; and the closure sequence has the seat read a few instances
+    of the exercised preferences against the diff, with an unrendered aggregate as a
+    prompt rather than a pass. Both written as what the seat is positioned to see, not
+    as a gate. Cost of the gap here: one rebase-plus-hygiene worker stream over seven
+    branches (~330 comment lines, ~1,400 test lines to triage) after the arc had
+    closed. *In skill* (§ Dispatching, the five-element paragraph; § Verifying and
+    closing, the closure sequence). n=1. Evidence: arc `trace-project-evaluators`
+    ledger, post-close rows; item 1's `closure-conformance.md` rows 59–93.
+
 ## Shipped verb history
 
 Moved from the SKILL's "Verbs this role wants" evidence log as each want shipped;
