@@ -1989,7 +1989,9 @@ func AttachTerminalCmd(slug, tmuxName, sessionID, harness, knowledgeDir, worktre
 		if err := worktree.ValidateIdentity(context.Background(), identity); err != nil {
 			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse tmux adoption: %w", err)}
 		}
-		managed := worktreeID != "" || executionDir != ""
+		// Recovered ordinary sessions also carry their execution directory. Only
+		// a manager-issued ID marks managed placement, as in the adoption scan.
+		managed := worktreeID != ""
 		var placement worktree.ManagedPlacement
 		if managed {
 			if worktreeID == "" || executionDir == "" {

@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
 	"github.com/anticorrelator/lore/tui/internal/worktree"
@@ -469,11 +471,33 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 		t.Fatalf("dead-target request survived adoption: %v", err)
 	}
 
-	// The attach Cmd re-hosts the survivor: it re-queries the pane PID (the crashed
-	// instance's captured one is gone) and reports the same tmux session.
-	started, ok := work.AttachTerminalCmd("demo", name, "uuid-1", "claude-code", "", "", "", identity, 80, 24)().(work.SessionProcessStartedMsg)
+	// Run the production handler, preserving the recovered ExecutionDir. Calling
+	// AttachTerminalCmd with hand-built empty placement fields hid an ordinary
+	// session being mistaken for a managed one at the final attach boundary.
+	m.width, m.height = 120, 40
+	_, attachCmd := m.handleAdoptionScan(msg)
+	var attachResult tea.Msg
+	var runAttach func(tea.Cmd)
+	runAttach = func(cmd tea.Cmd) {
+		if cmd == nil {
+			return
+		}
+		switch result := cmd().(type) {
+		case tea.BatchMsg:
+			for _, child := range result {
+				runAttach(child)
+			}
+		case work.SessionProcessStartedMsg, work.StreamErrorMsg:
+			attachResult = result
+		}
+	}
+	runAttach(attachCmd)
+	started, ok := attachResult.(work.SessionProcessStartedMsg)
 	if !ok {
-		t.Fatalf("attach did not start; session likely died mid-test")
+		t.Fatalf("attach did not start: %+v", attachResult)
+	}
+	if started.ExecutionDir != identity.CanonicalPath || started.WorktreeID != "" {
+		t.Fatalf("ordinary execution placement changed during attach: %+v", started)
 	}
 	if started.Ptmx != nil {
 		defer started.Ptmx.Close()

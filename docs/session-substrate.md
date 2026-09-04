@@ -67,21 +67,21 @@ One file per live TUI instance at `instances/<name>.json`.
 | &nbsp;&nbsp;`sessions[].pid` | integer \| absent | Direct child process identity, persisted independently of the registry heartbeat so a manager lease can protect a live writer and a crash sweep can prove the owner dead. |
 | &nbsp;&nbsp;`sessions[].request_id` | string \| absent | Spawn-request identity, persisted prospectively so recovery can correlate a terminal row to the exact spawn. Omit-when-empty for human or legacy sessions; never reconstructed from slug, time, type, or journal ordering. |
 | &nbsp;&nbsp;`sessions[].session_id` | string \| absent | Harness transcript-binding id (claude-code `--session-id`), persisted so an adopting instance can still extract token spend at teardown after the original TUI is gone. Omit-when-empty. |
-| &nbsp;&nbsp;`sessions[].harness` | string \| absent | Launch framework the session was spawned under (the spend probe's `--harness`). Omit-when-empty. |
+| &nbsp;&nbsp;`sessions[].harness` | string \| absent | Actual harness stamped at process start and restored on adoption. It selects runtime screen/input/close contracts and the spend probe's `--harness`; the TUI launch default does not change it. Missing legacy metadata cannot authorize harness-specific input. |
 | &nbsp;&nbsp;`sessions[].auto_close` | boolean \| absent | The close-ladder auto-close override carried onto the live session (see [Close-request queue](#close-request-queue)), persisted so it survives adoption. Omit-when-empty: absent defers to `initiator`. |
 | &nbsp;&nbsp;`sessions[].worktree` | object \| absent | Complete [session worktree identity](#session-worktree-identity-and-lifecycle), persisted without projection loss across launch, registry rewrites, teardown, and adoption. Absence marks a legacy row and is unsafe to spawn or adopt. |
 | &nbsp;&nbsp;`sessions[].worktree_id` | string \| absent | Coordinated manager manifest identity. Omit only for an unmanaged/legacy session; when present it travels with `execution_dir` and `worktree`. |
-| &nbsp;&nbsp;`sessions[].execution_dir` | string \| absent | Exact manager-validated child cwd. It is hard placement and must equal the canonical path in the manager row and guard identity. |
+| &nbsp;&nbsp;`sessions[].execution_dir` | string \| absent | Exact child cwd, stamped for ordinary as well as managed sessions. For managed sessions it must also equal the canonical path in the manager row and guard identity. Presence alone does not identify managed placement; `worktree_id` does. |
 | `build_sha` | string \| absent | Build vintage — the short git SHA embedded at build time (`-ldflags`). Absent for `go run`/dev builds and for any binary predating this field. Omit-when-empty. |
 | `build_time` | string \| absent | Build vintage — the **orderable** quantity: the commit's committer-date (release build) or the binary's mtime (dev build), ISO 8601 UTC. Absent for a binary predating this field. Omit-when-empty. This, not `build_sha`, is what `min_vintage` filtering compares against (a SHA has no read-side ordering). |
-| `project_dir` | string \| absent | The instance's project directory, physically resolved (`filepath.Abs` + `EvalSymlinks`) once at startup. Immutable for the process. Omit-when-empty for a binary predating this field. It is the match key a request's `prefer_project_dir` compares against byte-for-byte (both sides resolve physically, so `/tmp`→`/private/tmp` and worktree symlinks match). Not a claim filter — a visibility field only. |
+| `project_dir` | string \| absent | The instance's project directory, physically resolved (`filepath.Abs` + `EvalSymlinks`) once at startup. Immutable for the process. Omit-when-empty for a binary predating this field. It is the match key a request's `prefer_project_dir` compares against byte-for-byte (both sides resolve physically, so `/tmp`→`/private/tmp` and worktree symlinks match). Also the match key for hard `required_project_dir` placement when the request declares a `placement_stance`. |
 | `framework` | string \| absent | The launch framework the TUI resolves for untargeted spawns (`tui_launch_framework` → `ResolveTUILaunchFramework`), refreshed on every full-row write plus an explicit rewrite when the setting is committed. Omit-when-empty for a binary predating this field or when resolution errors. Not a claim filter — framework selection stays the request's `framework` field; this only surfaces the value a coordinator's routing read needs. |
 
 **Routing-visibility fields** (`project_dir`, `framework`) surface a coordinator's
 one-list-read routing tuple (target, framework, model-compat, worktree). Both are
 fully **additive**: a row written by a binary predating them carries neither, and
 `lore session list` renders each absent field as `unknown` (the vintage-fallback
-idiom). Neither is consulted by claim eligibility.
+idiom). `project_dir` participates in required-directory eligibility and soft-preference delay; `framework` reports the launch preference and is not a claim filter.
 
 **Build vintage** stamps a live TUI's build identity onto its row at startup so a
 live-but-outdated instance — registered, claiming, but executing stale semantics —
@@ -336,8 +336,10 @@ If it remains unclaimed past its TTL, the claim-side sweep instead moves it to
 
 Because `framework` is additive, old TUI decoders ignore it. When a
 `--framework` request must not be claimed by a TUI build that predates this
-field, enqueue it with `--min-vintage <feature-sha>` so the existing vintage gate
-filters stale claimers. Prove framework identity at spawn time through the child
+field, `--min-vintage <feature-sha>` filters claimers known to be older. Unknown
+vintage passes, and timestamps do not establish feature inclusion across branches;
+this is a compatibility hint, not a protocol-version guarantee. Prove framework
+identity at spawn time through the child
 environment, `SessionProcessStartedMsg.Harness`, or the live registry row; codex
 `closed` spend rows may remain duration-only and are not the routing proof.
 
