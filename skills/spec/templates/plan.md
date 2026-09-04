@@ -144,7 +144,7 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
      `[depends-on: task-N]`. -->
 - Do not modify: `path/to/file`
 - Output contract: <what this task fixes and later tasks may rely on>
-<!-- optional — executable close criteria for this task; omit the block when the task has none. Replace the example argv below with the check this task owns; the sample is an illustration, not a requirement to create scripts/test.sh -->
+<!-- optional — executable close criteria for this task; omit the block when the task has none. `lore criteria run` executes the published criterion exactly as written, resolved from the immutable revision: argv is a literal argument list with no implicit shell (name one explicitly if the check needs it), cwd is worktree-relative and must resolve inside the execution root, and any change to argv, cwd, timeout, expected exit, or applicability produces a new criterion version. A check that spans several tasks belongs to a named integration task that owns it. A passing result records only that this command exited as expected against a recorded code identity; whether the criterion is adequate for the task and whether the criteria together cover the original anchor remain the reviewer's judgment. Replace the example argv below with the check this task owns; the sample is an illustration, not a requirement to create scripts/test.sh -->
 **Close criteria:**
 ```json
 [

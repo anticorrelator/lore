@@ -578,3 +578,70 @@ bash "$REPO_DIR/scripts/plan-revise.sh" fixture >/dev/null`, "review-fixture", r
 		t.Fatal("TUI lost missing authored dispatch decision")
 	}
 }
+
+func TestRetainedMixedEvidence(t *testing.T) {
+	root := os.Getenv("LORE_EVIDENCE_FIXTURE_ROOT")
+	if root == "" {
+		t.Skip("set LORE_EVIDENCE_FIXTURE_ROOT to inspect the writer-created fixture")
+	}
+	repo, err := filepath.Abs("../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := t.TempDir()
+	if err := os.Symlink(filepath.Join(repo, "scripts"), filepath.Join(runtime, "scripts")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LORE_DATA_DIR", runtime)
+	kdir := filepath.Join(root, "store")
+	t.Setenv("LORE_KNOWLEDGE_DIR", kdir)
+	detail, err := LoadWorkItemDetail(filepath.Join(kdir, "_work"), "mixed-evidence")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(root, "work.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projected struct {
+		Evidence json.RawMessage `json:"evidence"`
+	}
+	if err := json.Unmarshal(body, &projected); err != nil {
+		t.Fatal(err)
+	}
+	var actual, expected any
+	if err := json.Unmarshal(detail.Evidence, &actual); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(projected.Evidence, &expected); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := json.Marshal(actual)
+	b, _ := json.Marshal(expected)
+	if string(a) != string(b) {
+		t.Fatal("TUI evidence differs from the retained public work projection")
+	}
+	var evidence struct {
+		Sources map[string]struct {
+			Rows []map[string]any `json:"rows"`
+		} `json:"sources"`
+	}
+	if err := json.Unmarshal(detail.Evidence, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range evidence.Sources["results"].Rows {
+		id, _ := row["result_id"].(string)
+		path, _ := row["output_path"].(string)
+		body, err := os.ReadFile(filepath.Join(kdir, "_work", "mixed-evidence", path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fmt.Sprintf("%x", sha256.Sum256(body)) != row["output_sha256"] {
+			t.Fatalf("result %s output hash differs", id)
+		}
+		t.Logf("result=%s task=%s criterion=%s packet=%s revision=%s output=%s", id, row["task_id"], row["criterion_id"], row["packet_id"], row["revision_id"], path)
+	}
+	if len(evidence.Sources["results"].Rows) < 2 || !strings.Contains(string(detail.Evidence), "Legacy report acceptance") {
+		t.Fatal("mixed evidence omitted legacy report or immutable results")
+	}
+}

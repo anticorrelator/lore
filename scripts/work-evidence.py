@@ -18,6 +18,7 @@ import sys
 READER_CONTRACT_VERSION = "2"
 EVIDENCE_SCHEMA_VERSION = 1
 CODE_DIGEST_VERSION = "1"
+RESULT_CODE_DIGEST_VERSION = "2"
 GENERATED_RETRO_FILES = {"retro-evidence-pack", "retro-filing"}
 
 
@@ -229,6 +230,10 @@ def validate_records(source, kind):
                 invalid = "invalid-criterion-version"
             elif not isinstance(row.get("state"), str) or row["state"] not in {"pass", "fail", "skipped", "unavailable"}:
                 invalid = "invalid-result-state"
+            elif "execution_sequence" in row and (type(row["execution_sequence"]) is not int or row["execution_sequence"] < 1):
+                invalid = "invalid-execution-sequence"
+            elif "execution_sequence" in row and row["execution_sequence"] in seen and seen[row["execution_sequence"]] != row["result_id"]:
+                invalid = "duplicate-execution-sequence"
             elif row.get("packet_id") and not row.get("dispatch_attempt_id"):
                 invalid = "missing-dispatch-attempt"
             elif not row.get("packet_id") and not row.get("unbound_reason"):
@@ -247,16 +252,19 @@ def validate_records(source, kind):
                 elif any(not isinstance(row.get(k), dict) or any(not row[k].get(field) for field in
                          ("head", "digest", "digest_version", "worktree")) for k in ("source_start", "source_end")):
                     invalid = "missing-passing-code-identity"
+        if kind == "results" and not invalid and "execution_sequence" in row:
+            seen[row["execution_sequence"]] = row["result_id"]
         if invalid:
             source["invalid_rows"].append(index)
             source["errors"].append({"row_index": index, "reason": invalid})
             mark(source, "unreadable", "invalid-" + kind + "-record")
 
 
-def code_identity(worktree, excluded_paths=()):
+def code_identity(worktree, excluded_paths=(), result_exclusion=None):
     """Hash index entries, tracked worktree bytes, and nonignored untracked files."""
+    version = RESULT_CODE_DIGEST_VERSION if result_exclusion else CODE_DIGEST_VERSION
     result = {"state": "unreadable", "reason": "code-unavailable", "worktree": str(worktree),
-              "head": None, "digest": None, "digest_version": CODE_DIGEST_VERSION}
+              "head": None, "digest": None, "digest_version": version}
     root = Path(worktree)
     try:
         root = root.resolve(strict=True)
@@ -268,11 +276,17 @@ def code_identity(worktree, excluded_paths=()):
             return mark(result, "unreadable", "not-a-worktree-root")
         result["head"] = git("rev-parse", "HEAD").decode().strip()
         excluded = [Path(p).resolve() for p in excluded_paths]
+        result_ledger = None
+        if result_exclusion:
+            result_item, result_id = result_exclusion
+            excluded.append((Path(result_item) / "results" / result_id).resolve())
+            result_ledger = (Path(result_item) / "results.jsonl").resolve()
         def omit(path):
             return any(path == p or p in path.parents for p in excluded)
         entries = git("ls-files", "--stage", "-z")
         names = {}
         index = []
+        tracked = set()
         for entry in entries.split(b"\0"):
             if not entry:
                 continue
@@ -281,6 +295,7 @@ def code_identity(worktree, excluded_paths=()):
             if omit(path):
                 continue
             index.append([os.fsdecode(name), metadata.decode()])
+            tracked.add(name)
             names[name] = metadata.split()[0] == b"160000"
         for name in git("ls-files", "--others", "--exclude-standard", "-z").split(b"\0"):
             if name and not omit(root / os.fsdecode(name)):
@@ -295,19 +310,33 @@ def code_identity(worktree, excluded_paths=()):
                 if stat.S_ISLNK(info.st_mode):
                     record["symlink"] = os.readlink(path)
                 elif submodule:
-                    record["submodule"] = code_identity(path)
+                    record["submodule"] = code_identity(path, excluded_paths, result_exclusion)
                     if record["submodule"]["state"] != "read":
                         return mark(result, "unreadable", "submodule-unavailable")
                     record["submodule"].pop("worktree", None)
                 elif stat.S_ISREG(info.st_mode):
-                    record["sha256"] = sha256(path.read_bytes())
+                    raw = path.read_bytes()
+                    if path == result_ledger:
+                        # Remove only this publication; malformed and older evidence still participates.
+                        retained = []
+                        for line in raw.splitlines(keepends=True):
+                            try:
+                                row = json.loads(line)
+                            except (ValueError, UnicodeError):
+                                row = None
+                            if not isinstance(row, dict) or row.get("result_id") != result_id:
+                                retained.append(line)
+                        raw = b"".join(retained)
+                        if not raw and name not in tracked:
+                            continue
+                    record["sha256"] = sha256(raw)
                 else:
                     return mark(result, "unreadable", "unsupported-code-file")
             except FileNotFoundError:
                 record["deleted"] = True
             files.append(record)
         result.update(state="read", reason=None,
-                      digest=sha256(canonical({"version": CODE_DIGEST_VERSION, "index": index, "files": files})))
+                      digest=sha256(canonical({"version": version, "index": index, "files": files})))
     except (OSError, subprocess.SubprocessError, ValueError):
         pass
     return result
@@ -488,14 +517,16 @@ def result_freshness(row, revision, criteria, artifacts, item, cache):
         if any(start.get(key) != end.get(key) for key in ("head", "digest", "digest_version")):
             stale.append("code-changed-during-execution")
         worktree = end.get("worktree")
-        if not worktree or end.get("digest_version") != CODE_DIGEST_VERSION:
+        if not worktree or end.get("digest_version") not in {CODE_DIGEST_VERSION, RESULT_CODE_DIGEST_VERSION}:
             unknown.append("code-identity-unavailable")
         else:
             result_id = row.get("result_id")
             excluded = (item / "results" / str(result_id),) if result_id else ()
-            key = (worktree, str(result_id))
+            key = (worktree, str(result_id), end.get("digest_version"))
             if key not in cache:
-                cache[key] = code_identity(worktree, excluded)
+                cache[key] = (code_identity(worktree, result_exclusion=(item, str(result_id)))
+                              if result_id and end["digest_version"] == RESULT_CODE_DIGEST_VERSION
+                              else code_identity(worktree, excluded))
             current = cache[key]
             if current["state"] != "read":
                 unknown.append("code-unavailable")
@@ -813,7 +844,18 @@ def project(item_dir, knowledge_dir):
                 record["freshness"] = freshness
                 key = (row.get("task_id"), row.get("criterion_id"))
                 if all(isinstance(k, str) and k for k in key):
-                    latest[key] = {"task_id": key[0], "criterion_id": key[1],
+                    prior = latest.get(key)
+                    sequence = row.get("execution_sequence")
+                    order = (1, sequence) if type(sequence) is int and sequence > 0 else (0, index)
+                    if prior is not None:
+                        previous_row = source["rows"][prior["row_index"]]
+                        previous_sequence = previous_row.get("execution_sequence")
+                        previous_order = ((1, previous_sequence) if type(previous_sequence) is int and previous_sequence > 0
+                                          else (0, prior["row_index"]))
+                    else:
+                        previous_order = (-1, -1)
+                    if order >= previous_order:
+                        latest[key] = {"task_id": key[0], "criterion_id": key[1],
                                    "result_id": row.get("result_id"), "row_index": index,
                                    "state": "unreadable" if invalid else row.get("state", "unavailable"), "freshness": freshness}
             source["records"].append(record)

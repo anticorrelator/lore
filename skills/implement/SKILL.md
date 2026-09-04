@@ -478,6 +478,28 @@ A worker SendMessage whose body begins with `## Consultation` and carries `consu
 
 A task's `step_completed` row belongs to the parent implement session and asserts the full acceptance sequence — report accepted, logged, checkbox persisted. Nothing upstream of that emits: worker completion messages, Tier-2 claim appends, consultation replies, batch transitions, and verification echoes all stay journal-silent. Whole-protocol completion remains `impl-close`'s separate `terminus_reached` row.
 
+#### Executing close criteria
+
+When a task declares `**Close criteria:**`, run each one through the runner rather than by hand, so the recorded outcome is the declared command's exit against a recorded code identity:
+
+```
+lore criteria run <slug> <task-id> <criterion-id> --execution-worktree <root> --packet-id <packet-id>
+```
+
+A schema 2 packet fixes the work item, task, revision, and dispatch attempt; any `--revision` or `--dispatch-attempt-id` you add must agree with it. Outside a dispatched packet, select the revision explicitly and state why the run is unbound with `--revision <rid> --unbound-reason "<text>"`. Selection is frozen before anything launches, and the runner never substitutes the current head for a historical revision you named; selection errors are reported before any result ID is allocated. The allocated result ID and execution-attempt ID are printed as JSON on stderr before launch. Each new run also receives an immutable `execution_sequence`, a positive integer allocated under the results directory lock as one plus the highest sequence retained across both the item's immutable result input journals and its canonical published results ledger, so a missing older result directory cannot cause reuse of its published sequence; invalid history is refused. It is not caller-selectable, and readers pick the latest attempt per criterion by greatest sequence rather than by finish, publication, or recovery order. On successful publication or recovery, stdout is a single JSON object with `status` of `published` or `recovered` and the full result row. A refusal or publication failure emits diagnostic JSON on stderr and may write nothing to stdout. Exit status is 0 for pass or skipped, 1 for fail, 2 for unavailable, and 3 for refused or a publication error.
+
+Record the actual result ID in the task report together with the state the runner produced. `unavailable` is observed evidence that execution could not provide a usable criterion outcome (launch, cwd, output persistence, inaccessible source, or supervisor interruption); it is not a fail, it is not an absence of evidence since retained launch, interruption, and output facts may exist, and it is not retried silently. `skipped` means only that the applicability predicate observed its declared inapplicable exit. A result whose start and end identities differ, or whose source HEAD, worktree digest, criterion version, or revision no longer match the live execution root, reads as stale; a root the reader cannot inspect reads as freshness unknown. Current freshness can describe a pass, fail, skipped, or unavailable record, and only a current pass supports a current passing check. Report those states as they are rather than rerunning until one passes.
+
+If a run was interrupted or its publication failed, recover it without executing anything:
+
+```
+lore criteria run <slug> --recover <result-id>
+```
+
+Recovery replays the persisted inputs, repairs its own torn ledger prefix, and launches nothing. It keeps the original `execution_sequence` unchanged, refuses conflicting identity flags or a changed durable output, and cannot proceed while the supervisor still holds the attempt lock. An interrupted attempt with no durable completion records `unavailable`. A new execution after a fail or an interruption is a new run with a new result ID and a new sequence.
+
+Result rows are evidence, not authority. Report acceptance, logging, checkoff, and close continue exactly as described in this skill. A pass on every criterion does not check off the task, accept the report, or close the work item, and the runner never does any of those itself.
+
 #### Eager dispatch join
 
 After every task acceptance, rejection, dispatch, terminus, reconciliation, cleanup, failure, or steering transition, re-join the board and ask what is dispatchable. Do not wait for unrelated active workers:

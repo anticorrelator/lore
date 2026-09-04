@@ -40,4 +40,9 @@ if [[ "$FILE_PATH" == */_work/*/reviews/* ]]; then
   exit 0
 fi
 
+if [[ "$FILE_PATH" == */_work/*/results.jsonl || "$FILE_PATH" == */_work/*/results/* ]]; then
+  printf '{"decision":"block","reason":"Use lore criteria run for executed results, output, and publication recovery."}\n'
+  exit 0
+fi
+
 printf '{"decision":"approve"}\n'

@@ -64,6 +64,7 @@ Commands:
   capture      Capture an insight to the knowledge store
   promote      Promote a Tier 3 observation row to the knowledge commons
   test         Run lore test suites (see: lore test protocols)
+  criteria     Execute plan-owned criteria (see: lore criteria run --help)
   plan         Publish plan revisions and authored decisions (see: lore plan --help)
   dispatch     Render dispatch-time guidance (see: lore dispatch --help)
   annotate     Record a retrieval friction annotation
@@ -2434,6 +2435,18 @@ case "$1" in
   impl)
     shift
     cmd_impl "$@"
+    ;;
+  criteria)
+    shift
+    if [[ "${1:---help}" == run ]]; then
+      shift
+      exec "$SCRIPTS_DIR/criteria-run.sh" "$@"
+    fi
+    printf '%s\n' 'Usage: lore criteria run <slug> <task-id> <criterion-id> --execution-worktree ROOT' \
+      '  --packet-id ID [--revision ID] [--dispatch-attempt-id ID]' \
+      '  or: --revision ID --unbound-reason TEXT' \
+      '  Recover publication: lore criteria run <slug> --recover RESULT_ID'
+    [[ "${1:---help}" == --help || "${1:-}" == -h ]]
     ;;
   plan)
     shift

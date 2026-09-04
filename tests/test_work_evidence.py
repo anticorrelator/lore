@@ -532,3 +532,37 @@ def test_malformed_review_obligation_is_visible_without_losing_other_evidence(st
     view = project(item, root)
     assert view["revision"]["review_requirement"]["state"] == "unreadable"
     assert view["sources"]["tasks"]["state"] == "read"
+
+
+def test_result_identity_excludes_only_named_publication_preserving_malformed_and_index(code):
+    item = code / 'store' / '_work' / 'example'
+    item.mkdir(parents=True)
+    identity = lambda: API['code_identity'](code, result_exclusion=(item, 'result-own'))
+    baseline = identity()
+    assert baseline['digest_version'] == '2'
+    write(item / 'results/result-own/output.txt', 'own output')
+    ledger(item / 'results.jsonl', [{'result_id': 'result-own'}])
+    assert identity()['digest'] == baseline['digest']
+    with (item / 'results.jsonl').open('a') as stream:
+        stream.write('{malformed older bytes\n')
+    assert identity()['digest'] != baseline['digest']
+    ledger(item / 'results.jsonl', [{'result_id': 'result-own'}])
+    subprocess.run(['git', '-C', str(code), 'add', 'store/_work/example/results.jsonl'], check=True)
+    assert identity()['digest'] != baseline['digest']
+    assert API['code_identity'](code)['digest_version'] == '1'
+
+
+def test_result_identity_mode_propagates_into_submodules(code, tmp_path):
+    child = tmp_path / 'child'
+    subprocess.run(['git', 'clone', '-q', str(code), str(child)], check=True)
+    subprocess.run(['git', '-C', str(code), '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(child), 'child'], check=True)
+    item = code / 'child/store/_work/example'
+    item.mkdir(parents=True)
+    identity = lambda: API['code_identity'](code, result_exclusion=(item, 'result-own'))
+    baseline = identity()
+    assert baseline['state'] == 'read'
+    ledger(item / 'results.jsonl', [{'result_id': 'result-own'}])
+    write(item / 'results/result-own/output.txt', 'own output')
+    assert identity()['digest'] == baseline['digest']
+    write(code / 'child/source.py', 'different child bytes')
+    assert identity()['digest'] != baseline['digest']
