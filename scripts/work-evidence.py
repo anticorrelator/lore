@@ -216,6 +216,9 @@ def validate_records(source, kind):
                 invalid = "missing-packet-attribution"
             elif not re.fullmatch(r"[0-9a-f]{12}", row["revision_id"]):
                 invalid = "invalid-packet-revision"
+            elif "source_head" not in row or (row["source_head"] is not None and
+                    (not isinstance(row["source_head"], str) or not row["source_head"])):
+                invalid = "invalid-packet-source-head"
         elif kind == "results":
             if any(not isinstance(row.get(k), str) or not row[k]
                    for k in ("result_id", "execution_attempt_id", "task_id", "criterion_id", "revision_id", "criterion_version")):
@@ -441,14 +444,14 @@ def publication_for_dispatch(item_dir, knowledge_dir):
         raise ValueError("incomplete revision publication: " + revision["reason"])
     head = revision["head"]
     if head is None:
-        return {"revision_id": None, "blocked": {}}
+        return {"revision_id": None, "source_head": None, "blocked": {}}
     for reference in references(head, item, root):
         if reference["state"] != "read":
             raise ValueError("committed revision snapshot unavailable: " + reference["reference"])
     dispatch = dispatch_projection(history, item, root)
     if dispatch["state"] != "read":
         raise ValueError("dispatch decisions unavailable: " + dispatch["reason"])
-    return {"revision_id": head["revision_id"], "blocked": dispatch["blocked"]}
+    return {"revision_id": head["revision_id"], "source_head": head.get("source_head"), "blocked": dispatch["blocked"]}
 
 
 def binding(row, revision):
@@ -577,9 +580,12 @@ def project(item_dir, knowledge_dir):
             artifacts = references(row, item, root) if name != "packets" else []
             record = {"row_index": index, "binding": binding(row, revision), "artifacts": artifacts}
             if name == "packets":
+                record["dispatch_attempt_id"] = row.get("dispatch_attempt_id")
+                record["packet_id"] = row.get("packet_id")
+                record["task_id"] = row.get("task_id")
                 record["receipt"] = "delivered" if row.get("delivery_stage") == "delivered" else "unknown"
-                if str(row.get("schema_version")) == "2" and not row.get("revision_id"):
-                    record["binding"] = {"state": "invalid", "reason": "missing-revision-id"}
+                if index in source["invalid_rows"]:
+                    record["binding"] = {"state": "invalid", "reason": "invalid-packet-attribution"}
             if name == "results":
                 invalid = index in source["invalid_rows"]
                 freshness = ({"state": "unknown", "reasons": ["invalid-result-record"]} if invalid else
@@ -600,6 +606,11 @@ def project(item_dir, knowledge_dir):
             summary["freshness"] = {"state": "unknown", "reasons": ["result-history-" + sources["results"]["state"]]}
     return {"schema_version": EVIDENCE_SCHEMA_VERSION, "reader_contract_version": READER_CONTRACT_VERSION,
             "sources": sources, "revision": revision,
+            "packet_summary": [{"packet_id": row.get("packet_id"), "task_id": row.get("task_id"),
+                                "dispatch_attempt_id": row.get("dispatch_attempt_id"),
+                                "revision_id": row.get("revision_id"),
+                                "binding": record["binding"], "receipt": record["receipt"]}
+                               for row, record in zip(sources["packets"]["rows"], sources["packets"]["records"])],
             "result_summary": [latest[k] for k in sorted(latest)]}
 
 

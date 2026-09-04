@@ -9,7 +9,7 @@
 #   - unmatched subjects warned and treated as incomplete
 #   - same-file collision groups within the batch returned as conditions
 #   - the four lead-inline conditions as separate fields, no aggregate boolean
-#   - the execution-log attribution row is the only filesystem write
+#   - batch preparation writes only attribution and packet evidence
 #   - resolver tri-state propagation, archived refusal, missing tasks.json
 #
 # Legacy progress retains the exact checksum of the original unchecked plan.
@@ -276,14 +276,14 @@ assert "eligible" not in json.dumps(c).lower()
 
 # --- Write discipline ----------------------------------------------------------------
 
-@test "the execution-log attribution row is the only filesystem write" {
+@test "batch preparation writes only attribution and packet evidence" {
   before="$(find "$TEST_KDIR" -type f | sort)"
   run bash "$NEXT_SH" batch-item --json
   [ "$status" -eq 0 ]
   after="$(find "$TEST_KDIR" -type f | sort)"
   diff <(echo "$before") <(echo "$after") > "$BATS_TEST_TMPDIR/fsdiff" || true
   new_files="$(grep '^>' "$BATS_TEST_TMPDIR/fsdiff" | sed 's/^> //')"
-  [ "$new_files" = "$ITEM_DIR/execution-log.md" ]
+  [ "$new_files" = "$(printf '%s\n' "$ITEM_DIR/execution-log.md" "$TEST_KDIR/_packets/README.md" "$TEST_KDIR/_packets/packets.jsonl" | sort)" ]
   grep -q "source: impl-verb" "$ITEM_DIR/execution-log.md"
   grep -q "Implement next-batch: 1 unblocked task(s) returned" "$ITEM_DIR/execution-log.md"
 }
@@ -414,4 +414,48 @@ assert sorted(d["candidates"]) == ["alpha-shared", "beta-shared"]
 @test "lore impl usage mentions the next-batch verb" {
   run bash "$LORE_CLI" impl --help
   echo "$output" | grep -q "next-batch"
+}
+
+@test "revision packets preserve old attempts and return the canonical dispatch tuple" {
+  source "$REPO_DIR/tests/helpers/packet_revision.bash"
+  packet_revision_fixture "$ITEM_DIR" batch-item
+  run bash "$NEXT_SH" batch-item  --json
+  [ "$status" -eq 0 ]
+  payload > "$BATS_TEST_TMPDIR/first.json"
+  cp "$TEST_KDIR/_packets/packets.jsonl" "$BATS_TEST_TMPDIR/old-packets"
+  printf '\nA changed task contract.\n' >> "$ITEM_DIR/plan.md"
+  bash "$REPO_DIR/scripts/plan-revise.sh" batch-item --decisions "$ITEM_DIR/decisions.json" >/dev/null
+  run bash "$NEXT_SH" batch-item  --json
+  [ "$status" -eq 0 ]
+  payload > "$BATS_TEST_TMPDIR/second.json"
+  run bash "$NEXT_SH" batch-item  --json
+  [ "$status" -eq 0 ]
+  payload > "$BATS_TEST_TMPDIR/retry.json"
+  python3 - "$TEST_KDIR" "$ITEM_DIR" "$BATS_TEST_TMPDIR" "$REPO_DIR" <<'PY'
+import json, pathlib, runpy, sys
+root, item, tmp, repo = map(pathlib.Path, sys.argv[1:])
+rows = [json.loads(line) for line in (root/'_packets/packets.jsonl').read_text().splitlines()]
+assert len(rows) == 3
+assert rows[1]['revision_id'] == rows[2]['revision_id']
+assert rows[1]['dispatch_attempt_id'] != rows[2]['dispatch_attempt_id']
+assert rows[1]['packet_id'] != rows[2]['packet_id']
+assert (root/'_packets/packets.jsonl').read_bytes().startswith((tmp/'old-packets').read_bytes())
+assert rows[0]['revision_id'] != rows[1]['revision_id']
+assert rows[0]['dispatch_attempt_id'] != rows[1]['dispatch_attempt_id']
+for filename, row in zip(('first.json','second.json','retry.json'), rows):
+    output = json.loads((tmp/filename).read_text())
+    tasks = output.get('batch', [op for op in output.get('manifest',[]) if op['op']=='TaskCreate'])
+    task = tasks[0]
+    for key in ('packet_id','revision_id','dispatch_attempt_id'):
+        assert task[key] == row[key] == output['packets'][0][key]
+    if 'batch' in output:
+        assert row['tier2_claim_ids'] == [r['claim_id'] for r in task['tier2_extract']]
+        assert row['delivered_entries'] == []
+        assert 'without knowledge-entry assembly' in row['empty_reason']
+view = runpy.run_path(str(repo/'scripts/work-evidence.py'))['project'](item, root)
+records = view['sources']['packets']['records']
+assert records[0]['binding'] == {'state':'stale','reason':'revision-mismatch'}
+assert records[1]['binding']['state'] == 'current'
+assert all(record['receipt']=='unknown' for record in records)
+PY
 }

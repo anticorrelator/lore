@@ -199,7 +199,7 @@ def run_reader(name, *args):
         return None, f"invalid JSON from published reader: {exc}", None
 
 
-def version_errors(envelope, label):
+def version_errors(envelope, label, vocabulary_versions=(EXPECTED_VERSION,)):
     errors = []
     fold = envelope.get("fold_version")
     vocab = envelope.get("vocabulary_version")
@@ -209,7 +209,7 @@ def version_errors(envelope, label):
         errors.append(f"{label} unknown fold_version={fold}")
     if vocab is None:
         errors.append(f"{label} missing vocabulary_version declaration")
-    elif str(vocab) != EXPECTED_VERSION:
+    elif str(vocab) not in vocabulary_versions:
         errors.append(f"{label} unknown vocabulary_version={vocab}")
     return errors, None if fold is None else str(fold), None if vocab is None else str(vocab)
 
@@ -663,6 +663,7 @@ def summarize_work_evidence(slug, item_dir):
                         "reader_contract_version": evidence["reader_contract_version"],
                         "revision": evidence["revision"],
                         "result_summary": evidence["result_summary"],
+                        "packet_summary": evidence["packet_summary"],
                         "sources": {name: {key: value for key, value in source.items()
                                              if key in ("state", "reason", "path", "sha256")}
                                     for name, source in evidence["sources"].items()}})
@@ -923,7 +924,7 @@ if session_list is not None:
     if fold is not None: session_fold_versions.add(fold)
     if vocab is not None: session_vocab_versions.add(vocab)
 if session_events is not None:
-    errs, fold, vocab = version_errors(session_events, "session events")
+    errs, fold, vocab = version_errors(session_events, "session events", ("1", "2"))
     session_errors.extend(errs)
     if fold is not None: session_fold_versions.add(fold)
     if vocab is not None: session_vocab_versions.add(vocab)
@@ -979,7 +980,7 @@ if session_errors:
         vocabulary_version="|".join(sorted(session_vocab_versions)) or None,
     )
 else:
-    source_row("session-journal", "ok", "1", "1", session_locator)
+    source_row("session-journal", "ok", "1", "|".join(sorted(session_vocab_versions)), session_locator)
 
 if session_list is not None and isinstance(session_list.get("instances"), list):
     for instance in session_list["instances"]:
@@ -1309,6 +1310,8 @@ for item in work_evidence:
         print(f"    reason: {item['reason']}")
     else:
         print(f"    revision={compact(item['revision'])}")
+        for packet in item["packet_summary"]:
+            print(f"    packet={compact(packet)}")
         for result in item["result_summary"]:
             print(f"    criterion={compact(result)}")
         for name, source in item["sources"].items():

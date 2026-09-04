@@ -375,3 +375,43 @@ PY_EDIT
     $e.sources.revisions.rows[-1].revision_id == $rid' "$item/retro-evidence-pack.json"
 
 }
+
+@test "revision dispatch packet mismatch agrees across work retro and coordinator" {
+  source "$REPO_DIR/tests/helpers/packet_revision.bash"
+  item="$TEST_KDIR/_work/cycle-a"
+  packet_revision_fixture "$item" cycle-a
+  run bash "$REPO_DIR/scripts/impl-open.sh" cycle-a --task task-1 --json
+  [ "$status" -eq 0 ]
+  cp "$TEST_KDIR/_packets/packets.jsonl" "$BATS_TEST_TMPDIR/first-packets"
+  printf '\nChanged packet contract.\n' >> "$item/plan.md"
+  bash "$REPO_DIR/scripts/plan-revise.sh" cycle-a --decisions "$item/decisions.json" >/dev/null
+  run bash "$REPO_DIR/scripts/impl-next-batch.sh" cycle-a --json
+  [ "$status" -eq 0 ]
+  run_prepare
+  run bash "$REPO_DIR/scripts/load-work-item.sh" cycle-a --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" > "$BATS_TEST_TMPDIR/work.json"
+  run bash "$REPO_DIR/scripts/coordinate-status.sh" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" > "$BATS_TEST_TMPDIR/coordinator.json"
+  python3 - "$TEST_KDIR" "$BATS_TEST_TMPDIR" <<'PY'
+import json, pathlib, sys
+root, tmp = map(pathlib.Path, sys.argv[1:])
+work = json.loads((tmp/'work.json').read_text())
+pack = json.loads((root/'_work/cycle-a/retro-evidence-pack.json').read_text())
+coordinator = json.loads((tmp/'coordinator.json').read_text())
+assert pack['source_data']['session_events']['vocabulary_version'] == '2'
+summary = work['evidence']['packet_summary']
+assert len(summary) == 2
+assert summary[0]['binding'] == {'state':'stale','reason':'revision-mismatch'}
+assert summary[1]['binding']['state'] == 'current'
+assert all(row['receipt'] == 'unknown' for row in summary)
+assert summary == pack['source_data']['cycle_work']['evidence']['packet_summary']
+assert summary == next(row for row in coordinator['work_evidence'] if row['slug']=='cycle-a')['packet_summary']
+assert (root/'_packets/packets.jsonl').read_bytes().startswith((tmp/'first-packets').read_bytes())
+rows = work['evidence']['sources']['packets']['rows']
+for raw, entry in zip(rows, summary):
+    for key in ('packet_id','task_id','dispatch_attempt_id','revision_id'):
+        assert raw[key] == entry[key]
+PY
+}

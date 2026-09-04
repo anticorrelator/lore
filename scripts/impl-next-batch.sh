@@ -30,7 +30,8 @@
 # never an aggregate boolean. An empty unblocked set is success with an
 # explanatory status (all-blocked | all-complete), not an error.
 #
-# The only write is one execution-log attribution row (source: impl-verb).
+# Packet rows describe the returned context; the execution log retains one
+# attribution row (source: impl-verb).
 #
 # Exit codes:
 #   0  batch emitted (possibly empty with explanatory status)
@@ -174,13 +175,15 @@ fi
 
 ACTIVE_CSV=$(IFS=','; echo "${ACTIVE_TASKS[*]-}")
 
-PAYLOAD=$(_LORE_CEREMONY_JSON="$CEREMONY_JSON" python3 - "$ITEM_DIR" "$SLUG" "$ACTIVE_CSV" "$SCRIPT_DIR" <<'PYEOF'
+PAYLOAD=$(_LORE_CEREMONY_JSON="$CEREMONY_JSON" python3 - "$ITEM_DIR" "$SLUG" "$ACTIVE_CSV" "$SCRIPT_DIR" "$TEMPLATE_VERSION" <<'PYEOF'
 import json
 import os
 import re
+import subprocess
 import sys
+import uuid
 
-item_dir, slug, active_csv, script_dir = sys.argv[1:5]
+item_dir, slug, active_csv, script_dir, template_version = sys.argv[1:6]
 active = {a for a in active_csv.split(",") if a}
 ceremony_skills = json.loads(os.environ.get("_LORE_CEREMONY_JSON", "[]"))
 
@@ -320,6 +323,39 @@ for tid in batch_ids:
         } for r in rows],
     })
 
+# The batch carries task and claim context; it does not resolve knowledge entries.
+packets = []
+for task in batch:
+    row = {
+        "packet_id": "pkt-" + uuid.uuid4().hex[:12],
+        "packet_scope": "task", "delivery_stage": "assembled",
+        "session_id": None, "work_item": slug, "phase": task["phase"],
+        "task_id": task["local_id"], "arm": os.environ.get("LORE_PACKET_ARM") or None,
+        "task_scale_set": None, "delivered_entries": [],
+        "empty_reason": "next-batch returns task descriptions and Tier 2 extracts without knowledge-entry assembly",
+        "budget": {"chars_used": None, "chars_budget": None},
+        "template_version": template_version if re.fullmatch(r"[0-9a-f]{12}", template_version or "") else None,
+        "tier2_claim_ids": [claim["claim_id"] for claim in task["tier2_extract"] if claim.get("claim_id")],
+    }
+    if publication["revision_id"]:
+        row.update(schema_version="2", revision_id=publication["revision_id"],
+                   source_head=publication["source_head"],
+                   dispatch_attempt_id="dispatch-" + uuid.uuid4().hex)
+    try:
+        proc = subprocess.run(
+            ["bash", os.path.join(script_dir, "packet-append.sh"),
+             "--kdir", os.path.dirname(os.path.dirname(item_dir)), "--row", json.dumps(row)],
+            capture_output=True, text=True, timeout=60)
+        if proc.returncode:
+            raise ValueError(proc.stderr.strip())
+        identity = {key: row.get(key) for key in ("packet_id", "dispatch_attempt_id", "revision_id")}
+        task.update(identity)
+        packets.append({"task_id": task["local_id"], "phase": task["phase"], **identity})
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        if publication["revision_id"]:
+            sys.exit(f"[impl] bound packet append failed for {task['local_id']}: {exc}")
+        warn(f"packet append failed for {task['local_id']}: {exc}")
+
 # --- Same-file collision groups within the batch -------------------------------
 # Returned as conditions: never parallel-dispatch these across workers;
 # serialize-within-one-worker vs merge is the lead's decision. chain_class is
@@ -446,6 +482,7 @@ print(json.dumps({
     "slug": slug,
     "status": status,
     "batch": batch,
+    "packets": packets,
     "active": sorted(active),
     "completed": completed,
     "pending_blocked": pending_blocked,
@@ -457,7 +494,7 @@ print(json.dumps({
 PYEOF
 )
 
-# --- Execution-log attribution row (the verb's only write) -------------------
+# --- Execution-log attribution row -------------------
 LOG_BODY=$(_LORE_PAYLOAD="$PAYLOAD" python3 <<'PYEOF'
 import json
 import os

@@ -49,7 +49,8 @@
 #   --entry-path <rel>        required (KDIR-relative; for provenance-migration
 #                             it defaults to --to-entry-path and must match it
 #                             when supplied)
-#   --source <enum>           required: worker|researcher|spec-lead|
+#   --source <enum>           required: investigator|designer|worker|reviewer|
+#                             researcher|spec-lead|
 #                             implement-lead|drift-sweep|expire-sweep|audit|
 #                             settlement|apply-correction|renormalize|interactive|
 #                             coordinator
@@ -100,7 +101,7 @@ usage() {
 Usage: trust-event-append.sh \
            --event <mechanical-check|consumption-verification|correction|retirement|adjudication|provenance-migration|trust-confirmation> \
            --entry-path <path-relative-to-KDIR> \
-           --source <worker|researcher|spec-lead|implement-lead|drift-sweep|expire-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator> \
+           --source <investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|drift-sweep|expire-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator> \
            [--observed-at <iso8601>] [--kdir <path>] [--json] \
            <event-specific payload flags>
 
@@ -278,9 +279,9 @@ esac
 
 # --- Source enum ---
 case "$SOURCE_KIND" in
-  worker|researcher|spec-lead|implement-lead|drift-sweep|expire-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator) : ;;
+  investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|drift-sweep|expire-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator) : ;;
   "") fail "--source is required" ;;
-  *)  fail "--source must be one of worker|researcher|spec-lead|implement-lead|drift-sweep|expire-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator (got '$SOURCE_KIND')" ;;
+  *)  fail "--source must be one of investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|drift-sweep|expire-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator (got '$SOURCE_KIND')" ;;
 esac
 
 # --- Entry-path shape: KDIR-relative, no traversal ---

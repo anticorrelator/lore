@@ -630,3 +630,47 @@ assert sorted(d["candidates"]) == ["alpha-shared", "beta-shared"]
   run bash "$LORE_CLI" impl --help
   echo "$output" | grep -q "open"
 }
+
+@test "revision packets preserve old attempts and return the canonical dispatch tuple" {
+  source "$REPO_DIR/tests/helpers/packet_revision.bash"
+  packet_revision_fixture "$ITEM_DIR" widget-pipeline
+  run bash "$OPEN_SH" widget-pipeline --task task-1 --json
+  [ "$status" -eq 0 ]
+  payload > "$BATS_TEST_TMPDIR/first.json"
+  cp "$TEST_KDIR/_packets/packets.jsonl" "$BATS_TEST_TMPDIR/old-packets"
+  printf '\nA changed task contract.\n' >> "$ITEM_DIR/plan.md"
+  bash "$REPO_DIR/scripts/plan-revise.sh" widget-pipeline --decisions "$ITEM_DIR/decisions.json" >/dev/null
+  run bash "$OPEN_SH" widget-pipeline --task task-1 --json
+  [ "$status" -eq 0 ]
+  payload > "$BATS_TEST_TMPDIR/second.json"
+  run bash "$OPEN_SH" widget-pipeline --task task-1 --json
+  [ "$status" -eq 0 ]
+  payload > "$BATS_TEST_TMPDIR/retry.json"
+  python3 - "$TEST_KDIR" "$ITEM_DIR" "$BATS_TEST_TMPDIR" "$REPO_DIR" <<'PY'
+import json, pathlib, runpy, sys
+root, item, tmp, repo = map(pathlib.Path, sys.argv[1:])
+rows = [json.loads(line) for line in (root/'_packets/packets.jsonl').read_text().splitlines()]
+assert len(rows) == 3
+assert rows[1]['revision_id'] == rows[2]['revision_id']
+assert rows[1]['dispatch_attempt_id'] != rows[2]['dispatch_attempt_id']
+assert rows[1]['packet_id'] != rows[2]['packet_id']
+assert (root/'_packets/packets.jsonl').read_bytes().startswith((tmp/'old-packets').read_bytes())
+assert rows[0]['revision_id'] != rows[1]['revision_id']
+assert rows[0]['dispatch_attempt_id'] != rows[1]['dispatch_attempt_id']
+for filename, row in zip(('first.json','second.json','retry.json'), rows):
+    output = json.loads((tmp/filename).read_text())
+    tasks = output.get('batch', [op for op in output.get('manifest',[]) if op['op']=='TaskCreate'])
+    task = tasks[0]
+    for key in ('packet_id','revision_id','dispatch_attempt_id'):
+        assert task[key] == row[key] == output['packets'][0][key]
+    if 'batch' in output:
+        assert row['tier2_claim_ids'] == [r['claim_id'] for r in task['tier2_extract']]
+        assert row['delivered_entries'] == []
+        assert 'without knowledge-entry assembly' in row['empty_reason']
+view = runpy.run_path(str(repo/'scripts/work-evidence.py'))['project'](item, root)
+records = view['sources']['packets']['records']
+assert records[0]['binding'] == {'state':'stale','reason':'revision-mismatch'}
+assert records[1]['binding']['state'] == 'current'
+assert all(record['receipt']=='unknown' for record in records)
+PY
+}

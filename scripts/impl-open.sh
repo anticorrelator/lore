@@ -44,8 +44,8 @@
 # Writes: one execution-log attribution row (source: impl-verb), plus one
 # task-scope packet row per eligible task appended via the sole-writer
 # packet-append.sh (delivery_stage "assembled"; per-entry trust snapshots from
-# resolve-manifest's --delivery-json sidecar). Packet appends are fail-open:
-# a failed append warns and omits that task's packet_id from the manifest.
+# resolve-manifest's --delivery-json sidecar). A legacy append failure warns;
+# a bound append failure stops dispatch.
 # Each TaskCreate manifest entry carries its packet_id so the lead can thread
 # it into the worker Task prompt for dispatch confirmation.
 #
@@ -675,7 +675,7 @@ for tid in eligible_ids:
 
 # --- Task-scope packet emission (append-supersede; one row per eligible task) --
 # Rows go through packet-append.sh, the sole writer of _packets/packets.jsonl.
-# Fail-open: a failed append warns and leaves that task without a packet_id.
+# Bound packet failures stop dispatch; legacy packet failures warn.
 pk_status_by_unit = {e["unit_key"]: e for e in prior_knowledge}
 packets = []
 for tid in eligible_ids:
@@ -712,6 +712,10 @@ for tid in eligible_ids:
         "tier2_claim_ids": [r["claim_id"] for r in tier2_extracts.get(tid, [])
                             if r.get("claim_id")],
     }
+    if publication["revision_id"]:
+        row.update(schema_version="2", revision_id=publication["revision_id"],
+                   source_head=publication["source_head"],
+                   dispatch_attempt_id="dispatch-" + uuid.uuid4().hex)
     if snapshot and snapshot.get("trust_compute_sha"):
         row["trust_compute_sha"] = snapshot["trust_compute_sha"]
     if not delivered_entries:
@@ -726,13 +730,19 @@ for tid in eligible_ids:
              "--row", json.dumps(row, ensure_ascii=False)],
             capture_output=True, text=True, timeout=60)
         if proc.returncode == 0:
-            taskcreate_by_id[tid]["packet_id"] = row["packet_id"]
-            packets.append({"task_id": tid, "phase": pnum, "packet_id": row["packet_id"]})
+            identity = {key: row.get(key) for key in
+                        ("packet_id", "dispatch_attempt_id", "revision_id")}
+            taskcreate_by_id[tid].update(identity)
+            packets.append({"task_id": tid, "phase": pnum, **identity})
         else:
             stderr_lines = (proc.stderr or "").strip().splitlines()
+            if publication["revision_id"]:
+                sys.exit(f"[impl] bound packet append failed for {tid}: {proc.stderr.strip()}")
             warn(f"packet append failed for {tid}"
                  + (f": {stderr_lines[-1]}" if stderr_lines else ""))
     except Exception as exc:
+        if publication["revision_id"]:
+            sys.exit(f"[impl] bound packet append failed for {tid}: {exc}")
         warn(f"packet append failed for {tid} ({exc})")
 
 # --- Per-unit plan content: advisors, consultations, task format -------------

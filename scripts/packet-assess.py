@@ -375,6 +375,8 @@ def _base_verdict(row, session_id, transcript_path, sha):
     return {
         "packet_id": row["packet_id"],
         "packet_scope": row.get("packet_scope"),
+        **({key: row[key] for key in ("revision_id", "dispatch_attempt_id", "source_head")}
+           if row.get("schema_version") == "2" else {}),
         "session_id": session_id,
         "source_transcript": transcript_path,
         "assessor_schema_sha": sha,

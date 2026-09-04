@@ -408,3 +408,18 @@ def test_revision_chain_and_snapshot_gaps_are_incomplete(mixed, mutation):
     evidence = project(item, root)
     assert evidence["revision"]["publication_state"] == "incomplete"
     assert all(s["freshness"]["state"] != "current" for s in evidence["result_summary"])
+
+
+@pytest.mark.parametrize('source_head', ['missing', '', 42, {}, None, 'a' * 40])
+def test_packet_source_identity_requires_explicit_string_or_null(mixed, source_head):
+    root, item, _ = mixed
+    row = {'schema_version': '2', 'packet_id': 'source-check', 'work_item': item.name,
+           'task_id': 'task-1', 'revision_id': 'a' * 12, 'dispatch_attempt_id': 'dispatch-1'}
+    if source_head != 'missing':
+        row['source_head'] = source_head
+    ledger(root / '_packets/packets.jsonl', [row])
+    packets = project(item, root)['sources']['packets']
+    valid = source_head is None or source_head == 'a' * 40
+    assert packets['state'] == ('read' if valid else 'unreadable')
+    if not valid:
+        assert packets['records'][0]['binding']['state'] == 'invalid'

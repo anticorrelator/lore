@@ -289,3 +289,27 @@ func locateAppendScript(t *testing.T) string {
 	}
 	return ""
 }
+
+func TestPositionTerminusReaderRoundtrip(t *testing.T) {
+	reasons := []string{TerminusSpecFinalize, TerminusImplClose, TerminusInvestigator, TerminusDesigner, TerminusWorker, TerminusReviewer}
+	dir := t.TempDir()
+	var content strings.Builder
+	for _, reason := range reasons {
+		data, err := json.Marshal(Event{Event: EventTerminusReached, Reason: reason})
+		if err != nil {
+			t.Fatal(err)
+		}
+		content.Write(data)
+		content.WriteByte('\n')
+	}
+	writeJournal(t, dir, content.String())
+	events, _ := ReadEventsFrom(dir, 0)
+	if len(events) != len(reasons) {
+		t.Fatalf("got %d events", len(events))
+	}
+	for i, event := range events {
+		if event.Event != EventTerminusReached || event.Reason != reasons[i] {
+			t.Fatalf("reason lost: %+v", event)
+		}
+	}
+}

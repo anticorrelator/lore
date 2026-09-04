@@ -171,3 +171,26 @@ teardown() {
   run bash "$ASSESSMENT_APPEND" --row "$GOOD_ROW" --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
 }
+
+@test "schema two retries coexist with unchanged legacy packet bytes" {
+  export LORE_KNOWLEDGE_DIR="$TEST_KDIR"
+  source "$REPO_DIR/tests/helpers/packet_revision.bash"
+  run bash "$PACKET_APPEND" --row "$VALID_PACKET_ROW" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  cp "$TEST_KDIR/_packets/packets.jsonl" "$BATS_TEST_TMPDIR/legacy"
+  packet_revision_fixture "$TEST_KDIR/_work/packet-fixture" packet-fixture
+  revision="$(jq -r .revision_id "$TEST_KDIR/_work/packet-fixture/tasks.json")"
+  source_head="$(tail -1 "$TEST_KDIR/_work/packet-fixture/revisions.jsonl" | jq -c .source_head)"
+  for attempt in first retry; do
+    row="$(printf '%s' "$VALID_PACKET_ROW" | jq -c --arg revision "$revision" --arg attempt "$attempt" --argjson source_head "$source_head" '.work_item="packet-fixture" | .revision_id=$revision | .dispatch_attempt_id=$attempt | .packet_id=$attempt | .source_head=$source_head')"
+    run bash "$PACKET_APPEND" --row "$row" --kdir "$TEST_KDIR"
+    [ "$status" -eq 0 ]
+  done
+  head -1 "$TEST_KDIR/_packets/packets.jsonl" | cmp - "$BATS_TEST_TMPDIR/legacy"
+  jq -se 'map(.schema_version) == ["1","2","2"] and .[1].dispatch_attempt_id != .[2].dispatch_attempt_id and .[1].revision_id == .[2].revision_id' "$TEST_KDIR/_packets/packets.jsonl"
+  row="$(printf '%s' "$row" | jq -c 'del(.revision_id)')"
+  run bash "$PACKET_APPEND" --row "$row" --kdir "$TEST_KDIR"
+  [ "$status" -ne 0 ]
+  [ "$(wc -l < "$TEST_KDIR/_packets/packets.jsonl" | tr -d ' ')" = 3 ]
+  unset LORE_KNOWLEDGE_DIR
+}

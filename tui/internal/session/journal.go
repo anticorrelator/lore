@@ -68,6 +68,15 @@ const (
 	EventWorktreeWriteRefused = "worktree_write_refused"
 )
 
+const (
+	TerminusSpecFinalize = "spec-finalize"
+	TerminusImplClose    = "impl-close"
+	TerminusInvestigator = "investigator"
+	TerminusDesigner     = "designer"
+	TerminusWorker       = "worker"
+	TerminusReviewer     = "reviewer"
+)
+
 // AppendEvent emits one journal row by piping it into the sole-writer script
 // `session-event-append.sh` (scriptPath), targeting the store at kdir. The
 // script validates, stamps provenance, and appends; a non-zero exit is returned

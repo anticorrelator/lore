@@ -469,3 +469,28 @@ def test_assessment_writer_roundtrip_and_reject(kdir):
     assert "dispatch_confirmed" in result.stderr
     with open(rows_file, encoding="utf-8") as fh:
         assert len(fh.readlines()) == 1
+
+@pytest.mark.parametrize('missing', [None, 'revision_id', 'dispatch_attempt_id', 'source_head'])
+def test_schema_two_has_revision_and_attempt_identity(missing):
+    row = _valid_task_row(random.Random(4))
+    row.update(schema_version='2', revision_id='a' * 12,
+               dispatch_attempt_id='dispatch-first', source_head=None,
+               work_item='fixture')
+    if missing:
+        row.pop(missing)
+        assert any(missing in error for error in ps.validate_packet_row(row))
+    else:
+        assert ps.validate_packet_row(row) == []
+        row['packet_schema_sha'] = 'f' * 64
+        assert ps.validate_packet_row(row) == []  # Historical schema stamps stay valid.
+
+
+@pytestmark_shell
+def test_bound_writer_rejects_nonexistent_revision_without_append(kdir):
+    row = _unstamped_packet_row(random.Random(4))
+    row.update(packet_scope='task', task_id='task-1', work_item='fixture',
+               revision_id='a' * 12, dispatch_attempt_id='dispatch-first', source_head=None)
+    result = _run_writer(PACKET_APPEND_SH, json.dumps(row), kdir)
+    assert result.returncode != 0
+    assert 'committed task generation' in result.stderr
+    assert not os.path.exists(os.path.join(kdir, '_packets'))

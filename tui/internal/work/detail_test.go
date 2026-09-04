@@ -437,6 +437,14 @@ func evidenceFixture(t *testing.T) (string, string, string) {
 	write("results/r1/output.txt", "output")
 	result, _ := json.Marshal(map[string]any{"execution_attempt_id": "exec-1", "revision_id": "aaaaaaaaaaaa", "unbound_reason": "fixture", "exit": 0, "signal": nil, "timed_out": false, "output_path": "results/r1/output.txt", "output_sha256": fmt.Sprintf("%x", sha256.Sum256([]byte("output"))), "schema_version": 1, "task_id": "task-1", "criterion_id": "check", "criterion_version": fmt.Sprintf("%x", sha256.Sum256([]byte(`{"id":"check"}`))), "result_id": "r1", "state": "pass", "source_start": identity, "source_end": identity})
 	write("results.jsonl", string(result)+"\n")
+	if err := os.MkdirAll(filepath.Join(kdir, "_packets"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	packets := `{"schema_version":"1","packet_id":"legacy","work_item":"fixture","task_id":"task-1"}` + "\n" +
+		`{"schema_version":"2","packet_id":"bound","work_item":"fixture","task_id":"task-1","revision_id":"aaaaaaaaaaaa","dispatch_attempt_id":"dispatch-1","source_head":null}` + "\n"
+	if err := os.WriteFile(filepath.Join(kdir, "_packets", "packets.jsonl"), []byte(packets), 0644); err != nil {
+		t.Fatal(err)
+	}
 	return kdir, item, repo
 }
 

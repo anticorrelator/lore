@@ -181,6 +181,8 @@ assert_eq "manifest source set is fixed" \
   "$(jq -r '[.source_manifest[].source_id] | sort | join(",")' "$JSON_OUT")"
 assert_eq "healthy fixture reports all sources ok" "5" \
   "$(jq -r '[.source_manifest[] | select(.read_status=="ok")] | length' "$JSON_OUT")"
+assert_eq "session manifest retains observed vocabulary versions" "1|2" \
+  "$(jq -r '.source_manifest[] | select(.source_id=="session-journal") | .vocabulary_version' "$JSON_OUT")"
 assert_eq "every manifest row carries the complete contract" "true" \
   "$(jq -r 'all(.source_manifest[]; (.source_id|length)>0 and (.read_status|length)>0 and (.observed_at|length)>0 and (.schema_version|length)>0 and (.vocabulary_version|length)>0 and (.locator|length)>0 and has("error"))' "$JSON_OUT")"
 
@@ -677,6 +679,7 @@ evidence = runpy.run_path(str(repo / 'scripts/work-evidence.py'))['project'](roo
 row = next(row for row in json.loads(pathlib.Path(sys.argv[3]).read_text())['work_evidence'] if row['slug'] == 'actionable')
 assert row['reader_contract_version'] == '2'
 assert row['result_summary'] == evidence['result_summary']
+assert row['packet_summary'] == evidence['packet_summary']
 assert row['revision'] == evidence['revision']
 assert row['sources']['reports']['sha256'] == evidence['sources']['reports']['sha256']
 assert row['result_summary'][0]['freshness']['state'] == 'unknown'
