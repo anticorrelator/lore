@@ -44,7 +44,7 @@ def _extract_section(text: str, heading: str) -> str | None:
     if not m:
         return None
     section = text[m.end():]
-    next_h = re.search(r'\n\*\*[A-Z][a-zA-Z0-9 ]+:\*\*', section)
+    next_h = re.search(r'\n(?:\*\*[A-Z][a-zA-Z0-9 ]+:\*\*|[ \t]*Task:)', section)
     if next_h:
         section = section[:next_h.start()]
     return section

@@ -145,7 +145,13 @@ Run from the project repo root so `workspace-write` scopes to the repo you are i
 
 #### 6.1 Parseability gate
 
-Read `$REPORT_FILE` — Codex's final message, captured by `-o`. It is a valid worker report only if it contains, at minimum, the `**Task:**`, `**Changes:**`, `**Observations:**`, and `**Tier 2 evidence:**` labels. If the run has a **non-zero exit, an empty or missing report file, or missing labels**, skip 6.3 entirely — do NOT append evidence from a degraded run — and go straight to the degraded template in 6.4. A degraded run's rows are untrustworthy; appending them would poison the evidence trail.
+Read `$REPORT_FILE` — Codex's final message, captured by `-o`. It is a valid worker report only if it contains a `Task:` or `**Task:**` label and the `**Changes:**`, `**Observations:**`, and `**Tier 2 evidence:**` labels. If the run has a **non-zero exit, an empty or missing report file, or missing labels**, skip 6.3 entirely — do NOT append evidence from a degraded run — and go straight to the degraded template in 6.4. A degraded run's rows are untrustworthy; appending them would poison the evidence trail.
+
+Run the label check; exit 0 confirms the required labels and non-zero takes the degraded path:
+
+```bash
+python3 ~/.lore/scripts/check-report-labels.py "$REPORT_FILE"
+```
 
 Spend capture (6.2) is **independent of this gate**: a parseable report whose event stream carried no readable `token_count` still relays normally, with its `**Spend:**` section degraded to duration-only. Report parseability and spend basis are separate axes.
 

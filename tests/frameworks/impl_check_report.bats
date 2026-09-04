@@ -102,6 +102,39 @@ log_file() { echo "$ITEM_DIR/execution-log.md"; }
 
 rows_file() { echo "$TEST_KDIR/_scorecards/rows.jsonl"; }
 
+@test "plain and bold Task headers produce identical check-report results" {
+  local bold_result
+  write_basic_report
+  run bash "$CHECK_SH" report-item --task 5 --report "$REPORT" --json
+  [ "$status" -eq 0 ]
+  bold_result="$(json_line)"
+  sed 's/^\*\*Task:\*\*/Task:/' "$REPORT" > "$REPORT.plain"
+  mv "$REPORT.plain" "$REPORT"
+  run bash "$CHECK_SH" report-item --task 5 --report "$REPORT" --json
+  [ "$status" -eq 0 ]
+  [ "$(json_line)" = "$bold_result" ]
+}
+
+@test "plain and bold Task labels both end a preceding evidence section" {
+  local label bold_result
+  for label in '**Task:**' 'Task:'; do
+    cat > "$REPORT" <<EOF
+**Tier 2 evidence:** c1
+$label Do the thing
+**Changes:** none
+**Observations:** none
+**Convention handling:** none in scope
+EOF
+    run bash "$CHECK_SH" report-item --task 5 --report "$REPORT" --json
+    [ "$status" -eq 0 ]
+    if [ "$label" = '**Task:**' ]; then
+      bold_result="$(json_line)"
+    else
+      [ "$(json_line)" = "$bold_result" ]
+    fi
+  done
+}
+
 # --- Required flags ----------------------------------------------------------
 
 @test "missing --task exits 1 naming the flag" {
