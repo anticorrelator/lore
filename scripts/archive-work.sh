@@ -139,6 +139,7 @@ mv "$ITEM_DIR" "$ARCHIVE_DIR/$SLUG"
 
 # Rebuild index
 "$SCRIPT_DIR/update-work-index.sh" >/dev/null 2>/dev/null || true
+python3 "$SCRIPT_DIR/pk_work_history.py" "$KNOWLEDGE_DIR" >/dev/null || true
 bash "$SCRIPT_DIR/export-obsidian.sh" --work-hubs > /dev/null 2>&1 || true
 
 # Get title for confirmation

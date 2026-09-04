@@ -76,6 +76,7 @@ _script_dir = os.environ.get("_WHY_SCRIPT_DIR", "")
 if _script_dir:
     sys.path.insert(0, _script_dir)
 from pk_search import render_trust_stamp
+from pk_work_history import lookup, render
 
 knowledge_dir = sys.argv[1]
 target_file = sys.argv[2]
@@ -197,6 +198,8 @@ CAT_PRIORITY = {"design-rationale": 6, "principles": 5, "architecture": 4, "abst
 matches.sort(key=lambda x: (-x["boosted_importance"], -CAT_PRIORITY.get(x["category"], 0)))
 matches = matches[:limit]
 
+records = lookup(knowledge_dir, location=target_file, limit=limit)
+
 # --- Output ---
 json_mode = os.environ.get("_WHY_JSON", "0") == "1"
 
@@ -214,11 +217,12 @@ if json_mode:
             "template_version": m["template_version"],
             "related_files": m["related_files"],
         })
-    print(json.dumps(out, indent=2))
+    print(json.dumps(out + records, indent=2))
     sys.exit(0)
 
 if not matches:
     print(f'No design-rationale entries found for {location}')
+    print(render(records), end='')
     sys.exit(0)
 
 print(f'## Design rationale for {location}')
@@ -245,4 +249,5 @@ for i, m in enumerate(matches, 1):
     except (OSError, UnicodeDecodeError):
         pass
     print()
+print(render(records), end='')
 PYEOF

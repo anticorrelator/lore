@@ -94,6 +94,18 @@ class Bylines:
             correction = corrections[-1]
             lines.append(self._line("corrected", correction.get("reported_by"),
                                     correction.get("work_item"), correction.get("date")))
+        path = Path(entry["file_path"])
+        try:
+            category = path.relative_to(self.root).parts[0] if path.is_absolute() else path.parts[0]
+        except (ValueError, IndexError):
+            category = ""
+        files = meta.get("related_files")
+        if isinstance(files, str):
+            files = [f.strip() for f in files.split(",") if f.strip()]
+        if category == "conventions" and meta.get("work_item") and isinstance(files, list) and files:
+            first = files[0]
+            if isinstance(first, str) and first.strip():
+                lines.append("history: lore why " + first.strip())
         return "\n".join(line for line in lines if line)
 
     def block(self, entry, indent=""):
