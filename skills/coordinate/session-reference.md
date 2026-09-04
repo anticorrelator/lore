@@ -518,6 +518,22 @@ the lifecycle stated in § The role of the skill.
     *In skill* (throughout). n=1; the friction read is textual — retro evidence on
     whether seats actually park or over-ceremony under the old text is still owed.
 
+### Coordination panel review, 2026-09-04
+
+17. **2026-09-04 — the owner reviewed the coordination panel and found the stream rows
+    unreadable cold and the graph wrapping into illegibility at half-screen widths.**
+    Diagnosis: register, not density. The TUI projects the ledger's Step cell to the
+    owner verbatim, first and largest, while the skill wrote it for the seat — 150-char
+    dispatch notes with `[[work:…]]` links and protocol vocabulary — and the one register
+    the owner reads well, the decision digest's four plain sentences, existed only at arc
+    close. Rule: the Step cell is a plain headline in the digest register (roughly sixty
+    characters, no slug, no session identifiers, no protocol vocabulary); the shorthand
+    and the backlink move to the rationale cell; each step closure appends its settled
+    decisions to a running `digest.md` the panel renders live, and the terminal digest
+    is that file re-read and re-ordered rather than composed fresh. *In skill*
+    (§ The ledger; § Verifying and closing; § Close the arc; the template's Step Ledger).
+    n=1. Evidence: [[work:coordination-panel-owner-plain-headlines-marquee-r]], design.md.
+
 ## Shipped verb history
 
 Moved from the SKILL's "Verbs this role wants" evidence log as each want shipped;

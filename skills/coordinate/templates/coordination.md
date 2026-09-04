@@ -38,9 +38,9 @@
 
 | # | Step | Depends on | Tree | Rung | Executor / route | Call + one-line rationale | Gate | Status | Verdict | Worktree / attempt | Evidence / SHA |
 |---|------|------------|------|------|------------------|---------------------------|------|--------|---------|--------------------|----------------|
-| 1 | <e.g. /spec on item X> | — | read-only | 2 | <session / subagent (model)> | <depth/routing/granularity call + why> | notify | pending | — | — | — |
+| 1 | <headline, e.g. Live, typeable session screens> | — | read-only | 2 | <session / subagent (model)> | <depth/routing/granularity call + why; the shorthand — mechanism, files, contract notes — and the [[work:<slug>]] backlink> | notify | pending | — | — | — |
 
-`Depends on` names step ids; `Tree` is `writer` or `read-only`. Keep durable status and attempt identity here, but derive ready/waiting/needs-judgment by re-joining the board after each transition. A writer reaches `done` only after full reconciliation and verified cleanup across path, Git registry, and branch/ref disposition.
+`Step` is the owner's cell: the TUI shows it verbatim as the row's headline, so write it in the decision digest's register — roughly sixty characters or fewer, no slug, no session identifiers, no protocol vocabulary — and carry the shorthand plus the `[[work:…]]` backlink in `Call + one-line rationale`. `Depends on` names step ids; `Tree` is `writer` or `read-only`. Keep durable status and attempt identity here, but derive ready/waiting/needs-judgment by re-joining the board after each transition. A writer reaches `done` only after full reconciliation and verified cleanup across path, Git registry, and branch/ref disposition.
 
 ## Dynamic-acts log
 
