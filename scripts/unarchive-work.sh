@@ -104,6 +104,7 @@ mv "$ITEM_DIR" "$WORK_DIR/$SLUG"
 
 # Rebuild index
 "$SCRIPT_DIR/update-work-index.sh" >/dev/null 2>/dev/null || true
+python3 "$SCRIPT_DIR/pk_work_history.py" "$KNOWLEDGE_DIR" >/dev/null || true
 
 # Get title for confirmation
 TITLE=$(json_field "title" "$WORK_DIR/$SLUG/_meta.json")

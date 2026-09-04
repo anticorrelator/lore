@@ -123,4 +123,6 @@ HEADING_TS="$(date -u +%Y-%m-%dT%H:%M)"
   printf '%s\n' "$BODY"
 } >> "$NOTES_FILE"
 
+python3 "$SCRIPT_DIR/pk_work_history.py" "$KNOWLEDGE_DIR" >/dev/null || true
+
 echo "[work note] Appended entry ($HEADING_TS) to $NOTES_FILE"

@@ -103,6 +103,9 @@ json_mode = json_mode_s == "1"
 
 sys.path.insert(0, script_dir)
 from pk_search import render_trust_stamp
+from pk_work_history import lookup, render
+
+records = lookup(kdir, topic=topic, limit=limit)
 
 RATIONALE_KEYWORDS = {"rejected", "alternative", "tradeoff", "considered", "rationale", "instead", "over"}
 
@@ -173,7 +176,7 @@ fallback_entries = [e for e in combined if e["_rationale_score"] < 3]
 
 if json_mode:
     output = (rationale_entries + fallback_entries)[:limit]
-    print(json.dumps(output, indent=2))
+    print(json.dumps(output + records, indent=2))
     sys.exit(0)
 
 if rationale_entries:
@@ -204,6 +207,7 @@ else:
     top = fallback_entries[:limit]
     if not top:
         print(f"No results found for tradeoffs topic: {topic!r}")
+        print(render(records), end="")
         sys.exit(0)
     print(f"## Tradeoffs: {topic}")
     print("_No explicit rationale entries found; showing closest knowledge matches:_")
@@ -225,4 +229,5 @@ else:
             if len(snippet) > 300:
                 shown += "..."
             print(shown)
+print(render(records), end="")
 PYEOF

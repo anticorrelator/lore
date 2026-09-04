@@ -80,6 +80,7 @@ rm -rf "$ITEM_DIR"
 
 # Rebuild index
 "$SCRIPT_DIR/update-work-index.sh" >/dev/null 2>/dev/null || true
+python3 "$SCRIPT_DIR/pk_work_history.py" "$KNOWLEDGE_DIR" >/dev/null || true
 
 if [[ "$JSON_OUTPUT" == true ]]; then
   python3 -c "

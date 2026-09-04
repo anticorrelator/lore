@@ -171,6 +171,8 @@ if [[ -d "$WORK_DIR/_projects" ]]; then
   done
 fi
 
+python3 "$SCRIPT_DIR/pk_work_history.py" "$KNOWLEDGE_DIR" >/dev/null
+
 # --- Report ---
 echo "=== Work Heal Report ==="
 if [[ ${#FINDINGS[@]} -eq 0 ]]; then

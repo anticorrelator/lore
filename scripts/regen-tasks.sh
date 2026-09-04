@@ -82,3 +82,5 @@ update_meta_timestamp "$WORK_ITEM_DIR"
 # the TUI (which polls _index.json mtime to detect changes) would miss a
 # tasks.json appearing for an existing item and keep showing "needs tasks".
 bash "$SCRIPT_DIR/update-work-index.sh" >/dev/null
+
+python3 "$SCRIPT_DIR/pk_work_history.py" "$KNOWLEDGE_DIR" >/dev/null || true
