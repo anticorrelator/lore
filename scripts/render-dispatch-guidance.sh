@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# render-dispatch-guidance.sh — Render the canonical prompt floor prepended to
-# every sanctioned subagent dispatch. Routed as `lore dispatch guidance`.
+# render-dispatch-guidance.sh — Outside a project, the hook emits nothing.
+# Inside a project, --short supplies unmarked prompts; full blocks remain
+# available for marked prompts, which the hook validates strictly.
 
 set -euo pipefail
 
@@ -8,25 +9,38 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: lore dispatch guidance
+Usage: lore dispatch guidance [--short]
 
 Render the invocation-fresh schema-v1 dispatch-guidance block on stdout.
-The block is prompt content: prepend it verbatim before task-specific context.
+Prepend the output verbatim before task-specific context.
+With --short, render only the external vocabulary boundary and defaults pointer.
 EOF
 }
 
-if [[ $# -gt 0 ]]; then
+SHORT=false
+while [[ $# -gt 0 ]]; do
   case "$1" in
+    --short)
+      SHORT=true
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
       ;;
     *)
-      echo "Error: lore dispatch guidance accepts no arguments" >&2
+      echo "Error: unexpected argument '$1'" >&2
       usage
       exit 1
       ;;
   esac
+done
+
+EXTERNAL_VOCABULARY='External-Vocabulary: In pull requests, issues, comments, and every other colleague-visible deliverable, describe only what shipped and its effect. Do not expose internal process: no harness session links, session trailers, generated-attribution lines, agent/worker/skill language, or Lore tooling references.'
+
+if [[ "$SHORT" == true ]]; then
+  printf '%s\n' "$EXTERNAL_VOCABULARY" 'For the standing defaults in force, run `lore dispatch guidance`.'
+  exit 0
 fi
 
 DEFAULTS="$("$SCRIPT_DIR/render-standing-defaults.sh")"
@@ -47,7 +61,7 @@ cat <<EOF
 Schema-Version: 1
 Defaults-Digest: sha256:$DEFAULTS_DIGEST
 Binding: Treat this invocation-fresh guidance as binding for this dispatch. It informs execution but does not select or rewrite the model, role, concurrency, or report contract.
-External-Vocabulary: In pull requests, issues, comments, and every other colleague-visible deliverable, describe only what shipped and its effect. Do not expose internal process: no harness session links, session trailers, generated-attribution lines, agent/worker/skill language, or Lore tooling references.
+$EXTERNAL_VOCABULARY
 Standing-Defaults:
 $DEFAULTS
 <!-- lore-dispatch-guidance:v1:end -->

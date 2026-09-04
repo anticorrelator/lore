@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# validate-dispatch-guidance.sh — Validate a composed dispatch prompt against
-# the current schema-v1 guidance floor. In --hook mode, extract the exact
-# evidence-backed prompt field and emit the harness's native deny shape.
+# validate-dispatch-guidance.sh — The Claude Code hook leaves launches outside
+# initialized projects untouched. Inside a project, unmarked prompts get a
+# short floor and missing models get the default; marked prompts validate
+# strictly. Direct validation and the Codex hook require a full current block.
 
 set -euo pipefail
 
@@ -16,7 +17,9 @@ Usage:
   validate-dispatch-guidance.sh --hook <claude-code|codex>
 
 Without --prompt-file, reads the composed prompt from stdin. Hook mode reads
-the native PreToolUse JSON payload from stdin and blocks invalid launches.
+the native PreToolUse JSON payload from stdin. The Claude Code hook leaves
+launches outside initialized projects untouched, supplies a short floor to
+unmarked prompts inside projects, and validates marked prompts strictly.
 EOF
 }
 
@@ -57,21 +60,29 @@ TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 PROMPT_PATH="$TMP_DIR/prompt.txt"
 MODEL_PATH="$TMP_DIR/model.txt"
+CWD_PATH="$TMP_DIR/cwd.txt"
 DEFAULTS_PATH="$TMP_DIR/defaults.txt"
 ERROR_PATH="$TMP_DIR/error.txt"
 
 if [[ -n "$HOOK_FRAMEWORK" ]]; then
   PAYLOAD_PATH="$TMP_DIR/payload.json"
   tee "$PAYLOAD_PATH" >/dev/null
-  if ! python3 - "$HOOK_FRAMEWORK" "$PAYLOAD_PATH" "$PROMPT_PATH" "$MODEL_PATH" >"$ERROR_PATH" 2>&1 <<'PY'; then
-import json, sys
+  if ! python3 - "$HOOK_FRAMEWORK" "$PAYLOAD_PATH" "$PROMPT_PATH" "$MODEL_PATH" "$CWD_PATH" >"$ERROR_PATH" 2>&1 <<'PY'; then
+import json, os, sys
 
-framework, payload_path, prompt_path, model_path = sys.argv[1:]
+framework, payload_path, prompt_path, model_path, cwd_path = sys.argv[1:]
 try:
     with open(payload_path, encoding="utf-8") as fh:
         payload = json.load(fh)
 except Exception as exc:
     raise SystemExit(f"malformed launch-hook payload: {exc}")
+
+if framework == "claude-code":
+    cwd = payload.get("cwd", os.getcwd())
+    if not isinstance(cwd, str) or not cwd.strip():
+        raise SystemExit("launch-hook payload has an invalid cwd")
+    with open(cwd_path, "w", encoding="utf-8") as fh:
+        fh.write(cwd)
 
 tool_name = payload.get("tool_name")
 tool_input = payload.get("tool_input")
@@ -108,19 +119,19 @@ else
   tee "$PROMPT_PATH" >/dev/null
 fi
 
+if [[ "$HOOK_FRAMEWORK" == "claude-code" && -s "$CWD_PATH" ]]; then
+  cd -- "$(cat "$CWD_PATH")" 2>/dev/null || exit 0
+  KNOWLEDGE_DIR=$("$SCRIPT_DIR/resolve-repo.sh" 2>/dev/null) || exit 0
+  [[ -f "$KNOWLEDGE_DIR/_manifest.json" ]] || exit 0
+fi
+
 FAILURE_REASON="${FAILURE_REASON:-}"
 
-# Injection path (claude-code hook mode only): a launch prompt that carries no
-# trace of a guidance block is a non-protocol dispatch — the launching agent
-# never had a delivery mechanism for the guidance floor. Render it fresh at
-# this seam and inject it via updatedInput instead of teaching by denial.
-# Any marker presence means a protocol seat attempted the form; those prompts
-# fall through to strict validation so tampering and staleness still surface.
 INJECT_GUIDANCE_PATH=""
 if [[ "$HOOK_FRAMEWORK" == "claude-code" && -z "$FAILURE_REASON" ]] \
   && ! grep -qF 'lore-dispatch-guidance:v1:' "$PROMPT_PATH"; then
   GUIDANCE_PATH="$TMP_DIR/guidance.txt"
-  if "$SCRIPT_DIR/render-dispatch-guidance.sh" > "$GUIDANCE_PATH" 2>"$ERROR_PATH"; then
+  if "$SCRIPT_DIR/render-dispatch-guidance.sh" --short > "$GUIDANCE_PATH" 2>"$ERROR_PATH"; then
     INJECT_GUIDANCE_PATH="$GUIDANCE_PATH"
   else
     FAILURE_REASON="guidance rendering failed at the admission gate: $(tr '\n' ' ' < "$ERROR_PATH" | sed 's/[[:space:]]*$//')"
@@ -237,9 +248,8 @@ if guidance_path:
         guidance += "\n"
     tool_input["prompt"] = guidance + tool_input["prompt"]
     reasons.append(
-        "Dispatch guidance was absent from this launch prompt; a fresh "
-        "schema-v1 guidance block was rendered and prepended at the "
-        "admission gate."
+        "Dispatch guidance was absent from this launch prompt; the external "
+        "vocabulary boundary and standing-defaults pointer were prepended."
     )
 
 if model:

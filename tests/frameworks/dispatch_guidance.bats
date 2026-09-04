@@ -19,6 +19,11 @@ setup() {
   export HOME="$TEST_HOME"
   export LORE_DATA_DIR="$TEST_LORE_DATA_DIR"
   export LORE_FRAMEWORK=codex
+  unset LORE_KNOWLEDGE_DIR
+  TEST_PROJECT="$TEST_ROOT/project"
+  mkdir -p "$TEST_PROJECT" "$TEST_LORE_DATA_DIR/repos/local/project"
+  printf '{}\n' > "$TEST_LORE_DATA_DIR/repos/local/project/_manifest.json"
+  export TEST_PROJECT
   write_settings alpha
 }
 
@@ -41,16 +46,15 @@ write_settings() {
 EOF
 }
 
-# Wrap a prompt in the claude-code PreToolUse payload shape. A third argument
-# adds an explicit tool_input.model.
 agent_payload() {
   python3 - "$@" <<'PY'
-import json, sys
+import json, os, sys
 prompt = sys.argv[1]
 tool_input = {"prompt": prompt, "subagent_type": "Explore"}
 if len(sys.argv) > 2 and sys.argv[2]:
     tool_input["model"] = sys.argv[2]
-print(json.dumps({"tool_name": "Agent", "tool_input": tool_input}))
+cwd = sys.argv[3] if len(sys.argv) > 3 else os.environ["TEST_PROJECT"]
+print(json.dumps({"cwd": cwd, "tool_name": "Agent", "tool_input": tool_input}))
 PY
 }
 
@@ -81,6 +85,36 @@ render_prompt() {
   [[ "$output" == *"generated-attribution lines"* ]]
   [[ "$output" == *"agent/worker/skill language"* ]]
   [[ "$output" == *"Lore tooling references"* ]]
+}
+
+@test "short renderer reuses the full vocabulary boundary and points to defaults" {
+  block="$(render_prompt)"
+  external="$(printf '%s\n' "$block" | sed -n '/^External-Vocabulary:/p')"
+  run bash "$CLI" dispatch guidance --short
+  [ "$status" -eq 0 ]
+  [ "$output" = "$external"$'\n''For the standing defaults in force, run `lore dispatch guidance`.' ]
+}
+
+@test "claude-code hook leaves outside launches untouched using payload cwd" {
+  outside="$TEST_ROOT/outside"
+  mkdir -p "$outside"
+  cd "$TEST_PROJECT"
+  for prompt in 'Task only' '<!-- lore-dispatch-guidance:v1:begin -->'; do
+    payload=$(agent_payload "$prompt" "" "$outside")
+    run bash -c 'printf %s "$1" | bash "$2" --hook claude-code' _ "$payload" "$VALIDATOR"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+  done
+}
+
+@test "claude-code hook resolves an initialized payload project from outside" {
+  outside="$TEST_ROOT/outside"
+  mkdir -p "$outside"
+  cd "$outside"
+  payload=$(agent_payload 'Task only')
+  run bash -c 'printf %s "$1" | bash "$2" --hook claude-code' _ "$payload" "$VALIDATOR"
+  [ "$status" -eq 0 ]
+  [ "$(printf %s "$output" | jq -r '.hookSpecificOutput.updatedInput.model')" = "opus-test" ]
 }
 
 @test "validator accepts one complete current block inside a composed prompt" {
@@ -132,7 +166,7 @@ render_prompt() {
   [[ "$output" == *"lore dispatch guidance"* ]]
 }
 
-@test "claude-code hook injects fresh guidance and the default model into block-free launches" {
+@test "claude-code hook injects the short floor and default model into block-free launches" {
   payload=$(agent_payload "Task only")
   run bash -c "printf '%s' \"\$1\" | bash '$VALIDATOR' --hook claude-code" _ "$payload"
   [ "$status" -eq 0 ]
@@ -140,17 +174,17 @@ render_prompt() {
   [[ "$output" == *'"updatedInput"'* ]]
 
   updated_prompt=$(printf '%s' "$output" | jq -r '.hookSpecificOutput.updatedInput.prompt')
-  [[ "$updated_prompt" == "<!-- lore-dispatch-guidance:v1:begin -->"* ]]
-  [[ "$updated_prompt" == *"<!-- lore-dispatch-guidance:v1:end -->"$'\n'"Task only" ]]
+  short_floor="$(bash "$RENDERER" --short)"
+  [ "$updated_prompt" = "$short_floor"$'\n'"Task only" ]
+  [[ "$updated_prompt" != *"lore-dispatch-guidance:v1:"* ]]
+  [[ "$updated_prompt" != *"dispatch_test:"* ]]
+  [[ "$output" == *"This launch named no model, so the settings-resolved default for this harness (opus-test) was supplied at the admission gate."* ]]
 
   # Guidance and model arrive in the same rewrite.
   [ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.updatedInput.model')" = "opus-test" ]
 
   # Untouched tool_input fields survive the rewrite.
   [ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.updatedInput.subagent_type')" = "Explore" ]
-
-  # The injected prompt passes the strict validator it just bypassed.
-  printf '%s' "$output" | jq -r '.hookSpecificOutput.updatedInput.prompt' | bash "$VALIDATOR"
 }
 
 @test "claude-code hook supplies the default model to a valid launch that names none" {
@@ -227,6 +261,7 @@ PY
 }
 
 @test "hook mode rejects aliases and prompt fields without evidence" {
+  cd "$TEST_PROJECT"
   run bash -c "printf '%s' '{\"tool_name\":\"Task\",\"tool_input\":{\"prompt\":\"x\"}}' | bash '$VALIDATOR' --hook claude-code"
   [ "$status" -eq 0 ]
   [[ "$output" == *"unsupported claude-code launch tool"* ]]
