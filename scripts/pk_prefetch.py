@@ -18,6 +18,7 @@ import sqlite3
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pk_byline import Bylines
 from pk_search import Searcher, render_trust_stamp, _CORRECTIONS_FIELD_RE  # noqa: E402
 from pk_resolve import Resolver, build_backlink_from_result  # noqa: E402
 import pk_retrieval  # noqa: E402
@@ -329,6 +330,7 @@ def run_prefetch(
             _emit_scope_pointers(knowledge_dir, work_item, query)
         return 0
 
+    bylines = Bylines(knowledge_dir)
     see_also_map = _load_see_also_map(knowledge_dir)
     requested_label = ",".join(sorted({s.strip().lower() for s in scale_set if s.strip()}))
 
@@ -351,7 +353,9 @@ def run_prefetch(
                 snippet = r.get("snippet", "")[:200]
                 if len(r.get("snippet", "")) > 200:
                     snippet += "..."
-                print(f'- **{r["heading"]}** ({r["file_path"]}, score: {r.get("score", 0)}): {snippet}')
+                prefix = f'- **{r["heading"]}** ({r["file_path"]}, score: {r.get("score", 0)})'
+                byline = bylines.block(r, "  ")
+                print(prefix + ("\n" + byline + "  " + snippet if byline else ": " + snippet))
             print()
         print('## Prior Knowledge')
         print(f'Results from knowledge store for: "{query}" (scale-set: {requested_label})')
@@ -365,6 +369,10 @@ def run_prefetch(
                 corrected = _last_corrected_line(knowledge_dir, r["file_path"])
                 if corrected:
                     line += f" [{corrected}]"
+            byline = bylines.block(r, "  ")
+            if byline:
+                prefix, body = line.split("): ", 1)
+                line = prefix + ")\n" + byline + "  " + body
             print(line)
         _log_prefetch(knowledge_dir, results, caller=caller, scale_set=scale_set)
         if work_item:
@@ -380,6 +388,7 @@ def run_prefetch(
             trust_line = render_trust_stamp(r, knowledge_dir)
             content = _resolve_content(backlink) or r.get("snippet", "")
             print(f'\n### {r["heading"]} (from {r["file_path"]})')
+            print(bylines.block(r), end="")
             print(trust_line)
             print(content)
         print()
@@ -407,7 +416,7 @@ def run_prefetch(
         sa_line = ("See also: " + ", ".join(sa_entries[:3])) if sa_entries else ""
         trust_line = render_trust_stamp(r, knowledge_dir)
         corrected_line = _last_corrected_line(knowledge_dir, r["file_path"]) if is_knowledge else ""
-        block = f'\n### {r["heading"]} (from {r["file_path"]}){_stale_tag(r)}\n{trust_line}'
+        block = f'\n### {r["heading"]} (from {r["file_path"]}){_stale_tag(r)}\n{bylines.block(r)}{trust_line}'
         if corrected_line:
             block += f'\n{corrected_line}'
         block += f'\n{_entry_content(r)}'
@@ -417,10 +426,10 @@ def run_prefetch(
 
     def _snippet_block(r):
         snippet = r.get("snippet", "") or _entry_content(r)
-        return f'\n### {r["heading"]} (from {r["file_path"]}){_stale_tag(r)}\n{snippet[:SNIPPET_LIMIT]}'
+        return f'\n### {r["heading"]} (from {r["file_path"]}){_stale_tag(r)}\n{bylines.block(r)}{snippet[:SNIPPET_LIMIT]}'
 
     def _backlink_block(r):
-        return f'\n- {pk_retrieval.backlink_for(r["file_path"], r["heading"])}'
+        return f'\n- {pk_retrieval.backlink_for(r["file_path"], r["heading"])}' + ("\n" + bylines.block(r).rstrip("\n") if bylines.lines(r) else "")
 
     # Sections are rendered before the entry blocks so their actual size is
     # known in time to come out of the entry budget, and printed after them so

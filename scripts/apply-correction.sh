@@ -412,8 +412,8 @@ Optional:
                                the entry's own kind via kind-registry.sh
   --kind-status-note TEXT      [set-kind-status mode only] What moved it
   --note TEXT                  [restore mode only] What the entry is needed for
-  --reported-by ROLE           [dispute/retire/restore modes] Role that observed it
-  --work-item SLUG             [dispute/retire/restore modes] Work item it was
+  --reported-by ROLE           Role that observed the correction or status change
+  --work-item SLUG             Work item it was
                                observed in
   --dry-run                    Print what would change without writing
 EOF
@@ -1878,6 +1878,8 @@ SUPERSEDED_DERIVED_TITLE=$(derive_entry_title "$SUPERSEDED_TEXT")
 REPLACEMENT_DERIVED_TITLE=$(derive_entry_title "$REPLACEMENT_TEXT")
 
 # --- Delegate to Python for safe multi-line text replacement and META editing ---
+CORRECTION_REPORTED_BY="$REPORTED_BY" \
+CORRECTION_WORK_ITEM="$WORK_ITEM" \
 PEER_MODE="$ALLOW_PEER_VERIFICATION" \
 PEER_OBSERVATION_ID="$OBSERVATION_ID" \
 python3 - "$ENTRY_PATH" "$VERDICT_ID" "$VERDICT_SOURCE" "$EVIDENCE" \
@@ -2029,6 +2031,10 @@ correction_fields = {
     "superseded_text": superseded,
     "replacement_text": replacement,
 }
+for key, env in (("reported_by", "CORRECTION_REPORTED_BY"), ("work_item", "CORRECTION_WORK_ITEM")):
+    value = os.environ.get(env, "").strip()
+    if value:
+        correction_fields[key] = value
 if h1_action == 'regenerate':
     correction_fields["previous_title"] = previous_title
     correction_fields["new_title"] = new_title

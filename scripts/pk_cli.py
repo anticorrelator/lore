@@ -16,6 +16,8 @@ Usage:
     python pk_cli.py generate-backlinks <knowledge_dir> [--json] [--threshold F] [--dry-run]
 """
 
+from pk_byline import Bylines
+
 import argparse
 import json
 import os
@@ -306,6 +308,7 @@ def cmd_search(args: argparse.Namespace) -> None:
         _report_withheld_retired(withheld_retired, sys.stdout)
         return
 
+    bylines = Bylines(args.knowledge_dir)
     for i, r in enumerate(results, 1):
         st = r.get("source_type", "knowledge")
         print(f"\n--- Result {i} [{st}] (score: {r['score']}) ---")
@@ -315,6 +318,7 @@ def cmd_search(args: argparse.Namespace) -> None:
             print(f"  Entry: {r['heading']}")
         else:
             print(f"  Heading: {r['heading']}")
+        print(bylines.block(r, "  "), end="")
         if r.get("category"):
             print(f"  Category: {r['category']}")
         if r.get("confidence"):
@@ -363,10 +367,12 @@ def cmd_search_preferences(args: argparse.Namespace) -> None:
         print(f'No preference results for "{args.query}"')
         return
 
+    bylines = Bylines(args.knowledge_dir)
     for i, r in enumerate(results, 1):
         print(f"\n--- Preference {i} (score: {r['score']}) ---")
         print(f"  File: {r['file_path']}")
         print(f"  Heading: {r['heading']}")
+        print(bylines.block(r, "  "), end="")
         if r.get("learned_date"):
             print(f"  Learned: {r['learned_date']}")
         print(f"  {render_trust_stamp(r, knowledge_dir=args.knowledge_dir)}")

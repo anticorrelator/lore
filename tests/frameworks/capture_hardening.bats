@@ -239,3 +239,23 @@ captured_entry() {
   file="$(captured_entry "$PROJECT_STORE")"
   [ "$(head -1 "$file")" = "# The Token Bucket Refills At A Constant Rate" ]
 }
+
+@test "capture records the capturing role and preserves explicit synthesis attribution" {
+  export LORE_KNOWLEDGE_DIR="$PROJECT_STORE"
+  run bash "$CAPTURE_SH" --insight "queues drain oldest-first" --scale implementation \
+    --producer-role worker --work-item queue-work --skip-manifest
+  [ "$status" -eq 0 ]
+  grep -q 'capturer_role: worker' "$(captured_entry "$PROJECT_STORE")"
+  grep -q 'work_item: queue-work' "$(captured_entry "$PROJECT_STORE")"
+  run bash "$CAPTURE_SH" --insight "queues preserve admission order" --scale implementation \
+    --producer-role researcher --capturer-role implement-lead --skip-manifest
+  [ "$status" -eq 0 ]
+  grep -rq 'capturer_role: implement-lead' "$PROJECT_STORE/conventions"
+}
+
+@test "capture without provenance does not infer a role from repository access" {
+  export LORE_KNOWLEDGE_DIR="$PROJECT_STORE" LORE_ROLE=maintainer
+  run bash "$CAPTURE_SH" --insight "queues drain oldest-first" --scale implementation --skip-manifest
+  [ "$status" -eq 0 ]
+  ! grep -q 'capturer_role:\|producer_role:\|work_item:' "$(captured_entry "$PROJECT_STORE")"
+}

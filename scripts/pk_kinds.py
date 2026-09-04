@@ -34,6 +34,7 @@ from typing import NamedTuple
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pk_search import DEFAULT_KIND, DEGRADED_UNAVAILABLE, SOURCE_TYPES, Searcher  # noqa: E402
 from pk_resolve import Resolver, build_backlink_from_result  # noqa: E402
+from pk_byline import Bylines
 import pk_retrieval  # noqa: E402
 
 SNIPPET_LIMIT = pk_retrieval.SNIPPET_CHAR_LIMIT
@@ -207,6 +208,7 @@ class _Renderer:
 
     def __init__(self, knowledge_dir: str):
         self._content: dict = {}
+        self._bylines = Bylines(knowledge_dir)
         try:
             self._resolver = Resolver(knowledge_dir)
         except (Exception, SystemExit):
@@ -229,18 +231,18 @@ class _Renderer:
     def full(self, entry: dict) -> str:
         heading = pk_retrieval.entry_heading(entry)
         path = pk_retrieval.entry_path(entry)
-        return f"\n#### {heading}{_entry_label(entry)} (from {path})\n{self._entry_content(entry)}\n"
+        return f"\n#### {heading}{_entry_label(entry)} (from {path})\n{self._bylines.block(entry)}{self._entry_content(entry)}\n"
 
     def snippet(self, entry: dict) -> str:
         heading = pk_retrieval.entry_heading(entry)
         path = pk_retrieval.entry_path(entry)
         body = (entry.get("snippet") or self._entry_content(entry))[:SNIPPET_LIMIT]
-        return f"\n#### {heading}{_entry_label(entry)} (from {path})\n{body}\n"
+        return f"\n#### {heading}{_entry_label(entry)} (from {path})\n{self._bylines.block(entry)}{body}\n"
 
     def backlink(self, entry: dict) -> str:
         heading = pk_retrieval.entry_heading(entry)
         path = pk_retrieval.entry_path(entry)
-        return f"\n- {pk_retrieval.backlink_for(path, heading)}{_entry_label(entry)}\n"
+        return f"\n- {pk_retrieval.backlink_for(path, heading)}{_entry_label(entry)}\n{self._bylines.block(entry)}"
 
 
 def section_header(spec: SectionSpec) -> str:

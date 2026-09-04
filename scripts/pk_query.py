@@ -15,6 +15,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pk_byline import Bylines
 from pk_search import Searcher, SOURCE_TYPES, attach_similar_entries  # noqa: E402
 from pk_resolve import Resolver  # noqa: E402
 import pk_retrieval  # noqa: E402
@@ -75,12 +76,13 @@ def _inject_path(entries: list[dict]) -> list[dict]:
     return out
 
 
-def _render_prompt(data) -> None:
+def _render_prompt(data, knowledge_dir=None) -> None:
     """Emit a compact ## Prior Knowledge backlink list from results."""
     entries = data["full"] if isinstance(data, dict) and "full" in data else data
     if not entries:
         return
 
+    bylines = Bylines(knowledge_dir) if knowledge_dir else None
     lines = ["## Prior Knowledge"]
     for r in entries:
         heading = r.get("heading", "")
@@ -89,6 +91,8 @@ def _render_prompt(data) -> None:
         if len(snippet) > 300:
             snippet = snippet[:300].rsplit(" ", 1)[0] + "..."
         lines.append(f"- {pk_retrieval.backlink_for(fp, heading)}")
+        if bylines:
+            lines.extend(bylines.block(r, "  ").splitlines())
         if snippet:
             lines.append(f"  {snippet.splitlines()[0][:200]}")
         for s in r.get("similar_entries", []):
@@ -163,7 +167,7 @@ def run_query(
         data = _inject_path(data)
 
     if fmt == "prompt":
-        _render_prompt(data)
+        _render_prompt(data, knowledge_dir)
     else:
         print(json.dumps(data, indent=2))
     return 0

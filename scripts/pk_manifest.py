@@ -19,6 +19,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pk_byline import Bylines
 import pk_kinds  # noqa: E402
 import pk_search  # noqa: E402
 from pk_search import Searcher  # noqa: E402
@@ -68,24 +69,27 @@ def _build_query(topic: dict) -> str:
     return " ".join(parts).strip()
 
 
-def _entry_full_block(entry: dict) -> str:
+def _entry_full_block(entry: dict, bylines=None) -> str:
+    byline = bylines.block(entry) if bylines else ""
     heading = pk_retrieval.entry_heading(entry)
     path = pk_retrieval.entry_path(entry)
     content = entry.get("content") or entry.get("body") or entry.get("snippet") or ""
-    return f"\n#### {heading} (from {path})\n{content}\n"
+    return f"\n#### {heading} (from {path})\n{byline}{content}\n"
 
 
-def _entry_snippet_block(entry: dict) -> str:
+def _entry_snippet_block(entry: dict, bylines=None) -> str:
+    byline = bylines.block(entry) if bylines else ""
     heading = pk_retrieval.entry_heading(entry)
     path = pk_retrieval.entry_path(entry)
     snippet = (entry.get("snippet") or entry.get("content") or "")[:SNIPPET_CHAR_LIMIT]
-    return f"\n#### {heading} (from {path})\n{snippet}\n"
+    return f"\n#### {heading} (from {path})\n{byline}{snippet}\n"
 
 
-def _entry_backlink_block(entry: dict) -> str:
+def _entry_backlink_block(entry: dict, bylines=None) -> str:
+    byline = bylines.block(entry) if bylines else ""
     heading = pk_retrieval.entry_heading(entry)
     path = pk_retrieval.entry_path(entry)
-    return f"\n- {pk_retrieval.backlink_for(path, heading)}\n"
+    return f"\n- {pk_retrieval.backlink_for(path, heading)}\n{byline}"
 
 
 def _trust_snapshot(knowledge_dir: str, entry: dict) -> dict:
@@ -288,6 +292,8 @@ def resolve_v2(
 
     # --- Step 3: Render with full -> snippet -> backlink degradation per section ---
 
+    bylines = Bylines(knowledge_dir)
+
     def _render_section(sec: dict) -> dict:
         candidates = sec["candidates"]
         floor = FOCAL_FLOOR_K if sec["role"] == "focal" else 1
@@ -298,9 +304,9 @@ def resolve_v2(
             budget=sec["chars_budget"],
             floor=floor,
             header_chars=len(header_line),
-            render_full=lambda c: _entry_full_block(c["entry"]),
-            render_snippet=lambda c: _entry_snippet_block(c["entry"]),
-            render_backlink=lambda c: _entry_backlink_block(c["entry"]),
+            render_full=lambda c: _entry_full_block(c["entry"], bylines),
+            render_snippet=lambda c: _entry_snippet_block(c["entry"], bylines),
+            render_backlink=lambda c: _entry_backlink_block(c["entry"], bylines),
         )
         rendered_blocks = degraded["rendered_blocks"]
 

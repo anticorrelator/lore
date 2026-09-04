@@ -587,6 +587,7 @@ if [[ -n "$RELATED_FILES" ]]; then
 fi
 if [[ -n "$PRODUCER_ROLE" ]]; then
   append_meta producer_role "$PRODUCER_ROLE"
+  CAPTURER_ROLE="${CAPTURER_ROLE:-$PRODUCER_ROLE}"
 fi
 if [[ -n "$PROTOCOL_SLOT" ]]; then
   append_meta protocol_slot "$PROTOCOL_SLOT"

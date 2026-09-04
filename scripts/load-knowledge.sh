@@ -158,7 +158,7 @@ echo ""
         [[ -f "$ABS_PATH" ]] || continue
       fi
 
-      CONTENT=$(cat "$ABS_PATH" 2>/dev/null) || continue
+      CONTENT=$(python3 "$SCRIPT_DIR/pk_byline.py" "$KNOWLEDGE_DIR" "$ABS_PATH" 2>/dev/null) || continue
       ENTRY_SIZE=${#CONTENT}
       REL_ENTRY_PATH="${ABS_PATH#"$KNOWLEDGE_DIR/"}"
 
@@ -364,6 +364,13 @@ PYTHON_SCRIPT
       BUDGET_RESULTS=$(LORE_INDEX_LOCK_WAIT_SECS="$LOCK_WAIT_SECS" \
         python3 "$SCRIPT_DIR/pk_cli.py" "${BUDGET_ARGS[@]}" 2>/dev/null) || BUDGET_RESULTS="{}"
 
+      BUDGET_RESULTS=$(echo "$BUDGET_RESULTS" | python3 -c '
+import json, sys
+sys.path.insert(0, sys.argv[2])
+from pk_byline import Bylines
+print(json.dumps(Bylines(sys.argv[1]).budget(json.load(sys.stdin))))
+' "$KNOWLEDGE_DIR" "$SCRIPT_DIR")
+
       SEARCH_DEGRADED=$(echo "$BUDGET_RESULTS" | python3 -c "
 import json, sys
 try:
@@ -404,7 +411,7 @@ for e in data.get('full', []):
             content = open(abs_path, 'r').read().rstrip('\n')
     if content:
         sys.stdout.write(fp + '\t' + content + '\0')
-" "$KNOWLEDGE_DIR" 2>/dev/null)
+" "$KNOWLEDGE_DIR" "$SCRIPT_DIR" 2>/dev/null)
 
       # Parse titles-only entries (null-delimited: heading\tfile_path\0)
       FIRST_TITLE=1
@@ -414,19 +421,26 @@ for e in data.get('full', []):
           echo "--- Additional relevant entries (titles only) ---"
           FIRST_TITLE=0
         fi
-        echo "  - ${heading} (${title_path})"
+        echo "$heading"
         FILES_SUMMARY=$((FILES_SUMMARY + 1))
         PACKET_ENTRIES+=("summary"$'\t'"$title_path")
       done < <(echo "$BUDGET_RESULTS" | python3 -c "
 import json, sys
+sys.path.insert(0, sys.argv[2])
+from pk_byline import Bylines
+bylines = Bylines(sys.argv[1])
 data = json.load(sys.stdin)
 
 for e in data.get('titles_only', []):
     fp = e.get('file_path', '')
     heading = e.get('heading', '')
     if heading:
+        heading = '  - ' + heading + ' (' + fp + ')'
+        block = bylines.block(e, '    ')
+        if block:
+            heading += '\n' + block.rstrip('\n')
         sys.stdout.write(heading + '\t' + fp + '\0')
-" 2>/dev/null)
+" "$KNOWLEDGE_DIR" "$SCRIPT_DIR" 2>/dev/null)
 
       if [[ $FIRST_TITLE -eq 0 ]]; then
         echo ""
