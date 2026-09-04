@@ -38,12 +38,12 @@ write_no_suggestion_manifest() {
     dimension_judgments:[
       {dimension_id:"D1",score:5,rationale:"Delivery complete.",evidence_refs:["source:cycle_work"]},
       {dimension_id:"D2",score:4,rationale:"Evidence quality explicit.",evidence_refs:["pack:/source_manifest"]},
-      {dimension_id:"D3",score:4,rationale:"Gaps are named.",evidence_refs:["calculation:consumer_contradiction_routing"]},
+      {dimension_id:"D3",score:4,rationale:"Gaps are named.",evidence_refs:["calculation:channel_contract_drift"]},
       {dimension_id:"D4",score:5,rationale:"Anchor alignment holds.",evidence_refs:["pack:/cycle/slug"]},
       {dimension_id:"D5",score:4,rationale:"Spec was useful.",evidence_refs:["source:journal"]}
     ],
     behavioral_health:[{check_id:"C7",answer:"The agents reasoned from missing evidence instead of complying with a green default.",evidence_refs:["pack:/fixed_health/state"]}],
-    causal_diagnoses:[{diagnosis_id:"source-gap",interpretation:"The public reader boundary prevents a trustworthy rate.",evidence_refs:["source:consumer_contradiction_lifecycle"]}],
+    causal_diagnoses:[{diagnosis_id:"source-gap",interpretation:"The cycle work reader does not expose role-slot denominators for a trustworthy drift rate.",evidence_refs:["source:cycle_work"]}],
     escalation_judgment:{applicability:"not-applicable",reason:"No worker escalation fired."},
     scale_access_judgment:{applicability:"not-applicable",reason:"No scale comparison applies to this fixture."},
     channel_flags:{applicability:"applicable",value:[]},
@@ -91,7 +91,7 @@ write_no_suggestion_manifest() {
 
 @test "substantive filing fans out escalation scale channel and one proposal by exact keys" {
   jq '.suggestion_outcome="substantive" |
-      .suggestions=[{target:"skills/retro/SKILL.md",change_type:"evidence-gap",section:"Step 3.8",suggestion:"Add a sanctioned reader.",evidence:"Lifecycle is not computable.",evidence_refs:["calculation:consumer_contradiction_routing"]}] |
+      .suggestions=[{target:"skills/retro/SKILL.md",change_type:"evidence-gap",section:"Step 3.8",suggestion:"Add a sanctioned reader.",evidence:"Channel contract drift is not computable without role-slot denominators.",evidence_refs:["calculation:channel_contract_drift"]}] |
       .escalation_judgment={applicability:"applicable",value:{observation:"One task needed re-scoping.",evidence_refs:["pack:/facts/task_context_backlinks"]}} |
       .scale_access_judgment={applicability:"applicable",value:{abstraction_grade:"right-sized",abstraction_rationale:"The subsystem pack was sufficient.",counterfactual_better:"worse",counterfactual_rationale:"Full-store retrieval would add noise.",evidence_refs:["source:cycle_work"]}} |
       .channel_flags={applicability:"applicable",value:[{role:"worker",slot:"Surfaced-concerns",signal_type:"under_routing",rate:0.5,window_cycles:3,remedy_hint:"Clarify the slot.",evidence_refs:["pack:/facts/task_context_backlinks"]}]}' "$JUDGMENTS" > "$JUDGMENTS.tmp"
