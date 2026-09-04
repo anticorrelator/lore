@@ -23,6 +23,8 @@ emitted follows the plan's own grammar, and only one is ever present:
 import argparse
 import hashlib
 import json
+import math
+from pathlib import PurePosixPath
 import os
 import re
 import subprocess
@@ -1417,11 +1419,144 @@ _TASK_HEADING_RE = re.compile(r"^### Task (\d+):\s*(.*)", re.MULTILINE)
 PLAN_VERIFICATION_HEADING = "**Plan verification (plan-owned close criteria):**"
 
 
+_TASK_ID_MARKER = re.compile(r"\[id:\s*(task-[1-9][0-9]*)\]", re.IGNORECASE)
+
+
+def _explicit_task_id(text):
+    markers = _TASK_ID_MARKER.findall(text)
+    if len(markers) > 1 or len(re.findall(r"\[id:", text, re.IGNORECASE)) != len(markers):
+        raise ValueError("task must declare exactly one valid [id: task-N] marker")
+    return markers[0].lower() if markers else None
+
+
+def _task_subject(text):
+    return _TASK_ID_MARKER.sub("", text).strip()
+
+
+class _TaskIdentity:
+    def __init__(self, previous, plan):
+        self.previous = previous
+        self.used = set()
+        self.by_subject = {}
+        self.previous_ids = set()
+        self.high_watermark = 0
+        if previous is not None:
+            if not isinstance(previous, dict) or (("tasks" in previous) == ("phases" in previous)):
+                raise ValueError("previous tasks must declare exactly one tasks or phases array")
+            old = previous.get("tasks") if "tasks" in previous else [
+                t for phase in previous["phases"] for t in phase["tasks"]]
+            ids = set()
+            for task in old:
+                task_id = task.get("id", "")
+                if not re.fullmatch(r"task-[1-9][0-9]*", task_id) or task_id in ids:
+                    raise ValueError("previous tasks contain invalid or duplicate task IDs")
+                ids.add(task_id)
+                self.previous_ids.add(task_id)
+                self.high_watermark = max(self.high_watermark, int(task_id[5:]))
+                self.by_subject.setdefault(_task_subject(task["subject"]), []).append(task_id)
+            high = previous.get("task_id_high_watermark", self.high_watermark)
+            if type(high) is not int or high < self.high_watermark:
+                raise ValueError("invalid task_id_high_watermark")
+            self.high_watermark = high
+        self.previous_high_watermark = self.high_watermark
+        self.reserved = set(_TASK_ID_MARKER.findall(plan))
+        if self.reserved:
+            self.high_watermark = max(self.high_watermark, *(int(x[5:]) for x in self.reserved))
+
+    def allocate(self, subject, default, explicit=None):
+        if explicit:
+            task_id = explicit
+        elif self.previous is not None:
+            matches = self.by_subject.get(_task_subject(subject), [])
+            if len(matches) > 1:
+                raise ValueError(f"ambiguous previous task subject: {subject!r}; add [id: task-N]")
+            if matches:
+                task_id = matches[0]
+            else:
+                self.high_watermark += 1
+                task_id = f"task-{self.high_watermark}"
+        else:
+            task_id = default
+        if task_id in self.used:
+            raise ValueError(f"duplicate or ambiguous task identity: {task_id}; add distinct [id: task-N] markers")
+        self.used.add(task_id)
+        self.high_watermark = max(self.high_watermark, int(task_id[5:]))
+        return task_id
+
+
+def _validate_command(command, predicate=False):
+    required = {"argv", "cwd", "timeout"} | ({"applicable_exit", "inapplicable_exit"} if predicate else {"expected_exit"})
+    if not isinstance(command, dict) or not required <= command.keys():
+        raise ValueError("close criterion command is missing required fields")
+    argv = command["argv"]
+    if not isinstance(argv, list) or not argv or any(not isinstance(arg, str) or "\0" in arg for arg in argv) or not argv[0]:
+        raise ValueError("close criterion argv must be a nonempty string array")
+    cwd = command["cwd"]
+    if not isinstance(cwd, str) or not cwd or "\0" in cwd or "\\" in cwd or PurePosixPath(cwd).is_absolute() or ".." in PurePosixPath(cwd).parts or re.match(r"^[A-Za-z]:", cwd):
+        raise ValueError("close criterion cwd must be worktree-relative without parent traversal")
+    timeout = command["timeout"]
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("close criterion timeout must be positive and finite")
+    for key in required & {"expected_exit", "applicable_exit", "inapplicable_exit"}:
+        if type(command[key]) is not int or not 0 <= command[key] <= 255:
+            raise ValueError(f"close criterion {key} must be an exit value from 0 to 255")
+    if predicate and command["applicable_exit"] == command["inapplicable_exit"]:
+        raise ValueError("applicability exit values must be distinct")
+    if predicate and command.keys() - required:
+        raise ValueError("unknown applicability fields")
+
+
+def _close_criteria(block):
+    markers = list(re.finditer(r"^\*\*Close criteria:\*\*([^\n]*)$", block, re.MULTILINE))
+    if not markers:
+        return None, ""
+    if len(markers) != 1:
+        raise ValueError("duplicate Close criteria blocks")
+    if markers[0].group(1).strip():
+        raise ValueError("Close criteria requires a fenced JSON array")
+    match = re.match(r"\s*```json[ \t]*\n(.*?)\n```[ \t]*(?=\n|$)", block[markers[0].end():], re.DOTALL)
+    if not match:
+        raise ValueError("Close criteria requires a fenced JSON array")
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate close criterion JSON key: {key}")
+            result[key] = value
+        return result
+    criteria = json.loads(match.group(1), object_pairs_hook=unique_object)
+    if not isinstance(criteria, list):
+        raise ValueError("Close criteria must be a JSON array")
+    seen = set()
+    for criterion in criteria:
+        _validate_command(criterion)
+        allowed = {"id", "intent", "argv", "cwd", "timeout", "expected_exit", "applicability"}
+        if criterion.keys() - allowed:
+            raise ValueError("unknown close criterion fields")
+        criterion_id = criterion.get("id")
+        if not isinstance(criterion_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", criterion_id):
+            raise ValueError("close criterion id must be a nonempty identifier")
+        if criterion_id in seen:
+            raise ValueError(f"duplicate close criterion id: {criterion_id}")
+        seen.add(criterion_id)
+        if not isinstance(criterion.get("intent"), str) or not criterion["intent"].strip():
+            raise ValueError("close criterion intent must be nonempty text")
+        if "applicability" in criterion:
+            _validate_command(criterion["applicability"], predicate=True)
+        # Shared reader criterion_version uses this canonical UTF-8 definition.
+        criterion["criterion_version"] = hashlib.sha256(json.dumps(
+            criterion, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")).hexdigest()
+    return criteria, block[markers[0].start():markers[0].end() + match.end()]
+
+
 def generate_tasks_from_plan(
     plan_content: str,
     knowledge_dir: str = "",
     slug: str = "",
     script_dir: str = "",
+    previous_tasks: dict | None = None,
+    include_completed: bool = False,
 ) -> dict:
     """Parse plan.md content and return a tasks.json-compatible dict.
 
@@ -1430,6 +1565,8 @@ def generate_tasks_from_plan(
         knowledge_dir: Path to the knowledge store (for backlink resolution).
         slug: Work item slug (for plan references in descriptions).
         script_dir: Path to the scripts directory (for pk_search.py).
+        previous_tasks: Prior generation used to retain task identities.
+        include_completed: Retain checked definitions and validate revision DAGs.
 
     Returns:
         Dict matching the tasks.json schema with plan_checksum, generated_at,
@@ -1479,6 +1616,8 @@ def generate_tasks_from_plan(
         "design_decisions_present": design_decisions_present,
     }
 
+    identity = _TaskIdentity(previous_tasks, plan_content)
+
     if task_matches:
         tasks = _tasks_from_plan(
             plan_content=plan_content,
@@ -1489,6 +1628,8 @@ def generate_tasks_from_plan(
             knowledge_dir=knowledge_dir,
             slug=slug,
             script_dir=script_dir,
+            identity=identity,
+            include_completed=include_completed,
         )
         all_tasks = tasks
         result["tasks"] = tasks
@@ -1502,16 +1643,20 @@ def generate_tasks_from_plan(
             knowledge_dir=knowledge_dir,
             slug=slug,
             script_dir=script_dir,
+            identity=identity,
+            include_completed=include_completed,
         )
         all_tasks = [task for phase in phases for task in phase["tasks"]]
         result["phases"] = phases
 
-    _validate_dependency_graph(all_tasks)
+    if previous_tasks is not None or include_completed:
+        result["task_id_high_watermark"] = identity.high_watermark
+    _validate_dependency_graph(all_tasks, check_cycles=previous_tasks is not None or include_completed)
     result["recommended_workers"] = compute_recommended_workers(all_tasks)
     return result
 
 
-def _validate_dependency_graph(all_tasks: list[dict]) -> None:
+def _validate_dependency_graph(all_tasks: list[dict], check_cycles=False) -> None:
     """Refuse a task list whose blockedBy edges name absent or self ids."""
     task_ids = {task["id"] for task in all_tasks}
     for task in all_tasks:
@@ -1526,6 +1671,14 @@ def _validate_dependency_graph(all_tasks: list[dict]) -> None:
         if task["id"] in task["blockedBy"]:
             raise ValueError(f"{task['id']} cannot depend on itself")
 
+    if check_cycles:
+        pending = {task["id"]: set(task["blockedBy"]) for task in all_tasks}
+        while pending:
+            ready = {task_id for task_id, edges in pending.items() if not edges}
+            if not ready:
+                raise ValueError("task dependency cycle (including file-target collisions)")
+            pending = {task_id: edges - ready for task_id, edges in pending.items() if task_id not in ready}
+
 
 def _phases_from_plan(
     plan_content: str,
@@ -1536,6 +1689,8 @@ def _phases_from_plan(
     knowledge_dir: str,
     slug: str,
     script_dir: str,
+    identity: _TaskIdentity,
+    include_completed: bool = False,
 ) -> list[dict]:
     """Build ``phases[]`` from a plan authored with ``### Phase N:`` headings.
 
@@ -1624,17 +1779,20 @@ def _phases_from_plan(
         )
 
         # Extract unchecked task items
-        unchecked = re.findall(r"^- \[ \]\s+(.*)", phase_content, re.MULTILINE)
+        unchecked = re.findall(r"^- \[[ xX]\]\s+(.*)" if include_completed else r"^- \[ \]\s+(.*)", phase_content, re.MULTILINE)
         if not unchecked:
             continue
 
+        criteria, criteria_text = _close_criteria(phase_content)
+        if criteria is not None and len(re.findall(r"^- \[[ xX]\]\s+", phase_content, re.MULTILINE)) != 1:
+            raise ValueError("phase Close criteria requires exactly one task; use flat task blocks for per-task criteria")
         phase_tasks = []
 
         # First pass: parse tasks, extract file_targets and backlinks
         parsed_items: list[dict] = []
         for item_text in unchecked:
             task_counter += 1
-            task_id = f"task-{task_counter}"
+            task_id = identity.allocate(item_text, f"task-{task_counter}", _explicit_task_id(item_text))
             subject = item_text.strip()
             active_form = to_active_form(subject)
             file_targets = extract_file_targets(item_text, files)
@@ -1746,6 +1904,8 @@ def _phases_from_plan(
             if slug:
                 desc_parts.append("")
                 desc_parts.append(f"**Plan reference:** [[work:{slug}]]")
+            if criteria_text:
+                desc_parts.extend(["", criteria_text])
             description = "\n".join(desc_parts)
 
             context_cost_estimate = estimate_context_cost(
@@ -1766,6 +1926,8 @@ def _phases_from_plan(
                 "judgment_class": judgment_class,
                 "context_cost_estimate": context_cost_estimate,
             }
+            if criteria is not None:
+                task_payload["close_criteria"] = criteria
             # Omit-when-empty: the route field is present only when the task
             # line carried a [route: …] marker — no default synthesis.
             if route is not None:
@@ -1888,11 +2050,10 @@ def _plan_level_text(plan_content: str, blocks: list[dict]) -> str:
     return "".join(parts)
 
 
-def _flat_checklist_line(block: dict) -> "str | None":
-    """Return a task block's single unchecked checklist line.
+def _flat_checklist_line(block: dict, include_completed=False) -> "str | None":
+    """Return the single checklist line, optionally including completed work.
 
-    ``None`` means the line is checked — completed work, which the generator
-    drops from the emitted list. Any count other than one is a refusal: the
+    ``None`` means the line is checked and include_completed is false. Any count other than one is a refusal: the
     heading number is the task's id, so two lines under one heading have no
     distinct identity to take.
     """
@@ -1904,7 +2065,7 @@ def _flat_checklist_line(block: dict) -> "str | None":
             f"[generate-tasks] task {block['number']} ({block['name']!r}) carries "
             f"{total} checklist lines; each '### Task N:' block carries exactly one."
         )
-    return unchecked[0] if unchecked else None
+    return unchecked[0] if unchecked else (checked[0] if include_completed else None)
 
 
 def _flat_file_targets(block: dict, item_text: str) -> list[str]:
@@ -1964,6 +2125,8 @@ def _tasks_from_plan(
     knowledge_dir: str,
     slug: str,
     script_dir: str,
+    identity: _TaskIdentity,
+    include_completed: bool = False,
 ) -> list[dict]:
     """Build ``tasks[]`` from a plan authored with ``### Task N:`` headings.
 
@@ -1991,9 +2154,14 @@ def _tasks_from_plan(
                 f"be unique."
             )
         seen_numbers.add(number)
-        task_id = f"task-{number}"
+        full_item = _flat_checklist_line(block, include_completed=True)
+        explicit = _explicit_task_id(block["name"] + " " + full_item)
+        heading_id = f"task-{number}"
+        if identity.previous is not None and not explicit and heading_id not in identity.previous_ids and number <= identity.previous_high_watermark:
+            raise ValueError(f"historical task ID {heading_id} cannot be reused implicitly; add [id: {heading_id}] to restore it")
+        task_id = identity.allocate(full_item, heading_id, explicit or heading_id)
 
-        item_text = _flat_checklist_line(block)
+        item_text = _flat_checklist_line(block, include_completed=include_completed)
         if item_text is None:
             completed_ids.add(task_id)
             continue
@@ -2034,6 +2202,7 @@ def _tasks_from_plan(
             and bool(knowledge_context)
         )
 
+        criteria, criteria_text = _close_criteria(body)
         desc_parts: list[str] = []
         if deliverable:
             desc_parts.append(f"**Deliverable:** {deliverable}")
@@ -2053,6 +2222,12 @@ def _tasks_from_plan(
             desc_parts.append("")
             desc_parts.append("**Consultations required:**")
             desc_parts.extend(f"- {domain}" for domain in consultations_required)
+
+        if criteria_text:
+            desc_parts.extend(["", criteria_text])
+        local_verification = _parse_verification_lines(body)
+        if local_verification:
+            desc_parts.extend(["", "**Verification:**", *local_verification])
 
         if plan_verification:
             desc_parts.append("")
@@ -2093,7 +2268,7 @@ def _tasks_from_plan(
 
         task_payload = {
             "id": task_id,
-            "name": block["name"],
+            "name": _task_subject(block["name"]),
             "subject": subject,
             "deliverable": deliverable,
             "description": description,
@@ -2111,6 +2286,8 @@ def _tasks_from_plan(
                 has_advisory=has_advisory,
             ),
         }
+        if criteria is not None:
+            task_payload["close_criteria"] = criteria
         route = extract_route(item_text)
         if route is not None:
             task_payload["route"] = route
@@ -2273,6 +2450,8 @@ def main():
         "--quiet", action="store_true",
         help="Suppress diagnostics output (overrides --diagnostics)"
     )
+    parser.add_argument("--previous-tasks", help="Previous generation for stable task identities")
+    parser.add_argument("--include-completed", action="store_true", help="Retain completed task definitions")
     args = parser.parse_args()
 
     if not os.path.isfile(args.plan_path):
@@ -2287,11 +2466,18 @@ def main():
     if not slug:
         slug = os.path.basename(os.path.dirname(os.path.abspath(args.plan_path)))
 
+    previous_tasks = None
+    if args.previous_tasks:
+        with open(args.previous_tasks, encoding="utf-8") as previous_file:
+            previous_tasks = json.load(previous_file)
+
     result = generate_tasks_from_plan(
         plan_content=plan_content,
         knowledge_dir=args.knowledge_dir,
         slug=slug,
         script_dir=os.path.dirname(os.path.abspath(__file__)),
+        previous_tasks=previous_tasks,
+        include_completed=args.include_completed,
     )
 
     if args.diagnostics and not args.quiet:

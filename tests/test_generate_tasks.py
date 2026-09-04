@@ -3140,3 +3140,150 @@ class TestFlatSizingDiagnostics:
         assert "Context cost summary:" in err
         assert "Parser" in err
         assert "Reader" in err
+
+
+class TestRevisionGeneration:
+    @staticmethod
+    def flat(units):
+        return "# Plan\n## Tasks\n" + "\n".join(
+            f"### Task {number}: Unit {number}\n**Files:** `src/{number}.py`\n- [{checked}] {subject}\n{extra}\n"
+            for number, subject, checked, extra in units
+        )
+
+    @staticmethod
+    def criteria(**changes):
+        criterion = {"id": "smoke", "intent": "Check π behavior", "argv": ["python", "check.py"],
+                     "cwd": ".", "timeout": 30, "expected_exit": 0}
+        criterion.update(changes)
+        return criterion
+
+    @staticmethod
+    def block(criteria):
+        import json
+        return "**Close criteria:**\n```json\n" + json.dumps(criteria, ensure_ascii=False) + "\n```"
+
+    def test_flat_heading_identity_survives_subject_edit_reorder_and_completion(self):
+        old = generate_tasks_from_plan(self.flat([(2, "Old subject", " ", ""), (9, "Other", " ", "")]))
+        new = generate_tasks_from_plan(self.flat([(9, "Other", " ", ""), (2, "New subject", "x", "")]),
+                                       previous_tasks=old, include_completed=True)
+        assert [t["id"] for t in new["tasks"]] == ["task-9", "task-2"]
+        assert new["tasks"][1]["subject"] == "New subject"
+        assert new["task_id_high_watermark"] == 9
+        assert "phases" not in new
+
+    def test_explicit_id_overrides_heading_and_retains_subject(self):
+        plan = self.flat([(1, "Run checks [id: task-8]", " ", "")])
+        task = generate_tasks_from_plan(plan, include_completed=True)["tasks"][0]
+        assert task["id"] == "task-8"
+        assert task["subject"] == "Run checks [id: task-8]"
+
+    def test_legacy_subject_matching_preserves_ids_and_historical_max(self):
+        old = generate_tasks_from_plan(MINIMAL_PLAN, include_completed=True)
+        revised = MINIMAL_PLAN.replace("- [ ] Create config file\n", "").replace(
+            "- [ ] Add default values", "- [x] Add default values\n- [ ] New configuration")
+        new = generate_tasks_from_plan(revised, previous_tasks=old, include_completed=True)
+        tasks = [task for phase in new["phases"] for task in phase["tasks"]]
+        assert [t["id"] for t in tasks] == ["task-2", "task-5", "task-3", "task-4"]
+        removed = revised.replace("- [ ] New configuration\n", "")
+        next_gen = generate_tasks_from_plan(removed, previous_tasks=new, include_completed=True)
+        restored = generate_tasks_from_plan(removed.replace("- [x] Add default values", "- [x] Add default values\n- [ ] Brand new"), previous_tasks=next_gen, include_completed=True)
+        assert restored["phases"][0]["tasks"][1]["id"] == "task-6"
+        assert "tasks" not in restored
+
+    def test_ambiguous_legacy_subject_requires_marker(self):
+        plan = "### Phase 1: Work\n**Files:** `src/a.py`\n- [ ] Same\n- [ ] Same\n"
+        old = generate_tasks_from_plan(plan)
+        with pytest.raises(ValueError, match="ambiguous"):
+            generate_tasks_from_plan(plan, previous_tasks=old, include_completed=True)
+        explicit = plan.replace("- [ ] Same\n- [ ] Same", "- [ ] Changed [id: task-2]\n- [ ] Same [id: task-1]")
+        assert [t["id"] for t in generate_tasks_from_plan(explicit, previous_tasks=old)["phases"][0]["tasks"]] == ["task-2", "task-1"]
+
+    def test_criteria_retained_and_version_matches_reader(self):
+        import runpy
+        c = self.criteria(applicability={"argv": ["test", "-f", "config"], "cwd": "src", "timeout": 2,
+                                       "applicable_exit": 0, "inapplicable_exit": 1})
+        block = self.block([c])
+        plan = self.flat([(1, "Run checks", "x", block + "\n**Verification:**\n- Legacy acceptance prose")])
+        task = generate_tasks_from_plan(plan, include_completed=True)["tasks"][0]
+        reader = runpy.run_path(str(_script_path.with_name("work-evidence.py")))
+        assert task["close_criteria"][0] == {**c, "criterion_version": reader["criterion_version"](c)}
+        assert block in task["description"]
+        assert "**Verification:**\n- Legacy acceptance prose" in task["description"]
+        changed = self.criteria(argv=["python", "other.py"])
+        newer = generate_tasks_from_plan(self.flat([(1, "Run checks", " ", self.block([changed]))]))
+        assert newer["tasks"][0]["close_criteria"][0]["criterion_version"] != task["close_criteria"][0]["criterion_version"]
+
+    @pytest.mark.parametrize("changes", [
+        {"argv": "python check.py"}, {"argv": []}, {"argv": [""]}, {"argv": ["x", 2]},
+        {"cwd": "../escape"}, {"cwd": "/tmp"}, {"cwd": "a/../b"}, {"cwd": "C:\\temp"},
+        {"timeout": 0}, {"timeout": True}, {"timeout": float("nan")}, {"timeout": float("inf")},
+        {"expected_exit": False}, {"expected_exit": 256}, {"id": ""}, {"intent": " "},
+        {"unexpected": 1}, {"applicability": {"argv": ["true"], "cwd": ".", "timeout": 1,
+                                            "applicable_exit": 0, "inapplicable_exit": 0}},
+    ])
+    def test_invalid_criteria_fail_before_output(self, changes):
+        with pytest.raises(ValueError):
+            generate_tasks_from_plan(self.flat([(1, "Run checks", " ", self.block([self.criteria(**changes)]))]))
+
+    @pytest.mark.parametrize("payload", ["{}", "[{}]", '[{"id":"a","id":"b"}]', "not json"])
+    def test_malformed_criteria(self, payload):
+        with pytest.raises(ValueError):
+            generate_tasks_from_plan(self.flat([(1, "Run checks", " ", "**Close criteria:**\n```json\n" + payload + "\n```")]))
+
+    def test_duplicate_criteria_and_task_ids_refused(self):
+        with pytest.raises(ValueError, match="duplicate close criterion"):
+            generate_tasks_from_plan(self.flat([(1, "Run", " ", self.block([self.criteria(), self.criteria()]))]))
+        with pytest.raises(ValueError, match="duplicate or ambiguous"):
+            generate_tasks_from_plan(self.flat([(1, "Run [id: task-3]", " ", ""), (2, "Other [id: task-3]", " ", "")]))
+
+    def test_revision_cycles_include_file_collisions_and_complete_tasks(self):
+        plan = self.flat([(1, "First [depends-on: task-2]", "x", ""), (2, "Second", " ", "")])
+        plan = plan.replace("src/2.py", "src/1.py")
+        with pytest.raises(ValueError, match="cycle"):
+            generate_tasks_from_plan(plan, include_completed=True)
+        missing = self.flat([(1, "First [depends-on: task-99]", "x", "")])
+        with pytest.raises(ValueError, match="unknown dependencies"):
+            generate_tasks_from_plan(missing, include_completed=True)
+
+    def test_single_task_phase_criteria_and_multi_task_refusal(self):
+        plan = "### Phase 1: Work\n**Files:** `src/a.py`\n- [x] Run\n" + self.block([self.criteria()])
+        task = generate_tasks_from_plan(plan, include_completed=True)["phases"][0]["tasks"][0]
+        assert task["close_criteria"][0]["id"] == "smoke"
+        with pytest.raises(ValueError, match="exactly one task"):
+            generate_tasks_from_plan(plan + "\n- [ ] Other\n", include_completed=True)
+
+    def test_deleted_flat_identity_requires_explicit_restoration(self):
+        old = generate_tasks_from_plan(self.flat([(1, "First", " ", ""), (8, "Eighth", " ", "")]), include_completed=True)
+        deleted = generate_tasks_from_plan(self.flat([(8, "Eighth", " ", "")]), previous_tasks=old, include_completed=True)
+        with pytest.raises(ValueError, match="historical task ID"):
+            generate_tasks_from_plan(self.flat([(1, "New", " ", "")]), previous_tasks=deleted, include_completed=True)
+        restored = generate_tasks_from_plan(self.flat([(1, "New [id: task-1]", " ", "")]), previous_tasks=deleted, include_completed=True)
+        assert restored["tasks"][0]["id"] == "task-1"
+        assert restored["task_id_high_watermark"] == 8
+
+    def test_revision_cli_keeps_checksum_and_completed_criteria(self, tmp_path):
+        import hashlib
+        import json
+        import subprocess
+        import sys
+        plan = self.flat([(4, "Run checks", "x", self.block([self.criteria()]))])
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text(plan)
+        old_path = tmp_path / "old.json"
+        old_path.write_text(json.dumps(generate_tasks_from_plan(plan, include_completed=True)))
+        result = subprocess.run([sys.executable, str(_script_path), str(plan_path),
+                                 "--previous-tasks", str(old_path), "--include-completed", "--quiet"],
+                                capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        output = json.loads(result.stdout)
+        assert output["plan_checksum"] == hashlib.sha256(plan.encode()).hexdigest()
+        assert output["tasks"][0]["id"] == "task-4"
+        assert output["tasks"][0]["close_criteria"][0]["argv"] == ["python", "check.py"]
+        assert output["task_id_high_watermark"] == 4
+
+    def test_inline_criterion_payload_and_completed_phase_ambiguity_refused(self):
+        with pytest.raises(ValueError, match="fenced JSON"):
+            generate_tasks_from_plan(self.flat([(1, "Run", " ", '**Close criteria:** []')]))
+        plan = "### Phase 1: Work\n**Files:** `src/a.py`\n- [x] Complete\n- [ ] Pending\n" + self.block([self.criteria()])
+        with pytest.raises(ValueError, match="exactly one task"):
+            generate_tasks_from_plan(plan)

@@ -279,3 +279,99 @@ PY
   [ "$(jq -r .pack_id "$item/retro-evidence-pack.json")" != "$previous" ]
   jq -e '.source_data.cycle_work.evidence.sources.outcomes.rows | length == 1' "$item/retro-evidence-pack.json"
 }
+
+@test "published revision snapshots decisions and progress remain inspectable in the pack" {
+  local item="$TEST_KDIR/_work/cycle-a"
+  cat > "$item/plan.md" <<'PLAN'
+# Cycle A
+
+## Goal
+Exercise revision evidence.
+
+## Narrative
+A task retains its criterion through publication and progress.
+
+## Intent Anchor
+Exercise every published retro evidence reader.
+
+**Scope delta:** none
+
+## Tasks
+
+**Merge rationale:** One criterion exercises the revision reader.
+
+### Task 1: Retain revision evidence
+**Deliverable:** A revision-bound example.
+**Files:** `example.py`
+**Scope:**
+- Output contract: Evidence remains inspectable.
+**Close criteria:**
+```json
+[{"id":"C1","intent":"Observe the example","argv":["python3","-c","print('revision-one')"],"cwd":".","timeout":10,"expected_exit":0}]
+```
+
+- [ ] Retain the revision example.
+PLAN
+  cat > "$TEST_KDIR/decisions.json" <<'JSON'
+{"anchor_coverage":{"disposition":"covered","by":"designer","note":"The criterion exercises the declared reader."},"review_requirement":{"disposition":"pending","by":"designer","note":"Review scope remains to be decided.","prior_review_refs":[]},"dispatch_decision":{"disposition":"proceed","by":"coordinator","note":"This isolated fixture can proceed while review scope is considered.","task_ids":["task-1"],"prior_review_refs":[]}}
+JSON
+  run bash "$REPO_DIR/scripts/plan-revise.sh" cycle-a --reason 'Publish reader fixture' --author-role designer --decisions "$TEST_KDIR/decisions.json" --json
+  [ "$status" -eq 0 ]
+  run_prepare
+  local first_pack first_revision
+  first_pack="$(jq -r .pack_id "$item/retro-evidence-pack.json")"
+  first_revision="$(jq -r .revision_id "$item/tasks.json")"
+  jq -e --arg rid "$first_revision" '
+    .source_data.cycle_work.evidence as $e |
+    $e.revision.publication_state == "current" and
+    $e.revision.head.revision_id == $rid and
+    $e.sources.tasks.data.tasks[0].close_criteria[0].argv[2] == "print('\''revision-one'\'')" and
+    ($e.sources.revisions.records[0].artifacts | length) >= 2 and
+    ($e.sources.revisions.snapshots.entries | map(.content // "") | join("\n") | contains("revision-one"))
+  ' "$item/retro-evidence-pack.json"
+  cp "$item/revisions.jsonl" "$TEST_KDIR/first-ledger"
+  run bash "$REPO_DIR/scripts/plan-revise.sh" cycle-a --reason 'Unchanged reader fixture' --author-role designer --json
+  [ "$status" -eq 0 ]
+  cmp "$TEST_KDIR/first-ledger" "$item/revisions.jsonl"
+  run_prepare
+  [ "$first_pack" = "$(jq -r .pack_id "$item/retro-evidence-pack.json")" ]
+
+  run bash "$REPO_DIR/scripts/update-plan-checkbox.sh" cycle-a 'Retain the revision example.'
+  [ "$status" -eq 0 ]
+  run_prepare
+  [ "$first_pack" != "$(jq -r .pack_id "$item/retro-evidence-pack.json")" ]
+  jq -e --arg first "$first_revision" '
+    .source_data.cycle_work.evidence as $e |
+    $e.revision.publication_state == "current" and
+    $e.revision.head.kind == "progress" and
+    $e.revision.head.predecessor == $first and
+    $e.sources.revisions.rows[0].revision_id == $first and
+    $e.sources.tasks.data.tasks[0].id == "task-1" and
+    ($e.sources.revisions.snapshots.entries | map(.content // "") | join("\n") | contains("- [ ] Retain"))
+  ' "$item/retro-evidence-pack.json"
+  python3 - "$item/plan.md" <<'PY_EDIT'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]);p.write_text(p.read_text().replace("revision-one", "revision-two"))
+PY_EDIT
+  run bash "$REPO_DIR/scripts/plan-revise.sh" cycle-a --reason 'Change the actual criterion command' --author-role designer --json
+  [ "$status" -eq 0 ]
+  run_prepare
+  local semantic_revision semantic_pack
+  semantic_revision="$(jq -r .revision_id "$item/tasks.json")"
+  semantic_pack="$(jq -r .pack_id "$item/retro-evidence-pack.json")"
+  jq -e '.source_data.cycle_work.evidence as $e |
+    $e.revision.head.kind == "semantic" and
+    $e.revision.head.anchor_coverage.disposition == "pending" and
+    ($e.sources.revisions.snapshots.entries | map(.content // "") | join("\n") | contains("revision-one")) and
+    ($e.sources.tasks.content | contains("revision-two"))' "$item/retro-evidence-pack.json"
+  run bash "$REPO_DIR/scripts/plan-revise.sh" cycle-a --decision-for "$semantic_revision" --decision-id reader-disposition --decisions "$TEST_KDIR/decisions.json" --json
+  [ "$status" -eq 0 ]
+  run_prepare
+  [ "$semantic_pack" != "$(jq -r .pack_id "$item/retro-evidence-pack.json")" ]
+  jq -e --arg rid "$semantic_revision" '.source_data.cycle_work.evidence as $e |
+    $e.revision.head.revision_id == $rid and
+    $e.sources.revisions.rows[-1].record_type == "decision" and
+    $e.sources.revisions.rows[-1].revision_id == $rid' "$item/retro-evidence-pack.json"
+
+}

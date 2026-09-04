@@ -7,11 +7,13 @@
 set -euo pipefail
 
 QUIET=false
+INSTALL_REVISION=""
 POSITIONAL=()
-for arg in "$@"; do
-  case "$arg" in
-    --quiet) QUIET=true ;;
-    *) POSITIONAL+=("$arg") ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --quiet) QUIET=true; shift ;;
+    --install-revision) INSTALL_REVISION="$2"; shift 2 ;;
+    *) POSITIONAL+=("$1"); shift ;;
   esac
 done
 
@@ -41,19 +43,54 @@ if [[ ! -f "$PLAN_FILE" ]]; then
   exit 1
 fi
 
-# Generate tasks.json from plan.md (diagnostics printed to stderr unless --quiet)
-if $QUIET; then
-  OUTPUT=$(python3 "$SCRIPT_DIR/generate-tasks.py" "$PLAN_FILE" \
-    --knowledge-dir "$KNOWLEDGE_DIR" \
-    --slug "$SLUG")
-else
-  OUTPUT=$(python3 "$SCRIPT_DIR/generate-tasks.py" "$PLAN_FILE" \
-    --knowledge-dir "$KNOWLEDGE_DIR" \
-    --slug "$SLUG" \
-    --diagnostics)
+if [[ -z "$INSTALL_REVISION" && -e "$WORK_ITEM_DIR/revisions.jsonl" ]]; then
+  exec bash "$SCRIPT_DIR/plan-revise.sh" "$SLUG" --reason "record authored plan state"
 fi
 
-echo "$OUTPUT" > "$TASKS_FILE"
+if [[ -n "$INSTALL_REVISION" ]]; then
+  OUTPUT=$(python3 - "$WORK_ITEM_DIR" "$INSTALL_REVISION" <<'PYINSTALL'
+import fcntl, hashlib, json, os, pathlib, sys
+item = pathlib.Path(sys.argv[1])
+fd = int(os.environ.get('LORE_PLAN_PUBLICATION_LOCK_FD', '-1'))
+try:
+    if os.fstat(fd).st_ino != os.stat(item / 'revisions/.publication.lock').st_ino:
+        raise ValueError('publication lock descriptor mismatch')
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except (OSError, ValueError):
+    sys.exit('revision task installation requires the publication lock')
+rows = [json.loads(line) for line in (item / 'revisions.jsonl').read_text().splitlines()]
+head = next(r for r in reversed(rows) if r.get('record_type', 'revision') == 'revision')
+if head['revision_id'] != sys.argv[2]:
+    sys.exit('only the committed head can replace live tasks')
+source = (item / head['tasks_path']).resolve()
+if not source.is_relative_to(item.resolve()):
+    sys.exit('snapshot outside item')
+raw = source.read_bytes()
+if hashlib.sha256(raw).hexdigest() != head['tasks_sha256']:
+    sys.exit('committed task snapshot digest mismatch')
+if json.loads(raw).get('revision_id') != head['revision_id']:
+    sys.exit('committed task snapshot revision mismatch')
+temporary = item / '.tasks.json.publish'
+with open(temporary, 'wb') as stream:
+    stream.write(raw)
+    stream.flush()
+    os.fsync(stream.fileno())
+os.replace(temporary, item / 'tasks.json')
+directory = os.open(item, os.O_RDONLY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+sys.stdout.write(raw.decode())
+PYINSTALL
+  )
+else
+  GENERATOR_ARGS=("$PLAN_FILE" --knowledge-dir "$KNOWLEDGE_DIR" --slug "$SLUG")
+  $QUIET || GENERATOR_ARGS+=(--diagnostics)
+  OUTPUT=$(python3 "$SCRIPT_DIR/generate-tasks.py" "${GENERATOR_ARGS[@]}")
+  printf '%s\n' "$OUTPUT" > "$TASKS_FILE.tmp"
+  mv "$TASKS_FILE.tmp" "$TASKS_FILE"
+fi
 
 # Summarize the generated JSON. tasks[] is authoritative when present; a
 # document carrying only phases[] is summarized through the fallback.

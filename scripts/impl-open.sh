@@ -12,8 +12,8 @@
 # Computed envelope:
 #   - orchestration-adapter capability gates (completion_enforcement,
 #     team_messaging) for the active framework
-#   - tasks.json checksum validation (delegates to load-tasks.sh; a mismatch
-#     is a hard error directing the caller to `lore work regen-tasks`)
+#   - revision reconciliation followed by read-only tasks.json validation
+#   - authored per-task coverage and dispatch decisions on adopted items
 #   - unit map: one entry per brief owner — a task on a flat plan, a phase on a
 #     phase-shaped one — with its name, objective, files, and directive kind
 #   - prior knowledge per brief owner via the 3-branch gate: retrieval_directive
@@ -215,9 +215,12 @@ TASKS_FILE="$ITEM_DIR/tasks.json"
 
 [[ -f "$META" ]] || fail "missing _meta.json for work item '$SLUG'"
 [[ -f "$PLAN_FILE" ]] || fail "No structured plan found for '$SLUG'. Run /spec first to create phases and tasks."
-if [[ ! -f "$TASKS_FILE" ]]; then
+if [[ ! -f "$TASKS_FILE" && ! -e "$ITEM_DIR/revisions.jsonl" ]]; then
   fail "no tasks.json for '$SLUG' — generate it first: lore work tasks $SLUG"
 fi
+
+# Reconciliation belongs to the composer; the loader remains read-only.
+bash "$SCRIPT_DIR/plan-revise.sh" "$SLUG" --reconcile >/dev/null || fail "plan reconciliation failed for '$SLUG'"
 
 # --- Checksum gate: delegate to the load-tasks sole validator ---------------
 set +e
@@ -289,6 +292,12 @@ with open(os.path.join(item_dir, "_meta.json"), encoding="utf-8") as f:
     meta = json.load(f)
 title = meta.get("title") or slug
 
+publication_lock = None
+if os.path.exists(os.path.join(item_dir, "revisions.jsonl")):
+    import fcntl
+    publication_lock = open(os.path.join(item_dir, "revisions", ".publication.lock"), "rb")
+    fcntl.flock(publication_lock, fcntl.LOCK_SH)
+
 with open(os.path.join(item_dir, "tasks.json"), encoding="utf-8") as f:
     tasks_data = json.load(f)
 
@@ -351,6 +360,16 @@ for tid in selected_ids:
         already_complete.append(tid)
     else:
         eligible_ids.append(tid)
+import runpy
+try:
+    publication = runpy.run_path(os.path.join(script_dir, "work-evidence.py"))["publication_for_dispatch"](item_dir, os.path.dirname(os.path.dirname(item_dir)))
+except (OSError, ValueError, KeyError) as exc:
+    sys.exit("[impl] " + str(exc))
+if tasks_data.get("revision_id") != publication["revision_id"]:
+    sys.exit("[impl] task generation changed during dispatch preparation; refresh and retry")
+blocked_selection = {tid: publication["blocked"][tid] for tid in eligible_ids if tid in publication["blocked"]}
+if blocked_selection:
+    sys.exit("[impl] revision " + str(publication["revision_id"]) + ": " + json.dumps(blocked_selection, sort_keys=True) + "; record lore plan revise --decision-for before dispatch")
 eligible_set = set(eligible_ids)
 
 # --- Dependency closure over the full tasks.json DAG --------------------------

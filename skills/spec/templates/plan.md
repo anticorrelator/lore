@@ -144,6 +144,20 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
      `[depends-on: task-N]`. -->
 - Do not modify: `path/to/file`
 - Output contract: <what this task fixes and later tasks may rely on>
+<!-- optional — executable close criteria for this task; omit the block when the task has none. Replace the example argv below with the check this task owns; the sample is an illustration, not a requirement to create scripts/test.sh -->
+**Close criteria:**
+```json
+[
+  {
+    "id": "unit-tests",
+    "intent": "The task's unit tests pass from the execution worktree.",
+    "argv": ["bash", "scripts/test.sh"],
+    "cwd": ".",
+    "timeout": 600,
+    "expected_exit": 0
+  }
+]
+```
 **Task format:** prescriptive  <!-- optional — omit for default intent+constraints format -->
 **Knowledge delivery:** full  <!-- optional — omit for default annotation-only delivery -->
 **Retrieval directive:**

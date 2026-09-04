@@ -48,6 +48,14 @@ if [[ ! -f "$PLAN_FILE" ]]; then
   exit 1
 fi
 
+python3 - "$SCRIPT_DIR" "$WORK_ITEM_DIR" "$KNOWLEDGE_DIR" <<'PYREVISION'
+import runpy, sys
+try:
+    runpy.run_path(sys.argv[1] + '/work-evidence.py')['publication_for_dispatch'](sys.argv[2], sys.argv[3])
+except (OSError, ValueError, KeyError) as exc:
+    sys.exit('[load-tasks] ' + str(exc) + '; run: lore plan revise --reconcile')
+PYREVISION
+
 python3 - "$TASKS_FILE" "$PLAN_FILE" "$SLUG" << 'PYTHON'
 import json
 import sys

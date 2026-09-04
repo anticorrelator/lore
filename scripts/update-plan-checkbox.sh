@@ -31,6 +31,11 @@ if [[ ! -f "$PLAN_FILE" ]]; then
   exit 1
 fi
 
+if [[ -e "$(dirname "$PLAN_FILE")/revisions.jsonl" && -z "${LORE_PLAN_CHECKBOX_LOCK_FD:-}" ]]; then
+  exec bash "$SCRIPT_DIR/plan-revise.sh" "$WORK_SLUG" --kind progress \
+    --reason "record task completion" --complete-subject "$TASK_SUBJECT"
+fi
+
 # --- Use Python for robust matching and update ---
 python3 - "$PLAN_FILE" "$TASK_SUBJECT" << 'PYTHON_SCRIPT'
 import sys

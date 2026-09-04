@@ -64,6 +64,7 @@ Commands:
   capture      Capture an insight to the knowledge store
   promote      Promote a Tier 3 observation row to the knowledge commons
   test         Run lore test suites (see: lore test protocols)
+  plan         Publish plan revisions and authored decisions (see: lore plan --help)
   dispatch     Render dispatch-time guidance (see: lore dispatch --help)
   annotate     Record a retrieval friction annotation
   verify       Record a consumption-verification outcome (held|contradicted)
@@ -2215,6 +2216,22 @@ cmd_dispatch() {
   esac
 }
 
+cmd_plan() {
+  local subcmd="${1:---help}"
+  [[ $# -eq 0 ]] || shift
+  case "$subcmd" in
+    revise) exec "$SCRIPTS_DIR/plan-revise.sh" "$@" ;;
+    --help|-h)
+      printf '%s\n' 'Usage: lore plan revise <slug> [--reason TEXT] [--author-role ROLE]' \
+        '  [--kind auto|semantic|progress] [--expected-predecessor RID|none]' \
+        '  [--decisions FILE] [--json]' \
+        '  Decision only: --decision-for RID --decision-id TOKEN --decisions FILE' \
+        '  Recovery: --reconcile repairs adopted items and adopts legacy checksum drift.'
+      ;;
+    *) echo "Error: unknown plan subcommand '$subcmd'" >&2; return 1 ;;
+  esac
+}
+
 # --- Top-level dispatch ---
 if [[ $# -eq 0 ]]; then
   exec lore-tui
@@ -2415,6 +2432,10 @@ case "$1" in
   impl)
     shift
     cmd_impl "$@"
+    ;;
+  plan)
+    shift
+    cmd_plan "$@"
     ;;
   spec)
     shift

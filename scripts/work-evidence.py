@@ -370,6 +370,87 @@ def revision_view(source, tasks, plan):
     return result
 
 
+def dispatch_projection(history, item, root):
+    """Fold authored decisions by task while preserving their source revision."""
+    import copy
+    result = {"schema_version": 1, "state": "read", "reason": "", "tasks": {}, "blocked": {}}
+    if history["state"] not in {"read", "absent"}:
+        result.update(state="unreadable", reason="revision-history-unavailable")
+        return result
+    states = {}
+    decisions = {}
+    for row in history["rows"]:
+        if row.get("record_type") == "decision":
+            decisions.setdefault(row["revision_id"], []).append(row)
+    try:
+        for row in history["rows"]:
+            if row.get("record_type", "revision") != "revision":
+                continue
+            rid = row["revision_id"]
+            path = (item / row["tasks_path"]).resolve()
+            if not path.is_relative_to(item.resolve()):
+                raise ValueError("revision snapshot outside item")
+            source = read_file(path, root, json_file=True, versions={"1"})
+            if source["state"] != "read" or source["sha256"] != row["tasks_sha256"]:
+                raise ValueError("revision task snapshot unavailable")
+            ids = {task["id"] for task in task_rows(source["data"])}
+            current = {tid: copy.deepcopy(value) for tid, value in states.get(row.get("predecessor"), {}).items()
+                       if tid in ids}
+            changed = set(row.get("changed_task_ids", ids)) if row.get("kind") != "progress" else set()
+            for tid in ids:
+                if tid in changed or tid not in current:
+                    current[tid] = {"coverage": row.get("anchor_coverage"), "coverage_revision_id": rid,
+                                    "dispatch": None, "dispatch_revision_id": None}
+            def apply(value, coverage_all=False):
+                if coverage_all and value.get("anchor_coverage") is not None:
+                    for entry in current.values():
+                        entry.update(coverage=value["anchor_coverage"], coverage_revision_id=rid)
+                dispatch = value.get("dispatch_decision") or {}
+                for tid in dispatch.get("task_ids", []):
+                    if tid in current:
+                        current[tid].update(dispatch=dispatch, dispatch_revision_id=rid)
+            if row.get("kind") != "progress":
+                apply(row, coverage_all="anchor_coverage" in row.get("decision_overrides", {}))
+            else:
+                apply(row.get("decision_overrides", {}), coverage_all=True)
+            for decision in decisions.get(rid, []):
+                apply(decision, coverage_all=True)
+            states[rid] = current
+            result["tasks"] = current
+        for tid, value in sorted(result["tasks"].items()):
+            coverage, dispatch = value["coverage"] or {}, value["dispatch"] or {}
+            if coverage.get("disposition") != "covered":
+                result["blocked"][tid] = "pending anchor coverage decision"
+            elif not dispatch:
+                result["blocked"][tid] = "missing authored dispatch decision"
+            elif dispatch.get("disposition") not in {"proceed", "reuse"}:
+                result["blocked"][tid] = "authored dispatch decision is wait"
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        result.update(state="unreadable", reason=str(exc), tasks={}, blocked={})
+    return result
+
+
+def publication_for_dispatch(item_dir, knowledge_dir):
+    """Read the committed generation and the authored decisions for dispatch."""
+    item, root = Path(item_dir), Path(knowledge_dir)
+    history = read_ledger(item / "revisions.jsonl", root, {"1"})
+    validate_records(history, "revisions")
+    generated = read_file(item / "tasks.json", root, json_file=True, versions={"1"})
+    revision = revision_view(history, generated, read_file(item / "plan.md", root))
+    if revision["publication_state"] == "incomplete":
+        raise ValueError("incomplete revision publication: " + revision["reason"])
+    head = revision["head"]
+    if head is None:
+        return {"revision_id": None, "blocked": {}}
+    for reference in references(head, item, root):
+        if reference["state"] != "read":
+            raise ValueError("committed revision snapshot unavailable: " + reference["reference"])
+    dispatch = dispatch_projection(history, item, root)
+    if dispatch["state"] != "read":
+        raise ValueError("dispatch decisions unavailable: " + dispatch["reason"])
+    return {"revision_id": head["revision_id"], "blocked": dispatch["blocked"]}
+
+
 def binding(row, revision):
     recorded = row.get("revision_id")
     head = (revision.get("head") or {}).get("revision_id")
@@ -477,6 +558,7 @@ def project(item_dir, knowledge_dir):
         artifacts = references(revision["head"], item, root)
         if any(a["state"] != "read" for a in artifacts):
             revision.update(publication_state="incomplete", reason="revision-snapshot-unavailable")
+    revision["dispatch"] = dispatch_projection(revisions, item, root)
     for entry in sources["reviews"]["entries"]:
         if isinstance(entry.get("data"), dict) and entry["data"].get("revision_id"):
             entry["binding"] = binding(entry["data"], revision)

@@ -12,9 +12,9 @@
 # lead maintains — by matching each tasks.json subject against checked
 # (`- [x]`) and unchecked (`- [ ]`) lines. Tasks whose subject matches no
 # checkbox are returned as `unmatched` and treated as incomplete blockers.
-# The plan checksum is deliberately NOT enforced here: checking boxes edits
-# plan.md after tasks.json generation by design, so mid-run the cryptographic
-# gate (open's job) would always fail.
+# Revision publication is reconciled before batch selection. Legacy progress
+# stays unbound only when its original checksum can be proved from the current
+# checkbox bytes; other drift requires a coherent revision and authored decisions.
 #
 # --active <task-id> declares a task the lead has already dispatched and is
 # still in flight (live task state is harness-side; the lead passes it in).
@@ -152,9 +152,11 @@ ITEM_DIR="$KNOWLEDGE_DIR/_work/$SLUG"
 
 [[ -f "$ITEM_DIR/_meta.json" ]] || fail "missing _meta.json for work item '$SLUG'"
 [[ -f "$ITEM_DIR/plan.md" ]] || fail "No structured plan found for '$SLUG'. Run /spec first to create the plan's tasks."
-if [[ ! -f "$ITEM_DIR/tasks.json" ]]; then
+if [[ ! -f "$ITEM_DIR/tasks.json" && ! -e "$ITEM_DIR/revisions.jsonl" ]]; then
   fail "no tasks.json for '$SLUG' — generate it first: lore work tasks $SLUG"
 fi
+
+bash "$SCRIPT_DIR/plan-revise.sh" "$SLUG" --reconcile --allow-legacy-progress >/dev/null || fail "plan reconciliation failed for '$SLUG'"
 
 CEREMONY_JSON=$(bash "$SCRIPT_DIR/ceremony-config.sh" get implement 2>/dev/null) || CEREMONY_JSON="[]"
 if ! printf '%s' "$CEREMONY_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, list)' 2>/dev/null; then
@@ -172,15 +174,21 @@ fi
 
 ACTIVE_CSV=$(IFS=','; echo "${ACTIVE_TASKS[*]-}")
 
-PAYLOAD=$(_LORE_CEREMONY_JSON="$CEREMONY_JSON" python3 - "$ITEM_DIR" "$SLUG" "$ACTIVE_CSV" <<'PYEOF'
+PAYLOAD=$(_LORE_CEREMONY_JSON="$CEREMONY_JSON" python3 - "$ITEM_DIR" "$SLUG" "$ACTIVE_CSV" "$SCRIPT_DIR" <<'PYEOF'
 import json
 import os
 import re
 import sys
 
-item_dir, slug, active_csv = sys.argv[1:4]
+item_dir, slug, active_csv, script_dir = sys.argv[1:5]
 active = {a for a in active_csv.split(",") if a}
 ceremony_skills = json.loads(os.environ.get("_LORE_CEREMONY_JSON", "[]"))
+
+publication_lock = None
+if os.path.exists(os.path.join(item_dir, "revisions.jsonl")):
+    import fcntl
+    publication_lock = open(os.path.join(item_dir, "revisions", ".publication.lock"), "rb")
+    fcntl.flock(publication_lock, fcntl.LOCK_SH)
 
 with open(os.path.join(item_dir, "tasks.json"), encoding="utf-8") as f:
     tasks_data = json.load(f)
@@ -242,6 +250,13 @@ for task in all_tasks:
              f"have drifted; treating it as incomplete (run lore work regen-tasks "
              f"{slug} if the plan was restructured)")
 
+import runpy
+try:
+    publication = runpy.run_path(os.path.join(script_dir, "work-evidence.py"))["publication_for_dispatch"](item_dir, os.path.dirname(os.path.dirname(item_dir)))
+except (OSError, ValueError, KeyError) as exc:
+    sys.exit("[impl] " + str(exc))
+if tasks_data.get("revision_id") != publication["revision_id"]:
+    sys.exit("[impl] task generation changed during dispatch preparation; refresh and retry")
 completed_set = set(completed)
 
 # --- Unblocked pending set -----------------------------------------------------
@@ -251,6 +266,10 @@ batch_ids = []
 pending_blocked = []
 for tid in pending:
     if tid in active:
+        continue
+    if tid in publication["blocked"]:
+        pending_blocked.append({"id": tid, "blocked_by_pending": [], "revision_id": publication["revision_id"],
+                                "decision_reason": publication["blocked"][tid]})
         continue
     blockers = [dep for dep in task_by_id[tid].get("blockedBy", [])
                 if dep not in completed_set]
