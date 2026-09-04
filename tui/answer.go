@@ -85,19 +85,23 @@ func optionDelta(state screenClass, requested int) (int, bool) {
 }
 
 func (m model) handleAnswerRequestScan(msg answerRequestScanMsg) (model, tea.Cmd) {
-	framework, resolveErr := config.ResolveTUILaunchFramework()
-	hasContract := false
-	contractErr := resolveErr
-	if resolveErr == nil {
-		hasContract, contractErr = config.HarnessSignatureContract(framework)
-	}
-	return m.handleAnswerRequestScanResolved(msg, framework, hasContract, contractErr)
+	return m.handleAnswerRequestScanWithContract(msg, func(slug string) (string, bool, error) {
+		framework := m.sessionHarness(slug)
+		if framework == "" {
+			return framework, false, nil
+		}
+		hasContract, err := config.HarnessSignatureContract(framework)
+		return framework, hasContract, err
+	})
 }
 
-// handleAnswerRequestScanResolved is the live consume path with framework
-// resolution already performed. Keeping resolution outside the loop makes every
-// request on a poll tick use the same capability contract.
+// handleAnswerRequestScanResolved supplies a fixed contract for isolated gate tests.
+// Production resolves each target independently, including within one scan.
 func (m model) handleAnswerRequestScanResolved(msg answerRequestScanMsg, framework string, hasContract bool, contractErr error) (model, tea.Cmd) {
+	return m.handleAnswerRequestScanWithContract(msg, func(string) (string, bool, error) { return framework, hasContract, contractErr })
+}
+
+func (m model) handleAnswerRequestScanWithContract(msg answerRequestScanMsg, contract func(string) (string, bool, error)) (model, tea.Cmd) {
 	diagnosticCmd := appendDiagnosticsCmd(m.sessionsDir, msg.diagnostics)
 	if len(msg.matched) == 0 {
 		return m, diagnosticCmd
@@ -126,6 +130,7 @@ func (m model) handleAnswerRequestScanResolved(msg answerRequestScanMsg, framewo
 		}
 		m.pendingAnswer[request.RequestID] = true
 
+		framework, hasContract, contractErr := contract(request.Slug)
 		reason := ""
 		wrote := false
 		if contractErr != nil {

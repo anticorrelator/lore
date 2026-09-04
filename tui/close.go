@@ -336,10 +336,10 @@ func (m model) closeLadderCmd(slug string, panel work.SessionPanelModel, request
 	if poll <= 0 {
 		poll = closePollDefault
 	}
+	framework := m.sessionHarness(slug)
 	return func() tea.Msg {
-		framework, ferr := config.ResolveTUILaunchFramework()
 		exitSeq, exitSupported := "", false
-		if ferr == nil {
+		if framework != "" {
 			if seq, ok, err := config.HarnessGracefulExitSequence(framework); err == nil {
 				exitSeq, exitSupported = seq, ok
 			}
@@ -502,14 +502,13 @@ func (m model) modalRetryCheckpoints() [3]time.Duration {
 // observeClosePanel reads at most one ScreenSnapshot and routes it through the
 // shared classifier. Lifecycle and timer-derived quiescence remain observable
 // even when the framework or screen cannot be classified.
-func observeClosePanel(panel work.SessionPanelModel) closeObservation {
+func observeClosePanel(panel work.SessionPanelModel, framework string) closeObservation {
 	done, quiescent := panel.IsDone(), panel.NeedsInput()
 	base := closeObservation{done: done, quiescent: quiescent}
 	if done {
 		return base
 	}
-	framework, err := config.ResolveTUILaunchFramework()
-	if err != nil {
+	if framework == "" {
 		return base
 	}
 	snap, err := panel.ScreenState()
@@ -523,7 +522,7 @@ func (m model) observeClose(panel work.SessionPanelModel) closeObservation {
 	if m.observeCloseFn != nil {
 		return m.observeCloseFn(panel)
 	}
-	return observeClosePanel(panel)
+	return observeClosePanel(panel, m.sessionHarness(panel.Slug()))
 }
 
 // handleCloseRequestDeleted surfaces a failed row delete. The pendingClose entry

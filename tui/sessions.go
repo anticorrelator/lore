@@ -466,9 +466,8 @@ var matchModalAnswer = config.MatchModalAnswer
 // observeModalPanel reads one screen and reuses the readiness classifier's
 // interactive predicate. Resolution or snapshot failures are unobservable, not
 // clears: callers preserve the prior latch until a successful classification.
-func observeModalPanel(panel work.SessionPanelModel) modalObservation {
-	framework, err := config.ResolveTUILaunchFramework()
-	if err != nil {
+func observeModalPanel(panel work.SessionPanelModel, framework string) modalObservation {
+	if framework == "" {
 		return modalObservation{}
 	}
 	snap, err := panel.ScreenState()
@@ -526,7 +525,7 @@ func (m model) observeModal(panel work.SessionPanelModel) modalObservation {
 	if m.observeModalFn != nil {
 		return m.observeModalFn(panel)
 	}
-	return observeModalPanel(panel)
+	return observeModalPanel(panel, m.sessionHarness(panel.Slug()))
 }
 
 // registeredModalAnswerCmd preserves modal_blocked as the first durable fact,

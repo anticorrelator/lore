@@ -75,17 +75,6 @@ func (m model) handlePeekRequestScan(msg peekRequestScanMsg) (model, tea.Cmd) {
 	if len(msg.matched) == 0 {
 		return m, diagnosticCmd
 	}
-	framework, ferr := config.ResolveTUILaunchFramework()
-	hasContract := false
-	queuesMidGen := false
-	if ferr == nil {
-		if ok, err := config.HarnessSignatureContract(framework); err == nil {
-			hasContract = ok
-		}
-		if ok, err := config.HarnessQueuesMidGeneration(framework); err == nil {
-			queuesMidGen = ok
-		}
-	}
 	var cmds []tea.Cmd
 	if diagnosticCmd != nil {
 		cmds = append(cmds, diagnosticCmd)
@@ -103,6 +92,18 @@ func (m model) handlePeekRequestScan(msg peekRequestScanMsg) (model, tea.Cmd) {
 		}
 		m.pendingPeek[pr.RequestID] = true
 
+		framework := m.sessionHarness(pr.Slug)
+		hasContract := false
+		queuesMidGen := false
+		if framework != "" {
+			if ok, err := config.HarnessSignatureContract(framework); err == nil {
+				hasContract = ok
+			}
+			if ok, err := config.HarnessQueuesMidGeneration(framework); err == nil {
+				queuesMidGen = ok
+			}
+		}
+
 		resp := session.PeekResponse{
 			RequestID:  pr.RequestID,
 			Slug:       pr.Slug,
@@ -113,7 +114,7 @@ func (m model) handlePeekRequestScan(msg peekRequestScanMsg) (model, tea.Cmd) {
 			resp.BlockedReason = sendReasonInternal
 		} else {
 			ready, reason := false, sendReasonNoContract
-			if ferr == nil {
+			if framework != "" {
 				ready, reason = sendReadiness(framework, panel.NeedsInput(), hasContract, queuesMidGen, snap)
 			}
 			resp.Ready = ready

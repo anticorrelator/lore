@@ -107,21 +107,6 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 	if len(msg.matched) == 0 {
 		return m, diagnosticCmd
 	}
-	framework, ferr := config.ResolveTUILaunchFramework()
-	hasContract := false
-	queuesMidGen := false
-	submitSeq := ""
-	if ferr == nil {
-		if ok, err := config.HarnessSignatureContract(framework); err == nil {
-			hasContract = ok
-		}
-		if ok, err := config.HarnessQueuesMidGeneration(framework); err == nil {
-			queuesMidGen = ok
-		}
-		if seq, ok, err := config.HarnessSubmitSequence(framework); err == nil && ok {
-			submitSeq = seq
-		}
-	}
 	var cmds []tea.Cmd
 	if diagnosticCmd != nil {
 		cmds = append(cmds, diagnosticCmd)
@@ -142,9 +127,25 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 		}
 		m.pendingSend[sr.RequestID] = true
 
+		framework := m.sessionHarness(sr.Slug)
+		hasContract := false
+		queuesMidGen := false
+		submitSeq := ""
+		if framework != "" {
+			if ok, err := config.HarnessSignatureContract(framework); err == nil {
+				hasContract = ok
+			}
+			if ok, err := config.HarnessQueuesMidGeneration(framework); err == nil {
+				queuesMidGen = ok
+			}
+			if seq, ok, err := config.HarnessSubmitSequence(framework); err == nil && ok {
+				submitSeq = seq
+			}
+		}
+
 		injected := false
 		reason := sendReasonNoContract
-		if ferr != nil {
+		if framework == "" {
 			// framework unresolved → no contract to gate against
 		} else if snap, serr := panel.ScreenState(); serr != nil {
 			reason = sendReasonInternal
@@ -229,8 +230,8 @@ func (m model) observeSendState(panel work.SessionPanelModel) sendObs {
 	if m.observeSendFn != nil {
 		return m.observeSendFn(panel)
 	}
-	framework, err := config.ResolveTUILaunchFramework()
-	if err != nil {
+	framework := m.sessionHarness(panel.Slug())
+	if framework == "" {
 		return obsUnobservable
 	}
 	snap, serr := panel.ScreenState()
