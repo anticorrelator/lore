@@ -76,70 +76,8 @@ fi
 
 # --- JSON output mode ---
 if [[ "$JSON_OUTPUT" == true ]]; then
-  python3 -c "
-import json, os, sys
-
-item_dir = sys.argv[1]
-slug = sys.argv[2]
-archived = sys.argv[3] == 'true'
-meta_file = os.path.join(item_dir, '_meta.json')
-
-try:
-    with open(meta_file) as f:
-        meta = json.load(f)
-except json.JSONDecodeError as e:
-    print(json.dumps({'error': f'malformed _meta.json: {e}'}))
-    sys.exit(1)
-
-# Read optional content files
-def read_file(path):
-    if os.path.isfile(path):
-        with open(path) as f:
-            return f.read()
-    return None
-
-plan_path = os.path.join(item_dir, 'plan.md')
-notes_path = os.path.join(item_dir, 'notes.md')
-tasks_path = os.path.join(item_dir, 'tasks.json')
-exec_log_path = os.path.join(item_dir, 'execution-log.md')
-
-result = {
-    'slug': slug,
-    'title': meta.get('title', ''),
-    'status': meta.get('status', ''),
-    'archived': archived,
-    'project': meta.get('project', ''),
-    'branches': meta.get('branches', []),
-    'tags': meta.get('tags', []),
-    'issue': meta.get('issue', ''),
-    'pr': meta.get('pr', ''),
-    'intent_anchor': meta.get('intent_anchor', ''),
-    'created': meta.get('created', ''),
-    'updated': meta.get('updated', ''),
-    'related_work': meta.get('related_work', []),
-    'blocked_by': meta.get('blocked_by', []),
-    'ceremony_depth': meta.get('ceremony_depth'),
-    'plan_content': read_file(plan_path),
-    'notes_content': read_file(notes_path),
-    'has_execution_log': os.path.isfile(exec_log_path),
-    'has_tasks': os.path.isfile(tasks_path),
-    'exec_log_content': read_file(exec_log_path),
-}
-
-# Collect extra .md files (not plan, notes, execution-log, or _-prefixed)
-canonical = {'plan.md', 'notes.md', 'execution-log.md'}
-extra_files = []
-for name in sorted(os.listdir(item_dir)):
-    if not name.endswith('.md') or name.startswith('_') or name in canonical:
-        continue
-    content = read_file(os.path.join(item_dir, name))
-    if content is not None:
-        extra_files.append({'name': name[:-3], 'content': content})
-if extra_files:
-    result['extra_files'] = extra_files
-
-print(json.dumps(result))
-" "$ITEM_DIR" "$SLUG" "$ARCHIVED"
+  python3 -B "$SCRIPT_DIR/work-evidence.py" --item-dir "$ITEM_DIR" \
+    --knowledge-dir "$KNOWLEDGE_DIR" --work
   exit 0
 fi
 

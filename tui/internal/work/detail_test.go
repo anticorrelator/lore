@@ -1,9 +1,13 @@
 package work
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -397,5 +401,120 @@ func TestExtraFileRendersAsTab(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected a 'Design Notes' tab, got %+v", m.tabHost.Tabs())
+	}
+}
+
+func evidenceFixture(t *testing.T) (string, string, string) {
+	t.Helper()
+	repo, err := filepath.Abs("../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := t.TempDir()
+	if err := os.Symlink(filepath.Join(repo, "scripts"), filepath.Join(data, "scripts")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LORE_DATA_DIR", data)
+	kdir := t.TempDir()
+	item := filepath.Join(kdir, "_work", "fixture")
+	if err := os.MkdirAll(filepath.Join(item, "worker-reports"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(item, name), []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("_meta.json", `{"title":"Fixture","status":"active"}`)
+	write("tasks.json", `{"tasks":[{"id":"task-1","subject":"Task","description":"Complete task body","blockedBy":["task-0"],"close_criteria":[{"id":"check"}]}]}`)
+	write("worker-reports/report.md", "Report-id: report\nStatus: completed\nFull nested report body")
+	write("execution-log.md", "## 2026-09-04 | source: worker\nLegacy execution body\n")
+	identity := map[string]any{"head": strings.Repeat("a", 40), "digest": strings.Repeat("a", 64), "digest_version": "1", "worktree": filepath.Join(kdir, "removed-code")}
+	if err := os.MkdirAll(filepath.Join(item, "results", "r1"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	write("results/r1/output.txt", "output")
+	result, _ := json.Marshal(map[string]any{"execution_attempt_id": "exec-1", "revision_id": "aaaaaaaaaaaa", "unbound_reason": "fixture", "exit": 0, "signal": nil, "timed_out": false, "output_path": "results/r1/output.txt", "output_sha256": fmt.Sprintf("%x", sha256.Sum256([]byte("output"))), "schema_version": 1, "task_id": "task-1", "criterion_id": "check", "criterion_version": fmt.Sprintf("%x", sha256.Sum256([]byte(`{"id":"check"}`))), "result_id": "r1", "state": "pass", "source_start": identity, "source_end": identity})
+	write("results.jsonl", string(result)+"\n")
+	return kdir, item, repo
+}
+
+func TestCanonicalEvidenceAndDeletion(t *testing.T) {
+	kdir, item, repo := evidenceFixture(t)
+	load := func() *WorkItemDetail {
+		t.Helper()
+		d, err := LoadWorkItemDetail(filepath.Join(kdir, "_work"), "fixture")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	detail := load()
+	output, err := exec.Command("python3", "-B", filepath.Join(repo, "scripts", "work-evidence.py"), "--item-dir", item, "--knowledge-dir", kdir).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fromCLI, fromGo any
+	if err := json.Unmarshal(output, &fromCLI); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(detail.Evidence, &fromGo); err != nil {
+		t.Fatal(err)
+	}
+	canonicalCLI, _ := json.Marshal(fromCLI)
+	canonicalGo, _ := json.Marshal(fromGo)
+	if string(canonicalCLI) != string(canonicalGo) || detail.ReaderContractVersion != "2" {
+		t.Fatal("TUI evidence differs from shared projection")
+	}
+	if !strings.Contains(string(detail.Evidence), "code-unavailable") {
+		t.Fatalf("unknown code freshness omitted: %s", detail.Evidence)
+	}
+	if detail.TasksContent.Tasks[0].Description != "Complete task body" || detail.TasksContent.Tasks[0].BlockedBy[0] != "task-0" {
+		t.Fatal("task body or dependencies lost")
+	}
+	if !strings.Contains(*detail.ExecLogContent, "Legacy execution body") {
+		t.Fatal("legacy log lost")
+	}
+	before := DetailFingerprint(detail)
+	if err := os.WriteFile(filepath.Join(item, "worker-reports", "report.md"), []byte("Changed nested body"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	changed := load()
+	if before == DetailFingerprint(changed) {
+		t.Fatal("nested report edit did not invalidate detail")
+	}
+	if err := os.Remove(filepath.Join(item, "worker-reports", "report.md")); err != nil {
+		t.Fatal(err)
+	}
+	deleted := load()
+	if DetailFingerprint(changed) == DetailFingerprint(deleted) || strings.Contains(string(deleted.Evidence), "Changed nested body") {
+		t.Fatal("deleted report retained")
+	}
+	if err := os.WriteFile(filepath.Join(item, "_meta.json"), []byte("{"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	malformed := load()
+	if !malformed.Malformed || !strings.Contains(string(malformed.Evidence), "result_summary") {
+		t.Fatal("malformed metadata hid evidence")
+	}
+	archive := filepath.Join(kdir, "_work", "_archive")
+	if err := os.MkdirAll(archive, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(item, filepath.Join(archive, "fixture")); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(load().Evidence), "_work/_archive/fixture") {
+		t.Fatal("archived evidence not loaded")
+	}
+}
+
+func TestEvidenceReaderUnavailable(t *testing.T) {
+	t.Setenv("LORE_DATA_DIR", t.TempDir())
+	d := &WorkItemDetail{}
+	loadEvidence(d, t.TempDir(), t.TempDir())
+	if !strings.Contains(string(d.Evidence), `"state":"unreadable"`) {
+		t.Fatalf("reader failure disappeared: %s", d.Evidence)
 	}
 }

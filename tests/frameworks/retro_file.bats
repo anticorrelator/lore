@@ -144,3 +144,27 @@ write_no_suggestion_manifest() {
   [ ! -f "$TEST_KDIR/_work/cycle-a/retro-filing.json" ]
   [ "$(wc -l < "$TEST_KDIR/_meta/effectiveness-journal.jsonl" | tr -d ' ')" -eq 0 ]
 }
+
+@test "legacy reader-version-one pack remains fileable and accepted replay preserves its bytes" {
+  python3 - "$PACK" <<'PY'
+import hashlib,json,pathlib,sys
+p=pathlib.Path(sys.argv[1]);pack=json.loads(p.read_text())
+pack.pop('source_data',None)
+for row in pack['source_manifest']:
+ if row['source_id']=='cycle_work': row['reader_contract_version']='1'
+body={k:v for k,v in pack.items() if k!='artifact_sha256'}
+canonical=lambda x:json.dumps(x,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()
+pack['artifact_sha256']=hashlib.sha256(canonical(body)).hexdigest()
+p.write_bytes(canonical(pack))
+PY
+  write_no_suggestion_manifest
+  cp "$PACK" "$TEST_KDIR/legacy-pack.json"
+  run bash "$FILE_VERB" cycle-a --pack "$PACK" --judgments "$JUDGMENTS" --json
+  [ "$status" -eq 0 ]
+  cp "$TEST_KDIR/_work/cycle-a/retro-filing.json" "$TEST_KDIR/accepted-filing.json"
+  run bash "$FILE_VERB" cycle-a --pack "$PACK" --judgments "$JUDGMENTS" --json
+  [ "$status" -eq 0 ]
+  json_line | jq -e '.status == "reused" and .filing_complete'
+  cmp "$PACK" "$TEST_KDIR/legacy-pack.json"
+  cmp "$TEST_KDIR/_work/cycle-a/retro-filing.json" "$TEST_KDIR/accepted-filing.json"
+}

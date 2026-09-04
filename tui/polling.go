@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -43,11 +44,12 @@ type planMtimeCheckedMsg struct {
 	err   error
 }
 
-// detailMtimeCheckedMsg carries the result of stat-ing a work item's detail files.
+// detailMtimeCheckedMsg carries a content token and the detail it identifies.
 type detailMtimeCheckedMsg struct {
-	slug  string
-	mtime time.Time
-	err   error
+	detail *work.WorkItemDetail
+	slug   string
+	mtime  time.Time
+	err    error
 }
 
 // planContentReadMsg carries freshly-read plan.md content for an in-place refresh.
@@ -68,26 +70,17 @@ func checkPlanMtime(workDir, slug string) tea.Cmd {
 	}
 }
 
-// checkDetailMtime stats _meta.json, notes.md, execution-log.md, and tasks.json
-// for the given slug and sends detailMtimeCheckedMsg with the most recent mtime.
+// checkDetailMtime uses a content-derived token in the existing polling clock.
+// It includes nested evidence, deletions, and code freshness outside the item.
 func checkDetailMtime(workDir, slug string) tea.Cmd {
 	return func() tea.Msg {
-		dir := filepath.Join(workDir, slug)
-		files := []string{"_meta.json", "notes.md", "execution-log.md", "tasks.json"}
-		var maxMtime time.Time
-		for _, f := range files {
-			info, err := os.Stat(filepath.Join(dir, f))
-			if err != nil {
-				continue // file may not exist yet
-			}
-			if mt := info.ModTime(); mt.After(maxMtime) {
-				maxMtime = mt
-			}
+		detail, err := work.LoadWorkItemDetail(workDir, slug)
+		if err != nil {
+			return detailMtimeCheckedMsg{slug: slug, err: err}
 		}
-		if maxMtime.IsZero() {
-			return detailMtimeCheckedMsg{slug: slug, err: errors.New("no detail files found")}
-		}
-		return detailMtimeCheckedMsg{slug: slug, mtime: maxMtime}
+		fingerprint := work.DetailFingerprint(detail)
+		token := time.Unix(0, int64(binary.BigEndian.Uint64(fingerprint[:8])))
+		return detailMtimeCheckedMsg{slug: slug, mtime: token, detail: detail}
 	}
 }
 
@@ -351,14 +344,9 @@ func (m model) handleFollowupDetailMtimeChecked(msg followupDetailMtimeCheckedMs
 	return m, nil
 }
 
-// handleDetailMtimeChecked compares the detail file mtime and triggers a full detail
-// reload when any of the tracked files have changed.
+// handleDetailMtimeChecked refreshes the displayed detail when its content token changes.
 func (m model) handleDetailMtimeChecked(msg detailMtimeCheckedMsg) (model, tea.Cmd) {
 	if msg.err != nil || msg.slug != m.list.CurrentSlug() {
-		return m, nil
-	}
-	if m.lastDetailMtime.IsZero() {
-		m.lastDetailMtime = msg.mtime // baseline initialization
 		return m, nil
 	}
 	if !msg.mtime.Equal(m.lastDetailMtime) {
@@ -368,6 +356,9 @@ func (m model) handleDetailMtimeChecked(msg detailMtimeCheckedMsg) (model, tea.C
 		// Invalidate cache so the reload fetches fresh data.
 		if m.detailCache != nil {
 			delete(m.detailCache, msg.slug)
+		}
+		if msg.detail != nil {
+			return m, func() tea.Msg { return work.DetailLoadedMsg{Slug: msg.slug, Detail: msg.detail} }
 		}
 		return m, work.LoadDetail(m.config.WorkDir, msg.slug)
 	}

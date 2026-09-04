@@ -1,11 +1,17 @@
 package work
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/anticorrelator/lore/tui/internal/config"
 )
 
 // ExtraFile holds the name and content of a non-canonical document found in a
@@ -19,27 +25,29 @@ type ExtraFile struct {
 // WorkItemDetail holds the full detail of a single work item, as returned by
 // `lore work show <slug> --json`.
 type WorkItemDetail struct {
-	Slug            string      `json:"slug"`
-	Title           string      `json:"title"`
-	Status          string      `json:"status"`
-	Branches        []string    `json:"branches"`
-	Tags            []string    `json:"tags"`
-	Project         string      `json:"project"`
-	RelatedWork     []string    `json:"related_work"`
-	BlockedBy       []string    `json:"blocked_by"`
-	Issue           string      `json:"issue"`
-	PR              string      `json:"pr"`
-	Created         string      `json:"created"`
-	Updated         string      `json:"updated"`
-	SourceCheckout  string      `json:"source_checkout,omitempty"`
-	PlanContent     *string     `json:"plan_content"`
-	NotesContent    *string     `json:"notes_content"`
-	HasExecutionLog bool        `json:"has_execution_log"`
-	HasTasks        bool        `json:"has_tasks"`
-	TasksContent    *TasksFile  `json:"tasks_content,omitempty"`
-	ExecLogContent  *string     `json:"exec_log_content,omitempty"`
-	ExtraFiles      []ExtraFile `json:"extra_files,omitempty"`
-	Malformed       bool        `json:"malformed,omitempty"`
+	Slug                  string          `json:"slug"`
+	Title                 string          `json:"title"`
+	Status                string          `json:"status"`
+	Branches              []string        `json:"branches"`
+	Tags                  []string        `json:"tags"`
+	Project               string          `json:"project"`
+	RelatedWork           []string        `json:"related_work"`
+	BlockedBy             []string        `json:"blocked_by"`
+	Issue                 string          `json:"issue"`
+	PR                    string          `json:"pr"`
+	Created               string          `json:"created"`
+	Updated               string          `json:"updated"`
+	SourceCheckout        string          `json:"source_checkout,omitempty"`
+	PlanContent           *string         `json:"plan_content"`
+	NotesContent          *string         `json:"notes_content"`
+	HasExecutionLog       bool            `json:"has_execution_log"`
+	HasTasks              bool            `json:"has_tasks"`
+	TasksContent          *TasksFile      `json:"tasks_content,omitempty"`
+	ExecLogContent        *string         `json:"exec_log_content,omitempty"`
+	ExtraFiles            []ExtraFile     `json:"extra_files,omitempty"`
+	ReaderContractVersion string          `json:"reader_contract_version,omitempty"`
+	Evidence              json.RawMessage `json:"evidence,omitempty"`
+	Malformed             bool            `json:"malformed,omitempty"`
 }
 
 // SearchLocation identifies a navigable position within a detail view tab.
@@ -151,6 +159,7 @@ func loadWorkItemDetailDirect(workDir, slug string) (*WorkItemDetail, error) {
 			}
 		}
 
+		loadEvidence(detail, itemDir, filepath.Dir(workDir))
 		return detail, nil
 	}
 
@@ -235,7 +244,43 @@ func loadWorkItemDetailDirect(workDir, slug string) (*WorkItemDetail, error) {
 		}
 	}
 
+	loadEvidence(detail, itemDir, filepath.Dir(workDir))
 	return detail, nil
+}
+
+// loadEvidence shares the public reader's projection, including coverage failures.
+func loadEvidence(detail *WorkItemDetail, itemDir, knowledgeDir string) {
+	detail.ReaderContractVersion = "2"
+	repo, err := config.LoreRepoDir()
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "python3", "-B", filepath.Join(repo, "scripts", "work-evidence.py"), "--item-dir", itemDir, "--knowledge-dir", knowledgeDir)
+		var output []byte
+		output, err = cmd.Output()
+		if err == nil {
+			var envelope struct {
+				SchemaVersion         int    `json:"schema_version"`
+				ReaderContractVersion string `json:"reader_contract_version"`
+			}
+			err = json.Unmarshal(output, &envelope)
+			if err == nil && envelope.SchemaVersion == 1 && envelope.ReaderContractVersion == "2" {
+				detail.Evidence = json.RawMessage(output)
+				return
+			}
+			if err == nil {
+				err = fmt.Errorf("unsupported evidence reader version")
+			}
+		}
+	}
+	detail.Evidence, _ = json.Marshal(map[string]any{"schema_version": 1, "reader_contract_version": "2", "state": "unreadable", "reason": fmt.Sprint(err)})
+}
+
+// DetailFingerprint includes source bodies and derived freshness, so removal and
+// changes outside the item directory invalidate the same view the user reads.
+func DetailFingerprint(detail *WorkItemDetail) [32]byte {
+	data, _ := json.Marshal(detail)
+	return sha256.Sum256(data)
 }
 
 // LoadWorkItemDetail reads work item detail directly from disk.

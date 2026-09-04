@@ -101,6 +101,35 @@ Each reader seam is one versioned contract: command, window or snapshot semantic
 
 Style, compression, and reorganization of this skill travel with the semantic change they describe. A standalone prose pass after behavior or contract tests have moved leaves three descriptions of one seam; keep prose, reader, and test moving as one mutation chain.
 
+#### The cycle_work projection
+
+`cycle_work` is the work reader's published view of a work item, read at reader contract version 2. The pack schema stays at 1, and the other source readers keep their existing versions. The version bump belongs to this seam alone. The TUI work detail and `lore coordinate status` read the same view, so a missing or stale result means the same thing wherever it appears. Retro does not fold ledgers, tasks, or results on its own beside it.
+
+The projection's `evidence` object carries one envelope per source: generated tasks, revision history, per-criterion results, packets addressed to this item, ceremony outcomes, review artifacts, nested reports, task claims, and the legacy close bundle described below. Each envelope records a `state`, a `reason`, the store-relative `path`, a `sha256` of the raw bytes, and the content or rows it read. Directory sources carry one full envelope per entry. The states are:
+
+- `read`: the source existed and parsed. Its content is present.
+- `absent`: nothing exists at the path. This establishes only that the source is not there, not why.
+- `unreadable`: something exists but did not parse or validate against the schema it declares.
+- `unsupported`: the source declares a schema or contract version this reader does not know. An item that predates a producer has no file for it and is `absent`, not `unsupported`.
+
+Stale is not a fifth state. It is a freshness property derived on records that name what they were produced against. A result is stale when its revision is behind the current head, when the criterion's complete definition has changed version since it ran, when the source HEAD or worktree digest it recorded differs from the current worktree, or when the code identity recorded at its start differs from the one recorded at its end. The record lists every reason that applies. When the execution worktree can no longer be inspected, for example after cleanup, freshness is `unknown` with a reason. Unknown is neither current nor stale. Report it as unknown.
+
+The projection's `revision` object names the committed head, its publication state, and a reason when publication is incomplete. Incomplete publication is a fact to report. The reader never regenerates tasks.
+
+The envelopes keep the material a judgment needs inspectable rather than counted. Task bodies and dependency edges are present, not only task IDs. Each report entry carries its identifier, its declared status or `unknown` when none was declared, its size, a content hash, and the full text. Claims carry a row count together with the canonical rows. Packets name their sources and the revision they were assembled against, or an explicit unbound state for legacy packets. Result history keeps every attempt. The result summary lists, per task and per criterion, the latest result ID, its state, its freshness, and the reasons behind either. A pass on one criterion is never rolled up into a pass for the task while other criteria are failing, stale, unknown, or missing.
+
+Read the states literally, as with every other source. An envelope that is not `read`, or a record that is stale or unknown, is not a passing result and does not supply a zero denominator. A calculation that requires that source keeps its `not-computable` disposition, and the retro reports the envelope's state and reason in its place. Calculations that do not depend on that source proceed as usual. One absent ledger does not empty the pack.
+
+Review output and report bodies travel in the projection under store-relative references, so a manifested review is judged from the pack alone. There is no private-file fallback. An envelope the pack could not read is reported as such.
+
+**Source identity.** `source_data.cycle_work` carries the semantic work projection, and its content identity covers every evidence envelope and its substantive content, including each envelope's raw `sha256`. A source that moves from malformed to valid changes identity even when the parsed shape looks unchanged. Two things are excluded from identity: retro's own completion atoms in the execution log, and the evidence-pack and filing artifacts retro itself generates. Nothing else is excluded. The public raw work view still delivers the execution log in full. The pack `source_data` semantic view excludes prepare-only entries and the headers associated with them. Parsed `Spec-outcome-record` entries in that log participate in identity on their own terms and are not removed by the completion-atom filter.
+
+#### Legacy close bundle
+
+`impl-close.sh` writes a nine-field, unversioned `retro-bundle.json` at implementation close. The projection reads it as a declared legacy-v0 snapshot, and the pack carries its fields, provenance, and coverage as written. Its producer and write timing are unchanged.
+
+Treat the bundle as a record of the last close, not as current revision truth. Where the bundle and the revision-bound result history disagree, the disagreement is a fact about timing to report, and the result history is the record that names revisions. A missing bundle is `absent`. That establishes only that no bundle exists, not why. A bundle that exists but does not parse is `unreadable`. Neither state says anything about the work's outcome.
+
 The required fact groups are `cycle_artifacts`, `task_context_backlinks`, `session_retrieval_friction_packets`, `review_events`, `scale_signals`, `scorecard_eligibility_deltas`, and `telemetry_attribution_rework`. A fact group is `available | absent | not-computable`; non-available facts carry `values: null` and a reason.
 
 Every calculation row names its calculation/version, source IDs, numerator, denominator, value, unit, sample floor, threshold, disposition, and reason. Disposition is exactly `green | tripped | abstained | not-computable`.
@@ -111,7 +140,7 @@ Treat each state literally:
 
 - `abstained` means a trustworthy statistic is below its declared floor.
 - `not-computable` means the published substrate cannot support the statistic.
-- `absent`, `unreadable`, and `stale` are evidence states, never favorable verdicts.
+- `absent`, `unreadable`, `unsupported`, and `stale` are evidence states, never favorable verdicts.
 - `fixed_health.state=not-computable` withholds `normal`; it does not imply `pipeline-degraded` and does not invite the lead to guess.
 
 The load-bearing calculations consume only the versioned published projections. Missing, unreadable, stale, malformed, or below-floor evidence keeps the calculation's emitted `not-computable` or `abstained` disposition and its reason — never green. An empty window is below sample, not proof of health.
@@ -142,7 +171,7 @@ Compatibility guard: there is no out-of-band queue, no backlog, and no sidecar l
 
 The pack answers what was present and what fixed rules produced. The lead answers what it means.
 
-Read the cycle artifacts named in `source_manifest`, then write concise judgments grounded by `source:<source_id>`, `calculation:<calculation_id>`, or `pack:<JSON Pointer>` references. A source gap may itself support a diagnosis, but it cannot support a favorable deterministic claim.
+Reports, review artifacts, result attempts, and claims are inside the `cycle_work` evidence envelopes. Judge them from the pack rather than opening the work directory. Read the cycle artifacts named in `source_manifest`, then write concise judgments grounded by `source:<source_id>`, `calculation:<calculation_id>`, or `pack:<JSON Pointer>` references. A source gap may itself support a diagnosis, but it cannot support a favorable deterministic claim.
 
 #### Dimension scores
 
@@ -154,7 +183,7 @@ Judge whether relevant knowledge reached the working agents and shaped their cho
 
 Delivery has exactly two tiers and they are scored separately. Task-level delivery is the `**Knowledge context:**` a plan attached to one task's own files; cross-cutting delivery is the material the plan aimed at the whole cycle rather than at any single task. Deduplicate within each tier and across the pair: an entry delivered to one task counts once for that task however often it appears there, and an entry that is both cross-cutting and attached to a specific task counts once in each tier and no more.
 
-Read the cycle's tasks from `tasks.json` before scoring either tier. Prefer the top-level `tasks[]` array; when it is absent, flatten a valid `phases[]` into the tasks it contains and score those. A document carrying neither shape is a delivery-evidence gap — report it as one, never as a zero numerator. Equivalent delivery facts score the same whichever shape recorded them; the nesting a cycle happened to use is not a difference in delivery.
+Read the cycle's tasks from the generated-task envelope in the `cycle_work` projection before scoring either tier. When that envelope is `read`, its content is the cycle's `tasks.json`. When it is `absent`, `unreadable`, or `unsupported`, both tiers are a delivery-evidence gap carrying the envelope's reason, not a zero numerator. Other calculations that do not depend on the task list are unaffected. Prefer the top-level `tasks[]` array; when it is absent, flatten a valid `phases[]` into the tasks it contains and score those. A document carrying neither shape is a delivery-evidence gap — report it as one, never as a zero numerator. Equivalent delivery facts score the same whichever shape recorded them; the nesting a cycle happened to use is not a difference in delivery.
 
 The task-level denominator is the count of generated tasks eligible for delivery. Every generated task is eligible unless the cycle names a reason it could not receive delivery — a cold-start target with no entries to deliver, or a generator artifact that is not a real unit of work. Name each exclusion in the rationale; an unnamed exclusion is a gap, not a smaller denominator. Evaluate cross-cutting delivery once for the plan and report it beside the task-level ratio; it never enters that denominator.
 
@@ -285,6 +314,7 @@ Lead with the deterministic evidence state:
 [retro] <cycle>
   pack: <pack_id> (<created|reused|recovered|replaced>)
   fixed health: <normal|warmup|pipeline-degraded|not-computable>
+  evidence: <envelopes not read, each with state and reason, or all read; results whose freshness is stale or unknown, with reasons>
   tripped/withheld: <calculation ids and reasons, or none>
   filing: judgment_accepted=<bool> filing_complete=<bool>
   missing sinks: <list or none>
