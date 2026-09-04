@@ -81,7 +81,7 @@ def find_structured_entries(s: str, section_heading: str):
         return 0, f"missing required section: **{section_heading}:**"
     section = s[m.end():]
     # Truncate at the next top-level **Heading:** if any.
-    next_h = re.search(r'\n\*\*[A-Z][a-zA-Z ]+:\*\*', section)
+    next_h = re.search(r'\n(?:\*\*[A-Z][a-zA-Z ]+:\*\*|[ \t]*Task:)', section)
     if next_h:
         section = section[:next_h.start()]
 
@@ -139,7 +139,7 @@ def find_convention_handling(s: str):
             f"or `none in scope`"
         )
     section = s[m.end():]
-    next_h = re.search(r'\n\*\*[A-Z][a-zA-Z0-9 ]+:\*\*', section)
+    next_h = re.search(r'\n(?:\*\*[A-Z][a-zA-Z0-9 ]+:\*\*|[ \t]*Task:)', section)
     if next_h:
         section = section[:next_h.start()]
     if not section.strip():

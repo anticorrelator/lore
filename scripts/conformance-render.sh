@@ -305,6 +305,8 @@ for report_path in report_files:
     active = False
     for line in lines:
         match = re.match(r"^\s*\*\*([^*]+?):\*\*\s*(.*)$", line)
+        if not match:
+            match = re.match(r"^\s*(Task):\s*(.*)$", line)
         if match:
             if active:
                 break

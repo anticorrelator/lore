@@ -132,7 +132,13 @@ The session writes its completion report to a durable file before `terminus_reac
 REPORT_FILE="$KDIR/_work/$WORK_ITEM_SLUG/worker-reports/$DERIVED_SLUG.md"
 ```
 
-**Parseability gate.** The file is a valid worker report only if it exists, is non-empty, and contains at minimum the `**Task:**`, `**Changes:**`, `**Observations:**`, and `**Tier 2 evidence:**` labels. A missing, empty, or label-incomplete file is a degraded outcome (§5) — do **not** synthesize the missing structure. An unparseable report means the session did not leave a checkable claim; relaying an invented shape would poison the audit loop with a claim no session actually made.
+**Parseability gate.** The file is a valid worker report only if it exists, is non-empty, and contains a `Task:` or `**Task:**` label and the `**Changes:**`, `**Observations:**`, and `**Tier 2 evidence:**` labels. A missing, empty, or label-incomplete file is a degraded outcome (§5) — do **not** synthesize the missing structure. An unparseable report means the session did not leave a checkable claim; relaying an invented shape would poison the audit loop with a claim no session actually made.
+
+Run the label check; exit 0 confirms the required labels and non-zero takes the degraded path:
+
+```bash
+python3 ~/.lore/scripts/check-report-labels.py "$REPORT_FILE"
+```
 
 ### 5. Relay verbatim, or mark degraded
 

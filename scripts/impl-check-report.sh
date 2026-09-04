@@ -389,11 +389,13 @@ def clean(value):
 
 
 def split_sections(text):
-    """Map '**Name:**' report sections to their lines (inline remainder first)."""
+    """Map report sections to lines, accepting plain or bold Task labels."""
     sections = {}
     current = None
     for line in text.splitlines():
         m = re.match(r"^\s*\*\*([^*]+?):\*\*\s*(.*)$", line)
+        if not m:
+            m = re.match(r"^\s*(Task):\s*(.*)$", line)
         if m:
             current = m.group(1).strip()
             sections.setdefault(current, [])

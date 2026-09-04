@@ -63,8 +63,8 @@ teardown() {
 }
 
 run_conformance() {
-  run bash -c 'cd "$1" && exec "$2" work conformance "$3" --diff-base "$4" --json' \
-    _ "$PROJECT" "$LORE" "$1" "$BASE_SHA"
+  run bash -c 'cd "$1" && exec "$2" "$3" --diff-base "$4" --json' \
+    _ "$PROJECT" "$REPO_DIR/scripts/conformance-render.sh" "$1" "$BASE_SHA"
 }
 
 @test "full render writes five panels, a cross-tab, and schema version 1 without judgment fields" {
@@ -148,4 +148,26 @@ PY
   run bash -c 'cd "$1" && exec "$2" work conformance no-such-item --diff-base HEAD~1' \
     _ "$PROJECT" "$LORE"
   [ "$status" -eq 1 ]
+}
+
+@test "report convention sections end at plain or bold Task labels" {
+  mkdir -p "$ITEM_DIR/worker-reports"
+  for label in 'Task:' '**Task:**'; do
+    cat > "$ITEM_DIR/worker-reports/task.md" <<EOF_REPORT
+**Convention handling:**
+- honored: report-norm
+$label Other task
+- honored: outside-section
+EOF_REPORT
+    run_conformance render-item
+    [ "$status" -eq 0 ]
+    python3 - "$ITEM_DIR/closure-conformance.md" <<'PY'
+import json, re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+payload = json.loads(re.search(r"```json\n(.*?)\n```", text, re.S).group(1))
+rows = [row for row in payload['recorded_dispositions']
+        if row['source'] == 'worker-reports/task.md']
+assert [row['label'] for row in rows] == ['report-norm'], rows
+PY
+  done
 }
