@@ -601,8 +601,8 @@ func TestDetailIntegratedBodyOrderAndUnknowns(t *testing.T) {
 	brief := strings.Index(out, "Brief")
 	streams := strings.Index(out, "Streams")
 	ticker := strings.Index(out, "Recent activity")
-	if !(digest >= 0 && digest < streams && streams < brief && brief < ticker) {
-		t.Fatalf("live body must render Since you left → Streams → Brief → Recent activity:\n%s", out)
+	if !(streams >= 0 && streams < digest && digest < brief && brief < ticker) {
+		t.Fatalf("live body must render Streams → Since you left → Brief → Recent activity:\n%s", out)
 	}
 	for _, want := range []string{"flagged for your review", "A decision the owner can scan.", "unknown · unknown · item-b"} {
 		if !strings.Contains(out, want) {
@@ -652,8 +652,8 @@ func TestDetailDigestStatesAndClosedOrder(t *testing.T) {
 	out := stripANSI(m.View())
 	digest := strings.Index(out, "Since you left")
 	streams := strings.Index(out, "Final streams")
-	if !(digest >= 0 && digest < streams) || !strings.Contains(out, "Decision:") {
-		t.Fatalf("closed digest must precede final streams:\n%s", out)
+	if !(streams >= 0 && streams < digest) || !strings.Contains(out, "Decision:") {
+		t.Fatalf("closed final streams must precede the digest:\n%s", out)
 	}
 }
 
@@ -847,8 +847,8 @@ func TestDetailClosedAndLiveReportModesStayDistinct(t *testing.T) {
 	digest := strings.Index(out, "Since you left")
 	streams := strings.Index(out, "Final streams")
 	graph := strings.Index(out, "First")
-	if !(digest >= 0 && digest < streams && streams < graph) {
-		t.Errorf("a closed arc must render its digest then final DAG:\n%s", out)
+	if !(streams >= 0 && streams < graph && graph < digest) {
+		t.Errorf("a closed arc must render its final DAG then the digest:\n%s", out)
 	}
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
 	if m.Mode() != ModeReport || !strings.Contains(stripANSI(m.View()), "Earlier report") {

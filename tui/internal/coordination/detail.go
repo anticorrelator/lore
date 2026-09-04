@@ -396,11 +396,11 @@ func (m DetailModel) render() string {
 
 func (m DetailModel) renderClosed() string {
 	var b strings.Builder
-	b.WriteString(m.renderDigest())
-	b.WriteString("\n\n")
 	b.WriteString(sectionRule("Final streams", m.contentWidth()))
 	b.WriteString("\n")
 	b.WriteString(m.renderBoard())
+	b.WriteString("\n\n")
+	b.WriteString(m.renderDigest())
 	return b.String()
 }
 
@@ -438,11 +438,11 @@ func (m DetailModel) renderDocument(label, body string, found bool, filename str
 
 func (m DetailModel) renderLive() string {
 	var b strings.Builder
-	b.WriteString(m.renderDigest())
-	b.WriteString("\n\n")
 	b.WriteString(sectionRule("Streams", m.contentWidth()))
 	b.WriteString("\n")
 	b.WriteString(m.renderBoard())
+	b.WriteString("\n\n")
+	b.WriteString(m.renderDigest())
 	b.WriteString("\n\n")
 	b.WriteString(sectionRule("Brief", m.contentWidth()))
 	b.WriteString("\n")
