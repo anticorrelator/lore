@@ -9,6 +9,16 @@
 # Tier 2 evidence schema via validate-tier2.sh, and appends one JSONL line to
 # $KDIR/_work/<slug>/task-claims.jsonl. Creates the file on first use.
 #
+# Rows may carry an OPTIONAL position_dispatch object
+# ({manifest_path, manifest_sha256}) naming the immutable prepared dispatch a
+# compiled producer was given. It is never required. When present, this writer
+# projects it through scripts/position_attribution.py and refuses only a
+# reference that resolves to a different work item or task; an unresolvable
+# reference is appended with a warning and reads as unknown attribution
+# downstream. Nothing is synthesized: a row without the field keeps the legacy
+# reading, and no reader substitutes the current agents/worker.md hash for a
+# producer the row did not record.
+#
 # Rows may carry an OPTIONAL executable_falsifier object
 # ({command, expected_output_shape[, root]}). It is never required; the row
 # passes through this writer untouched and validate-tier2.sh type-checks it
@@ -55,7 +65,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      sed -n '2,23p' "$0"
+      sed -n '2,35p' "$0"
       exit 0
       ;;
     *)
@@ -172,6 +182,39 @@ else
     WARN_CLAIM_ID=$(printf '%s' "$ROW" | jq -r '.claim_id // "(unknown)"')
     echo "evidence-append: warning: $WORK_ITEM/$WARN_CLAIM_ID anchored on commit not reachable from any origin/* ref; audits from sibling workspaces will fail until pushed." >&2
   fi
+fi
+
+# --- Optional producer reference: check the binding at the writer boundary ---
+# A row may carry `position_dispatch` naming the immutable dispatch bytes its
+# compiled producer was given. This is where that reference is worth checking:
+# the producer is still live, so a reference that resolves to a *different*
+# work item or task is a mistake it can fix now, and admitting it would file
+# the claim under another producer's dispatch. Two other outcomes are not
+# errors: a row with no reference is the legacy shape and passes untouched,
+# and a well-shaped reference whose store cannot be read here is appended with
+# a warning — losing the claim would be worse than recording a reference that
+# readers will honestly report as unknown.
+if printf '%s' "$ROW" | jq -e 'has("position_dispatch")' >/dev/null 2>&1; then
+  PD_TASK=$(printf '%s' "$ROW" | jq -r '.task_id // ""')
+  PD_PROJECTION=$(printf '%s' "$ROW" | python3 "$SCRIPT_DIR/position_attribution.py" \
+    --expected "$(jq -nc --arg w "$WORK_ITEM" --arg t "$PD_TASK" '{work_item: $w} + (if $t == "" then {} else {task_id: $t} end)')" \
+    2>/dev/null || echo '')
+  PD_STATUS=$(printf '%s' "$PD_PROJECTION" | jq -r '.status // "unreadable"' 2>/dev/null || echo "unreadable")
+  PD_REASON=$(printf '%s' "$PD_PROJECTION" | jq -r '.reason // ""' 2>/dev/null || echo "")
+  case "$PD_STATUS" in
+    resolved) ;;
+    unknown)
+      if [[ "$PD_REASON" == *mismatch* ]]; then
+        echo "[evidence-append] Row rejected: position_dispatch resolves to a different assignment — $PD_REASON" >&2
+        echo "[evidence-append]   the claim would be filed under another producer's dispatch; correct the reference or the task_id" >&2
+        exit 1
+      fi
+      echo "[evidence-append] Warning: position_dispatch is recorded but does not resolve here ($PD_REASON); readers will report unknown attribution." >&2
+      ;;
+    *)
+      echo "[evidence-append] Warning: could not project position_dispatch; the reference is stored as given." >&2
+      ;;
+  esac
 fi
 
 # --- Validate via validate-tier2.sh ---

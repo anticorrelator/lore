@@ -3,6 +3,7 @@
 # Usage: impl-consult-log.sh <ref> --consultation-id <id> --worker <name> --domain <domain>
 #        --handler <lead|skill|agent> --question <text> --answer <text>
 #        [--skill-template-version <hash>] [--advisor-template-version <hash>]
+#        [--position-dispatch-manifest <path> --position-dispatch-sha256 <sha256>]
 #        [--template-version <hash>] [--json]
 #
 # Judgment in, filing out: the answer is the lead's already-made judgment and
@@ -15,6 +16,18 @@
 #   lead                -                            -
 #   skill               R                            -
 #   agent               -                            R
+#
+# A designer answering in consultation mode is dispatched from a compiled
+# brief, and the pair --position-dispatch-manifest / --position-dispatch-sha256
+# names the immutable bytes it was given. Only handler 'agent' takes them: a
+# lead answers as itself, and a skill's answer is attributed to its own
+# SKILL.md hash, which no position identity replaces. When the reference
+# resolves, its compiled version IS the answering producer's version and must
+# agree with --advisor-template-version — a disagreement is refused before any
+# write rather than filed under a hash nobody can check. The three hashes stay
+# three things throughout: --template-version is the filing lead's,
+# --skill-template-version is the answering skill's, and
+# --advisor-template-version is the answering producer's.
 #
 # Side effects (both provenance-stamped):
 #   1. Appends one record to the work item's consultation-transcript.jsonl —
@@ -53,12 +66,15 @@ QUESTION_SET=0
 ANSWER_SET=0
 SKILL_TV_SET=0
 ADVISOR_TV_SET=0
+POSITION_MANIFEST=""
+POSITION_SHA256=""
 
 usage() {
   cat >&2 <<EOF
 Usage: lore impl consult-log <ref> --consultation-id <id> --worker <name> --domain <domain>
                              --handler <lead|skill|agent> --question <text> --answer <text>
                              [--skill-template-version <hash>] [--advisor-template-version <hash>]
+                             [--position-dispatch-manifest <path> --position-dispatch-sha256 <sha256>]
                              [--template-version <hash>] [--json]
 
 Files a consultation the lead has already answered: appends the transcript
@@ -66,7 +82,9 @@ record (consultation-transcript.jsonl) and the execution-log entry, both
 provenance-stamped. The answer is required — this script never infers it.
 
 Per-handler fields: --skill-template-version on skill; --advisor-template-version
-on agent. All other combinations are rejected.
+on agent. All other combinations are rejected. The position-dispatch pair is
+accepted on agent only, travels together, and must agree with
+--advisor-template-version once it resolves.
 
 Exit codes: 0 filed (identifiers on stdout), 1 error/no match, 2 ambiguous reference
 EOF
@@ -154,6 +172,22 @@ while [[ $# -gt 0 ]]; do
       ADVISOR_TV_SET=1
       shift
       ;;
+    --position-dispatch-manifest)
+      POSITION_MANIFEST="${2:-}"
+      shift 2
+      ;;
+    --position-dispatch-manifest=*)
+      POSITION_MANIFEST="${1#--position-dispatch-manifest=}"
+      shift
+      ;;
+    --position-dispatch-sha256)
+      POSITION_SHA256="${2:-}"
+      shift 2
+      ;;
+    --position-dispatch-sha256=*)
+      POSITION_SHA256="${1#--position-dispatch-sha256=}"
+      shift
+      ;;
     --template-version)
       TEMPLATE_VERSION="${2:-}"
       shift 2
@@ -239,6 +273,15 @@ case "$HANDLER" in
     ;;
 esac
 
+if [[ -n "$POSITION_MANIFEST" || -n "$POSITION_SHA256" ]]; then
+  if [[ "$HANDLER" != "agent" ]]; then
+    fail "the position-dispatch pair belongs to handler 'agent'; handler '$HANDLER' answers under its own identity"
+  fi
+  if [[ -z "$POSITION_MANIFEST" || -z "$POSITION_SHA256" ]]; then
+    fail "--position-dispatch-manifest and --position-dispatch-sha256 travel together; half a reference cannot be resolved"
+  fi
+fi
+
 # --- Resolve the work-item reference (tri-state exit passthrough) ------------
 set +e
 RESOLVED=$(bash "$SCRIPT_DIR/resolve-work-ref.sh" "$REF")
@@ -279,14 +322,46 @@ REPLIED_AT=$(timestamp_iso)
 CAPTURED_SHA=$(captured_at_sha)
 TRANSCRIPT_FILE="$ITEM_DIR/consultation-transcript.jsonl"
 
+# --- The answering designer's recorded producer, checked before any write ----
+# The reference names bytes; --advisor-template-version names a hash. When
+# both are present and the reference resolves, they are two statements about
+# the same producer, and a disagreement means one of them is wrong — refusing
+# is the only honest outcome, because filing either would put this answer's
+# quality on a producer that did not give it. A well-shaped reference that
+# cannot be resolved here is recorded as unknown and never silently scored
+# under the supplied hash: the report checker strips such an entry from the
+# rollup rather than crediting it.
+PRODUCER_ATTRIBUTION=""
+if [[ -n "$POSITION_MANIFEST" ]]; then
+  PRODUCER_ATTRIBUTION=$(jq -nc --arg p "$POSITION_MANIFEST" --arg s "$POSITION_SHA256" \
+      '{position_dispatch: {manifest_path: $p, manifest_sha256: $s}}' \
+    | python3 "$SCRIPT_DIR/position_attribution.py" \
+      --expected "$(jq -nc --arg w "$SLUG" --arg c "$CONSULTATION_ID" --arg d "$DOMAIN" \
+                      '{work_item: $w, mode: "consultation", consultation_id: $c, domain: $d}')" \
+    2>/dev/null || echo '')
+  if [[ -z "$PRODUCER_ATTRIBUTION" ]]; then
+    fail "could not project the position-dispatch reference for consultation '$CONSULTATION_ID'"
+  fi
+  PD_STATUS=$(printf '%s' "$PRODUCER_ATTRIBUTION" | jq -r '.status')
+  if [[ "$PD_STATUS" == "resolved" ]]; then
+    PD_VERSION=$(printf '%s' "$PRODUCER_ATTRIBUTION" | jq -r '.template_version')
+    if [[ "$ADVISOR_TV" != "$PD_VERSION" ]]; then
+      fail "--advisor-template-version '$ADVISOR_TV' disagrees with the resolved answering producer '$PD_VERSION'"
+    fi
+  else
+    PD_REASON=$(printf '%s' "$PRODUCER_ATTRIBUTION" | jq -r '.reason // "unresolvable"')
+    echo "[impl] Warning: the answering producer's reference does not resolve here ($PD_REASON); this consultation records unknown attribution." >&2
+  fi
+fi
+
 # --- Transcript record (this script is its sole sanctioned writer) -----------
 TRANSCRIPT_ROW=$(python3 - "$CONSULTATION_ID" "$WORKER" "$DOMAIN" "$HANDLER" \
   "$SKILL_TV" "$ADVISOR_TV" "$QUESTION" "$ANSWER" "$REPLIED_AT" \
-  "$TEMPLATE_VERSION" "$CAPTURED_SHA" <<'PYEOF'
+  "$TEMPLATE_VERSION" "$CAPTURED_SHA" "$POSITION_MANIFEST" "$POSITION_SHA256" <<'PYEOF'
 import json, sys
 (cid, worker, domain, handler, skill_tv, advisor_tv,
- question, answer, replied_at, tv, sha) = sys.argv[1:12]
-print(json.dumps({
+ question, answer, replied_at, tv, sha, manifest, manifest_sha) = sys.argv[1:14]
+row = {
     "consultation_id": cid,
     "worker": worker,
     "domain": domain,
@@ -298,7 +373,15 @@ print(json.dumps({
     "replied_at": replied_at,
     "template_version": tv or None,
     "captured_at_sha": None if sha == "null" else sha,
-}, ensure_ascii=False))
+}
+# Additive and omitted entirely when absent, so every record written before
+# compiled designers existed keeps its exact shape for the readers that join
+# on it. The reference is stored, not a resolved projection: a reader
+# re-resolves the original bytes, and a projection copied into a row would be
+# a second source of truth that nobody could check.
+if manifest:
+    row["position_dispatch"] = {"manifest_path": manifest, "manifest_sha256": manifest_sha}
+print(json.dumps(row, ensure_ascii=False))
 PYEOF
 )
 
@@ -323,6 +406,10 @@ BODY=$(printf 'Consultation: %s\nWorker: %s\nDomain: %s\nConsultation-handler: %
 WLOG_ARGS=(--slug "$SLUG" --source impl-verb)
 if [[ -n "$TEMPLATE_VERSION" ]]; then
   WLOG_ARGS+=(--template-version "$TEMPLATE_VERSION")
+fi
+if [[ -n "$POSITION_MANIFEST" ]]; then
+  WLOG_ARGS+=(--position-dispatch-manifest "$POSITION_MANIFEST"
+              --position-dispatch-sha256 "$POSITION_SHA256")
 fi
 
 if ! printf '%s\n' "$BODY" | bash "$SCRIPT_DIR/write-execution-log.sh" "${WLOG_ARGS[@]}" >/dev/null; then

@@ -63,6 +63,19 @@
 #                             strings; root, when present, is a non-empty string.
 # When present, the object is type-checked but never required — the prose
 # `falsifier` field stays mandatory regardless. Executed by falsifier-run.py.
+#
+# Optional position_dispatch (additive, non-gating):
+#   position_dispatch       — object: {manifest_path, manifest_sha256} naming
+#                             the immutable prepared dispatch a compiled
+#                             producer was given. manifest_path is absolute
+#                             and ends in manifest.json; manifest_sha256 is
+#                             64 lowercase hex. Shape only — this validator
+#                             reads no store, so a row whose store moved stays
+#                             valid and readers report unknown attribution
+#                             rather than the row becoming unreadable.
+#                             producer_role keeps its own enum: a compiled
+#                             position maps onto a legacy role at this
+#                             boundary and does not extend the vocabulary.
 
 set -euo pipefail
 
@@ -330,6 +343,28 @@ fi
 if printf '%s' "$ROW" | jq -e 'has("anchor_warning")' >/dev/null 2>&1; then
   if ! printf '%s' "$ROW" | jq -e '.anchor_warning | type == "string"' >/dev/null 2>&1; then
     fail_field "anchor_warning must be a string"
+  fi
+fi
+
+# --- Optional position_dispatch: type checks only (additive, non-gating) -----
+# A compiled producer records where its immutable dispatch bytes live; the pair
+# is the whole reference, and this validator checks its shape without touching
+# a store. Resolution belongs to readers (position_attribution.py) and to the
+# writer boundary (evidence-append.sh), so a row stays valid — and readable —
+# after the store it names moves. Rows written before compiled positions
+# existed omit the field and validate unchanged.
+if printf '%s' "$ROW" | jq -e 'has("position_dispatch")' >/dev/null 2>&1; then
+  PD_ERR=$(printf '%s' "$ROW" | jq -r '
+    .position_dispatch |
+    if type != "object" then "must be an object: {manifest_path, manifest_sha256}"
+    elif ((keys_unsorted | sort) != ["manifest_path", "manifest_sha256"]) then "must carry exactly manifest_path and manifest_sha256"
+    elif (.manifest_path | type != "string") or (.manifest_path | startswith("/") | not) then ".manifest_path must be an absolute path"
+    elif (.manifest_path | endswith("/manifest.json") | not) then ".manifest_path must name a dispatch manifest.json"
+    elif (.manifest_sha256 | type != "string") or (.manifest_sha256 | test("^[0-9a-f]{64}$") | not) then ".manifest_sha256 must match ^[0-9a-f]{64}$"
+    else empty end
+  ')
+  if [[ -n "$PD_ERR" ]]; then
+    fail_field "position_dispatch $PD_ERR"
   fi
 fi
 
