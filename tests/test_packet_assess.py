@@ -584,3 +584,163 @@ def test_mixed_packet_retries_keep_revision_identity_and_null_assessments(tmp_pa
     assert all(rows['retry'][name] is None for name in packet_schema.VERDICT_CLASSES)
     assert rows['first']['missing'] is None
     assert rows['first']['unattributed_retrieval'] is None
+
+
+# The retrospective reader consumes the actual writer schema, with a captured
+# cycle membership snapshot instead of opening a second mutable work view.
+_reader_spec = importlib.util.spec_from_file_location(
+    'packet_assessments_read', _scripts_dir / 'packet-assessments-read.py')
+_reader = importlib.util.module_from_spec(_reader_spec)
+_reader_spec.loader.exec_module(_reader)
+
+
+def summary_work(*ids, state='read'):
+    return {'evidence': {'sources': {'packets': {'state': state}}, 'packet_summary': [
+        {'packet_id': pid, 'delivery_stage': 'assembled', 'binding': {'state': 'current'},
+         'receipt': 'unknown', 'synthesis': None} for pid in ids]}}
+
+
+def assessment_row(pid='pkt-aaa', transcript='/private/transcript.jsonl', at=T1, **changes):
+    return dict(packet_id=pid, source_transcript=transcript, assessed_at=at,
+                schema_version='1', packet_schema_sha=HEX64, assessor_schema_sha=HEX64,
+                model='test', captured_at_branch=None, captured_at_sha=None,
+                captured_at_merge_base_sha=None, dispatch_confirmed=True,
+                **{name: [] for name in packet_schema.VERDICT_CLASSES}) | changes
+
+
+def assessment_summary(tmp_path, rows, work=None):
+    ledger = tmp_path / '_packets/assessments.jsonl'
+    ledger.parent.mkdir(exist_ok=True)
+    ledger.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    return _reader.read_summary(tmp_path, work or summary_work('pkt-aaa'), T0, T2)
+
+
+def test_reader_real_assessor_writer_contract(tmp_path):
+    path = basic_transcript(tmp_path)
+    kdir = make_kdir(tmp_path, [packet_row('pkt-aaa')])
+    verdicts, _ = _mod.assess_transcript(FakeProvider(), path, kdir)
+    for row in verdicts:
+        row['assessed_at'] = T1
+    assert _mod.append_assessments(verdicts, kdir) == (1, 0)
+    result = _reader.read_summary(kdir, summary_work('pkt-aaa'), T0, T2)
+    assert result['status'] == 'available'
+    summary = result['summary']
+    assert summary['observations'] == summary['confirmed_observations'] == 1
+    assert summary['classes']['missing']['findings'] == 0
+    assert summary['classes']['unused']['findings'] == 1
+    assert path not in json.dumps(result)
+
+
+def test_reader_cycle_time_duplicate_and_transcript_selection(tmp_path):
+    first = assessment_row(at=T0, harmful=[{'private': 'old finding'}])
+    latest = assessment_row(at=T1, unused=[{'private': 'new finding'}])
+    other = assessment_row(transcript='/private/second.jsonl', dispatch_confirmed=False,
+                           **{k: None for k in packet_schema.VERDICT_CLASSES},
+                           not_assessable_reason='dispatch-unconfirmed')
+    end = assessment_row(at=T2, missing=[{'query': 'excluded at end'}])
+    unrelated = assessment_row(pid='cycle-b', unused=[{}] * 10)
+    result = assessment_summary(tmp_path, [first, latest, latest, other, end, unrelated])
+    s = result['summary']
+    assert s['observations'] == 2 and s['observed_packets'] == 1
+    assert s['confirmed_observations'] == s['unconfirmed_observations'] == 1
+    assert s['exact_duplicates_collapsed'] == s['superseded_observations'] == 1
+    assert s['classes']['unused'] == {'assessable_observations': 1, 'findings': 1,
+        'not_assessable_observations': 1, 'reason_counts': {'dispatch-unconfirmed': 1}}
+    assert s['classes']['harmful']['findings'] == 0
+    assert s['row_reason_counts'] == {'dispatch-unconfirmed': 1}
+    assert s['packet_schema_hash_counts'] == {HEX64: 2}  # historical stamp accepted
+    text = json.dumps(result)
+    assert '/private/' not in text and 'new finding' not in text and 'excluded at end' not in text
+    changed = assessment_summary(tmp_path, [first, latest, latest, other, end, unrelated,
+                                          assessment_row(pid='cycle-c')])
+    assert result == changed
+    # A late observation outside this window does not replace the earlier one.
+    changed = assessment_summary(tmp_path, [first, latest, latest, other, end, unrelated,
+                                          assessment_row(at='2026-07-02T00:00:00Z')])
+    assert result == changed
+
+
+def test_reader_empty_missing_malformed_and_unreadable(tmp_path):
+    missing = _reader.read_summary(tmp_path, summary_work('pkt-aaa'), T0, T2)
+    assert missing['coverage'] == 'absent' and missing['summary'] is None
+    empty = assessment_summary(tmp_path, [])
+    assert empty['coverage'] == 'read' and empty['summary']['observations'] == 0
+    assert empty['summary']['classes']['unused']['findings'] is None
+    assert empty['summary']['packets_without_observations'] == ['pkt-aaa']
+    ledger = tmp_path / '_packets/assessments.jsonl'
+    ledger.write_text('{broken\n')
+    bad = _reader.read_summary(tmp_path, summary_work('pkt-aaa'), T0, T2)
+    assert bad['status'] == 'not-computable' and bad['summary'] is None
+    assert bad['diagnostics'][0]['reason'] == 'malformed-json'
+    ledger.unlink()
+    ledger.mkdir()
+    unreadable = _reader.read_summary(tmp_path, summary_work('pkt-aaa'), T0, T2)
+    assert unreadable['coverage'] == 'unreadable' and unreadable['summary'] is None
+
+
+def test_reader_invalid_schema_timestamp_and_unknown_membership(tmp_path):
+    for changes in ({'packet_schema_sha': 'bad'}, {'dispatch_confirmed': None},
+                    {'assessed_at': '2026-07-01'}, {'assessed_at': '2026-02-30T12:00:00Z'},
+                    {'unused': None}, {'unused': None, 'unused_not_assessable_reason': {},
+                                       'not_assessable_reason': 'unconfirmed',
+                                       'harmful': None, 'missing': None, 'unattributed_retrieval': None}):
+        result = assessment_summary(tmp_path, [assessment_row(**changes)])
+        assert result['status'] == 'not-computable' and result['diagnostics']
+    for state in ('absent', 'unreadable'):
+        result = assessment_summary(tmp_path, [], summary_work(state=state))
+        assert result['summary'] is None and result['membership']['state'] == 'unknown'
+    assert _reader.packet_delivery(None)['values'] is None
+    assert _reader.packet_delivery({'evidence': None})['status'] == 'not-computable'
+    assert _reader.packet_delivery({'evidence': {'sources': {'packets': {'state': 'read'}}}})['values'] is None
+    work = summary_work('pkt-aaa')
+    work['evidence']['packet_summary'][0].update(binding={'state': []}, delivery_stage={}, receipt=[])
+    assert _reader.packet_delivery(work)['values']['invalid_bindings'] == 1
+    assert _reader.packet_delivery(summary_work())['values']['unique_packets'] == 0
+
+
+def test_reader_null_classes_empty_arrays_and_content_identity(tmp_path):
+    row = assessment_row(unused=None, unused_not_assessable_reason='no-body', missing=[{'query': 'private-a'}])
+    result = assessment_summary(tmp_path, [row])
+    classes = result['summary']['classes']
+    assert classes['unused']['findings'] is None
+    assert classes['unused']['reason_counts'] == {'no-body': 1}
+    assert classes['harmful']['findings'] == 0
+    assert classes['missing']['findings'] == 1
+    changed = assessment_summary(tmp_path, [row | {'missing': [{'query': 'private-b'}]}])
+    assert changed['content_identity'] != result['content_identity']
+    assert changed['summary']['classes'] == classes
+
+
+def test_packet_delivery_counts_keep_unknown_synthesis_and_invalid_binding(tmp_path):
+    work = summary_work('assembled', 'synthesized', 'waived', 'receipt', 'unknown', 'invalid')
+    rows = work['evidence']['packet_summary']
+    rows[1].update(delivery_stage='synthesized', synthesis={'by': 'lead', 'kept': 2, 'dropped': 0, 'added': True})
+    rows[2]['synthesis_waiver'] = {'by': 'lead', 'reason': 'empty candidates'}
+    rows[3].update(delivery_stage='delivered', receipt='delivered')
+    rows[4]['delivery_stage'] = 'future-state'
+    rows[5].update(delivery_stage='synthesized', binding={'state': 'invalid'}, synthesis={'kept': 999, 'dropped': 999, 'added': 999})
+    result = _reader.packet_delivery(work)['values']
+    assert result['unique_packets'] == 6
+    assert result['synthesized_packets'] == result['waivers'] == result['unknown_states'] == result['invalid_bindings'] == 1
+    assert result['receipt_state_counts'] == {'unknown': 5, 'delivered': 1}
+    assert result['synthesis_counts']['kept']['total'] == 2
+    assert result['synthesis_counts']['dropped']['total'] == 0
+    assert result['synthesis_counts']['added']['total'] is None
+    assert result['synthesis_counts']['kept']['excluded_packets'] == 5
+    assert result['synthesis_counts']['added']['exclusion_reasons']['invalid-count'] == 1
+    # Latest-row semantics also protect a caller handing over repeated summaries.
+    rows.append(rows[0] | {'delivery_stage': 'synthesized', 'synthesis': {'kept': 1, 'dropped': 0, 'added': 0}})
+    assert _reader.packet_delivery(work)['values']['unique_packets'] == 6
+    assert _reader.packet_delivery(work)['values']['synthesis_counts']['kept']['total'] == 3
+
+
+def test_reader_boundaries_offsets_and_ties(tmp_path):
+    included = assessment_row(at='2026-07-01T08:00:00-04:00')
+    end = assessment_row(at='2026-07-01T08:01:00-04:00', harmful=[{}])
+    before = assessment_row(at='2026-07-01T11:59:59.999999Z', missing=[{}])
+    result = assessment_summary(tmp_path, [included, end, before])
+    assert result['summary']['observations'] == 1
+    assert result['summary']['classes']['harmful']['findings'] == 0
+    replacement = included | {'harmful': [{}]}
+    result = assessment_summary(tmp_path, [included, replacement])
+    assert result['summary']['classes']['harmful']['findings'] == 1

@@ -56,7 +56,7 @@ teardown() {
 run_prepare() {
   run bash "$PREPARE" cycle-a --window-start "$WINDOW_START" --window-end "$WINDOW_END" --json
   [ "$status" -eq 0 ]
-  jq -e '([.source_manifest[] | select(.coverage == "read")] | length) == 6' \
+  jq -e '([.source_manifest[] | select(.source_id != "packet_assessments" and .coverage == "read")] | length) == 6' \
     "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json" >/dev/null
 }
 
@@ -137,7 +137,7 @@ manifest_row() {
   run_prepare
   jq -e '
     ([.source_manifest[].source_id] | inside([
-      "cycle_work","due_queue","scorecard_rows","scorecard_current","session_events","journal"
+      "cycle_work","due_queue","scorecard_rows","scorecard_current","session_events","journal","packet_assessments"
     ])) and
     ([.facts | keys[]] | any(. == "settlement_health_inputs" or . == "concerns_contradictions") | not) and
     ([.calculations[].calculation_id] | inside([
@@ -450,4 +450,169 @@ assert pack['review_summary']==work['review_summary']==coord['review_summary']
 assert pack['revision']['review_requirement']==work['revision']['review_requirement']==coord['revision']['review_requirement']
 assert pack['sources']['outcomes']['rows'][0]['schema_version']==2
 PY
+}
+
+# Packet rows deliberately include both cycles and two appended construction
+# stages. The public work reader must supply membership and latest-row semantics.
+packet_assessment_fixture() {
+  mkdir -p "$TEST_KDIR/_packets"
+  python3 - "$TEST_KDIR" "$NOW" <<'PY'
+import json, pathlib, sys
+root=pathlib.Path(sys.argv[1]); now=sys.argv[2]
+base=dict(schema_version='1', task_id='task-1', delivery_stage='assembled', delivered_entries=[])
+rows=[dict(base,packet_id='pkt-a',work_item='cycle-a'),
+      dict(base,packet_id='pkt-a',work_item='cycle-a',delivery_stage='synthesized',
+           synthesis={'by':'lead','kept':[], 'dropped':[{'path':'old.md','reason':'irrelevant'}], 'added':[]}),
+      dict(base,packet_id='pkt-b',work_item='cycle-b'),
+      dict(base,packet_id='pkt-waived',work_item='cycle-a', synthesis_waiver={'by':'lead','reason':'empty candidates'}),
+      dict(base,packet_id='pkt-receipt',work_item='cycle-a',delivery_stage='delivered'),
+      dict(base,packet_id='pkt-unknown',work_item='cycle-a',delivery_stage='future-state')]
+(root/'_packets/packets.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
+row=dict(packet_id='pkt-a', source_transcript='/private/recipient-transcript.jsonl',
+         assessed_at=now, assessor_schema_sha='0'*64, dispatch_confirmed=True,
+         unused=[], harmful=[], missing=None, missing_not_assessable_reason='log-unavailable',
+         unattributed_retrieval=[])
+(root/'assessment-input.json').write_text(json.dumps(row))
+PY
+  run bash "$REPO_DIR/scripts/packet-assessment-append.sh" --kdir "$TEST_KDIR" --row "$(cat "$TEST_KDIR/assessment-input.json")" --json
+  [ "$status" -eq 0 ]
+}
+
+@test "packet assessments register the exact cycle summary and preserve writer null semantics" {
+  packet_assessment_fixture
+  run_prepare
+  pack="$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+  jq -e '.facts.packet_delivery.values as $d |
+    $d.unique_packets == 4 and $d.synthesized_packets == 1 and $d.waivers == 1 and
+    $d.unknown_states == 1 and $d.receipt_state_counts.delivered == 1 and
+    $d.synthesis_counts.dropped.total == 1 and $d.synthesis_counts.kept.total == 0 and
+    $d.synthesis_counts.kept.excluded_packets == 3 and
+    .source_data.cycle_work.evidence.packet_summary[0].superseded_rows == 1 and
+    .facts.packet_assessments.values.observations == 1 and
+    .facts.packet_assessments.values.classes.missing.findings == null and
+    .facts.packet_assessments.values.classes.unused.findings == 0' "$pack"
+  bash "$REPO_DIR/scripts/load-work-item.sh" cycle-a --json > "$TEST_KDIR/captured-work.json"
+  python3 "$REPO_DIR/scripts/packet-assessments-read.py" --kdir "$TEST_KDIR" \
+    --cycle-work "$TEST_KDIR/captured-work.json" --window-start "$WINDOW_START" --window-end "$WINDOW_END" --json > "$TEST_KDIR/summary.json"
+  python3 - "$pack" "$TEST_KDIR/summary.json" <<'PY'
+import hashlib,json,sys
+p=json.load(open(sys.argv[1])); summary=json.load(open(sys.argv[2]))
+assert p['source_data']['packet_assessments']==summary
+source=next(x for x in p['source_manifest'] if x['source_id']=='packet_assessments')
+assert source['reader_contract_version']=='1'
+assert source['projection_mode']=='cycle-assessment-summary'
+assert source['window_field']=='assessed_at [start,end)'
+assert '--cycle-work <captured-cycle_work-json>' in source['reader']
+assert source['content_identity']==hashlib.sha256(json.dumps(summary,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+assert 'recipient-transcript' not in json.dumps(p)
+assert summary['membership']['packet_ids']==['pkt-a','pkt-receipt','pkt-unknown','pkt-waived']
+PY
+}
+
+@test "assessment source gaps never erase delivery facts or become zero findings" {
+  packet_assessment_fixture
+  rm "$TEST_KDIR/_packets/assessments.jsonl"
+  run_prepare
+  pack="$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+  jq -e '.facts.packet_delivery.status == "available" and .facts.packet_assessments.status == "absent" and .facts.packet_assessments.values == null' "$pack"
+  first=$(jq -r .pack_id "$pack")
+  : > "$TEST_KDIR/_packets/assessments.jsonl"
+  run_prepare
+  [ "$first" != "$(jq -r .pack_id "$pack")" ]
+  jq -e '.facts.packet_assessments.status == "available" and .facts.packet_assessments.values.observations == 0 and .facts.packet_assessments.values.classes.unused.findings == null' "$pack"
+  printf '{broken assessment\n' > "$TEST_KDIR/_packets/assessments.jsonl"
+  run_prepare
+  jq -e '.facts.packet_delivery.status == "available" and .facts.packet_assessments.status == "not-computable" and .source_data.packet_assessments.diagnostics[0].reason == "malformed-json"' "$pack"
+  manifest_row packet_assessments | jq -e '.coverage == "unreadable"'
+  rm "$TEST_KDIR/_packets/assessments.jsonl"
+  mkdir "$TEST_KDIR/_packets/assessments.jsonl"
+  run_prepare
+  manifest_row packet_assessments | jq -e '.coverage == "unreadable"'
+}
+
+@test "packet source absent empty and malformed retain distinct membership coverage" {
+  run_prepare
+  pack="$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+  jq -e '.facts.packet_delivery.status == "not-computable" and .source_data.packet_assessments.membership.state == "unknown"' "$pack"
+  mkdir -p "$TEST_KDIR/_packets"
+  : > "$TEST_KDIR/_packets/packets.jsonl"
+  : > "$TEST_KDIR/_packets/assessments.jsonl"
+  run_prepare
+  jq -e '.facts.packet_delivery.values.unique_packets == 0 and .facts.packet_assessments.values.eligible_packets == 0' "$pack"
+  printf '{broken packet\n' > "$TEST_KDIR/_packets/packets.jsonl"
+  run_prepare
+  jq -e '.facts.packet_delivery.values == null and .facts.packet_assessments.status == "not-computable"' "$pack"
+}
+
+@test "assessment eligibility controls reuse and a later window admits delayed observations" {
+  packet_assessment_fixture
+  run_prepare
+  pack="$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+  cp "$pack" "$TEST_KDIR/first-pack.json"
+  run_prepare
+  cmp "$pack" "$TEST_KDIR/first-pack.json"
+  # Neither another cycle nor a delayed assessment belongs to this projection.
+  for case in unrelated delayed; do
+    python3 - "$TEST_KDIR" "$case" "$FUTURE_START" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1]); row=json.loads((root/'assessment-input.json').read_text())
+if sys.argv[2]=='unrelated': row['packet_id']='pkt-b'
+else: row['assessed_at']=sys.argv[3]
+(root/'next-assessment.json').write_text(json.dumps(row))
+PY
+    bash "$REPO_DIR/scripts/packet-assessment-append.sh" --kdir "$TEST_KDIR" --row "$(cat "$TEST_KDIR/next-assessment.json")" --json >/dev/null
+    run_prepare
+    cmp "$pack" "$TEST_KDIR/first-pack.json"
+  done
+  # A second transcript inside the window is a distinct observation.
+  jq '.source_transcript = "/private/second.jsonl"' "$TEST_KDIR/assessment-input.json" > "$TEST_KDIR/next-assessment.json"
+  bash "$REPO_DIR/scripts/packet-assessment-append.sh" --kdir "$TEST_KDIR" --row "$(cat "$TEST_KDIR/next-assessment.json")" --json >/dev/null
+  run_prepare
+  [ "$(jq -r .pack_id "$pack")" != "$(jq -r .pack_id "$TEST_KDIR/first-pack.json")" ]
+  jq -e '.facts.packet_assessments.values.observations == 2' "$pack"
+  run bash "$PREPARE" cycle-a --window-start "$FUTURE_START" --window-end "$FUTURE_END" --json
+  [ "$status" -eq 0 ]
+  jq -e '.facts.packet_assessments.values.observations == 1 and .source_data.packet_assessments.window.selection == "[start,end)"' "$pack"
+}
+
+@test "archived cycle keeps packet membership isolated from a second cycle" {
+  packet_assessment_fixture
+  bash "$REPO_DIR/scripts/create-work.sh" --title 'Cycle B' --slug cycle-b --intent-anchor 'Other cycle' --json >/dev/null
+  mkdir -p "$TEST_KDIR/_work/_archive"
+  mv "$TEST_KDIR/_work/cycle-a" "$TEST_KDIR/_work/_archive/cycle-a"
+  run bash "$PREPARE" cycle-a --window-start "$WINDOW_START" --window-end "$WINDOW_END" --json
+  [ "$status" -eq 0 ]
+  jq -e '.cycle.archived == true and .facts.packet_assessments.values.observations == 1 and .facts.packet_delivery.values.unique_packets == 4' "$TEST_KDIR/_work/_archive/cycle-a/retro-evidence-pack.json"
+  run bash "$PREPARE" cycle-b --window-start "$WINDOW_START" --window-end "$WINDOW_END" --json
+  [ "$status" -eq 0 ]
+  jq -e '.facts.packet_delivery.values.unique_packets == 1 and .facts.packet_assessments.values.observations == 0' "$TEST_KDIR/_work/cycle-b/retro-evidence-pack.json"
+}
+
+@test "prepare freezes complete rubric bytes and relevant edits invalidate reuse" {
+  local isolated="$BATS_TEST_TMPDIR/isolated"
+  mkdir -p "$isolated/skills/retro"
+  cp -R "$REPO_DIR/scripts" "$isolated/scripts"
+  cp "$REPO_DIR/skills/retro/rubric.json" "$isolated/skills/retro/rubric.json"
+  PREPARE="$isolated/scripts/retro-prepare.sh"
+  run_prepare
+  pack="$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+  jq .rubric "$pack" > "$TEST_KDIR/frozen.json"
+  run python3 "$REPO_DIR/scripts/retro-rubric.py" validate-frozen "$TEST_KDIR/frozen.json"
+  [ "$status" -eq 0 ]
+  first=$(jq -r .pack_id "$pack")
+  version=$(jq -r .rubric.rubric_version "$pack")
+  printf 'Only protocol prose changed.\n' > "$isolated/skills/retro/SKILL.md"
+  run_prepare
+  [ "$first" = "$(jq -r .pack_id "$pack")" ]
+  printf '\n' >> "$isolated/skills/retro/rubric.json"
+  run_prepare
+  [ "$first" != "$(jq -r .pack_id "$pack")" ]
+  [ "$version" != "$(jq -r .rubric.rubric_version "$pack")" ]
+  # An old valid descriptor stays independently verifiable.
+  run python3 "$REPO_DIR/scripts/retro-rubric.py" validate-frozen "$TEST_KDIR/frozen.json"
+  [ "$status" -eq 0 ]
+  printf '{invalid rubric' > "$isolated/skills/retro/rubric.json"
+  run bash "$PREPARE" cycle-a --window-start "$WINDOW_START" --window-end "$WINDOW_END" --json
+  [ "$status" -ne 0 ]
+  [[ "$output" == *pack-build-failed* ]]
 }

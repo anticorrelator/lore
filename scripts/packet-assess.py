@@ -48,7 +48,8 @@ Write discipline: this script writes nothing durable except its own
 state file. Verdicts route through adapters, each owning one write
 boundary:
   - every verdict     -> packet-assessment-append.sh (sole writer of
-                         _packets/assessments.jsonl; /retro D2/D3 reader)
+                         _packets/assessments.jsonl; packet-assessments-read.py
+                         cycle summary, reader contract 1)
   - missing[] gaps    -> mine-retrieval-misses.py --packet-verdicts -
                          (sole writer of _pending_captures/)
 Scorecard escalation is a separate, deliberate adapter and is never
