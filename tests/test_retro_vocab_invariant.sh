@@ -50,6 +50,18 @@ assert_present "resolution vocabulary is exactly the terminal pair" 'resolution 
 assert_present "a disputed marker is a settled outcome, never a backlog entry" 'never as queue depth' "$SECTION"
 assert_present "retired lifecycle words stay named as drift-detection tokens" '`pending`, `routed`, `verified`, `rejected`, `accepted`, `declined`, and `remediated`' "$SECTION"
 
+# Rubric identity vocabulary: D6 arrives beside D5 under a declared version, never in its place.
+assert_present "rubric identity is declared" 'rubric_id' "$FLAT"
+assert_present "rubric version is a byte hash" 'rubric_version' "$FLAT"
+assert_present "unversioned history reads as legacy-unversioned" 'legacy-unversioned' "$FLAT"
+assert_present "D6 may abstain" '`not-assessable`' "$FLAT"
+assert_present "historical D5 key survives" 'd5_spec_utility' "$FLAT"
+assert_present "D6 key is named" 'd6_packet_utility' "$FLAT"
+assert_present "Check 7 stays irreducible" 'Check 7 is irreducible ground truth and must never be replaced by a number' "$FLAT"
+assert_absent "D5 is never relabeled as packet utility" 'D5 — Packet Utility' "$FLAT"
+assert_absent "no cross-wired D5 key" 'd5_packet_utility' "$FLAT"
+assert_absent "no cross-wired D6 key" 'd6_spec_utility' "$FLAT"
+
 # Removed term set: no surface of the skill may describe the out-of-band path.
 assert_absent "no settlement vocabulary" 'settlement' "$FLAT"
 assert_absent "no Settlement heading" 'Settlement' "$FLAT"
