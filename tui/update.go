@@ -1353,6 +1353,12 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		}
 		return m, nil
 
+	case coordinationArchiveLoadedMsg:
+		return m.handleCoordinationArchiveLoaded(msg)
+
+	case coordinationRetryMsg:
+		return m, m.scanArcStoreCmd()
+
 	case coordinationArcsScannedMsg:
 		return m.handleCoordinationArcsScanned(msg)
 

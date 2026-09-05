@@ -68,10 +68,11 @@ type Member struct {
 // DetailModel renders one arc. All content is host-pushed, keeping the model
 // deterministic and headless-testable.
 type DetailModel struct {
-	arc    string
-	width  int
-	height int
-	mode   DetailMode
+	coverage string
+	arc      string
+	width    int
+	height   int
+	mode     DetailMode
 
 	members  []Member
 	sessions []sessionview.SessionRow
@@ -210,16 +211,13 @@ func (m *DetailModel) SetClosed(closed bool) {
 func (m *DetailModel) SetBoard(rows []board.Row, found bool, err error) {
 	selected := m.SelectedStream()
 	m.boardLoaded = true
-	m.boardFound = found
 	m.boardErr = ""
 	if err != nil {
 		m.boardErr = err.Error()
-		m.rows = nil
-		m.rendered = nil
-		m.rowCursor = 0
 		m.refresh()
 		return
 	}
+	m.boardFound = found
 	m.rows = append([]board.Row(nil), rows...)
 	m.rebuildRendered()
 	m.rowCursor = 0
@@ -376,6 +374,14 @@ func sectionRule(label string, width int) string {
 }
 
 func (m DetailModel) render() string {
+	body := m.renderContent()
+	if m.coverage != "" {
+		return style.Dim.Render(m.coverage) + "\n\n" + body
+	}
+	return body
+}
+
+func (m DetailModel) renderContent() string {
 	if m.arc == "" {
 		return style.Dim.Render("No arc selected.")
 	}
@@ -465,7 +471,7 @@ func (m DetailModel) renderBoard() string {
 	switch {
 	case !m.boardLoaded:
 		return style.Dim.Render("streams unknown — reading coordination status")
-	case m.boardErr != "":
+	case m.boardErr != "" && len(m.rendered) == 0:
 		return style.Dim.Render("streams unknown — " + m.boardErr)
 	case !m.boardFound:
 		return style.Dim.Render("streams unknown — arc is absent from the coordination projection")
@@ -482,6 +488,9 @@ func (m DetailModel) renderBoard() string {
 			}
 			b.WriteString(prefix + styleBoardLine(renderedLine, row.Gate, !m.closed) + "\n")
 		}
+	}
+	if m.boardErr != "" {
+		return style.Dim.Render("stale — "+m.boardErr) + "\n" + strings.TrimSuffix(b.String(), "\n")
 	}
 	return strings.TrimSuffix(b.String(), "\n")
 }
@@ -718,3 +727,5 @@ func (m DetailModel) View() string {
 	}
 	return "\n" + m.viewport.View()
 }
+
+func (m *DetailModel) SetCoverage(value string) { m.coverage = value; m.refresh() }

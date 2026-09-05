@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -395,8 +396,8 @@ func TestCoordinationArcScanSyncsDetail(t *testing.T) {
 		t.Error("first sync should dispatch the ledger and pin reads")
 	}
 	nm2, cmd2 := updateModel(t, nm, coordinationArcsScannedMsg{arcs: []coordination.Arc{{Slug: "arc-a", Status: coordination.StatusActive, Items: 1}}})
-	if cmd2 == nil {
-		t.Error("an unchanged scan should still refresh cross-arc attention")
+	if cmd2 != nil {
+		t.Error("an unchanged snapshot must not spawn another attention read")
 	}
 	_ = nm2
 }
@@ -548,7 +549,12 @@ func TestReadArcLedgerReadsTheStoreAndNeverDerivesClosure(t *testing.T) {
 // written once flipped the primary body back to the Brief. Closure now comes from
 // the record, so the append changes nothing.
 func TestLateLedgerAppendNeverFlipsClosure(t *testing.T) {
-	workDir := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "_work")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cli, _ := filepath.Abs("../cli")
+	t.Setenv("PATH", cli+string(os.PathListSeparator)+os.Getenv("PATH"))
 	ledger := "## Brief\n\nthe brief\n"
 	report := "# Report\n\nthe closing report\n"
 	arcStoreFixture(t, workDir, "arc-a", "closed", &ledger, &report,
@@ -558,6 +564,7 @@ func TestLateLedgerAppendNeverFlipsClosure(t *testing.T) {
 	m := minimalModel(stateCoordination, nil, nil)
 	m.width, m.height = 120, 40
 	m.config.WorkDir = workDir
+	m.coordinationPanelCallbacks().resize()
 
 	scan, ok := m.scanArcStoreCmd()().(coordinationArcsScannedMsg)
 	if !ok {
@@ -565,6 +572,8 @@ func TestLateLedgerAppendNeverFlipsClosure(t *testing.T) {
 	}
 	m, _ = updateModel(t, m, scan)
 	m, _ = updateModel(t, m, readArcLedgerCmd(workDir, "arc-a")())
+	m.coordinationDetail.SetCoverage("")
+	m.coordinationRead.inFlight.Store(false)
 	if out := stripANSI(m.coordinationDetail.View()); !strings.Contains(out, "Since you left") || !strings.Contains(out, "Final streams") || strings.Contains(out, "Report") || strings.Contains(out, "the brief") {
 		t.Fatalf("a closed arc must render its digest state and final DAG without inline Report or Brief:\n%s", out)
 	}
@@ -581,6 +590,8 @@ func TestLateLedgerAppendNeverFlipsClosure(t *testing.T) {
 	scan2, _ := m.scanArcStoreCmd()().(coordinationArcsScannedMsg)
 	m, _ = updateModel(t, m, scan2)
 	m, _ = updateModel(t, m, readArcLedgerCmd(workDir, "arc-a")())
+	m.coordinationDetail.SetCoverage("")
+	m.coordinationRead.inFlight.Store(false)
 	out := stripANSI(m.coordinationDetail.View())
 	if !strings.Contains(out, "Since you left") || !strings.Contains(out, "Final streams") || strings.Contains(out, "Report") || strings.Contains(out, "the brief") {
 		t.Errorf("a late ledger append must not flip a closed arc back to inline Report or Brief:\n%s", out)
@@ -857,5 +868,85 @@ func TestCoordinationPaneTitleRollupOmitsEmptyBuckets(t *testing.T) {
 	m.coordinationPanelCallbacks().resize()
 	if got := stripANSI(m.viewContent()); !strings.Contains(got, "Coordination — ⚠ 2 act now") {
 		t.Fatalf("top-bottom frame did not render the attention rollup title:\n%s", got)
+	}
+}
+
+func TestCoordinationArchiveRevealLoadsOncePerIdentity(t *testing.T) {
+	m := coordinationContractModel(t)
+	store := t.TempDir()
+	m.config.KnowledgeDir = store
+	resolved, _ := filepath.EvalSymlinks(store)
+	dir := filepath.Join(store, "_coordination")
+	_ = os.MkdirAll(dir, 0755)
+	catalog := map[string]any{"store": resolved, "identity": "archive-1", "arcs": []coordination.Arc{{Slug: "history", Status: coordination.StatusArchived}}}
+	data, _ := json.Marshal(catalog)
+	_ = os.WriteFile(filepath.Join(dir, "display-archive.json"), data, 0644)
+	m.coordinationArchiveWanted = "archive-1"
+	cmd, _, _ := m.coordinationPanelCallbacks().listUpdate(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	if !m.coordinationList.ShowArchived() || cmd == nil || !strings.Contains(stripANSI(m.coordinationList.View()), "loading archived arcs") {
+		t.Fatal("archive reveal must explicitly load")
+	}
+	switch reply := cmd().(type) {
+	case tea.BatchMsg:
+		for _, pending := range reply {
+			if pending != nil {
+				m, _ = updateModel(t, m, pending())
+			}
+		}
+	default:
+		m, _ = updateModel(t, m, reply)
+	}
+	if m.coordinationArchiveIdentity != "archive-1" {
+		t.Fatal("archive identity not installed")
+	}
+	if _, found := m.coordinationList.ArcBySlug("history"); !found {
+		t.Fatal("archived browsing lost")
+	}
+	_ = os.Remove(filepath.Join(dir, "display-archive.json"))
+	if cmd := m.loadCoordinationArchiveCmd(); cmd != nil {
+		t.Fatal("unchanged archive catalog reread")
+	}
+	m.coordinationArchiveWanted = "archive-2"
+	m, _ = m.handleCoordinationArchiveLoaded(coordinationArchiveLoadedMsg{identity: "archive-1", arcs: nil})
+	if m.coordinationArchiveIdentity != "archive-1" {
+		t.Fatal("late archive response replaced the cache")
+	}
+}
+
+func TestCoordinationSnapshotRejectsOldSelectionAndGeneration(t *testing.T) {
+	m := coordinationContractModel(t)
+	m.coordinationSelection = 3
+	m.coordinationRead.request.Store(4)
+	m.coordinationEpoch = "epoch"
+	m.coordinationGeneration = 8
+	before := stripANSI(m.coordinationDetail.View())
+	snapshot := &board.Snapshot{Epoch: "epoch", Generation: 7}
+	m, _ = m.handleCoordinationArcsScanned(coordinationArcsScannedMsg{request: 4, selection: 3, arc: "arc-a", snapshot: snapshot})
+	if stripANSI(m.coordinationDetail.View()) != before {
+		t.Fatal("older generation replaced visible state")
+	}
+	m, _ = m.handleCoordinationArcsScanned(coordinationArcsScannedMsg{request: 2, selection: 1, arc: "arc-a", snapshot: snapshot})
+	if stripANSI(m.coordinationDetail.View()) != before {
+		t.Fatal("A-B-A selection race replaced visible state")
+	}
+	m.coordinationRead.inFlight.Store(true)
+	if cmd := m.scanArcStoreCmd(); cmd != nil {
+		t.Fatal("overlapping refresh started")
+	}
+}
+
+func TestCoordinationArchiveDeltaSynchronizesDetailSelection(t *testing.T) {
+	m := minimalModel(stateCoordination, nil, nil)
+	m.coordinationList, _ = m.coordinationList.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	m.coordinationArchiveWanted = "first"
+	m, cmd := m.handleCoordinationArchiveLoaded(coordinationArchiveLoadedMsg{identity: "first", arcs: []coordination.Arc{{Slug: "old", Status: coordination.StatusArchived}}})
+	if cmd == nil || m.coordinationDetail.Arc() != "old" {
+		t.Fatal("archive-only reveal did not select detail immediately")
+	}
+	m.coordinationRead.inFlight.Store(false)
+	m.coordinationArchiveWanted = "second"
+	m, cmd = m.handleCoordinationArchiveLoaded(coordinationArchiveLoadedMsg{identity: "second", arcs: []coordination.Arc{{Slug: "replacement", Status: coordination.StatusArchived}}})
+	if cmd == nil || m.coordinationDetail.Arc() != "replacement" {
+		t.Fatal("removed selected archive left old detail visible")
 	}
 }

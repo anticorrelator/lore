@@ -189,8 +189,17 @@ type model struct {
 	// (stateCoordination): an arc list read from the arc store and an integrated
 	// detail. The store scan rides the poll tick from any state so the
 	// tab-indicator count stays current.
-	coordinationList   coordination.ListModel
-	coordinationDetail coordination.DetailModel
+	coordinationList            coordination.ListModel
+	coordinationDetail          coordination.DetailModel
+	coordinationRead            *coordinationReadState
+	coordinationSelection       uint64
+	coordinationEpoch           string
+	coordinationGeneration      uint64
+	coordinationDocumentToken   string
+	coordinationArchived        []coordination.Arc
+	coordinationArchiveIdentity string
+	coordinationArchiveWanted   string
+	coordinationArchiveLoading  bool
 	// coordinationJump holds an exact attention-row address while that jump
 	// remains selected. The issue string is rendered above the detail when
 	// either identity becomes stale.
@@ -632,8 +641,12 @@ func (m *model) coordinationPanelCallbacks() panelCallbacks {
 		sessionPanelFn: func() (work.SessionPanelModel, bool) { return work.SessionPanelModel{}, false },
 		listUpdate: func(lmsg tea.Msg) (tea.Cmd, string, string) {
 			prev := m.coordinationList.CurrentSlug()
+			wasArchived := m.coordinationList.ShowArchived()
 			cl, cmd := m.coordinationList.Update(lmsg)
 			m.coordinationList = cl
+			if !wasArchived && cl.ShowArchived() {
+				cmd = tea.Batch(cmd, m.loadCoordinationArchiveCmd())
+			}
 			if next := m.coordinationList.CurrentSlug(); next != "" && next != prev {
 				m.coordinationJump = nil
 				m.coordinationTargetIssue = ""

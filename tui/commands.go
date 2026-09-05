@@ -13,6 +13,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/anticorrelator/lore/tui/internal/coordination"
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/gh"
 	"github.com/anticorrelator/lore/tui/internal/search"
@@ -361,4 +362,36 @@ func runPopupSearch(query string) tea.Msg {
 		}
 	}
 	return popupSearchResultMsg{items: items, query: query}
+}
+
+// Cached age nominates a candidate; the canonical metadata must still declare
+// an old closed arc immediately before the archival command is issued.
+func runArcArchiveVerified(workDir string, slugs []string) tea.Cmd {
+	return func() tea.Msg {
+		msg := arcArchiveFinishedMsg{}
+		for _, slug := range slugs {
+			data, err := os.ReadFile(filepath.Join(coordination.ArcDir(workDir, slug), "_meta.json"))
+			var rec struct {
+				Status   string `json:"status"`
+				Opened   string `json:"opened"`
+				ClosedAt string `json:"closed_at"`
+			}
+			if err != nil || json.Unmarshal(data, &rec) != nil {
+				continue
+			}
+			arc := coordination.Arc{Status: rec.Status, Opened: rec.Opened, ClosedAt: rec.ClosedAt}
+			if arc.Status != coordination.StatusClosed || !arc.AgedOutAt(time.Now()) {
+				continue
+			}
+			cmd := exec.Command("lore", "arc", "archive", slug, "--kdir", filepath.Dir(workDir))
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if err := cmd.Run(); err != nil {
+				msg.Failed = append(msg.Failed, slug)
+				msg.Err = err
+			} else {
+				msg.Archived = append(msg.Archived, slug)
+			}
+		}
+		return msg
+	}
 }

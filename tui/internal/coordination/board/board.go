@@ -1,5 +1,5 @@
 // Package board loads and renders the declaration-ordered stream DAG for one
-// coordination arc. Its only data source is `lore coordinate status --json`;
+// coordination arc. Its only data source is the operational coordination snapshot;
 // coordination.md remains owned and parsed by the status join.
 package board
 
@@ -116,8 +116,8 @@ func LoadAttention(ctx context.Context) (Attention, error) {
 }
 
 func loadStatus(ctx context.Context) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "lore", "coordinate", "status", "--json")
-	out, err := projection.Output(ctx, cmd, true)
+	cmd := exec.CommandContext(ctx, "lore", "coordinate", "read", "--refresh", "--json")
+	out, err := projection.SnapshotOutput(ctx, cmd, true)
 	if err == nil {
 		return out, nil
 	}
@@ -134,6 +134,10 @@ func decodeRows(r io.Reader, arc string) ([]Row, bool, error) {
 	if err := decoder.Decode(&projection); err != nil {
 		return nil, false, fmt.Errorf("decode coordinate status: %w", err)
 	}
+	return rowsFromProjection(projection, arc)
+}
+
+func rowsFromProjection(projection statusProjection, arc string) ([]Row, bool, error) {
 	if len(projection.CoordinationArcs) == 0 {
 		return nil, false, fmt.Errorf("decode coordinate status: missing coordination_arcs")
 	}
@@ -175,6 +179,10 @@ func decodeAttention(r io.Reader) (Attention, error) {
 	if err := decoder.Decode(&projection); err != nil {
 		return nil, fmt.Errorf("decode coordinate status: %w", err)
 	}
+	return attentionFromProjection(projection)
+}
+
+func attentionFromProjection(projection statusProjection) (Attention, error) {
 	rawBuckets := map[AttentionBucket]json.RawMessage{
 		ActNow: projection.Buckets.ActNow, NeedsJudgment: projection.Buckets.NeedsJudgment,
 		Waiting: projection.Buckets.Waiting, Reconcile: projection.Buckets.Reconcile,

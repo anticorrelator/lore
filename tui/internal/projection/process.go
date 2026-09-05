@@ -65,6 +65,11 @@ func Output(ctx context.Context, cmd *exec.Cmd, combined bool) ([]byte, error) {
 	// Keep the lease in the child too: killing the TUI must not free capacity
 	// while its already-running projection is still alive.
 	cmd.ExtraFiles = append(cmd.ExtraFiles, lease)
+	return SnapshotOutput(ctx, cmd, combined)
+}
+
+// SnapshotOutput retains process-group cancellation without the expensive-read pool.
+func SnapshotOutput(ctx context.Context, cmd *exec.Cmd, combined bool) ([]byte, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)

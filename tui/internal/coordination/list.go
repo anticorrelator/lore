@@ -225,7 +225,9 @@ func closedRamp(bucket Bucket) lipgloss.Style {
 // the cursor rests only on arcs — collection.List skips headers by
 // construction.
 type ListModel struct {
-	arcs []Arc
+	coverage        string
+	archiveCoverage string
+	arcs            []Arc
 	// showArchived reveals the Archived section. Archived arcs are filed away,
 	// in the sense the key means; listed by default they would drown the live
 	// set.
@@ -297,6 +299,11 @@ func (m *ListModel) SetArcs(arcs []Arc, skipped int) {
 // If its row disappeared, one stale row retains that identity until the user
 // moves elsewhere or a later refresh restores it.
 func (m *ListModel) SetAttention(attention board.Attention, err error) {
+	if err != nil {
+		m.attentionErr = err.Error()
+		m.refreshAttentionRows()
+		return
+	}
 	selectedID := m.attention.CurrentID()
 	selected, hadSelected := m.attentionRows[selectedID]
 
@@ -799,6 +806,17 @@ func reverseTravel(msg tea.Msg) tea.Msg {
 }
 
 func (m ListModel) View() string {
+	body := m.viewContent()
+	if m.showArchived && m.archiveCoverage != "" {
+		body = style.Dim.Render(m.archiveCoverage) + "\n" + body
+	}
+	if m.coverage != "" {
+		return style.Dim.Render(m.coverage) + "\n" + body
+	}
+	return body
+}
+
+func (m ListModel) viewContent() string {
 	if m.attentionFocused {
 		if m.attentionErr != "" {
 			return style.Dim.Render("  Attention unknown — "+m.attentionErr) + "\n" + m.attention.View()
@@ -834,3 +852,7 @@ func (m ListModel) Count() int { return len(m.visibleArcs()) }
 
 // Arcs returns the full arc set, including archived arcs.
 func (m ListModel) Arcs() []Arc { return m.arcs }
+
+func (m *ListModel) SetCoverage(value string) { m.coverage = value }
+
+func (m *ListModel) SetArchiveCoverage(value string) { m.archiveCoverage = value }

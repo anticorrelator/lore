@@ -115,7 +115,7 @@ func TestLoadRunsTheStatusJoin(t *testing.T) {
 	dir := t.TempDir()
 	command := filepath.Join(dir, "lore")
 	script := `#!/bin/sh
-if [ "$*" != "coordinate status --json" ]; then
+if [ "$*" != "coordinate read --refresh --json" ]; then
   echo "unexpected arguments: $*" >&2
   exit 9
 fi

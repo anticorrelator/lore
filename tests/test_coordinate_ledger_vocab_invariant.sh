@@ -17,7 +17,7 @@ set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKILL="$REPO_DIR/skills/coordinate/SKILL.md"
-STATUS="$REPO_DIR/scripts/coordinate-status.sh"
+STATUS="$REPO_DIR/scripts/coordinate_reducer.py"
 PASS=0
 FAIL=0
 

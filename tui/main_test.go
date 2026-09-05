@@ -522,6 +522,7 @@ func minimalModel(state appState, workItems []work.WorkItem, fuItems []followup.
 		sessionsList:       sessionview.NewListModel(),
 		sessionsDetail:     sessionview.NewDetailModel(),
 		coordinationList:   coordination.NewListModel(),
+		coordinationRead:   &coordinationReadState{},
 		coordinationDetail: coordination.NewDetailModel(),
 	}
 }
@@ -2076,7 +2077,12 @@ func TestStateNoRepoInitReturnsNil(t *testing.T) {
 }
 
 func TestInitScansCoordinationBeforeTheFirstPoll(t *testing.T) {
-	workDir := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "_work")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cli, _ := filepath.Abs("../cli")
+	t.Setenv("PATH", cli+string(os.PathListSeparator)+os.Getenv("PATH"))
 	arcStoreFixture(t, workDir, "live", coordination.StatusActive, nil, nil, time.Time{}, time.Time{})
 	m := minimalModel(stateCoordination, nil, nil)
 	m.config.WorkDir = workDir
@@ -2088,6 +2094,13 @@ func TestInitScansCoordinationBeforeTheFirstPoll(t *testing.T) {
 	msg, ok := batch[0]().(coordinationArcsScannedMsg)
 	if !ok {
 		t.Fatalf("first startup command returned %T, want coordinationArcsScannedMsg", batch[0]())
+	}
+	deadline := time.Now().Add(12 * time.Second)
+	for len(msg.arcs) == 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		if cmd := m.scanArcStoreCmd(); cmd != nil {
+			msg = cmd().(coordinationArcsScannedMsg)
+		}
 	}
 	if len(msg.arcs) != 1 || msg.arcs[0].Slug != "live" {
 		t.Fatalf("startup arc scan = %+v, want live arc", msg.arcs)

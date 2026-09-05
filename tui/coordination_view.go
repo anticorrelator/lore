@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -19,8 +23,16 @@ import (
 // coordinationArcsScannedMsg carries one scan of the arc store: every usable
 // record as its own row, plus the count of records the scan could not use.
 type coordinationArcsScannedMsg struct {
-	arcs    []coordination.Arc
-	skipped int
+	arcs          []coordination.Arc
+	skipped       int
+	snapshot      *board.Snapshot
+	err           error
+	request       uint64
+	selection     uint64
+	arc           string
+	documents     *coordinationLedgerReadMsg
+	documentToken string
+	packets       map[string]string
 }
 
 // coordinationLedgerReadMsg carries one arc's coordination.md content plus the
@@ -62,24 +74,79 @@ type coordinationAttentionReadMsg struct {
 	err       error
 }
 
-// scanArcStoreCmd reads the arc store off the UI thread. It is the view's
-// sole arc source: one row per record, sectioned by the record's declared
-// status. The scan rides every poll tick, so it stays a native read — one
-// directory walk plus a small JSON parse per arc.
-func (m model) scanArcStoreCmd() tea.Cmd {
-	workDir := m.config.WorkDir
-	return func() tea.Msg {
-		arcs, skipped := coordination.ScanArcs(workDir)
-		return coordinationArcsScannedMsg{arcs: arcs, skipped: skipped}
-	}
+type coordinationReadState struct {
+	inFlight atomic.Bool
+	request  atomic.Uint64
 }
 
-func readCoordinationAttentionCmd() tea.Cmd {
+type coordinationRetryMsg struct{}
+
+func (m *model) scanArcStoreCmd() tea.Cmd {
+	if m.coordinationRead == nil {
+		m.coordinationRead = &coordinationReadState{}
+	}
+	gate := m.coordinationRead
+	if !gate.inFlight.CompareAndSwap(false, true) {
+		return nil
+	}
+	request := gate.request.Add(1)
+	arc, selection := m.coordinationDetail.Arc(), m.coordinationSelection
+	workDir, token := m.config.WorkDir, m.coordinationDocumentToken
+	store := m.config.KnowledgeDir
+	if store == "" {
+		store = filepath.Dir(workDir)
+	}
 	return func() tea.Msg {
+		defer gate.inFlight.Store(false)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		attention, err := board.LoadAttention(ctx)
-		return coordinationAttentionReadMsg{attention: attention, err: err}
+		snapshot, err := board.LoadSnapshot(ctx, store, arc)
+		msg := coordinationArcsScannedMsg{snapshot: &snapshot, err: err, request: request, selection: selection, arc: arc}
+		if err != nil {
+			return msg
+		}
+		for _, a := range snapshot.Arcs {
+			msg.arcs = append(msg.arcs, coordination.Arc{Slug: a.Slug, Title: a.Title, Status: a.Status, Project: a.Project,
+				Members: a.Members, Opened: a.Opened, ClosedAt: a.ClosedAt})
+		}
+		sort.Slice(msg.arcs, func(i, j int) bool {
+			if msg.arcs[i].Recency() == msg.arcs[j].Recency() {
+				return msg.arcs[i].Slug > msg.arcs[j].Slug
+			}
+			return msg.arcs[i].Recency() > msg.arcs[j].Recency()
+		})
+		msg.skipped = snapshot.Skipped
+		if arc != "" && snapshot.Details[arc].Loaded {
+			paths := []string{"coordination.md", "digest.md", "report.md"}
+			for _, row := range snapshot.Rows {
+				if row.ReviewPacket != nil {
+					paths = append(paths, *row.ReviewPacket)
+				}
+			}
+			var signatures strings.Builder
+			for _, path := range paths {
+				info, err := os.Stat(filepath.Join(coordination.ArcDir(workDir, arc), path))
+				if err != nil {
+					fmt.Fprintf(&signatures, "%s:%v;", path, err)
+				} else {
+					fmt.Fprintf(&signatures, "%s:%d:%d;", path, info.Size(), info.ModTime().UnixNano())
+				}
+			}
+			msg.documentToken = arc + signatures.String()
+			if msg.documentToken != token {
+				documents := readArcLedgerCmd(workDir, arc)().(coordinationLedgerReadMsg)
+				msg.documents = &documents
+				msg.packets = make(map[string]string)
+				for _, row := range snapshot.Rows {
+					if row.ReviewPacket != nil {
+						if body, ok := coordination.ReadReviewPacket(workDir, arc, *row.ReviewPacket); ok {
+							msg.packets[*row.ReviewPacket] = body
+						}
+					}
+				}
+			}
+		}
+		return msg
 	}
 }
 
@@ -121,37 +188,6 @@ func readArcLedgerCmd(workDir, arc string) tea.Cmd {
 	}
 }
 
-// readCoordinationBodyCmd re-derives the integrated body without a cursor or
-// cross-tick cache. The board package owns the status join and graph identity;
-// one full journal generation supplies both the selected arc's last-N detail
-// and the latest activity instant used by every attention row.
-func readCoordinationBodyCmd(workDir, sessionsDir string, arc coordination.Arc, arcs []coordination.Arc) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		rows, found, err := board.Load(ctx, arc.Slug)
-		events, _ := session.ReadEventsFrom(sessionsDir, 0)
-		msg := coordinationBodyReadMsg{
-			arc: arc.Slug, rows: rows, boardFound: found, boardErr: err,
-			events:   coordination.FilterEvents(events, arc.Members, coordination.JournalLimit),
-			activity: coordination.LatestEventTimes(events, arcs),
-			packets:  make(map[string]string),
-		}
-		if err != nil {
-			return msg
-		}
-		for _, row := range rows {
-			if row.ReviewPacket == nil {
-				continue
-			}
-			if body, ok := coordination.ReadReviewPacket(workDir, arc.Slug, *row.ReviewPacket); ok {
-				msg.packets[*row.ReviewPacket] = body
-			}
-		}
-		return msg
-	}
-}
-
 // handleCoordinationArcsScanned replaces the arc set (cursor preserved by
 // slug) and re-syncs the detail when the selection identity changed — the
 // cursor diff, not the raw index, drives detail sync. A same-identity scan
@@ -161,6 +197,64 @@ func readCoordinationBodyCmd(workDir, sessionsDir string, arc coordination.Arc, 
 // every application state so the tab count and the store agree whether or not
 // the coordination tab is focused.
 func (m model) handleCoordinationArcsScanned(msg coordinationArcsScannedMsg) (model, tea.Cmd) {
+	if msg.request != 0 {
+		if m.coordinationRead != nil && msg.request < m.coordinationRead.request.Load() {
+			return m, nil
+		}
+		if msg.selection != m.coordinationSelection {
+			return m, m.scanArcStoreCmd()
+		}
+		if msg.err != nil {
+			m.coordinationList.SetCoverage("stale — " + msg.err.Error())
+			m.coordinationDetail.SetCoverage("stale — " + msg.err.Error())
+			return m, tea.Tick(time.Second, func(time.Time) tea.Msg { return coordinationRetryMsg{} })
+		}
+		snapshot := msg.snapshot
+		if snapshot.Epoch == m.coordinationEpoch && snapshot.Generation < m.coordinationGeneration {
+			return m, nil
+		}
+		m.coordinationEpoch, m.coordinationGeneration = snapshot.Epoch, snapshot.Generation
+		m.coordinationArchiveWanted = snapshot.ArchiveIdentity
+		coverage := ""
+		if snapshot.Coverage.State != "ready" {
+			coverage = snapshot.Coverage.State + " — observed " + snapshot.Coverage.ObservedAt
+		}
+		if msg.arc != "" && !snapshot.Details[msg.arc].Loaded {
+			coverage = "loading selected arc — showing last available state"
+		}
+		m.coordinationList.SetCoverage(coverage)
+		m.coordinationDetail.SetCoverage(coverage)
+		m.coordinationList.SetAttention(snapshot.Attention, nil)
+		m.coordinationList.SetAttentionActivity(snapshot.Activity)
+		if msg.arc != "" && snapshot.Details[msg.arc].Loaded {
+			body := coordinationBodyReadMsg{arc: msg.arc, rows: snapshot.Rows, boardFound: snapshot.Found,
+				events: snapshot.Details[msg.arc].Events, activity: snapshot.Activity}
+			if detailError := snapshot.Details[msg.arc].Error; detailError != "" {
+				body.boardErr = fmt.Errorf("%s", detailError)
+			}
+			if msg.documents != nil {
+				body.packets = msg.packets
+			}
+			m, _ = m.handleCoordinationBodyRead(body)
+		}
+		if msg.documents != nil {
+			m, _ = m.handleCoordinationLedgerRead(*msg.documents)
+			m.coordinationDocumentToken = msg.documentToken
+		}
+	}
+	active := work.ActiveSlugs(m.list.Items())
+	for i := range msg.arcs {
+		if msg.snapshot != nil {
+			for _, member := range msg.arcs[i].Members {
+				if active[member] {
+					msg.arcs[i].Items++
+				}
+			}
+		}
+	}
+	if m.coordinationList.ShowArchived() {
+		msg.arcs = mergeCoordinationArchive(msg.arcs, m.coordinationArchived)
+	}
 	m.coordinationList.SetArcs(msg.arcs, msg.skipped)
 	var activeMembers []string
 	for _, arc := range msg.arcs {
@@ -176,8 +270,13 @@ func (m model) handleCoordinationArcsScanned(msg coordinationArcsScannedMsg) (mo
 		m.loadSessionsDetail(m.sessionsList.CurrentKey())
 	}
 	cmds := []tea.Cmd{m.startArcSweep(msg.arcs)}
+	if m.coordinationList.ShowArchived() {
+		cmds = append(cmds, m.loadCoordinationArchiveCmd())
+	}
+	if msg.snapshot != nil && ((msg.snapshot.Coverage.State == "catching-up" || msg.snapshot.Coverage.State == "rebuilding" || msg.snapshot.Coverage.State == "stale") || (msg.arc != "" && !msg.snapshot.Details[msg.arc].Loaded)) {
+		cmds = append(cmds, tea.Tick(time.Second, func(time.Time) tea.Msg { return coordinationRetryMsg{} }))
+	}
 	if m.state == stateCoordination {
-		cmds = append(cmds, readCoordinationAttentionCmd())
 		if target := m.coordinationJump; target != nil {
 			if _, ok := m.coordinationList.ArcBySlug(target.Arc); !ok {
 				m.coordinationTargetIssue = fmt.Sprintf("attention target stale/unknown — arc %s is absent", target.Arc)
@@ -248,7 +347,7 @@ func (m *model) startArcSweep(arcs []coordination.Arc) tea.Cmd {
 		m.arcSwept[slug] = true
 	}
 	m.arcSweepInFlight = true
-	return runArcArchive(slugs)
+	return runArcArchiveVerified(m.config.WorkDir, slugs)
 }
 
 // handleCoordinationLedgerRead pushes a ledger read into the detail, dropping
@@ -299,12 +398,16 @@ func (m model) handleCoordinationBodyRead(msg coordinationBodyReadMsg) (model, t
 			}
 		}
 		m.coordinationDetail.SetEvents(msg.events)
-		m.coordinationDetail.SetReviewPackets(msg.packets)
+		if msg.packets != nil {
+			m.coordinationDetail.SetReviewPackets(msg.packets)
+		}
 		return m, m.coordinationDetail.StartMarquee()
 	}
 	m.coordinationDetail.SetBoard(msg.rows, msg.boardFound, msg.boardErr)
 	m.coordinationDetail.SetEvents(msg.events)
-	m.coordinationDetail.SetReviewPackets(msg.packets)
+	if msg.packets != nil {
+		m.coordinationDetail.SetReviewPackets(msg.packets)
+	}
 	return m, m.coordinationDetail.StartMarquee()
 }
 
@@ -366,19 +469,12 @@ func (m model) returnToCoordinationView() (model, tea.Cmd) {
 // joins that derive from state already in memory, and kicks the disk reads
 // (ledger + integrated body) so selection does not wait for the next poll tick.
 func (m *model) loadCoordinationDetail(arc string) tea.Cmd {
+	m.coordinationSelection++
+	m.coordinationDocumentToken = ""
 	m.coordinationDetail.SetArc(arc)
+	m.coordinationDetail.SetCoverage("loading")
 	m.syncCoordinationArc()
-	if arc == "" {
-		return nil
-	}
-	selected, ok := m.coordinationList.ArcBySlug(arc)
-	if !ok {
-		return tea.Batch(readArcLedgerCmd(m.config.WorkDir, arc))
-	}
-	return tea.Batch(
-		readArcLedgerCmd(m.config.WorkDir, arc),
-		readCoordinationBodyCmd(m.config.WorkDir, m.sessionsDir, selected, m.coordinationList.Arcs()),
-	)
+	return m.scanArcStoreCmd()
 }
 
 // syncCoordinationArc pushes everything the selected arc's record decides:
@@ -439,4 +535,102 @@ func (m *model) syncCoordinationSessions() {
 		}
 	}
 	m.coordinationDetail.SetSessions(rows)
+}
+
+type coordinationArchiveLoadedMsg struct {
+	identity string
+	arcs     []coordination.Arc
+	err      error
+}
+
+func mergeCoordinationArchive(current, archived []coordination.Arc) []coordination.Arc {
+	bySlug := make(map[string]coordination.Arc)
+	for _, arc := range archived {
+		bySlug[arc.Slug] = arc
+	}
+	for _, arc := range current {
+		bySlug[arc.Slug] = arc
+	}
+	arcs := make([]coordination.Arc, 0, len(bySlug))
+	for _, arc := range bySlug {
+		arcs = append(arcs, arc)
+	}
+	sort.Slice(arcs, func(i, j int) bool {
+		if arcs[i].Recency() == arcs[j].Recency() {
+			return arcs[i].Slug > arcs[j].Slug
+		}
+		return arcs[i].Recency() > arcs[j].Recency()
+	})
+	return arcs
+}
+
+func (m *model) loadCoordinationArchiveCmd() tea.Cmd {
+	if m.coordinationArchiveLoading {
+		return nil
+	}
+	if m.coordinationArchiveWanted == "" {
+		m.coordinationList.SetArchiveCoverage("loading archived arcs")
+		return nil
+	}
+	if m.coordinationArchiveIdentity == m.coordinationArchiveWanted {
+		m.coordinationList.SetArchiveCoverage("")
+		m.coordinationList.SetArcs(mergeCoordinationArchive(m.coordinationList.Arcs(), m.coordinationArchived), 0)
+		if cur := m.coordinationList.CurrentSlug(); cur != m.coordinationDetail.Arc() {
+			return m.loadCoordinationDetail(cur)
+		}
+		return nil
+	}
+	m.coordinationArchiveLoading = true
+	m.coordinationList.SetArchiveCoverage("loading archived arcs")
+	identity, store := m.coordinationArchiveWanted, m.config.KnowledgeDir
+	if store == "" {
+		store = filepath.Dir(m.config.WorkDir)
+	}
+	return func() tea.Msg {
+		msg := coordinationArchiveLoadedMsg{identity: identity}
+		data, err := os.ReadFile(filepath.Join(store, "_coordination", "display-archive.json"))
+		if err != nil {
+			msg.err = err
+			return msg
+		}
+		var catalog struct {
+			Store    string             `json:"store"`
+			Identity string             `json:"identity"`
+			Arcs     []coordination.Arc `json:"arcs"`
+		}
+		err = json.Unmarshal(data, &catalog)
+		resolved, _ := filepath.EvalSymlinks(store)
+		resolved, _ = filepath.Abs(resolved)
+		if err == nil && (catalog.Identity != identity || catalog.Store != resolved) {
+			err = fmt.Errorf("archive catalog changed during read")
+		}
+		msg.arcs, msg.err = catalog.Arcs, err
+		return msg
+	}
+}
+
+func (m model) handleCoordinationArchiveLoaded(msg coordinationArchiveLoadedMsg) (model, tea.Cmd) {
+	m.coordinationArchiveLoading = false
+	if msg.identity != m.coordinationArchiveWanted {
+		return m, nil
+	}
+	if msg.err != nil {
+		m.coordinationList.SetArchiveCoverage("archive stale — " + msg.err.Error())
+		return m, nil
+	}
+	m.coordinationArchiveIdentity, m.coordinationArchived = msg.identity, msg.arcs
+	m.coordinationList.SetArchiveCoverage("")
+	if m.coordinationList.ShowArchived() {
+		var current []coordination.Arc
+		for _, arc := range m.coordinationList.Arcs() {
+			if arc.Status != coordination.StatusArchived {
+				current = append(current, arc)
+			}
+		}
+		m.coordinationList.SetArcs(mergeCoordinationArchive(current, msg.arcs), 0)
+		if cur := m.coordinationList.CurrentSlug(); cur != m.coordinationDetail.Arc() {
+			return m, m.loadCoordinationDetail(cur)
+		}
+	}
+	return m, nil
 }

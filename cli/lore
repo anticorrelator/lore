@@ -687,6 +687,8 @@ lore coordinate — cross-substrate coordination and stream lifecycle
 Usage: lore coordinate <verb> [args...]
 
 Verbs:
+  read      Read the committed operational display; --refresh maintains it,
+            --reconcile observes metadata, --rebuild repairs derived state
   status    Project work, session, ceremony, retro, and evolve evidence into
             Act now, Needs judgment, Waiting, and Reconcile
   reconcile Freeze and validate immutable per-stream reconciliation evidence
@@ -1057,6 +1059,9 @@ cmd_coordinate() {
     --help|-h)
       coordinate_usage
       return 0
+      ;;
+    read)
+      exec "$SCRIPTS_DIR/coordinate-read.sh" "$@"
       ;;
     status)
       exec "$SCRIPTS_DIR/coordinate-status.sh" "$@"

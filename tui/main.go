@@ -73,6 +73,7 @@ func newModel(cfg config.Config, prefs config.Prefs, startState appState) model 
 		sessionsList:       sessionview.NewListModel(),
 		sessionsDetail:     sessionview.NewDetailModel(),
 		coordinationList:   coordination.NewListModel(),
+		coordinationRead:   &coordinationReadState{},
 		coordinationDetail: coordination.NewDetailModel(),
 	}
 }
