@@ -1,7 +1,9 @@
 package work
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"charm.land/bubbles/v2/viewport"
@@ -22,7 +24,8 @@ const (
 	TabNotes
 	TabTasks
 	TabExecLog
-	TabFile     // extra document tabs; identified by a "file:<name>" host ID
+	TabFile // extra document tabs; identified by a "file:<name>" host ID
+	TabEvidence
 	TabOverview // project home's overview.md tab (project mode only)
 )
 
@@ -46,6 +49,8 @@ func (t Tab) hostID() string {
 		return "tasks"
 	case TabExecLog:
 		return "execlog"
+	case TabEvidence:
+		return "evidence"
 	case TabOverview:
 		return "overview"
 	}
@@ -69,6 +74,8 @@ func tabFromHostID(id string) Tab {
 		return TabTasks
 	case "execlog":
 		return TabExecLog
+	case "evidence":
+		return TabEvidence
 	case "overview":
 		return TabOverview
 	}
@@ -137,12 +144,14 @@ type DetailModel struct {
 	externalInitiator string
 	externalType      string
 
-	digestTab      DigestTabModel
-	planTab        PlanTabModel
-	notesTab       NotesTabModel
-	tasksModel     TasksModel
-	execLogModel   ExecLogModel
-	extraViewports []viewport.Model
+	digestTab        DigestTabModel
+	planTab          PlanTabModel
+	notesTab         NotesTabModel
+	tasksModel       TasksModel
+	execLogModel     ExecLogModel
+	evidenceViewport viewport.Model
+	evidenceSource   int
+	extraViewports   []viewport.Model
 
 	// isProject flips the model into project-home mode: it renders project
 	// (not work-item) content — an overview tab, doc tabs, and a project-shaped
@@ -217,6 +226,9 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 			m.extraViewports[i].SetWidth(m.contentWidth())
 			m.extraViewports[i].SetHeight(m.contentHeight())
 		}
+		m.evidenceViewport.SetWidth(m.contentWidth())
+		m.evidenceViewport.SetHeight(m.contentHeight())
+		m.refreshEvidence(false)
 		m.overviewViewport.SetWidth(m.contentWidth())
 		m.overviewViewport.SetHeight(m.contentHeight())
 		return m, nil
@@ -248,6 +260,8 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 			return m, nil
 		}
 		m.detail = msg.Detail
+		m.err = nil
+		m.refreshEvidence(false)
 		m.tabHost.SetTabs(m.buildTabs())
 		m.digestTab = NewDigestTabModel(m.detail, m.contentWidth(), m.contentHeight())
 		m.notesTab = NewNotesTabModel(m.detail.NotesContent, m.contentWidth(), m.contentHeight())
@@ -360,9 +374,23 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		}
 	}
 
+	if key, ok := msg.(tea.KeyPressMsg); ok && m.ActiveTab() == TabEvidence {
+		switch key.String() {
+		case "]", "[":
+			if key.String() == "]" {
+				m.evidenceSource++
+			} else {
+				m.evidenceSource--
+			}
+			m.refreshEvidence(true)
+			return m, nil
+		}
+	}
 	// Forward to active tab
 	var cmd tea.Cmd
 	switch m.ActiveTab() {
+	case TabEvidence:
+		m.evidenceViewport, cmd = m.evidenceViewport.Update(msg)
 	case TabOverview:
 		m.overviewViewport, cmd = m.overviewViewport.Update(msg)
 	case TabDigest:
@@ -472,6 +500,9 @@ func (m DetailModel) buildTabs() []collection.Tab {
 		tabs = append(tabs, collection.Tab{ID: TabExecLog.hostID(), Label: "Exec Log"})
 	}
 
+	if len(m.detail.Evidence) > 0 {
+		tabs = append(tabs, collection.Tab{ID: TabEvidence.hostID(), Label: "Evidence"})
+	}
 	tabs = append(tabs, collection.Tab{ID: TabMeta.hostID(), Label: "Meta"})
 
 	return tabs
@@ -666,6 +697,8 @@ func (m DetailModel) renderTabContent(width, height int) string {
 		return m.notesTab.View()
 	case TabTasks:
 		return m.tasksModel.View()
+	case TabEvidence:
+		return m.evidenceViewport.View()
 	case TabExecLog:
 		return m.execLogModel.View()
 	case TabFile:
@@ -983,4 +1016,77 @@ func (m DetailModel) BuildSearchIndex() []SearchLocation {
 	}
 
 	return locs
+}
+
+// evidencePages retains source text separately from JSON metadata so report and
+// output bodies remain readable, including malformed and unsupported sources.
+func evidencePages(raw json.RawMessage) []ExtraFile {
+	var value map[string]any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return []ExtraFile{{Name: "Summary", Content: "Evidence unreadable: " + err.Error()}}
+	}
+	sources, _ := value["sources"].(map[string]any)
+	delete(value, "sources")
+	pages := []ExtraFile{{Name: "Summary", Content: evidenceText(value)}}
+	names := make([]string, 0, len(sources))
+	for name := range sources {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		pages = append(pages, ExtraFile{Name: name, Content: evidenceText(sources[name])})
+	}
+	return pages
+}
+
+func evidenceText(value any) string {
+	switch v := value.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(v))
+		for key := range v {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		var b strings.Builder
+		for _, key := range keys {
+			b.WriteString(key + ":\n" + evidenceText(v[key]) + "\n")
+		}
+		return b.String()
+	case []any:
+		var b strings.Builder
+		for i, entry := range v {
+			fmt.Fprintf(&b, "[%d]\n%s\n", i+1, evidenceText(entry))
+		}
+		if len(v) == 0 {
+			return "[]"
+		}
+		return b.String()
+	case string:
+		return v
+	default:
+		data, _ := json.Marshal(value)
+		return string(data)
+	}
+}
+
+func (m *DetailModel) refreshEvidence(reset bool) {
+	if m.detail == nil || len(m.detail.Evidence) == 0 {
+		return
+	}
+	pages := evidencePages(m.detail.Evidence)
+	if m.evidenceSource < 0 {
+		m.evidenceSource = len(pages) - 1
+	}
+	if m.evidenceSource >= len(pages) {
+		m.evidenceSource = 0
+	}
+	offset := m.evidenceViewport.YOffset()
+	page := pages[m.evidenceSource]
+	body := fmt.Sprintf("Evidence — %s (%d/%d)\n[ / ] switch source; arrows scroll\n\n%s", page.Name, m.evidenceSource+1, len(pages), page.Content)
+	m.evidenceViewport = viewport.New(viewport.WithWidth(m.contentWidth()), viewport.WithHeight(m.contentHeight()))
+	m.evidenceViewport.SoftWrap = true
+	m.evidenceViewport.SetContent(body)
+	if !reset {
+		m.evidenceViewport.SetYOffset(offset)
+	}
 }

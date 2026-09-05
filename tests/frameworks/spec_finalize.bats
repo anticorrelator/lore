@@ -619,3 +619,17 @@ write_hosted_registry() {
   [ "$(row_count)" -eq 0 ]
   [ "$(close_request_count)" -eq 0 ]
 }
+
+@test "finalize preserves adopted revision identity when generation is unchanged" {
+  run bash "$REPO_DIR/scripts/plan-revise.sh" finalize-item
+  [ "$status" -eq 0 ]
+  local item="$WORK_DIR/finalize-item"
+  cp "$item/tasks.json" "$item/expected-tasks"
+  run bash "$FINALIZE_SH" finalize-item --json
+  [ "$status" -eq 0 ]
+  cmp "$item/tasks.json" "$item/expected-tasks"
+  [ "$(wc -l < "$item/revisions.jsonl" | tr -d ' ')" = 1 ]
+  run python3 "$REPO_DIR/scripts/work-evidence.py" --item-dir "$item" --knowledge-dir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"publication_state":"current"'* ]]
+}

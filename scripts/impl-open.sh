@@ -12,8 +12,8 @@
 # Computed envelope:
 #   - orchestration-adapter capability gates (completion_enforcement,
 #     team_messaging) for the active framework
-#   - tasks.json checksum validation (delegates to load-tasks.sh; a mismatch
-#     is a hard error directing the caller to `lore work regen-tasks`)
+#   - revision reconciliation followed by read-only tasks.json validation
+#   - authored per-task coverage and dispatch decisions on adopted items
 #   - unit map: one entry per brief owner — a task on a flat plan, a phase on a
 #     phase-shaped one — with its name, objective, files, and directive kind
 #   - prior knowledge per brief owner via the 3-branch gate: retrieval_directive
@@ -44,8 +44,8 @@
 # Writes: one execution-log attribution row (source: impl-verb), plus one
 # task-scope packet row per eligible task appended via the sole-writer
 # packet-append.sh (delivery_stage "assembled"; per-entry trust snapshots from
-# resolve-manifest's --delivery-json sidecar). Packet appends are fail-open:
-# a failed append warns and omits that task's packet_id from the manifest.
+# resolve-manifest's --delivery-json sidecar). A legacy append failure warns;
+# a bound append failure stops dispatch.
 # Each TaskCreate manifest entry carries its packet_id so the lead can thread
 # it into the worker Task prompt for dispatch confirmation.
 #
@@ -215,9 +215,12 @@ TASKS_FILE="$ITEM_DIR/tasks.json"
 
 [[ -f "$META" ]] || fail "missing _meta.json for work item '$SLUG'"
 [[ -f "$PLAN_FILE" ]] || fail "No structured plan found for '$SLUG'. Run /spec first to create phases and tasks."
-if [[ ! -f "$TASKS_FILE" ]]; then
+if [[ ! -f "$TASKS_FILE" && ! -e "$ITEM_DIR/revisions.jsonl" ]]; then
   fail "no tasks.json for '$SLUG' — generate it first: lore work tasks $SLUG"
 fi
+
+# Reconciliation belongs to the composer; the loader remains read-only.
+bash "$SCRIPT_DIR/plan-revise.sh" "$SLUG" --reconcile >/dev/null || fail "plan reconciliation failed for '$SLUG'"
 
 # --- Checksum gate: delegate to the load-tasks sole validator ---------------
 set +e
@@ -289,6 +292,12 @@ with open(os.path.join(item_dir, "_meta.json"), encoding="utf-8") as f:
     meta = json.load(f)
 title = meta.get("title") or slug
 
+publication_lock = None
+if os.path.exists(os.path.join(item_dir, "revisions.jsonl")):
+    import fcntl
+    publication_lock = open(os.path.join(item_dir, "revisions", ".publication.lock"), "rb")
+    fcntl.flock(publication_lock, fcntl.LOCK_SH)
+
 with open(os.path.join(item_dir, "tasks.json"), encoding="utf-8") as f:
     tasks_data = json.load(f)
 
@@ -351,6 +360,16 @@ for tid in selected_ids:
         already_complete.append(tid)
     else:
         eligible_ids.append(tid)
+import runpy
+try:
+    publication = runpy.run_path(os.path.join(script_dir, "work-evidence.py"))["publication_for_dispatch"](item_dir, os.path.dirname(os.path.dirname(item_dir)))
+except (OSError, ValueError, KeyError) as exc:
+    sys.exit("[impl] " + str(exc))
+if tasks_data.get("revision_id") != publication["revision_id"]:
+    sys.exit("[impl] task generation changed during dispatch preparation; refresh and retry")
+blocked_selection = {tid: publication["blocked"][tid] for tid in eligible_ids if tid in publication["blocked"]}
+if blocked_selection:
+    sys.exit("[impl] revision " + str(publication["revision_id"]) + ": " + json.dumps(blocked_selection, sort_keys=True) + "; record lore plan revise --decision-for before dispatch")
 eligible_set = set(eligible_ids)
 
 # --- Dependency closure over the full tasks.json DAG --------------------------
@@ -656,7 +675,7 @@ for tid in eligible_ids:
 
 # --- Task-scope packet emission (append-supersede; one row per eligible task) --
 # Rows go through packet-append.sh, the sole writer of _packets/packets.jsonl.
-# Fail-open: a failed append warns and leaves that task without a packet_id.
+# Bound packet failures stop dispatch; legacy packet failures warn.
 pk_status_by_unit = {e["unit_key"]: e for e in prior_knowledge}
 packets = []
 for tid in eligible_ids:
@@ -693,6 +712,10 @@ for tid in eligible_ids:
         "tier2_claim_ids": [r["claim_id"] for r in tier2_extracts.get(tid, [])
                             if r.get("claim_id")],
     }
+    if publication["revision_id"]:
+        row.update(schema_version="2", revision_id=publication["revision_id"],
+                   source_head=publication["source_head"],
+                   dispatch_attempt_id="dispatch-" + uuid.uuid4().hex)
     if snapshot and snapshot.get("trust_compute_sha"):
         row["trust_compute_sha"] = snapshot["trust_compute_sha"]
     if not delivered_entries:
@@ -707,13 +730,19 @@ for tid in eligible_ids:
              "--row", json.dumps(row, ensure_ascii=False)],
             capture_output=True, text=True, timeout=60)
         if proc.returncode == 0:
-            taskcreate_by_id[tid]["packet_id"] = row["packet_id"]
-            packets.append({"task_id": tid, "phase": pnum, "packet_id": row["packet_id"]})
+            identity = {key: row.get(key) for key in
+                        ("packet_id", "dispatch_attempt_id", "revision_id")}
+            taskcreate_by_id[tid].update(identity)
+            packets.append({"task_id": tid, "phase": pnum, **identity})
         else:
             stderr_lines = (proc.stderr or "").strip().splitlines()
+            if publication["revision_id"]:
+                sys.exit(f"[impl] bound packet append failed for {tid}: {proc.stderr.strip()}")
             warn(f"packet append failed for {tid}"
                  + (f": {stderr_lines[-1]}" if stderr_lines else ""))
     except Exception as exc:
+        if publication["revision_id"]:
+            sys.exit(f"[impl] bound packet append failed for {tid}: {exc}")
         warn(f"packet append failed for {tid} ({exc})")
 
 # --- Per-unit plan content: advisors, consultations, task format -------------

@@ -181,6 +181,8 @@ assert_eq "manifest source set is fixed" \
   "$(jq -r '[.source_manifest[].source_id] | sort | join(",")' "$JSON_OUT")"
 assert_eq "healthy fixture reports all sources ok" "5" \
   "$(jq -r '[.source_manifest[] | select(.read_status=="ok")] | length' "$JSON_OUT")"
+assert_eq "session manifest retains observed vocabulary versions" "1|2" \
+  "$(jq -r '.source_manifest[] | select(.source_id=="session-journal") | .vocabulary_version' "$JSON_OUT")"
 assert_eq "every manifest row carries the complete contract" "true" \
   "$(jq -r 'all(.source_manifest[]; (.source_id|length)>0 and (.read_status|length)>0 and (.observed_at|length)>0 and (.schema_version|length)>0 and (.vocabulary_version|length)>0 and (.locator|length)>0 and has("error"))' "$JSON_OUT")"
 
@@ -649,6 +651,49 @@ BARE_JSON="$TEST_DIR/arc-bare-block.json"
 bash "$COORDINATE" --kdir "$BARE_BLOCK" --json > "$BARE_JSON"
 assert_eq "a refless blocked-on: is not the blocked-on:<ref> token" "1" \
   "$(jq -r '[.buckets.reconcile[] | select(.kind=="coordination-status-invalid" and .observed_facts.stream_id=="s-bare")] | length' "$BARE_JSON")"
+
+# The coordinator must publish the helper's exact summary, including unavailable
+# freshness, and keep full content available through the public work reader.
+EVIDENCE_STORE="$TEST_DIR/evidence"
+setup_store "$EVIDENCE_STORE"
+python3 - "$EVIDENCE_STORE" "$REPO_ROOT" <<'PYFIXTURE'
+import json, pathlib, runpy, sys
+root = pathlib.Path(sys.argv[1]); repo = pathlib.Path(sys.argv[2])
+helper = runpy.run_path(str(repo / 'scripts/work-evidence.py'))
+item = root / '_work/actionable'
+criterion = {'id': 'check', 'argv': ['true']}
+(item / 'tasks.json').write_text(json.dumps({'tasks': [{'id': 'task-1', 'subject': 'Task', 'description': 'Full description', 'blockedBy': ['task-0'], 'close_criteria': [criterion]}]}))
+(item / 'worker-reports').mkdir()
+(item / 'worker-reports/report.md').write_text('Report-id: report\nStatus: completed\nFull report content')
+(item / 'results/r1').mkdir(parents=True)
+(item / 'results/r1/output.txt').write_text('output')
+identity = {'head': 'a' * 40, 'digest': 'a' * 64, 'digest_version': '1', 'worktree': str(root / 'removed-code')}
+(item / 'results.jsonl').write_text(json.dumps({'execution_attempt_id': 'exec-1', 'revision_id': 'aaaaaaaaaaaa', 'unbound_reason': 'fixture', 'exit': 0, 'signal': None, 'timed_out': False, 'output_path': 'results/r1/output.txt', 'output_sha256': helper['sha256'](b'output'), 'source_start': identity, 'source_end': identity, 'schema_version': 1, 'task_id': 'task-1', 'criterion_id': 'check', 'criterion_version': helper['criterion_version'](criterion), 'result_id': 'r1', 'state': 'pass'})+'\n')
+PYFIXTURE
+EVIDENCE_JSON="$TEST_DIR/evidence.json"
+bash "$COORDINATE" --kdir "$EVIDENCE_STORE" --json > "$EVIDENCE_JSON"
+python3 - "$EVIDENCE_STORE" "$REPO_ROOT" "$EVIDENCE_JSON" <<'PYCHECK'
+import json, pathlib, runpy, sys
+root = pathlib.Path(sys.argv[1]); repo = pathlib.Path(sys.argv[2])
+evidence = runpy.run_path(str(repo / 'scripts/work-evidence.py'))['project'](root / '_work/actionable', root)
+row = next(row for row in json.loads(pathlib.Path(sys.argv[3]).read_text())['work_evidence'] if row['slug'] == 'actionable')
+assert row['reader_contract_version'] == '2'
+assert row['result_summary'] == evidence['result_summary']
+assert row['packet_summary'] == evidence['packet_summary']
+assert row['review_summary'] == evidence['review_summary']
+assert row['revision']['review_requirement'] == evidence['revision']['review_requirement']
+assert row['revision'] == evidence['revision']
+assert row['sources']['reports']['sha256'] == evidence['sources']['reports']['sha256']
+assert row['result_summary'][0]['freshness']['state'] == 'unknown'
+assert 'code-unavailable' in row['result_summary'][0]['freshness']['reasons']
+assert row['inspection_argv'] == ['lore', 'work', 'show', 'actionable', '--json']
+PYCHECK
+assert_zero "coordinator uses exact shared criterion summaries and unknown freshness" "$?"
+BEFORE_REPORTS=$(jq -c '.work_evidence[] | select(.slug == "actionable") | .sources.reports' "$EVIDENCE_JSON")
+rm "$EVIDENCE_STORE/_work/actionable/worker-reports/report.md"
+bash "$COORDINATE" --kdir "$EVIDENCE_STORE" --json > "$EVIDENCE_JSON"
+AFTER_REPORTS=$(jq -c '.work_evidence[] | select(.slug == "actionable") | .sources.reports' "$EVIDENCE_JSON")
+if [[ "$BEFORE_REPORTS" != "$AFTER_REPORTS" ]]; then pass "coordinator refresh reflects nested report deletion"; else fail "coordinator refresh reflects nested report deletion"; fi
 
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]

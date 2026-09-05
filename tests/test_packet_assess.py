@@ -558,3 +558,29 @@ def test_transcript_mode_is_pure(tmp_path, monkeypatch, capsys):
     assert not (Path(kdir) / "_meta" / "packet-assessor-state.json").exists()
     assert not (Path(kdir) / "_packets" / "assessments.jsonl").exists()
     assert not (Path(kdir) / "_pending_captures").exists()
+
+
+def test_mixed_packet_retries_keep_revision_identity_and_null_assessments(tmp_path):
+    old = packet_row('legacy', scope='task', task_id='task-1')
+    first = packet_row('first', scope='task', task_id='task-1')
+    first.update(schema_version='2', work_item='fixture', revision_id='a' * 12,
+                 dispatch_attempt_id='dispatch-first', source_head=None)
+    retry = dict(first, packet_id='retry', dispatch_attempt_id='dispatch-retry')
+    kdir = make_kdir(tmp_path, [old, first, retry])
+    transcript = write_transcript(tmp_path, [
+        assistant_line(T0, [text_block('Beginning.')]),
+        assistant_line(T1, [text_block('Packet-id: first')]),
+        assistant_line(T2, [text_block('Finished.')]),
+    ])
+    loaded, corrupt = _mod.load_packets(kdir)
+    assert corrupt == 0 and len(loaded) == 3
+    verdicts, stats = _mod.assess_transcript(FakeProvider(), transcript, kdir)
+    rows = by_id(verdicts)
+    assert rows['first']['dispatch_confirmed'] is True
+    assert rows['retry']['dispatch_confirmed'] is False
+    assert rows['first']['revision_id'] == rows['retry']['revision_id'] == 'a' * 12
+    assert rows['first']['dispatch_attempt_id'] != rows['retry']['dispatch_attempt_id']
+    assert 'revision_id' not in rows['legacy']
+    assert all(rows['retry'][name] is None for name in packet_schema.VERDICT_CLASSES)
+    assert rows['first']['missing'] is None
+    assert rows['first']['unattributed_retrieval'] is None

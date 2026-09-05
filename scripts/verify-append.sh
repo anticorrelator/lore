@@ -35,7 +35,7 @@
 #
 # Usage:
 #   verify-append.sh <knowledge-path> <held|contradicted>
-#       --source <worker|researcher|spec-lead|implement-lead>
+#       --source <investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead>
 #       --file <absolute-path>
 #       --line-range <N-M>
 #       --exact-snippet <verbatim>
@@ -81,7 +81,7 @@ source "$SCRIPT_DIR/lib.sh"
 usage() {
   cat >&2 <<'EOF'
 Usage: verify-append.sh <knowledge-path> <held|contradicted> \
-           --source <worker|researcher|spec-lead|implement-lead> \
+           --source <investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead> \
            --file <absolute-path> \
            --line-range <N-M> \
            --exact-snippet <verbatim> \
@@ -208,9 +208,9 @@ esac
 
 # --- Source enum: agent producers only ---
 case "$SOURCE_KIND" in
-  worker|researcher|spec-lead|implement-lead) : ;;
+  investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead) : ;;
   "") fail "--source is required" ;;
-  *)  fail "--source must be 'worker', 'researcher', 'spec-lead', or 'implement-lead' (got '$SOURCE_KIND')" ;;
+  *)  fail "--source must be 'investigator', 'designer', 'worker', 'reviewer', 'researcher', 'spec-lead', or 'implement-lead' (got '$SOURCE_KIND')" ;;
 esac
 
 # --- Grounded-or-nothing: BOTH dispositions ---

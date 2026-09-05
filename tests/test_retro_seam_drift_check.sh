@@ -133,6 +133,7 @@ new_repo "$repo"
 base="$(git -C "$repo" rev-parse HEAD)"
 printf 'delivery scoring follows flat tasks\n' >> "$repo/skills/retro/SKILL.md"
 printf 'flat task emission\n' >> "$repo/scripts/generate-tasks.py"
+printf 'generation evidence case\n' >> "$repo/tests/frameworks/retro_prepare.bats"
 commit_all "$repo" "retro prose paired with task-DAG generator"
 expect_pass "$repo" "$base"
 
@@ -144,14 +145,14 @@ printf 'flat task contract case\n' >> "$repo/tests/test_flat_task_dag_contract.s
 commit_all "$repo" "retro prose paired with task-DAG contract test"
 expect_pass "$repo" "$base"
 
-# The companions license SKILL prose; they are not protected readers themselves.
+# Task generation changes the evidence delivered to retrospective readers.
 
 repo="$TMP/task-dag-alone"
 new_repo "$repo"
 base="$(git -C "$repo" rev-parse HEAD)"
 printf 'flat task emission\n' >> "$repo/scripts/generate-tasks.py"
 commit_all "$repo" "task-DAG change without retro surface"
-expect_pass "$repo" "$base"
+expect_fail "$repo" "$base"
 
 # A reader change reverted within the range leaves no net drift to pair.
 
@@ -211,5 +212,20 @@ commit_all "$repo" "reader change before enforcement"
 cp "$CHECKER" "$repo/scripts/check-retro-seam-drift.sh"
 commit_all "$repo" "introduce drift checker"
 expect_pass "$repo" "$base"
+
+# Each producer and display seam needs a reader contract companion, including
+# the first commit that creates a planned producer.
+for protected in scripts/plan-revise.sh scripts/plan-review.sh scripts/criteria-run.sh scripts/packet-append.sh scripts/spec-outcome.sh scripts/work-evidence.py scripts/load-work-item.sh scripts/coordinate-status.sh tui/internal/work/detail.go tui/polling.go; do
+  repo="$TMP/expanded-$(basename "$protected")"
+  new_repo "$repo"
+  base="$(git -C "$repo" rev-parse HEAD)"
+  mkdir -p "$repo/$(dirname "$protected")"
+  printf 'changed evidence contract\n' > "$repo/$protected"
+  commit_all "$repo" "change evidence seam"
+  expect_fail "$repo" "$base"
+  printf 'paired evidence case\n' >> "$repo/tests/frameworks/retro_prepare.bats"
+  commit_all "$repo" "add reader case"
+  expect_pass "$repo" "$base"
+done
 
 echo "retro seam drift check: PASS"

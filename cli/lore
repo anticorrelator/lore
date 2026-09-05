@@ -64,6 +64,8 @@ Commands:
   capture      Capture an insight to the knowledge store
   promote      Promote a Tier 3 observation row to the knowledge commons
   test         Run lore test suites (see: lore test protocols)
+  criteria     Execute plan-owned criteria (see: lore criteria run --help)
+  plan         Publish plan revisions and authored decisions (see: lore plan --help)
   dispatch     Render dispatch-time guidance (see: lore dispatch --help)
   annotate     Record a retrieval friction annotation
   verify       Record a consumption-verification outcome (held|contradicted)
@@ -2215,6 +2217,24 @@ cmd_dispatch() {
   esac
 }
 
+cmd_plan() {
+  local subcmd="${1:---help}"
+  [[ $# -eq 0 ]] || shift
+  case "$subcmd" in
+    revise) exec "$SCRIPTS_DIR/plan-revise.sh" "$@" ;;
+    review) exec "$SCRIPTS_DIR/plan-review.sh" "$@" ;;
+    --help|-h)
+      printf '%s\n' 'Usage: lore plan revise <slug> [--reason TEXT] [--author-role ROLE]' \
+        '  [--kind auto|semantic|progress] [--expected-predecessor RID|none]' \
+        '  [--decisions FILE] [--json]' \
+        '  Decision only: --decision-for RID --decision-id TOKEN --decisions FILE' \
+        '  Recovery: --reconcile repairs adopted items and adopts legacy checksum drift.' \
+        '  review        Prepare immutable review input for a revision, or seal a reviewed attempt (see: lore plan review prepare|seal --help)'
+      ;;
+    *) echo "Error: unknown plan subcommand '$subcmd'" >&2; return 1 ;;
+  esac
+}
+
 # --- Top-level dispatch ---
 if [[ $# -eq 0 ]]; then
   exec lore-tui
@@ -2415,6 +2435,22 @@ case "$1" in
   impl)
     shift
     cmd_impl "$@"
+    ;;
+  criteria)
+    shift
+    if [[ "${1:---help}" == run ]]; then
+      shift
+      exec "$SCRIPTS_DIR/criteria-run.sh" "$@"
+    fi
+    printf '%s\n' 'Usage: lore criteria run <slug> <task-id> <criterion-id> --execution-worktree ROOT' \
+      '  --packet-id ID [--revision ID] [--dispatch-attempt-id ID]' \
+      '  or: --revision ID --unbound-reason TEXT' \
+      '  Recover publication: lore criteria run <slug> --recover RESULT_ID'
+    [[ "${1:---help}" == --help || "${1:-}" == -h ]]
+    ;;
+  plan)
+    shift
+    cmd_plan "$@"
     ;;
   spec)
     shift

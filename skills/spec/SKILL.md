@@ -336,10 +336,77 @@ Synthesis organizes the itemized findings; it does not narrate over them. Keep e
 
 ### Ceremony outcome filing contract
 
-Apply this contract after every terminal evaluator attempt in Steps 5a and 5.5. The evaluator supplies evidence; the lead decides the normalized protocol outcome. Never parse evaluator prose into a disposition.
+Apply this contract after every terminal evaluator attempt in Steps 5a and 5.5. The evaluator supplies evidence; the lead decides the normalized protocol outcome. Never parse evaluator prose into a disposition. The two registered ceremonies stay distinct: an attempt names `spec-design` or `spec-post-plan`, and a review prepared under one ceremony never files under the other. Filing an outcome confers no authority the protocol did not already grant: acceptance, checkoff, and close keep their existing owners, and no review outcome gates dispatch on its own.
 
-1. Choose exactly one outcome: `completed | failed | skipped | needs-decision`. Preserve the evaluator's raw verdict byte-for-byte as `--verdict`. `skipped` and `needs-decision` require a reason; `completed` and `failed` forbid one. A registered evaluator that cannot execute is a filed `skipped` attempt, never a silent omission.
-2. Build a version-1 evidence manifest with exactly these fields:
+**Bound attempts (schema 2).** When the plan has a committed revision, prepare the review input before the evaluator reads anything. The reviewer then judges exact immutable bytes, and the filed outcome records the revision that was actually reviewed rather than whatever head is live at filing time.
+
+1. Prepare the review input:
+
+   ```bash
+   lore plan review prepare "$SLUG" --attempt-id "$ATTEMPT_ID" \
+     --ceremony <spec-design|spec-post-plan> \
+     --revision "$REVISION_ID" \
+     --purpose <criterion-adequacy|integration> \
+     [--execution-worktree "$WORKTREE"]
+   ```
+
+   Prepare copies the named revision's plan and tasks, together with the original anchor, under `reviews/<attempt-id>/` and publishes the directory in one rename. `--revision` may name a historical revision explicitly; that revision is the one the outcome binds to. The `integration` purpose requires an execution worktree that can still be inspected, because its code identity is frozen into the prepared record. That digest covers the execution worktree and nothing outside it: earlier review evidence enters the identity only when it lives inside that worktree, and the knowledge store is not code identity. The one exclusion is this attempt's own review directory, listed under `source_exclusions`. A prepare interrupted before the rename leaves no accepted attempt and a retry may publish; once the rename lands, the accepted attempt stays and an exact retry verifies it. An exact retry compares the request against the committed record and keeps the frozen source identity even when the worktree has moved on. Direct the evaluator at the prepared copies, never at the live plan.
+
+2. The reviewer authors judgments and findings. Criterion adequacy and integration against the original anchor are the reviewer's to judge. Task acceptance and execution records are not: acceptance stays with the lead, and execution evidence lives in results. The reviewer may read code, run commands, and describe in prose what a command does, but the ledger has no fields for executor state, exit codes, or argv, and a judgment never creates a result row; execution evidence the review relies on is cited by result ID. Each purpose gets its own judgment, the prepared purpose must appear, and an integration review may add a separate criterion-adequacy judgment. An empty `result_ids` list states that no execution evidence was cited; it is not a claim that none was consulted, so the judgment prose should say what the citations leave unverified.
+
+3. The lead normalizes. Choose exactly one outcome: `completed | failed | skipped | needs-decision`. Preserve the evaluator's raw verdict byte-for-byte. `skipped` and `needs-decision` require a reason; `completed` and `failed` forbid one. Record this normalization in the dispositions ledger before sealing, so the sealed bytes carry the decision beside the review it was made from:
+
+   ```json
+   {
+     "schema_version": 1,
+     "outcome": "completed",
+     "verdict": "<raw evaluator verdict>",
+     "reason": null,
+     "judgments": [
+       {"purpose": "criterion-adequacy", "judgment": "<authored>", "rationale": "<authored>", "result_ids": []}
+     ],
+     "dispositions": [
+       {"finding": "<text>", "disposition": "<text>", "reason": "<text>"}
+     ]
+   }
+   ```
+
+   The evaluator manifest names exactly the evaluator identity and nothing else:
+
+   ```json
+   {
+     "evaluator_locator": "<skill or agent locator>",
+     "evaluator_template_version": "<12 lowercase hex>",
+     "framework": "<active framework>",
+     "model": "<effective evaluator model>",
+     "final_round": 2
+   }
+   ```
+
+4. Seal once, then extract the evidence manifest to a file outside `reviews/`:
+
+   ```bash
+   lore plan review seal "$SLUG" --attempt-id "$ATTEMPT_ID" \
+     --output "$REVIEW_OUTPUT" --dispositions "$DISPOSITIONS_JSON" \
+     --evaluator-manifest "$EVALUATOR_JSON" > "$SEAL_RESULT"
+   jq '.evidence_manifest' "$SEAL_RESULT" > "$EVIDENCE_JSON"
+   ```
+
+   Seal checks every cited result ID against its canonical results row and refuses missing, ambiguous, or malformed IDs and wrong output hashes. It freezes the cited rows with their full output envelopes into `cited-results.json`; those copies are review evidence, never result appends, and later replays verify the frozen citations instead of rereading live results. The whole sealed directory publishes in one rename. A failure before that rename leaves no accepted artifact and a retry may publish; after it, a retry verifies the immutable bytes and refuses a changed output, ledger, or evaluator under the same attempt id. The manifest is returned in the seal's JSON result and is not written under the review; extracting it is the caller's only step, and no identity field is hand-composed. The schema 2 manifest carries the evaluator fields plus the review path and hash, the revision, the purpose, and source hashes derived from the sealed bytes.
+
+5. File the already-made judgment with the unchanged arguments:
+
+   ```bash
+   lore spec outcome "$SLUG" \
+     --ceremony <spec-design|spec-post-plan> \
+     --advisor "$EVALUATOR" --attempt-id "$ATTEMPT_ID" \
+     --outcome "$NORMALIZED_OUTCOME" --verdict "$RAW_VERDICT" \
+     --evidence-manifest "$EVIDENCE_JSON" [--reason "$REASON"]
+   ```
+
+   With a schema 2 manifest, filing revalidates the complete prepared, sealed, and citation bytes and checks that ceremony, attempt, outcome, verdict, and reason match the sealed ledger; a conflicting identity is refused rather than reconciled. The recorded revision is the reviewed one, not the live head. Exact replay is idempotent; reusing an attempt id for different semantics is a refused collision. `needs-decision` may return `status=partial` when its auxiliary resolution row fails to append; exact retry recovers only that sink without duplicating the outcome.
+
+**Unbound attempts (schema 1).** When no prepared revision exists, because the item predates revision publishing or because a registered evaluator could not run, file with the version-1 manifest instead:
 
    ```json
    {
@@ -354,18 +421,7 @@ Apply this contract after every terminal evaluator attempt in Steps 5a and 5.5. 
    }
    ```
 
-   `completed` and `failed` require every evidence field. `skipped` and `needs-decision` keep every field present but may use explicit `null` when evidence is unavailable. Missing fields are errors, never defaults.
-3. File the already-made judgment:
-
-   ```bash
-   lore spec outcome "$SLUG" \
-     --ceremony <spec-design|spec-post-plan> \
-     --advisor "$EVALUATOR" --attempt-id "$ATTEMPT_ID" \
-     --outcome "$NORMALIZED_OUTCOME" --verdict "$RAW_VERDICT" \
-     --evidence-manifest "$EVIDENCE_JSON" [--reason "$REASON"]
-   ```
-
-   Exact replay is idempotent; reusing an attempt id for different semantics is a refused collision. `needs-decision` may return `status=partial` when its auxiliary resolution row fails to append; exact retry recovers only that sink.
+   `completed` and `failed` require every evidence field. `skipped` and `needs-decision` keep every field present but may use explicit `null` when evidence is unavailable. Missing fields are errors, never defaults. Schema 1 outcomes stay legacy and unbound in every reader because no revision was recorded when the evidence was filed. A registered evaluator that cannot execute is a filed `skipped` attempt, never a silent omission.
 
 ### Step 5a: Design ceremony evaluation
 
@@ -402,7 +458,7 @@ Draft concrete implementation sections on top of the approved abstract plan:
 
    Follow the anchor with a `**Scope delta:**` line (default `none — anchor preserved unchanged`; if the spec narrows the capability, name the narrowing here) and a `**Tempting narrower implementation:**` heading the spec author fills in. The anchor body and `**Scope delta:**` line are **verifier-enforced** — the Step 5.6 gate refuses to regenerate tasks if missing or divergent. The `**Tempting narrower implementation:**` body is template-prescribed but not verifier-enforced — its presence forces the author to confront the failure mode, but the content is free-text that no parser can adjudicate. For work items without an `intent_anchor` field, omit the section entirely — the Step 5.6 verifier skips with a one-line stderr info message.
 
-1. **Tasks** — the plan holds its tasks directly, one `### Task N:` block each. Every block carries `**Deliverable:**`, `**Files:**`, and exactly one `- [ ]` checkbox line; optional `**Scope:**` / `**Knowledge context:**` / `**Retrieval directive:**` / `**Consultations required:**` / `**Advisors:**` / `**Task format:**` / `**Knowledge delivery:**` blocks follow as the work needs them. The heading number is the task's id — `### Task 3:` is `task-3` — and it stays fixed as earlier work is checked off. The plan itself carries `**Verification:**` once, plus whichever sizing rationale the band below requires.
+1. **Tasks** — the plan holds its tasks directly, one `### Task N:` block each. Every block carries `**Deliverable:**`, `**Files:**`, and exactly one `- [ ]` checkbox line; optional `**Scope:**` / `**Knowledge context:**` / `**Retrieval directive:**` / `**Consultations required:**` / `**Advisors:**` / `**Task format:**` / `**Knowledge delivery:**` / `**Close criteria:**` blocks follow as the work needs them. The heading number is the task's id — `### Task 3:` is `task-3` — and it stays fixed as earlier work is checked off and when the subject after the colon is renamed, because revisions, reviews, and results are keyed to that id. A legacy heading or checklist form may carry an explicit `[id: task-N]` marker; a normal flat heading needs none. Deleting a task retires its id — the next new task takes the next unused number rather than the retired one, so a result recorded against the old id cannot be read as evidence for a different task. `**Close criteria:**` is an optional fenced JSON array of executable checks, each with `id`, `intent`, `argv`, `cwd`, `timeout`, `expected_exit`, and an optional `applicability` predicate; task generation hashes the complete definition into a criterion version and carries the exact command fields into the worker brief. A task without the block is legible as having no executable criteria, which is an absence of evidence rather than a pass. The plan itself carries `**Verification:**` once, plus whichever sizing rationale the band below requires.
 
    **Sizing band.** Give every task one **design center** and at least one real design choice to make about it. A *design center* is the single interface, mechanism, or subsystem whose shape the worker decides; the term earns its place because the vocabulary already in use — scope, deliverable, file set — measures how much a task *touches*, and the band turns on how much a task *decides*. A deliverable spanning several independent design centers splits even when the parts run serially: chained tasks keep their own acceptance boundaries, their own reports, and their own premise-wrong exits.
 
@@ -474,6 +530,8 @@ Draft concrete implementation sections on top of the approved abstract plan:
    **Task format (intent+constraints).** Default. State what the change accomplishes, what not to do, and what success looks like at the deliverable level. Opt into prescriptive format with `**Task format:** prescriptive` for mechanical work where step-by-step instructions are required.
 
    **Verification (the plan's acceptance bar).** Write `**Verification:**` once, at plan level, as 0 to 3 observable-behavior criteria — the bar the lead honors at plan close. Task generation renders those bullets into every worker brief as plan-owned close criteria, and a worker self-checks only the bullets its own diff can affect, naming the rest as not-self-checked. Omitting the block declares no additional bar. The template's anti-pattern list governs what a bullet may say; the suite-shaped bar is the one to watch, because suite-level certification happens once at integration and a bar that asks for it pushes that cost onto every worker.
+
+   Verification prose and a task's `**Close criteria:**` block are different instruments. The prose states what the lead judges at close; a criterion states an exact command whose exit code can be recorded, so the two live side by side and neither replaces the other. A criterion's `argv` runs without an implicit shell and its `cwd` resolves inside the execution worktree, which is why the command is written as a literal argument list rather than a shell line. An `applicability` predicate is its own object with `argv`, `cwd`, `timeout`, `applicable_exit`, and `inapplicable_exit`, where the two exits are distinct; it carries no criterion `id`, `intent`, or `expected_exit` of its own. Its absence means the criterion always applies. Declared criteria are executed by `lore criteria run <slug> <task-id> <criterion-id>`, which resolves the criterion from the selected immutable revision and records an immutable result row. The runner takes identity only: `--execution-worktree <root>` plus either `--packet-id <id>` (a schema 2 packet fixes task, revision, and dispatch attempt, and any `--revision` or `--dispatch-attempt-id` given alongside must agree) or `--revision <rid> --unbound-reason <text>` when no packet exists. It accepts no command, output, state, exit, result, or skip override, so the recorded outcome is what the declaration produces, not what a caller asserts. The criterion version is a hash of the complete canonical definition, covering argv, cwd, timeout, expected exit, and applicability, so changing any of these yields a new version through a new plan revision. Author criteria knowing the run is exact: stdin is `/dev/null`, stdout and stderr are captured together as bytes, the process group is terminated at the declared timeout, a nonmatching exit or a signal or a timeout records `fail`, and a launch, cwd, output-persistence, or source-access failure records `unavailable` rather than either pass or fail. A predicate that observes its inapplicable exit records `skipped` and the command does not run; any predicate outcome other than its two declared exits records `unavailable`. A check that spans several tasks belongs to a named integration task that owns it. A result records that a command exited a certain way against a recorded code identity; whether that criterion is adequate for the task, and whether the criteria together cover the original anchor, remain the reviewer's authored judgments citing result IDs.
 
    **Premise-wrong exit (standing, every task).** A task brief hands its worker two sanctioned outcomes, not one: the deliverable, or the report "this cannot be built as scoped — here is what blocked me," naming the premise that failed contact with the code. The second is a first-class result from a colleague closer to the ground than the plan was; it routes to Step 6 follow-up investigation instead of forcing an approximation of a wrong plan. Never write a task whose only expressible outcome is success.
 
@@ -558,6 +616,15 @@ lore work regen-tasks <slug>
 ```
 
 Inspect the context cost summary as a sanity check — a single task far larger than its peers may signal an under-decomposed deliverable worth a closer read. Cost diagnostics are advisory only; the sizing band and the Deliverable contract gate in Step 5b are the binding gates. Do not split tasks merely because they fall above an avg-comparison threshold, and do not merge tasks merely because they fall below one. The avg-comparison heuristic is post-hoc and uniform-thinness blind; trust the intrinsic gates instead.
+
+On an item that has adopted revisions, this entry point composes `lore plan revise <slug>`: the revision writer validates plan, anchor, DAG, and criteria, stages plan and task snapshots, appends a revision row, and installs `tasks.json` through its existing writer. An identical regeneration returns the current revision without appending, so repeating this step costs nothing in history. The structural validation it performs is separate from the semantic disposition it records. A plan that parses and wires cleanly still carries `pending` anchor coverage and review requirement until someone authors them, because structural equality says nothing about whether the changed tasks cover the anchor or need a fresh review. The disposition can be supplied with the revision or later against its id:
+
+```bash
+lore plan revise <slug> --reason "split task 3 into tasks 3 and 6" --author-role designer --decisions decisions.json
+lore plan revise <slug> --decision-for <revision_id> --decision-id <token> --decisions decisions.json
+```
+
+The second form records a decision against an existing revision and creates no new revision; the same decision id replays exactly. `decisions.json` may hold `anchor_coverage`, `review_requirement`, and `dispatch_decision`; the dispatch decision belongs to the coordinator and is normally recorded during `/implement` rather than here. The field shapes and an example are in `docs/protocol-evidence.md`.
 
 ### Step 5.0a: Verify backlinks
 

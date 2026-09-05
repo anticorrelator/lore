@@ -60,7 +60,7 @@
 #   step_completed requires actor_instance, slug, session_type, step_id, and
 #   step_label, and forbids a top-level request_id.
 #   terminus_reached requires actor_instance, slug, session_type, and
-#   reason=spec-finalize|impl-close, and forbids a top-level request_id.
+#   reason=spec-finalize|impl-close|investigator|designer|worker|reviewer, and forbids a top-level request_id.
 #   Worktree outcomes: worktree_published, restore_refused, and
 #   worktree_quarantined REQUIRE a non-empty slug; the two refusal-shaped ones
 #   also REQUIRE a non-empty reason. A successful publish carries no reason.
@@ -264,8 +264,8 @@ if [[ "$EVENT" == "terminus_reached" ]]; then
       fail "missing required field: $field (required for event 'terminus_reached')"
     fi
   done
-  if ! printf '%s' "$ROW" | jq -e '.reason == "spec-finalize" or .reason == "impl-close"' >/dev/null 2>&1; then
-    fail "invalid field: reason (terminus_reached requires spec-finalize or impl-close)"
+  if ! printf '%s' "$ROW" | jq -e '.reason as $reason | ($reason | type == "string") and (["spec-finalize", "impl-close", "investigator", "designer", "worker", "reviewer"] | index($reason) != null)' >/dev/null 2>&1; then
+    fail "invalid field: reason (terminus_reached requires spec-finalize, impl-close, investigator, designer, worker, or reviewer)"
   fi
   if printf '%s' "$ROW" | jq -e 'has("request_id")' >/dev/null 2>&1; then
     fail "invalid field: request_id (terminus_reached is not a queue-lifecycle event)"

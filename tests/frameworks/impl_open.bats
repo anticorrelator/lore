@@ -120,7 +120,7 @@ payload() {
 # --- Manifest contract ----------------------------------------------------
 
 @test "--all --json returns a TeamCreate-first manifest with complete blockedBy edges" {
-  run bash "$LORE_CLI" impl open widget-pipeline --all --json
+  run bash "$OPEN_SH" widget-pipeline --all --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -147,7 +147,7 @@ d = json.load(open(p))
 d["phases"][0]["tasks"][0]["judgment_class"] = "mechanical"  # task-1
 json.dump(d, open(p, "w"), indent=1)
 PYEOF
-  run bash "$LORE_CLI" impl open widget-pipeline --all --json
+  run bash "$OPEN_SH" widget-pipeline --all --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -159,7 +159,7 @@ assert creates["task-2"]["judgment_class"] is None
 }
 
 @test "same-file concurrent tasks get a serialization edge; path-connected pairs do not" {
-  run bash "$LORE_CLI" impl open widget-pipeline --all --json
+  run bash "$OPEN_SH" widget-pipeline --all --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -176,7 +176,7 @@ assert "collision_serialized" not in updates["task-3"]
 }
 
 @test "the four lead-inline conditions are separate fields with no aggregate boolean" {
-  run bash "$LORE_CLI" impl open widget-pipeline --all --json
+  run bash "$OPEN_SH" widget-pipeline --all --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -211,7 +211,7 @@ EOF
     "tasks": [{"id": "task-1", "subject": "fix the typo", "activeForm": "Fixing the typo",
      "blockedBy": [], "file_targets": ["/src/a.sh"],
      "description": "**Phase:** 1\n\n## Prior Knowledge\n- embedded"}]}]}'
-  run bash "$LORE_CLI" impl open tiny-fix --all --json
+  run bash "$OPEN_SH" tiny-fix --all --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -231,7 +231,7 @@ assert c["detail"]["file_count_diagnostic"] == 1
 - security-advisor — security review. mode: persistent
 EOF
   build_tasks_json "$ITEM_DIR/plan.md" "$ITEM_DIR/tasks.json" "$DEFAULT_TASKS_BODY"
-  run bash "$LORE_CLI" impl open widget-pipeline --all --json
+  run bash "$OPEN_SH" widget-pipeline --all --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -247,7 +247,7 @@ assert adv["domain"] == "security review"
 # --- Prior-knowledge 3-branch gate ------------------------------------------
 
 @test "embedded Prior Knowledge skips prefetch; bare phase needs a declared fallback scale" {
-  run bash "$LORE_CLI" impl open widget-pipeline --all --json
+  run bash "$OPEN_SH" widget-pipeline --all --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -269,7 +269,7 @@ d = json.load(open(p))
 d["phases"][1]["retrieval_directive"] = {"seeds": [], "scale_set": "implementation"}
 json.dump(d, open(p, "w"), indent=1)
 PYEOF
-  run bash "$LORE_CLI" impl open widget-pipeline --all --json
+  run bash "$OPEN_SH" widget-pipeline --all --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -282,7 +282,7 @@ assert pk2["status"] == "error"
 }
 
 @test "invalid --fallback-scale-set bucket is rejected" {
-  run bash "$LORE_CLI" impl open widget-pipeline --all --fallback-scale-set bogus
+  run bash "$OPEN_SH" widget-pipeline --all --fallback-scale-set bogus
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "fallback-scale-set bucket"
 }
@@ -290,7 +290,7 @@ assert pk2["status"] == "error"
 # --- Tier 2 extracts ----------------------------------------------------------
 
 @test "Tier 2 extracts match by task_id and by file-target overlap" {
-  run bash "$LORE_CLI" impl open widget-pipeline --all --json
+  run bash "$OPEN_SH" widget-pipeline --all --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -307,7 +307,7 @@ assert [r["claim_id"] for r in t2["task-4"]] == ["c2"]    # file overlap
   mkdir -p "$TEST_DATA_DIR/config"
   printf '{"harnesses": {"claude-code": {"ceremonies": {"implement": ["pr-review"]}}}}\n' \
     > "$TEST_DATA_DIR/config/settings.json"
-  run bash "$LORE_CLI" impl open widget-pipeline --all --json
+  run bash "$OPEN_SH" widget-pipeline --all --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, re, sys
@@ -328,7 +328,7 @@ assert d["lead_inline_conditions"]["detail"]["ceremony_skills"] == ["pr-review"]
     > "$TEST_DATA_DIR/config/settings.json"
 
   run env LORE_FRAMEWORK=opencode HOME="$BATS_TEST_TMPDIR/home" \
-    bash "$LORE_CLI" impl open widget-pipeline --all --json
+    bash "$OPEN_SH" widget-pipeline --all --json
 
   [ "$status" -eq 0 ]
   payload | python3 -c '
@@ -373,7 +373,7 @@ PYEOF
   printf 'blocks scorecard directory creation\n' > "$TEST_KDIR/_scorecards"
 
   run env LORE_FRAMEWORK=opencode HOME="$BATS_TEST_TMPDIR/home" \
-    bash "$LORE_CLI" impl open widget-pipeline --all --json
+    bash "$OPEN_SH" widget-pipeline --all --json
 
   [ "$status" -eq 0 ]
   payload | python3 -c '
@@ -391,25 +391,25 @@ assert d["lead_inline_conditions"]["detail"]["ceremony_skills"] == []
 # --- Selection modes -----------------------------------------------------------
 
 @test "selection is required: no default mode" {
-  run bash "$LORE_CLI" impl open widget-pipeline --json
+  run bash "$OPEN_SH" widget-pipeline --json
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "selection is required"
 }
 
 @test "selection modes are exclusive" {
-  run bash "$LORE_CLI" impl open widget-pipeline --all --task task-3
+  run bash "$OPEN_SH" widget-pipeline --all --task task-3
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "exactly one of"
 }
 
 @test "the removed --phase selection is refused, naming the accepted flags" {
-  run bash "$LORE_CLI" impl open widget-pipeline --phase 2
+  run bash "$OPEN_SH" widget-pipeline --phase 2
   [ "$status" -eq 1 ]
   echo "$output" | grep -q -- "--task"
 }
 
 @test "--task selection surfaces out-of-selection blockers as external_blocked_by" {
-  run bash "$LORE_CLI" impl open widget-pipeline --task task-3 --task task-4 --json
+  run bash "$OPEN_SH" widget-pipeline --task task-3 --task task-4 --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -439,7 +439,7 @@ d["tasks"] = [
 ]
 json.dump(d, open(p, "w"), indent=1)
 PYEOF
-  run bash "$LORE_CLI" impl open widget-pipeline --all --json
+  run bash "$OPEN_SH" widget-pipeline --all --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -467,13 +467,13 @@ d = json.load(open(p))
 d["plan_checksum"] = checksum
 json.dump(d, open(p, "w"), indent=1)
 PYEOF
-  run bash "$LORE_CLI" impl open widget-pipeline --all
+  run bash "$OPEN_SH" widget-pipeline --all
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "regen-tasks"
 }
 
 @test "--task selection matching nothing is a successful empty manifest with status" {
-  run bash "$LORE_CLI" impl open widget-pipeline --task task-99 --json
+  run bash "$OPEN_SH" widget-pipeline --task task-99 --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -492,7 +492,7 @@ s = open(p).read().replace("- [ ] build alpha module", "- [x] build alpha module
 open(p, "w").write(s)
 PYEOF
   build_tasks_json "$ITEM_DIR/plan.md" "$ITEM_DIR/tasks.json" "$DEFAULT_TASKS_BODY"
-  run bash "$LORE_CLI" impl open widget-pipeline --all --json
+  run bash "$OPEN_SH" widget-pipeline --all --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -510,7 +510,7 @@ assert "task-3" not in json.dumps([op.get("external_blocked_by") for op in d["ma
 
 @test "filesystem writes are the execution-log row plus the packet substrate" {
   before="$(find "$TEST_KDIR" -type f | sort)"
-  run bash "$LORE_CLI" impl open widget-pipeline --all --json
+  run bash "$OPEN_SH" widget-pipeline --all --json
   [ "$status" -eq 0 ]
   after="$(find "$TEST_KDIR" -type f | sort)"
   diff <(echo "$before") <(echo "$after") > "$BATS_TEST_TMPDIR/fsdiff" || true
@@ -527,7 +527,7 @@ assert "task-3" not in json.dumps([op.get("external_blocked_by") for op in d["ma
 }
 
 @test "one task-scope packet row per eligible task; manifest TaskCreate entries carry packet_id" {
-  run bash "$LORE_CLI" impl open widget-pipeline --all --json
+  run bash "$OPEN_SH" widget-pipeline --all --json
   [ "$status" -eq 0 ]
   payload > "$BATS_TEST_TMPDIR/payload.json"
   python3 - "$BATS_TEST_TMPDIR/payload.json" "$TEST_KDIR/_packets/packets.jsonl" <<'PYEOF'
@@ -553,16 +553,17 @@ PYEOF
 
 # --- Validation gates ------------------------------------------------------------
 
-@test "checksum mismatch (plan.md edited after generation) exits 1 with regen guidance" {
+@test "checksum drift reconciliation preserves structural anchor refusal" {
   echo "- a late edit" >> "$ITEM_DIR/plan.md"
-  run bash "$LORE_CLI" impl open widget-pipeline --all
+  run bash "$OPEN_SH" widget-pipeline --all
   [ "$status" -eq 1 ]
-  echo "$output" | grep -q "regen-tasks"
+  echo "$output" | grep -q "section missing"
+  echo "$output" | grep -q "plan reconciliation failed"
 }
 
 @test "missing tasks.json exits 1 directing to lore work tasks" {
   rm "$ITEM_DIR/tasks.json"
-  run bash "$LORE_CLI" impl open widget-pipeline --all
+  run bash "$OPEN_SH" widget-pipeline --all
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "lore work tasks widget-pipeline"
 }
@@ -570,7 +571,7 @@ PYEOF
 @test "archived item is refused" {
   mkdir -p "$WORK_DIR/_archive/old-item"
   printf '{"title": "Old Item"}\n' > "$WORK_DIR/_archive/old-item/_meta.json"
-  run bash "$LORE_CLI" impl open old-item --all
+  run bash "$OPEN_SH" old-item --all
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "archived"
 }
@@ -578,7 +579,7 @@ PYEOF
 # --- Resolver tri-state / CLI surface ---------------------------------------------
 
 @test "no match exits 1 with the resolver error" {
-  run bash "$LORE_CLI" impl open absolutely-no-such-thing-9999 --all
+  run bash "$OPEN_SH" absolutely-no-such-thing-9999 --all
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "No match for reference"
 }
@@ -593,7 +594,7 @@ PYEOF
  {"slug": "beta-shared", "title": "Beta Shared", "tags": ["duptag"], "updated": "2026-01-02T00:00:00Z"}
 ], "archived": []}
 EOF
-  run bash "$LORE_CLI" impl open duptag --all --json
+  run bash "$OPEN_SH" duptag --all --json
   [ "$status" -eq 2 ]
   echo "$output" | python3 -c '
 import json, sys
@@ -604,19 +605,19 @@ assert sorted(d["candidates"]) == ["alpha-shared", "beta-shared"]
 }
 
 @test "missing ref argument returns a usage error" {
-  run bash "$LORE_CLI" impl open --all
+  run bash "$OPEN_SH" --all
   [ "$status" -eq 1 ]
   echo "$output" | grep -qi "missing required argument"
 }
 
 @test "unknown flag returns an error" {
-  run bash "$LORE_CLI" impl open widget-pipeline --all --no-such-flag
+  run bash "$OPEN_SH" widget-pipeline --all --no-such-flag
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "Unknown flag"
 }
 
 @test "text mode renders the manifest, conditions, and checksum line" {
-  run bash "$LORE_CLI" impl open widget-pipeline --all
+  run bash "$OPEN_SH" widget-pipeline --all
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "\[impl open\] Widget Pipeline"
   echo "$output" | grep -q "1. TeamCreate impl-widget-pipeline"
@@ -628,4 +629,48 @@ assert sorted(d["candidates"]) == ["alpha-shared", "beta-shared"]
 @test "lore impl usage mentions the open verb" {
   run bash "$LORE_CLI" impl --help
   echo "$output" | grep -q "open"
+}
+
+@test "revision packets preserve old attempts and return the canonical dispatch tuple" {
+  source "$REPO_DIR/tests/helpers/packet_revision.bash"
+  packet_revision_fixture "$ITEM_DIR" widget-pipeline
+  run bash "$OPEN_SH" widget-pipeline --task task-1 --json
+  [ "$status" -eq 0 ]
+  payload > "$BATS_TEST_TMPDIR/first.json"
+  cp "$TEST_KDIR/_packets/packets.jsonl" "$BATS_TEST_TMPDIR/old-packets"
+  printf '\nA changed task contract.\n' >> "$ITEM_DIR/plan.md"
+  bash "$REPO_DIR/scripts/plan-revise.sh" widget-pipeline --decisions "$ITEM_DIR/decisions.json" >/dev/null
+  run bash "$OPEN_SH" widget-pipeline --task task-1 --json
+  [ "$status" -eq 0 ]
+  payload > "$BATS_TEST_TMPDIR/second.json"
+  run bash "$OPEN_SH" widget-pipeline --task task-1 --json
+  [ "$status" -eq 0 ]
+  payload > "$BATS_TEST_TMPDIR/retry.json"
+  python3 - "$TEST_KDIR" "$ITEM_DIR" "$BATS_TEST_TMPDIR" "$REPO_DIR" <<'PY'
+import json, pathlib, runpy, sys
+root, item, tmp, repo = map(pathlib.Path, sys.argv[1:])
+rows = [json.loads(line) for line in (root/'_packets/packets.jsonl').read_text().splitlines()]
+assert len(rows) == 3
+assert rows[1]['revision_id'] == rows[2]['revision_id']
+assert rows[1]['dispatch_attempt_id'] != rows[2]['dispatch_attempt_id']
+assert rows[1]['packet_id'] != rows[2]['packet_id']
+assert (root/'_packets/packets.jsonl').read_bytes().startswith((tmp/'old-packets').read_bytes())
+assert rows[0]['revision_id'] != rows[1]['revision_id']
+assert rows[0]['dispatch_attempt_id'] != rows[1]['dispatch_attempt_id']
+for filename, row in zip(('first.json','second.json','retry.json'), rows):
+    output = json.loads((tmp/filename).read_text())
+    tasks = output.get('batch', [op for op in output.get('manifest',[]) if op['op']=='TaskCreate'])
+    task = tasks[0]
+    for key in ('packet_id','revision_id','dispatch_attempt_id'):
+        assert task[key] == row[key] == output['packets'][0][key]
+    if 'batch' in output:
+        assert row['tier2_claim_ids'] == [r['claim_id'] for r in task['tier2_extract']]
+        assert row['delivered_entries'] == []
+        assert 'without knowledge-entry assembly' in row['empty_reason']
+view = runpy.run_path(str(repo/'scripts/work-evidence.py'))['project'](item, root)
+records = view['sources']['packets']['records']
+assert records[0]['binding'] == {'state':'stale','reason':'revision-mismatch'}
+assert records[1]['binding']['state'] == 'current'
+assert all(record['receipt']=='unknown' for record in records)
+PY
 }

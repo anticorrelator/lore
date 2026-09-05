@@ -17,7 +17,7 @@ INPUT=$(cat)
 TOOL_NAME=$(printf '%s' "$INPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('tool_name') or '')" 2>/dev/null || true)
 
 # Fast exit: not a Write call
-if [[ "$TOOL_NAME" != "Write" ]]; then
+if [[ "$TOOL_NAME" != "Write" && "$TOOL_NAME" != "Edit" && "$TOOL_NAME" != "MultiEdit" ]]; then
   printf '{"decision":"approve"}\n'
   exit 0
 fi
@@ -27,6 +27,21 @@ FILE_PATH=$(printf '%s' "$INPUT" | python3 -c "import json,sys; d=json.load(sys.
 # Block if path contains /_work/ and ends with /_meta.json
 if [[ "$FILE_PATH" == */_work/* && "$FILE_PATH" == */_meta.json ]]; then
   printf '{"decision":"block","reason":"Use '\''lore work create --title <name>'\'' instead of writing _meta.json directly. See /work skill for details."}\n'
+  exit 0
+fi
+
+if [[ "$FILE_PATH" == */_work/*/revisions.jsonl || "$FILE_PATH" == */_work/*/revisions/* ]]; then
+  printf '{"decision":"block","reason":"Use lore plan revise for revision history, snapshots, and publication staging."}\n'
+  exit 0
+fi
+
+if [[ "$FILE_PATH" == */_work/*/reviews/* ]]; then
+  printf '{"decision":"block","reason":"Use lore plan review prepare or seal for immutable review evidence."}\n'
+  exit 0
+fi
+
+if [[ "$FILE_PATH" == */_work/*/results.jsonl || "$FILE_PATH" == */_work/*/results/* ]]; then
+  printf '{"decision":"block","reason":"Use lore criteria run for executed results, output, and publication recovery."}\n'
   exit 0
 fi
 

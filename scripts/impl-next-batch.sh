@@ -12,9 +12,9 @@
 # lead maintains — by matching each tasks.json subject against checked
 # (`- [x]`) and unchecked (`- [ ]`) lines. Tasks whose subject matches no
 # checkbox are returned as `unmatched` and treated as incomplete blockers.
-# The plan checksum is deliberately NOT enforced here: checking boxes edits
-# plan.md after tasks.json generation by design, so mid-run the cryptographic
-# gate (open's job) would always fail.
+# Revision publication is reconciled before batch selection. Legacy progress
+# stays unbound only when its original checksum can be proved from the current
+# checkbox bytes; other drift requires a coherent revision and authored decisions.
 #
 # --active <task-id> declares a task the lead has already dispatched and is
 # still in flight (live task state is harness-side; the lead passes it in).
@@ -30,7 +30,8 @@
 # never an aggregate boolean. An empty unblocked set is success with an
 # explanatory status (all-blocked | all-complete), not an error.
 #
-# The only write is one execution-log attribution row (source: impl-verb).
+# Packet rows describe the returned context; the execution log retains one
+# attribution row (source: impl-verb).
 #
 # Exit codes:
 #   0  batch emitted (possibly empty with explanatory status)
@@ -152,9 +153,11 @@ ITEM_DIR="$KNOWLEDGE_DIR/_work/$SLUG"
 
 [[ -f "$ITEM_DIR/_meta.json" ]] || fail "missing _meta.json for work item '$SLUG'"
 [[ -f "$ITEM_DIR/plan.md" ]] || fail "No structured plan found for '$SLUG'. Run /spec first to create the plan's tasks."
-if [[ ! -f "$ITEM_DIR/tasks.json" ]]; then
+if [[ ! -f "$ITEM_DIR/tasks.json" && ! -e "$ITEM_DIR/revisions.jsonl" ]]; then
   fail "no tasks.json for '$SLUG' — generate it first: lore work tasks $SLUG"
 fi
+
+bash "$SCRIPT_DIR/plan-revise.sh" "$SLUG" --reconcile --allow-legacy-progress >/dev/null || fail "plan reconciliation failed for '$SLUG'"
 
 CEREMONY_JSON=$(bash "$SCRIPT_DIR/ceremony-config.sh" get implement 2>/dev/null) || CEREMONY_JSON="[]"
 if ! printf '%s' "$CEREMONY_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, list)' 2>/dev/null; then
@@ -172,15 +175,23 @@ fi
 
 ACTIVE_CSV=$(IFS=','; echo "${ACTIVE_TASKS[*]-}")
 
-PAYLOAD=$(_LORE_CEREMONY_JSON="$CEREMONY_JSON" python3 - "$ITEM_DIR" "$SLUG" "$ACTIVE_CSV" <<'PYEOF'
+PAYLOAD=$(_LORE_CEREMONY_JSON="$CEREMONY_JSON" python3 - "$ITEM_DIR" "$SLUG" "$ACTIVE_CSV" "$SCRIPT_DIR" "$TEMPLATE_VERSION" <<'PYEOF'
 import json
 import os
 import re
+import subprocess
 import sys
+import uuid
 
-item_dir, slug, active_csv = sys.argv[1:4]
+item_dir, slug, active_csv, script_dir, template_version = sys.argv[1:6]
 active = {a for a in active_csv.split(",") if a}
 ceremony_skills = json.loads(os.environ.get("_LORE_CEREMONY_JSON", "[]"))
+
+publication_lock = None
+if os.path.exists(os.path.join(item_dir, "revisions.jsonl")):
+    import fcntl
+    publication_lock = open(os.path.join(item_dir, "revisions", ".publication.lock"), "rb")
+    fcntl.flock(publication_lock, fcntl.LOCK_SH)
 
 with open(os.path.join(item_dir, "tasks.json"), encoding="utf-8") as f:
     tasks_data = json.load(f)
@@ -242,6 +253,13 @@ for task in all_tasks:
              f"have drifted; treating it as incomplete (run lore work regen-tasks "
              f"{slug} if the plan was restructured)")
 
+import runpy
+try:
+    publication = runpy.run_path(os.path.join(script_dir, "work-evidence.py"))["publication_for_dispatch"](item_dir, os.path.dirname(os.path.dirname(item_dir)))
+except (OSError, ValueError, KeyError) as exc:
+    sys.exit("[impl] " + str(exc))
+if tasks_data.get("revision_id") != publication["revision_id"]:
+    sys.exit("[impl] task generation changed during dispatch preparation; refresh and retry")
 completed_set = set(completed)
 
 # --- Unblocked pending set -----------------------------------------------------
@@ -251,6 +269,10 @@ batch_ids = []
 pending_blocked = []
 for tid in pending:
     if tid in active:
+        continue
+    if tid in publication["blocked"]:
+        pending_blocked.append({"id": tid, "blocked_by_pending": [], "revision_id": publication["revision_id"],
+                                "decision_reason": publication["blocked"][tid]})
         continue
     blockers = [dep for dep in task_by_id[tid].get("blockedBy", [])
                 if dep not in completed_set]
@@ -300,6 +322,39 @@ for tid in batch_ids:
             "captured_at_sha": r.get("captured_at_sha"),
         } for r in rows],
     })
+
+# The batch carries task and claim context; it does not resolve knowledge entries.
+packets = []
+for task in batch:
+    row = {
+        "packet_id": "pkt-" + uuid.uuid4().hex[:12],
+        "packet_scope": "task", "delivery_stage": "assembled",
+        "session_id": None, "work_item": slug, "phase": task["phase"],
+        "task_id": task["local_id"], "arm": os.environ.get("LORE_PACKET_ARM") or None,
+        "task_scale_set": None, "delivered_entries": [],
+        "empty_reason": "next-batch returns task descriptions and Tier 2 extracts without knowledge-entry assembly",
+        "budget": {"chars_used": None, "chars_budget": None},
+        "template_version": template_version if re.fullmatch(r"[0-9a-f]{12}", template_version or "") else None,
+        "tier2_claim_ids": [claim["claim_id"] for claim in task["tier2_extract"] if claim.get("claim_id")],
+    }
+    if publication["revision_id"]:
+        row.update(schema_version="2", revision_id=publication["revision_id"],
+                   source_head=publication["source_head"],
+                   dispatch_attempt_id="dispatch-" + uuid.uuid4().hex)
+    try:
+        proc = subprocess.run(
+            ["bash", os.path.join(script_dir, "packet-append.sh"),
+             "--kdir", os.path.dirname(os.path.dirname(item_dir)), "--row", json.dumps(row)],
+            capture_output=True, text=True, timeout=60)
+        if proc.returncode:
+            raise ValueError(proc.stderr.strip())
+        identity = {key: row.get(key) for key in ("packet_id", "dispatch_attempt_id", "revision_id")}
+        task.update(identity)
+        packets.append({"task_id": task["local_id"], "phase": task["phase"], **identity})
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        if publication["revision_id"]:
+            sys.exit(f"[impl] bound packet append failed for {task['local_id']}: {exc}")
+        warn(f"packet append failed for {task['local_id']}: {exc}")
 
 # --- Same-file collision groups within the batch -------------------------------
 # Returned as conditions: never parallel-dispatch these across workers;
@@ -427,6 +482,7 @@ print(json.dumps({
     "slug": slug,
     "status": status,
     "batch": batch,
+    "packets": packets,
     "active": sorted(active),
     "completed": completed,
     "pending_blocked": pending_blocked,
@@ -438,7 +494,7 @@ print(json.dumps({
 PYEOF
 )
 
-# --- Execution-log attribution row (the verb's only write) -------------------
+# --- Execution-log attribution row -------------------
 LOG_BODY=$(_LORE_PAYLOAD="$PAYLOAD" python3 <<'PYEOF'
 import json
 import os

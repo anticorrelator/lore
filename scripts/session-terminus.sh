@@ -2,7 +2,7 @@
 # session-terminus.sh — Emit one idempotent hosted-session completion event
 #
 # Usage:
-#   bash session-terminus.sh --reason <spec-finalize|impl-close> [--kdir <path>] [--json]
+#   bash session-terminus.sh --reason <spec-finalize|impl-close|investigator|designer|worker|reviewer> [--kdir <path>] [--json]
 #
 # The live registry supplies the spawn request identity used only to construct
 # the deterministic event id. The emitted row is a protocol transition, not a
@@ -29,8 +29,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$REASON" in
-  spec-finalize|impl-close) ;;
-  *) die "invalid --reason: '$REASON' (must be one of spec-finalize, impl-close)" ;;
+  spec-finalize|impl-close|investigator|designer|worker|reviewer) ;;
+  *) die "invalid --reason: '$REASON' (must be one of spec-finalize, impl-close, investigator, designer, worker, reviewer)" ;;
 esac
 
 INSTANCE="${LORE_SESSION_INSTANCE:-}"

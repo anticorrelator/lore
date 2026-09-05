@@ -231,7 +231,7 @@ print(json.dumps({
     "projection_mode": "half-open-window" if start is not None else "cursor",
     "window": {"start": start_raw, "end": end_raw} if start is not None else None,
     "fold_version": "1",
-    "vocabulary_version": "1",
+    "vocabulary_version": "2",
     "events": events,
     "records": records,
     "next_cursor": next_cursor,

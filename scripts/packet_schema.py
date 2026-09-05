@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Schema v1 validation for the `_packets/` substrate — single source of truth.
+"""Schema validation for the `_packets/` substrate — single source of truth.
 
 Two row kinds share this module:
   - packet rows      (`_packets/packets.jsonl`,     written by packet-append.sh)
@@ -21,9 +21,9 @@ row. Validation checks the stamp's format only (64-char hex), not its value:
 rows are validated once at write time, and a reader comparing shas across
 rows is how schema drift is detected.
 
-Versioning: rows carry `schema_version: "1"`. Unknown extra fields are
-accepted so a future v2 can add fields without invalidating v1 producers;
-required-field additions must bump schema_version and branch here on it.
+Packets accept schema versions "1" and "2"; assessments retain version "1".
+Version 2 binds task packets to a committed revision and dispatch attempt.
+Unknown extra fields remain accepted.
 """
 
 from __future__ import annotations
@@ -70,10 +70,10 @@ def schema_sha() -> str:
         return hashlib.sha256(fh.read()).hexdigest()
 
 
-def _check_stamps(row: dict, errors: list[str]) -> None:
+def _check_stamps(row: dict, errors: list[str], versions=("1",)) -> None:
     """Stamps common to both row kinds (writer-applied; see writer headers)."""
-    if row.get("schema_version") != "1":
-        errors.append("schema_version must be the string \"1\"")
+    if row.get("schema_version") not in versions:
+        errors.append("schema_version must be one of " + "|".join(versions))
     if not _is_sha256_hex(row.get("packet_schema_sha")):
         errors.append("packet_schema_sha must be a 64-char lowercase sha256 hex string")
     if not _is_nonempty_str(row.get("model")):
@@ -190,7 +190,17 @@ def validate_packet_row(row) -> list[str]:
     elif row["template_version"] is not None and not _is_template_version(row["template_version"]):
         errors.append("template_version must be a 12-char lowercase hex string or null")
 
-    _check_stamps(row, errors)
+    if row.get("schema_version") == "2":
+        if scope != "task":
+            errors.append('schema 2 requires packet_scope "task"')
+        for key in ("work_item", "dispatch_attempt_id"):
+            if not _is_nonempty_str(row.get(key)):
+                errors.append(f"{key} must be a non-empty string for schema 2")
+        if not _is_template_version(row.get("revision_id")):
+            errors.append("revision_id must be a 12-char lowercase hex string for schema 2")
+        if "source_head" not in row or (row["source_head"] is not None and not _is_nonempty_str(row["source_head"])):
+            errors.append("source_head is required (non-empty string or null) for schema 2")
+    _check_stamps(row, errors, ("1", "2"))
     return errors
 
 

@@ -186,23 +186,24 @@ run_reader() {
 
 WINDOW_START_NORM=$(printf '%s' "$WINDOW_JSON" | jq -r .start)
 WINDOW_END_NORM=$(printf '%s' "$WINDOW_JSON" | jq -r .end)
-run_reader cycle_work "$LORE_REPO_DIR/cli/lore" work show "$SLUG" --json
-run_reader due_queue "$LORE_REPO_DIR/cli/lore" retro queue --cycle-id "$SLUG" \
+run_reader cycle_work bash "$SCRIPT_DIR/load-work-item.sh" "$SLUG" --json
+run_reader due_queue bash "$SCRIPT_DIR/retro-queue.sh" queue --cycle-id "$SLUG" \
   --window-start "$WINDOW_START_NORM" --window-end "$WINDOW_END_NORM" --json
-run_reader scorecard_rows "$LORE_REPO_DIR/cli/lore" scorecard rows \
+run_reader scorecard_rows bash "$SCRIPT_DIR/scorecard-read.sh" rows \
   --window-start "$WINDOW_START_NORM" --window-end "$WINDOW_END_NORM" --json
-run_reader scorecard_current "$LORE_REPO_DIR/cli/lore" scorecard current --json
-run_reader session_events "$LORE_REPO_DIR/cli/lore" session events --since 0 \
+run_reader scorecard_current bash "$SCRIPT_DIR/scorecard-read.sh" current --json
+run_reader session_events bash "$SCRIPT_DIR/session-events.sh" --since 0 \
   --window-start "$WINDOW_START_NORM" --window-end "$WINDOW_END_NORM" --json
-run_reader journal "$LORE_REPO_DIR/cli/lore" journal read \
+run_reader journal bash "$SCRIPT_DIR/journal.sh" read \
   --since "$WINDOW_START_NORM" --until "$WINDOW_END_NORM" --json
 
 PREPARED="$TMP_DIR/prepared.json"
 set +e
-python3 - "$TMP_DIR" "$PREPARED" "$SLUG" "$ARCHIVED" "$WINDOW_JSON" "$DUE_DISPOSITION" "$DUE_WARNING" <<'PY'
-import hashlib,json,os,sys
+python3 - "$TMP_DIR" "$PREPARED" "$SLUG" "$ARCHIVED" "$WINDOW_JSON" "$DUE_DISPOSITION" "$DUE_WARNING" "$SCRIPT_DIR/work-evidence.py" "$ARTIFACT" <<'PY'
+import hashlib,json,os,runpy,sys
 
-tmp,out_path,slug,archived_raw,window_raw,due_disposition,due_warning=sys.argv[1:]
+tmp,out_path,slug,archived_raw,window_raw,due_disposition,due_warning,evidence_helper,prior_pack_path=sys.argv[1:]
+identity_projection=runpy.run_path(evidence_helper)["identity_projection"]
 window=json.loads(window_raw); archived=archived_raw=="true"
 
 SOURCE_REGISTRY=[
@@ -241,11 +242,7 @@ def load_reader(source_id):
   return None,{"coverage":"unreadable","warnings":[str(exc)],"reason":"invalid-reader-output","cursor":None}
  identity_obj=obj
  if source_id=="cycle_work" and isinstance(obj,dict):
-  # The sanctioned work reader includes execution-log.md. Prepare appends its
-  # own completion atom there, so hashing the whole reader response would make
-  # the source fingerprint recursively invalidate itself. Only fields capable
-  # of changing this pack's facts participate in this source identity.
-  identity_obj={k:obj.get(k) for k in ("slug","title","status","archived","plan_content","notes_content","has_tasks","extra_files")}
+  identity_obj=identity_projection(obj)
  return (obj,{"coverage":"read","warnings":[err] if err else [],"reason":None,
               "cursor":obj.get("next_cursor") if isinstance(obj,dict) else None,
               "identity":hashlib.sha256(canonical(identity_obj)).hexdigest()})
@@ -254,7 +251,7 @@ objects={}; manifest=[]
 for sid,reader,resolved,projection_mode,empty_shape in SOURCE_REGISTRY:
  obj,meta=load_reader(sid); objects[sid]=obj
  manifest.append({"source_id":sid,"reader":reader,"resolved_source":resolved,
-  "reader_contract_version":"1","projection_mode":projection_mode,"stable_empty_shape":empty_shape,
+  "reader_contract_version":"2" if sid=="cycle_work" else "1","projection_mode":projection_mode,"stable_empty_shape":empty_shape,
   "coverage":meta["coverage"],"content_identity":meta.get("identity"),"cursor":meta.get("cursor"),
   "window_field":"[start,end)" if projection_mode=="half-open-window" else None,
   "warnings":meta["warnings"],"reason":meta["reason"]})
@@ -270,6 +267,8 @@ if isinstance(work,dict):
  task_values={"checked_tasks":plan.count("- [x]"),"unchecked_tasks":plan.count("- [ ]"),
               "knowledge_links":plan.count("[[knowledge:"),"work_links":plan.count("[[work:"),
               "prior_knowledge_mentions":plan.count("Prior Knowledge")}
+ if work.get("evidence",{}).get("sources",{}).get("tasks",{}).get("state")!="read":
+  task_values=None
 else: cycle_values=task_values=None
 events=objects.get("session_events")
 event_rows=events.get("events",[]) if isinstance(events,dict) else []
@@ -277,7 +276,7 @@ journal=objects.get("journal") if isinstance(objects.get("journal"),list) else [
 rows=objects.get("scorecard_rows") if isinstance(objects.get("scorecard_rows"),list) else []
 facts={
  "cycle_artifacts":fact("available",FACT_REGISTRY["cycle_artifacts"],cycle_values) if cycle_values is not None else fact("not-computable",FACT_REGISTRY["cycle_artifacts"],reason="cycle-reader-unavailable"),
- "task_context_backlinks":fact("available",FACT_REGISTRY["task_context_backlinks"],task_values) if task_values is not None else fact("not-computable",FACT_REGISTRY["task_context_backlinks"],reason="cycle-reader-unavailable"),
+ "task_context_backlinks":fact("available",FACT_REGISTRY["task_context_backlinks"],task_values) if task_values is not None else fact("not-computable",FACT_REGISTRY["task_context_backlinks"],reason="generated-task-evidence-unavailable" if isinstance(work,dict) else "cycle-reader-unavailable"),
  "session_retrieval_friction_packets":fact("available",FACT_REGISTRY["session_retrieval_friction_packets"],{"session_events":len(event_rows),"journal_entries":len(journal)}) if isinstance(events,dict) else fact("not-computable",FACT_REGISTRY["session_retrieval_friction_packets"],reason="session-reader-unavailable"),
  "review_events":fact("available",FACT_REGISTRY["review_events"],{"review_like_events":sum(1 for e in event_rows if "review" in str(e.get("event","")).lower())}),
  "scale_signals":fact("available",FACT_REGISTRY["scale_signals"],{"declared_scale_events":sum(1 for e in event_rows if e.get("scale_declared") is True or isinstance(e.get("scale_declared"),str) and e.get("scale_declared"))}),
@@ -315,8 +314,19 @@ work_title=work.get("title","") if isinstance(work,dict) else ""
 pack={"schema_version":1,"pack_id":pack_id,"input_fingerprint":input_fp,"source_fingerprint":source_fp,"artifact_sha256":None,
  "cycle":{"slug":slug,"title":work_title,"archived":archived,"cycle_type":None},"window":window,
  "due_claim":{"attempted":due_disposition!="absent","outcome_ids":[],"disposition":due_disposition,"warning":due_warning or None},
- "source_manifest":manifest,"facts":facts,"calculations":calcs,"fixed_health":fixed_health,
+ "source_manifest":manifest,
+ "source_data":{sid:identity_projection(obj) if sid=="cycle_work" and isinstance(obj,dict) else obj for sid,obj in objects.items()},
+ "facts":facts,"calculations":calcs,"fixed_health":fixed_health,
  "provenance":{"producer":"retro-prepare.sh","schema_version":1,"captured_at":window["end"],"judgment_boundary":"deterministic-facts-only"}}
+# Keep the first handling attempt when the manifested evidence is unchanged.
+# The next call's no-op is not a replacement for that recorded attempt.
+try:
+ with open(prior_pack_path,encoding="utf-8") as handle: previous=json.load(handle)
+ prior_body={k:v for k,v in previous.items() if k!="artifact_sha256"}
+ if previous.get("pack_id")==pack_id and previous.get("artifact_sha256")==hashlib.sha256(canonical(prior_body)).hexdigest():
+  pack["due_claim"]=previous["due_claim"]
+except (OSError,ValueError,TypeError,KeyError,AttributeError):
+ pass
 pack["artifact_sha256"]=hashlib.sha256(canonical({k:v for k,v in pack.items() if k!="artifact_sha256"})).hexdigest()
 text=canonical(pack)
 with open(out_path,"w",encoding="utf-8") as f: json.dump({"pack":pack,"text":text.decode(),"sha256":hashlib.sha256(text).hexdigest()},f,ensure_ascii=False)

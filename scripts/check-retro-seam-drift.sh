@@ -28,6 +28,28 @@ PROTECTED_READERS=(
   scripts/retro-queue.sh
   scripts/scorecard-read.sh
   scripts/session-events.sh
+  scripts/load-work-item.sh
+  scripts/work-evidence.py
+  scripts/coordinate-status.sh
+  scripts/packet_schema.py
+  scripts/packet-append.sh
+  scripts/packet-assess.py
+  scripts/impl-open.sh
+  scripts/impl-next-batch.sh
+  scripts/spec-outcome.sh
+  scripts/regen-tasks.sh
+  scripts/generate-tasks.py
+  scripts/load-tasks.sh
+  tui/internal/work/detail.go
+  tui/internal/work/detailview.go
+  tui/internal/work/tasks.go
+  tui/polling.go
+)
+# These producers are protected before their first publication.
+PLANNED_PRODUCERS=(
+  scripts/plan-revise.sh
+  scripts/plan-review.sh
+  scripts/criteria-run.sh
 )
 # Companion surfaces for the retro SKILL pairing beyond the readers: the retro
 # judge scores delivery straight from tasks.json, so the task-DAG generator,
@@ -68,7 +90,7 @@ contains_path() {
 
 cli_reader_changed() {
   git diff --unified=0 "$BASE" "$HEAD" -- cli/lore \
-    | grep -Eq '^[+-].*(scorecard-read\.sh|current\|rows)'
+    | grep -Eq '^[+-].*(scorecard-read\.sh|load-work-item\.sh|plan-revise\.sh|plan-review\.sh|criteria-run\.sh|current\|rows)'
 }
 
 range_has_companion() {
@@ -95,7 +117,7 @@ done < <(git diff --name-only "$BASE" "$HEAD")
 failures=0
 if [[ ${#paths[@]} -gt 0 ]]; then
   reader_change=0
-  for protected in "${PROTECTED_READERS[@]}"; do
+  for protected in "${PROTECTED_READERS[@]}" "${PLANNED_PRODUCERS[@]}"; do
     if contains_path "$protected" "${paths[@]}"; then
       reader_change=1
       break

@@ -63,7 +63,7 @@ assert "no-published-reader" not in text, "stale pre-reader doctrine resurfaced"
 assert "not-computable:dormant-census" not in text, "dormant census is an abstention, not not-computable"
 
 for token in [
-    '"reader_contract_version":"1"',
+    '"reader_contract_version":"2" if sid=="cycle_work" else "1"',
     '"projection_mode":projection_mode',
     '"stable_empty_shape":empty_shape',
 ]:
@@ -98,5 +98,14 @@ for token in [
 ]:
     assert token in drift_check, f"seam-fix mutation doctrine missing: {token}"
 
+# Public helper, manifest, and documented contract describe the same shape.
+import runpy
+root = Path(sys.argv[1]).parents[2]
+helper = runpy.run_path(str(root / "scripts/work-evidence.py"))
+doc = (root / "docs/protocol-evidence.md").read_text()
+assert helper["READER_CONTRACT_VERSION"] == "2"
+assert "Reader contract: 2" in doc
+assert '"source_data"' in prepare
+assert "source_data.cycle_work" in text
 print("retro evidence-pack protocol: PASS")
 PY

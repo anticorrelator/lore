@@ -9,12 +9,12 @@ setup() {
   TEST_KDIR="$(mktemp -d)"
   export LORE_KNOWLEDGE_DIR="$TEST_KDIR"
 
-  run "$LORE" init --force "$TEST_KDIR"
+  run bash "$REPO_DIR/scripts/init-repo.sh" --force "$TEST_KDIR"
   [ "$status" -eq 0 ]
-  run "$LORE" work create --title "Cycle A" --slug cycle-a \
+  run bash "$REPO_DIR/scripts/create-work.sh" --title "Cycle A" --slug cycle-a \
     --intent-anchor "Exercise every published retro evidence reader." --json
   [ "$status" -eq 0 ]
-  run "$LORE" work note cycle-a --text '**Focus:** writer-created retro reader state'
+  run bash "$REPO_DIR/scripts/work-note.sh" cycle-a --text '**Focus:** writer-created retro reader state'
   [ "$status" -eq 0 ]
 
   NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -33,16 +33,16 @@ PY
   [ "$status" -eq 0 ]
 
   SCORECARD_ROW="$(jq -cn --arg now "$NOW" '{schema_version:1,kind:"telemetry",tier:"telemetry",calibration_state:"unknown",metric:"retro-contract",value:1,sample_size:1,window_start:$now,window_end:$now}')"
-  run "$LORE" scorecard append --kdir "$TEST_KDIR" --row "$SCORECARD_ROW" --json
+  run bash "$REPO_DIR/scripts/scorecard-append.sh" --kdir "$TEST_KDIR" --row "$SCORECARD_ROW" --json
   [ "$status" -eq 0 ]
-  run "$LORE" scorecard rollup --kdir "$TEST_KDIR" --json
+  run bash "$REPO_DIR/scripts/scorecard-rollup.sh" --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
 
   SESSION_ROW="$(jq -cn --arg now "$NOW" '{event:"needs_input",slug:"cycle-a",ts:$now}')"
   run bash "$REPO_DIR/scripts/session-event-append.sh" --kdir "$TEST_KDIR" --row "$SESSION_ROW" --json
   [ "$status" -eq 0 ]
 
-  run "$LORE" journal write --observation "reader contract" --context "retro integration" \
+  run bash "$REPO_DIR/scripts/journal.sh" write --observation "reader contract" --context "retro integration" \
     --work-item cycle-a --role retro
   [ "$status" -eq 0 ]
 
@@ -54,7 +54,7 @@ teardown() {
 }
 
 run_prepare() {
-  run "$LORE" retro prepare cycle-a --window-start "$WINDOW_START" --window-end "$WINDOW_END" --json
+  run bash "$PREPARE" cycle-a --window-start "$WINDOW_START" --window-end "$WINDOW_END" --json
   [ "$status" -eq 0 ]
   jq -e '([.source_manifest[] | select(.coverage == "read")] | length) == 6' \
     "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json" >/dev/null
@@ -66,12 +66,12 @@ manifest_row() {
 }
 
 @test "cycle_work uses the work writers and public snapshot reader" {
-  run "$LORE" work show cycle-a --json
+  run bash "$REPO_DIR/scripts/load-work-item.sh" cycle-a --json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.slug == "cycle-a" and (.notes_content | contains("writer-created retro reader state"))'
   run_prepare
   manifest_row cycle_work | jq -e '
-    .reader_contract_version == "1" and .projection_mode == "snapshot" and
+    .reader_contract_version == "2" and .projection_mode == "snapshot" and
     .reader == "lore work show cycle-a --json" and .stable_empty_shape == "missing-cycle-nonzero"
   '
   jq -e '.facts.cycle_artifacts.status == "available" and .facts.cycle_artifacts.values.has_notes' \
@@ -79,7 +79,7 @@ manifest_row() {
 }
 
 @test "due_queue folds writer-created DUE state through the bounded public reader" {
-  run "$LORE" retro queue --cycle-id cycle-a --window-start "$WINDOW_START" --window-end "$WINDOW_END" --json
+  run bash "$REPO_DIR/scripts/retro-queue.sh" queue --cycle-id cycle-a --window-start "$WINDOW_START" --window-end "$WINDOW_END" --json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.reader_contract_version == "1" and .counts.unhandled_due == 1'
   run_prepare
@@ -90,7 +90,7 @@ manifest_row() {
 }
 
 @test "scorecard_rows returns the bounded row written by scorecard append" {
-  run "$LORE" scorecard rows --window-start "$WINDOW_START" --window-end "$WINDOW_END" --kdir "$TEST_KDIR" --json
+  run bash "$REPO_DIR/scripts/scorecard-read.sh" rows --window-start "$WINDOW_START" --window-end "$WINDOW_END" --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e 'length == 1 and .[0].metric == "retro-contract"'
   run_prepare
@@ -100,7 +100,7 @@ manifest_row() {
 }
 
 @test "scorecard_current returns the snapshot produced by rollup" {
-  run "$LORE" scorecard current --kdir "$TEST_KDIR" --json
+  run bash "$REPO_DIR/scripts/scorecard-read.sh" current --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.reader_contract_version == "1" and .projection_mode == "snapshot" and .row_count == 1'
   run_prepare
@@ -111,7 +111,7 @@ manifest_row() {
 }
 
 @test "session_events preserves cursor semantics while applying the half-open window" {
-  run "$LORE" session events --since 0 --window-start "$WINDOW_START" --window-end "$WINDOW_END" --kdir "$TEST_KDIR" --json
+  run bash "$REPO_DIR/scripts/session-events.sh" --since 0 --window-start "$WINDOW_START" --window-end "$WINDOW_END" --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '
     .reader_contract_version == "1" and .projection_mode == "half-open-window" and
@@ -124,7 +124,7 @@ manifest_row() {
 }
 
 @test "journal keeps its published bounded projection unchanged" {
-  run "$LORE" journal read --since "$WINDOW_START" --until "$WINDOW_END" --json
+  run bash "$REPO_DIR/scripts/journal.sh" read --since "$WINDOW_START" --until "$WINDOW_END" --json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e 'length == 1 and .[0].observation == "reader contract"'
   run_prepare
@@ -148,19 +148,19 @@ manifest_row() {
 }
 
 @test "history readers have stable empty projections and absence never becomes green" {
-  run "$LORE" retro queue --cycle-id cycle-a --window-start "$FUTURE_START" --window-end "$FUTURE_END" --json
+  run bash "$REPO_DIR/scripts/retro-queue.sh" queue --cycle-id cycle-a --window-start "$FUTURE_START" --window-end "$FUTURE_END" --json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.counts.unhandled_due == 0 and .counts.handled_due == 0'
-  run "$LORE" scorecard rows --window-start "$FUTURE_START" --window-end "$FUTURE_END" --kdir "$TEST_KDIR" --json
+  run bash "$REPO_DIR/scripts/scorecard-read.sh" rows --window-start "$FUTURE_START" --window-end "$FUTURE_END" --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
   [ "$output" = "[]" ]
-  run "$LORE" session events --since 0 --window-start "$FUTURE_START" --window-end "$FUTURE_END" --kdir "$TEST_KDIR" --json
+  run bash "$REPO_DIR/scripts/session-events.sh" --since 0 --window-start "$FUTURE_START" --window-end "$FUTURE_END" --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.events == [] and (.next_cursor | type) == "number"'
-  run "$LORE" journal read --since "$FUTURE_START" --until "$FUTURE_END" --json
+  run bash "$REPO_DIR/scripts/journal.sh" read --since "$FUTURE_START" --until "$FUTURE_END" --json
   [ "$status" -eq 0 ]
   [ "$output" = "[]" ]
-  run "$LORE" retro prepare cycle-a --window-start "$FUTURE_START" --window-end "$FUTURE_END" --json
+  run bash "$PREPARE" cycle-a --window-start "$FUTURE_START" --window-end "$FUTURE_END" --json
   [ "$status" -eq 0 ]
   jq -e '
     .fixed_health.state != "normal" and
@@ -169,13 +169,285 @@ manifest_row() {
 }
 
 @test "writer validation rejects malformed evidence before readers see it" {
-  run "$LORE" scorecard append --kdir "$TEST_KDIR" --row '{"kind":"telemetry"}' --json
+  run bash "$REPO_DIR/scripts/scorecard-append.sh" --kdir "$TEST_KDIR" --row '{"kind":"telemetry"}' --json
   [ "$status" -ne 0 ]
   run bash "$REPO_DIR/scripts/session-event-append.sh" --kdir "$TEST_KDIR" --row '{"event":"not-a-real-event"}' --json
   [ "$status" -ne 0 ]
-  run "$LORE" scorecard rows --window-start "$WINDOW_START" --window-end "$WINDOW_END" --kdir "$TEST_KDIR" --json
+  run bash "$REPO_DIR/scripts/scorecard-read.sh" rows --window-start "$WINDOW_START" --window-end "$WINDOW_END" --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e 'length == 1'
   run_prepare
   jq -e '.fixed_health.state != "normal"' "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+}
+
+@test "cycle_work v2 carries evidence bodies and names missing task evidence" {
+  run_prepare
+  jq -e '.schema_version == 1 and
+    .source_data.cycle_work.reader_contract_version == "2" and
+    .source_data.cycle_work.evidence.sources.tasks.state == "absent" and
+    .source_data.cycle_work.evidence.sources.bundle.state == "absent" and
+    .facts.task_context_backlinks.status == "not-computable" and
+    .facts.task_context_backlinks.values == null' \
+    "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+  run bash "$REPO_DIR/scripts/load-work-item.sh" cycle-a --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | python3 -B "$REPO_DIR/scripts/work-evidence.py" --identity > "$TEST_KDIR/semantic-work.json"
+  python3 - "$TEST_KDIR" <<'PY'
+import hashlib, json, pathlib, sys
+root=pathlib.Path(sys.argv[1]); work=json.loads((root/'semantic-work.json').read_text())
+pack=json.loads((root/'_work/cycle-a/retro-evidence-pack.json').read_text())
+assert pack['source_data']['cycle_work']==work
+encoded=json.dumps(work,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()
+source=next(x for x in pack['source_manifest'] if x['source_id']=='cycle_work')
+assert source['content_identity']==hashlib.sha256(encoded).hexdigest()
+PY
+}
+
+@test "unchanged preparation excludes only its own marker and keeps exact pack bytes" {
+  run_prepare
+  pack="$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+  cp "$pack" "$TEST_KDIR/first-pack.json"
+  run_prepare
+  python3 - "$pack" "$TEST_KDIR/first-pack.json" <<'PYCOMPARE'
+import json,sys
+left=json.load(open(sys.argv[1])); right=json.load(open(sys.argv[2]))
+def differences(a,b,path=''):
+ if isinstance(a,dict) and isinstance(b,dict):
+  for k in sorted(a.keys()|b.keys()): differences(a.get(k),b.get(k),path+'/'+k)
+ elif a!=b: print(path,repr(a)[:400],repr(b)[:400])
+if left!=right: differences(left,right)
+assert left==right
+PYCOMPARE
+  printf 'ordinary execution evidence\n' | bash "$REPO_DIR/scripts/write-execution-log.sh" --slug cycle-a --source manual
+  run_prepare
+  [ "$(jq -r .pack_id "$pack")" != "$(jq -r .pack_id "$TEST_KDIR/first-pack.json")" ]
+  jq -e '.source_data.cycle_work.exec_log_content | contains("ordinary execution evidence")' "$pack"
+}
+
+@test "task bytes reports reviews result output packets and bundle all change identity" {
+  item="$TEST_KDIR/_work/cycle-a"
+  mkdir -p "$item/worker-reports" "$item/reviews/review-1" "$item/results/result-1" "$TEST_KDIR/_packets"
+  printf '{"tasks":[{"id":"task-1","description":"task original","blocked_by":[]}]}' > "$item/tasks.json"
+  printf 'Report-id: report-1\nStatus: completed\nreport original\n' > "$item/worker-reports/report-1.md"
+  printf 'review original\n' > "$item/reviews/review-1/output.md"
+  printf 'result original\n' > "$item/results/result-1/output.txt"
+  printf '{"work_item":"cycle-a","tasks_completed":[],"tier2_claim_ids":[],"tier3_promoted_ids":[],"advisor_consultations_count":0,"blockers":[],"template_versions":{},"captured_at_sha":"old","run_started_at":"2026-07-01T00:00:00Z"}' > "$item/retro-bundle.json"
+  printf '{"schema_version":"1","packet_id":"pkt-test","work_item":"cycle-a","task_id":"task-1","revision_id":"aaaaaaaaaaaa","delivery_stage":"assembled","delivered_entries":[]}' > "$TEST_KDIR/_packets/packets.jsonl"
+  run_prepare
+  previous="$(jq -r .pack_id "$item/retro-evidence-pack.json")"
+  for target in tasks.json worker-reports/report-1.md reviews/review-1/output.md results/result-1/output.txt retro-bundle.json; do
+    python3 - "$item/$target" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); value=p.read_text()
+p.write_text(value.replace('original','changed').replace('"old"','"new"'))
+PY
+    run_prepare
+    current="$(jq -r .pack_id "$item/retro-evidence-pack.json")"
+    [ "$current" != "$previous" ]
+    previous="$current"
+  done
+  python3 - "$TEST_KDIR/_packets/packets.jsonl" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]);p.write_text(p.read_text().replace('aaaaaaaaaaaa','bbbbbbbbbbbb'))
+PY
+  run_prepare
+  [ "$(jq -r .pack_id "$item/retro-evidence-pack.json")" != "$previous" ]
+  python3 - "$item/retro-evidence-pack.json" <<'PY'
+import json,sys
+work=json.load(open(sys.argv[1]))['source_data']['cycle_work']
+text=json.dumps(work)
+for marker in ('task changed','report changed','review changed','result changed','bbbbbbbbbbbb'):
+ assert marker in text, marker
+PY
+}
+
+@test "malformed task repair and review outcome append remain substantive evidence" {
+  item="$TEST_KDIR/_work/cycle-a"
+  printf '{broken tasks' > "$item/tasks.json"
+  run_prepare
+  jq -e '.source_data.cycle_work.evidence.sources.tasks.state == "unreadable"' "$item/retro-evidence-pack.json"
+  previous="$(jq -r .pack_id "$item/retro-evidence-pack.json")"
+  printf '{"tasks":[]}' > "$item/tasks.json"
+  run_prepare
+  [ "$(jq -r .pack_id "$item/retro-evidence-pack.json")" != "$previous" ]
+  previous="$(jq -r .pack_id "$item/retro-evidence-pack.json")"
+  printf 'Spec-outcome-record: {"schema_version":1,"attempt_id":"historical-review","ceremony":"spec-design","outcome":"completed"}\n' |
+    bash "$REPO_DIR/scripts/write-execution-log.sh" --slug cycle-a --source manual
+  run_prepare
+  [ "$(jq -r .pack_id "$item/retro-evidence-pack.json")" != "$previous" ]
+  jq -e '.source_data.cycle_work.evidence.sources.outcomes.rows | length == 1' "$item/retro-evidence-pack.json"
+  jq -e '.source_data.cycle_work.evidence.sources.outcomes.records[0].binding.state == "legacy-unbound"' "$item/retro-evidence-pack.json"
+}
+
+@test "published revision snapshots decisions and progress remain inspectable in the pack" {
+  local item="$TEST_KDIR/_work/cycle-a"
+  cat > "$item/plan.md" <<'PLAN'
+# Cycle A
+
+## Goal
+Exercise revision evidence.
+
+## Narrative
+A task retains its criterion through publication and progress.
+
+## Intent Anchor
+Exercise every published retro evidence reader.
+
+**Scope delta:** none
+
+## Tasks
+
+**Merge rationale:** One criterion exercises the revision reader.
+
+### Task 1: Retain revision evidence
+**Deliverable:** A revision-bound example.
+**Files:** `example.py`
+**Scope:**
+- Output contract: Evidence remains inspectable.
+**Close criteria:**
+```json
+[{"id":"C1","intent":"Observe the example","argv":["python3","-c","print('revision-one')"],"cwd":".","timeout":10,"expected_exit":0}]
+```
+
+- [ ] Retain the revision example.
+PLAN
+  cat > "$TEST_KDIR/decisions.json" <<'JSON'
+{"anchor_coverage":{"disposition":"covered","by":"designer","note":"The criterion exercises the declared reader."},"review_requirement":{"disposition":"pending","by":"designer","note":"Review scope remains to be decided.","prior_review_refs":[]},"dispatch_decision":{"disposition":"proceed","by":"coordinator","note":"This isolated fixture can proceed while review scope is considered.","task_ids":["task-1"],"prior_review_refs":[]}}
+JSON
+  run bash "$REPO_DIR/scripts/plan-revise.sh" cycle-a --reason 'Publish reader fixture' --author-role designer --decisions "$TEST_KDIR/decisions.json" --json
+  [ "$status" -eq 0 ]
+  run_prepare
+  local first_pack first_revision
+  first_pack="$(jq -r .pack_id "$item/retro-evidence-pack.json")"
+  first_revision="$(jq -r .revision_id "$item/tasks.json")"
+  jq -e --arg rid "$first_revision" '
+    .source_data.cycle_work.evidence as $e |
+    $e.revision.publication_state == "current" and
+    $e.revision.head.revision_id == $rid and
+    $e.sources.tasks.data.tasks[0].close_criteria[0].argv[2] == "print('\''revision-one'\'')" and
+    ($e.sources.revisions.records[0].artifacts | length) >= 2 and
+    ($e.sources.revisions.snapshots.entries | map(.content // "") | join("\n") | contains("revision-one"))
+  ' "$item/retro-evidence-pack.json"
+  cp "$item/revisions.jsonl" "$TEST_KDIR/first-ledger"
+  run bash "$REPO_DIR/scripts/plan-revise.sh" cycle-a --reason 'Unchanged reader fixture' --author-role designer --json
+  [ "$status" -eq 0 ]
+  cmp "$TEST_KDIR/first-ledger" "$item/revisions.jsonl"
+  run_prepare
+  [ "$first_pack" = "$(jq -r .pack_id "$item/retro-evidence-pack.json")" ]
+
+  run bash "$REPO_DIR/scripts/update-plan-checkbox.sh" cycle-a 'Retain the revision example.'
+  [ "$status" -eq 0 ]
+  run_prepare
+  [ "$first_pack" != "$(jq -r .pack_id "$item/retro-evidence-pack.json")" ]
+  jq -e --arg first "$first_revision" '
+    .source_data.cycle_work.evidence as $e |
+    $e.revision.publication_state == "current" and
+    $e.revision.head.kind == "progress" and
+    $e.revision.head.predecessor == $first and
+    $e.sources.revisions.rows[0].revision_id == $first and
+    $e.sources.tasks.data.tasks[0].id == "task-1" and
+    ($e.sources.revisions.snapshots.entries | map(.content // "") | join("\n") | contains("- [ ] Retain"))
+  ' "$item/retro-evidence-pack.json"
+  python3 - "$item/plan.md" <<'PY_EDIT'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]);p.write_text(p.read_text().replace("revision-one", "revision-two"))
+PY_EDIT
+  run bash "$REPO_DIR/scripts/plan-revise.sh" cycle-a --reason 'Change the actual criterion command' --author-role designer --json
+  [ "$status" -eq 0 ]
+  run_prepare
+  local semantic_revision semantic_pack
+  semantic_revision="$(jq -r .revision_id "$item/tasks.json")"
+  semantic_pack="$(jq -r .pack_id "$item/retro-evidence-pack.json")"
+  jq -e '.source_data.cycle_work.evidence as $e |
+    $e.revision.head.kind == "semantic" and
+    $e.revision.head.anchor_coverage.disposition == "pending" and
+    ($e.sources.revisions.snapshots.entries | map(.content // "") | join("\n") | contains("revision-one")) and
+    ($e.sources.tasks.content | contains("revision-two"))' "$item/retro-evidence-pack.json"
+  run bash "$REPO_DIR/scripts/plan-revise.sh" cycle-a --decision-for "$semantic_revision" --decision-id reader-disposition --decisions "$TEST_KDIR/decisions.json" --json
+  [ "$status" -eq 0 ]
+  run_prepare
+  [ "$semantic_pack" != "$(jq -r .pack_id "$item/retro-evidence-pack.json")" ]
+  jq -e --arg rid "$semantic_revision" '.source_data.cycle_work.evidence as $e |
+    $e.revision.head.revision_id == $rid and
+    $e.sources.revisions.rows[-1].record_type == "decision" and
+    $e.sources.revisions.rows[-1].revision_id == $rid' "$item/retro-evidence-pack.json"
+
+}
+
+@test "revision dispatch packet mismatch agrees across work retro and coordinator" {
+  source "$REPO_DIR/tests/helpers/packet_revision.bash"
+  item="$TEST_KDIR/_work/cycle-a"
+  packet_revision_fixture "$item" cycle-a
+  run bash "$REPO_DIR/scripts/impl-open.sh" cycle-a --task task-1 --json
+  [ "$status" -eq 0 ]
+  cp "$TEST_KDIR/_packets/packets.jsonl" "$BATS_TEST_TMPDIR/first-packets"
+  printf '\nChanged packet contract.\n' >> "$item/plan.md"
+  bash "$REPO_DIR/scripts/plan-revise.sh" cycle-a --decisions "$item/decisions.json" >/dev/null
+  run bash "$REPO_DIR/scripts/impl-next-batch.sh" cycle-a --json
+  [ "$status" -eq 0 ]
+  run_prepare
+  run bash "$REPO_DIR/scripts/load-work-item.sh" cycle-a --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" > "$BATS_TEST_TMPDIR/work.json"
+  run bash "$REPO_DIR/scripts/coordinate-status.sh" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" > "$BATS_TEST_TMPDIR/coordinator.json"
+  python3 - "$TEST_KDIR" "$BATS_TEST_TMPDIR" <<'PY'
+import json, pathlib, sys
+root, tmp = map(pathlib.Path, sys.argv[1:])
+work = json.loads((tmp/'work.json').read_text())
+pack = json.loads((root/'_work/cycle-a/retro-evidence-pack.json').read_text())
+coordinator = json.loads((tmp/'coordinator.json').read_text())
+assert pack['source_data']['session_events']['vocabulary_version'] == '2'
+summary = work['evidence']['packet_summary']
+assert len(summary) == 2
+assert summary[0]['binding'] == {'state':'stale','reason':'revision-mismatch'}
+assert summary[1]['binding']['state'] == 'current'
+assert all(row['receipt'] == 'unknown' for row in summary)
+assert summary == pack['source_data']['cycle_work']['evidence']['packet_summary']
+assert summary == next(row for row in coordinator['work_evidence'] if row['slug']=='cycle-a')['packet_summary']
+assert (root/'_packets/packets.jsonl').read_bytes().startswith((tmp/'first-packets').read_bytes())
+rows = work['evidence']['sources']['packets']['rows']
+for raw, entry in zip(rows, summary):
+    for key in ('packet_id','task_id','dispatch_attempt_id','revision_id'):
+        assert raw[key] == entry[key]
+PY
+}
+
+@test "sealed review text dispositions and bound outcomes enter pack identity while prepare atoms do not" {
+  source "$REPO_DIR/tests/helpers/packet_revision.bash"
+  item="$TEST_KDIR/_work/cycle-a"
+  packet_revision_fixture "$item" cycle-a
+  rid=$(jq -r '.revision_id' "$item/tasks.json")
+  bash "$REPO_DIR/scripts/plan-review.sh" prepare cycle-a --attempt-id review-retro --ceremony spec-design --revision "$rid" --purpose criterion-adequacy >/dev/null
+  printf '%s\n' 'The criterion checks the intended behavior; the review raises a coverage question.' > "$TEST_KDIR/review.txt"
+  printf '%s\n' '{"schema_version":1,"outcome":"completed","verdict":"PASS","reason":null,"judgments":[{"purpose":"criterion-adequacy","judgment":"adequate","rationale":"The criterion addresses the original anchor.","result_ids":[]}],"dispositions":[{"finding":"Coverage question","disposition":"resolved","reason":"The second branch is covered."}]}' > "$TEST_KDIR/dispositions.json"
+  printf '%s\n' '{"evaluator_locator":"skill://review","evaluator_template_version":"123456789abc","framework":"codex","model":"review-model","final_round":1}' > "$TEST_KDIR/evaluator.json"
+  bash "$REPO_DIR/scripts/plan-review.sh" seal cycle-a --attempt-id review-retro --output "$TEST_KDIR/review.txt" --dispositions "$TEST_KDIR/dispositions.json" --evaluator-manifest "$TEST_KDIR/evaluator.json" | jq '.evidence_manifest' > "$TEST_KDIR/review-manifest.json"
+  run_prepare
+  first=$(jq -r '.pack_id' "$item/retro-evidence-pack.json")
+  run_prepare
+  [ "$first" = "$(jq -r '.pack_id' "$item/retro-evidence-pack.json")" ]
+  jq -e '.source_data.cycle_work.evidence.sources.reviews.entries | map(.content // "") | join("\n") | contains("coverage question") and contains("The second branch is covered.")' "$item/retro-evidence-pack.json"
+  bash "$REPO_DIR/scripts/spec-outcome.sh" cycle-a --ceremony spec-design --advisor reviewer --attempt-id review-retro --outcome completed --verdict PASS --evidence-manifest "$TEST_KDIR/review-manifest.json" --json >/dev/null
+  run_prepare
+  [ "$first" != "$(jq -r '.pack_id' "$item/retro-evidence-pack.json")" ]
+  after=$(jq -r '.pack_id' "$item/retro-evidence-pack.json")
+  run_prepare
+  [ "$after" = "$(jq -r '.pack_id' "$item/retro-evidence-pack.json")" ]
+  bash "$REPO_DIR/scripts/load-work-item.sh" cycle-a --json > "$TEST_KDIR/work-view.json"
+  bash "$REPO_DIR/scripts/coordinate-status.sh" --kdir "$TEST_KDIR" --json > "$TEST_KDIR/coordinator-view.json"
+  python3 - "$TEST_KDIR" <<'PY'
+import json,sys
+from pathlib import Path
+root=Path(sys.argv[1]);pack=json.loads((root/'_work/cycle-a/retro-evidence-pack.json').read_text())['source_data']['cycle_work']['evidence']
+work=json.loads((root/'work-view.json').read_text())['evidence']
+coord=next(r for r in json.loads((root/'coordinator-view.json').read_text())['work_evidence'] if r['slug']=='cycle-a')
+assert pack['review_summary']==work['review_summary']==coord['review_summary']
+assert pack['revision']['review_requirement']==work['revision']['review_requirement']==coord['revision']['review_requirement']
+assert pack['sources']['outcomes']['rows'][0]['schema_version']==2
+PY
 }

@@ -1,6 +1,7 @@
 package work
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -399,5 +400,29 @@ func TestMetaTabRendersBlockedBy(t *testing.T) {
 	m.detail.BlockedBy = nil
 	if out := stripListANSI(m.renderMetaTab(80)); strings.Contains(out, "Blocked by:") {
 		t.Errorf("item with no blockers must not show a 'Blocked by:' field, got:\n%s", out)
+	}
+}
+
+func TestEvidenceSourceNavigationAndReload(t *testing.T) {
+	raw := json.RawMessage(`{"schema_version":1,"reader_contract_version":"2","revision":{"publication_state":"legacy-unbound"},"sources":{"reports":{"state":"read","entries":[{"content":"Full report body\nSecond line"}]},"bundle":{"state":"absent","reason":"missing"}}}`)
+	m := NewDetailModel("", "fixture")
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m, _ = m.Update(DetailLoadedMsg{Slug: "fixture", Detail: &WorkItemDetail{Evidence: raw}})
+	m.tabHost.SetActiveID(TabEvidence.hostID())
+	if !strings.Contains(m.View(), "legacy-unbound") {
+		t.Fatal("summary not shown")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: ']', Text: "]"})
+	if !strings.Contains(m.View(), "absent") {
+		t.Fatal("missing bundle not inspectable")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: ']', Text: "]"})
+	if !strings.Contains(m.View(), "Full report body") || !strings.Contains(m.View(), "Second line") {
+		t.Fatal("report text not readable")
+	}
+	m.PreserveTab()
+	m, _ = m.Update(DetailLoadedMsg{Slug: "fixture", Detail: &WorkItemDetail{Evidence: json.RawMessage(`{"schema_version":1,"reader_contract_version":"2","sources":{"bundle":{"state":"absent"},"reports":{"state":"absent","reason":"missing"}}}`)}})
+	if m.ActiveTab() != TabEvidence || strings.Contains(m.View(), "Full report body") || !strings.Contains(m.View(), "absent") {
+		t.Fatal("refresh retained deleted report or lost tab")
 	}
 }

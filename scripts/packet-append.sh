@@ -6,7 +6,7 @@
 #   packet-append.sh --row '<json>' [--kdir <path>] [--json] [--model <id>]
 #
 # Reads a single JSON object (via --row or stdin), stamps writer-owned
-# provenance fields, validates it against the packet schema v1
+# provenance fields, validates it against the packet schema
 # (packet_schema.py), and appends one compact JSONL line to
 # $KDIR/_packets/packets.jsonl. Creates the _packets/ directory and seeds
 # its README on first use. A row that fails validation exits non-zero
@@ -28,7 +28,7 @@
 # record contaminates the measurement. See $KDIR/_packets/README.md.
 #
 # Writer-owned stamps (applied here, before validation):
-#   schema_version         always "1"
+#   schema_version         "2" for bound task identity, otherwise "1"
 #   packet_schema_sha      sha256 of packet_schema.py (always overwritten)
 #   model                  row's own value > --model flag > LORE_MODEL > "unrecorded"
 #   captured_at_branch / captured_at_sha / captured_at_merge_base_sha
@@ -38,7 +38,7 @@
 #                          the delivered scores); sha256 of trust-compute.py
 #                          when absent
 #
-# Schema v1 field reference and reader contract: $KDIR/_packets/README.md.
+# Legacy field reference: $KDIR/_packets/README.md. Bound identity: docs/protocol-evidence.md.
 
 set -euo pipefail
 
@@ -137,7 +137,7 @@ ROW=$(printf '%s' "$ROW" | jq -c \
   --arg mb "$CAPTURED_AT_MERGE_BASE_SHA" \
   '
   def nullable($v): if $v == "null" then null else $v end;
-  .schema_version = "1"
+  .schema_version = (if .schema_version == "2" or has("revision_id") or has("dispatch_attempt_id") then "2" else "1" end)
   | .packet_schema_sha = $schema_sha
   | .trust_compute_sha = (.trust_compute_sha // $tc_sha)
   | .model = (if (.model // "") == "" then $model else .model end)
@@ -150,7 +150,7 @@ ROW=$(printf '%s' "$ROW" | jq -c \
 
 # --- Validate before any disk touch ---
 if ! printf '%s' "$ROW" | python3 "$SCRIPT_DIR/packet_schema.py" --kind packet; then
-  fail "row rejected by packet schema v1 — not appended"
+  fail "row rejected by packet schema — not appended"
 fi
 
 # --- Resolve knowledge directory ---
@@ -163,6 +163,36 @@ fi
 if [[ ! -d "$KNOWLEDGE_DIR" ]]; then
   fail "knowledge store not found at: $KNOWLEDGE_DIR"
 fi
+
+# Validate revision attribution before creating packet artifacts.
+printf '%s' "$ROW" | python3 - "$KNOWLEDGE_DIR" "$SCRIPT_DIR" 3<&0 <<'PY'
+import json, os, runpy, sys
+row = json.load(os.fdopen(3))
+root, scripts = sys.argv[1:]
+from pathlib import Path
+if row.get("packet_scope") == "task" and row.get("work_item"):
+    item = Path(root) / "_work" / row["work_item"]
+    if item.parent.resolve() != (Path(root) / "_work").resolve():
+        sys.exit("packet: work_item must identify an active work item")
+    if row["schema_version"] == "1" and ((item / "revisions.jsonl").exists() or
+            ((item / "tasks.json").exists() and json.loads((item / "tasks.json").read_text()).get("revision_id"))):
+        sys.exit("packet: revised tasks require revision_id and dispatch_attempt_id")
+if row["schema_version"] == "2":
+    try:
+        publication = runpy.run_path(os.path.join(scripts, "work-evidence.py"))["publication_for_dispatch"](str(item), root)
+        if publication["revision_id"] != row["revision_id"]:
+            raise ValueError("packet revision does not match the committed task generation")
+        tasks = json.loads((item / "tasks.json").read_text())
+        flat = tasks.get("tasks")
+        if not isinstance(flat, list):
+            flat = [task for phase in tasks.get("phases", []) for task in phase.get("tasks", [])]
+        if row["task_id"] not in {task["id"] for task in flat}:
+            raise ValueError("packet task is absent from the committed revision")
+        if row["source_head"] != publication["source_head"]:
+            raise ValueError("packet source_head differs from the committed revision")
+    except (OSError, ValueError, KeyError) as exc:
+        sys.exit("packet: " + str(exc))
+PY
 
 PACKETS_DIR="$KNOWLEDGE_DIR/_packets"
 ROWS_FILE="$PACKETS_DIR/packets.jsonl"

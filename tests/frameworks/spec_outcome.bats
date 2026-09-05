@@ -16,7 +16,7 @@ setup() {
 teardown() { rm -rf "$TEST_KDIR"; unset LORE_KNOWLEDGE_DIR; }
 
 invoke_completed() {
-  run bash "$LORE" spec outcome outcome-item --ceremony spec-design --advisor reviewer \
+  run bash "$REPO_DIR/scripts/spec-outcome.sh" outcome-item --ceremony spec-design --advisor reviewer \
     --attempt-id attempt-1 --outcome completed --verdict PASS --evidence-manifest "$EVIDENCE" --json
 }
 
@@ -37,7 +37,7 @@ record_count() { grep -c '^Spec-outcome-record:' "$TEST_KDIR/_work/outcome-item/
   echo "$output" | grep -q '"status": "reused"'
   [ "$(record_count)" -eq 1 ]
 
-  run bash "$LORE" spec outcome outcome-item --ceremony spec-design --advisor reviewer \
+  run bash "$REPO_DIR/scripts/spec-outcome.sh" outcome-item --ceremony spec-design --advisor reviewer \
     --attempt-id attempt-1 --outcome failed --verdict FAIL --evidence-manifest "$EVIDENCE" --json
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "attempt-id collision"
@@ -52,12 +52,12 @@ for k in list(d):
     if k != "schema_version": d[k]=None
 json.dump(d,open(sys.argv[1],"w"))
 PY
-  run bash "$LORE" spec outcome outcome-item --ceremony spec-post-plan --advisor reviewer \
+  run bash "$REPO_DIR/scripts/spec-outcome.sh" outcome-item --ceremony spec-post-plan --advisor reviewer \
     --attempt-id attempt-2 --outcome needs-decision --verdict UNAVAILABLE --evidence-manifest "$EVIDENCE" --json
   [ "$status" -eq 1 ]
   echo "$output" | grep -q -- "--reason is required"
 
-  run bash "$LORE" spec outcome outcome-item --ceremony spec-post-plan --advisor reviewer \
+  run bash "$REPO_DIR/scripts/spec-outcome.sh" outcome-item --ceremony spec-post-plan --advisor reviewer \
     --attempt-id attempt-2 --outcome needs-decision --verdict UNAVAILABLE --evidence-manifest "$EVIDENCE" \
     --reason "Evaluator could not resolve." --json
   [ "$status" -eq 0 ]
@@ -71,7 +71,7 @@ PY
   echo "$output" | grep -q "validation failed"
   [ ! -e "$TEST_KDIR/_work/outcome-item/execution-log.md" ]
 
-  run bash "$LORE" spec outcome outcome-item --ceremony spec-design
+  run bash "$REPO_DIR/scripts/spec-outcome.sh" outcome-item --ceremony spec-design
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "missing required declaration"
 }

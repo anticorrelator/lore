@@ -63,6 +63,7 @@ import hashlib
 import json
 import os
 import re
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -198,7 +199,7 @@ def run_reader(name, *args):
         return None, f"invalid JSON from published reader: {exc}", None
 
 
-def version_errors(envelope, label):
+def version_errors(envelope, label, vocabulary_versions=(EXPECTED_VERSION,)):
     errors = []
     fold = envelope.get("fold_version")
     vocab = envelope.get("vocabulary_version")
@@ -208,7 +209,7 @@ def version_errors(envelope, label):
         errors.append(f"{label} unknown fold_version={fold}")
     if vocab is None:
         errors.append(f"{label} missing vocabulary_version declaration")
-    elif str(vocab) != EXPECTED_VERSION:
+    elif str(vocab) not in vocabulary_versions:
         errors.append(f"{label} unknown vocabulary_version={vocab}")
     return errors, None if fold is None else str(fold), None if vocab is None else str(vocab)
 
@@ -640,6 +641,38 @@ for record in arc_records:
         project_arc_coordination(record, dispatch=record["status"] == "active")
 
 
+# Evidence uses the same projection as work show, independently of metadata health.
+work_evidence = []
+try:
+    evidence_project = runpy.run_path(str(scripts / "work-evidence.py"))["project"]
+    evidence_error = None
+except Exception as exc:
+    evidence_project = None
+    evidence_error = str(exc)
+
+
+def summarize_work_evidence(slug, item_dir):
+    summary = {"slug": slug, "reader_contract_version": "2",
+               "locator": str(item_dir.relative_to(kdir)),
+               "inspection_argv": ["lore", "work", "show", slug, "--json"]}
+    try:
+        if evidence_project is None:
+            raise RuntimeError(evidence_error)
+        evidence = evidence_project(item_dir, kdir)
+        summary.update({"state": "read", "schema_version": evidence["schema_version"],
+                        "reader_contract_version": evidence["reader_contract_version"],
+                        "revision": evidence["revision"],
+                        "result_summary": evidence["result_summary"],
+                        "packet_summary": evidence["packet_summary"],
+                        "review_summary": evidence["review_summary"],
+                        "sources": {name: {key: value for key, value in source.items()
+                                             if key in ("state", "reason", "path", "sha256")}
+                                    for name, source in evidence["sources"].items()}})
+    except Exception as exc:
+        summary.update({"state": "unreadable", "reason": str(exc)})
+    return summary
+
+
 # --- work-index -----------------------------------------------------------
 work_locator = "_work/_index.json"
 work_path = kdir / work_locator
@@ -665,6 +698,9 @@ else:
                     continue
                 slug = index_row["slug"]
                 item_dir = kdir / "_work" / slug
+                if not item_dir.is_dir() and (kdir / "_work" / "_archive" / slug).is_dir():
+                    item_dir = kdir / "_work" / "_archive" / slug
+                work_evidence.append(summarize_work_evidence(slug, item_dir))
                 meta_path = item_dir / "_meta.json"
                 meta_locator = f"_work/{slug}/_meta.json"
                 meta = None
@@ -889,7 +925,7 @@ if session_list is not None:
     if fold is not None: session_fold_versions.add(fold)
     if vocab is not None: session_vocab_versions.add(vocab)
 if session_events is not None:
-    errs, fold, vocab = version_errors(session_events, "session events")
+    errs, fold, vocab = version_errors(session_events, "session events", ("1", "2"))
     session_errors.extend(errs)
     if fold is not None: session_fold_versions.add(fold)
     if vocab is not None: session_vocab_versions.add(vocab)
@@ -945,7 +981,7 @@ if session_errors:
         vocabulary_version="|".join(sorted(session_vocab_versions)) or None,
     )
 else:
-    source_row("session-journal", "ok", "1", "1", session_locator)
+    source_row("session-journal", "ok", "1", "|".join(sorted(session_vocab_versions)), session_locator)
 
 if session_list is not None and isinstance(session_list.get("instances"), list):
     for instance in session_list["instances"]:
@@ -1229,6 +1265,7 @@ projection = {
     # Every readable arc record, including records whose ledger has zero rows.
     # This keeps an empty declared plan distinct from an absent arc identity.
     "coordination_arcs": coordination_arcs,
+    "work_evidence": work_evidence,
     # Complete active and closed ledger rows in declaration order. Buckets intentionally contain
     # only actionable/reconcilable rows and sort those rows by identity, so they
     # cannot serve consumers that need the whole DAG and its authored order.
@@ -1266,6 +1303,22 @@ print(
 )
 if scan["reason"]:
     print(f"  reason: {scan['reason']}")
+
+print("\nWork evidence (reader contract 2)")
+for item in work_evidence:
+    print(f"  {item['slug']}: {item['state']} locator={item['locator']}")
+    if item.get("reason"):
+        print(f"    reason: {item['reason']}")
+    else:
+        print(f"    revision={compact(item['revision'])}")
+        for packet in item["packet_summary"]:
+            print(f"    packet={compact(packet)}")
+        for result in item["result_summary"]:
+            print(f"    criterion={compact(result)}")
+        for name, source in item["sources"].items():
+            if source["state"] != "read":
+                print(f"    {name}: {source['state']} reason={source.get('reason', '')}")
+    print(f"    inspect: {compact(item['inspection_argv'])}")
 
 labels = [
     ("act_now", "Act now"),

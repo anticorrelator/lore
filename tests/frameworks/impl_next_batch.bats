@@ -9,11 +9,11 @@
 #   - unmatched subjects warned and treated as incomplete
 #   - same-file collision groups within the batch returned as conditions
 #   - the four lead-inline conditions as separate fields, no aggregate boolean
-#   - the execution-log attribution row is the only filesystem write
+#   - batch preparation writes only attribution and packet evidence
 #   - resolver tri-state propagation, archived refusal, missing tasks.json
 #
-# The plan checksum is intentionally NOT enforced by next-batch (checking
-# boxes edits plan.md mid-run by design), so fixtures use a stale checksum.
+# Legacy progress retains the exact checksum of the original unchecked plan.
+# Behavioral tests invoke the checkout script rather than an installed CLI target.
 
 REPO_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME:-$0}")/../.." && pwd)"
 LORE_CLI="$REPO_DIR/cli/lore"
@@ -52,9 +52,10 @@ EOF
 - [ ] verify alpha module
 EOF
   python3 - "$ITEM_DIR/tasks.json" <<'PYEOF'
-import json, sys
+import hashlib, json, pathlib, sys
+plan = pathlib.Path(sys.argv[1]).with_name("plan.md").read_bytes().replace(b"- [x] ", b"- [ ] ")
 data = {
- "plan_checksum": "stale-by-design-for-next-batch",
+ "plan_checksum": hashlib.sha256(plan).hexdigest(),
  "generated_at": "2026-06-10T00:00:00Z",
  "recommended_workers": 1,
  "phases": [
@@ -94,10 +95,19 @@ payload() {
   echo "$output" | grep '"slug"'
 }
 
+seal_fixture_generation() {
+  python3 - "$ITEM_DIR" <<'PYFIXTURE'
+import hashlib, json, pathlib, sys
+p=pathlib.Path(sys.argv[1]); data=json.loads((p/'tasks.json').read_text())
+data['plan_checksum']=hashlib.sha256((p/'plan.md').read_bytes().replace(b'- [x] ',b'- [ ] ')).hexdigest()
+(p/'tasks.json').write_text(json.dumps(data))
+PYFIXTURE
+}
+
 # --- Unblocked-set discovery -------------------------------------------------
 
 @test "--json returns only the unblocked pending task with refreshed payload fields" {
-  run bash "$LORE_CLI" impl next-batch batch-item --json
+  run bash "$NEXT_SH" batch-item --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -118,7 +128,7 @@ assert d["pending_blocked"] == [{"id": "task-3", "blocked_by_pending": ["task-2"
 @test "rows appended after open are picked up by the refresh" {
   echo '{"claim_id": "b3", "task_id": "task-2", "claim": "late row", "captured_at_sha": "fff"}' \
     >> "$ITEM_DIR/task-claims.jsonl"
-  run bash "$LORE_CLI" impl next-batch batch-item --json
+  run bash "$NEXT_SH" batch-item --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -130,7 +140,7 @@ assert [r["claim_id"] for r in d["batch"][0]["tier2_extract"]] == ["b1", "b2", "
 # --- Empty-batch semantics ------------------------------------------------------
 
 @test "fully blocked (the only unblocked task is --active) is success with an empty batch" {
-  run bash "$LORE_CLI" impl next-batch batch-item --active task-2 --json
+  run bash "$NEXT_SH" batch-item --active task-2 --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -149,7 +159,7 @@ p = sys.argv[1]
 s = open(p).read().replace("- [ ]", "- [x]")
 open(p, "w").write(s)
 PYEOF
-  run bash "$LORE_CLI" impl next-batch batch-item --json
+  run bash "$NEXT_SH" batch-item --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -167,7 +177,8 @@ p = sys.argv[1]
 s = open(p).read().replace("- [ ] build beta module\n", "")
 open(p, "w").write(s)
 PYEOF
-  run bash "$LORE_CLI" impl next-batch batch-item --json
+  seal_fixture_generation
+  run bash "$NEXT_SH" batch-item --json
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "task-2 subject matches no plan.md checkbox"
   payload | python3 -c '
@@ -181,7 +192,7 @@ assert d["pending_blocked"] == [{"id": "task-3", "blocked_by_pending": ["task-2"
 }
 
 @test "--active naming an unknown task warns but does not fail" {
-  run bash "$LORE_CLI" impl next-batch batch-item --active task-99 --json
+  run bash "$NEXT_SH" batch-item --active task-99 --json
   [ "$status" -eq 0 ]
   echo "$output" | grep -q -- "--active task-99 matches no task"
 }
@@ -201,7 +212,8 @@ d["phases"][1]["tasks"].append({
     "blockedBy": [], "file_targets": ["/src/beta.sh"], "description": "**Phase:** 2"})
 json.dump(d, open(tasks, "w"), indent=1)
 PYEOF
-  run bash "$LORE_CLI" impl next-batch batch-item --json
+  seal_fixture_generation
+  run bash "$NEXT_SH" batch-item --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -229,7 +241,8 @@ d["phases"][1]["tasks"].append({
     "description": "**Phase:** 2"})
 json.dump(d, open(tasks, "w"), indent=1)
 PYEOF
-  run bash "$LORE_CLI" impl next-batch batch-item --json
+  seal_fixture_generation
+  run bash "$NEXT_SH" batch-item --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -247,7 +260,7 @@ assert grp["chain_class"] == "judgment-dense"   # max(mechanical, judgment-dense
 # --- Lead-inline conditions --------------------------------------------------------
 
 @test "the four lead-inline conditions are separate fields with no aggregate boolean" {
-  run bash "$LORE_CLI" impl next-batch batch-item --json
+  run bash "$NEXT_SH" batch-item --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -263,22 +276,22 @@ assert "eligible" not in json.dumps(c).lower()
 
 # --- Write discipline ----------------------------------------------------------------
 
-@test "the execution-log attribution row is the only filesystem write" {
+@test "batch preparation writes only attribution and packet evidence" {
   before="$(find "$TEST_KDIR" -type f | sort)"
-  run bash "$LORE_CLI" impl next-batch batch-item --json
+  run bash "$NEXT_SH" batch-item --json
   [ "$status" -eq 0 ]
   after="$(find "$TEST_KDIR" -type f | sort)"
   diff <(echo "$before") <(echo "$after") > "$BATS_TEST_TMPDIR/fsdiff" || true
   new_files="$(grep '^>' "$BATS_TEST_TMPDIR/fsdiff" | sed 's/^> //')"
-  [ "$new_files" = "$ITEM_DIR/execution-log.md" ]
+  [ "$new_files" = "$(printf '%s\n' "$ITEM_DIR/execution-log.md" "$TEST_KDIR/_packets/README.md" "$TEST_KDIR/_packets/packets.jsonl" | sort)" ]
   grep -q "source: impl-verb" "$ITEM_DIR/execution-log.md"
   grep -q "Implement next-batch: 1 unblocked task(s) returned" "$ITEM_DIR/execution-log.md"
 }
 
 @test "each invocation appends exactly one attribution row" {
-  run bash "$LORE_CLI" impl next-batch batch-item --json
+  run bash "$NEXT_SH" batch-item --json
   [ "$status" -eq 0 ]
-  run bash "$LORE_CLI" impl next-batch batch-item --json
+  run bash "$NEXT_SH" batch-item --json
   [ "$status" -eq 0 ]
   count="$(grep -c "Implement next-batch:" "$ITEM_DIR/execution-log.md")"
   [ "$count" -eq 2 ]
@@ -315,7 +328,8 @@ data = {
 with open(sys.argv[1], "w") as f:
     json.dump(data, f, indent=1)
 PYEOF
-  run bash "$LORE_CLI" impl next-batch batch-item --json
+  seal_fixture_generation
+  run bash "$NEXT_SH" batch-item --json
   [ "$status" -eq 0 ]
   echo "$output" | grep '^{' | python3 -c '
 import json, sys
@@ -329,14 +343,14 @@ assert d["completed"] == ["task-1"], d["completed"]
 
 @test "a tasks.json with neither unit array is refused, not read as all-complete" {
   echo '{"generated_at": "2026-06-10T00:00:00Z"}' > "$ITEM_DIR/tasks.json"
-  run bash "$LORE_CLI" impl next-batch batch-item
+  run bash "$NEXT_SH" batch-item
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "regen-tasks"
 }
 
 @test "missing tasks.json exits 1 directing to lore work tasks" {
   rm "$ITEM_DIR/tasks.json"
-  run bash "$LORE_CLI" impl next-batch batch-item
+  run bash "$NEXT_SH" batch-item
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "lore work tasks batch-item"
 }
@@ -344,13 +358,13 @@ assert d["completed"] == ["task-1"], d["completed"]
 @test "archived item is refused" {
   mkdir -p "$WORK_DIR/_archive/old-item"
   printf '{"title": "Old Item"}\n' > "$WORK_DIR/_archive/old-item/_meta.json"
-  run bash "$LORE_CLI" impl next-batch old-item
+  run bash "$NEXT_SH" old-item
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "archived"
 }
 
 @test "no match exits 1 with the resolver error" {
-  run bash "$LORE_CLI" impl next-batch absolutely-no-such-thing-9999
+  run bash "$NEXT_SH" absolutely-no-such-thing-9999
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "No match for reference"
 }
@@ -365,7 +379,7 @@ assert d["completed"] == ["task-1"], d["completed"]
  {"slug": "beta-shared", "title": "Beta Shared", "tags": ["duptag"], "updated": "2026-01-02T00:00:00Z"}
 ], "archived": []}
 EOF
-  run bash "$LORE_CLI" impl next-batch duptag --json
+  run bash "$NEXT_SH" duptag --json
   [ "$status" -eq 2 ]
   echo "$output" | python3 -c '
 import json, sys
@@ -376,19 +390,19 @@ assert sorted(d["candidates"]) == ["alpha-shared", "beta-shared"]
 }
 
 @test "missing ref argument returns a usage error" {
-  run bash "$LORE_CLI" impl next-batch
+  run bash "$NEXT_SH"
   [ "$status" -eq 1 ]
   echo "$output" | grep -qi "missing required argument"
 }
 
 @test "unknown flag returns an error" {
-  run bash "$LORE_CLI" impl next-batch batch-item --no-such-flag
+  run bash "$NEXT_SH" batch-item --no-such-flag
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "Unknown flag"
 }
 
 @test "text mode renders the batch, blockers, and conditions" {
-  run bash "$LORE_CLI" impl next-batch batch-item
+  run bash "$NEXT_SH" batch-item
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "\[impl next-batch\] batch-item"
   echo "$output" | grep -q "Status: batch-ready"
@@ -400,4 +414,48 @@ assert sorted(d["candidates"]) == ["alpha-shared", "beta-shared"]
 @test "lore impl usage mentions the next-batch verb" {
   run bash "$LORE_CLI" impl --help
   echo "$output" | grep -q "next-batch"
+}
+
+@test "revision packets preserve old attempts and return the canonical dispatch tuple" {
+  source "$REPO_DIR/tests/helpers/packet_revision.bash"
+  packet_revision_fixture "$ITEM_DIR" batch-item
+  run bash "$NEXT_SH" batch-item  --json
+  [ "$status" -eq 0 ]
+  payload > "$BATS_TEST_TMPDIR/first.json"
+  cp "$TEST_KDIR/_packets/packets.jsonl" "$BATS_TEST_TMPDIR/old-packets"
+  printf '\nA changed task contract.\n' >> "$ITEM_DIR/plan.md"
+  bash "$REPO_DIR/scripts/plan-revise.sh" batch-item --decisions "$ITEM_DIR/decisions.json" >/dev/null
+  run bash "$NEXT_SH" batch-item  --json
+  [ "$status" -eq 0 ]
+  payload > "$BATS_TEST_TMPDIR/second.json"
+  run bash "$NEXT_SH" batch-item  --json
+  [ "$status" -eq 0 ]
+  payload > "$BATS_TEST_TMPDIR/retry.json"
+  python3 - "$TEST_KDIR" "$ITEM_DIR" "$BATS_TEST_TMPDIR" "$REPO_DIR" <<'PY'
+import json, pathlib, runpy, sys
+root, item, tmp, repo = map(pathlib.Path, sys.argv[1:])
+rows = [json.loads(line) for line in (root/'_packets/packets.jsonl').read_text().splitlines()]
+assert len(rows) == 3
+assert rows[1]['revision_id'] == rows[2]['revision_id']
+assert rows[1]['dispatch_attempt_id'] != rows[2]['dispatch_attempt_id']
+assert rows[1]['packet_id'] != rows[2]['packet_id']
+assert (root/'_packets/packets.jsonl').read_bytes().startswith((tmp/'old-packets').read_bytes())
+assert rows[0]['revision_id'] != rows[1]['revision_id']
+assert rows[0]['dispatch_attempt_id'] != rows[1]['dispatch_attempt_id']
+for filename, row in zip(('first.json','second.json','retry.json'), rows):
+    output = json.loads((tmp/filename).read_text())
+    tasks = output.get('batch', [op for op in output.get('manifest',[]) if op['op']=='TaskCreate'])
+    task = tasks[0]
+    for key in ('packet_id','revision_id','dispatch_attempt_id'):
+        assert task[key] == row[key] == output['packets'][0][key]
+    if 'batch' in output:
+        assert row['tier2_claim_ids'] == [r['claim_id'] for r in task['tier2_extract']]
+        assert row['delivered_entries'] == []
+        assert 'without knowledge-entry assembly' in row['empty_reason']
+view = runpy.run_path(str(repo/'scripts/work-evidence.py'))['project'](item, root)
+records = view['sources']['packets']['records']
+assert records[0]['binding'] == {'state':'stale','reason':'revision-mismatch'}
+assert records[1]['binding']['state'] == 'current'
+assert all(record['receipt']=='unknown' for record in records)
+PY
 }

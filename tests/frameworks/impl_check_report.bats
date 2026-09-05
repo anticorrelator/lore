@@ -139,20 +139,20 @@ EOF
 
 @test "missing --task exits 1 naming the flag" {
   write_basic_report
-  run bash "$LORE_CLI" impl check-report report-item --report "$REPORT"
+  run bash "$CHECK_SH" report-item --report "$REPORT"
   [ "$status" -eq 1 ]
   echo "$output" | grep -q -- "--task is required"
 }
 
 @test "missing --report exits 1 naming the flag" {
-  run bash "$LORE_CLI" impl check-report report-item --task 5
+  run bash "$CHECK_SH" report-item --task 5
   [ "$status" -eq 1 ]
   echo "$output" | grep -q -- "--report is required"
 }
 
 @test "the removed --phase flag is refused, naming the accepted flags" {
   write_basic_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --phase 1
   [ "$status" -eq 1 ]
   echo "$output" | grep -q -- "--task"
@@ -160,13 +160,13 @@ EOF
 
 @test "a task id absent from tasks.json is refused, naming the id" {
   write_basic_report
-  run bash "$LORE_CLI" impl check-report report-item --task task-99 --report "$REPORT"
+  run bash "$CHECK_SH" report-item --task task-99 --report "$REPORT"
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "task-99"
 }
 
 @test "nonexistent report file exits 1" {
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$TEST_KDIR/no-such-report.md"
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "report file not found"
@@ -174,7 +174,7 @@ EOF
 
 @test "invalid --provider-status exits 1 listing the enum" {
   write_basic_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 --report "$REPORT" \
+  run bash "$CHECK_SH" report-item --task 5 --report "$REPORT" \
     --provider-status degraded
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "full|partial|unavailable"
@@ -182,7 +182,7 @@ EOF
 
 @test "--spawned-advisors without --provider-status exits 1" {
   write_basic_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 --report "$REPORT" \
+  run bash "$CHECK_SH" report-item --task 5 --report "$REPORT" \
     --spawned-advisors "abcdef123456"
   [ "$status" -eq 1 ]
   echo "$output" | grep -q -- "--spawned-advisors requires --provider-status"
@@ -190,7 +190,7 @@ EOF
 
 @test "--provider-status unavailable rejects --spawned-advisors" {
   write_basic_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 --report "$REPORT" \
+  run bash "$CHECK_SH" report-item --task 5 --report "$REPORT" \
     --provider-status unavailable --spawned-advisors "abcdef123456"
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "does not take --spawned-advisors"
@@ -200,7 +200,7 @@ EOF
 
 @test "unknown reference exits 1" {
   write_basic_report
-  run bash "$LORE_CLI" impl check-report no-such-item-zzz --task 5 \
+  run bash "$CHECK_SH" no-such-item-zzz --task 5 \
     --report "$REPORT"
   [ "$status" -eq 1 ]
 }
@@ -218,7 +218,7 @@ EOF
   "archived": []
 }
 EOF
-  run bash "$LORE_CLI" impl check-report shared-tag --task 5 \
+  run bash "$CHECK_SH" shared-tag --task 5 \
     --report "$REPORT"
   [ "$status" -eq 2 ]
 }
@@ -227,7 +227,7 @@ EOF
 
 @test "all reported claim_ids found passes with exit 0" {
   write_basic_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --woven-norm norm-a
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Mechanical pass: true"
@@ -240,7 +240,7 @@ c1
 ghost-claim-9
 **Convention handling:** `none in scope`
 EOF
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT"
   [ "$status" -eq 3 ]
   echo "$output" | grep -q "ghost-claim-9"
@@ -253,7 +253,7 @@ EOF
 **Tier 2 evidence:** none
 **Convention handling:** `none in scope`
 EOF
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "none-reported"
@@ -264,7 +264,7 @@ EOF
 **Task:** Did stuff
 **Convention handling:** `none in scope`
 EOF
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT"
   [ "$status" -eq 3 ]
   echo "$output" | grep -q "Tier 2 evidence"
@@ -276,7 +276,7 @@ EOF
 ghost-claim-9
 **Convention handling:** `none in scope`
 EOF
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --json
   [ "$status" -eq 3 ]
   json_line | python3 -c '
@@ -291,7 +291,7 @@ assert d["task_id"] == "5"
 
 @test "passing report in --json carries mechanical_pass true with exit 0" {
   write_basic_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --woven-norm norm-a --json
   [ "$status" -eq 0 ]
   json_line | python3 -c '
@@ -322,7 +322,7 @@ EOF
 
 @test "a task declaring no consultation domains reports not-required" {
   write_basic_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Required consultations: not-required"
@@ -332,7 +332,7 @@ EOF
   write_consulted_report
   printf '{"consultation_id":"c-100","worker":"worker-5","domain":"security","handler":"lead","replied_at":"2026-06-10T00:00:00Z"}\n' \
     > "$TRANSCRIPT"
-  run bash "$LORE_CLI" impl check-report report-item --task 6 \
+  run bash "$CHECK_SH" report-item --task 6 \
     --report "$REPORT" --transcript "$TRANSCRIPT"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Required consultations: satisfied"
@@ -346,7 +346,7 @@ c1
 EOF
   printf '{"consultation_id":"c-100","worker":"worker-5","domain":"security","handler":"lead","replied_at":"2026-06-10T00:00:00Z"}\n' \
     > "$TRANSCRIPT"
-  run bash "$LORE_CLI" impl check-report report-item --task 6 \
+  run bash "$CHECK_SH" report-item --task 6 \
     --report "$REPORT" --transcript "$TRANSCRIPT"
   [ "$status" -eq 3 ]
   echo "$output" | grep -q "security"
@@ -357,7 +357,7 @@ EOF
   write_consulted_report
   printf '{"consultation_id":"c-999","worker":"worker-5","domain":"security","handler":"lead","replied_at":"2026-06-10T00:00:00Z"}\n' \
     > "$TRANSCRIPT"
-  run bash "$LORE_CLI" impl check-report report-item --task 6 \
+  run bash "$CHECK_SH" report-item --task 6 \
     --report "$REPORT" --transcript "$TRANSCRIPT"
   [ "$status" -eq 3 ]
   echo "$output" | grep -q "no acknowledged transcript record"
@@ -367,7 +367,7 @@ EOF
   write_consulted_report
   printf '{"consultation_id":"c-100","worker":"worker-7","domain":"security","handler":"lead","replied_at":"2026-06-10T00:00:00Z"}\n' \
     > "$TRANSCRIPT"
-  run bash "$LORE_CLI" impl check-report report-item --task 7 \
+  run bash "$CHECK_SH" report-item --task 7 \
     --report "$REPORT" --transcript "$TRANSCRIPT"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Required consultations: satisfied"
@@ -386,7 +386,7 @@ with open(sys.argv[1], "w") as f:
     json.dump(tasks, f, indent=2)
 PYEOF
   write_basic_report
-  run bash "$LORE_CLI" impl check-report report-item --task 8 --report "$REPORT"
+  run bash "$CHECK_SH" report-item --task 8 --report "$REPORT"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Required consultations: not-required"
 }
@@ -406,7 +406,7 @@ PYEOF
   write_consulted_report
   printf '{"consultation_id":"c-100","worker":"worker-5","domain":"security","handler":"lead","replied_at":"2026-06-10T00:00:00Z"}\n' \
     > "$TRANSCRIPT"
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --transcript "$TRANSCRIPT"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Required consultations: satisfied"
@@ -415,7 +415,7 @@ PYEOF
 @test "a tasks.json with neither unit array is refused, not read as no domains" {
   echo '{"generated_at": "2026-06-10T00:00:00Z"}' > "$ITEM_DIR/tasks.json"
   write_basic_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 --report "$REPORT"
+  run bash "$CHECK_SH" report-item --task 5 --report "$REPORT"
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "regen-tasks"
 }
@@ -423,14 +423,14 @@ PYEOF
 @test "a missing tasks.json is refused rather than passing the blocking check" {
   rm "$ITEM_DIR/tasks.json"
   write_basic_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 --report "$REPORT"
+  run bash "$CHECK_SH" report-item --task 5 --report "$REPORT"
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "lore work tasks"
 }
 
 @test "required domains without --transcript exit 1 naming the flag" {
   write_consulted_report
-  run bash "$LORE_CLI" impl check-report report-item --task 6 \
+  run bash "$CHECK_SH" report-item --task 6 \
     --report "$REPORT"
   [ "$status" -eq 1 ]
   echo "$output" | grep -q -- "--transcript"
@@ -440,7 +440,7 @@ PYEOF
 
 @test "missing woven norm is surfaced but does not block" {
   write_basic_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --woven-norm norm-a --woven-norm norm-b
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "missing: norm-b"
@@ -455,7 +455,7 @@ c1
 - honored: norm-a
 - honored: never-woven-norm
 EOF
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --woven-norm norm-a
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "unrecognized: never-woven-norm"
@@ -467,7 +467,7 @@ EOF
 c1
 **Convention handling:** `none in scope`
 EOF
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --woven-norm norm-a
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "'none in scope' reported but woven norms exist"
@@ -475,7 +475,7 @@ EOF
 
 @test "no --woven-norm flags yields a loud skipped status" {
   write_basic_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Convention handling: skipped-no-woven-list"
@@ -488,7 +488,7 @@ c1
 **Convention handling:**
 - honored: norm-a — applied the convention as written
 EOF
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --woven-norm norm-a --json
   [ "$status" -eq 0 ]
   json_line | python3 -c '
@@ -506,7 +506,7 @@ c1
 **Convention handling:**
 - honored: norm-a – applied the convention as written
 EOF
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --woven-norm norm-a
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Convention handling: clean"
@@ -519,7 +519,7 @@ c1
 **Convention handling:**
 - honored: norm-a - applied the convention as written
 EOF
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --woven-norm norm-a
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Convention handling: clean"
@@ -527,7 +527,7 @@ EOF
 
 @test "bare honored label with no rationale reports clean" {
   write_basic_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --woven-norm norm-a
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Convention handling: clean"
@@ -540,7 +540,7 @@ c1
 **Convention handling:**
 - honored: norm-with-hyphens — rationale text here
 EOF
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --woven-norm norm-with-hyphens
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Convention handling: clean"
@@ -553,7 +553,7 @@ c1
 **Convention handling:**
 - diverged: norm-a — the norm assumes a queue this change does not have
 EOF
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --woven-norm norm-a
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "diverged: norm-a"
@@ -582,7 +582,7 @@ EOF
 
 @test "agent consultations without --provider-status exit 1" {
   write_agent_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT"
   [ "$status" -eq 1 ]
   echo "$output" | grep -q -- "--provider-status"
@@ -590,7 +590,7 @@ EOF
 
 @test "provider full requires --spawned-advisors" {
   write_agent_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --provider-status full
   [ "$status" -eq 1 ]
   echo "$output" | grep -q -- "requires --spawned-advisors"
@@ -598,7 +598,7 @@ EOF
 
 @test "verified agent consultation rolls up scorecard rows" {
   write_agent_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --provider-status full \
     --spawned-advisors "abcdef123456"
   [ "$status" -eq 0 ]
@@ -610,7 +610,7 @@ EOF
 
 @test "unverified advisor is stripped and logged; rollup withheld" {
   write_agent_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --provider-status full --spawned-advisors ""
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Advisor rollup: skipped (all-entries-stripped)"
@@ -620,7 +620,7 @@ EOF
 
 @test "provider unavailable withholds the rollup and logs the branch" {
   write_agent_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --provider-status unavailable
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Advisor rollup: skipped (provider-unavailable)"
@@ -632,7 +632,7 @@ EOF
   write_consulted_report
   printf '{"consultation_id":"c-100","worker":"worker-5","domain":"security","handler":"lead","replied_at":"2026-06-10T00:00:00Z"}\n' \
     > "$TRANSCRIPT"
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --transcript "$TRANSCRIPT"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Fabrication guard: no-agent-consultations"
@@ -643,7 +643,7 @@ EOF
 
 @test "passing check appends one execution-log entry with source impl-verb" {
   write_basic_report
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --woven-norm norm-a
   [ "$status" -eq 0 ]
   grep -q "source: impl-verb" "$(log_file)"
@@ -657,7 +657,7 @@ EOF
 ghost-claim-9
 **Convention handling:** `none in scope`
 EOF
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT"
   [ "$status" -eq 3 ]
   grep -q "source: impl-verb" "$(log_file)"
@@ -669,7 +669,7 @@ EOF
   write_basic_report
   mkdir -p "$WORK_DIR/_archive"
   mv "$ITEM_DIR" "$WORK_DIR/_archive/report-item"
-  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+  run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT"
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "archived"
