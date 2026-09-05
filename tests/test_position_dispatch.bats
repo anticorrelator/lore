@@ -767,6 +767,8 @@ elif scenario=='launch':
     (temporary/'examples.json').write_text(json.dumps(examples,indent=2))
     print(json.dumps(examples))
 elif scenario=='archive':
+    metadata=json.loads((item/'_meta.json').read_text());metadata['status']='active'
+    (item/'_meta.json').write_text(json.dumps(metadata))
     refs=[]
     for fw in ('claude-code','codex','opencode'):
         d=compile('reviewer',fw);b=fixture('reviewer','archive-'+fw)
@@ -774,7 +776,8 @@ elif scenario=='archive':
         refs.append(bind(d,b));execution.rmdir()
     with ThreadPoolExecutor(max_workers=3) as pool:
         list(pool.map(lambda r:binder.resolve_dispatch(r['manifest_path'],r['manifest_sha256']),refs))
-    archived=store/'_archive/fixture';archived.parent.mkdir();item.rename(archived)
+    call(['bash',str(repo/'scripts/archive-work.sh'),'fixture'])
+    archived=store/'_work/_archive/fixture'
     for ref in refs:
         result=binder.resolve_dispatch(ref['manifest_path'],ref['manifest_sha256'])
         assert result['manifest']['work_item_path']==str(item)
@@ -791,6 +794,10 @@ elif scenario=='archive':
     refused(lambda:binder.resolve_dispatch(refs[0]['manifest_path'],refs[0]['manifest_sha256']))
     refused(lambda:binder.resolve_dispatch(unrelated/'position-dispatch/archive-claude-code/manifest.json',refs[0]['manifest_sha256']))
     unrelated.rename(archived)
+    # The historical location remains readable without rewriting the manifest.
+    legacy=store/'_archive/fixture';legacy.parent.mkdir();archived.rename(legacy)
+    assert binder.resolve_dispatch(refs[0]['manifest_path'],refs[0]['manifest_sha256'])['resolved_manifest_path'].startswith(str(legacy))
+    legacy.rename(archived)
     # Active item with the same slug cannot borrow an archived attempt.
     item.mkdir()
     refused(lambda:binder.resolve_dispatch(refs[0]['manifest_path'],refs[0]['manifest_sha256']))

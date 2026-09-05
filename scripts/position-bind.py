@@ -78,7 +78,7 @@ def validate_bindings(bindings, position, kdir, required=(), *, preparation=True
     if bindings['revision_id'] is not None and not re.fullmatch(r'[0-9a-f]{12}', bindings['revision_id']):
         raise ValueError('invalid revision_id')
     item = kdir.resolve() / '_work' / bindings['work_item']
-    physical_item = kdir.resolve() / '_archive' / bindings['work_item'] if archived else item
+    physical_item = archived_item(kdir.resolve(), bindings['work_item']) if archived else item
     if not physical_item.is_dir() or physical_item.is_symlink():
         raise ValueError('work item must exist in the selected store')
     execution = absolute(bindings['execution_root'], 'execution_root') if bindings['execution_root'] is not None else None
@@ -116,19 +116,30 @@ def file_record(path, data):
     return {'path': str(path), 'sha256': digest(data), 'bytes': len(data)}
 
 
+def archived_item(kdir, slug):
+    canonical = kdir / '_work' / '_archive' / slug
+    historical = kdir / '_archive' / slug
+    if canonical.exists() and historical.exists():
+        raise ValueError('conflicting archived item locations')
+    return canonical if canonical.exists() or not historical.exists() else historical
+
+
 def resolve_manifest_path(manifest_path):
-    """Resolve only an original _work reference or its exact _archive counterpart."""
+    """Resolve active references through canonical archival or the historical layout."""
     path = Path(manifest_path)
     if not path.is_absolute() or path.name != 'manifest.json':
         raise ValueError('invalid dispatch manifest path')
-    # <store>/<tier>/<item>/position-dispatch/<attempt>/manifest.json
     if path.parent.parent.name != 'position-dispatch' or path.parents[3].name not in ('_work', '_archive'):
         raise ValueError('invalid dispatch manifest location')
-    original = path.parents[4] / '_work' / path.parents[2].name / 'position-dispatch' / path.parent.name / path.name
-    archived = path.parents[4] / '_archive' / path.parents[2].name / 'position-dispatch' / path.parent.name / path.name
-    if path == archived and original.parents[2].exists():
+    container = path.parents[3]
+    kdir = container.parent.parent if container.name == '_archive' and container.parent.name == '_work' else container.parent
+    slug = path.parents[2].name
+    active = kdir / '_work' / slug
+    archived = archived_item(kdir, slug)
+    if active.exists() and archived.exists():
         raise ValueError('active and archived item conflict')
-    resolved = original if original.parents[2].exists() else archived
+    item = active if active.exists() else archived
+    resolved = item / 'position-dispatch' / path.parent.name / path.name
     if resolved.is_symlink() or resolved.resolve() != resolved:
         raise ValueError('dispatch reference cannot follow symlinks')
     return resolved

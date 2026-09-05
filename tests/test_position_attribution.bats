@@ -144,7 +144,7 @@ for position in ('investigator','designer','worker','reviewer'):
             if framework == 'codex':
                 claim = emit_claim('claim-' + attempt,ref)
                 assert claim['producer_attribution']['template_version'] == d['template_version']
-                write_log('Task: task-1\nReport-key: fixture/task-1\nChanges: Isolated attribution fixture.\nSurfaced concerns: None', ref)
+                write_log('Task: task-1\nReport-key: fixture/task-1\nChanges: Isolated attribution fixture.\nSurfaced concerns: None', ref, version=d['template_version'])
 
 worker = next(r for r in refs if r[0]['position']=='worker' and r[0]['framework']=='codex')
 d,b,ref = worker
@@ -183,7 +183,7 @@ assert result['mechanical_pass'] and result['producer_attribution']['template_ve
 assert project(report_record(report.replace(d['template_version'],'0'*12)))['status']=='unknown'
 assert project(report_record(report.replace('Producer-role: worker','Producer-role: reviewer')))['status']=='unknown'
 assert project(report_record(report.replace(b['report_id'],'other-report')))['status']=='unknown'
-write_log(report.replace('**Surfaced concerns:**','Surfaced concerns:'))
+write_log(report.replace('**Surfaced concerns:**','Surfaced concerns:'), version=d['template_version'])
 assert 'Retain this isolated routing concern.' in (item/'off_scale_routes.jsonl').read_text()
 script('write-execution-log.sh','--slug','fixture','--source','implement-lead','--template-version',d['template_version'],
        '--filing-template-version','111111111111','--position-dispatch-manifest',ref['manifest_path'],
@@ -257,7 +257,7 @@ new = make_attempt('worker','codex','worker-retry')
 assert new[0]['template_version'] != d['template_version']
 assert project({'position_dispatch':ref})['template_version']==d['template_version']
 assert project({'position_dispatch':new[2]})['template_version']==new[0]['template_version']
-emit_claim('claim-worker-retry',new[2]);write_log('Task: task-1\nReport-key: fixture/task-1',new[2])
+emit_claim('claim-worker-retry',new[2]);write_log('Task: task-1\nReport-key: fixture/task-1',new[2],version=new[0]['template_version'])
 refs.append(new)
 
 # Real registry refusal must prevent a new compiled artifact from looking registered.
@@ -284,13 +284,200 @@ try:
 finally:
     log_writer.write_bytes(source)
 
-# Downstream reader fixture additions are integrated here by the owning lead.
-
 # The original active reference survives archival; no historical row is rewritten.
-archive = store/'_archive';archive.mkdir(exist_ok=True)
-item.rename(archive/'fixture')
+script('archive-work.sh','fixture')
+archive = store/'_work/_archive'
 assert project({'position_dispatch':ref})['status']=='resolved'
-(archive/'fixture').rename(item)
+script('unarchive-work.sh','fixture')
+# Python fragment: insert inside exercise_attribution()'s Python heredoc, after
+# the writer checks and before its final PY delimiter. Uses the fixture API in
+# task-4-writers-interface.md; invoke reader_checks() once. No production data.
+def reader_checks():
+    import copy
+    from position_attribution import project
+
+    def json_output(result):
+        return json.loads(result.stdout)
+
+    def audit(path, gate=None, curator=None):
+        args = ['bash', str(repo/'scripts/audit-artifact.sh'), str(path), '--kdir', str(store), '--json']
+        if Path(path).name == 'promoted-commons.jsonl':
+            args = ['bash',str(repo/'scripts/audit-artifact.sh'),'--kdir',str(store),'--json',
+                    '--work-item','fixture','--kind','commons','--id','reader-promoted']
+        if gate is None:
+            args += ['--dry-run']
+        else:
+            args += ['--gate-output-file', str(gate)]
+            if curator is not None:
+                args += ['--curator-output-file', str(curator)]
+        return call(args)
+
+    def candidate(cid, ids):
+        return dict(claim_id=cid, tier='reusable', claim='Compiled fixture attribution '+cid,
+                    producer_role='worker', protocol_slot='implement-step-3', scale='implementation',
+                    why_future_agent_cares='The original producing version remains recoverable.',
+                    falsifier='A different compiled version is recovered from the source.',
+                    related_files=[str(repo/'scripts/position_attribution.py')],
+                    source_artifact_ids=ids, work_item='fixture', captured_at_sha='abc123')
+
+    (store/'_manifest.json').write_text('{"version":1}\n')
+    first = make_attempt(attempt='reader-first')
+    brief = repo/'agents/positions/worker.md'
+    original = brief.read_bytes()
+    brief.write_bytes(original+b'\nFixture version change.\n')
+    try:
+        second = make_attempt(attempt='reader-second')
+    finally:
+        brief.write_bytes(original)
+    assert first[0]['template_version'] != second[0]['template_version']
+    ref1 = {k:first[2][k] for k in ('manifest_path','manifest_sha256')}
+    ref2 = {k:second[2][k] for k in ('manifest_path','manifest_sha256')}
+    emit_claim('reader-first', ref1)
+    emit_claim('reader-second', ref2)
+    emit_claim('reader-legacy')
+    missing = dict(ref1, manifest_sha256='0'*64)
+    emit_claim('reader-unknown', missing)
+    claims_path = item/'task-claims.jsonl'
+    resolved = json_output(audit(claims_path))
+    claims = {c['claim_id']:c for c in resolved['claim_payload']}
+    for name, attempt in [('reader-first',first),('reader-second',second)]:
+        producer = claims[name]['producer_attribution']
+        assert producer['status'] == 'resolved', producer
+        assert producer['template_version'] == attempt[0]['template_version']
+        assert producer['template_id'] == attempt[0]['template_id']
+    assert claims['reader-unknown']['producer_attribution']['status'] == 'unknown'
+    assert 'producer_attribution' not in claims['reader-legacy']
+    assert resolved['producer_template_version'] == 'unknown'
+
+    gate = item/'reader-gate.json'
+    gate.write_text(json.dumps({'judge':'correctness-gate','judge_template_version':'reader-fixture',
+        'verdicts':[{'claim_id':name,'verdict':'verified','evidence':'isolated fixture'}
+                    for name in ['reader-first','reader-second','reader-legacy','reader-unknown']]}))
+    curator = item/'reader-curator.json'
+    curator.write_text(json.dumps({'judge':'curator','judge_template_version':'reader-fixture',
+        'selected':[{'claim_id':'reader-first','selection_rationale':'fixture'}],
+        'dropped':[{'claim_id':name,'drop_rationale':'fixture'}
+                   for name in ['reader-second','reader-legacy','reader-unknown']]}))
+    audit(claims_path,gate,curator)
+    rows = [json.loads(line) for line in (store/'_scorecards/rows.jsonl').read_text().splitlines() if line.strip()]
+    for attempt in [first,second]:
+        matching = [r for r in rows if r.get('template_version') == attempt[0]['template_version']]
+        assert any(r['metric']=='factual_precision' and r['value']==1 for r in matching), matching
+        assert any(r['metric']=='curated_rate' for r in matching), matching
+        assert all(r['template_id']==attempt[0]['template_id'] for r in matching)
+    assert any(r.get('template_version')=='unknown' for r in rows)
+    assert any(r.get('template_version')=='task-claims-jsonl' for r in rows)
+
+    candidates = item/'reader-candidates.json'
+    candidates.write_text(json.dumps([candidate('reader-promoted',['reader-first']),
+        candidate('reader-mixed',['reader-first','reader-second']),
+        candidate('reader-missing',['reader-unknown']),
+        dict(candidate('reader-wrong-role',['reader-first']),producer_role='implement-lead'),
+        dict(candidate('reader-wrong-ref',['reader-first']),position_dispatch=ref2)]))
+    result = call(['bash',str(repo/'scripts/impl-promote-batch.sh'),'fixture','--candidates',str(candidates),'--json'])
+    # Some canonical writers log before the final one-line JSON result.
+    payload = [json.loads(line) for line in result.stdout.decode().splitlines() if line.startswith('{')][-1]
+    assert len(payload['accepted']) == 1 and len(payload['rejected']) == 4, payload
+    promoted = [json.loads(line) for line in (item/'promoted-commons.jsonl').read_text().splitlines()]
+    row = next(r for r in promoted if r['claim_id']=='reader-promoted')
+    assert row['position_dispatch'] == ref1
+    assert row['source_artifact_ids'] == ['reader-first']
+    assert row['template_version'] == first[0]['template_version']
+    assert first[0]['template_version'] in (store/row['entry_path']).read_text()
+    projected = json_output(audit(item/'promoted-commons.jsonl'))
+    assert next(c for c in projected['claim_payload'] if c['claim_id']=='reader-promoted')['producer_attribution']['status']=='resolved'
+
+    # Assert the finalized legacy vocabulary directly, without deriving the
+    # expected role from the same resolver that is under test.
+    for position, expected_role in [('investigator','researcher'),('reviewer','advisor')]:
+        typed = make_attempt(position=position,attempt='reader-role-'+position)
+        typed_claim = emit_claim('reader-role-'+position,typed[2])
+        assert typed_claim['producer_role'] == expected_role, typed_claim
+        assert typed_claim['producer_attribution']['status'] == 'resolved', typed_claim
+        typed_candidates = item/('reader-role-'+position+'.json')
+        typed_candidates.write_text(json.dumps([dict(candidate('reader-promote-'+position,['reader-role-'+position]),producer_role=expected_role)]))
+        result = call(['bash',str(repo/'scripts/impl-promote-batch.sh'),'fixture','--candidates',str(typed_candidates),'--json'])
+        typed_result = [json.loads(line) for line in result.stdout.decode().splitlines() if line.startswith('{')][-1]
+        assert typed_result['accepted_count'] == 1, typed_result
+
+    # Corrupt only the isolated registry: the reader must not emit an eligible
+    # compiled hash when the sanctioned registration writer refuses the store.
+    registry = store/'_scorecards/template-registry.json'
+    registry_bytes = registry.read_bytes()
+    registry.write_text('{"schema_version":"broken","entries":[]}')
+    try:
+        broken = json_output(audit(claims_path))
+        assert next(c for c in broken['claim_payload'] if c['claim_id']=='reader-first')['producer_attribution']['status']=='unknown'
+    finally:
+        registry.write_bytes(registry_bytes)
+
+    call(['bash',str(repo/'scripts/template-registry-register.sh'),'--kdir',str(store),
+          '--template-id',first[0]['template_id'],'--template-version',first[0]['template_version'],
+          '--template-path',str(brief)],ok=False)
+    advisor = make_attempt(position='designer',attempt='reader-advisor',mode='consultation')
+    answer = dict(handler='agent',advisor_template_version=advisor[0]['template_version'],
+                  consultation_id=advisor[1]['consultation_id'],domain='storage',query_summary='Fixture query',
+                  advice_summary='Fixture reply',was_followed=True,position_dispatch=advisor[2])
+    rolled = json_output(call(['bash',str(repo/'scripts/advisor-impact-rollup.sh'),'rollup','--kdir',str(store),
+        '--work-item','fixture','--consultations-json',json.dumps([answer]),'--json']))
+    assert rolled['advisors'] == [advisor[0]['template_version']], rolled
+    before = (store/'_scorecards/rows.jsonl').read_bytes()
+    unknown_answer = dict(answer,position_dispatch=dict(advisor[2],manifest_sha256='0'*64))
+    call(['bash',str(repo/'scripts/advisor-impact-rollup.sh'),'rollup','--kdir',str(store),
+        '--work-item','fixture','--consultations-json',json.dumps([unknown_answer]),'--json'])
+    assert (store/'_scorecards/rows.jsonl').read_bytes() == before
+    for invalid_answer in [dict(answer,position_dispatch=ref1,advisor_template_version=first[0]['template_version']),
+                           dict(answer,domain='different-domain'),dict(answer,consultation_id='wrong-id')]:
+        call(['bash',str(repo/'scripts/advisor-impact-rollup.sh'),'rollup','--kdir',str(store),
+            '--work-item','fixture','--consultations-json',json.dumps([invalid_answer]),'--json'])
+        assert (store/'_scorecards/rows.jsonl').read_bytes() == before
+
+    # Sampling observes each new compiled version even when the lead version
+    # already has historical telemetry, and ignores the current close's rows.
+    history = dict(schema_version='1',kind='telemetry',tier='telemetry',calibration_state='pre-calibration',
+                   event_type='fixture',metric='fixture',work_item='previous',template_version='111111111111')
+    call(['bash',str(repo/'scripts/scorecard-append.sh'),'--kdir',str(store)],input=json.dumps(history).encode())
+    attr = [{'task_id':'task-1','producer_attempts':[project({'position_dispatch':ref1}),project({'position_dispatch':ref2})]}]
+    sampled = json_output(call(['bash',str(repo/'scripts/retro-sampling-gate.sh'),'--kdir',str(store),
+        '--slug','fixture','--terminus','impl-close','--template-version','111111111111','--first-k','0',
+        '--routine-rate','0','--task-attribution',json.dumps(attr),'--json']))
+    assert 'new_template_version' in sampled['strata'], sampled
+    assert {p['template_version'] for p in sampled['new_producer_versions']} == {first[0]['template_version'],second[0]['template_version']}
+
+    forged = dict(project({'position_dispatch':ref1}),position_dispatch=missing,template_version='f'*12)
+    forged_sample = json_output(call(['bash',str(repo/'scripts/retro-sampling-gate.sh'),'--kdir',str(store),
+        '--slug','fixture','--terminus','impl-close','--template-version','111111111111','--first-k','0',
+        '--routine-rate','0','--task-attribution',json.dumps([{'producer_attempts':[forged]}]),'--json']))
+    assert not forged_sample['new_producer_versions'], forged_sample
+    write_log('Task: task-1\nReport-key: fixture/task-1\nSpend: task=task-1 total_tokens=10\n',ref1,first[0]['template_version'])
+    write_log('Task: task-1\nReport-key: fixture/task-1\n',ref1,first[0]['template_version'])
+    call(['bash',str(repo/'scripts/write-execution-log.sh'),'--slug','fixture','--source','impl-verb',
+          '--template-version','111111111111','--position-dispatch-manifest',ref1['manifest_path'],
+          '--position-dispatch-sha256',ref1['manifest_sha256']],input=b'Check-report task: task-1')
+    write_log('Task: task-1\nReport-key: fixture/task-1\nSpend: task=task-1 total_tokens=20\n',ref2,second[0]['template_version'])
+    call(['bash',str(repo/'scripts/write-execution-log.sh'),'--slug','fixture','--source','implement-lead',
+          '--template-version','0'*12,'--filing-template-version','111111111111',
+          '--position-dispatch-manifest',advisor[2]['manifest_path'],
+          '--position-dispatch-sha256',advisor[2]['manifest_sha256']],input=b'Task: task-1')
+    plan = item/'plan.md'
+    plan.write_text(plan.read_text().replace('- [ ]','- [x]'))
+    call(['bash',str(repo/'scripts/impl-close.sh'),'fixture','--verdict','full','--summary','Fixture complete.','--json'])
+    archived = store/'_work/_archive/fixture'
+    assert archived.is_dir(), list(store.iterdir())
+    bundle = json.loads((archived/'retro-bundle.json').read_text())
+    task = next(t for t in bundle['task_attribution'] if t['task_id']=='task-1')
+    assert {p['template_version'] for p in task['producer_attempts'] if p['status']=='resolved'} >= {first[0]['template_version'],second[0]['template_version']}, task
+    assert next(p for p in task['producer_attempts'] if p['position_dispatch']==advisor[2])['status']=='unknown', task
+    assert sum(p['position_dispatch']==ref1 for p in task['producer_attempts']) == 1, task
+    assert len(task['producer_attempts']) == len(task['dispatch_context_estimates']), task
+    assert isinstance(task['spend'],list) and [s['total_tokens'] for s in task['spend']][-2:] == [10,20]
+    assert project({'position_dispatch':ref1})['status']=='resolved'
+    assert project({'position_dispatch':ref2})['status']=='resolved'
+    assert project({'position_dispatch':missing})['status']=='unknown'
+    print('reader_checks: mixed versions, audit, promotion, registry refusal, sampling, close and archive passed')
+
+reader_checks()
+
 (temporary/'commands.json').write_text(json.dumps(commands,indent=2))
 (temporary/'fixture-index.json').write_text(json.dumps({'isolated_test_data':True,'source':str(original),'attempts':[{'producer':d,'bindings':b,'position_dispatch':r} for d,b,r in refs]},indent=2))
 print(f'PASS: {len(refs)} compiled attempts, canonical report/claim/consultation/log writers, legacy/unknown/archive/failure controls; fixtures: {temporary}')
