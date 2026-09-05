@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/followup"
+	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
@@ -183,6 +184,18 @@ func readPlanContent(workDir, slug string) tea.Cmd {
 // handleIndexPollTick handles the periodic poll tick: schedules mtime checks, touches
 // session files for active spec panels, and kicks off a new tick.
 func (m model) handleIndexPollTick() (model, tea.Cmd) {
+	if m.pollingStopped {
+		return m, nil
+	}
+	if m.instanceName != "" {
+		// Registration is established by Init. Its removal retires this UI's
+		// poll loop; a heartbeat must not resurrect it or launch more readers.
+		if _, err := os.Stat(filepath.Join(session.InstancesDir(m.sessionsDir), m.instanceName+".json")); err != nil {
+			m.pollingStopped = true
+			m.flashErr = compactErr("polling stopped: session registry", err)
+			return m, nil
+		}
+	}
 	cmds := []tea.Cmd{checkIndexMtime(m.indexPath), indexPollTick()}
 	// Poll plan.md and detail files for the current item on every tick.
 	if slug := m.list.CurrentSlug(); slug != "" {

@@ -566,3 +566,57 @@ def test_result_identity_mode_propagates_into_submodules(code, tmp_path):
     assert identity()['digest'] == baseline['digest']
     write(code / 'child/source.py', 'different child bytes')
     assert identity()['digest'] != baseline['digest']
+
+
+def test_packet_snapshot_preserves_raw_selection_and_unknown_rows(store):
+    root, item = store
+    path = root / "_packets/packets.jsonl"
+    raw = (' {"schema_version":1,"work_item":"example","packet_id":"p1"} \r\n'
+           '{"schema_version":99,"work_item":"other"}\n'
+           'broken\n'
+           '[]\n'
+           '{"schema_version":2,"work_item":"example","packet_id":"p2"}\n')
+    write(path, raw)
+    snapshot = API["LedgerSnapshot"](path, root, {"1", "2"})
+    selected = snapshot.read(select=lambda row: row.get("work_item") == "example")
+    # read_file decodes the bytes directly, preserving CRLF in the fingerprint.
+    expected = raw.splitlines(keepends=True)
+    expected = "".join(expected[i] for i in (0, 2, 3, 4))
+    assert selected["content"] == expected
+    assert selected["sha256"] == sha256(expected.encode())
+    assert selected["size"] == len(expected.encode())
+    assert selected["row_count"] == 2
+    assert selected["errors"] == [{"line": 3, "reason": "invalid-json-row"},
+                                  {"line": 4, "reason": "invalid-json-row"}]
+    assert selected["state"] == "unreadable"
+    other = snapshot.read(select=lambda row: row.get("work_item") == "other")
+    assert other["errors"][0] == {"line": 2, "reason": "unsupported-schema-version"}
+
+
+def test_shared_packet_snapshot_matches_independent_projection_and_refreshes(mixed):
+    root, item, _ = mixed
+    path = root / "_packets/packets.jsonl"
+    snapshot = API["LedgerSnapshot"](path, root, {"1", "2"})
+    expected = project(item, root)
+    actual = project(item, root, packet_ledger=snapshot)
+    assert actual == expected
+    actual["sources"]["packets"]["rows"][0]["packet_id"] = "mutated"
+    assert project(item, root, packet_ledger=snapshot) == expected
+    with path.open("a") as stream:
+        stream.write('{"schema_version":1,"work_item":"example","packet_id":"new"}\n')
+    assert project(item, root, packet_ledger=snapshot) == expected
+    refreshed = API["LedgerSnapshot"](path, root, {"1", "2"})
+    assert project(item, root, packet_ledger=refreshed) == project(item, root)
+    assert len(project(item, root)["packet_summary"]) == len(expected["packet_summary"]) + 1
+
+
+@pytest.mark.parametrize("raw,state", [(None, "absent"), (b"\xff", "unreadable")])
+def test_packet_snapshot_preserves_absent_and_unreadable(store, raw, state):
+    root, item = store
+    path = root / "_packets/packets.jsonl"
+    if raw is not None:
+        path.parent.mkdir(parents=True)
+        path.write_bytes(raw)
+    snapshot = API["LedgerSnapshot"](path, root, {"1", "2"})
+    assert snapshot.read()["state"] == state
+    assert project(item, root, packet_ledger=snapshot) == project(item, root)

@@ -235,3 +235,23 @@ func TestAtomicWriteLeavesNoTmp(t *testing.T) {
 		}
 	}
 }
+
+func TestHeartbeatExistingDoesNotRecreateRemovedRegistration(t *testing.T) {
+	dir := t.TempDir()
+	inst := Instance{Name: "retired-ui", PID: 3}
+	if err := WriteInstance(dir, inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := HeartbeatExisting(dir, inst.Name); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveInstance(dir, inst.Name); err != nil {
+		t.Fatal(err)
+	}
+	if err := HeartbeatExisting(dir, inst.Name); !os.IsNotExist(err) {
+		t.Fatalf("missing registration should remain absent: %v", err)
+	}
+	if InstanceLive(dir, inst.Name) {
+		t.Fatal("removed registration was recreated")
+	}
+}

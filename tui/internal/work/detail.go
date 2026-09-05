@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
+	"github.com/anticorrelator/lore/tui/internal/projection"
 )
 
 // ExtraFile holds the name and content of a non-canonical document found in a
@@ -257,7 +258,7 @@ func loadEvidence(detail *WorkItemDetail, itemDir, knowledgeDir string) {
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "python3", "-B", filepath.Join(repo, "scripts", "work-evidence.py"), "--item-dir", itemDir, "--knowledge-dir", knowledgeDir)
 		var output []byte
-		output, err = cmd.Output()
+		output, err = projection.Output(ctx, cmd, false)
 		if err == nil {
 			var envelope struct {
 				SchemaVersion         int    `json:"schema_version"`

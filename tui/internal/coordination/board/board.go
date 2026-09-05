@@ -11,6 +11,8 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+
+	"github.com/anticorrelator/lore/tui/internal/projection"
 )
 
 // Row is one authored stream in an arc's coordination ledger.
@@ -115,7 +117,7 @@ func LoadAttention(ctx context.Context) (Attention, error) {
 
 func loadStatus(ctx context.Context) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "lore", "coordinate", "status", "--json")
-	out, err := cmd.CombinedOutput()
+	out, err := projection.Output(ctx, cmd, true)
 	if err == nil {
 		return out, nil
 	}

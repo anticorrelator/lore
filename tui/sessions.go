@@ -141,12 +141,16 @@ func readInstancesCmd(sessionsDir string) tea.Cmd {
 	}
 }
 
-// syncInstanceCmd heartbeats this instance's registry file, recreating it if a
-// stale-reaper or first tick left it absent.
+// syncInstanceCmd touches an interactive UI's existing registration. Dedicated
+// session hosts retain their recovery heartbeat independently of UI polling.
 func (m model) syncInstanceCmd() tea.Cmd {
 	dir := m.sessionsDir
 	inst := m.instanceRow()
+	host := m.hostKey != ""
 	return func() tea.Msg {
+		if !host {
+			return instanceSyncedMsg{err: session.HeartbeatExisting(dir, inst.Name)}
+		}
 		// A managed tree needs nothing from this loop: it comes down as part of
 		// the release its owner drives, not on a lease this heartbeat renews.
 		return instanceSyncedMsg{err: session.Heartbeat(dir, inst)}

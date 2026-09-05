@@ -156,16 +156,18 @@ func (m model) Init() tea.Cmd {
 		m.scanArcStoreCmd(),
 		loadWorkItems(m.config.WorkDir),
 		loadPRStatus(),
-		indexPollTick(),
 		followup.LoadIndexCmd(m.config.KnowledgeDir),
 		runDoctor(),
 		tea.RequestForegroundColor,
 		tea.RequestBackgroundColor,
 	}
+	if m.instanceName == "" {
+		cmds = append(cmds, indexPollTick())
+	}
 	// Register this instance in the substrate so other instances see it (and the
 	// queue's own-liveness check works) from the first tick.
 	if m.instanceName != "" {
-		cmds = append(cmds, m.writeInstanceCmd(), m.sessionsRefreshCmd())
+		cmds = append(cmds, tea.Sequence(m.writeInstanceCmd(), indexPollTick()), m.sessionsRefreshCmd())
 		// D5 crash/restart recovery: scan for dead instances' still-running
 		// tmux-hosted sessions and adopt them, once at startup (before the first
 		// poll tick, which is scheduled 5s out). tmux-gated — with tmux off,
@@ -669,6 +671,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		return m.handlePeekResponded(msg)
 
 	case instanceSyncedMsg:
+		if msg.err != nil && m.hostKey == "" && os.IsNotExist(msg.err) {
+			m.pollingStopped = true
+		}
 		if msg.err != nil {
 			m.flashErr = compactErr("session registry", msg.err)
 		}

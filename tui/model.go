@@ -270,6 +270,7 @@ type model struct {
 	// set of sessions this instance owns (written into its registry row);
 	// pendingSpawns holds a session's metadata between claim/confirm and the
 	// SpecProcessStarted that promotes it into localSessions.
+	pollingStopped     bool
 	instanceName       string
 	sessionsDir        string
 	eventScript        string

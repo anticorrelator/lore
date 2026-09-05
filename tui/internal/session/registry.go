@@ -128,13 +128,18 @@ func WriteInstance(sessionsDir string, inst Instance) error {
 	return atomicWrite(instancePath(sessionsDir, inst.Name), data)
 }
 
+// HeartbeatExisting renews a registration without recreating a removed row.
+func HeartbeatExisting(sessionsDir, name string) error {
+	now := time.Now()
+	return os.Chtimes(instancePath(sessionsDir, name), now, now)
+}
+
 // Heartbeat bumps the instance file's mtime to signal liveness. When the file
 // is absent (first tick, or a hard-killed predecessor was never present) it
 // rewrites the full row from inst so the instance re-registers rather than
 // silently dropping out of snapshots.
 func Heartbeat(sessionsDir string, inst Instance) error {
-	now := time.Now()
-	err := os.Chtimes(instancePath(sessionsDir, inst.Name), now, now)
+	err := HeartbeatExisting(sessionsDir, inst.Name)
 	if errors.Is(err, os.ErrNotExist) {
 		return WriteInstance(sessionsDir, inst)
 	}

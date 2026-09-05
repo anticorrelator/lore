@@ -78,46 +78,69 @@ def read_file(path, root, *, json_file=False, versions=None):
     return result
 
 
-def read_ledger(path, root, versions=None, *, select=None, prefix=None):
-    result = read_file(path, root)
-    result.update(rows=[], row_count=0, errors=[])
-    if result["state"] != "read":
-        return result
-    if result["content"] is None:
-        return mark(result, "unreadable", "invalid-utf8")
-    selected = []
-    for line_number, line in enumerate(result["content"].splitlines(keepends=True), 1):
-        if prefix is not None:
-            if not line.startswith(prefix):
+class LedgerSnapshot:
+    """One invocation's parsed ledger; selections retain raw row fingerprints.
+
+    Malformed rows belong to every selection because their owner is unknown.
+    Each read returns independent data for the projection's validation passes.
+    """
+
+    def __init__(self, path, root, versions=None, *, prefix=None):
+        self.source = read_file(path, root)
+        self.versions = versions
+        self.prefix = prefix
+        self.lines = []
+        if self.source["state"] != "read":
+            return
+        if self.source["content"] is None:
+            mark(self.source, "unreadable", "invalid-utf8")
+            return
+        for line_number, line in enumerate(self.source["content"].splitlines(keepends=True), 1):
+            if prefix is not None:
+                if not line.startswith(prefix):
+                    continue
+                line = line[len(prefix):]
+            if not line.strip():
                 continue
-            line = line[len(prefix):]
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-            if not isinstance(row, dict):
-                raise ValueError("expected-object")
-        except ValueError:
+            try:
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    raise ValueError("expected-object")
+            except ValueError:
+                row = None
+            self.lines.append((line_number, line, row))
+
+    def read(self, *, select=None):
+        result = dict(self.source, rows=[], row_count=0, errors=[])
+        if result["state"] != "read":
+            return result
+        selected = []
+        for line_number, line, row in self.lines:
+            if row is None:
+                selected.append(line)
+                result["errors"].append({"line": line_number, "reason": "invalid-json-row"})
+                continue
+            if select is not None and not select(row):
+                continue
             selected.append(line)
-            result["errors"].append({"line": line_number, "reason": "invalid-json-row"})
-            continue
-        if select is not None and not select(row):
-            continue
-        selected.append(line)
-        result["rows"].append(row)
-        if versions is not None and str(row.get("schema_version")) not in versions:
-            result["errors"].append({"line": line_number, "reason": "unsupported-schema-version"})
-    # Filtered streams fingerprint exactly the raw rows they expose.
-    if select is not None or prefix is not None:
-        result["content"] = "".join(selected)
-        result["size"] = len(result["content"].encode())
-        result["sha256"] = sha256(result["content"].encode())
-    result["row_count"] = len(result["rows"])
-    if result["errors"]:
-        unsupported = all(e["reason"] == "unsupported-schema-version" for e in result["errors"])
-        mark(result, "unsupported" if unsupported else "unreadable",
-             "unsupported-schema-version" if unsupported else "malformed-ledger")
-    return result
+            result["rows"].append(copy.deepcopy(row))
+            if self.versions is not None and str(row.get("schema_version")) not in self.versions:
+                result["errors"].append({"line": line_number, "reason": "unsupported-schema-version"})
+        # Filtered streams fingerprint exactly the raw rows they expose.
+        if select is not None or self.prefix is not None:
+            result["content"] = "".join(selected)
+            result["size"] = len(result["content"].encode())
+            result["sha256"] = sha256(result["content"].encode())
+        result["row_count"] = len(result["rows"])
+        if result["errors"]:
+            unsupported = all(e["reason"] == "unsupported-schema-version" for e in result["errors"])
+            mark(result, "unsupported" if unsupported else "unreadable",
+                 "unsupported-schema-version" if unsupported else "malformed-ledger")
+        return result
+
+
+def read_ledger(path, root, versions=None, *, select=None, prefix=None):
+    return LedgerSnapshot(path, root, versions, prefix=prefix).read(select=select)
 
 
 def read_directory(path, root, *, reports=False, versions=None):
@@ -282,7 +305,7 @@ def code_identity(worktree, excluded_paths=(), result_exclusion=None):
             excluded.append((Path(result_item) / "results" / result_id).resolve())
             result_ledger = (Path(result_item) / "results.jsonl").resolve()
         def omit(path):
-            return any(path == p or p in path.parents for p in excluded)
+            return any(path.is_relative_to(p) for p in excluded)
         entries = git("ls-files", "--stage", "-z")
         names = {}
         index = []
@@ -743,7 +766,7 @@ def review_requirement_projection(history, revision):
                 "value": None, "revision_id": None, "decision_id": None, "inherited_from_revision": None}
 
 
-def project(item_dir, knowledge_dir):
+def project(item_dir, knowledge_dir, *, packet_ledger=None):
     item, root = Path(item_dir).absolute(), Path(knowledge_dir).absolute()
     tasks = read_file(item / "tasks.json", root, json_file=True, versions={"1"})
     if tasks["state"] == "read":
@@ -759,8 +782,9 @@ def project(item_dir, knowledge_dir):
         "tasks": tasks,
         "revisions": revisions,
         "results": read_ledger(item / "results.jsonl", root, {"1"}),
-        "packets": read_ledger(root / "_packets" / "packets.jsonl", root, {"1", "2"},
-                               select=lambda row: row.get("work_item") == item.name),
+        "packets": (packet_ledger if packet_ledger is not None else
+                    LedgerSnapshot(root / "_packets" / "packets.jsonl", root, {"1", "2"})).read(
+                        select=lambda row: row.get("work_item") == item.name),
         "outcomes": read_ledger(item / "execution-log.md", root, {"1", "2"}, prefix="Spec-outcome-record: "),
         "reviews": read_directory(item / "reviews", root, versions={"1", "2"}),
         "reports": read_directory(item / "worker-reports", root, reports=True),

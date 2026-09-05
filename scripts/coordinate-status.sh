@@ -643,7 +643,11 @@ for record in arc_records:
 # Evidence uses the same projection as work show, independently of metadata health.
 work_evidence = []
 try:
-    evidence_project = runpy.run_path(str(scripts / "work-evidence.py"))["project"]
+    evidence_reader = runpy.run_path(str(scripts / "work-evidence.py"))
+    evidence_project = evidence_reader["project"]
+    # A command-local snapshot avoids parsing the shared history once per item.
+    packet_ledger = evidence_reader["LedgerSnapshot"](
+        kdir / "_packets" / "packets.jsonl", kdir, {"1", "2"})
     evidence_error = None
 except Exception as exc:
     evidence_project = None
@@ -657,7 +661,7 @@ def summarize_work_evidence(slug, item_dir):
     try:
         if evidence_project is None:
             raise RuntimeError(evidence_error)
-        evidence = evidence_project(item_dir, kdir)
+        evidence = evidence_project(item_dir, kdir, packet_ledger=packet_ledger)
         summary.update({"state": "read", "schema_version": evidence["schema_version"],
                         "reader_contract_version": evidence["reader_contract_version"],
                         "revision": evidence["revision"],
