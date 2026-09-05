@@ -27,7 +27,7 @@ import yaml
 
 original, temporary, scenario = sys.argv[1:]
 original, temporary = Path(original).resolve(), Path(temporary).resolve()
-if os.environ.get('POSITION_DISPATCH_FIXTURES') and scenario in ('native', 'session', 'launch', 'native-selection'):
+if os.environ.get('POSITION_DISPATCH_FIXTURES') and scenario in ('native', 'session', 'launch', 'native-selection', 'spec', 'spec-native'):
     temporary = Path(os.environ['POSITION_DISPATCH_FIXTURES']).resolve() / scenario
     temporary.mkdir(parents=True, exist_ok=False)
 repo, home = temporary / 'checkout', temporary / 'home'
@@ -146,7 +146,187 @@ def request(b, position='worker', framework='codex', extra=None, flags=(), ok=Tr
 def pending():
     return list((store / '_sessions/requests/pending').glob('*.json'))
 
-if scenario == 'native':
+if scenario == 'spec':
+    document = {'schema_version': 1, 'track': 'full', 'investigations': [
+        {'id': 'external', 'kind': 'fixed', 'question': 'External skill and agent applicability', 'complexity': 'simple', 'prefetch': []},
+        {'id': 'preferences', 'kind': 'fixed', 'question': 'Preferences and conventions applicability', 'complexity': 'simple', 'prefetch': []},
+        {'id': 'code', 'kind': 'lead-authored', 'question': 'Which bytes enter the investigator input? λ', 'complexity': 'moderate', 'prefetch': []}]}
+    source = temporary / 'investigations.json'
+    def spec_open(doc, ok=True):
+        source.write_text(json.dumps(doc))
+        proc = call(['bash', str(repo/'scripts/spec-open.sh'), 'fixture', '--investigations', str(source), '--json'], ok=ok)
+        if not ok:
+            return proc
+        return json.loads(proc.stdout)
+    first = spec_open(document)
+    assert first['status'] == 'created'
+    payload = first['directives'][2]['payload']
+    reference = payload['position_dispatch']
+    prepared = binder.validate_dispatch(reference['manifest_path'], reference['manifest_sha256'])
+    assert payload['prompt'].encode() == Path(reference['payload_path']).read_bytes()
+    assert prepared['producer']['template_id'] == 'position/investigator/codex'
+    assert payload['producer']['template_version'] == prepared['producer']['template_version']
+    assert prepared['wrapper']['template_version'] == first['source_manifest']['wrapper']['sha256'][:12]
+    assert prepared['bindings']['report_path'] == str(item/'worker-reports'/(prepared['bindings']['report_id']+'.md'))
+    assert prepared['bindings']['task_id'] is None and prepared['bindings']['revision_id'] is None
+    packet = show(store, prepared['bindings']['packet_id'])
+    assert packet['recipient_role'] == 'investigator' and packet['schema_version'] == '1'
+    assert packet['template_version'] == first['source_manifest']['lead_template_version']
+    assert json.loads(prepared['bindings']['assignment'])['question'] == document['investigations'][2]['question']
+    assert Path(payload['descriptor']['body_path']).read_text() in payload['prompt']
+    assert (repo/'agents/researcher.md').read_text() not in payload['prompt']
+    assert first['source_manifest']['researcher_route']['native_binding'] == 'research-model'
+    selected = binder.native_input(reference['manifest_path'], reference['manifest_sha256'])
+    assert selected['tool'] == 'spawn_agent'
+    assert selected['tool_input']['message'] == payload['prompt']
+    assert selected['tool_input']['model'] == 'research-model'
+    assert selected['registration'] is None
+    assert payload['completion_input'] == {'position_dispatch':reference, 'lore_task_id':None}
+    hook=['bash', str(repo/'scripts/task-completed-capture-check.sh')]
+    call(hook, ok=False, input=json.dumps(payload['completion_input']).encode())
+    report = f"""Template-version: {prepared['producer']['template_version']}
+Position-dispatch-manifest: {reference['manifest_path']}
+Position-dispatch-sha256: {reference['manifest_sha256']}
+**Question:** {document['investigations'][2]['question']}
+**Findings:**
+The packet premise needs a scoped correction; the report retains that finding.
+**Key files:** None
+**Implications:** The collector reads the correction beside the finding.
+**Assertions:** None
+**Observations:** None
+**Worker leads:** None
+**Unknowns:** Native live inventory is outside this isolated fixture.
+"""
+    call(['bash',str(repo/'scripts/coordinate-report.sh'),'fixture','--report-id',prepared['bindings']['report_id'],'--kdir',str(store),'--json'], input=report.encode())
+    landed=Path(prepared['bindings']['report_path']).read_text()
+    assert report.rstrip()==landed.rstrip()
+    call(hook,input=json.dumps(payload['completion_input']).encode())
+    wrong=copy.deepcopy(payload['completion_input']);wrong['position_dispatch']['manifest_sha256']='0'*64
+    call(hook,ok=False,input=json.dumps(wrong).encode())
+    examples=[{'route':'native-codex','payload':payload,'native_input':selected,'report_path':prepared['bindings']['report_path']}]
+    first_bytes = (item/'spec-dispatch.json').read_bytes()
+    replay = spec_open(document)
+    assert replay['status'] == 'reused'
+    assert (item/'spec-dispatch.json').read_bytes() == first_bytes
+    assert replay['directives'][2]['payload'] == payload
+    saved_log=(item/'execution-log.md').read_bytes()
+    for broken in ('completion_input','position_dispatch'):
+        damaged=copy.deepcopy(replay)
+        for key in ('status','artifact_path','artifact_sha256'):
+            damaged.pop(key,None)
+        if broken=='completion_input':
+            damaged['directives'][2]['payload'][broken]['position_dispatch']['manifest_sha256']='0'*64
+        else:
+            del damaged['directives'][2]['payload'][broken]
+        (item/'execution-log.md').unlink()
+        (item/'spec-dispatch.json').write_text(json.dumps(damaged,sort_keys=True,separators=(',',':')))
+        spec_open(document,ok=False)
+        (item/'spec-dispatch.json').write_bytes(first_bytes)
+        (item/'execution-log.md').write_bytes(saved_log)
+    changed = copy.deepcopy(document)
+    changed['investigations'][2]['question'] += ' Check exact retry identity.'
+    retried = spec_open(changed)
+    newer = retried['directives'][2]['payload']['bindings']
+    assert newer['report_id'] != prepared['bindings']['report_id']
+    assert newer['dispatch_attempt_id'] != prepared['bindings']['dispatch_attempt_id']
+    legacy = spec_open({**document, 'template': 'researcher'})
+    assert all(d['payload']['provenance'] == 'explicit-legacy-template' for d in legacy['directives'])
+    assert all('position_dispatch' not in d['payload'] for d in legacy['directives'])
+    assert all(d['payload']['template_path'] == str(repo/'agents/researcher.md') for d in legacy['directives'])
+    for target, model in [('codex', 'research-model'), ('opencode', 'anthropic/opus')]:
+        doc = copy.deepcopy(document)
+        bound = fixture('investigator', 'spec-session-'+target)
+        bound['assignment'] = json.dumps({k:doc['investigations'][2][k] for k in ('question','complexity')} | {'investigation_id':'code'})
+        bound['report_path'] = str(item/'worker-reports'/(bound['report_id']+'.md'))
+        doc['investigations'][2]['dispatch'] = {'framework':target, 'route':'session', 'model':model, 'bindings':bound}
+        current = spec_open(doc)
+        session_payload = current['directives'][2]['payload']
+        assert session_payload['route'] == 'session'
+        examples.append({'route':'session-'+target,'payload':session_payload})
+        context_path = temporary / ('spec-session-'+target+'.json')
+        context_path.write_text(json.dumps(session_payload['session_context']))
+        before = set(pending())
+        (instances/'fixture.json').touch()
+        call(['bash', str(repo/'scripts/session-request.sh'), '--type','worker','--slug','fixture--w1','--anywhere',
+              '--framework',target,'--model',model,'--worktree-id','fixture-worktree','--execution-dir',str(repo),
+              '--context',str(context_path),'--kdir',str(store),'--json'])
+        queued = json.loads(next(iter(set(pending())-before)).read_text())
+        assert queued['extra_context'] == session_payload['session_context']
+        launched = binder.launch_session(queued['extra_context'], framework=target, slug='fixture--w1', execution_root=str(repo), kdir=store)
+        assert launched['payload'] == session_payload['prompt']
+        assert launched['producer']['position'] == 'investigator'
+        for field in ('task_id','revision_id','packet_id','packet_pointer'):
+            invalid=copy.deepcopy(doc)
+            invalid['investigations'][2]['dispatch']['bindings'][field]='mismatched'
+            spec_open(invalid,ok=False)
+        conflicting=copy.deepcopy(doc)
+        conflicting['investigations'][2]['question'] += ' conflicting question'
+        spec_open(conflicting,ok=False)
+    (temporary/'spec-examples.json').write_text(json.dumps(examples,indent=2)+'\n')
+    print('spec compiled bytes, original replay, fresh retries, legacy input, bound sessions and identity refusals checked')
+
+elif scenario == 'spec-native':
+    document={'schema_version':1,'track':'full','investigations':[
+        {'id':'external','kind':'fixed','question':'External skill and agent applicability','complexity':'simple','prefetch':[]},
+        {'id':'preferences','kind':'fixed','question':'Preferences and conventions applicability','complexity':'simple','prefetch':[]},
+        {'id':'code','kind':'lead-authored','question':'Which native input is selected?','complexity':'moderate','prefetch':[]}]}
+    source=temporary/'investigations.json'
+    def spec_open(doc,ok=True):
+        source.write_text(json.dumps(doc))
+        proc=call(['bash',str(repo/'scripts/spec-open.sh'),'fixture','--investigations',str(source),'--json'],ok=ok)
+        return json.loads(proc.stdout) if ok else proc
+    env.update(LORE_FRAMEWORK='claude-code',LORE_MODEL_RESEARCHER='opus')
+    claude=spec_open(document)
+    payload=claude['directives'][2]['payload'];reference=payload['position_dispatch']
+    selection=payload['native_selection']
+    assert selection['tool']=='Agent'
+    scope=repo/'.claude/agents';scope.mkdir(parents=True)
+    refused(lambda:binder.native_input(reference['manifest_path'],reference['manifest_sha256'],scope),'registration')
+    binder.register_native(reference['manifest_path'],reference['manifest_sha256'],scope)
+    native=binder.native_input(reference['manifest_path'],reference['manifest_sha256'],scope)
+    assert native['tool_input']['prompt']==payload['prompt']
+    assert native['tool_input']['model']=='opus'
+    name=native['tool_input']['subagent_type']
+    assert name==native['readiness']['selection_name']
+    assert (scope/(name+'.md')).read_bytes()==(Path(reference['manifest_path']).parent/'selection.md').read_bytes()
+    assert Path(payload['descriptor']['body_path']).read_text() not in payload['prompt']
+    assert native['readiness']['kind']=='native-agent-inventory'
+    examples=[{'route':'native-claude','payload':payload,'native_input':native}]
+    env.update(LORE_MODEL_RESEARCHER='codex/research-model')
+    foreign=spec_open(document)['directives'][2]['payload']
+    assert foreign['route']=='codex-chaperone' and foreign['framework']=='codex' and foreign['model']=='research-model'
+    assert foreign['native_selection'] is None
+    assert Path(foreign['descriptor']['body_path']).read_text() in foreign['prompt']
+    assert (Path(foreign['position_dispatch']['manifest_path']).parent/'launch.json').exists()
+    examples.append({'route':'foreign-codex','payload':foreign})
+    env.update(LORE_FRAMEWORK='opencode',LORE_MODEL_RESEARCHER='anthropic/opus')
+    before=(item/'spec-dispatch.json').read_bytes()
+    failure=spec_open(document,ok=False)
+    assert b'unsupported' in failure.stderr.lower() or b'unavailable' in failure.stderr.lower()
+    assert (item/'spec-dispatch.json').read_bytes()==before
+    sessions=copy.deepcopy(document)
+    for inv, original in zip(sessions['investigations'],claude['directives']):
+        binding=copy.deepcopy(original['payload']['bindings'])
+        binding['dispatch_attempt_id']+='-session';binding['report_id']+='-session'
+        binding['report_path']=str(item/'worker-reports'/(binding['report_id']+'.md'))
+        assert binding['task_id'] is None and binding['revision_id'] is None
+        inv['dispatch']={'framework':'opencode','route':'session','model':'anthropic/opus','bindings':binding}
+    session_payload=spec_open(sessions)['directives'][2]['payload']
+    context=temporary/'preplan-session.json';context.write_text(json.dumps(session_payload['session_context']))
+    before_requests=set(pending());(instances/'fixture.json').touch()
+    call(['bash',str(repo/'scripts/session-request.sh'),'--type','worker','--slug','fixture--w1','--anywhere',
+          '--framework','opencode','--model',session_payload['model'],'--worktree-id','fixture-worktree','--execution-dir',str(repo),
+          '--context',str(context),'--kdir',str(store),'--json'])
+    queued=json.loads(next(iter(set(pending())-before_requests)).read_text())
+    assert queued['extra_context']==session_payload['session_context']
+    launched=binder.launch_session(queued['extra_context'],framework='opencode',slug='fixture--w1',execution_root=str(repo),kdir=store)
+    assert launched['payload']==session_payload['prompt']
+    assert 'OPENCODE_CONFIG_CONTENT' in launched['activation']['env']
+    examples.append({'route':'preplan-session-opencode','payload':session_payload,'activation':launched['activation']})
+    (temporary/'spec-native-examples.json').write_text(json.dumps(examples,indent=2)+'\n')
+    print('spec Claude selected bytes/readiness, foreign Codex, OpenCode native refusal and pre-plan session checked')
+
+elif scenario == 'native':
     def exercise_pair(pair):
         position,framework=pair
         d=compile(position,framework)
@@ -540,5 +720,15 @@ PY
 
 @test "native subagent selection retains exact activation bytes and requires separate live readiness" {
   run exercise_binding native-selection
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "spec dispatch delivers compiled investigator inputs, durable reports, replay and explicit sessions" {
+  run exercise_binding spec
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "spec native dispatch selects Claude definitions and preserves foreign and pre-plan session routes" {
+  run exercise_binding spec-native
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }

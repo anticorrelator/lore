@@ -260,8 +260,12 @@ previous = None
 if Path(artifact_path).is_file():
     previous = json.loads(Path(artifact_path).read_bytes())
 if previous and previous.get("input_fingerprint") == input_fp and previous.get("source_fingerprint") == source_fp:
+    if len(previous["directives"]) != len(normalized):
+        reject("published investigation count differs from the declared input")
     for directive in previous["directives"]:
         reference = directive["payload"].get("position_dispatch")
+        if not legacy and not isinstance(reference, dict):
+            reject("published investigator reference is missing")
         if reference:
             resolved = binder.resolve_dispatch(reference["manifest_path"], reference["manifest_sha256"],
                                                expected={"work_item": slug, "position": "investigator"})
@@ -271,6 +275,16 @@ if previous and previous.get("input_fingerprint") == input_fp and previous.get("
                 reject("published investigator input differs from its immutable dispatch")
             if payload["session_context"] != {"dispatch_guidance": payload["prompt"], "position_dispatch": reference}:
                 reject("published investigator session context differs from its immutable dispatch")
+            if payload["completion_input"] != {"position_dispatch": reference, "lore_task_id": frozen["bindings"]["task_id"]}:
+                reject("published investigator completion reference differs from its immutable dispatch")
+            if payload["producer"] != {key: frozen["producer"][key] for key in ("template_id", "template_version")}:
+                reject("published investigator producer differs from its immutable dispatch")
+            bundle = Path(resolved["resolved_manifest_path"]).parent
+            if payload["descriptor"] != json.loads((bundle / "descriptor.json").read_bytes()):
+                reject("published investigator descriptor differs from its immutable dispatch")
+            selected = json.loads((bundle / "selection.json").read_bytes()) if frozen.get("dispatch_route") == "native-subagent" else None
+            if payload["native_selection"] != selected:
+                reject("published investigator native selection differs from its immutable dispatch")
     artifact_bytes = canonical(previous)
     Path(output_path).write_text(json.dumps({"artifact": previous, "artifact_text": artifact_bytes.decode(),
                                             "artifact_sha256": hashlib.sha256(artifact_bytes).hexdigest()}))
