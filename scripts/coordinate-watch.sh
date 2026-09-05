@@ -298,6 +298,11 @@ LAST_RECONCILE=0
 emit_wake() {
   local cursor="$1" code="$2" message="$3" payload
 
+  CURRENT_OBSERVATIONS="$(printf '%s' "$CURRENT_OBSERVATIONS" | python3 "$WATCH_HELPER" current)" || fail "could not validate current observation freshness"
+  CURRENT_DELTA="$(printf '%s' "$CURRENT_OBSERVATIONS" | jq -c '.delta')"
+  if [[ "$WAKE_OUTCOME" == "current_delta" ]]; then
+    WAKE_TIER="$(printf '%s' "$CURRENT_DELTA" | jq -r 'if any(.[]; .observation.fresh == true and (.observation.activity == "idle" or .observation.activity == "blocked")) then "confirmed" else "advisory" end')"
+  fi
   payload="$(jq -cn \
     --argjson schema "$WAKE_SCHEMA_VERSION" \
     --arg outcome "$WAKE_OUTCOME" \
@@ -332,6 +337,7 @@ emit_wake() {
 
   if [[ $DURABLE -eq 1 ]]; then
     payload="$(printf '%s' "$payload" | python3 "$WATCH_HELPER" publish --path "$DELIVERY_FILE" --identity "$IDENTITY_JSON" --interval "$TIMEOUT")" || fail "could not persist wake; cursor remains uncommitted"
+    [[ "$payload" != "null" ]] || return 0
   fi
   [[ "$cursor" == "null" ]] || write_cursor_file "$cursor"
   printf '%s' "$payload" | python3 "$WATCH_HELPER" consume --path "$OBSERVATION_FILE" >/dev/null || fail "could not commit observation delta"
@@ -610,12 +616,24 @@ emit_matched_from_record() {
 reconcile_current() {
   local current_time
   current_time=$(date +%s)
-  if [[ $LAST_RECONCILE -gt 0 && $((current_time - LAST_RECONCILE)) -lt $RECONCILE_INTERVAL ]]; then
+  if [[ "${1:-}" != "force" && $LAST_RECONCILE -gt 0 && $((current_time - LAST_RECONCILE)) -lt $RECONCILE_INTERVAL ]]; then
     return 0
   fi
   CURRENT_OBSERVATIONS="$(python3 "$WATCH_HELPER" sweep --kdir "$KNOWLEDGE_DIR" --scripts "$SCRIPT_DIR" --path "$OBSERVATION_FILE" --scope "$SCOPE_SLUGS_JSON" --budget "$RECONCILE_BUDGET" --peek-timeout "$PEEK_TIMEOUT")" || CURRENT_OBSERVATIONS='{"current":[],"delta":[],"unavailable":[{"error":"reconciliation-failed"}],"complete":false}'
   CURRENT_DELTA="$(printf '%s' "$CURRENT_OBSERVATIONS" | jq -c '.delta')"
   LAST_RECONCILE=$(date +%s)
+}
+
+emit_current_delta() {
+  if [[ "$(printf '%s' "$CURRENT_DELTA" | jq '[.[] | select(.observation.activity == "idle" or .observation.activity == "blocked" or .observation.activity == "unknown")] | length')" -gt 0 ]]; then
+    WAKE_OUTCOME="current_delta"
+    WAKE_TIER="advisory"
+    if [[ "$(printf '%s' "$CURRENT_DELTA" | jq '[.[] | select(.observation.fresh == true and (.observation.activity == "idle" or .observation.activity == "blocked"))] | length')" -gt 0 ]]; then WAKE_TIER="confirmed"; fi
+    WAKE_AUTHORITY="observation"
+    WAKE_STATE="current_observation"
+    WAKE_LABEL="current-session-delta"
+    emit_wake "$CURSOR" 0 "[coordinate] current session activity changed in scope"
+  fi
 }
 
 replay_pending() {
@@ -647,15 +665,7 @@ while :; do
   # row after the last row this read consumed, and advancing to it is correct.
   CURSOR="$NEXT"
   reconcile_current
-  if [[ "$(printf '%s' "$CURRENT_DELTA" | jq '[.[] | select(.observation.activity == "idle" or .observation.activity == "blocked" or .observation.activity == "unknown")] | length')" -gt 0 ]]; then
-    WAKE_OUTCOME="current_delta"
-    WAKE_TIER="advisory"
-    if [[ "$(printf '%s' "$CURRENT_DELTA" | jq '[.[] | select(.observation.fresh == true and (.observation.activity == "idle" or .observation.activity == "blocked"))] | length')" -gt 0 ]]; then WAKE_TIER="confirmed"; fi
-    WAKE_AUTHORITY="observation"
-    WAKE_STATE="current_observation"
-    WAKE_LABEL="current-session-delta"
-    emit_wake "$CURSOR" 0 "[coordinate] current session activity changed in scope"
-  fi
+  emit_current_delta
   replay_pending
 
   # A journal row always wins: it is the real event, and the pending check is
@@ -700,6 +710,9 @@ while :; do
   sleep 1
 done
 
+reconcile_current force
+emit_current_delta
+WAKE_PENDING='[]'
 WAKE_OUTCOME="timeout"
 WAKE_TIER="quiet"
 WAKE_AUTHORITY="none"

@@ -127,6 +127,23 @@ def belongs(identity):
     return False
 
 
+def current_snapshot(current):
+    result = dict(current)
+    result['original_delta'] = current.get('original_delta', current.get('delta', []))
+    result['unavailable'] = list(current.get('unavailable', []))
+    for field in ('current', 'delta'):
+        rows = []
+        for row in current.get(field, []):
+            screen = dict(row.get('peek') or {'observation': row.get('observation')})
+            value = observation(screen)
+            rows.append(dict(row, observation=value, **({'peek': dict(screen, observation=value)} if 'peek' in row else {})))
+            if field == 'current' and not value['fresh']:
+                result['complete'] = False
+                result['unavailable'].append({'slug': row.get('slug'), 'error': 'observation-expired-or-unavailable'})
+        result[field] = rows
+    return result
+
+
 class Delivery:
     def __init__(self, path):
         self.path = Path(path)
@@ -138,7 +155,14 @@ class Delivery:
     def publish(self, payload, identity, interval):
         with locked(self.lock):
             state = self.state()
-            key = hashlib.sha256(json.dumps({k: payload.get(k) for k in ('outcome', 'matched', 'pending', 'next_cursor', 'current_delta')}, sort_keys=True).encode()).hexdigest()
+            basis = {k: payload.get(k) for k in ('outcome', 'matched', 'pending', 'next_cursor', 'current_delta')}
+            if payload.get('outcome') == 'pending_stale':
+                basis = {'outcome': 'pending_stale', 'requests': sorted({str(r['request_id']) for r in payload.get('pending', [])})}
+            key = hashlib.sha256(json.dumps(basis, sort_keys=True).encode()).hexdigest()
+            if payload.get('outcome') == 'pending_stale':
+                previous = next((r for r in reversed(state['wakes']) if r['fingerprint'] == key), None)
+                if previous and time.time() - previous.get('last_delivery', 0) < previous.get('interval', 600):
+                    return None
             pending = [r for r in state['wakes'] if not r.get('acknowledged_at')]
             found = next((r for r in pending if r['fingerprint'] == key), None)
             if payload.get('tier') == 'quiet':
@@ -175,6 +199,7 @@ class Delivery:
         payload = dict(row['payload'], wake_id=row['wake_id'], created_at=row['created_at'],
                        acknowledgment_required=True, recipient=row['identity'])
         payload['original_observations'] = payload.get('current_observations')
+        current = current_snapshot(current) if current is not None else None
         payload['current_observations'] = current if current is not None else {'current': [], 'complete': False, 'unavailable': [{'error': 'not-reconciled-by-receipt'}]}
         matched = payload.get('matched') or {}
         if matched.get('event') in {'needs_input', 'modal_blocked'}:
@@ -293,7 +318,8 @@ def consume_delta(path, payload):
     with locked(Path(path).with_suffix('.lock')):
         saved = read(path, {})
         pending = saved.get('pending', {})
-        for row in payload.get('current_observations', {}).get('delta', []):
+        current = payload.get('current_observations', {})
+        for row in current.get('original_delta', current.get('delta', [])):
             if pending.get(row['slug']) == row:
                 pending.pop(row['slug'])
         saved['pending'] = pending
@@ -312,7 +338,7 @@ def peek_summary(peek):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['publish', 'pending', 'cursor', 'classify', 'sweep', 'consume', 'peek', 'peek-text'])
+    parser.add_argument('command', choices=['publish', 'pending', 'cursor', 'classify', 'sweep', 'consume', 'peek', 'peek-text', 'current'])
     parser.add_argument('--path')
     parser.add_argument('--kdir')
     parser.add_argument('--scripts')
@@ -331,7 +357,9 @@ def main():
         if args.command == 'peek-text':
             print(peek_summary(payload))
             return
-        if args.command == 'peek':
+        if args.command == 'current':
+            result = current_snapshot(payload)
+        elif args.command == 'peek':
             result = dict(payload, observation=observation(payload))
         elif args.command == 'consume':
             consume_delta(args.path, payload)

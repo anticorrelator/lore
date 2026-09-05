@@ -90,6 +90,35 @@ class WatchDelivery(unittest.TestCase):
         with patch.object(m.time, 'time', return_value=1600):
             self.assertEqual(self.delivery.pending()['wake_id'], first['wake_id'])
 
+    def test_pending_stale_age_and_cursor_changes_do_not_bypass_cadence(self):
+        payload = self.payload(outcome='pending_stale', tier='advisory', matched=None,
+                               pending=[{'request_id': 'r1', 'age_seconds': 301}])
+        with patch.object(m.time, 'time', return_value=1000):
+            first = self.delivery.publish(payload, self.identity, 600)
+        changed = dict(payload, next_cursor=99, pending=[{'request_id': 'r1', 'age_seconds': 401}])
+        with patch.object(m.time, 'time', return_value=1100):
+            self.assertIsNone(self.delivery.publish(changed, self.identity, 600))
+            newer = self.delivery.publish(dict(changed, pending=changed['pending'] + [{'request_id': 'r2'}]), self.identity, 600)
+            self.assertNotEqual(first['wake_id'], newer['wake_id'])
+        with patch.object(m.time, 'time', return_value=1600):
+            self.assertEqual(self.delivery.publish(changed, self.identity, 600)['wake_id'], first['wake_id'])
+        m.wake_receipt(self.kdir, first['wake_id'], acknowledge=True)
+        with patch.object(m.time, 'time', return_value=1700):
+            self.assertIsNone(self.delivery.publish(changed, self.identity, 600))
+
+    def test_pending_replay_demotes_expired_cached_snapshot(self):
+        captured = peek()
+        current = {'current': [{'slug': 'task--w1', 'peek': captured, 'observation': captured['observation']}], 'complete': True}
+        first = self.delivery.publish(self.payload(current_observations=current), self.identity, 0)
+        with patch.object(m.time, 'time', return_value=time.time() + 10):
+            replay = self.delivery.pending(current)
+        self.assertEqual(replay['wake_id'], first['wake_id'])
+        snapshot = replay['current_observations']
+        self.assertFalse(snapshot['complete'])
+        self.assertFalse(snapshot['current'][0]['observation']['fresh'])
+        self.assertFalse(snapshot['current'][0]['peek']['observation']['fresh'])
+        self.assertEqual(snapshot['current'][0]['observation']['activity'], 'unknown')
+
     def test_replay_demotes_superseded_park(self):
         current = {'current': [{'slug': 'task--w1', 'peek': peek()}]}
         first = self.delivery.publish(self.payload(matched={'event': 'needs_input', 'slug': 'task--w1'}, current_observations=current), self.identity, 0)
@@ -108,7 +137,8 @@ class WatchDelivery(unittest.TestCase):
             first = m.sweep(self.kdir, ROOT / 'scripts', state, ['task'], 8, 10)
             second = m.sweep(self.kdir, ROOT / 'scripts', state, ['task'], 8, 10)
             self.assertEqual(first['delta'], second['delta'])
-            m.consume_delta(state, {'current_observations': second})
+            delivered = self.delivery.publish(self.payload(current_observations=m.current_snapshot(second)), self.identity, 0)
+            m.consume_delta(state, delivered)
             third = m.sweep(self.kdir, ROOT / 'scripts', state, ['task'], 8, 10)
         self.assertEqual(first['delta'][0]['observation']['activity'], 'idle')
         self.assertEqual(third['delta'], [])
@@ -203,6 +233,38 @@ class WatchCommands(unittest.TestCase):
         _, result = self.watch('--since', '0')
         self.assertEqual(result['outcome'], 'timeout')
         self.assertEqual(result['tier'], 'quiet')
+
+    def test_shell_unchanged_stale_request_waits_before_replay(self):
+        m.atomic(self.kdir / '_sessions/requests/pending/r1.json',
+                 {'request_id': 'r1', 'slug': 'task--w1', 'requested_at': '2000-01-01T00:00:00Z'})
+        _, first = self.watch('--durable', '--pending-stale', '1', '--timeout', '2')
+        self.assertEqual(first['outcome'], 'pending_stale')
+        started = time.monotonic()
+        _, replay = self.watch('--durable', '--pending-stale', '1', '--timeout', '2')
+        self.assertGreaterEqual(time.monotonic() - started, 1)
+        self.assertEqual(replay['wake_id'], first['wake_id'])
+
+    def test_deadline_runs_a_final_sweep_before_quiet_delivery(self):
+        scripts = self.kdir / 'scripts'
+        scripts.mkdir()
+        for source in (ROOT / 'scripts').iterdir():
+            if source.name != 'coordinate_watch_state.py':
+                (scripts / source.name).symlink_to(source)
+        helper = scripts / 'coordinate_watch_state.py'
+        helper.write_text("import json, pathlib, runpy, sys, time\n"
+                          "if sys.argv[1] == 'sweep':\n"
+                          "    with pathlib.Path(__file__).with_suffix('.calls').open('a') as f: f.write(str(time.time()) + '\\n')\n"
+                          "    print(json.dumps({'current': [], 'delta': [], 'complete': True, 'unavailable': [], 'observed_at_epoch': time.time()}))\n"
+                          "else:\n"
+                          f"    runpy.run_path({str(ROOT / 'scripts/coordinate_watch_state.py')!r}, run_name='__main__')\n")
+        result = subprocess.run(['bash', str(scripts / 'coordinate-watch.sh'), '--kdir', str(self.kdir),
+                                 '--owner-pid', str(os.getpid()), '--timeout', '2', '--pending-stale', '0',
+                                 '--reconcile-interval', '15', '--json'], env=self.env, text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        calls = [float(v) for v in helper.with_suffix('.calls').read_text().splitlines()]
+        self.assertEqual(len(calls), 2)
+        self.assertGreater(calls[-1] - calls[0], 1)
+        self.assertLess(abs(json.loads(result.stdout)['current_observations']['observed_at_epoch'] - calls[-1]), .1)
 
     def test_quiet_lost_output_retries_on_window_not_immediately(self):
         _, first = self.watch('--durable')
