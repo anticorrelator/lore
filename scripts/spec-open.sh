@@ -64,6 +64,7 @@ ARTIFACT="$ITEM_DIR/spec-dispatch.json"
 LOG_FILE="$ITEM_DIR/execution-log.md"
 FRAMEWORK=$(resolve_active_framework) || emit_error "active framework could not be resolved"
 RESEARCHER_MODEL=$(resolve_model_for_role researcher spec 2>/dev/null) || emit_error "researcher model could not be resolved for the spec ceremony"
+RESEARCHER_ROUTE=$(_model_route_json researcher "$RESEARCHER_MODEL") || emit_error "researcher route could not be resolved"
 RESEARCHER_TEMPLATE=$(resolve_agent_template researcher 2>/dev/null) || emit_error "researcher template could not be resolved"
 RESEARCHER_TEMPLATE_VERSION=$(bash "$SCRIPT_DIR/template-version.sh" "$RESEARCHER_TEMPLATE" 2>/dev/null) || emit_error "researcher template version could not be resolved"
 LEAD_TEMPLATE_VERSION=$(bash "$SCRIPT_DIR/template-version.sh" "$LORE_REPO_DIR/skills/spec/SKILL.md" 2>/dev/null) || emit_error "spec lead template version could not be resolved"
@@ -87,12 +88,22 @@ validate_dispatch_guidance --prompt-file "$GUIDANCE_FILE" || \
 
 set +e
 python3 - "$INVESTIGATIONS_FILE" "$PREPARED" "$SLUG" "$FRAMEWORK" "$SUBAGENTS" "$TEAM_MESSAGING" \
-  "$RESEARCHER_MODEL" "$RESEARCHER_TEMPLATE_VERSION" "$SCRIPT_DIR/prefetch-knowledge.sh" "$ADAPTER" "$GUIDANCE_FILE" <<'PY'
-import hashlib, json, os, subprocess, sys
+  "$RESEARCHER_MODEL" "$RESEARCHER_TEMPLATE_VERSION" "$SCRIPT_DIR/prefetch-knowledge.sh" "$ADAPTER" "$GUIDANCE_FILE" \
+  "$SCRIPT_DIR" "$KDIR" "$LEAD_TEMPLATE_VERSION" "$ARTIFACT" "$RESEARCHER_TEMPLATE" "$RESEARCHER_ROUTE" <<'PY'
+import hashlib, importlib.util, json, os, subprocess, sys, uuid
+from pathlib import Path
 
 (input_path, output_path, slug, framework, subagents, team_messaging,
  researcher_model, researcher_template_version, prefetch_script, adapter,
- guidance_path) = sys.argv[1:]
+ guidance_path, script_dir, kdir, lead_template_version, artifact_path, legacy_template, researcher_route) = sys.argv[1:]
+researcher_route = json.loads(researcher_route)
+sys.path.insert(0, script_dir)
+from position_compile import compile_position, validate_descriptor
+from packet_builder import build_packet, pointer
+module = importlib.util.spec_from_file_location("position_bind", Path(script_dir) / "position-bind.py")
+binder = importlib.util.module_from_spec(module)
+module.loader.exec_module(binder)
+kdir = Path(kdir).resolve()
 
 def reject(message):
     print(message, file=sys.stderr)
@@ -104,7 +115,10 @@ except Exception as exc:
     reject(f"invalid investigations JSON: {exc}")
 
 if not isinstance(raw, dict): reject("investigations document must be an object")
-allowed_root = {"schema_version", "track", "investigations"}
+allowed_root = {"schema_version", "track", "investigations", "template"}
+if raw.get("template") not in (None, "researcher"):
+    reject("template must name the explicit legacy researcher template")
+legacy = raw.get("template") == "researcher"
 unknown = sorted(set(raw) - allowed_root)
 if unknown: reject("unknown investigations document field(s): " + ", ".join(unknown))
 if raw.get("schema_version") != 1: reject("schema_version must be the integer 1")
@@ -112,7 +126,8 @@ if raw.get("track") != "full": reject("track must be declared as 'full'; short t
 investigations = raw.get("investigations")
 if not isinstance(investigations, list) or not investigations: reject("investigations must be a non-empty array")
 
-allowed_inv = {"id", "kind", "question", "complexity", "prefetch"}
+required_inv = {"id", "kind", "question", "complexity", "prefetch"}
+allowed_inv = required_inv | {"dispatch"}
 allowed_prefetch = {"query", "scale_set"}
 allowed_scales = {"abstract", "architecture", "subsystem", "implementation"}
 seen = set()
@@ -124,7 +139,7 @@ for index, inv in enumerate(investigations):
     if not isinstance(inv, dict): reject(f"{where} must be an object")
     unknown = sorted(set(inv) - allowed_inv)
     if unknown: reject(f"{where} has unknown field(s): {', '.join(unknown)}")
-    if set(inv) != allowed_inv: reject(f"{where} must declare exactly: id, kind, question, complexity, prefetch")
+    if not required_inv.issubset(inv): reject(f"{where} must declare exactly: id, kind, question, complexity, prefetch")
     ident = inv.get("id")
     if not isinstance(ident, str) or not ident.strip(): reject(f"{where}.id must be a non-empty string")
     if ident in seen: reject(f"duplicate investigation id: {ident}")
@@ -148,13 +163,40 @@ for index, inv in enumerate(investigations):
             reject(f"{pwhere}.scale_set must declare one or more of: abstract, architecture, subsystem, implementation")
         if len(scales) != len(set(scales)): reject(f"{pwhere}.scale_set contains duplicates")
         normalized_prefetch.append({"query": query, "scale_set": scales})
+    dispatch = inv.get("dispatch")
+    if dispatch is not None:
+        if legacy or not isinstance(dispatch, dict) or set(dispatch) != {"framework", "route", "model", "bindings"}:
+            reject(f"{where}.dispatch must declare framework, route, model, bindings on a compiled path")
+        if dispatch["framework"] not in {"codex", "claude-code", "opencode"} or dispatch["route"] not in {"native", "session"}:
+            reject(f"{where}.dispatch has an unsupported framework or route")
+        if not isinstance(dispatch["model"], str) or not dispatch["model"].strip():
+            reject(f"{where}.dispatch.model must be resolved before publication")
+        model_check = subprocess.run(["bash", "-c", 'source "$1/lib.sh"; _model_route_json researcher "$2"',
+                                      "spec-model", script_dir, dispatch["model"]],
+                                     env={**os.environ, "LORE_FRAMEWORK": dispatch["framework"]},
+                                     capture_output=True, text=True)
+        if model_check.returncode or json.loads(model_check.stdout)["target_framework"] != dispatch["framework"]:
+            reject(f"{where}.dispatch.model is not a native binding for the selected framework")
+        if dispatch["route"] == "native" and dispatch["framework"] != framework and dispatch["framework"] != "codex":
+            reject(f"{where}.dispatch requests an unsupported foreign native route")
+        binder.validate_bindings(dispatch["bindings"], "investigator", kdir, ("packet_id", "packet_pointer"))
+        expected_assignment = {"investigation_id": ident, "question": question, "complexity": inv["complexity"]}
+        try:
+            assigned_question = json.loads(dispatch["bindings"]["assignment"])
+        except (TypeError, ValueError):
+            reject(f"{where}.dispatch.bindings.assignment must encode the investigation object")
+        if assigned_question != expected_assignment:
+            reject(f"{where}.dispatch assignment conflicts with investigation")
+        if dispatch["bindings"]["work_item"] != slug:
+            reject(f"{where}.dispatch work_item mismatch")
     lowered = question.lower()
     if inv.get("kind") == "fixed" and "external skill" in lowered and "agent" in lowered:
         fixed_external += 1
     if inv.get("kind") == "fixed" and "preference" in lowered and "convention" in lowered:
         fixed_preferences += 1
     normalized.append({"id": ident, "kind": inv["kind"], "question": question,
-                       "complexity": inv["complexity"], "prefetch": normalized_prefetch})
+                       "complexity": inv["complexity"], "prefetch": normalized_prefetch,
+                       **({"dispatch": dispatch} if dispatch is not None else {})})
 
 if fixed_external != 1: reject("exactly one fixed external-skill/agent investigation is required")
 if fixed_preferences != 1: reject("exactly one fixed preference/convention investigation is required")
@@ -173,7 +215,8 @@ if len(matches) != 1 or len(matches[0]) != 64:
     reject("canonical dispatch guidance lacks one defaults digest identity")
 guidance_identity = {"schema_version": 1, "defaults_digest": f"sha256:{matches[0]}"}
 
-input_shape = {"schema_version": 1, "slug": slug, "ordered_investigations": normalized}
+input_shape = {"schema_version": 1, "slug": slug, "ordered_investigations": normalized,
+               "template": raw.get("template")}
 input_fp = hashlib.sha256(canonical(input_shape)).hexdigest()
 prefetch_manifest = []
 knowledge_by_id = {}
@@ -194,11 +237,35 @@ for inv in normalized:
 
 capabilities = {"subagents": subagents, "team_messaging": team_messaging}
 source_shape = {"active_framework": framework, "adapter_capabilities": capabilities,
-                "researcher_model": researcher_model,
+                "researcher_model": researcher_model, "researcher_route": researcher_route,
                 "researcher_template_version": researcher_template_version,
                 "dispatch_guidance_identity": guidance_identity,
                 "ordered_prefetch": prefetch_manifest}
+descriptors = {}
+if not legacy:
+    for target in sorted({inv.get("dispatch", {}).get("framework", researcher_route["target_framework"]) for inv in normalized}):
+        descriptors[target] = compile_position("investigator", target, kdir, Path(guidance_path))
+source_shape.update(lead_template_version=lead_template_version,
+                    wrapper={"path": str(Path(script_dir) / "spec-open.sh"),
+                             "sha256": hashlib.sha256((Path(script_dir) / "spec-open.sh").read_bytes()).hexdigest()},
+                    producers={key: {field: value[field] for field in ("template_id", "template_version", "descriptor_path", "descriptor_sha256")}
+                               for key, value in descriptors.items()},
+                    legacy_template_path=legacy_template if legacy else None)
 source_fp = hashlib.sha256(canonical(source_shape)).hexdigest()
+
+previous = None
+if Path(artifact_path).is_file():
+    previous = json.loads(Path(artifact_path).read_bytes())
+if previous and previous.get("input_fingerprint") == input_fp and previous.get("source_fingerprint") == source_fp:
+    for directive in previous["directives"]:
+        reference = directive["payload"].get("position_dispatch")
+        if reference:
+            binder.resolve_dispatch(reference["manifest_path"], reference["manifest_sha256"],
+                                    expected={"work_item": slug, "position": "investigator"})
+    artifact_bytes = canonical(previous)
+    Path(output_path).write_text(json.dumps({"artifact": previous, "artifact_text": artifact_bytes.decode(),
+                                            "artifact_sha256": hashlib.sha256(artifact_bytes).hexdigest()}))
+    raise SystemExit(0)
 
 directives = []
 handle_slots = {}
@@ -208,7 +275,51 @@ for ordinal, inv in enumerate(normalized, 1):
                "investigation_id": inv["id"], "question": inv["question"],
                "complexity": inv["complexity"], "prior_knowledge": knowledge_by_id[inv["id"]],
                "dispatch_guidance": dispatch_guidance}
-    directives.append({"ordinal": ordinal, "operation_id": op_id, "adapter": adapter,
+    if legacy:
+        payload.update(template_path=legacy_template, template_version=researcher_template_version,
+                       provenance="explicit-legacy-template")
+    else:
+        request = inv.get("dispatch", {})
+        target = request.get("framework", researcher_route["target_framework"])
+        route = request.get("route", "native")
+        if route == "native" and target != framework:
+            route = "codex-chaperone"
+        model = request.get("model", researcher_route["native_binding"])
+        descriptor = descriptors[target]
+        bindings = request.get("bindings")
+        if bindings is None:
+            attempt = "spec-" + uuid.uuid4().hex
+            packet_id = "pkt-" + uuid.uuid4().hex[:12]
+            scales = list(dict.fromkeys(s for r in inv["prefetch"] for s in r["scale_set"]))
+            row = {"packet_id": packet_id, "packet_scope": "session", "work_item": slug,
+                   "session_id": None, "arm": None, "phase": None, "task_scale_set": ",".join(scales) or None,
+                   "task_id": None, "template_version": lead_template_version,
+                   "prefetch_queries": [r["query"] for r in inv["prefetch"]]}
+            build_packet(kdir, row, role="investigator", caller="spec-lead", scales=scales,
+                         assembly=("\n".join(r["content"] for r in knowledge_by_id[inv["id"]]), {}))
+            bindings = dict.fromkeys(binder.FIELDS)
+            bindings.update(work_item=slug, dispatch_attempt_id=attempt, report_id=attempt,
+                            report_path=str(kdir / "_work" / slug / "investigator-reports" / (attempt + ".md")),
+                            execution_root=str(Path.cwd().resolve()), packet_id=packet_id,
+                            packet_pointer=pointer(kdir, packet_id), assignment=json.dumps({
+                                "investigation_id": inv["id"], "question": inv["question"], "complexity": inv["complexity"]}, ensure_ascii=False))
+            bindings["absence_reasons"] = {field: "pre-plan-investigation" if field in {"task_id", "revision_id"}
+                                          else "not-applicable-to-investigator" for field in binder.FIELDS if bindings[field] is None}
+        if route == "session" and (bindings["task_id"] is None or bindings["revision_id"] is None):
+            reject("session investigator requires an assigned plan task and revision in the current session runtime")
+        reference = binder.publish(descriptor, bindings, kdir, dispatch_guidance.encode(),
+                                   required=("packet_id", "packet_pointer"),
+                                   wrapper={"template_id": "spec", "template_version": lead_template_version,
+                                            "path": str(Path(script_dir).parent / "skills/spec/SKILL.md"),
+                                            "sha256": hashlib.sha256((Path(script_dir).parent / "skills/spec/SKILL.md").read_bytes()).hexdigest()})
+        prompt = Path(reference["payload_path"]).read_text()
+        payload.update(position="investigator", framework=target, route=route, model=model,
+                       prompt=prompt, position_dispatch=reference, descriptor=descriptor,
+                       producer={key: descriptor[key] for key in ("template_id", "template_version")},
+                       wrapper_template_version=lead_template_version, bindings=bindings,
+                       session_context={"dispatch_guidance": prompt, "position_dispatch": reference})
+    directives.append({"ordinal": ordinal, "operation_id": op_id,
+                       "adapter": str(Path(script_dir).parent / "adapters/agents" / (payload.get("framework", framework) + ".sh")),
                        "action": "spawn", "payload": payload,
                        "teardown_payload": {"action": "shutdown", "handle_slot": op_id, "approve": True}})
     handle_slots[op_id] = None
