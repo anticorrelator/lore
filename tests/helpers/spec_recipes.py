@@ -875,6 +875,13 @@ def exercise_consultation(f):
     authored_plan(f, item, concrete=True)
     revision = json.loads(f.recipe("publish-revision", "publish the requesting worker's real task",
                                   REASON="Prepare a task-domain consultation.", AUTHOR_ROLE="spec-lead").stdout)["revision_id"]
+    decisions = f.data("consultation-task-decisions.json", {
+        "anchor_coverage": {"disposition": "covered", "by": "fixture-coordinator", "note": "The task retains inspectable history."},
+        "review_requirement": {"disposition": "not-required", "by": "fixture-coordinator", "note": "Declared isolated consultation fixture."},
+        "dispatch_decision": {"disposition": "proceed", "by": "fixture-coordinator", "note": "Exercise the requested consultation.",
+                              "task_ids": ["task-1"], "prior_review_refs": []}})
+    f.recipe("plan-decision", "record the fixture seat's explicit task preparation decision", REVISION_ID=revision,
+             DECISION_ID="consultation-task", DECISIONS_FILE=decisions)
     opened = json.loads(f.lore("impl", "open", "recipes", "--all", "--compiled-positions", "--json").stdout)
     task = next(row for row in opened["manifest"] if row["op"] == "TaskCreate")
     worker = task["position_binding_inputs"]
@@ -952,6 +959,138 @@ def review_inputs(f, name, *, outcome="completed", verdict="PASS", reason=None, 
             "evaluator_template_version": digest(skill.read_bytes())[:12], "framework": "codex", "model": "gpt-6-astra", "final_round": 1}))
 
 
+def prepared_connection(f, prepared, *, ceremony, evaluator):
+    # Preserve the writer's exact output; only the authored extractor converts it.
+    output = f.root / (f.values["ATTEMPT_ID"] + "-prepare-result.json")
+    output.write_bytes(prepared.stdout)
+    raw = json.loads(prepared.stdout)
+    directory = Path(f.recipe("prepared-directory", "convert emitted prepared.json to the evaluator directory",
+                              PREPARE_RESULT=output).stdout.decode().strip())
+    namespace = "spec-design-review" if ceremony == "spec-design" else "spec-plan-review"
+    skill = "codex-design-review" if ceremony == "spec-design" else "codex-plan-review"
+    bad = f.external(skill, namespace, "read-prepared", "raw prepared.json is not a prepared directory", expected=1,
+                     PREPARED_DIR=raw["prepared_path"])
+    assert b"does not name attempt" in bad.stdout + bad.stderr
+    bound = json.loads(f.external(skill, namespace, "read-prepared", "consume the exact authored directory output",
+                                  PREPARED_DIR=directory).stdout)
+    assert bound["attempt_id"] == f.values["ATTEMPT_ID"] and bound["revision_id"] == f.values["REVISION_ID"]
+    assert directory == Path(bound["prepared_dir"])
+    f.connection("prepared directory", producer="review-prepare -> prepared-directory", consumer=skill + " read-prepared",
+                 value=directory, actor=evaluator, revision=bound["revision_id"], attempt=bound["attempt_id"])
+    return directory, bound
+
+
+def ceremony_records(item):
+    log = item / "execution-log.md"
+    return [json.loads(line.removeprefix("Spec-outcome-record: ")) for line in
+            (log.read_text().splitlines() if log.exists() else []) if line.startswith("Spec-outcome-record: ")]
+
+
+def exercise_gate_composition(f, ceremony):
+    item = f.create_item()
+    authored_plan(f, item, concrete=ceremony == "spec-post-plan")
+    revision = json.loads(f.recipe("publish-revision", "publish before the commissioned gate",
+                                  REASON="Publish the declared ceremony stage.", AUTHOR_ROLE="spec-lead").stdout)["revision_id"]
+    skill = "codex-design-review" if ceremony == "spec-design" else "codex-plan-review"
+    namespace = "spec-design-review" if ceremony == "spec-design" else "spec-plan-review"
+    other = "fixture-" + skill
+    # A second distinct registered evaluator with an explicitly authored response.
+    other_source = f.repo / "skills" / other / "SKILL.md"
+    other_source.parent.mkdir()
+    other_source.write_text("# Fixture evaluator\nReads the supplied revision; returns a declared test response.\n")
+    for evaluator in (skill, other):
+        f.lore("ceremony", "add", ceremony, evaluator)
+    registered = f.recipe("ceremony-get", "read both registered identities", CEREMONY=ceremony).stdout.decode()
+    assert skill in registered and other in registered
+    attempts = [ceremony + "-" + evaluator + "-r1" for evaluator in (skill, other)]
+    prepared = []
+    for evaluator, attempt in zip((skill, other), attempts):
+        result = f.recipe("review-prepare", "commissioned lead prepares one initial attempt for " + evaluator,
+                          ATTEMPT_ID=attempt, CEREMONY=ceremony, REVISION_ID=revision,
+                          PURPOSE="criterion-adequacy", EXECUTION_WORKTREE="")
+        prepared.append(result)
+        f.connection("commissioned preparation", producer="review-prepare", consumer="coordinator handoff",
+                     value=json.loads(result.stdout)["prepared_path"], actor="commissioned-spec-lead", revision=revision, attempt=attempt)
+    f.recipe("awaiting-note", "lead hands both prepared attempts to the coordinator once",
+             ATTEMPT_IDS=" ".join(attempts), PUBLISHED_REVISION="")
+    notes = (item / "notes.md").read_text()
+    assert all(attempt in notes for attempt in attempts) and revision in notes and notes.count("Awaiting") == 1
+    assert not list((item / "reviews").glob("*/sealed"))
+    assert not ceremony_records(item)
+    pre_seat = tree_hashes(item / "reviews")
+    f.data("pre-seat-state.json", {"actor": "commissioned-spec-lead", "revision": revision, "attempts": attempts,
+                                 "review_hashes": pre_seat, "seal_count": 0, "acceptance": None})
+    history = []
+    for index, (evaluator, attempt, result) in enumerate(zip((skill, other), attempts, prepared)):
+        f.values.update(ATTEMPT_ID=attempt, REVISION_ID=revision, CEREMONY=ceremony)
+        directory, bound = prepared_connection(f, result, ceremony=ceremony, evaluator="coordinator")
+        review_inputs(f, attempt, evaluator=evaluator, verdict="COMPARABLE" if ceremony == "spec-design" else "GATE PASSED")
+        if index == 0:
+            f.external(skill, namespace, "evaluator-manifest", "coordinator runs the registered skill's terminal continuation",
+                       FINAL_ROUND=1, EVALUATOR_FILE=f.values["EVALUATOR_JSON"])
+            f.external(skill, namespace, "seal-review", "coordinator seals the attempt that the evaluator read",
+                       DISPOSITIONS_FILE=f.values["DISPOSITIONS_JSON"], EVIDENCE_FILE=f.values["EVIDENCE_JSON"])
+            outcome = json.loads(f.external(skill, namespace, "file-outcome", "coordinator files the registered skill identity",
+                                           OUTCOME="completed", VERDICT=f.values["RAW_VERDICT"]).stdout)
+        else:
+            f.recipe("review-seal", "coordinator seals the second evaluator's independent response")
+            outcome = json.loads(f.recipe("spec-outcome", "file the second evaluator under its own identity").stdout)
+        assert outcome["outcome"] == "completed"
+        joined = [row for row in ceremony_records(item) if row["attempt_id"] == attempt]
+        assert len(joined) == 1 and joined[0]["advisor"] == evaluator and joined[0]["ceremony"] == ceremony
+        evidence = json.loads(Path(f.values["EVIDENCE_JSON"]).read_text())
+        assert evidence["revision_id"] == revision and evidence["review_path"] == "reviews/" + attempt + "/sealed/seal.json"
+        history.append((directory, tree_hashes(directory)))
+        f.connection("commissioned terminal review", producer=evaluator, consumer="seal and outcome",
+                     value=f.values["EVIDENCE_JSON"], actor="coordinator", revision=revision, attempt=attempt)
+        if index == 0:
+            original_inputs = dict(f.values)
+            review_inputs(f, attempt + "-collision", evaluator=other, verdict="SECOND DISTINCT VERDICT")
+            refused = f.recipe("review-seal", "a second evaluator cannot reuse a write-once attempt", expected=1)
+            assert b"already" in (refused.stdout + refused.stderr).lower() or b"changed" in (refused.stdout + refused.stderr).lower()
+            f.values.update(original_inputs)
+            f.recipe("spec-outcome", "an advisor identity cannot be changed after outcome filing", expected=1, EVALUATOR=other)
+            f.values.update(original_inputs)
+    # The seat's acceptance is a separate note, after both terminal outcomes.
+    note = f.root / "gate-acceptance.md"
+    note.write_text("Fixture coordinator accepts " + ceremony + " revision " + revision + " after reading it whole.\n")
+    f.recipe("work-note", "acceptance follows evaluator evidence and remains a separate record", NOTE_FILE=note)
+    # A user edit after the earlier publication must enter a new reviewed snapshot.
+    live = item / "plan.md"
+    live.write_text(live.read_text().replace("A later reader can recover the basis of the design.",
+                                          "A later reader can recover the basis of the design. Accepted abstract clarification."))
+    revised = json.loads(f.recipe("publish-revision", "publish intervening user-gate edits immediately before review",
+                                 REASON="Publish design-affecting user-gate clarification.", AUTHOR_ROLE="spec-lead").stdout)["revision_id"]
+    assert revised != revision
+    repeat_design = f.recipe("review-prepare", "the abstract edit repeats the affected design gate",
+                             ATTEMPT_ID=ceremony + "-affected-design", CEREMONY="spec-design", REVISION_ID=revised)
+    directory, bound = prepared_connection(f, repeat_design, ceremony="spec-design", evaluator="coordinator")
+    assert Path(bound["plan_file"]).read_bytes() == live.read_bytes()
+    # Retain all-Accept: the evaluated revision remains sealed; no unread successor is fabricated.
+    f.values.update(CEREMONY=ceremony, REVISION_ID=revision)
+    f.recipe("awaiting-note", "post-edit handoff names reviewed N and newly published M once",
+             ATTEMPT_IDS=" ".join(attempts), PUBLISHED_REVISION=revised)
+    notes = (item / "notes.md").read_text()
+    assert revision in notes and revised in notes and notes.count("Awaiting") == 2
+    assert not list((item / "reviews").glob("*automatic*"))
+    for path, hashes in history:
+        assert tree_hashes(path) == hashes
+    # Each evaluator's follow-up gets its own attempt at the new revision.
+    for evaluator in (skill, other):
+        attempt = ceremony + "-" + evaluator + "-r2"
+        fresh = f.recipe("review-prepare", "independent evaluator retry retains its own attempt lineage",
+                         ATTEMPT_ID=attempt, CEREMONY=ceremony, REVISION_ID=revised)
+        _, bound = prepared_connection(f, fresh, ceremony=ceremony, evaluator="coordinator")
+        assert Path(bound["plan_file"]).read_bytes() == live.read_bytes()
+        review_inputs(f, attempt, evaluator=evaluator)
+        f.recipe("review-seal", "seal the actual independently reviewed successor")
+        f.recipe("spec-outcome", "file the successor without relabeling either historical review")
+    for path, hashes in history:
+        assert tree_hashes(path) == hashes
+    assert not (item / "results.jsonl").exists()
+    f.finish({"publish-revision", "ceremony-get", "review-prepare", "prepared-directory", "awaiting-note", "review-seal", "spec-outcome", "work-note"})
+
+
 def exercise_reviews(f):
     item = f.create_item()
     historic = []
@@ -964,9 +1103,9 @@ def exercise_reviews(f):
         registered = f.recipe("ceremony-get", "the registered evaluator remains discoverable", CEREMONY=ceremony).stdout.decode()
         assert evaluator in registered
         attempt = ceremony + "-registered"
-        prepared = json.loads(f.recipe("review-prepare", "freeze the registered evaluator's exact stage", ATTEMPT_ID=attempt,
-                                       CEREMONY=ceremony, REVISION_ID=revision, PURPOSE="criterion-adequacy", EXECUTION_WORKTREE="").stdout)
-        directory = Path(prepared["prepared_path"]).parent
+        prepared = f.recipe("review-prepare", "freeze the registered evaluator's exact stage", ATTEMPT_ID=attempt,
+                            CEREMONY=ceremony, REVISION_ID=revision, PURPOSE="criterion-adequacy", EXECUTION_WORKTREE="")
+        directory, _ = prepared_connection(f, prepared, ceremony=ceremony, evaluator="standalone-spec-lead")
         before = tree_hashes(directory)
         f.recipe("review-prepare", "the same attempt cannot be rebound to an unknown revision", expected=1, REVISION_ID="0" * 12)
         f.values["REVISION_ID"] = revision
@@ -992,7 +1131,8 @@ def exercise_reviews(f):
         # A commissioned lead prepares this handoff but seals no gate itself.
         commissioned = ceremony + "-commissioned"
         f.recipe("review-prepare", "prepare the coordinator's commissioned gate", ATTEMPT_ID=commissioned)
-        f.recipe("awaiting-note", "one commissioned note names the revision and prepared attempt")
+        f.recipe("awaiting-note", "one commissioned note names the revision and prepared attempt",
+                 ATTEMPT_IDS=commissioned, PUBLISHED_REVISION="")
         notes = (item / "notes.md").read_text()
         assert revision in notes and commissioned in notes and "Awaiting" in notes
         assert not (item / "reviews" / commissioned / "sealed").exists()
@@ -1038,13 +1178,21 @@ def exercise_finalize(f):
     registry = f.store / "_sessions/instances/fixture.json"
     registry.write_text(json.dumps({"name": "fixture", "project_dir": str(f.code), "sessions": [
         {"slug": "recipes", "type": "spec", "request_id": "fixture-spawn-request"}]}))
+    declared_steps = dict(re.findall(r'STEP_ID=(spec:[a-z-]+)[^\n]*?STEP_LABEL="([^"]+)"',
+                                    (f.repo / "skills/spec/SKILL.md").read_text()))
+    assert set(declared_steps) == {"spec:investigation", "spec:design", "spec:plan-ready"}, "missing authored milestone call site"
+    assert {"LORE_SESSION_INSTANCE", "LORE_SESSION_SLUG", "LORE_SESSION_TYPE"} <= set(f.rows["journal-step"]["inputs"])
     session_before = tree_hashes(f.store / "_sessions")
-    unhosted = f.recipe("journal-step", "unhosted milestone invokes no session writer", STEP_ID="spec:investigation", STEP_LABEL="Investigation complete")
+    investigation = next(step for step in declared_steps if step == "spec:investigation")
+    unhosted = f.recipe("journal-step", "unhosted milestone invokes no session writer", STEP_ID=investigation,
+                       STEP_LABEL=declared_steps[investigation], LORE_SESSION_INSTANCE="", LORE_SESSION_SLUG="", LORE_SESSION_TYPE="")
     assert unhosted.stdout == b"" and unhosted.stderr == b""
     assert tree_hashes(f.store / "_sessions") == session_before
-    f.env.update(LORE_SESSION_INSTANCE="fixture", LORE_SESSION_SLUG="recipes", LORE_SESSION_TYPE="spec")
-    for step, label in (("investigation", "Investigation complete"), ("design", "Design complete"), ("plan-ready", "Plan ready")):
-        f.recipe("journal-step", "journal the durable " + step + " milestone", STEP_ID="spec:" + step, STEP_LABEL=label)
+    for step, label in declared_steps.items():
+        f.recipe("journal-step", "journal the durable " + step + " milestone", STEP_ID=step, STEP_LABEL=label,
+                 LORE_SESSION_INSTANCE="fixture", LORE_SESSION_SLUG="recipes", LORE_SESSION_TYPE="spec")
+        f.connection("hosted milestone", producer="authored milestone call site", consumer="journal-step",
+                     value=step + ": " + label, actor="spec-lead")
         before = tree_hashes(f.store / "_sessions")
         f.recipe("journal-step", "identical milestone replay is idempotent")
         assert tree_hashes(f.store / "_sessions") == before
@@ -1058,6 +1206,8 @@ def exercise_finalize(f):
     warned = f.recipe("journal-step", "milestone failure warns without rolling back the plan", STEP_ID="spec:warning", STEP_LABEL="Warning fixture")
     assert b"Warning" in warned.stderr
     registry.write_bytes(registry_bytes)
+    # Finalize inherits the host environment independently of journal-step's explicit inputs.
+    f.env.update(LORE_SESSION_INSTANCE="fixture", LORE_SESSION_SLUG="recipes", LORE_SESSION_TYPE="spec")
     original = (item / "plan.md").read_text()
     (item / "plan.md").write_text(original.replace("Preserve execution and dispatch history.", "Narrowed fixture anchor."))
     session_before = tree_hashes(f.store / "_sessions")
@@ -1158,7 +1308,7 @@ def merge_coverage(source, paths, destination):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenario", required=True, choices=("inventory", "coverage", "synthesis", "entry", "inline", "full", "native", "designer", "consultation", "reviews", "finalize", "stewardship"))
+    parser.add_argument("--scenario", required=True, choices=("inventory", "coverage", "synthesis", "entry", "inline", "full", "native", "designer", "consultation", "gate-design", "gate-plan", "reviews", "finalize", "stewardship"))
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--prose-ref")
     parser.add_argument("--source", type=Path)
@@ -1170,9 +1320,9 @@ def main():
         empty = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--scenario", "unknown", "--root", str(args.root / "empty-spec")], capture_output=True)
         assert empty.returncode == 2 and b"invalid choice" in empty.stderr
         assert not (args.root / "empty-spec").exists()
-    elif args.scenario in ("synthesis", "entry", "inline", "full", "native", "designer", "consultation", "reviews", "finalize", "stewardship"):
+    elif args.scenario in ("synthesis", "entry", "inline", "full", "native", "designer", "consultation", "gate-design", "gate-plan", "reviews", "finalize", "stewardship"):
         implementation = compose_source(Path(__file__).resolve().parents[2], args.root / "source", args.prose_ref)
-        {"synthesis": exercise_synthesis, "entry": exercise_entry, "inline": exercise_inline, "full": exercise_full, "native": exercise_native, "designer": exercise_designer, "consultation": exercise_consultation, "reviews": exercise_reviews, "finalize": exercise_finalize, "stewardship": exercise_stewardship}[args.scenario](SpecFixture(implementation, args.root / "case"))
+        {"synthesis": exercise_synthesis, "entry": exercise_entry, "inline": exercise_inline, "full": exercise_full, "native": exercise_native, "designer": exercise_designer, "consultation": exercise_consultation, "gate-design": lambda f: exercise_gate_composition(f, "spec-design"), "gate-plan": lambda f: exercise_gate_composition(f, "spec-post-plan"), "reviews": exercise_reviews, "finalize": exercise_finalize, "stewardship": exercise_stewardship}[args.scenario](SpecFixture(implementation, args.root / "case"))
     elif args.scenario == "coverage":
         assert args.source, "coverage requires the exact spec source"
         args.root.mkdir(parents=True, exist_ok=True)
