@@ -52,7 +52,7 @@ if [[ -n "$KNOWLEDGE_DIR" && -d "$PREF_DIR" ]]; then
     title="$(grep -m1 '^# ' "$f" 2>/dev/null | sed 's/^# //')"
     [[ -n "$title" ]] || title="$(basename "$f" .md)"
     echo "- $title"
-  done < <(find "$PREF_DIR" -name '*.md' -type f | sort)
+  done < <(find "$PREF_DIR" -name '*.md' -type f | LC_ALL=C sort)
   [[ $found -eq 1 ]] || echo "(none)"
 else
   echo "(no preferences directory in the knowledge store)"
