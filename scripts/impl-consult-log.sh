@@ -3,6 +3,7 @@
 # Usage: impl-consult-log.sh <ref> --consultation-id <id> --worker <name> --domain <domain>
 #        --handler <lead|skill|agent> --question <text> --answer <text>
 #        [--skill-template-version <hash>] [--advisor-template-version <hash>]
+#        [--position-dispatch-manifest <path> --position-dispatch-sha256 <hash>]
 #        [--template-version <hash>] [--json]
 #
 # Judgment in, filing out: the answer is the lead's already-made judgment and
@@ -48,6 +49,8 @@ ANSWER=""
 SKILL_TV=""
 ADVISOR_TV=""
 TEMPLATE_VERSION=""
+POSITION_MANIFEST=""
+POSITION_SHA256=""
 JSON_MODE=0
 QUESTION_SET=0
 ANSWER_SET=0
@@ -59,6 +62,7 @@ usage() {
 Usage: lore impl consult-log <ref> --consultation-id <id> --worker <name> --domain <domain>
                              --handler <lead|skill|agent> --question <text> --answer <text>
                              [--skill-template-version <hash>] [--advisor-template-version <hash>]
+                             [--position-dispatch-manifest <path> --position-dispatch-sha256 <hash>]
                              [--template-version <hash>] [--json]
 
 Files a consultation the lead has already answered: appends the transcript
@@ -154,6 +158,10 @@ while [[ $# -gt 0 ]]; do
       ADVISOR_TV_SET=1
       shift
       ;;
+    --position-dispatch-manifest)
+      POSITION_MANIFEST="${2:-}"; shift 2 ;;
+    --position-dispatch-sha256)
+      POSITION_SHA256="${2:-}"; shift 2 ;;
     --template-version)
       TEMPLATE_VERSION="${2:-}"
       shift 2
@@ -275,6 +283,25 @@ if [[ -z "$TEMPLATE_VERSION" ]]; then
   fi
 fi
 
+ATTRIBUTION='null'
+if [[ -n "$POSITION_MANIFEST" || -n "$POSITION_SHA256" ]]; then
+  [[ "$HANDLER" == "agent" ]] || fail "position dispatch reference requires handler agent"
+  if ! ATTRIBUTION=$(PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 - "$POSITION_MANIFEST" "$POSITION_SHA256" "$SLUG" "$CONSULTATION_ID" "$DOMAIN" "$ADVISOR_TV" <<'ATTR_PY'
+import json, sys
+from position_attribution import project, validate_reference
+path, sha, slug, cid, domain, version = sys.argv[1:]
+ref = {"manifest_path": path, "manifest_sha256": sha}
+validate_reference(ref)
+value = project({"position_dispatch": ref}, expected={"work_item": slug, "position": "designer", "mode": "consultation", "consultation_id": cid, "domain": domain})
+if value["status"] == "resolved" and value["template_version"] != version:
+    raise SystemExit("advisor template version differs from recorded answer producer")
+print(json.dumps(value))
+ATTR_PY
+); then
+    fail "invalid consultation producer reference"
+  fi
+fi
+
 REPLIED_AT=$(timestamp_iso)
 CAPTURED_SHA=$(captured_at_sha)
 TRANSCRIPT_FILE="$ITEM_DIR/consultation-transcript.jsonl"
@@ -282,11 +309,11 @@ TRANSCRIPT_FILE="$ITEM_DIR/consultation-transcript.jsonl"
 # --- Transcript record (this script is its sole sanctioned writer) -----------
 TRANSCRIPT_ROW=$(python3 - "$CONSULTATION_ID" "$WORKER" "$DOMAIN" "$HANDLER" \
   "$SKILL_TV" "$ADVISOR_TV" "$QUESTION" "$ANSWER" "$REPLIED_AT" \
-  "$TEMPLATE_VERSION" "$CAPTURED_SHA" <<'PYEOF'
+  "$TEMPLATE_VERSION" "$CAPTURED_SHA" "$ATTRIBUTION" <<'PYEOF'
 import json, sys
 (cid, worker, domain, handler, skill_tv, advisor_tv,
  question, answer, replied_at, tv, sha) = sys.argv[1:12]
-print(json.dumps({
+row = {
     "consultation_id": cid,
     "worker": worker,
     "domain": domain,
@@ -298,7 +325,11 @@ print(json.dumps({
     "replied_at": replied_at,
     "template_version": tv or None,
     "captured_at_sha": None if sha == "null" else sha,
-}, ensure_ascii=False))
+}
+attribution = json.loads(sys.argv[12])
+if attribution is not None:
+    row.update(position_dispatch=attribution["position_dispatch"], producer_attribution=attribution)
+print(json.dumps(row, ensure_ascii=False))
 PYEOF
 )
 
@@ -323,6 +354,10 @@ BODY=$(printf 'Consultation: %s\nWorker: %s\nDomain: %s\nConsultation-handler: %
 WLOG_ARGS=(--slug "$SLUG" --source impl-verb)
 if [[ -n "$TEMPLATE_VERSION" ]]; then
   WLOG_ARGS+=(--template-version "$TEMPLATE_VERSION")
+fi
+
+if [[ "$ATTRIBUTION" != "null" ]]; then
+  WLOG_ARGS+=(--position-dispatch-manifest "$POSITION_MANIFEST" --position-dispatch-sha256 "$POSITION_SHA256")
 fi
 
 if ! printf '%s\n' "$BODY" | bash "$SCRIPT_DIR/write-execution-log.sh" "${WLOG_ARGS[@]}" >/dev/null; then

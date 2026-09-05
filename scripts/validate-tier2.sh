@@ -352,6 +352,21 @@ if printf '%s' "$ROW" | jq -e 'has("executable_falsifier")' >/dev/null 2>&1; the
   fi
 fi
 
+# Optional dispatch references retain unavailable identities as unknown at read time.
+if printf '%s' "$ROW" | jq -e 'has("position_dispatch")' >/dev/null 2>&1; then
+  if ! printf '%s' "$ROW" | PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c '
+import json, sys
+from position_attribution import validate_reference
+try:
+    validate_reference(json.load(sys.stdin)["position_dispatch"])
+except (ValueError, TypeError) as exc:
+    print(exc, file=sys.stderr)
+    sys.exit(1)
+'; then
+    fail_field "invalid position_dispatch reference"
+  fi
+fi
+
 # --- Final result ---
 if [[ $ERRORS -gt 0 ]]; then
   echo "$ERRORS validation error(s) — row rejected" >&2
