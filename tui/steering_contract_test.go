@@ -201,7 +201,7 @@ func TestSteeringInterruptDeliveryNeverReplays(t *testing.T) {
 			if err := hostAtomicJSON(queue, r); err != nil {
 				t.Fatal(err)
 			}
-			m, _ = m.handleInterruptScan(interruptScanMsg{r})
+			m = runInterruptRequest(t, m, r)
 			if m.flashErr != "" {
 				t.Fatal(m.flashErr)
 			}
@@ -224,7 +224,7 @@ func TestSteeringInterruptDeliveryNeverReplays(t *testing.T) {
 			}
 			// A scan captured before consumption and a recreated request cannot write twice.
 			hostAtomicJSON(queue, r)
-			m, _ = m.handleInterruptScan(interruptScanMsg{r})
+			m = runInterruptRequest(t, m, r)
 			reader.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
 			buffer := make([]byte, 1)
 			if n, _ := reader.Read(buffer); n != 0 {
@@ -242,7 +242,7 @@ func TestSteeringInterruptRefusalDoesNotWrite(t *testing.T) {
 	m.localSessions["demo"] = ls
 	panel, reader := runtimePanel(t, "demo", append([]string{"Working (10s · esc to interrupt)"}, ccModalRows...))
 	m.sessionPanels["demo"] = panel
-	m, _ = m.handleInterruptScan(interruptScanMsg{r})
+	m = runInterruptRequest(t, m, r)
 	if m.flashErr != "" {
 		t.Fatal(m.flashErr)
 	}
@@ -261,5 +261,209 @@ func TestSteeringInterruptRefusalDoesNotWrite(t *testing.T) {
 	json.Unmarshal(b, &saved)
 	if saved.Event.Event != "interrupt_refused" || saved.Event.Reason != "modal-owned-input" {
 		t.Fatalf("%+v", saved)
+	}
+}
+
+func runInterruptCommand(t *testing.T, m model, cmd tea.Cmd) model {
+	t.Helper()
+	if cmd == nil {
+		return m
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, child := range batch {
+			m = runInterruptCommand(t, m, child)
+		}
+		return m
+	}
+	switch msg.(type) {
+	case interruptPreparedMsg, interruptConsumedMsg:
+	default:
+		t.Fatalf("unexpected interrupt message %T", msg)
+	}
+	next, more := m.Update(msg)
+	return runInterruptCommand(t, next.(model), more)
+}
+func runInterruptRequest(t *testing.T, m model, r interruptRequest) model {
+	t.Helper()
+	next, cmd := m.handleInterruptScan(interruptScanMsg{r})
+	return runInterruptCommand(t, next, cmd)
+}
+
+func TestSteeringProviderErrorsEndAtSubmittedPrompt(t *testing.T) {
+	for _, tc := range []struct {
+		framework, glyph string
+		composer         []string
+	}{
+		{"claude-code", "❯", ccComposerRows}, {"codex", "›", cxComposerRows}, {"opencode", ">", ocComposerRows},
+	} {
+		rows := append([]string{"API error: connection failed", tc.glyph + " new request", "Working (1s · esc to interrupt)"}, tc.composer...)
+		if got, _ := classifyActivity(tc.framework, work.ScreenSnapshot{Rows: rows}); got != "working" {
+			t.Fatalf("%s historical error poisoned new turn: %s", tc.framework, got)
+		}
+		rows = append([]string{tc.glyph + " new request", "API error: connection failed", "Working (1s · esc to interrupt)"}, tc.composer...)
+		if got, _ := classifyActivity(tc.framework, work.ScreenSnapshot{Rows: rows}); got != "blocked" {
+			t.Fatalf("%s current error lost precedence: %s", tc.framework, got)
+		}
+	}
+	rows := append([]string{"API error: connection failed", "Working (1s · esc to interrupt)"}, ccComposerRows...)
+	rows[len(rows)-3] = "❯ held input is not a submitted request"
+	if got, _ := classifyActivity("claude-code", work.ScreenSnapshot{Rows: rows}); got != "blocked" {
+		t.Fatal("held composer cleared provider error", got)
+	}
+}
+
+func TestSteeringInterruptModalArrivesDuringPersistence(t *testing.T) {
+	m := runtimeModel(t)
+	m.instanceName = "host"
+	m.instanceStartedISO = "owner-start"
+	r, ls := steeringRequest(time.Now())
+	m.localSessions["demo"] = ls
+	panel, reader := runtimePanel(t, "demo", append([]string{"Working (10s · esc to interrupt)"}, make([]string, len(ccModalRows))...))
+	m.sessionPanels["demo"] = panel
+	// Block the real journal append boundary in a command while the main Update
+	// goroutine receives a terminal paint. No terminal or observation is mocked.
+	dir := t.TempDir()
+	entered := filepath.Join(dir, "entered")
+	release := filepath.Join(dir, "release")
+	wrapper := filepath.Join(dir, "journal.sh")
+	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
+	script := "#!/bin/bash\nset -eu\nrow=$(cat)\nif [[ $row == *interrupt_attempted* ]]; then\n touch " + quote(entered) + "\n while [[ ! -f " + quote(release) + " ]]; do sleep .01; done\nfi\nprintf '%s' \"$row\" | bash " + quote(m.eventScript) + " \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m.eventScript = wrapper
+	t.Cleanup(func() { os.WriteFile(release, nil, 0600) })
+	var cmd tea.Cmd
+	m, cmd = m.handleInterruptScan(interruptScanMsg{r})
+	if cmd == nil {
+		t.Fatal("persistence was not dispatched")
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(entered); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("journal did not reach persistence boundary")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// The attempt exists durably before any ESC, and duplicate scans stay held.
+	delivery := m
+	delivery.hostKey = "interrupt-host"
+	if _, err := os.Stat(delivery.hostDeliveryPath(r.RequestID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, duplicate := m.handleInterruptScan(interruptScanMsg{r}); duplicate != nil {
+		t.Fatal("duplicate scan scheduled another attempt")
+	}
+	next, _ := m.Update(work.TerminalOutputMsg{Slug: "demo", Data: []byte("\x1b[2J\x1b[H" + strings.Join(ccModalRows, "\r\n"))})
+	m = next.(model)
+	snap, err := m.sessionPanels["demo"].ScreenState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !interactivePromptState("claude-code", snap) {
+		t.Fatal("modal output was not applied while persistence was blocked")
+	}
+	if err := os.WriteFile(release, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var msg tea.Msg
+	select {
+	case msg = <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("persistence did not finish")
+	}
+	if _, ok := msg.(interruptPreparedMsg); !ok {
+		t.Fatalf("not prepared: %T", msg)
+	}
+	next, outcome := m.Update(msg)
+	m = next.(model)
+	// Repeated completion delivery cannot replay ESC while outcome is pending.
+	if _, duplicate := m.Update(msg); duplicate != nil {
+		t.Fatal("prepared message replayed")
+	}
+	m = runInterruptCommand(t, m, outcome)
+	if m.flashErr != "" {
+		t.Fatal(m.flashErr)
+	}
+	reader.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+	buffer := make([]byte, 1)
+	if n, _ := reader.Read(buffer); n != 0 {
+		t.Fatal("ESC reached the newly displayed modal")
+	}
+	b, err := os.ReadFile(delivery.hostDeliveryPath(r.RequestID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved hostDelivery
+	json.Unmarshal(b, &saved)
+	if saved.Event.Event != "interrupt_refused" || saved.Event.Reason != "modal-owned-input" || saved.Event.Links["transport_attempted"] != "" {
+		t.Fatalf("untruthful final gate result %+v", saved)
+	}
+}
+
+func TestSteeringInterruptPreparedRechecksIdentityAndRecovery(t *testing.T) {
+	for _, change := range []string{"generation", "expired", "gone", "recovered-before-write"} {
+		t.Run(change, func(t *testing.T) {
+			m := runtimeModel(t)
+			m.instanceName = "host"
+			m.instanceStartedISO = "owner-start"
+			r, ls := steeringRequest(time.Now())
+			m.localSessions["demo"] = ls
+			panel, reader := runtimePanel(t, "demo", []string{"Working (10s · esc to interrupt)"})
+			m.sessionPanels["demo"] = panel
+			var cmd tea.Cmd
+			m, cmd = m.handleInterruptScan(interruptScanMsg{r})
+			prepared, ok := cmd().(interruptPreparedMsg)
+			if !ok {
+				t.Fatal("attempt not prepared")
+			}
+			switch change {
+			case "generation":
+				ls.requestID = "replacement"
+				m.localSessions["demo"] = ls
+			case "expired":
+				prepared.request.ExpiresAt = time.Now().Add(-time.Second).Format(time.RFC3339Nano)
+			case "gone":
+				delete(m.sessionPanels, "demo")
+			case "recovered-before-write":
+				// Losing the prepared in-memory message after a crash must not permit a
+				// second attempt; the durable record already makes delivery uncertain.
+				m.pendingInterrupt = nil
+				m = runInterruptRequest(t, m, r)
+			}
+			if change != "recovered-before-write" {
+				next, outcome := m.Update(prepared)
+				m = runInterruptCommand(t, next.(model), outcome)
+			}
+			if m.flashErr != "" {
+				t.Fatal(m.flashErr)
+			}
+			reader.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+			buffer := make([]byte, 1)
+			if n, _ := reader.Read(buffer); n != 0 {
+				t.Fatal("stale/recovered preparation wrote ESC")
+			}
+			delivery := m
+			delivery.hostKey = "interrupt-host"
+			b, err := os.ReadFile(delivery.hostDeliveryPath(r.RequestID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saved hostDelivery
+			json.Unmarshal(b, &saved)
+			want := session.EventInterruptRefused
+			if change == "recovered-before-write" {
+				want = session.EventInterruptUncertain
+			}
+			if saved.Event.Event != want || saved.Event.Links["transport_attempted"] != "" {
+				t.Fatalf("%+v", saved)
+			}
+		})
 	}
 }

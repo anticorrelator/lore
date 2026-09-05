@@ -112,7 +112,7 @@ func classifyActivity(framework string, snap work.ScreenSnapshot) (string, sessi
 	if state.interactive {
 		return "blocked", session.ObservationEvidence{Matcher: state.interactiveReason, Reason: "Interactive prompt owns terminal input."}
 	}
-	if matcher := providerErrorMatcher(snap.Rows); matcher != "" {
+	if matcher := providerErrorMatcher(framework, snap.Rows); matcher != "" {
 		return "blocked", session.ObservationEvidence{Matcher: matcher, Reason: "Provider reports a connection or request failure; interrupt chrome does not establish healthy progress."}
 	}
 	if matcher := activeScreenMatcher(framework, snap.Rows); matcher != "" {
@@ -259,7 +259,44 @@ func (m model) reconcileSessionObservation(slug string) (model, tea.Cmd) {
 
 var providerFailure = regexp.MustCompile(`(?i)^\s*(?:[!⚠●⎿]\s*)?(?:reconnecting\b|stream disconnected\b|connection (?:lost|failed|error)\b|(?:api|provider|request) error\b|error (?:connecting|during streaming)\b|retrying\.{0,3}\s*\(?\d)`)
 
-func providerErrorMatcher(rows []string) string {
+func providerErrorMatcher(framework string, rows []string) string {
+	composer := len(rows)
+	switch framework {
+	case "claude-code":
+		composer = ccComposerRegionStart(rows)
+	case "codex":
+		if footer := cxFooterIndex(rows); footer >= 0 {
+			for i := footer; i >= 0; i-- {
+				if strings.HasPrefix(strings.TrimSpace(rows[i]), cxGlyph) {
+					composer = i
+					break
+				}
+			}
+		}
+	case "opencode":
+		for i := len(rows) - 1; i >= 0; i-- {
+			if strings.Contains(rows[i], "┃") {
+				composer = i
+			} else if composer < len(rows) {
+				break
+			}
+		}
+	}
+	for i := composer - 1; i >= 0; i-- {
+		row := strings.TrimSpace(rows[i])
+		glyph := "❯"
+		if framework == "codex" {
+			glyph = cxGlyph
+		}
+		if framework == "opencode" {
+			glyph = ">"
+		}
+		if strings.HasPrefix(row, glyph+" ") && strings.TrimSpace(strings.TrimPrefix(row, glyph)) != "" {
+			rows = rows[i+1:]
+			break
+		}
+	}
+
 	for i := len(rows) - 1; i >= 0; i-- {
 		row := strings.TrimSpace(rows[i])
 		if ccSettled.MatchString(row) || cxSettled.MatchString(row) || ocSettled.MatchString(row) {

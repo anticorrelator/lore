@@ -1,15 +1,16 @@
 package main
 
 import (
-	tea "charm.land/bubbletea/v2"
 	"encoding/json"
 	"fmt"
-	"github.com/anticorrelator/lore/tui/internal/session"
-	"github.com/anticorrelator/lore/tui/internal/work"
 	"os"
 	"path/filepath"
 	"regexp"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/anticorrelator/lore/tui/internal/session"
+	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
 type interruptRequest struct {
@@ -75,79 +76,126 @@ func interruptGate(r interruptRequest, ls liveSession, instance, ownerStarted st
 	return ""
 }
 
-// The durable delivery record fences every ESC attempt across scans and host
-// recovery. Successful transport remains uncertain: it cannot prove a turn ended.
+type interruptPreparedMsg struct {
+	request     interruptRequest
+	deliveryKey string
+	event       session.Event
+}
+type interruptConsumedMsg struct {
+	requestID string
+	err       error
+}
+
+// interruptScreenGate reads only the current event-loop-owned session and
+// terminal. Persistence must not run between this check and the ESC write.
+func (m model) interruptScreenGate(r interruptRequest) (work.SessionPanelModel, string) {
+	ls, exists := m.localSessions[r.Slug]
+	panel, attached := m.sessionPanels[r.Slug]
+	if !exists || !attached || panel.IsDone() || panel.MirrorError() != "" {
+		return panel, "session-unavailable"
+	}
+	snap, err := panel.ScreenState()
+	if err != nil {
+		return panel, "screen-unavailable"
+	}
+	return panel, interruptGate(r, ls, m.instanceName, m.instanceStartedISO, os.Getpid(), m.sessionHarness(r.Slug), snap, time.Now())
+}
+
 func (m model) handleInterruptScan(rows interruptScanMsg) (model, tea.Cmd) {
+	if m.pendingInterrupt == nil {
+		m.pendingInterrupt = make(map[string]bool)
+	}
+	var cmds []tea.Cmd
 	for _, r := range rows {
+		if _, pending := m.pendingInterrupt[r.RequestID]; pending {
+			continue
+		}
+		m.pendingInterrupt[r.RequestID] = true
+		_, reason := m.interruptScreenGate(r)
 		delivery := m
 		if delivery.hostKey == "" {
 			delivery.hostKey = "interrupt-" + m.instanceName
 		}
-		path := delivery.hostDeliveryPath(r.RequestID)
+		ev := session.Event{Event: session.EventInterruptRefused, RequestID: r.RequestID, Slug: r.Slug, ActorInstance: session.StrPtr(m.instanceName), Reason: reason, Links: map[string]string{"session_id": r.SessionID, "launch_request_id": r.LaunchRequestID, "epoch": r.Epoch}}
+		cmds = append(cmds, delivery.prepareInterruptCmd(r, ev))
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// The command owns all blocking reads, fsync and journal work. While it runs,
+// Update remains free to process terminal paints and lifecycle transitions.
+func (m model) prepareInterruptCmd(r interruptRequest, ev session.Event) tea.Cmd {
+	return func() tea.Msg {
+		path := m.hostDeliveryPath(r.RequestID)
 		if b, err := os.ReadFile(path); err == nil {
 			var d hostDelivery
-			if json.Unmarshal(b, &d) == nil {
-				if err = delivery.finishHostDelivery(d); err != nil {
-					m.flashErr = compactErr("interrupt receipt", err)
-				}
+			if err = json.Unmarshal(b, &d); err == nil {
+				err = m.finishHostDelivery(d)
 			}
-			continue
+			return interruptConsumedMsg{r.RequestID, err}
 		} else if !os.IsNotExist(err) {
-			m.flashErr = compactErr("interrupt receipt", err)
-			continue
+			return interruptConsumedMsg{r.RequestID, err}
 		}
-		ev := session.Event{Event: session.EventInterruptRefused, RequestID: r.RequestID, Slug: r.Slug, ActorInstance: session.StrPtr(m.instanceName), Links: map[string]string{"session_id": r.SessionID, "launch_request_id": r.LaunchRequestID, "epoch": r.Epoch}}
-		reason := "session-unavailable"
-		ls, exists := m.localSessions[r.Slug]
-		panel, attached := m.sessionPanels[r.Slug]
-		if exists && attached && !panel.IsDone() && panel.MirrorError() == "" {
-			if snap, err := panel.ScreenState(); err == nil {
-				reason = interruptGate(r, ls, m.instanceName, m.instanceStartedISO, os.Getpid(), m.sessionHarness(r.Slug), snap, time.Now())
-			}
+		if ev.Reason != "" {
+			return m.finishInterruptCmd(ev)()
 		}
+		ev.Event = session.EventInterruptUncertain
+		ev.Reason = "delivery-uncertain"
+		// The durable record prohibits a second ESC even if this process exits
+		// before the prepared message is handled or its outcome can be published.
+		if err := m.hostDeliveryAttempt("interrupt", ev); err != nil {
+			return interruptConsumedMsg{r.RequestID, err}
+		}
+		attempt := ev
+		attempt.Event = session.EventInterruptAttempted
+		attempt.EventID = "interrupt-attempt-" + r.RequestID
+		if err := session.AppendEvent(m.eventScript, m.config.KnowledgeDir, attempt); err != nil {
+			return interruptConsumedMsg{r.RequestID, err}
+		}
+		return interruptPreparedMsg{request: r, deliveryKey: m.hostKey, event: ev}
+	}
+}
+
+func (m model) handleInterruptPrepared(msg interruptPreparedMsg) (model, tea.Cmd) {
+	if !m.pendingInterrupt[msg.request.RequestID] {
+		return m, nil
+	}
+	m.pendingInterrupt[msg.request.RequestID] = false
+	panel, reason := m.interruptScreenGate(msg.request)
+	ev := msg.event
+	if reason != "" {
+		ev.Event = session.EventInterruptRefused
 		ev.Reason = reason
-		if reason == "" {
-			ev.Event = session.EventInterruptUncertain
-			ev.Reason = "delivery-uncertain"
-			if err := delivery.hostDeliveryAttempt("interrupt", ev); err != nil {
-				m.flashErr = compactErr("persist interrupt attempt", err)
-				continue
-			}
-			// Persist attempted before touching the terminal. Recheck immediately after
-			// persistence because the filesystem/journal can block while the turn moves.
-			attempt := ev
-			attempt.Event = session.EventInterruptAttempted
-			attempt.EventID = "interrupt-attempt-" + r.RequestID
-			if err := session.AppendEvent(m.eventScript, m.config.KnowledgeDir, attempt); err != nil {
-				m.flashErr = compactErr("interrupt attempt", err)
-				continue
-			}
-			snap, err := panel.ScreenState()
-			if err != nil {
-				ev.Event = session.EventInterruptRefused
-				ev.Reason = "screen-unavailable"
-			} else if reason = interruptGate(r, ls, m.instanceName, m.instanceStartedISO, os.Getpid(), m.sessionHarness(r.Slug), snap, time.Now()); reason != "" {
-				ev.Event = session.EventInterruptRefused
-				ev.Reason = reason
-			} else {
-				err = panel.Interrupt()
-				ev.Links["transport_attempted"] = "true"
-				if err != nil {
-					ev.Links["transport_error"] = fmt.Sprint(err)
-				} else {
-					ev.Links["escape_written"] = "true"
-				}
-			}
+	} else {
+		err := panel.Interrupt()
+		ev.Links["transport_attempted"] = "true"
+		if err != nil {
+			ev.Links["transport_error"] = fmt.Sprint(err)
+		} else {
+			ev.Links["escape_written"] = "true"
 		}
-		ev.EventID = "host-delivery-" + delivery.hostKey + "-" + r.RequestID
+	}
+	delivery := m
+	delivery.hostKey = msg.deliveryKey
+	return m, delivery.finishInterruptCmd(ev)
+}
+
+func (m model) finishInterruptCmd(ev session.Event) tea.Cmd {
+	return func() tea.Msg {
+		ev.EventID = "host-delivery-" + m.hostKey + "-" + ev.RequestID
 		d := hostDelivery{Kind: "interrupt", Event: ev, Terminal: true}
-		if err := hostAtomicJSON(path, d); err != nil {
-			m.flashErr = compactErr("interrupt outcome", err)
-			continue
+		err := hostAtomicJSON(m.hostDeliveryPath(ev.RequestID), d)
+		if err == nil {
+			err = m.finishHostDelivery(d)
 		}
-		if err := delivery.finishHostDelivery(d); err != nil {
-			m.flashErr = compactErr("interrupt outcome", err)
-		}
+		return interruptConsumedMsg{ev.RequestID, err}
+	}
+}
+
+func (m model) handleInterruptConsumed(msg interruptConsumedMsg) (model, tea.Cmd) {
+	delete(m.pendingInterrupt, msg.requestID)
+	if msg.err != nil {
+		m.flashErr = compactErr("interrupt receipt", msg.err)
 	}
 	return m, nil
 }

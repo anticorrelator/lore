@@ -1162,7 +1162,10 @@ harnesses, modal-owned input and screens without current activity are refused.
 The operation never starts a host, closes a session, or escalates to process
 termination.
 
-The runtime checks the live terminal immediately before sending ESC. This targets
+The runtime persists the attempt outside the terminal event loop, allowing new
+terminal output and lifecycle changes to be processed during journal writes. It
+then reacquires the current session and checks the live terminal immediately before
+sending ESC, with no intervening persistence. This targets
 the turn active when the owner handles the request; it does not identify or
 promise to interrupt an earlier observed turn. `interrupt_requested` records
 intent, `interrupt_attempted` records the durable attempt boundary, and
@@ -1173,7 +1176,8 @@ Durable delivery records prohibit replay after an ambiguous attempt, including
 recovery. The CLI's `turn_ended` is null, not a completion assertion.
 
 Provider reconnect/request errors take precedence over generic interrupt chrome
-in observations. `progress_observed_at` and `progress_age_seconds` describe the
+in observations. A later submitted prompt outside the current composer ends the
+previous turn’s error evidence; held composer input does not. `progress_observed_at` and `progress_age_seconds` describe the
 last change to meaningful visible output; `observed_at` describes screen capture
 freshness. Animated activity/status rows do not refresh output progress. After
 120 seconds without such progress, `suspected_stall` is advisory only: long tools

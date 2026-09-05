@@ -303,6 +303,7 @@ type model struct {
 	tmuxEnabled            bool
 	localSessions          map[string]liveSession
 	pendingSpawns          map[string]liveSession
+	pendingInterrupt       map[string]bool
 	sessionIdle            map[string]bool
 	sessionObservations    map[string]session.Observation
 	meaningfulObservations map[string]session.Observation
