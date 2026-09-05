@@ -314,23 +314,26 @@ for ordinal, inv in enumerate(normalized, 1):
                                 "investigation_id": inv["id"], "question": inv["question"], "complexity": inv["complexity"]}, ensure_ascii=False))
             bindings["absence_reasons"] = {field: "no-plan-task-assigned" if field in {"task_id", "revision_id"}
                                           else "not-applicable-to-investigator" for field in binder.FIELDS if bindings[field] is None}
-        if route == "session" and (bindings["task_id"] is None or bindings["revision_id"] is None):
-            reject("session investigator requires an assigned plan task and revision in the current session runtime")
         header_fields = {"Packet-id": bindings["packet_id"], "Report-id": bindings["report_id"],
                          "Dispatch-attempt-id": bindings["dispatch_attempt_id"]}
         if bindings["revision_id"] is not None:
             header_fields["Revision-id"] = bindings["revision_id"]
         identity_headers = "".join(f"{key}: {value}\n" for key, value in header_fields.items()).encode()
         reference = binder.publish(descriptor, bindings, kdir, dispatch_guidance.encode(),
+                                   native_model=model if route == "native" else None,
                                    prefix=identity_headers, required=("packet_id", "packet_pointer"),
-                                   wrapper={"template_id": "spec", "template_version": lead_template_version,
-                                            "path": str(Path(script_dir).parent / "skills/spec/SKILL.md"),
-                                            "sha256": hashlib.sha256((Path(script_dir).parent / "skills/spec/SKILL.md").read_bytes()).hexdigest()})
+                                   wrapper={"template_id": "spec-open", "template_version": source_shape["wrapper"]["sha256"][:12],
+                                            "path": source_shape["wrapper"]["path"],
+                                            "sha256": source_shape["wrapper"]["sha256"]})
         prompt = Path(reference["payload_path"]).read_text()
+        selection_path = Path(reference["manifest_path"]).parent / "selection.json"
+        selection = json.loads(selection_path.read_bytes()) if route == "native" else None
         payload.update(position="investigator", framework=target, route=route, model=model,
                        prompt=prompt, position_dispatch=reference, descriptor=descriptor,
                        producer={key: descriptor[key] for key in ("template_id", "template_version")},
-                       wrapper_template_version=lead_template_version, bindings=bindings,
+                       native_selection=selection, completion_input={"position_dispatch": reference, "lore_task_id": bindings["task_id"]},
+                       wrapper_template_version=source_shape["wrapper"]["sha256"][:12],
+                       lead_template_version=lead_template_version, bindings=bindings,
                        session_context={"dispatch_guidance": prompt, "position_dispatch": reference})
     directives.append({"ordinal": ordinal, "operation_id": op_id,
                        "adapter": str(Path(script_dir).parent / "adapters/agents" / (payload.get("framework", framework) + ".sh")),
