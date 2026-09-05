@@ -199,3 +199,93 @@ func TestStartupSweepHoldsBackCheckoutsARegistryRowClaims(t *testing.T) {
 		t.Fatalf("claimed checkout was removed: %v", err)
 	}
 }
+
+func TestOrdinaryCloseRetainsCommittedAndDirtyResultsWithoutIntegration(t *testing.T) {
+	for _, branch := range []bool{false, true} {
+		for _, dirty := range []bool{false, true} {
+			name := "detached"
+			if branch {
+				name = "branch"
+			}
+			if dirty {
+				name += "-dirty"
+			}
+			t.Run(name, func(t *testing.T) {
+				_, repo, _ := closedSessionWorktree(t, "fixture")
+				ctx := context.Background()
+				identity, err := worktree.Create(ctx, repo, filepath.Join(t.TempDir(), "result"), "retained")
+				if err != nil {
+					t.Fatal(err)
+				}
+				identity, err = worktree.Transition(identity, worktree.StateActive)
+				if err != nil {
+					t.Fatal(err)
+				}
+				git := func(path string, args ...string) string {
+					t.Helper()
+					out, err := exec.Command("git", append([]string{"-C", path}, args...)...).CombinedOutput()
+					if err != nil {
+						t.Fatalf("git %v: %v: %s", args, err, out)
+					}
+					return strings.TrimSpace(string(out))
+				}
+				if branch {
+					git(identity.CanonicalPath, "switch", "-c", "result")
+				}
+				if err := os.WriteFile(filepath.Join(identity.CanonicalPath, "committed.txt"), []byte("commit result\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				git(identity.CanonicalPath, "add", ".")
+				git(identity.CanonicalPath, "commit", "-m", "result")
+				tip := git(identity.CanonicalPath, "rev-parse", "HEAD")
+				if dirty {
+					if err := os.WriteFile(filepath.Join(identity.CanonicalPath, "uncommitted.txt"), []byte("dirty result\n"), 0644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				head := git(repo, "rev-parse", "HEAD")
+				index, err := os.ReadFile(filepath.Join(repo, ".git", "index"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				tracked, err := os.ReadFile(filepath.Join(repo, "tracked.txt"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				m := model{}
+				msg := m.disposeWorktreeCmd("worker", liveSession{worktree: &identity, sourceDir: repo}, "")().(worktreeDispositionMsg)
+				if msg.err != nil || msg.outcome.Kind != worktree.OutcomeWorktreeQuarantined || !strings.Contains(msg.outcome.Reason, "integration_pending") {
+					t.Fatalf("disposition: %+v", msg)
+				}
+				if git(repo, "rev-parse", "HEAD") != head {
+					t.Fatal("source HEAD changed")
+				}
+				after, err := os.ReadFile(filepath.Join(repo, ".git", "index"))
+				if err != nil || string(after) != string(index) {
+					t.Fatal("source index changed")
+				}
+				after, err = os.ReadFile(filepath.Join(repo, "tracked.txt"))
+				if err != nil || string(after) != string(tracked) {
+					t.Fatal("source bytes changed")
+				}
+				if _, err := os.Stat(filepath.Join(repo, "committed.txt")); !os.IsNotExist(err) {
+					t.Fatal("result appeared in source")
+				}
+				cleanup := sessionWorktreeCleanupCmd("worker", liveSession{worktree: &msg.outcome.Identity})().(sessionWorktreeCleanedMsg)
+				if cleanup.err != nil || !cleanup.proof.Verified {
+					t.Fatalf("cleanup failed: %+v", cleanup)
+				}
+				git(repo, "merge-base", "--is-ancestor", tip, msg.outcome.Artifact.OID)
+				if git(repo, "show", msg.outcome.Artifact.Ref+":committed.txt") != "commit result" {
+					t.Fatal("committed result lost")
+				}
+				if dirty && git(repo, "show", msg.outcome.Artifact.Ref+":uncommitted.txt") != "dirty result" {
+					t.Fatal("dirty result lost")
+				}
+				if _, err := os.Stat(msg.outcome.Artifact.PatchPath); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}

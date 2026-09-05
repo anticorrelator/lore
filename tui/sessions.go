@@ -168,19 +168,12 @@ func (m model) writeInstanceCmd() tea.Cmd {
 }
 
 func (m model) disposeWorktreeCmd(slug string, ls liveSession, closeRequestID string) tea.Cmd {
-	destination := ls.sourceDir
-	if destination == "" {
-		destination = m.normalizedProjectDir
-	}
-	if destination == "" {
-		destination = m.config.ProjectDir
-	}
 	return func() tea.Msg {
 		if ls.worktree == nil {
 			return worktreeDispositionMsg{slug: slug, closeRequestID: closeRequestID, ls: ls,
 				err: fmt.Errorf("missing versioned worktree identity")}
 		}
-		outcome, err := publishWorktree(context.Background(), *ls.worktree, destination)
+		outcome, err := retainWorktree(context.Background(), *ls.worktree)
 		return worktreeDispositionMsg{slug: slug, closeRequestID: closeRequestID, ls: ls, outcome: outcome, err: err}
 	}
 }
@@ -221,15 +214,20 @@ func (m model) handleManagedWorktreeQuiesced(msg managedWorktreeQuiescedMsg) (mo
 	return m, tea.Sequence(cmds...)
 }
 
-func publishWorktree(ctx context.Context, identity worktree.Identity, destination string) (worktree.PublishOutcome, error) {
-	publishable, artifact, err := worktree.MakePublishable(ctx, identity)
+// retainWorktree is automatic disposition, never authorization to integrate.
+func retainWorktree(ctx context.Context, identity worktree.Identity) (worktree.PublishOutcome, error) {
+	const reason = "integration_pending: result retained for explicit integration"
+	publishable, _, err := worktree.MakePublishable(ctx, identity)
 	if err != nil {
-		return worktree.PublishOutcome{
-			Kind: worktree.OutcomeRestoreRefused, Identity: identity,
-			Expected: identity.Captured, Reason: err.Error(),
-		}, err
+		return worktree.PublishOutcome{Kind: worktree.OutcomeRestoreRefused, Identity: identity, Reason: err.Error()}, err
 	}
-	return worktree.Publish(ctx, publishable, artifact, destination)
+	next, artifact, err := worktree.Quarantine(ctx, publishable, reason)
+	if err != nil {
+		return worktree.PublishOutcome{Kind: worktree.OutcomeRestoreRefused,
+			Identity: identity, Expected: identity.Captured, Reason: err.Error()}, err
+	}
+	return worktree.PublishOutcome{Kind: worktree.OutcomeWorktreeQuarantined,
+		Identity: next, Artifact: artifact, Expected: identity.Captured, Reason: reason}, nil
 }
 
 func worktreeOutcomeEvent(instanceName, slug string, ls liveSession, outcome worktree.PublishOutcome) session.Event {
@@ -674,10 +672,11 @@ type adoptedSession struct {
 // with no surviving tmux are journaled `orphaned` inside the scan Cmd; only live
 // ones need re-attach and a `recovered` row here.
 type adoptionScanMsg struct {
-	alive       []adoptedSession
-	retained    []adoptedSession
-	notices     []runtimeNotice
-	diagnostics []session.Diagnostic
+	settledClaims []string
+	alive         []adoptedSession
+	retained      []adoptedSession
+	notices       []runtimeNotice
+	diagnostics   []session.Diagnostic
 }
 
 func adoptedFromRegistry(deadInstance string, s session.Session) adoptedSession {
@@ -724,7 +723,7 @@ func validateAdoptionIdentity(kdir string, s session.Session) error {
 			return fmt.Errorf("managed worktree owner does not match persisted session pid/tmux identity")
 		}
 	}
-	if managed {
+	if managed || s.PID > 0 {
 		panePID, err := work.TmuxPanePID(s.Tmux)
 		if err != nil {
 			return fmt.Errorf("read tmux pane pid: %w", err)
@@ -846,12 +845,13 @@ func (m model) adoptionScanCmd() tea.Cmd {
 	if destination == "" {
 		destination = m.config.ProjectDir
 	}
+	transferred := m.instanceRow()
 	return func() tea.Msg {
 		var alive []adoptedSession
 		var retained []adoptedSession
 		var notices []runtimeNotice
 		var diagnostics []session.Diagnostic
-		transferred := m.instanceRow()
+		var settledClaims []string
 		candidates := session.ScanAdoptable(dir, repo, self, time.Now())
 		if m.hostKey != "" {
 			var err error
@@ -868,18 +868,50 @@ func (m model) adoptionScanCmd() tea.Cmd {
 				return adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Message: err.Error()}}}
 			}
 		}
-		for slug := range m.localSessions {
-			seen[slug] = true
+		for _, row := range transferred.Sessions {
+			seen[row.Slug] = true
+		}
+		known := map[string]session.Session{}
+		for _, row := range transferred.Sessions {
+			known[row.Slug] = row
+		}
+		if m.hostKey == "" {
+			owners, err := session.OwnershipInstances(dir)
+			if err != nil {
+				return adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Code: "adoption-ownership-read", Message: err.Error()}}}
+			}
+			for _, owner := range owners {
+				if owner.Repo != repo || owner.HostKey != "" || owner.Name == self || !session.ProcessAlive(owner.PID) {
+					continue
+				}
+				for _, row := range owner.Sessions {
+					seen[row.Slug] = true
+					known[row.Slug] = row
+				}
+			}
 		}
 		for _, inst := range candidates {
-			claim, claimPath, err := session.ClaimInstance(dir, inst.Name)
+			claim, claimPath, err := session.ClaimAdoptable(dir, inst)
 			if err != nil {
 				continue // lost the claim race, or the row vanished
 			}
 			var claimAlive []adoptedSession
 			var claimRetained []adoptedSession
 			var claimEvents []session.Event
+			preserveClaim := false
 			for _, s := range claim.Sessions {
+				if m.hostKey == "" {
+					if seen[s.Slug] {
+						if session.SameSessionGeneration(known[s.Slug], s) {
+							continue
+						}
+						preserveClaim = true
+						notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "adoption-generation-conflict", Message: "retained conflicting session " + s.Slug + " in " + claimPath})
+						continue
+					}
+					seen[s.Slug] = true
+					known[s.Slug] = s
+				}
 				if m.hostKey != "" {
 					if seen[s.Slug] {
 						continue
@@ -934,11 +966,7 @@ func (m model) adoptionScanCmd() tea.Cmd {
 						claimRetained = append(claimRetained, a)
 					} else {
 						a.worktree = cloneWorktreeIdentity(&pending)
-						target := destination
-						if s.SourceDir != "" {
-							target = s.SourceDir
-						}
-						outcome, dispositionErr := publishWorktree(context.Background(), pending, target)
+						outcome, dispositionErr := retainWorktree(context.Background(), pending)
 						if dispositionErr != nil || outcome.Kind == worktree.OutcomeRestoreRefused {
 							a.refusalReason = outcome.Reason
 							if a.refusalReason == "" && dispositionErr != nil {
@@ -947,13 +975,9 @@ func (m model) adoptionScanCmd() tea.Cmd {
 							claimEvents = append(claimEvents, adoptionRefusedEvent(self, a))
 							claimRetained = append(claimRetained, a)
 						} else if outcome.Kind == worktree.OutcomeWorktreeQuarantined {
-							claimEvents = append(claimEvents, worktreeOutcomeEvent(self, s.Slug, ls, outcome))
-						} else if outcome.Kind == worktree.OutcomePublished {
-							// A re-run sweep over the same session must replay this
-							// row rather than publish a second one.
-							published := worktreeOutcomeEvent(self, s.Slug, ls, outcome)
-							published.EventID = recoveryEventID("worktree-published", a.deadInstance, a.slug, a.requestID)
-							claimEvents = append(claimEvents, published)
+							retainedEvent := worktreeOutcomeEvent(self, s.Slug, ls, outcome)
+							retainedEvent.EventID = recoveryEventID("worktree-retained", a.deadInstance, a.slug, a.requestID+":"+outcome.Identity.Epoch)
+							claimEvents = append(claimEvents, retainedEvent)
 						}
 					}
 				}
@@ -964,10 +988,14 @@ func (m model) adoptionScanCmd() tea.Cmd {
 			for _, a := range append(append([]adoptedSession(nil), claimAlive...), claimRetained...) {
 				transferred.Sessions = append(transferred.Sessions, a.registrySession())
 			}
+			transferred.Revision++
 			if err := session.WriteInstance(dir, transferred); err != nil {
 				transferred.Sessions = transferred.Sessions[:transferStart]
+				if _, releaseErr := session.ReleaseClaim(claimPath); releaseErr != nil {
+					notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "adoption-claim-release", Message: releaseErr.Error()})
+				}
 				notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "adoption-ownership-transfer", Message: compactErr("adoption ownership transfer", err)})
-				continue
+				return adoptionScanMsg{alive: alive, retained: retained, notices: notices, diagnostics: diagnostics, settledClaims: settledClaims}
 			}
 			alive = append(alive, claimAlive...)
 			retained = append(retained, claimRetained...)
@@ -985,7 +1013,12 @@ func (m model) adoptionScanCmd() tea.Cmd {
 					}
 				}
 			}
-			if m.hostKey != "" && !settled {
+			if !settled || preserveClaim {
+				if path, err := session.ReleaseClaim(claimPath); err != nil {
+					notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "adoption-claim-release", Message: err.Error()})
+				} else {
+					notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "adoption-retained-manifest", Message: "unresolved ownership remains available for recovery at " + path})
+				}
 				continue
 			}
 			var retirementNotices []runtimeNotice
@@ -995,11 +1028,34 @@ func (m model) adoptionScanCmd() tea.Cmd {
 			}
 			notices = append(notices, retirementNotices...)
 			diagnostics = append(diagnostics, retirementDiagnostics...)
-			if err := session.DeleteClaim(claimPath); err != nil {
-				notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "adoption-claim-delete", Message: compactErr("adoption claim delete", err)})
+			settledClaims = append(settledClaims, claimPath)
+		}
+		return adoptionScanMsg{alive: alive, retained: retained, notices: notices, diagnostics: diagnostics, settledClaims: settledClaims}
+	}
+}
+
+// Retire recovery checkpoints only from a snapshot built after the event loop
+// has incorporated every survivor. Rejected writes leave the claims recoverable.
+func (m model) finishAdoptionClaimsCmd(paths []string) tea.Cmd {
+	if len(paths) == 0 {
+		return nil
+	}
+	row := m.instanceRow()
+	return func() tea.Msg {
+		if err := session.WriteInstance(m.sessionsDir, row); err != nil {
+			for _, path := range paths {
+				if _, releaseErr := session.ReleaseClaim(path); releaseErr != nil {
+					return instanceSyncedMsg{err: fmt.Errorf("%w; release recovery claim: %v", err, releaseErr)}
+				}
+			}
+			return instanceSyncedMsg{err: err}
+		}
+		for _, path := range paths {
+			if err := session.DeleteClaim(path); err != nil {
+				return instanceSyncedMsg{err: err}
 			}
 		}
-		return adoptionScanMsg{alive: alive, retained: retained, notices: notices, diagnostics: diagnostics}
+		return instanceSyncedMsg{}
 	}
 }
 
@@ -1019,7 +1075,7 @@ func (m model) handleAdoptionScan(msg adoptionScanMsg) (model, tea.Cmd) {
 		m.localSessions[a.slug] = a.liveSession()
 	}
 	if len(msg.alive) == 0 {
-		return m, diagnosticCmd
+		return m, tea.Batch(diagnosticCmd, m.finishAdoptionClaimsCmd(msg.settledClaims))
 	}
 	specH := m.detailPanelHeight()
 	specW := m.rightPanelWidth() - 2
@@ -1057,6 +1113,7 @@ func (m model) handleAdoptionScan(msg adoptionScanMsg) (model, tea.Cmd) {
 	if diagnosticCmd != nil {
 		cmds = append(cmds, diagnosticCmd)
 	}
+	cmds = append(cmds, m.finishAdoptionClaimsCmd(msg.settledClaims))
 	return m, tea.Batch(cmds...)
 }
 
@@ -1352,8 +1409,12 @@ func (m model) spawnSessionOnRef(d work.SessionDescriptor, requestID, requiredRe
 	}
 	env := work.SessionEnv{Instance: m.instanceName, Slug: slug, Type: sessionType(d.Type),
 		WorktreeID: d.WorktreeID, ExecutionDir: d.ExecutionDir, SourceDir: m.normalizedProjectDir, HostKey: m.hostKey, RoutingOverrides: d.RoutingOverrides}
-	if m.hostKey != "" {
-		env.Prepared = m.hostSpawnCheckpoint(requestID)
+	if m.hostKey != "" || (m.tmuxEnabled && requestID != "") {
+		checkpointID := requestID
+		if checkpointID == "" {
+			checkpointID = slug
+		}
+		env.Prepared = m.hostSpawnCheckpoint(checkpointID)
 	}
 	if d.Worktree == nil {
 		sourceDir := m.normalizedProjectDir

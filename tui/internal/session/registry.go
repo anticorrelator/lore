@@ -8,6 +8,7 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -57,6 +58,8 @@ type Session struct {
 // Instance is one live TUI instance's registry row, stored at
 // instances/<name>.json.
 type Instance struct {
+	adoptionPath string // scan-only source, including an abandoned claim
+
 	Revision int64 `json:"revision,omitempty"`
 
 	HostKey          string    `json:"host_key,omitempty"`
@@ -101,31 +104,47 @@ func instancePath(sessionsDir, name string) string {
 	return filepath.Join(InstancesDir(sessionsDir), name+".json")
 }
 
-// WriteInstance writes an instance's own registry file via tmp+rename so a
-// concurrent reader never observes a torn row. The instance is the sole writer
-// of its own file, so no lock is needed.
+// ErrStaleInstance means a newer snapshot or retirement already owns this name.
+// Callers must preserve launch/recovery checkpoints when publication is refused.
+var ErrStaleInstance = errors.New("stale instance snapshot")
+
+// Registry operations share a process lock: each name has one owning process,
+// but its asynchronous commands can finish in any order.
 var instanceWriteMu sync.Mutex
 
 func WriteInstance(sessionsDir string, inst Instance) error {
 	instanceWriteMu.Lock()
 	defer instanceWriteMu.Unlock()
-	if inst.HostKey != "" && inst.Revision > 0 {
-		if b, err := os.ReadFile(instancePath(sessionsDir, inst.Name)); err == nil {
-			var previous Instance
-			if json.Unmarshal(b, &previous) == nil && previous.Revision > inst.Revision {
-				return nil
-			}
-		}
-	}
 	dir := InstancesDir(sessionsDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create instances dir: %w", err)
 	}
 	data, err := json.Marshal(inst)
 	if err != nil {
-		return fmt.Errorf("marshal instance %q: %w", inst.Name, err)
+		return err
 	}
-	return atomicWrite(instancePath(sessionsDir, inst.Name), data)
+	path := instancePath(sessionsDir, inst.Name)
+	for _, priorPath := range []string{path, filepath.Join(dir, "."+inst.Name+".retired")} {
+		b, err := os.ReadFile(priorPath)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		var previous Instance
+		if err := json.Unmarshal(b, &previous); err != nil {
+			return err
+		}
+		if priorPath != path && previous.PID == inst.PID && previous.Started == inst.Started {
+			return ErrStaleInstance
+		}
+		if previous.Revision > inst.Revision ||
+			(previous.Revision > 0 && previous.Revision == inst.Revision && !bytes.Equal(b, data)) {
+			return ErrStaleInstance
+		}
+	}
+	return atomicWrite(path, data)
 }
 
 // HeartbeatExisting renews a registration without recreating a removed row.
@@ -149,11 +168,22 @@ func Heartbeat(sessionsDir string, inst Instance) error {
 // RemoveInstance deletes the instance's registry file. Idempotent: a missing
 // file is not an error (a hard kill may have raced a graceful teardown).
 func RemoveInstance(sessionsDir, name string) error {
-	err := os.Remove(instancePath(sessionsDir, name))
+	instanceWriteMu.Lock()
+	defer instanceWriteMu.Unlock()
+	path := instancePath(sessionsDir, name)
+	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	// Keep the retired generation outside the ownership manifest glob. A delayed
+	// write or heartbeat fallback must not recreate a gracefully removed owner.
+	if err := atomicWrite(filepath.Join(InstancesDir(sessionsDir), "."+name+".retired"), data); err != nil {
+		return err
+	}
+	return os.Remove(path)
 }
 
 // ListInstances returns every live instance and discards scan diagnostics.

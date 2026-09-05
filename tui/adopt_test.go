@@ -206,16 +206,22 @@ func TestAdoptionScan_DeadSessionJournalsOrphaned(t *testing.T) {
 	if len(dueRows) != 1 || dueRows[0]["event_type"] != "session-orphaned" || dueRows[0]["stratum"] != "instance_death" || dueRows[0]["disposition"] != "unhandled" {
 		t.Fatalf("orphan DUE rows = %+v", dueRows)
 	}
-	// The corpse claim is deleted only after the adopting instance owns the
-	// refused legacy row; a later heartbeat must not erase that ownership.
-	leftover, _ := filepath.Glob(filepath.Join(session.InstancesDir(sessionsDir), "*"))
-	if len(leftover) != 1 || filepath.Base(leftover[0]) != "me.json" {
-		t.Fatalf("ownership transfer rows = %v, want only me.json", leftover)
+	// The original claim stays recoverable until the event loop incorporates
+	// transferred ownership and publishes that complete snapshot.
+	if len(msg.settledClaims) != 1 {
+		t.Fatalf("settled claims = %v", msg.settledClaims)
+	}
+	if _, err := os.Stat(msg.settledClaims[0]); err != nil {
+		t.Fatal(err)
 	}
 	m, _ = m.handleAdoptionScan(msg)
-	if cmd := m.writeInstanceCmd(); cmd != nil {
-		_ = cmd()
+	if result := m.finishAdoptionClaimsCmd(msg.settledClaims)().(instanceSyncedMsg); result.err != nil {
+		t.Fatal(result.err)
 	}
+	if _, err := os.Stat(msg.settledClaims[0]); !os.IsNotExist(err) {
+		t.Fatalf("claim remains: %v", err)
+	}
+
 	instances := session.ListInstances(sessionsDir)
 	if len(instances) != 1 || instances[0].Name != "me" || len(instances[0].Sessions) != 1 || instances[0].Sessions[0].Slug != "demo" {
 		t.Fatalf("adopter heartbeat lost refused ownership: %+v", instances)
@@ -464,9 +470,10 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 	if len(msg.alive[0].closeRequests) != 1 || msg.alive[0].closeRequests[0] != "term-1" {
 		t.Fatalf("recovered close-request manifest lost: %+v", msg.alive[0])
 	}
-	if leftover, _ := filepath.Glob(filepath.Join(session.InstancesDir(sessionsDir), "*")); len(leftover) != 1 || filepath.Base(leftover[0]) != "me.json" {
-		t.Fatalf("corpse ownership was not transferred before cleanup: %v", leftover)
+	if len(msg.settledClaims) != 1 {
+		t.Fatalf("recovery checkpoint missing before event-loop transfer: %+v", msg)
 	}
+
 	if _, err := os.Stat(retiredPath); !os.IsNotExist(err) {
 		t.Fatalf("dead-target request survived adoption: %v", err)
 	}
@@ -516,10 +523,8 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 	}
 }
 
-// TestAdoptionScan_PublishedSessionJournalsDestinationOnce: the recovery sweep's
-// publish is journaled like the interactive one, and its deterministic event id
-// makes a re-run an exact replay rather than a second publication row.
-func TestAdoptionScan_PublishedSessionJournalsDestinationOnce(t *testing.T) {
+// Dead-session recovery records retained results with an idempotentent event id.
+func TestAdoptionScan_RetainsSessionWithoutIntegrationOnce(t *testing.T) {
 	m, sessionsDir := baseSessionModel(t)
 	kdir := m.config.KnowledgeDir
 	m.config.RepoIdentifier = "my-repo"
@@ -577,29 +582,81 @@ func TestAdoptionScan_PublishedSessionJournalsDestinationOnce(t *testing.T) {
 		t.Fatalf("dead (no-tmux) session returned as alive: %+v", msg.alive)
 	}
 	got := readEventTypes(t, kdir)
-	if len(got) != 2 || got[0] != session.EventWorktreePublished || got[1] != session.EventOrphaned {
-		t.Fatalf("events = %v, want [worktree_published orphaned]", got)
+	if len(got) != 2 || got[0] != session.EventWorktreeQuarantined || got[1] != session.EventOrphaned {
+		t.Fatalf("events = %v, want [worktree_quarantined orphaned]", got)
 	}
 	rows := readEventRows(t, kdir)
-	wantDestination, err := filepath.EvalSymlinks(sourceDir)
-	if err != nil {
-		t.Fatal(err)
+	if rows[0].Links["destination_path"] != "" || !strings.Contains(rows[0].Reason, "integration_pending") {
+		t.Fatalf("retention must report pending integration, not a destination write: %+v", rows[0])
 	}
-	if rows[0].Links["destination_path"] != wantDestination {
-		t.Fatalf("recovery published row destination = %q, want %q", rows[0].Links["destination_path"], wantDestination)
-	}
-	if rows[0].Slug != "demo" || rows[0].Reason != "" {
-		t.Fatalf("recovery published identity = %+v", rows[0])
-	}
-	wantID := recoveryEventID("worktree-published", "dead-inst", "demo", "spawn-1")
+	wantID := recoveryEventID("worktree-retained", "dead-inst", "demo", "spawn-1:"+identity.Epoch)
 	if rows[0].EventID != wantID {
-		t.Fatalf("recovery published event_id = %q, want deterministic %q", rows[0].EventID, wantID)
+		t.Fatalf("retention event_id = %q, want %q", rows[0].EventID, wantID)
 	}
+	if got := refOID(t, sourceDir, "HEAD"); got != identity.Captured.HeadOID {
+		t.Fatalf("recovery integrated result: %s", got)
+	}
+
 	// A re-run sweep replays the same evidence under the same id.
 	if err := session.AppendEvent(m.eventScript, kdir, rows[0]); err != nil {
 		t.Fatalf("replaying the recovery row failed: %v", err)
 	}
 	if got := readEventTypes(t, kdir); len(got) != 2 {
 		t.Fatalf("replay appended a second publication row: %v", got)
+	}
+}
+
+func TestAdoptionConflictingSlugPreservesBothGenerationsForRetry(t *testing.T) {
+	m, dir := baseSessionModel(t)
+	m.config.RepoIdentifier = "repo"
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	dead := deadPID(t)
+	for i, name := range []string{"old-owner", "new-owner"} {
+		row := session.Instance{Name: name, PID: dead, Repo: "repo", Revision: int64(i + 1), Sessions: []session.Session{{Slug: "same", RequestID: name, Type: "worker", Initiator: "agent"}}}
+		if err := session.WriteInstance(dir, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	msg := m.adoptionScanCmd()().(adoptionScanMsg)
+	if len(msg.retained) != 1 || msg.retained[0].requestID != "new-owner" {
+		t.Fatalf("newest identity not retained: %+v", msg)
+	}
+	rows := session.ScanAdoptable(dir, "repo", m.instanceName, time.Now())
+	if len(rows) != 1 || rows[0].Sessions[0].RequestID != "old-owner" {
+		t.Fatalf("conflict unavailable while adopter alive: %+v", rows)
+	}
+	if len(msg.notices) == 0 {
+		t.Fatal("conflict did not surface a recovery notice")
+	}
+	m, _ = m.handleAdoptionScan(msg)
+	if m.localSessions["same"].requestID != "new-owner" {
+		t.Fatal("older generation overwrote new one")
+	}
+}
+
+func TestAdoptionStaleTransferReleasesClaimForImmediateRetry(t *testing.T) {
+	m, dir := baseSessionModel(t)
+	m.config.RepoIdentifier = "repo"
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	row := session.Instance{Name: "dead-owner", PID: deadPID(t), Repo: "repo", Sessions: []session.Session{{Slug: "recover", RequestID: "exact-request", Type: "worker", Initiator: "agent"}}}
+	if err := session.WriteInstance(dir, row); err != nil {
+		t.Fatal(err)
+	}
+	cmd := m.adoptionScanCmd()
+	if err := session.WriteInstance(dir, m.instanceRow()); err != nil {
+		t.Fatal(err)
+	}
+	msg := cmd().(adoptionScanMsg)
+	if len(msg.retained) != 0 || len(msg.alive) != 0 || len(msg.notices) == 0 {
+		t.Fatalf("stale transfer appeared successful: %+v", msg)
+	}
+	rows := session.ScanAdoptable(dir, "repo", m.instanceName, time.Now())
+	if len(rows) != 1 || rows[0].Sessions[0].RequestID != "exact-request" {
+		t.Fatalf("failed transfer stranded claim: %+v", rows)
+	}
+	// Retry succeeds without stopping or replacing this adopter.
+	retry := m.adoptionScanCmd()().(adoptionScanMsg)
+	if len(retry.retained) != 1 || retry.retained[0].requestID != "exact-request" {
+		t.Fatalf("retry lost identity: %+v", retry)
 	}
 }

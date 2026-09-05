@@ -431,17 +431,23 @@ func (m model) handleSessionProcessStarted(msg work.SessionProcessStartedMsg) (m
 			Reason:         "adopted from " + meta.adoptedFrom,
 		}))
 	default:
-		cmds = append(cmds, m.writeInstanceCmd())
-		if meta.requestID != "" {
-			cmds = append(cmds, emitSpawnedCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, session.Event{
-				Event:         session.EventSpawned,
-				ActorInstance: session.StrPtr(m.instanceName),
-				Slug:          slug,
-				SessionType:   meta.typ,
-				Initiator:     meta.initiator,
-				RequestID:     meta.requestID,
-			}))
-		}
+		row := m.instanceRow()
+		cmds = append(cmds, func() tea.Msg {
+			if err := session.WriteInstance(m.sessionsDir, row); err != nil {
+				return journalResultMsg{err: err}
+			}
+			if meta.requestID != "" {
+				ev := session.Event{Event: session.EventSpawned, ActorInstance: session.StrPtr(m.instanceName), Slug: slug, SessionType: meta.typ, Initiator: meta.initiator, RequestID: meta.requestID}
+				if result := emitSpawnedCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, ev)().(journalResultMsg); result.err != nil {
+					return result
+				}
+			}
+			checkpointID := meta.requestID
+			if checkpointID == "" {
+				checkpointID = slug
+			}
+			return journalResultMsg{err: m.clearHostSpawn(checkpointID)}
+		})
 	}
 
 	if m.hostKey != "" {

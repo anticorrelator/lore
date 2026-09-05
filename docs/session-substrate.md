@@ -141,8 +141,9 @@ direct-PTY spawn on stderr rather than degrading quietly. A dead instance's
 registry row is not deleted (mtime-TTL hides it from live snapshots but nothing
 unlinks it), which makes that row its own recovery manifest. At startup a
 replacement TUI scans `instances/*.json` **including TTL-stale files**, and a row
-is adoptable when it names this repo and its owner is dead (mtime beyond the TTL
-**and** PID not alive). The scanner claims a corpse atomically by renaming its file
+is adoptable when it names this repo and its owner PID is dead, even within the
+heartbeat TTL. An inaccessible process is treated as alive. Abandoned adoption
+claims are scanned too; a live adopter keeps exclusive ownership of its claim. The scanner claims a corpse atomically by renaming its file
 to a claim suffix — exactly one racing renamer wins, so two fresh TUIs cannot
 double-adopt (the same rename-as-claim atomicity the request queue uses). For each
 nested session with a live `tmux` session (`tmux has-session`), the adopter
@@ -151,8 +152,8 @@ tmux is gone (or that had no `tmux` name) is journaled `orphaned` with
 `reason=instance-death`, the dead predecessor in `target_instance`, its persisted
 spawn request ID when available, and spend bounded by the existing transcript or
 duration-only evidence. Before attaching, the adopter validates the complete
-versioned worktree identity and proves that the pane cwd equals its canonical
-path. Missing identity, a different Git common-dir or per-worktree git-dir, an
+versioned worktree identity, checks the persisted pane PID when present, and
+proves that the pane cwd equals its canonical path. Missing identity, a different Git common-dir or per-worktree git-dir, an
 epoch mismatch, or a reused path is refused; recovery never substitutes the
 replacement TUI's project directory. The durable registry write transferring
 ownership lands before its `recovered` journal row (the substrate's
@@ -174,38 +175,45 @@ versioned `Identity` from `tui/internal/worktree/guard.go`, which carries exactl
 - target ref and target OID; and
 - lifecycle state.
 
-The ordinary lifecycle is `captured → active → publishable → published |
-quarantined`. `teardown-pending` is the ownership-retaining state used when close
-cannot yet prove process death; it may proceed to `publishable` or `quarantined`
-but is not cleanup-eligible itself. Identity is checked before spawn, adoption,
-publish, and cleanup. Unknown or incomplete legacy identity and any path,
-common-dir, git-dir, epoch, or generation mismatch fail closed.
+The ordinary close lifecycle is `captured → active → teardown-pending →
+quarantined`. Closing and dead-session recovery retain results for explicit Git
+integration; neither advances the captured destination or changes its index or
+files. The retained outcome uses `worktree_quarantined` with reason
+`integration_pending: result retained for explicit integration`. This is a normal
+successful result disposition followed by `closed` after observed teardown, or
+`orphaned` during dead-owner recovery. It is not a claim that integration failed.
 
-Publishing compares the destination's full live generation with the captured
-generation before applying the session result through Git. The typed outcomes
-are exactly `published`, `restore_refused`, and `worktree_quarantined`. A refusal
-or quarantine leaves every destination file byte-for-byte unchanged and keeps
-the session result recoverable through its durable result ref and patch. A
-quarantined identity is cleanup-eligible because the content is durable
-elsewhere; quarantine does not promise indefinite retention of the physical
-worktree directory.
+Retention preserves the result ref and a binary patch before making the physical
+checkout cleanup-eligible. Snapshot commits preserve the session's committed tip
+as an ancestor, so detached commits and uncommitted changes remain recoverable
+after cleanup. The outcome records `result_ref`, `result_oid`, and `patch_path`.
+Use the retained ref with an explicit Git operation to integrate the chosen
+result. Branch switching inside the session does not authorize integration.
 
-`published` is the successful internal disposition and projects to the normal
-exactly-once `closed` session terminal. It also appends its own
-`worktree_published` journal row naming the destination checkout the merge landed
-in: that destination is the one fact no later reader can reconstruct from registry
-state, and auditing a wrong-clone merge needs it. The row carries the session
-slug, the worktree epoch, path, target ref and OID, the result ref and OID, and
-`links.destination_path`; it carries no refusal reason, because a success has
-none, and no generation blobs, because on a success the expected and observed
-generations are equal by construction. It is appended after the merge is known
-successful and before worktree cleanup is sequenced. An append failure surfaces
-through the ordinary journal error path and does not undo the merge — the merge
-stays published. The recovery sweep's row carries a deterministic event id, so a
-re-run sweep replays it rather than publishing a second row. `restore_refused` and
-`worktree_quarantined` add their named worktree rows because the operator needs
-the refusal reason and recovery artifact. None of the three is an additional close
-terminal; all three remain linked lifecycle outcomes.
+The separate explicit `Publish` primitive still supports `publishable →
+published` under the full destination-generation, identity, ancestry, and
+cleanliness checks. Automatic teardown and recovery do not call it. Identity is
+checked before preservation and cleanup; incomplete or mismatched identity
+returns `restore_refused` and retains ownership.
+
+Registry snapshots carry a revision for both ordinary and managed hosts. An older
+revision, a conflicting equal revision, or a write from a retired owner is
+refused, so asynchronously completed spawn and close writes cannot erase newer
+membership or recreate a removed owner. Launch checkpoints survive until the
+complete owning registry snapshot is durable. Ordinary queued tmux launches use
+the same provisional checkpoint as dedicated hosts, scoped as `session-spawn`.
+
+Recovery chooses newer full owners before provisional launch records. It compares
+session generations using request, transcript, process, and worktree identity;
+a slug alone cannot prove duplicate ownership. Different generations sharing a
+slug remain in separate manifests with a conflict notice, rather than replacing
+one another. Unresolved ordinary claims are released to immediate recovery
+discovery, with their preserved path reported, even while the current adopter
+remains alive. They can be retried by a subsequent recovery scan after the
+conflict is resolved; there is no periodic replay or automatic slug renaming.
+Successful claims are retired only after the receiving event loop incorporates
+all recovered identities and publishes its complete snapshot. Managed-host
+claims remain scoped to their host and source checkout.
 
 ### Session write containment
 
