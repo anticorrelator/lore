@@ -211,6 +211,9 @@ set +e
 RESULT=$(python3 - "$CANDIDATES_FILE" "$ITEM_DIR/task-claims.jsonl" "$SLUG" \
   "$SCRIPT_DIR/lore-promote.sh" "$LEAD_TV" "$WORKER_TV" "$ADVISOR_TV" <<'PYEOF'
 import json, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[4]).parent))
+from position_attribution import project
 
 (cand_path, claims_path, slug, promote_sh,
  lead_tv, worker_tv, advisor_tv) = sys.argv[1:8]
@@ -245,6 +248,7 @@ else:
                 sys.exit(1)
 
 claim_ids = set()
+claims = {}
 try:
     with open(claims_path, encoding="utf-8") as f:
         for line in f:
@@ -257,6 +261,7 @@ try:
                 continue
             if isinstance(row, dict) and row.get("claim_id"):
                 claim_ids.add(row["claim_id"])
+                claims[row["claim_id"]] = row
 except FileNotFoundError:
     pass
 
@@ -308,6 +313,23 @@ for i, cand in enumerate(candidates, 1):
                          "reason": f"no template-version attribution for producer_role '{role}'"})
         continue
     tv = ROLE_TV[role]
+    producers = [project(claims[sid], expected={"work_item": slug}) for sid in sids]
+    compiled = [p for p in producers if p["status"] != "legacy"]
+    if compiled:
+        identities = {(p["template_id"], p["template_version"]) for p in compiled}
+        if (len(compiled) != len(producers) or len(identities) != 1
+                or any(p["status"] != "resolved" for p in compiled)):
+            rejected.append({"claim_id": cid, "reason": "source claims have unknown or mixed compiled producer attribution"})
+            continue
+        producer = compiled[0]
+        registration = subprocess.run(["bash", str(Path(promote_sh).with_name("template-registry-register.sh")),
+            "--template-id", producer["template_id"], "--template-version", producer["template_version"],
+            "--template-path", producer["template_path"]], capture_output=True, text=True)
+        if registration.returncode:
+            rejected.append({"claim_id": cid, "reason": "compiled producer registration failed"})
+            continue
+        tv = producer["template_version"]
+        cand = dict(cand, position_dispatch=producer["position_dispatch"], producer_attribution=producer)
 
     argv = ["bash", promote_sh, "--work-item", slug, "--producer-role", role]
     if tv:

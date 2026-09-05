@@ -142,6 +142,14 @@ if ! printf '%s' "$ROW" | "$VALIDATE_SCRIPT"; then
   exit 1
 fi
 
+# Re-resolve additive producer metadata before using a caller's version stamp.
+ATTRIBUTION=$(printf '%s' "$ROW" | python3 "$SCRIPT_DIR/position_attribution.py" \
+  --expected "$(jq -cn --arg wi "$WORK_ITEM" '{work_item:$wi}')")
+if [[ $(printf '%s' "$ATTRIBUTION" | jq -r '.status') != legacy ]]; then
+  ROW=$(printf '%s' "$ROW" | jq --argjson attribution "$ATTRIBUTION" '. + {producer_attribution:$attribution}')
+  TEMPLATE_VERSION=$(printf '%s' "$ATTRIBUTION" | jq -r '.template_version // ""')
+fi
+
 # --- Extract provenance fields from row (CLI overrides take precedence) ---
 CLAIM_ID=$(printf '%s' "$ROW" | jq -r '.claim_id // ""')
 CLAIM=$(printf '%s' "$ROW" | jq -r '.claim // ""')
@@ -279,6 +287,9 @@ COMMONS_ROW=$(printf '%s' "$ROW" | jq -c --arg ep "$ENTRY_PATH" --arg wi "$WORK_
   captured_at_sha,
   entry_path: $ep
 }
++ (if has("position_dispatch") or has("producer_attribution") then
+    {position_dispatch, producer_attribution, producer_role, source_artifact_ids,
+     template_version: .producer_attribution.template_version} else {} end)
 + (if has("executable_falsifier") then {executable_falsifier} else {} end)
 + ({kind, kind_status, where_looked, answered_by, subsystem} | with_entries(select(.value != null)))')
 if ! printf '%s' "$COMMONS_ROW" \

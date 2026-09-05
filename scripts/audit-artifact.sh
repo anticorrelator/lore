@@ -1044,9 +1044,28 @@ fi
 # error. Branch-aware reconciliation per Appendix B of the plan is future work.
 build_resolved_input() {
   local dry_run_flag="$1"  # "true" or "false"
-  python3 - "$ARTIFACT_ID" "$ARTIFACT_PATH" "$ARTIFACT_TYPE" "$KDIR" "$TASK_CLAIMS_PATH" "$AUDIT_CANDIDATES_PATH" "$dry_run_flag" << 'PYEOF'
+  python3 - "$ARTIFACT_ID" "$ARTIFACT_PATH" "$ARTIFACT_TYPE" "$KDIR" "$TASK_CLAIMS_PATH" "$AUDIT_CANDIDATES_PATH" "$dry_run_flag" "$SCRIPT_DIR" << 'PYEOF'
 import json, re, sys
-artifact_id, artifact_path, artifact_type, kdir, task_claims_path, audit_candidates_path, dry_run_flag = sys.argv[1:8]
+artifact_id, artifact_path, artifact_type, kdir, task_claims_path, audit_candidates_path, dry_run_flag, scripts = sys.argv[1:9]
+sys.path.insert(0, scripts)
+from position_attribution import project
+import subprocess
+registered = {}
+
+def attribution(row):
+    expected = {key: row[key] for key in ("task_id", "work_item") if row.get(key)}
+    producer = project(row, expected=expected)
+    if producer["status"] == "resolved":
+        key = (producer["template_id"], producer["template_version"])
+        if key not in registered:
+            proc = subprocess.run(["bash", scripts + "/template-registry-register.sh",
+                "--kdir", kdir, "--template-id", key[0], "--template-version", key[1],
+                "--template-path", producer["template_path"]], capture_output=True, text=True)
+            registered[key] = proc.returncode == 0
+        if not registered[key]:
+            producer.update(status="unknown", reason="compiled producer registration failed",
+                            template_id=None, template_version=None)
+    return producer
 
 out = {
     "artifact_id": artifact_id,
@@ -1186,6 +1205,10 @@ if task_claims_path:
                     "scale": row.get("scale") or None,
                     "evidence_ref": {"path": task_claims_path, "line": line_no},
                 }
+                producer = attribution(row)
+                if producer["status"] != "legacy":
+                    claim["position_dispatch"] = row.get("position_dispatch")
+                    claim["producer_attribution"] = producer
                 claim["change_context"] = normalize_change_context(row, claim)
                 claims.append(claim)
     except OSError as e:
@@ -1203,6 +1226,12 @@ if task_claims_path:
     out["change_context"] = merge_change_context(claims)
     out["producer_role"] = "worker"
     out["producer_template_version"] = "task-claims-jsonl"
+    producers = {(c.get("producer_attribution", {}).get("template_id"),
+                  c.get("producer_attribution", {}).get("template_version")) for c in claims}
+    if any("producer_attribution" in c for c in claims):
+        ident, version = next(iter(producers)) if len(producers) == 1 else (None, None)
+        out["producer_role"] = ident or "unknown"
+        out["producer_template_version"] = version or "unknown"
     if skipped:
         out["task_claims_skipped"] = skipped
 
@@ -1756,16 +1785,33 @@ row_base = {
     "window_start": now,
     "window_end": now,
     "source_artifact_ids": [artifact_id] if artifact_id else [],
+    "work_item": resolved.get("work_item"),
     "granularity": "claim-local",
     "verdict_source": gate_template_id,
     "judge_template_version": gate_template_version,
 }
 
-rows = [
-    {**row_base, "metric": "factual_precision", "value": factual_precision},
-    {**row_base, "metric": "falsifier_quality", "value": falsifier_quality},
-    {**row_base, "metric": "audit_contradiction_rate", "value": audit_contradiction_rate},
-]
+claims = {c["claim_id"]: c for c in resolved.get("claim_payload", [])}
+groups = {}
+for verdict in verdicts:
+    claim = claims.get(verdict.get("claim_id"), {})
+    producer = claim.get("producer_attribution")
+    if producer is None:
+        key = ("worker", "task-claims-jsonl") if resolved.get("task_claims_path") else (producer_template_id, producer_template_version)
+    else:
+        key = (producer.get("template_id") or "unknown", producer.get("template_version") or "unknown")
+    groups.setdefault(key, []).append(verdict)
+rows = []
+for (ident, version), values in groups.items():
+    total = len(values)
+    verified = sum(v.get("verdict") == "verified" for v in values)
+    contradicted = [v for v in values if v.get("verdict") == "contradicted"]
+    corrected = sum(bool((v.get("correction") or "").strip()) for v in contradicted)
+    base = dict(row_base, template_id=ident, template_version=version, sample_size=total)
+    for metric, value in (("factual_precision", verified / total),
+                          ("falsifier_quality", corrected / len(contradicted) if contradicted else 1.0),
+                          ("audit_contradiction_rate", len(contradicted) / total)):
+        rows.append(dict(base, metric=metric, value=value))
 print(json.dumps(rows))
 PYEOF
   )
@@ -2006,15 +2052,31 @@ row_base = {
     "window_start": now,
     "window_end": now,
     "source_artifact_ids": [artifact_id] if artifact_id else [],
+    "work_item": resolved.get("work_item"),
     "granularity": "set-level",
     "verdict_source": "curator",
     "judge_template_version": curator_tv,
 }
 
-rows = [
-    {**row_base, "metric": "curated_rate", "value": curated_rate},
-    {**row_base, "metric": "triviality_rate", "value": triviality_rate},
-]
+claims = {c["claim_id"]: c for c in resolved.get("claim_payload", [])}
+groups = {}
+for kept, items in ((True, selected), (False, dropped)):
+    for item in items:
+        cid = item.get("claim_id") if isinstance(item, dict) else item
+        producer = claims.get(cid, {}).get("producer_attribution")
+        if producer is None:
+            key = ("worker", "task-claims-jsonl") if resolved.get("task_claims_path") else (producer_template_id, producer_template_version)
+        else:
+            key = (producer.get("template_id") or "unknown", producer.get("template_version") or "unknown")
+        groups.setdefault(key, []).append(kept)
+rows = []
+for (ident, version), values in groups.items():
+    base = dict(row_base, template_id=ident, template_version=version, sample_size=len(values))
+    rows.extend([dict(base, metric="curated_rate", value=sum(values) / len(values)),
+                 dict(base, metric="triviality_rate", value=(len(values) - sum(values)) / len(values))])
+if not any("producer_attribution" in c for c in claims.values()):
+    rows = [{**row_base, "metric": "curated_rate", "value": curated_rate},
+            {**row_base, "metric": "triviality_rate", "value": triviality_rate}]
 print(json.dumps(rows))
 PYEOF
 )
@@ -2640,6 +2702,7 @@ row_common = {
     "window_start": now,
     "window_end": now,
     "source_artifact_ids": [artifact_id] if artifact_id else [],
+    "work_item": resolved.get("work_item"),
     "granularity": "portfolio-level",
     "verdict_source": "reverse-auditor",
     "judge_template_version": ra_tv,

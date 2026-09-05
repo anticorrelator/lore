@@ -152,6 +152,17 @@ EXISTS=$(jq --arg id "$TEMPLATE_ID" --arg ver "$TEMPLATE_VERSION" \
 
 RELPATH="${REGISTRY_FILE#$KNOWLEDGE_DIR/}"
 
+if [[ "$TEMPLATE_ID" == position/* ]]; then
+  [[ "$TEMPLATE_VERSION" =~ ^[0-9a-f]{12}$ && -f "$TEMPLATE_PATH" ]] \
+    || fail "compiled template registration requires a retained artifact and 12-hex version"
+  if [[ "$EXISTS" == "true" ]]; then
+    RECORDED_PATH=$(jq -r --arg id "$TEMPLATE_ID" --arg ver "$TEMPLATE_VERSION" \
+      '.entries[] | select(.template_id == $id and .template_version == $ver) | .template_path' "$REGISTRY_FILE")
+    [[ "$RECORDED_PATH" == "$TEMPLATE_PATH" ]] \
+      || fail "compiled template identity is already registered to a different retained artifact"
+  fi
+fi
+
 if [[ "$EXISTS" == "true" ]]; then
   if [[ $JSON_MODE -eq 1 ]]; then
     jq -n \
