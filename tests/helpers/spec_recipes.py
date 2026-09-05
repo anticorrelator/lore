@@ -710,6 +710,9 @@ def exercise_designer(f):
              REPORT_PATHS=str(report), NORMS_FILE=norms, ACCEPTED_REVISION="", DISPOSITIONS_FILE="",
              ASSIGNMENT_FILE=assignment)
     original_assignment = assignment.read_text()
+    abstract_input = json.loads(original_assignment)
+    for key in ("accepted_plan_path", "accepted_plan_sha256", "dispositions", "dispositions_sha256"):
+        assert abstract_input[key] is None
     assert str(report) in original_assignment and "Preserve execution and dispatch history." in original_assignment
     packet_id, _ = synthesized_packet(f, "designer-packet", role="designer", TOPIC="source history design", SCALE_SET="architecture")
     bindings = f.root / "abstract-designer-bindings.json"
@@ -744,9 +747,11 @@ def exercise_designer(f):
     f.recipe("designer-assignment", "concrete continuation names the accepted revision and dispositions", ACCEPTED_REVISION=abstract_revision)
     continuation_input = json.loads(continuation.read_text())
     assert abstract_revision in continuation.read_text()
-    assert str(snapshot) in continuation_input.values(), "the assignment must name the exact frozen accepted plan"
+    assert continuation_input["accepted_plan_path"] == str(snapshot)
+    assert continuation_input["accepted_plan_sha256"] == digest(snapshot.read_bytes())
     accepted_dispositions = json.loads(disposition.read_text())
-    assert accepted_dispositions in continuation_input.values(), "mutable dispositions must be embedded in the bound assignment"
+    assert continuation_input["dispositions"] == accepted_dispositions
+    assert continuation_input["dispositions_sha256"] == digest(disposition.read_bytes())
     next_packet, _ = synthesized_packet(f, "designer-packet", role="designer", TOPIC="source history concrete plan", SCALE_SET="subsystem")
     assert next_packet != packet_id
     next_bindings = f.root / "concrete-bindings.json"
@@ -765,7 +770,7 @@ def exercise_designer(f):
     disposition.write_text(json.dumps({"changed_after_binding": "MUTABLE-DISPOSITIONS-DRIFT-4819"}))
     retained = f.recipe("read-payload", "the accepted continuation retains dispositions despite input-file drift", REFERENCE_FILE=ref_file).stdout
     frozen_assignment = json.loads(json.loads(Path(reference["manifest_path"]).read_text())["bindings"]["assignment"])
-    assert accepted_dispositions in frozen_assignment.values()
+    assert frozen_assignment == continuation_input
     assert b"MUTABLE-DISPOSITIONS-DRIFT-4819" not in retained
     assert str(snapshot).encode() in retained
     authored_plan(f, item, concrete=True)
@@ -903,7 +908,8 @@ def exercise_finalize(f):
     registry.write_text(json.dumps({"name": "fixture", "project_dir": str(f.code), "sessions": [
         {"slug": "recipes", "type": "spec", "request_id": "fixture-spawn-request"}]}))
     session_before = tree_hashes(f.store / "_sessions")
-    f.recipe("journal-step", "unhosted milestone invokes no session writer", STEP_ID="spec:investigation", STEP_LABEL="Investigation complete")
+    unhosted = f.recipe("journal-step", "unhosted milestone invokes no session writer", STEP_ID="spec:investigation", STEP_LABEL="Investigation complete")
+    assert unhosted.stdout == b"" and unhosted.stderr == b""
     assert tree_hashes(f.store / "_sessions") == session_before
     f.env.update(LORE_SESSION_INSTANCE="fixture", LORE_SESSION_SLUG="recipes", LORE_SESSION_TYPE="spec")
     for step, label in (("investigation", "Investigation complete"), ("design", "Design complete"), ("plan-ready", "Plan ready")):
@@ -928,6 +934,7 @@ def exercise_finalize(f):
     failed = f.recipe("spec-finalize", "anchor refusal emits no success telemetry or terminus", expected=3, LEAD_TEMPLATE_VERSION=lead_version)
     assert b"anchor" in (failed.stdout + failed.stderr).lower()
     assert rows(f.store / "_scorecards/rows.jsonl") == telemetry_before
+    assert unhosted.stdout == b"" and unhosted.stderr == b""
     assert tree_hashes(f.store / "_sessions") == session_before
     (item / "plan.md").write_text(original)
     f.recipe("spec-finalize", "successful finalization publishes the authored current revision")
