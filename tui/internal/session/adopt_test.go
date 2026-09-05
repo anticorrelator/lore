@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -39,8 +40,8 @@ func writeInstanceAged(t *testing.T, dir string, inst Instance, age time.Duratio
 }
 
 // TestScanAdoptable_FilterMatrix is the adoptability rule: a row is adoptable only
-// when it is not self, names this repo, is mtime-stale, AND its PID is dead. Every
-// other combination — self, wrong repo, fresh mtime, live PID — is excluded.
+// when it is not self, names this repo, and its PID is dead. Fresh heartbeat
+// timestamps must not hide dead owners from the one startup recovery pass.
 func TestScanAdoptable_FilterMatrix(t *testing.T) {
 	dir := t.TempDir()
 	const repo, self = "my-repo", "me"
@@ -52,16 +53,16 @@ func TestScanAdoptable_FilterMatrix(t *testing.T) {
 	writeInstanceAged(t, dir, Instance{Name: "corpse", Repo: repo, PID: dead}, stale)            // adoptable
 	writeInstanceAged(t, dir, Instance{Name: "me", Repo: repo, PID: dead}, stale)                // self → skip
 	writeInstanceAged(t, dir, Instance{Name: "other-repo", Repo: "elsewhere", PID: dead}, stale) // wrong repo → skip
-	writeInstanceAged(t, dir, Instance{Name: "fresh", Repo: repo, PID: dead}, fresh)             // heartbeating → skip
+	writeInstanceAged(t, dir, Instance{Name: "fresh", Repo: repo, PID: dead}, fresh)             // fresh but dead → adopt
 	writeInstanceAged(t, dir, Instance{Name: "alive", Repo: repo, PID: live}, stale)             // pid live → skip
 
 	got := ScanAdoptable(dir, repo, self, time.Now())
-	if len(got) != 1 || got[0].Name != "corpse" {
+	if len(got) != 2 || got[0].Name != "corpse" || got[1].Name != "fresh" {
 		names := make([]string, len(got))
 		for i, g := range got {
 			names[i] = g.Name
 		}
-		t.Fatalf("adoptable = %v, want exactly [corpse]", names)
+		t.Fatalf("adoptable = %v, want exactly [corpse fresh]", names)
 	}
 }
 
@@ -123,7 +124,7 @@ func TestScanAdoptable_ClaimFilesInvisible(t *testing.T) {
 	if err := os.MkdirAll(InstancesDir(dir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	claim := filepath.Join(InstancesDir(dir), "corpse.json"+claimSuffix+".999")
+	claim := filepath.Join(InstancesDir(dir), "corpse.json"+claimSuffix+"."+strconv.Itoa(os.Getpid()))
 	if err := os.WriteFile(claim, []byte(`{"name":"corpse","repo":"r","pid":1}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +140,7 @@ func TestSessionRow_RecoveryFieldsRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	yes := true
 	full := Instance{
-		Name: "inst", Repo: "r", PID: 1,
+		Name: "inst", Repo: "r", PID: reapedPID(t),
 		Sessions: []Session{{
 			Slug: "demo", Type: "spec", Initiator: "human", Started: "2026-07-06T00:00:00Z",
 			Tmux: "lore-inst-demo", SessionID: "uuid-1", Harness: "claude-code", AutoClose: &yes,
@@ -175,5 +176,54 @@ func TestSessionRow_RecoveryFieldsRoundtrip(t *testing.T) {
 	}
 	if round.Tmux != "lore-inst-demo" || round.SessionID != "uuid-1" || round.Harness != "claude-code" || round.AutoClose == nil || !*round.AutoClose {
 		t.Fatalf("recovery fields did not round-trip: %+v", round)
+	}
+}
+
+func TestAbandonedAndReleasedClaimsRecoverWhileCurrentAdopterLives(t *testing.T) {
+	dir := t.TempDir()
+	row := Instance{Name: "dead", Repo: "repo", PID: reapedPID(t), Sessions: []Session{{Slug: "same", RequestID: "old", Tmux: "pane", PID: 123}}}
+	if err := WriteInstance(dir, row); err != nil {
+		t.Fatal(err)
+	}
+	_, claim, err := ClaimInstance(dir, row.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ScanAdoptable(dir, "repo", "self", time.Now()); len(got) != 0 {
+		t.Fatalf("live claim stolen: %+v", got)
+	}
+	released, err := ReleaseClaim(claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ScanAdoptable(dir, "repo", "self", time.Now())
+	if len(got) != 1 {
+		t.Fatalf("released claim unavailable: %+v", got)
+	}
+	adopted, next, err := ClaimAdoptable(dir, got[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted.Sessions[0].RequestID != "old" || adopted.Sessions[0].PID != 123 {
+		t.Fatalf("identity changed: %+v", adopted)
+	}
+	if _, err := os.Stat(released); !os.IsNotExist(err) {
+		t.Fatalf("release path survived claim: %v", err)
+	}
+	if _, err := ReleaseClaim(next); err != nil {
+		t.Fatal(err)
+	}
+	// A same-name newer row must coexist with the released older generation.
+	row.Sessions = []Session{{Slug: "same", RequestID: "new"}}
+	row.Revision = 2
+	if err := WriteInstance(dir, row); err != nil {
+		t.Fatal(err)
+	}
+	got = ScanAdoptable(dir, "repo", "self", time.Now())
+	if len(got) != 2 {
+		t.Fatalf("same-name generation lost: %+v", got)
+	}
+	if SameSessionGeneration(got[0].Sessions[0], got[1].Sessions[0]) {
+		t.Fatal("distinct generations collapsed")
 	}
 }

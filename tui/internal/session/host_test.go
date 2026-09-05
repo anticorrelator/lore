@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -91,7 +92,7 @@ func TestHostRegistryRejectsLateSnapshot(t *testing.T) {
 	old := newer
 	old.Revision = 1
 	old.Sessions = nil
-	if err := WriteInstance(dir, old); err != nil {
+	if err := WriteInstance(dir, old); !errors.Is(err, ErrStaleInstance) {
 		t.Fatal(err)
 	}
 	rows, err := OwnershipInstances(dir)

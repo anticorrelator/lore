@@ -2,9 +2,11 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -253,5 +255,74 @@ func TestHeartbeatExistingDoesNotRecreateRemovedRegistration(t *testing.T) {
 	}
 	if InstanceLive(dir, inst.Name) {
 		t.Fatal("removed registration was recreated")
+	}
+}
+
+func TestRegistryOrdersSpawnAndTwoClosesForEveryHost(t *testing.T) {
+	for _, host := range []string{"", "managed"} {
+		t.Run("host="+host, func(t *testing.T) {
+			dir := t.TempDir()
+			rows := []Instance{
+				{Name: "owner", HostKey: host, Revision: 1, Sessions: []Session{{Slug: "close-a"}, {Slug: "close-b"}}},
+				{Name: "owner", HostKey: host, Revision: 2, Sessions: []Session{{Slug: "close-a"}, {Slug: "close-b"}, {Slug: "spawn"}}},
+				{Name: "owner", HostKey: host, Revision: 3, Sessions: []Session{{Slug: "close-b"}, {Slug: "spawn"}}},
+				{Name: "owner", HostKey: host, Revision: 4, Sessions: []Session{{Slug: "spawn"}}},
+			}
+			if err := WriteInstance(dir, rows[3]); err != nil {
+				t.Fatal(err)
+			}
+			var wg sync.WaitGroup
+			for _, row := range rows[:3] {
+				wg.Add(1)
+				go func(row Instance) {
+					defer wg.Done()
+					if err := WriteInstance(dir, row); !errors.Is(err, ErrStaleInstance) {
+						t.Errorf("late write: %v", err)
+					}
+				}(row)
+			}
+			wg.Wait()
+			got := ListInstances(dir)
+			if len(got) != 1 || got[0].Revision != 4 || len(got[0].Sessions) != 1 || got[0].Sessions[0].Slug != "spawn" {
+				t.Fatalf("newest membership lost: %+v", got)
+			}
+			equal := rows[3]
+			equal.Sessions = nil
+			if err := WriteInstance(dir, equal); !errors.Is(err, ErrStaleInstance) {
+				t.Fatalf("conflicting equal revision accepted: %v", err)
+			}
+			legacy := rows[0]
+			legacy.Revision = 0
+			if err := WriteInstance(dir, legacy); !errors.Is(err, ErrStaleInstance) {
+				t.Fatalf("unversioned stale write accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestRetiredInstanceCannotBeResurrectedByLateWriteOrHeartbeat(t *testing.T) {
+	dir := t.TempDir()
+	row := Instance{Name: "retired", PID: 17, Started: "old", Revision: 2}
+	if err := WriteInstance(dir, row); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveInstance(dir, row.Name); err != nil {
+		t.Fatal(err)
+	}
+	row.Revision = 3
+	if err := WriteInstance(dir, row); !errors.Is(err, ErrStaleInstance) {
+		t.Fatalf("late write: %v", err)
+	}
+	if err := Heartbeat(dir, row); !errors.Is(err, ErrStaleInstance) {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	if got := ListInstances(dir); len(got) != 0 {
+		t.Fatalf("resurrected: %+v", got)
+	}
+	row.PID = 18
+	row.Started = "new"
+	row.Revision = 4
+	if err := WriteInstance(dir, row); err != nil {
+		t.Fatalf("new generation refused: %v", err)
 	}
 }

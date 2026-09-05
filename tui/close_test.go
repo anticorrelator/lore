@@ -84,8 +84,8 @@ func TestCloseDispositionStaleDestinationPreservesHostAndStreamMarkers(t *testin
 		t.Fatalf("quarantine artifact incomplete: %+v", msg.outcome)
 	}
 	ev := worktreeOutcomeEvent(m.instanceName, "demo", ls, msg.outcome)
-	if ev.Links["reason"] != "worktree-dirty" || ev.Links["worktree_base_oid"] != identity.Captured.HeadOID || ev.Links["destination_head_oid"] != identity.Captured.HeadOID || ev.Links["worktree_head_oid"] == "" {
-		t.Fatalf("quarantine links omit refusal evidence: %+v", ev.Links)
+	if !strings.Contains(ev.Links["reason"], "integration_pending") || ev.Links["worktree_base_oid"] != identity.Captured.HeadOID || ev.Links["destination_head_oid"] != "" || ev.Links["result_oid"] == "" {
+		t.Fatalf("retention links omit result evidence: %+v", ev.Links)
 	}
 	m, outcomeCmd := m.handleWorktreeDisposition(msg)
 	if outcomeCmd == nil {
@@ -1195,10 +1195,9 @@ func TestHandleCloseLadderDone_ErrorJournalsCloseFailed(t *testing.T) {
 	}
 }
 
-// TestCloseDispositionPublishJournalsDestination: a close whose publish succeeds
-// journals the destination checkout the merge landed in. That destination is the
-// fact an audit of a wrong-clone merge cannot reconstruct afterward.
-func TestCloseDispositionPublishJournalsDestination(t *testing.T) {
+// A successful close journals a retained artifact and pending integration,
+// without claiming that a destination checkout was changed.
+func TestCloseDispositionRetainsResultAndJournalsPendingIntegration(t *testing.T) {
 	sourceDir := t.TempDir()
 	for _, args := range [][]string{
 		{"init", "-b", "main"},
@@ -1247,40 +1246,29 @@ func TestCloseDispositionPublishJournalsDestination(t *testing.T) {
 	if !ok {
 		t.Fatal("close disposition returned unexpected message")
 	}
-	if msg.err != nil || msg.outcome.Kind != worktree.OutcomePublished {
-		t.Fatalf("clean close disposition = %+v err=%v, want published", msg.outcome, msg.err)
+	if msg.err != nil || msg.outcome.Kind != worktree.OutcomeWorktreeQuarantined {
+		t.Fatalf("close disposition = %+v err=%v, want retained result", msg.outcome, msg.err)
 	}
 	if _, outcomeCmd := m.handleWorktreeDisposition(msg); outcomeCmd == nil {
-		t.Fatal("successful publish scheduled no journal command")
+		t.Fatal("retention scheduled no journal command")
 	}
-
 	ev := worktreeOutcomeEvent(m.instanceName, "demo", ls, msg.outcome)
-	if ev.Event != session.EventWorktreePublished {
-		t.Fatalf("published outcome journaled as %q", ev.Event)
+	if ev.Event != session.EventWorktreeQuarantined || !strings.Contains(ev.Reason, "integration_pending") {
+		t.Fatalf("incorrect retention event: %+v", ev)
 	}
-	if ev.Reason != "" {
-		t.Fatalf("published row carries a refusal reason %q", ev.Reason)
+	if ev.Links["worktree_base_oid"] != identity.Captured.HeadOID || ev.Links["result_oid"] != msg.outcome.Artifact.OID || ev.Links["result_ref"] == "" || ev.Links["patch_path"] == "" {
+		t.Fatalf("retention row omits result identity: %+v", ev.Links)
 	}
-	if ev.Links["worktree_base_oid"] != identity.Captured.HeadOID || ev.Links["destination_head_oid"] != identity.Captured.HeadOID || ev.Links["worktree_head_oid"] != msg.outcome.Artifact.OID {
-		t.Fatalf("published row omits commit identities: %+v", ev.Links)
+	if ev.Links["destination_path"] != "" || ev.Links["destination_head_oid"] != "" {
+		t.Fatalf("retention falsely reports integration: %+v", ev.Links)
 	}
-	if _, carried := ev.Links["expected_generation"]; carried {
-		t.Error("published row carries the expected generation blob")
-	}
-	if _, carried := ev.Links["observed_generation"]; carried {
-		t.Error("published row carries the observed generation blob")
-	}
-	wantDestination, err := filepath.EvalSymlinks(sourceDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := ev.Links["destination_path"]; got != wantDestination {
-		t.Fatalf("destination_path = %q, want %q", got, wantDestination)
+	if got := refOID(t, sourceDir, "HEAD"); got != identity.Captured.HeadOID {
+		t.Fatalf("close advanced destination: %s", got)
 	}
 	if journalMsg, isErr := journalCmd(m.eventScript, kdir, ev)().(journalResultMsg); isErr && journalMsg.err != nil {
-		t.Fatalf("sole writer rejected the published row: %v", journalMsg.err)
+		t.Fatal(journalMsg.err)
 	}
-	if got := readEventTypes(t, kdir); len(got) != 1 || got[0] != session.EventWorktreePublished {
-		t.Fatalf("journal = %v, want [worktree_published]", got)
+	if got := readEventTypes(t, kdir); len(got) != 1 || got[0] != session.EventWorktreeQuarantined {
+		t.Fatalf("journal = %v", got)
 	}
 }

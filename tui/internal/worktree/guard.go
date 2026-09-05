@@ -618,7 +618,13 @@ func materializeRef(ctx context.Context, identity Identity, ref string) (ResultA
 		"GIT_COMMITTER_NAME=Lore", "GIT_COMMITTER_EMAIL=lore@localhost",
 		"GIT_AUTHOR_DATE=2000-01-01T00:00:00Z", "GIT_COMMITTER_DATE=2000-01-01T00:00:00Z",
 	}
-	commit, err := gitOutput(ctx, identity.CanonicalPath, message, env, "commit-tree", tree, "-p", identity.TargetOID)
+	// Keep committed session history reachable even when a dirty detached
+	// checkout is reduced to its retained snapshot.
+	head, err := gitString(ctx, identity.CanonicalPath, "rev-parse", "HEAD")
+	if err != nil {
+		return ResultArtifact{}, err
+	}
+	commit, err := gitOutput(ctx, identity.CanonicalPath, message, env, "commit-tree", tree, "-p", head)
 	if err != nil {
 		return ResultArtifact{}, err
 	}

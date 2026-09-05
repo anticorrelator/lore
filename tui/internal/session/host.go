@@ -55,18 +55,22 @@ func ScanHostAdoptable(dir, key, source, self string) ([]Instance, error) {
 			if current.HostKey != key || current.ProjectDir != source || pidAlive(current.PID) {
 				return nil, fmt.Errorf("recovery claim conflicts with live ownership: %s", path)
 			}
-			known := map[string]bool{}
-			for _, s := range current.Sessions {
-				known[s.Slug] = true
-			}
-			for _, s := range inst.Sessions {
-				if !known[s.Slug] {
-					current.Sessions = append(current.Sessions, s)
+			// An existing newer snapshot may have closed a session. Never merge
+			// older membership back into it. Only retire a fully duplicated claim;
+			// otherwise preserve both records for explicit reconciliation.
+			for _, old := range inst.Sessions {
+				found := false
+				for _, live := range current.Sessions {
+					if SameSessionGeneration(old, live) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return nil, fmt.Errorf("recovery claim retains conflicting generation: %s", path)
 				}
 			}
-			if err = WriteInstance(dir, current); err != nil {
-				return nil, err
-			}
+
 			if err = os.Remove(path); err != nil {
 				return nil, err
 			}
