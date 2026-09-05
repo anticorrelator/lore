@@ -277,9 +277,24 @@ cmd_smoke() {
   printf '  %-24s %-13s %s\n' resolve_model_for_role "single"          "--model <id> (single-provider harness)"
 }
 
+cmd_render_position() {
+  require_claude_code
+  local position="${1:-}" body="${2:-}"
+  case "$position" in
+    investigator|designer|worker|reviewer) ;;
+    *) echo "Error: invalid position '$position'" >&2; return 1 ;;
+  esac
+  [[ -f "$body" && -s "$body" ]] || { echo 'Error: missing position body' >&2; return 1; }
+  local tools="Read, Glob, Grep, Bash"
+  [[ "$position" != worker ]] || tools="$tools, Write, Edit"
+  printf '%s\n' '---' "name: position-$position" "description: $position" "tools: $tools" '---'
+  cat "$body"
+}
+
 # --- Dispatch ---
 cmd="${1:-}"
 case "$cmd" in
+  render_position)          shift; cmd_render_position          "$@" ;;
   spawn)                    shift; cmd_spawn                    "$@" ;;
   wait)                     shift; cmd_wait                     "$@" ;;
   send_message)             shift; cmd_send_message             "$@" ;;
@@ -295,6 +310,8 @@ case "$cmd" in
 Usage: $(basename "$0") <subcommand> [args]
 
 Subcommands (mirroring adapters/agents/README.md §Operation Surface):
+  render_position <position> <body-file>
+                            Render a native position artifact on stdout.
   spawn <role> <task_prompt> [model_override]
                             Emit TaskCreate delegation directive.
   wait <spawn_handle>       Emit TaskList polling delegation directive.

@@ -924,3 +924,29 @@ if errs:
 PYEOF
   [ "$status" -eq 0 ]
 }
+
+@test "position rendering is separate from model routing and preserves the supplied body" {
+  local fw adapter body native
+  body="$TEST_LORE_DATA_DIR/body.md"
+  printf '%s\n' '# Fixture position body' > "$body"
+  for fw in claude-code codex opencode; do
+    adapter="$REPO_DIR/adapters/agents/$fw.sh"
+    native="$TEST_LORE_DATA_DIR/$fw.md"
+    LORE_FRAMEWORK="$fw" bash "$adapter" render_position investigator "$body" > "$native"
+    run python3 - "$native" "$body" "$fw" <<'PYTEST'
+import sys
+from pathlib import Path
+native, body = (Path(p).read_bytes() for p in sys.argv[1:3])
+assert native.endswith(body)
+assert b"delegate:" not in native
+assert b"model:" not in native
+if sys.argv[3] == "codex":
+    assert native == body
+else:
+    assert native.startswith(b"---\n")
+PYTEST
+    [ "$status" -eq 0 ]
+    run env LORE_FRAMEWORK="$fw" bash "$adapter" render_position invalid "$body"
+    [ "$status" -ne 0 ]
+  done
+}

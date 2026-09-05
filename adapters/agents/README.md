@@ -20,7 +20,8 @@ this contract.
 
 ## Operation Surface (Closed Set)
 
-Every adapter exposes exactly seven operations. The shape is identical
+Every adapter exposes seven orchestration operations plus the rendering API
+documented below. The orchestration shape is identical
 across adapters; the implementation language is bash for
 claude-code/codex and TypeScript for opencode (mirroring the hook
 adapter language split).
@@ -562,3 +563,66 @@ operation, changing the seven-shape return contract, or introducing
 a fifth completion-enforcement mode requires a schema bump and a
 coordinated rewrite of all three adapters plus the bats coverage in
 T63.
+
+## Position compilation API
+
+`lore position compile <investigator|designer|worker|reviewer> --framework
+<claude-code|codex|opencode> [--kdir PATH] [--guidance-file PATH]` returns one
+JSON descriptor. The default store is the current project's resolved store.
+Installation passes the installation data directory explicitly. A supplied
+guidance file must pass the existing current-defaults validator.
+
+Each adapter also exposes `render_position <position> <body-file>`. It writes
+native bytes to stdout: Claude agent Markdown with a tool list, Codex prompt
+text, or OpenCode subagent Markdown with edit permissions. The operation does
+not resolve models or invoke the seven orchestration lifecycle operations.
+Investigation, design, and review omit direct source-edit tools; shell access
+remains available for the sanctioned store writers named in the brief. This
+scoping is not a shell sandbox.
+
+The descriptor includes:
+
+- `template_id` (`position/<position>/<framework>`) and `template_version`;
+- `artifact_path`/`artifact_sha256` for the native definition and
+  `prompt_path`/`prompt_sha256` for its text, without native frontmatter;
+- `body_path` for the stamped brief without guidance, and `guidance_path` for
+  the normalized guidance block; `prompt.md` is guidance, one newline, body;
+- `contract_references` with immutable paths and SHA-256 digests;
+- `descriptor_path`/`descriptor_sha256`, `component_manifest_sha256`, the
+  named `components`, and `retained_files` with byte lengths and digests;
+- `native_surface`, `install_target`, `registry_path`, and null
+  `dispatch_bindings` for the assignment owner to populate;
+- `accounting` byte counts. Prompt/native totals already include guidance;
+  contract bytes are on-demand input and are not part of those totals.
+
+The version is the first twelve hex digits of SHA-256 over canonical JSON
+(`sort_keys=True`, compact separators, UTF-8, trailing newline). The framed
+manifest contains schema/framing identifiers and an ordered list of component
+names, byte lengths, and full SHA-256 digests. Components cover the source
+brief, report contract, compiler and shell entry point, selected adapter,
+shared resolver, guidance render/validation implementation, normalized guidance,
+selected surface, position/framework identifiers, and native output before
+stamp/location expansion. The latter uses `{{template_version}}` and
+`{{compiled_root}}` slots to avoid self-reference. Only the canonical defaults
+header timestamp normalizes to `<invocation>`; other guidance bytes remain
+significant. Assignment, packet, report, and dispatch identities enter later.
+
+Retained bundles live under `_templates/positions/<position>/<framework>/<version>/`.
+Contract references in the native text resolve to that bundle, preserving their
+original bytes after source edits. `position_compile.validate_descriptor()`
+checks a descriptor and its retained files before dispatch composition. A
+caller records the exact final delivered payload separately after binding; the
+compiled version does not identify that assignment-specific payload. Codex
+consumers pass prompt text through the existing prompt argument; installing a
+Markdown file does not register a native Codex agent.
+
+Compilation publishes a complete bundle by directory rename, then registers
+its native path through `template-registry-register.sh`. An identical retry
+verifies and reuses both. Corrupt/missing retained files, conflicting registered
+paths, invalid input, guidance/render errors, or failed registration produce a
+nonzero exit and no descriptor. A complete but unregistered bundle can survive
+a failed registration and be registered by a later retry. Historical registry
+rows keep their original paths; concurrent writes serialize in the registry
+writer. Install targets include the framework name so Claude and OpenCode can
+share the existing agent directory. Uninstallation removes those links while
+retaining registered bundles.

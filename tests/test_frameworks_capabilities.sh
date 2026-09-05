@@ -381,6 +381,8 @@ ids = set()
 for fw_id, fw in data.get("frameworks", {}).items():
     mr = fw.get("model_routing") or {}
     if mr.get("evidence"): ids.add(mr["evidence"])
+    pc = fw.get("position_compilation") or {}
+    if pc.get("evidence"): ids.add(pc["evidence"])
     st = fw.get("spend_telemetry") or {}
     if st.get("evidence"): ids.add(st["evidence"])
     for cap, cell in (fw.get("capabilities") or {}).items():
