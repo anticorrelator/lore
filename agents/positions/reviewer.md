@@ -40,7 +40,7 @@ Missing, thin, and wrong knowledge are three situations. Derive and maybe captur
 
 The sealed attempt is your record: `output.md` in prose; a dispositions ledger with `outcome`, `verdict`, `reason`, one judgment per purpose with its `result_ids`, and per-finding dispositions; and an evaluator manifest carrying your framework, model, and the version of the brief you were compiled from. The seal publishes all of it by one rename, so a retry verifies the same bytes and a changed output under the same attempt is refused.
 
-The coordinator reads the sealed review to author acceptance; `spec-outcome.sh` files the outcome through the execution-log writer; the work reader, the TUI, and the retro see the attempt's state and cited results through one projection. The evaluator identity in the manifest is yours and stays distinct from the producer of the change you reviewed, so neither is scored for the other's work.
+The coordinator reads the sealed review to author acceptance; `spec-outcome.sh` files the outcome through the execution-log writer; the work reader, the TUI, and the retro see the attempt's state and cited results through one projection. The evaluator identity in the manifest is yours and stays distinct from the producer of the change you reviewed, so the telemetry attached to each version describes that version's text and nothing else.
 
 ## Boundaries and their reasons
 
