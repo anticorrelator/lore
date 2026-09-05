@@ -145,47 +145,72 @@ def build_packet(kdir, row, *, directive=None, assembly=None, role="worker", cal
     return status
 
 
-def _strip_md(path):
-    return path[:-3] if path.endswith(".md") else path
+def _canonical(path):
+    return os.path.normpath(str(path)).lstrip("./")
 
 
-def _block_boundary(line):
-    return bool(re.match(r"(#### |- \[\[knowledge:|### |## )", line))
+def _drop_blocks(content, entries, dropped_paths):
+    """Remove each dropped entry's recorded rendered block from the candidate content, once, by exact bytes.
 
-
-def _drop_blocks(content, dropped_paths):
-    """Remove each dropped entry's rendered block from the candidate content; return (content, headings)."""
+    Assembly records the block it rendered for every delivered entry; that block is the entry's identity in
+    the content, so removal cannot cut into a neighbour or stop at a heading inside the entry's own body.
+    An entry whose block was not recorded cannot be dropped honestly and is refused.
+    """
     headings = {}
-    lines = content.splitlines(keepends=True)
-    kept_lines, skipping = [], False
-    for line in lines:
-        if _block_boundary(line):
-            skipping = False
-            for path in dropped_paths:
-                full = re.match(r"#### (.+?) \(from " + re.escape(path) + r"\)\s*$", line)
-                back = re.match(r"- \[\[knowledge:" + re.escape(_strip_md(path)) + r"(?:#([^\]]+))?\]\]\s*$", line)
-                if full or back:
-                    skipping = True
-                    headings.setdefault(path, (full.group(1) if full else (back.group(1) or path)))
-                    break
-        if not skipping:
-            kept_lines.append(line)
-    return "".join(kept_lines), headings
+    for path in dropped_paths:
+        matches = [e for e in entries if _canonical(e.get("path", "")) == _canonical(path)]
+        for entry in matches:
+            block = entry.get("rendered")
+            if not block or block not in content:
+                raise ValueError(f"synthesis: the assembly did not record a rendered block for {path}; "
+                                 "re-pull with `lore packet build` to synthesize with drops")
+            content = content.replace(block, "", 1)
+            first = next((line for line in block.splitlines() if line.strip()), "")
+            heading = re.match(r"#### (.+?)(?: \[[^\]]*\])? \(from ", first) or re.match(r"- \[\[knowledge:[^#\]]+#(.+?)\]\]", first)
+            headings.setdefault(path, heading.group(1) if heading else path)
+    return content, headings
 
 
 def _entry_from_file(kdir, path):
     text = (Path(kdir) / path).read_text()
     heading = next((l[2:].strip() for l in text.splitlines() if l.startswith("# ")), Path(path).stem)
-    scale = re.search(r"scale:\s*([a-z]+)", text)
-    return heading, text, (scale.group(1) if scale else None)
+    try:
+        from pk_search import MarkdownParser
+        meta = MarkdownParser._extract_metadata(text) or {}
+    except Exception:
+        meta = {}
+    scale = meta.get("scale")
+    if not scale:
+        found = re.search(r"scale:\s*([a-z,\s]+?)\s*(?:\||-->)", text)
+        scale = found.group(1).strip() if found else None
+    return heading, text, scale, {"entry_status": meta.get("entry_status"), "confidence": meta.get("confidence")}
 
 
-def _trust_for(kdir, path):
+def _is_knowledge_entry(kdir, path):
+    """A store-relative, .md, category-dir file inside the store — the same membership the indexer uses."""
+    try:
+        from pk_search import CATEGORY_DIRS
+    except Exception:
+        CATEGORY_DIRS = {"architecture", "conventions", "design-rationale", "gotchas", "principles", "workflows", "domains", "preferences", "abstractions"}
+    rel = _canonical(path)
+    parts = Path(rel).parts
+    if Path(path).is_absolute() or ".." in parts or len(parts) < 2 or parts[0] not in CATEGORY_DIRS or not rel.endswith(".md"):
+        return False
+    target = (Path(kdir) / rel)
+    try:
+        target.resolve().relative_to(Path(kdir).resolve())
+    except ValueError:
+        return False
+    return target.is_file()
+
+
+def _trust_for(kdir, path, meta):
     try:
         from pk_manifest import _trust_snapshot
-        return _trust_snapshot(str(kdir), {"path": path})
+        return _trust_snapshot(str(kdir), {"path": path, **{k: v for k, v in meta.items() if v}})
     except Exception:
-        return {"score": None, "status": "unknown", "confidence": "unknown", "correction_recency": None}
+        return {"score": None, "status": meta.get("entry_status") or "unknown",
+                "confidence": meta.get("confidence") or "unknown", "correction_recency": None}
 
 
 def synthesize(kdir, packet_id, *, by, dropped=(), added=()):
@@ -202,7 +227,9 @@ def synthesize(kdir, packet_id, *, by, dropped=(), added=()):
     if not by or not str(by).strip():
         raise ValueError("synthesis: --by must name who synthesized")
     entries = list(candidate.get("delivered_entries", []))
-    delivered = list(dict.fromkeys(e["path"] for e in entries))
+    delivered = list(dict.fromkeys(_canonical(e["path"]) for e in entries))
+    dropped = [(_canonical(p), r) for p, r in dropped]
+    added = [(_canonical(p), r) for p, r in added]
     drop_paths = [p for p, _ in dropped]
     add_paths = [p for p, _ in added]
     for path, reason in list(dropped) + list(added):
@@ -216,17 +243,19 @@ def synthesize(kdir, packet_id, *, by, dropped=(), added=()):
     for path in add_paths:
         if path in delivered:
             raise ValueError(f"synthesis: {path} is already delivered; drop or keep it instead of adding it")
-        if Path(path).is_absolute() or ".." in Path(path).parts or not (Path(kdir) / path).is_file():
-            raise ValueError(f"synthesis: {path} is not a knowledge entry under the store")
-    content, headings = _drop_blocks(candidate.get("content") or "", drop_paths)
-    kept_entries = [e for e in entries if e["path"] not in drop_paths]
+        if not _is_knowledge_entry(kdir, path):
+            raise ValueError(f"synthesis: {path} is not a knowledge entry under the store (a category-dir .md file inside it)")
+    content, headings = _drop_blocks(candidate.get("content") or "", entries, drop_paths)
+    kept_entries = [e for e in entries if _canonical(e["path"]) not in drop_paths]
     kept = [p for p in delivered if p not in drop_paths]
     added_entries, added_blocks = [], []
     for path, reason in added:
-        heading, text, scale = _entry_from_file(kdir, path)
-        added_blocks.append(f"\n#### {heading} (from {path})\n{text.rstrip()}\n")
+        heading, text, scale, meta = _entry_from_file(kdir, path)
+        block = f"\n#### {heading} (from {path})\n{text.rstrip()}\n"
+        added_blocks.append(block)
         added_entries.append({"path": path, "scale": scale, "render_mode": "full", "section_role": "synthesis",
-                              "topic": "added by synthesis", "ranking_path": "search-order", "trust": _trust_for(kdir, path)})
+                              "topic": "added by synthesis", "ranking_path": "search-order",
+                              "trust": _trust_for(kdir, path, meta), "rendered": block})
     if added_blocks:
         content = content.rstrip("\n") + "\n\n### Added by synthesis\n" + "".join(added_blocks)
     if dropped:

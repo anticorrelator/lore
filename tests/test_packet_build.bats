@@ -306,3 +306,80 @@ PY
   run bash "$PACKET" synthesize "$PKT" --by implement-lead --spec "$TEST_KDIR/bad.json"
   [ "$status" -ne 0 ]
 }
+
+@test "synthesize removes exactly the recorded block: internal headings survive nothing, neighbours survive whole, unrecorded blocks refuse" {
+  printf '%s\n' '# Gadget boundary' 'The gadget boundary is separate.' '## Internal rule' 'GADGET INTERNAL TEXT MUST GO' '<!-- learned: 2026-09-01 | confidence: high | scale: subsystem | status: current -->' > "$TEST_KDIR/conventions/gadget.md"
+  run bash "$PACKET" build --work-item packet-fixture --role worker --caller implement-lead --topic "widget gadget" --scale-set subsystem,implementation
+  [ "$status" -eq 0 ]
+  PKT=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["packet_id"])')
+  run bash "$PACKET" synthesize "$PKT" --by implement-lead --drop conventions/gadget.md "not this worker's file"
+  [ "$status" -eq 0 ]
+  PKT="$PKT" python3 - <<'PY'
+import json, os
+from pathlib import Path
+rows = [json.loads(l) for l in Path(os.environ['LORE_KNOWLEDGE_DIR'], '_packets/packets.jsonl').read_text().splitlines() if l.strip()]
+cand, syn = [r for r in rows if r['packet_id'] == os.environ['PKT']]
+assert all(e.get('rendered') for e in cand['delivered_entries']), "assembly must record every rendered block"
+body = syn['content'].split('## Left out by synthesis')[0]
+assert 'GADGET INTERNAL TEXT MUST GO' not in body and 'Internal rule' not in body, body
+assert 'Widget boundary' in body and 'The widget boundary preserves identity.' in body
+assert syn['content'].count('Widget boundary') == cand['content'].count('Widget boundary')
+PY
+  # A candidate whose assembly recorded no blocks cannot be dropped from honestly.
+  REFUSED=$(python3 - "$TEST_KDIR" "$REPO_DIR" <<'PY'
+import json, sys
+from pathlib import Path
+kdir, repo = sys.argv[1:]
+sys.path.insert(0, repo + '/scripts')
+from packet_builder import build_packet, synthesize
+row = {'packet_id': 'pkt-noblocks', 'packet_scope': 'session', 'session_id': None, 'work_item': 'packet-fixture', 'task_id': None, 'phase': None, 'arm': None, 'task_scale_set': 'subsystem'}
+entries = [{'path': 'conventions/widget.md', 'scale': 'subsystem', 'render_mode': 'full', 'ranking_path': 'search-order',
+            'trust': {'score': None, 'status': 'unknown', 'confidence': 'unknown', 'correction_recency': None}}]
+build_packet(Path(kdir), row, assembly=('Legacy content without recorded blocks', {'entries': entries}), role='worker', caller='lead', scales=['subsystem'])
+try:
+    synthesize(Path(kdir), 'pkt-noblocks', by='lead', dropped=[('conventions/widget.md', 'try')])
+except ValueError as exc:
+    print('refused:', exc)
+else:
+    print('accepted')
+PY
+)
+  [[ "$REFUSED" == refused:*"did not record a rendered block"* ]]
+  run bash "$PACKET" synthesize pkt-noblocks --by lead
+  [ "$status" -eq 0 ]
+}
+
+@test "added entries carry every declared scale and their own status and confidence" {
+  synth_fixture
+  printf '%s\n' '# Dual scale note' 'Applies at two altitudes.' '<!-- learned: 2026-09-01 | confidence: high | scale: subsystem,implementation | status: current -->' > "$TEST_KDIR/conventions/dual.md"
+  run bash "$PACKET" synthesize "$PKT" --by lead --add conventions/dual.md "both altitudes matter here"
+  [ "$status" -eq 0 ]
+  run bash "$PACKET" show "$PKT" --json
+  printf '%s' "$output" | python3 -c '
+import json, sys
+row = json.loads(sys.stdin.read())
+added = [e for e in row["delivered_entries"] if e["path"] == "conventions/dual.md"][0]
+assert added["scale"] == "subsystem,implementation", added
+assert added["trust"]["status"] == "current" and added["trust"]["confidence"] == "high", added["trust"]
+assert row["entries_per_scale"] == {"subsystem": 3, "implementation": 1}, row["entries_per_scale"]
+'
+  synth_fixture
+  run bash "$PACKET" synthesize "$PKT" --by lead --add _packets/README.md "not an entry"
+  [ "$status" -ne 0 ]; [[ "$output" == *"not a knowledge entry"* ]]
+}
+
+@test "the sole writer refuses a malformed synthesis row and a chain that changes identity" {
+  synth_fixture
+  ROW=$(bash "$PACKET" show "$PKT" --json)
+  # synthesized stage without a synthesis object
+  printf '%s' "$ROW" | python3 -c 'import json,sys; r=json.load(sys.stdin); r["delivery_stage"]="synthesized"; r.pop("delivered_at",None); print(json.dumps(r))' > "$TEST_KDIR/bad1.json"
+  run bash "$REPO_DIR/scripts/packet-append.sh" --row "$(cat "$TEST_KDIR/bad1.json")" --kdir "$TEST_KDIR"
+  [ "$status" -ne 0 ]; [[ "$output" == *"synthesis must be an object"* ]]
+  # a superseding row that changes identity: synthesize legitimately, then replay that row with another recipient
+  run bash "$PACKET" synthesize "$PKT" --by lead
+  [ "$status" -eq 0 ]
+  bash "$PACKET" show "$PKT" --json | python3 -c 'import json,sys; r=json.load(sys.stdin); r["recipient_role"]="designer"; r.pop("delivered_at",None); print(json.dumps(r))' > "$TEST_KDIR/bad2.json"
+  run bash "$REPO_DIR/scripts/packet-append.sh" --row "$(cat "$TEST_KDIR/bad2.json")" --kdir "$TEST_KDIR"
+  [ "$status" -ne 0 ]; [[ "$output" == *"recipient_role differs from the prior row"* ]]
+  [ "$(grep -c "\"$PKT\"" "$TEST_KDIR/_packets/packets.jsonl")" -eq 2 ]
+}

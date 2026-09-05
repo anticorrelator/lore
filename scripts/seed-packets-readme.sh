@@ -22,10 +22,11 @@ fi
 cat > "$README" << 'EOF'
 # _packets/
 
-Append-only storage for context-packet delivery records and their post-hoc
-assessments. A packet is the evaluable unit of knowledge delivery: one row
-per delivery event recording exactly what was handed to an agent, at what
-trust, under what budget. Assessments are verdicts about a delivered packet
+Append-only storage for context-packet records and their post-hoc
+assessments. A packet is the evaluable unit of knowledge delivery. One
+`packet_id` names a chain of rows: an `assembled` candidate set, then the
+`synthesized` row that was actually handed on; each row records exactly what
+it held, at what trust, under what budget. Assessments are verdicts about a delivered packet
 written after the receiving session ends.
 
 ## Contents
@@ -44,17 +45,19 @@ of `packets.jsonl`; `packet-assessment-append.sh` is the **only** writer of
 may append to, edit, or truncate either file directly. If a second write
 verb is ever needed, it must be a thin front that shells out to the file's
 existing appender — never a second physical appender. Every append is
-validated against schema v1 (`scripts/packet_schema.py`) before any disk
-touch; rejected rows never reach disk.
+validated against the packet schema (`scripts/packet_schema.py`; versions
+"1" and "2") before any disk touch, and a row whose identity differs from
+a prior row under the same `packet_id` is refused; rejected rows never reach
+disk.
 
 ## Append-supersede posture (no dedupe)
 
 Both files are append-only **without dedupe**. Each packet row is a
-point-in-time delivery event: re-dispatching the same content is a new
-delivery and produces a new row; running the same append twice produces two
-rows. The same holds for assessments — a re-assessment is a new row. To
-supersede a row, write a new one; never rewrite history. Readers that need
-"latest" semantics order by `delivered_at` / `assessed_at`.
+point-in-time record; re-dispatching the same content is a new packet, and
+running the same append twice produces two rows. The same holds for
+assessments — a re-assessment is a new row. To supersede a row, write a new
+one; never rewrite history. Packet readers take the last row appended under a
+`packet_id` as the current packet; assessment readers order by `assessed_at`.
 
 ## Prompt-context invariant
 
@@ -71,20 +74,24 @@ A row at `delivery_stage: assembled` is a **candidate set**: one retrieval
 pass at a declared scale, nobody's judgment yet. Building one and handing it
 on is search pushed down to the receiver. Before dispatch the dispatcher
 reads it and records a synthesis — `lore packet synthesize <id> --by <who>
-[--drop <path> "<reason>"]... [--add <path> "<reason>"]...` — which appends a
-superseding row under the same `packet_id` at `delivery_stage: synthesized`
-carrying `synthesis: {by, synthesized_at, kept, dropped[{path, reason}],
-added[{path, reason}]}`. Its `content` is re-rendered without the dropped
-blocks, with the added entries under `### Added by synthesis`, and with a
-`## Left out by synthesis` list (title, path, reason) so the receiver can see
-what was set aside and pull it back if the reason turns out wrong. Dispatch
-binding refuses an assembled packet unless it carries a `synthesis_waiver:
-{by, reason}`, which a builder records when assembly and dispatch happen in
-one verb with no head between them (the spec full wave). `show` returns the
-latest row; the candidate row stays in the file as history. Retro reads
-synthesis rows beside retrieval-miss telemetry: a dropped entry the receiver
-later searched for, or a kept entry never cited, is one row of evidence
-about the judgment.
+[--drop <path> "<reason>"]... [--add <path> "<reason>"]... [--spec <file>]` —
+which appends a superseding row under the same `packet_id` at
+`delivery_stage: synthesized` carrying `synthesis: {by, synthesized_at, kept,
+dropped[{path, reason}], added[{path, reason}]}`. Assembly records each
+delivered entry's rendered block (`delivered_entries[].rendered`), and
+synthesis removes dropped blocks by exact bytes; a candidate whose assembly
+recorded no blocks cannot be dropped from. Added entries render under
+`### Added by synthesis`; when anything was dropped, a `## Left out by
+synthesis` list (title, path, reason) closes the content so the receiver can
+see what was set aside and pull it back if the reason turns out wrong.
+Dispatch preparation (`position-bind`) refuses a packet whose latest row is
+not synthesized unless it carries a `synthesis_waiver: {by, reason}`, which a
+builder records when assembly and dispatch happen in one verb with no head
+between them (the spec full wave's own investigator packets). Pointer-only
+surfaces do not enforce the rule. `show` returns the latest row; the candidate
+row stays in the file as history. Retro reads synthesis rows beside
+retrieval-miss telemetry: a dropped entry the receiver later searched for, or
+a kept entry never cited, is one row of evidence about the judgment.
 
 ## Packet row schema (v1)
 

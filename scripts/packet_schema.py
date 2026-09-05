@@ -140,8 +140,10 @@ def _check_reasoned_paths(items, name: str, errors: list[str]) -> list[str]:
             errors.append(f"{prefix}.path must be a non-empty string")
         else:
             paths.append(item["path"])
-        if not _is_nonempty_str(item.get("reason")):
+        if not isinstance(item.get("reason"), str) or item["reason"].strip() == "":
             errors.append(f"{prefix}.reason must be a non-empty string")
+    if len(set(paths)) != len(paths):
+        errors.append(f"synthesis.{name} must not repeat a path")
     return paths
 
 
@@ -150,11 +152,15 @@ def _check_synthesis(row: dict, errors: list[str]) -> None:
     stage = row.get("delivery_stage")
     synthesis = row.get("synthesis")
     waiver = row.get("synthesis_waiver")
+
+    def _is_text(v):
+        return isinstance(v, str) and v.strip() != ""
+
     if stage == "synthesized":
         if not isinstance(synthesis, dict):
             errors.append("synthesis must be an object when delivery_stage is \"synthesized\"")
             return
-        if not _is_nonempty_str(synthesis.get("by")):
+        if not _is_text(synthesis.get("by")):
             errors.append("synthesis.by must be a non-empty string")
         if not _is_nonempty_str(synthesis.get("synthesized_at")):
             errors.append("synthesis.synthesized_at must be a non-empty string (ISO 8601)")
@@ -168,13 +174,13 @@ def _check_synthesis(row: dict, errors: list[str]) -> None:
             errors.append("synthesis.kept and synthesis.dropped must be disjoint")
         if set(added) & (set(kept) | set(dropped)):
             errors.append("synthesis.added must not repeat a kept or dropped path")
-        if waiver is not None:
+        if "synthesis_waiver" in row:
             errors.append("synthesis_waiver must be absent on a synthesized row")
         return
     if synthesis is not None:
         errors.append("synthesis must be absent unless delivery_stage is \"synthesized\"")
     if waiver is not None:
-        if not isinstance(waiver, dict) or not _is_nonempty_str(waiver.get("by")) or not _is_nonempty_str(waiver.get("reason")):
+        if not isinstance(waiver, dict) or not _is_text(waiver.get("by")) or not _is_text(waiver.get("reason")):
             errors.append("synthesis_waiver must be an object with non-empty by and reason")
 
 
