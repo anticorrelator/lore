@@ -279,7 +279,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import uuid
 
 (item_dir, slug, select_all, tasks_csv, fallback_scale_set,
@@ -517,8 +516,13 @@ def unit_owners():
         }
 
 
+sys.path.insert(0, script_dir)
+from packet_builder import assemble, build_packet
+knowledge_dir = os.path.dirname(os.path.dirname(item_dir))
+
 unit_map = []
 prior_knowledge = []
+directive_by_unit = {}
 delivery_by_unit = {}  # unit key -> resolve-manifest delivery snapshot
 unit_key_of_task = {}  # task id -> unit key
 for owner in unit_owners():
@@ -528,6 +532,7 @@ for owner in unit_owners():
     for member in owner["members"]:
         unit_key_of_task[member] = key
     directive = owner["directive"]
+    directive_by_unit[key] = directive
     if directive is None:
         directive_kind = None
     elif isinstance(directive, dict) and directive.get("version") == 2:
@@ -556,54 +561,24 @@ for owner in unit_owners():
     # manifest, so every subprocess branch is contained per-iteration.
     if directive is not None:
         entry["branch"] = "directive"
-        delivery_fd, delivery_path = tempfile.mkstemp(suffix=".json", prefix="rm-delivery-")
-        os.close(delivery_fd)
-        rm_args = ["bash", os.path.join(script_dir, "resolve-manifest.sh"), slug]
-        if owner["kind"] == "phase":
-            rm_args.append(str(owner["phase_number"]))
-            # task_id attribution is only unambiguous when one task consumes the resolve
-            if len(unit_eligible) == 1:
-                rm_args += ["--task-id", unit_eligible[0]]
-        else:
-            rm_args += ["--task-id", owner["task_id"]]
-        rm_args += ["--delivery-json", delivery_path]
         try:
-            proc = subprocess.run(rm_args, capture_output=True, text=True, timeout=120)
-            if proc.returncode == 0:
-                content = proc.stdout.strip()
-                entry["content"] = proc.stdout if content else None
-                if content:
-                    entry["status"] = "resolved"
-                else:
-                    # Empty sections mean the per-topic search failed (e.g. the
-                    # FTS5 lowercase-operator trap), not that no knowledge exists.
-                    entry["status"] = "resolved-empty"
-                    entry["note"] = ("resolve-manifest.sh returned no content — per-topic "
-                                     "search may have failed; see conventions/"
-                                     "empty-prior-knowledge-sections-resolve-manifest-sh")
-            else:
-                entry["status"] = "error"
-                entry["content"] = None
-                stderr_lines = (proc.stderr or "").strip().splitlines()
-                entry["note"] = stderr_lines[-1] if stderr_lines else None
-                warn(f"{owner['label']}: resolve-manifest.sh failed (exit {proc.returncode})")
+            content, snapshot = assemble(
+                knowledge_dir, slug, directive,
+                owner["task_id"] if owner["kind"] == "task" else
+                (unit_eligible[0] if len(unit_eligible) == 1 else None),
+                owner["phase_number"] if owner["kind"] == "phase" else None)
+            delivery_by_unit[key] = snapshot
+            entry["content"] = content if content.strip() else None
+            entry["status"] = "resolved" if content.strip() else "resolved-empty"
+            if not content.strip():
+                entry["note"] = ("resolve-manifest.sh returned no content — per-topic "
+                                 "search may have failed; see conventions/"
+                                 "empty-prior-knowledge-sections-resolve-manifest-sh")
         except Exception as exc:  # containment: timeout, missing binary, etc.
             entry["status"] = "error"
             entry["content"] = None
             entry["note"] = str(exc)
             warn(f"{owner['label']}: resolve-manifest.sh failed ({exc})")
-        try:
-            with open(delivery_path, encoding="utf-8") as df:
-                snapshot_text = df.read().strip()
-            if snapshot_text:
-                delivery_by_unit[key] = json.loads(snapshot_text)
-        except (OSError, ValueError):
-            pass  # legacy directives and failed resolves leave no snapshot
-        finally:
-            try:
-                os.unlink(delivery_path)
-            except OSError:
-                pass
     elif any("## Prior Knowledge" in d for d in owner["descriptions"]):
         entry["branch"] = "task-descriptions"
         entry["status"] = "skipped-embedded"
@@ -725,21 +700,14 @@ for tid in eligible_ids:
             f"(branch={pk_entry.get('branch', 'unknown')}, "
             f"status={pk_entry.get('status', 'unknown')})")
     try:
-        proc = subprocess.run(
-            ["bash", os.path.join(script_dir, "packet-append.sh"),
-             "--row", json.dumps(row, ensure_ascii=False)],
-            capture_output=True, text=True, timeout=60)
-        if proc.returncode == 0:
-            identity = {key: row.get(key) for key in
-                        ("packet_id", "dispatch_attempt_id", "revision_id")}
-            taskcreate_by_id[tid].update(identity)
-            packets.append({"task_id": tid, "phase": pnum, **identity})
-        else:
-            stderr_lines = (proc.stderr or "").strip().splitlines()
-            if publication["revision_id"]:
-                sys.exit(f"[impl] bound packet append failed for {tid}: {proc.stderr.strip()}")
-            warn(f"packet append failed for {tid}"
-                 + (f": {stderr_lines[-1]}" if stderr_lines else ""))
+        build_packet(knowledge_dir, row,
+                     directive=directive_by_unit.get(unit_key),
+                     assembly=(pk_status_by_unit.get(unit_key, {}).get("content") or "", snapshot or {}),
+                     caller="implement-lead")
+        identity = {key: row.get(key) for key in
+                    ("packet_id", "dispatch_attempt_id", "revision_id")}
+        taskcreate_by_id[tid].update(identity)
+        packets.append({"task_id": tid, "phase": pnum, **identity})
     except Exception as exc:
         if publication["revision_id"]:
             sys.exit(f"[impl] bound packet append failed for {tid}: {exc}")

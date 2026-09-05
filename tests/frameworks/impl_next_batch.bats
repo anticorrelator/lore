@@ -451,7 +451,7 @@ for filename, row in zip(('first.json','second.json','retry.json'), rows):
     if 'batch' in output:
         assert row['tier2_claim_ids'] == [r['claim_id'] for r in task['tier2_extract']]
         assert row['delivered_entries'] == []
-        assert 'without knowledge-entry assembly' in row['empty_reason']
+        assert 'task has no retrieval directive' in row['empty_reason']
 view = runpy.run_path(str(repo/'scripts/work-evidence.py'))['project'](item, root)
 records = view['sources']['packets']['records']
 assert records[0]['binding'] == {'state':'stale','reason':'revision-mismatch'}

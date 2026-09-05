@@ -3,6 +3,58 @@
 Mechanics consulted on demand. The judgment doctrine stays in SKILL.md; this file
 holds the flag semantics, exit codes, and incident-derived calibrations that back it.
 
+## Knowledge packets
+
+Build context for a recipient at dispatch, or pull it again during a task:
+
+```bash
+lore packet build --work-item <slug> --role coordinator --caller coordinator \
+  --topic "<assignment topic>" --scale-set architecture,subsystem
+```
+
+`--role` names the recipient: `investigator`, `designer`, `worker`, `reviewer`,
+or `coordinator`. `--caller` records who requested the assembly. `--task <id>`
+addresses a task in the item. Supply `--topic`, `--seeds <paths...>` (space- or
+comma-separated), or both; when neither is supplied, the named task must have
+a retrieval directive. That directive retains its focal/adjacent topics and
+consultation requirements. `--scale-set` is required and declares the buckets
+for this pull; there is no default. Existing task directives are read with the
+caller’s declared scales.
+
+The JSON status contains `packet_id`, `recipient_role`, `entries_per_scale`,
+`scales_requested`, `scales_returned`, `norm_population_count`,
+`consultation_requirements`, `trust_snapshot_hash`, `delivery_stage`, `location`,
+and `flags`. Counts are distinct entry paths tagged with each requested scale;
+a preference or abstract entry returned through the retrieval stack’s bypass
+rule does not count as a hit at a different scale. The norm population retains
+the full discovery tree enumeration with the labels used by conformance.
+Status describes assembly. It does not establish receipt or decide whether the
+context answers the assignment.
+
+`--thin-floor <n>` adds `below_floor`, the requested scales whose counts are
+below the caller’s threshold. Repeat `--flag <trigger> "<reason>"` to record
+`unverified-assumption`, `unfamiliar-boundary`, or `conflicting-explanations`.
+The caller declares these reasons; retrieval does not infer them.
+
+A task packet uses schema 2 when a committed revision and a recorded dispatch
+attempt exist. A re-pull uses the latest recorded attempt for that task and
+current revision. Otherwise `unbound_reason` names the missing task, revision,
+or attempt. Assembly writes through `packet-append.sh` and retains the
+renderer’s `manifest_load` provenance. It does not publish a revision or create
+a dispatch attempt.
+
+Pass `--packet <id>` to managed `lore session start` or raw
+`lore session request --type worker` to put one pointer
+line after the guidance floor and before the brief. For a harness-native spawn,
+`lore dispatch guidance --short --packet <id>` emits the same pointer after the
+short floor. Without `--packet`, both surfaces retain their existing output.
+The pointer names the store location and `lore packet show <id>`; it carries no
+entry bodies. `show` renders entries with their available bylines, norm labels,
+flags, and binding. `show --json` returns the stored row. Coordinators receive
+the build status by default and can inspect a packet when the decision needs it.
+Packets are pulled at dispatch; prefetch and session-start output do not change.
+
+
 ## Managed sessions
 
 Use `lore session start <item> --workspace <source-checkout> --framework <id> --model <model> --context <brief> --packet <packet-id> --key <dispatch-id> --json` for item-backed workers. It starts or recovers a source-scoped host without a human TUI, seeds missing source provenance, and returns a durable session handle. Identical keyed retries join the same start; changed keyed intent refuses; no key means a new worker. Agent initiation and cooperative terminus auto-close are the defaults.
@@ -585,6 +637,46 @@ the lifecycle stated in § The role of the skill.
     recorded in `implement-spec-reshape-agent-s-interaction-commons` supplied
     convergent reasoning, not a verdict binding this read. n=1 dry run; effects on
     sustained coordination have not been measured.
+
+
+### Commons-reshape arc, 2026-09-04/05 (n=1 arc, thirteen steps)
+
+1. **Tiers are what the work needs; rungs are the ceremony.** The arc that dissolved
+   spec and implement into tiered dispatch needed a vocabulary for *what kind of work
+   this is* separate from *how much ceremony it gets*: fix / decision / change / arc,
+   set by decisions and working sets, never by diff size, and cheap to move between
+   because a fix can reveal a fork mid-stream. A peer read from a differently-trained
+   model named the failure this prevents — agents defend an initial classification to
+   avoid procedural expansion when moving costs something. *In skill.*
+2. **A packet at every dispatch; investigation and design are commissioned, not
+   scheduled.** The retrospective record (2026-08-15) showed the store holding the
+   answer to the one decision that went wrong while no surface put it in front of the
+   agent making it — the lead path had no packet; only implement workers did, once, at
+   finalize. `lore packet build` (arc step 4) builds one for any role at dispatch and
+   returns facts, not a verdict; the seat declares a floor if it wants one. The three
+   non-thin triggers (unverified assumption, unfamiliar boundary, conflicting
+   explanations) came from the same peer read: a packet can be rich, current, and
+   pointed at the wrong framing, and no retrieval count distinguishes that from
+   readiness. *In skill.*
+3. **Seat captures carry role and work item.** Bylines shipped (arc step 2) and the
+   seat's own captures showed no byline because `lore capture` at the seat had been
+   given no role; every seat capture now passes `--producer-role coordinator
+   --work-item <slug>`. *In skill.*
+4. **Compare a wake's event time to the session's spawn time before acting on it.** A
+   `needs_input` wake for a just-finalized spec session arrived; by the time the seat
+   peeked, a fresh implement session had spawned on the same slug and sat in its
+   pre-submit startup state (launch command typed, unsent — `no-signature`). The seat
+   read the startup as a park and closed it, losing 46 s and one re-request. Ledgered
+   with a false first explanation, corrected against the journal. *Not yet in skill* —
+   the durable fix is the watcher carrying spawn time, or readiness recognizing the
+   startup state; see the arc's friction log.
+5. **Session-owned teardown never lands a commit.** Across eleven streams: when the
+   seat had moved main, the guard quarantined (correct, empty of anything new); when it
+   had not, the guard *published* the result as uncommitted working-tree changes on the
+   control checkout, and the next fast-forward refused to overwrite them. The landing
+   path is always the worker's branch commit — verify the published copies identical,
+   discard, fast-forward or cherry-pick. *Not yet in skill*; belongs in § Verifying and
+   closing once the guard's behavior is settled rather than described.
 
 ## Shipped verb history
 

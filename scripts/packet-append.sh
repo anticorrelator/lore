@@ -22,11 +22,6 @@
 # re-dispatch is a new delivery, so identical appends produce distinct rows.
 # Supersede by writing a new row, never by editing.
 #
-# PROMPT-CONTEXT INVARIANT: packet rows are never loaded into any agent
-# prompt. The packet measures delivery quality for agents whose behavior the
-# graduation experiment compares; a measured agent seeing its own delivery
-# record contaminates the measurement. See $KDIR/_packets/README.md.
-#
 # Writer-owned stamps (applied here, before validation):
 #   schema_version         "2" for bound task identity, otherwise "1"
 #   packet_schema_sha      sha256 of packet_schema.py (always overwritten)
@@ -96,7 +91,7 @@ if [[ -z "$ROW" ]]; then
   ROW=$(cat)
 fi
 
-if [[ -z "${ROW// }" ]]; then
+if [[ -z "$ROW" || "$ROW" =~ ^[[:space:]]*$ ]]; then
   fail "row is empty"
 fi
 
@@ -174,9 +169,22 @@ if row.get("packet_scope") == "task" and row.get("work_item"):
     item = Path(root) / "_work" / row["work_item"]
     if item.parent.resolve() != (Path(root) / "_work").resolve():
         sys.exit("packet: work_item must identify an active work item")
-    if row["schema_version"] == "1" and ((item / "revisions.jsonl").exists() or
+    if row["schema_version"] == "1" and row.get("unbound_reason") != "dispatch-attempt-not-recorded" and ((item / "revisions.jsonl").exists() or
             ((item / "tasks.json").exists() and json.loads((item / "tasks.json").read_text()).get("revision_id"))):
         sys.exit("packet: revised tasks require revision_id and dispatch_attempt_id")
+if row.get("unbound_reason") == "dispatch-attempt-not-recorded":
+    if row["schema_version"] != "1" or row.get("packet_scope") != "task":
+        sys.exit("packet: missing-attempt reason requires an unbound task packet")
+    publication = runpy.run_path(os.path.join(scripts, "work-evidence.py"))["publication_for_dispatch"](str(item), root)
+    if not publication["revision_id"]:
+        sys.exit("packet: missing-attempt reason requires a committed revision")
+    packets = Path(root) / "_packets/packets.jsonl"
+    if packets.exists():
+        for line in packets.read_text().splitlines():
+            prior = json.loads(line)
+            if (prior.get("work_item") == row["work_item"] and prior.get("task_id") == row["task_id"]
+                    and prior.get("revision_id") == publication["revision_id"] and prior.get("dispatch_attempt_id")):
+                sys.exit("packet: a dispatch attempt exists; bind the packet to it")
 if row["schema_version"] == "2":
     try:
         publication = runpy.run_path(os.path.join(scripts, "work-evidence.py"))["publication_for_dispatch"](str(item), root)
