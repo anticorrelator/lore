@@ -1868,6 +1868,14 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 					name = TmuxSessionNameSlugless(sessionEnv.Instance)
 					label = "slugless session (" + name + ")"
 				}
+				if sessionEnv.Prepared != nil {
+					prepared := d
+					prepared.Worktree = &identity
+					prepared.ExecutionDir = worktreeDir
+					if err := sessionEnv.Prepared(prepared, activeFramework, sessionID, name, 0); err != nil {
+						return StreamErrorMsg{Slug: slug, Err: err}
+					}
+				}
 				extras := append([]string{"LORE_FRAMEWORK=" + activeFramework}, sessionEnv.vars()...)
 				pid, terr := createTmuxSession(name, worktreeDir, width, height, extras, harnessBinary, args)
 				if terr != nil {
@@ -1891,6 +1899,14 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 			}
 		}
 		if cmd == nil {
+			if sessionEnv.Prepared != nil {
+				prepared := d
+				prepared.Worktree = &identity
+				prepared.ExecutionDir = worktreeDir
+				if err := sessionEnv.Prepared(prepared, activeFramework, sessionID, "", 0); err != nil {
+					return StreamErrorMsg{Slug: slug, Err: err}
+				}
+			}
 			cmd = exec.Command(harnessBinary, args...)
 			cmd.Dir = worktreeDir
 			cmd.Env = append(os.Environ(), "LORE_FRAMEWORK="+activeFramework)
@@ -1920,6 +1936,15 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 			processPID = panePID
 		} else if cmd.Process != nil {
 			processPID = cmd.Process.Pid
+		}
+		if sessionEnv.Prepared != nil {
+			prepared := d
+			prepared.Worktree = &identity
+			prepared.ExecutionDir = worktreeDir
+			if err := sessionEnv.Prepared(prepared, activeFramework, sessionID, tmuxName, processPID); err != nil {
+				_ = ptmx.Close()
+				return StreamErrorMsg{Slug: slug, Err: err}
+			}
 		}
 		if managed {
 			if err := runManagedWorktreeCommand(context.Background(), knowledgeDir, "bind", d.WorktreeID, placement.Owner.ID); err == nil {

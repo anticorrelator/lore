@@ -249,7 +249,16 @@ func removeCheckout(ctx context.Context, c checkout) (CleanupProof, error) {
 	// Nothing may be removed until the bytes on disk are provably reachable from
 	// a ref that survives the removal. A checkout that drifted after its result
 	// was materialized holds content no ref describes, so it is left alone.
-	contentRef, err := contentPreservedBy(ctx, c, preserved)
+	contentRef := "terminal refs (checkout already absent)"
+	var errContent error
+	if _, statErr := os.Lstat(c.Path); os.IsNotExist(statErr) {
+		proof.BranchDisposition = "checkout already absent; branches unchanged"
+	} else if statErr != nil {
+		errContent = statErr
+	} else {
+		contentRef, errContent = contentPreservedBy(ctx, c, preserved)
+	}
+	err = errContent
 	if err != nil {
 		return proof, err
 	}

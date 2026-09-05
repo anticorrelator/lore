@@ -116,7 +116,16 @@ func Create(ctx context.Context, sourcePath, worktreePath, epoch string) (Identi
 // leaving nothing on disk. A source on a detached HEAD has no branch to compare
 // and is refused too, rather than passing the check unexamined. An empty
 // requiredRef imposes no requirement.
-func CreateOnRef(ctx context.Context, sourcePath, worktreePath, epoch, requiredRef string) (identity Identity, err error) {
+// AllocationIntent is the pre-mutation ownership record for a new checkout.
+type AllocationIntent struct {
+	Path      string     `json:"path"`
+	Epoch     string     `json:"epoch"`
+	Captured  Generation `json:"captured"`
+	TargetRef string     `json:"target_ref"`
+	TargetOID string     `json:"target_oid"`
+}
+
+func CreateOnRef(ctx context.Context, sourcePath, worktreePath, epoch, requiredRef string, beforeCreate ...func(AllocationIntent) error) (identity Identity, err error) {
 	if !validEpoch.MatchString(epoch) {
 		return Identity{}, fmt.Errorf("invalid worktree epoch %q", epoch)
 	}
@@ -157,6 +166,11 @@ func CreateOnRef(ctx context.Context, sourcePath, worktreePath, epoch, requiredR
 			return Identity{}, fmt.Errorf("worktree path already exists: %s", targetPath)
 		}
 		return Identity{}, fmt.Errorf("inspect worktree path: %w", statErr)
+	}
+	for _, checkpoint := range beforeCreate {
+		if err := checkpoint(AllocationIntent{Path: targetPath, Epoch: epoch, Captured: captured, TargetRef: targetRef, TargetOID: targetOID}); err != nil {
+			return Identity{}, err
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		return Identity{}, fmt.Errorf("create worktree parent: %w", err)
@@ -648,4 +662,35 @@ func gitOutput(ctx context.Context, path string, stdin []byte, env []string, arg
 		return nil, errors.New(message)
 	}
 	return stdout.Bytes(), nil
+}
+
+// RecoverAllocation quarantines an interrupted, never-launched allocation. Its
+// caller must first prove no launch ownership checkpoint exists. The original
+// source generation comes from the pre-create record, never from today's cwd.
+func RecoverAllocation(ctx context.Context, intent AllocationIntent) (Identity, ResultArtifact, error) {
+	path, common, gitDir, err := repositoryIdentity(ctx, intent.Path)
+	if err != nil {
+		return Identity{}, ResultArtifact{}, err
+	}
+	expectedPath, err := canonicalExisting(intent.Path)
+	if err != nil {
+		return Identity{}, ResultArtifact{}, err
+	}
+	if path != expectedPath || common != intent.Captured.GitCommonDir {
+		return Identity{}, ResultArtifact{}, fmt.Errorf("allocation placement changed")
+	}
+	marker := filepath.Join(gitDir, "lore-worktree-epoch")
+	if b, err := os.ReadFile(marker); err == nil {
+		if strings.TrimSpace(string(b)) != intent.Epoch {
+			return Identity{}, ResultArtifact{}, fmt.Errorf("allocation epoch changed")
+		}
+	} else if os.IsNotExist(err) {
+		if err = os.WriteFile(marker, []byte(intent.Epoch+"\n"), 0600); err != nil {
+			return Identity{}, ResultArtifact{}, err
+		}
+	} else {
+		return Identity{}, ResultArtifact{}, err
+	}
+	identity := Identity{Version: IdentityVersion, CanonicalPath: path, GitCommonDir: common, GitDir: gitDir, Epoch: intent.Epoch, Captured: intent.Captured, TargetRef: intent.TargetRef, TargetOID: intent.TargetOID, State: StateActive}
+	return Quarantine(ctx, identity, "interrupted before harness launch")
 }

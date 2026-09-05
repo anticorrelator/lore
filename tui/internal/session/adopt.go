@@ -47,6 +47,9 @@ func ScanAdoptable(sessionsDir, repo, selfName string, now time.Time) []Instance
 		if inst.Name == selfName || inst.Name == "" {
 			continue
 		}
+		if inst.HostKey != "" || inst.Role == "session-host" {
+			continue
+		}
 		if inst.Repo != repo {
 			continue
 		}

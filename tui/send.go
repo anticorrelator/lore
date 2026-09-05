@@ -43,6 +43,8 @@ type sendConsumedMsg struct {
 // the unobservable wait; retried marks that the one submit-sequence replay is
 // spent.
 type pendingSendState struct {
+	uncertain bool
+
 	slug       string
 	requestID  string
 	submitSeq  string
@@ -56,12 +58,12 @@ type pendingSendState struct {
 // this instance (target_instance == myName) for a slug it currently hosts —
 // both filters must hold, mirroring scanCloseRequestsCmd. hosted is snapshotted
 // at Cmd-build time.
-func scanSendRequestsCmd(sessionsDir, myName string, hosted map[string]bool) tea.Cmd {
+func scanSendRequestsCmd(sessionsDir, myName string, hosted map[string]bool, retarget ...bool) tea.Cmd {
 	return func() tea.Msg {
 		var matched []session.SendRequest
 		rows, diagnostics := session.ScanSendRequestsWithDiagnostics(sessionsDir)
 		for _, sr := range rows {
-			if sr.RequestID == "" || sr.TargetInstance != myName {
+			if sr.RequestID == "" || (sr.TargetInstance != myName && !hostRetarget(retarget)) {
 				continue
 			}
 			if !hosted[sr.Slug] {
@@ -118,6 +120,10 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 		if _, verifying := m.pendingSendVerify[sr.RequestID]; verifying {
 			continue // injected already; its outcome is deferred to the verify loop
 		}
+		if cmd, exists := m.existingHostDelivery(sr.RequestID); exists {
+			cmds = append(cmds, cmd)
+			continue
+		}
 		panel, ok := m.sessionPanels[sr.Slug]
 		if !ok {
 			continue // slug no longer hosted here (raced teardown); leave the row
@@ -153,11 +159,17 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 			var ready bool
 			ready, reason = sendReadiness(framework, panel.NeedsInput(), hasContract, queuesMidGen, snap)
 			if ready {
-				if err := panel.InjectMessage(sr.Body, submitSeq, snap.BracketedPaste); err != nil {
+				if err := m.hostDeliveryAttempt("send", m.sendOutcomeEvent(sr, false, "delivery-uncertain")); err != nil {
+					reason = sendReasonInternal
+					m.flashErr = compactErr("persist delivery attempt", err)
+				} else if err := panel.InjectMessage(sr.Body, submitSeq, snap.BracketedPaste); err != nil {
 					if errors.Is(err, work.ErrUnsafePayload) {
 						reason = sendReasonUnsafe
 					} else {
 						reason = sendReasonInternal
+						if m.hostKey != "" {
+							reason = "delivery-uncertain"
+						}
 						m.flashErr = compactErr("session send", err)
 					}
 				} else {
@@ -191,7 +203,11 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 			m = m.routeRuntimeNotices([]runtimeNotice{noContractNotice(framework)})
 		}
 		ev := m.sendOutcomeEvent(sr, false, reason)
-		cmds = append(cmds, consumeSendCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, sr.RequestID, ev))
+		if m.hostKey != "" {
+			cmds = append(cmds, m.hostDeliveryTerminalCmd("send", ev))
+		} else {
+			cmds = append(cmds, consumeSendCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, sr.RequestID, ev))
+		}
 	}
 	if len(cmds) == 0 {
 		return m, nil
@@ -259,6 +275,7 @@ func (m model) advanceSendVerifications() (model, []tea.Cmd) {
 			// so the honest terminal is send_refused reason=unsubmitted — the requester
 			// gets one outcome rather than timing out.
 			delete(m.pendingSendVerify, reqID)
+			ps.uncertain = true
 			cmds = append(cmds, m.sendVerifyTerminalCmd(ps, false))
 			continue
 		}
@@ -284,6 +301,7 @@ func (m model) advanceSendVerifications() (model, []tea.Cmd) {
 			cmds = append(cmds, m.sendVerifyTerminalCmd(ps, false))
 		default: // obsUnobservable
 			if time.Since(ps.injectedAt) >= m.sendVerifyGraceOr() {
+				ps.uncertain = true
 				delete(m.pendingSendVerify, reqID)
 				cmds = append(cmds, m.sendVerifyTerminalCmd(ps, false))
 			}
@@ -299,8 +317,14 @@ func (m model) sendVerifyTerminalCmd(ps pendingSendState, submitted bool) tea.Cm
 	reason := ""
 	if !submitted {
 		reason = sendReasonUnsubmitted
+		if m.hostKey != "" && ps.uncertain {
+			reason = "delivery-uncertain"
+		}
 	}
 	ev := m.sendOutcomeEvent(session.SendRequest{Slug: ps.slug, RequestID: ps.requestID}, submitted, reason)
+	if m.hostKey != "" {
+		return m.hostDeliveryTerminalCmd("send", ev)
+	}
 	return journalCmd(m.eventScript, m.config.KnowledgeDir, ev)
 }
 

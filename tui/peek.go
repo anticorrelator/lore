@@ -35,13 +35,13 @@ type peekRespondedMsg struct {
 // scanPeekRequestsCmd garbage-collects stale peek-responses, then returns the
 // peek-requests addressed to this instance for a slug it hosts. Both filters
 // (target + hosted) must hold, mirroring the send/close scans.
-func scanPeekRequestsCmd(sessionsDir, myName string, hosted map[string]bool) tea.Cmd {
+func scanPeekRequestsCmd(sessionsDir, myName string, hosted map[string]bool, retarget ...bool) tea.Cmd {
 	return func() tea.Msg {
 		session.GCPeekResponses(sessionsDir, peekResponseTTL)
 		var matched []session.PeekRequest
 		rows, diagnostics := session.ScanPeekRequestsWithDiagnostics(sessionsDir)
 		for _, pr := range rows {
-			if pr.RequestID == "" || pr.TargetInstance != myName {
+			if pr.RequestID == "" || (pr.TargetInstance != myName && !hostRetarget(retarget)) {
 				continue
 			}
 			if !hosted[pr.Slug] {

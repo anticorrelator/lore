@@ -78,6 +78,9 @@ func newModel(cfg config.Config, prefs config.Prefs, startState appState) model 
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--session-host" {
+		os.Exit(sessionHostMain(os.Args[2:]))
+	}
 	// Capture panics to a crash log for debugging.
 	crashLog := filepath.Join(os.TempDir(), "lore-tui-crash.log")
 	defer func() {

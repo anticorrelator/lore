@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/anticorrelator/lore/tui/internal/worktree"
@@ -35,6 +36,7 @@ const LivenessTTL = 30 * time.Second
 // the close-ladder override; CloseRequests preserves every consumed close-request
 // id so the eventual closed row can declare the exact recovery correlation.
 type Session struct {
+	SourceDir string `json:"source_dir,omitempty"`
 	Slug      string `json:"slug"`
 	Type      string `json:"type"`      // spec|implement|chat
 	Initiator string `json:"initiator"` // agent|human
@@ -55,6 +57,10 @@ type Session struct {
 // Instance is one live TUI instance's registry row, stored at
 // instances/<name>.json.
 type Instance struct {
+	Revision int64 `json:"revision,omitempty"`
+
+	HostKey          string    `json:"host_key,omitempty"`
+	Role             string    `json:"role,omitempty"`
 	Name             string    `json:"name"`
 	PID              int       `json:"pid"`
 	Repo             string    `json:"repo"`
@@ -98,7 +104,19 @@ func instancePath(sessionsDir, name string) string {
 // WriteInstance writes an instance's own registry file via tmp+rename so a
 // concurrent reader never observes a torn row. The instance is the sole writer
 // of its own file, so no lock is needed.
+var instanceWriteMu sync.Mutex
+
 func WriteInstance(sessionsDir string, inst Instance) error {
+	instanceWriteMu.Lock()
+	defer instanceWriteMu.Unlock()
+	if inst.HostKey != "" && inst.Revision > 0 {
+		if b, err := os.ReadFile(instancePath(sessionsDir, inst.Name)); err == nil {
+			var previous Instance
+			if json.Unmarshal(b, &previous) == nil && previous.Revision > inst.Revision {
+				return nil
+			}
+		}
+	}
 	dir := InstancesDir(sessionsDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create instances dir: %w", err)
@@ -195,13 +213,31 @@ func nowISO() string {
 // write.
 func atomicWrite(dest string, data []byte) error {
 	dir := filepath.Dir(dest)
-	tmp := filepath.Join(dir, fmt.Sprintf(".%s.tmp.%d", filepath.Base(dest), os.Getpid()))
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("write tmp: %w", err)
+	f, err := os.CreateTemp(dir, ".instance-*")
+	if err != nil {
+		return err
 	}
-	if err := os.Rename(tmp, dest); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename into place: %w", err)
+	defer os.Remove(f.Name())
+	if err = f.Chmod(0644); err == nil {
+		_, err = f.Write(data)
 	}
-	return nil
+	if err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if err = os.Rename(f.Name(), dest); err != nil {
+		return err
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }

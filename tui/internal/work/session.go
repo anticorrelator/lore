@@ -97,6 +97,11 @@ type SessionDescriptor struct {
 // inferring it from the slug. The zero value exports nothing (a launch with no
 // session identity to advertise).
 type SessionEnv struct {
+	// Prepared persists ownership before launch and after the process PID is known.
+	Prepared func(SessionDescriptor, string, string, string, int) error
+
+	SourceDir    string
+	HostKey      string
 	Instance     string // LORE_SESSION_INSTANCE
 	Slug         string // LORE_SESSION_SLUG
 	Type         string // LORE_SESSION_TYPE: spec|implement|chat
@@ -126,6 +131,12 @@ type SessionEnv struct {
 // `[ -n "$LORE_SESSION_INSTANCE" ]` gate stays meaningful).
 func (s SessionEnv) vars() []string {
 	var out []string
+	if s.SourceDir != "" {
+		out = append(out, "LORE_SESSION_SOURCE_DIR="+s.SourceDir)
+	}
+	if s.HostKey != "" {
+		out = append(out, "LORE_SESSION_HOST_KEY="+s.HostKey)
+	}
 	if s.Instance != "" {
 		out = append(out, "LORE_SESSION_INSTANCE="+s.Instance)
 	}

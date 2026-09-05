@@ -53,6 +53,7 @@ const (
 // an absent field, an explicit JSON null, and a present value stay distinct;
 // numeric attempts stays an int so a strict decoder rejects a quoted "0".
 type Request struct {
+	HostKey        string          `json:"host_key,omitempty"`
 	RequestID      string          `json:"request_id"`
 	Type           string          `json:"type"` // spec|implement|chat|worker
 	Slug           *string         `json:"slug"`
@@ -539,12 +540,22 @@ func QueueTick(
 	now time.Time,
 	reclaimAfter time.Duration,
 ) (QueueTickResult, error) {
+	return QueueTickForHost(sessionsDir, myName, myVintage, myProjectDir, "", liveInstances, hasPlanDoc, slugLive, now, reclaimAfter)
+}
+
+func QueueTickForHost(sessionsDir, myName, myVintage, myProjectDir, hostKey string, liveInstances map[string]bool, hasPlanDoc func(string) bool, slugLive func(string) bool, now time.Time, reclaimAfter time.Duration) (QueueTickResult, error) {
 	var res QueueTickResult
 
 	claimedRows, claimedDiagnostics := ScanClaimedWithDiagnostics(sessionsDir)
 	res.Diagnostics = append(res.Diagnostics, claimedDiagnostics...)
 	for _, row := range claimedRows {
+		if row.Request.HostKey != hostKey {
+			continue
+		}
 		reason, reclaim := reclaimReason(row, liveInstances, now, reclaimAfter)
+		if hostKey != "" && row.Request.ClaimedBy != nil && *row.Request.ClaimedBy != myName && !liveInstances[*row.Request.ClaimedBy] {
+			reason, reclaim = "host-predecessor-dead", true
+		}
 		if !reclaim {
 			continue
 		}
@@ -562,6 +573,12 @@ func QueueTick(
 	pendingRows, pendingDiagnostics := ScanPendingWithDiagnostics(sessionsDir)
 	res.Diagnostics = append(res.Diagnostics, pendingDiagnostics...)
 	for _, req := range pendingRows {
+		if req.HostKey != hostKey {
+			continue
+		}
+		if hostKey != "" {
+			req.TargetInstance = StrPtr(myName)
+		}
 		if !claimableBy(req, myName, myVintage, myProjectDir, now) {
 			continue
 		}

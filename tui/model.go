@@ -148,6 +148,8 @@ func (m model) rightPanelWidth() int {
 }
 
 type model struct {
+	hostKey string // nonempty only for the administrative session host
+
 	state          appState
 	prevState      appState // state to return to when leaving knowledge browser
 	focusedPanel   panelFocus

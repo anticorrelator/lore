@@ -162,6 +162,28 @@ func (m model) finalizeLocalSessionClosed(slug, closeRequestID string) (model, [
 	if !ok {
 		return m, nil
 	}
+	if m.hostKey != "" {
+		delivery := m.hostCloseDelivery(slug, ls, closeRequestID)
+		id := delivery.ID
+		if err := hostAtomicJSON(m.hostDeliveryPath(id), delivery); err != nil {
+			return m, []tea.Cmd{func() tea.Msg { return hostRuntimeErrorMsg{err: err} }}
+		}
+		delete(m.localSessions, slug)
+		delete(m.sessionIdle, slug)
+		delete(m.sessionModalBlocked, slug)
+		row := m.instanceRow()
+		return m, []tea.Cmd{func() tea.Msg {
+			delivery.Event.Spend = closedSpend(m.spendScript, ls.harness, ls.sessionID, ls.sourceDir, sessionDurationSeconds(ls.started))
+			err := hostAtomicJSON(m.hostDeliveryPath(id), delivery)
+			if err == nil {
+				err = m.finishHostDelivery(delivery)
+			}
+			if err == nil {
+				err = session.WriteInstance(m.sessionsDir, row)
+			}
+			return journalResultMsg{err: err}
+		}}
+	}
 	delete(m.localSessions, slug)
 	delete(m.sessionIdle, slug)
 	delete(m.sessionModalBlocked, slug)
@@ -416,6 +438,33 @@ func (m model) handleSessionProcessStarted(msg work.SessionProcessStartedMsg) (m
 				RequestID:     meta.requestID,
 			}))
 		}
+	}
+
+	if m.hostKey != "" {
+		// Complete ownership transfer before retiring the provisional launch row.
+		row := m.instanceRow()
+		return m, tea.Batch(cmd, func() tea.Msg {
+			err := session.WriteInstance(m.sessionsDir, row)
+			if err == nil && meta.requestID != "" {
+				if meta.adopted {
+					ev := session.Event{Event: session.EventRecovered, ActorInstance: session.StrPtr(m.instanceName), TargetInstance: session.StrPtr(meta.adoptedFrom), Slug: slug, SessionType: meta.typ, Initiator: meta.initiator, RequestID: meta.requestID, Reason: "adopted from " + meta.adoptedFrom}
+					err = session.AppendEvent(m.eventScript, m.config.KnowledgeDir, ev)
+					if err == nil {
+						err = session.DeleteClaimed(m.sessionsDir, meta.requestID)
+					}
+				} else {
+					ev := session.Event{Event: session.EventSpawned, ActorInstance: session.StrPtr(m.instanceName), Slug: slug, SessionType: meta.typ, Initiator: meta.initiator, RequestID: meta.requestID}
+					err = session.AppendEvent(m.eventScript, m.config.KnowledgeDir, ev)
+					if err == nil {
+						err = session.DeleteClaimed(m.sessionsDir, meta.requestID)
+					}
+				}
+			}
+			if err == nil {
+				err = m.clearHostSpawn(meta.requestID)
+			}
+			return hostPromotionDoneMsg{err: err}
+		})
 	}
 
 	// Agent-initiated spawns never steal focus — the request row is the recorded

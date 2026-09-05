@@ -33,6 +33,7 @@ const sessionSpendProbeTimeout = 5 * time.Second
 // write its registry row and to journal its lifecycle. requestID is set only for
 // queue-claimed (agent) sessions.
 type liveSession struct {
+	sourceDir string
 	typ       string // spec|implement|chat
 	initiator string // agent|human
 	requestID string
@@ -124,6 +125,8 @@ type sessionWorktreeCleanedMsg struct {
 
 // sessionWorktreeSweptMsg carries the crash-resume backstop's results.
 type sessionWorktreeSweptMsg struct {
+	deferred error
+
 	proofs   []worktree.CleanupProof
 	failures []error
 }
@@ -161,7 +164,10 @@ func (m model) writeInstanceCmd() tea.Cmd {
 }
 
 func (m model) disposeWorktreeCmd(slug string, ls liveSession, closeRequestID string) tea.Cmd {
-	destination := m.normalizedProjectDir
+	destination := ls.sourceDir
+	if destination == "" {
+		destination = m.normalizedProjectDir
+	}
 	if destination == "" {
 		destination = m.config.ProjectDir
 	}
@@ -294,6 +300,13 @@ func (m model) handleWorktreeDisposition(msg worktreeDispositionMsg) (model, tea
 	var outcomeCmd tea.Cmd
 	if msg.outcome.Kind == worktree.OutcomeWorktreeQuarantined || msg.outcome.Kind == worktree.OutcomePublished {
 		outcomeCmd = journalCmd(m.eventScript, m.config.KnowledgeDir, worktreeOutcomeEvent(m.instanceName, msg.slug, ls, msg.outcome))
+		if m.hostKey != "" {
+			var err error
+			outcomeCmd, err = m.hostWorktreeOutcome(worktreeOutcomeEvent(m.instanceName, msg.slug, ls, msg.outcome), msg.outcome.Identity.Epoch, m.hostCloseDelivery(msg.slug, ls, msg.closeRequestID))
+			if err != nil {
+				return m, func() tea.Msg { return hostRuntimeErrorMsg{err: err} }
+			}
+		}
 	}
 	var terminalCmds []tea.Cmd
 	m, terminalCmds = m.finalizeLocalSessionClosed(msg.slug, msg.closeRequestID)
@@ -355,7 +368,14 @@ func (m model) sweepSessionWorktreesCmd() tea.Cmd {
 	sessionsDir := m.sessionsDir
 	return func() tea.Msg {
 		var claimed []string
-		for _, inst := range session.ListInstances(sessionsDir) {
+		instances, err := session.OwnershipInstances(sessionsDir)
+		if err != nil {
+			if m.hostKey != "" {
+				return sessionWorktreeSweptMsg{deferred: err}
+			}
+			return sessionWorktreeSweptMsg{failures: []error{err}}
+		}
+		for _, inst := range instances {
 			for _, s := range inst.Sessions {
 				if s.Worktree != nil {
 					claimed = append(claimed, s.Worktree.CanonicalPath)
@@ -430,9 +450,11 @@ func (m model) queueTickCmd() tea.Cmd {
 		live := make(map[string]bool)
 		instances, instanceDiagnostics := session.ListInstancesWithDiagnostics(dir)
 		for _, inst := range instances {
-			live[inst.Name] = true
+			if m.hostKey == "" || session.ProcessAlive(inst.PID) {
+				live[inst.Name] = true
+			}
 		}
-		res, err := session.QueueTick(dir, name, vintage, projectDir, live,
+		res, err := session.QueueTickForHost(dir, name, vintage, projectDir, m.hostKey, live,
 			func(slug string) bool { return planDocs[slug] },
 			func(slug string) bool { return liveSlugs[slug] },
 			time.Now(), session.ReclaimAfter)
@@ -615,6 +637,7 @@ func emitRecoveredCmd(dir, script, kdir string, inst session.Instance, ev sessio
 // adoptedSession is one still-running tmux-hosted session recovered from a dead
 // instance's registry row during startup adoption.
 type adoptedSession struct {
+	sourceDir     string
 	deadInstance  string
 	slug          string
 	typ           string
@@ -646,6 +669,7 @@ type adoptionScanMsg struct {
 func adoptedFromRegistry(deadInstance string, s session.Session) adoptedSession {
 	return adoptedSession{
 		deadInstance: deadInstance,
+		sourceDir:    s.SourceDir,
 		slug:         s.Slug, typ: s.Type, initiator: s.Initiator, requestID: s.RequestID,
 		started: parseStartedISO(s.Started), tmuxName: s.Tmux, sessionID: s.SessionID,
 		harness: s.Harness, autoClose: s.AutoClose,
@@ -814,7 +838,26 @@ func (m model) adoptionScanCmd() tea.Cmd {
 		var notices []runtimeNotice
 		var diagnostics []session.Diagnostic
 		transferred := m.instanceRow()
-		for _, inst := range session.ScanAdoptable(dir, repo, self, time.Now()) {
+		candidates := session.ScanAdoptable(dir, repo, self, time.Now())
+		if m.hostKey != "" {
+			var err error
+			candidates, err = session.ScanHostAdoptable(dir, m.hostKey, destination, self)
+			if err != nil {
+				return adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Code: "host-recovery", Message: err.Error()}}}
+			}
+		}
+		seen := map[string]bool{}
+		if m.hostKey != "" {
+			var err error
+			seen, err = m.hostClosedSlugs()
+			if err != nil {
+				return adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Message: err.Error()}}}
+			}
+		}
+		for slug := range m.localSessions {
+			seen[slug] = true
+		}
+		for _, inst := range candidates {
 			claim, claimPath, err := session.ClaimInstance(dir, inst.Name)
 			if err != nil {
 				continue // lost the claim race, or the row vanished
@@ -823,6 +866,16 @@ func (m model) adoptionScanCmd() tea.Cmd {
 			var claimRetained []adoptedSession
 			var claimEvents []session.Event
 			for _, s := range claim.Sessions {
+				if m.hostKey != "" {
+					if seen[s.Slug] {
+						continue
+					}
+					seen[s.Slug] = true
+					if s.SourceDir == "" {
+						s.SourceDir = claim.ProjectDir
+					}
+				}
+
 				if s.Tmux != "" && work.TmuxHasSession(s.Tmux) {
 					a := adoptedFromRegistry(claim.Name, s)
 					if err := validateAdoptionIdentity(kdir, s); err != nil {
@@ -867,7 +920,11 @@ func (m model) adoptionScanCmd() tea.Cmd {
 						claimRetained = append(claimRetained, a)
 					} else {
 						a.worktree = cloneWorktreeIdentity(&pending)
-						outcome, dispositionErr := publishWorktree(context.Background(), pending, destination)
+						target := destination
+						if s.SourceDir != "" {
+							target = s.SourceDir
+						}
+						outcome, dispositionErr := publishWorktree(context.Background(), pending, target)
 						if dispositionErr != nil || outcome.Kind == worktree.OutcomeRestoreRefused {
 							a.refusalReason = outcome.Reason
 							if a.refusalReason == "" && dispositionErr != nil {
@@ -900,18 +957,28 @@ func (m model) adoptionScanCmd() tea.Cmd {
 			}
 			alive = append(alive, claimAlive...)
 			retained = append(retained, claimRetained...)
+			settled := true
 			for _, ev := range claimEvents {
 				if err := session.AppendEvent(script, kdir, ev); err != nil {
+					settled = false
 					notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "recovery-outcome-append", Message: compactErr("recovery outcome", err)})
 					continue
 				}
 				if ev.Event == session.EventOrphaned {
 					if err := appendOrphanDue(script, kdir, ev); err != nil {
+						settled = false
 						notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "orphaned-due", Message: compactErr("orphaned session", err)})
 					}
 				}
 			}
-			retirementNotices, retirementDiagnostics := retireDeadTargetCloseRequests(dir, script, kdir, self, claim.Name)
+			if m.hostKey != "" && !settled {
+				continue
+			}
+			var retirementNotices []runtimeNotice
+			var retirementDiagnostics []session.Diagnostic
+			if m.hostKey == "" {
+				retirementNotices, retirementDiagnostics = retireDeadTargetCloseRequests(dir, script, kdir, self, claim.Name)
+			}
 			notices = append(notices, retirementNotices...)
 			diagnostics = append(diagnostics, retirementDiagnostics...)
 			if err := session.DeleteClaim(claimPath); err != nil {
@@ -960,6 +1027,7 @@ func (m model) handleAdoptionScan(msg adoptionScanMsg) (model, tea.Cmd) {
 			autoClose:     a.autoClose,
 			sessionID:     a.sessionID,
 			harness:       a.harness,
+			sourceDir:     a.sourceDir,
 			tmuxName:      a.tmuxName,
 			adopted:       true,
 			adoptedFrom:   a.deadInstance,
@@ -981,7 +1049,7 @@ func (m model) handleAdoptionScan(msg adoptionScanMsg) (model, tea.Cmd) {
 func (a adoptedSession) liveSession() liveSession {
 	return liveSession{
 		typ: a.typ, initiator: a.initiator, requestID: a.requestID, started: a.started,
-		autoClose: a.autoClose, sessionID: a.sessionID, harness: a.harness,
+		autoClose: a.autoClose, sessionID: a.sessionID, harness: a.harness, sourceDir: a.sourceDir,
 		tmuxName: a.tmuxName, adopted: true, adoptedFrom: a.deadInstance,
 		closeRequests: append([]string(nil), a.closeRequests...),
 		worktree:      cloneWorktreeIdentity(a.worktree),
@@ -995,7 +1063,7 @@ func (a adoptedSession) registrySession() session.Session {
 	return session.Session{
 		Slug: a.slug, Type: a.typ, Initiator: a.initiator,
 		Started: a.started.UTC().Format("2006-01-02T15:04:05Z"), Tmux: a.tmuxName,
-		RequestID: a.requestID, SessionID: a.sessionID, Harness: a.harness,
+		RequestID: a.requestID, SessionID: a.sessionID, Harness: a.harness, SourceDir: a.sourceDir,
 		AutoClose: a.autoClose, CloseRequests: append([]string(nil), a.closeRequests...),
 		Worktree:   cloneWorktreeIdentity(a.worktree),
 		WorktreeID: a.worktreeID, ExecutionDir: a.executionDir, PID: a.pid,
@@ -1214,9 +1282,9 @@ func (e *allocationRefusedError) Unwrap() error { return e.refusal }
 // stays recoverable with errors.As after crossing work.StreamErrorMsg; an
 // ordinary creation error stays unmarked and returns the request to pending for
 // another attempt.
-func allocateSessionWorktreeOnRefCmd(d work.SessionDescriptor, sourceDir, worktreePath, epoch, requiredRef string, next func(work.SessionDescriptor) tea.Msg) tea.Cmd {
+func allocateSessionWorktreeOnRefCmd(d work.SessionDescriptor, sourceDir, worktreePath, epoch, requiredRef string, next func(work.SessionDescriptor) tea.Msg, beforeCreate ...func(worktree.AllocationIntent) error) tea.Cmd {
 	return func() tea.Msg {
-		identity, err := worktree.CreateOnRef(context.Background(), sourceDir, worktreePath, epoch, requiredRef)
+		identity, err := worktree.CreateOnRef(context.Background(), sourceDir, worktreePath, epoch, requiredRef, beforeCreate...)
 		if err != nil {
 			var refusal *worktree.RefusalError
 			if errors.As(err, &refusal) {
@@ -1262,13 +1330,16 @@ func (m model) spawnSessionOnRef(d work.SessionDescriptor, requestID, requiredRe
 		started:      time.Now(),
 		autoClose:    d.AutoClose,
 		worktreeID:   d.WorktreeID,
-		executionDir: d.ExecutionDir,
+		executionDir: d.ExecutionDir, sourceDir: m.normalizedProjectDir,
 	}
 	if d.Initiator != "agent" {
 		m.sessionLaunchedFromModal = m.state == stateWork
 	}
 	env := work.SessionEnv{Instance: m.instanceName, Slug: slug, Type: sessionType(d.Type),
-		WorktreeID: d.WorktreeID, ExecutionDir: d.ExecutionDir, RoutingOverrides: d.RoutingOverrides}
+		WorktreeID: d.WorktreeID, ExecutionDir: d.ExecutionDir, SourceDir: m.normalizedProjectDir, HostKey: m.hostKey, RoutingOverrides: d.RoutingOverrides}
+	if m.hostKey != "" {
+		env.Prepared = m.hostSpawnCheckpoint(requestID)
+	}
 	if d.Worktree == nil {
 		sourceDir := m.normalizedProjectDir
 		if sourceDir == "" {
@@ -1278,7 +1349,7 @@ func (m model) spawnSessionOnRef(d work.SessionDescriptor, requestID, requiredRe
 		worktreePath := filepath.Join(m.config.KnowledgeDir, "_sessions", "worktrees", epoch)
 		return m, allocateSessionWorktreeOnRefCmd(d, sourceDir, worktreePath, epoch, requiredRef, func(allocated work.SessionDescriptor) tea.Msg {
 			return work.StartTerminalCmd(allocated, specW, specH, m.config.KnowledgeDir, env, m.tmuxEnabled)()
-		})
+		}, m.hostAllocationCheckpoint(requestID, d))
 	}
 	return m, work.StartTerminalCmd(d, specW, specH, m.config.KnowledgeDir, env, m.tmuxEnabled)
 }
@@ -1297,6 +1368,7 @@ func (m model) instanceRow() session.Instance {
 			RequestID:     ls.requestID,
 			SessionID:     ls.sessionID,
 			Harness:       ls.harness,
+			SourceDir:     ls.sourceDir,
 			AutoClose:     ls.autoClose,
 			CloseRequests: append([]string(nil), ls.closeRequests...),
 			Worktree:      cloneWorktreeIdentity(ls.worktree),
@@ -1312,6 +1384,8 @@ func (m model) instanceRow() session.Instance {
 		framework = ""
 	}
 	return session.Instance{
+		Revision: time.Now().UnixNano(),
+		HostKey:  m.hostKey, Role: sessionHostRole(m.hostKey),
 		Name:             m.instanceName,
 		PID:              os.Getpid(),
 		Repo:             m.config.RepoIdentifier,

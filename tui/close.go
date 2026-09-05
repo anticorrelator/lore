@@ -286,12 +286,12 @@ func resolveCloseTargetSlug(cr session.CloseRequest, idToSlug map[string]string)
 // row's target session is its session_id when present (see resolveCloseTargetSlug),
 // else its slug. hosted and idToSlug are snapshotted at Cmd-build time, mirroring
 // queueTickCmd's plan-doc snapshot.
-func scanCloseRequestsCmd(sessionsDir, myName string, hosted map[string]bool, idToSlug map[string]string) tea.Cmd {
+func scanCloseRequestsCmd(sessionsDir, myName string, hosted map[string]bool, idToSlug map[string]string, retarget ...bool) tea.Cmd {
 	return func() tea.Msg {
 		var matched []session.CloseRequest
 		rows, diagnostics := session.ScanCloseRequestsWithDiagnostics(sessionsDir)
 		for _, cr := range rows {
-			if cr.RequestID == "" || cr.TargetInstance != myName {
+			if cr.RequestID == "" || (cr.TargetInstance != myName && !hostRetarget(retarget)) {
 				continue
 			}
 			slug, ok := resolveCloseTargetSlug(cr, idToSlug)
@@ -318,7 +318,10 @@ func deleteCloseRequestCmd(sessionsDir, requestID string) tea.Cmd {
 // commands before any close action it dispatches in the same update.
 func consumeCloseRequestCmd(sessionsDir, requestID string, inst session.Instance) tea.Cmd {
 	return func() tea.Msg {
-		deleteErr := session.DeleteCloseRequest(sessionsDir, requestID)
+		var deleteErr error
+		if inst.HostKey == "" {
+			deleteErr = session.DeleteCloseRequest(sessionsDir, requestID)
+		}
 		writeErr := session.WriteInstance(sessionsDir, inst)
 		return closeRequestDeletedMsg{requestID: requestID, err: errors.Join(deleteErr, writeErr)}
 	}
