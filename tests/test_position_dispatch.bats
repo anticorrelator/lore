@@ -17,11 +17,14 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import runpy
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
+import textwrap
 
 import yaml
 
@@ -146,6 +149,82 @@ def request(b, position='worker', framework='codex', extra=None, flags=(), ok=Tr
 def pending():
     return list((store / '_sessions/requests/pending').glob('*.json'))
 
+def enqueue_recipe(recipe):
+    cli_dir = home / 'bin'; cli_dir.mkdir(exist_ok=True)
+    cli = cli_dir / 'lore'
+    if not cli.exists(): cli.symlink_to(repo/'cli/lore')
+    (instances/'fixture.json').touch()
+    before = set(pending())
+    call(['bash', '-e', '-c', 'export PATH=' + shlex.quote(str(cli_dir)) + ':"$PATH"\n' + recipe])
+    created = set(pending()) - before
+    assert len(created) == 1
+    return created.pop()
+
+def implement_session_recipe(fixed=False):
+    # Execute the authored preparation and enqueue recipes, through the real
+    # CLI and writers in this isolated checkout, rather than recreating them.
+    b = fixture(attempt='implement-recipe-' + ('fixed' if fixed else 'ordinary'))
+    if not fixed:
+        b['execution_root'] = None
+        b['absence_reasons']['execution_root'] = 'ordinary host supplies the root'
+    g = guidance()
+    gpath = temporary / (b['dispatch_attempt_id'] + '.guidance.md'); gpath.write_bytes(g)
+    d = compile_position('worker', 'codex', store, gpath)
+    wrapper_path = repo / 'agents/session-worker.md'
+    wrapper_bytes = wrapper_path.read_bytes()
+    wrapper = {'template_id': 'implement/session-worker', 'template_version': hashlib.sha256(wrapper_bytes).hexdigest()[:12],
+               'path': str(wrapper_path), 'sha256': hashlib.sha256(wrapper_bytes).hexdigest()}
+    text = wrapper_bytes.decode()
+    suffix = text.split('## Session note', 1)[1].split('```\n', 1)[1].split('\n```', 1)[0].encode()
+    for name, value in {'work item title':'Fixture', 'task-id':'task-1', 'derived-slug':'fixture--w1', 'slug':'fixture',
+                        'packet-id':b['packet_id'], 'report-id':b['report_id'], 'subject':'Inspect bytes', 'framework':'codex'}.items():
+        suffix = suffix.replace(('<' + name + '>').encode(), value.encode())
+    prefix = ''.join(f'{label}: {b[key]}\n' for label, key in [('Packet-id','packet_id'), ('Report-id','report_id'),
+                      ('Revision-id','revision_id'), ('Dispatch-attempt-id','dispatch_attempt_id')]).encode()
+    paths = {'KDIR': str(store), 'GUIDANCE_FILE': str(gpath)}
+    for name, value in [('DESCRIPTOR_FILE', json.dumps(d).encode()), ('BINDINGS_FILE', json.dumps(b).encode()),
+                        ('WRAPPER_FILE', json.dumps(wrapper).encode()), ('PREFIX_FILE', prefix), ('SUFFIX_FILE', suffix)]:
+        path = temporary / (b['dispatch_attempt_id'] + '.' + name); path.write_bytes(value); paths[name] = str(path)
+    context_path = temporary / (b['dispatch_attempt_id'] + '.context.json'); paths['CONTEXT_FILE'] = str(context_path)
+    if fixed:
+        ref = binder.publish(d, b, store, g, wrapper=wrapper, prefix=prefix, suffix=suffix)
+        context_path.write_text(json.dumps({'position_dispatch': ref, 'dispatch_guidance': Path(ref['payload_path']).read_text()}))
+    else:
+        blocks = re.findall(r'```bash\n(.*?)\n\s*```', (repo/'skills/implement/templates/worker-spawn.md').read_text(), re.S)
+        recipes = [textwrap.dedent(block) for block in blocks if 'binder.prepare_session_input(' in block]
+        assert len(recipes) == 1
+        assignments = '\n'.join(name + '=' + shlex.quote(value) for name, value in paths.items())
+        call(['bash', '-eu', '-c', assignments + '\n' + recipes[0]])
+    context = json.loads(context_path.read_bytes())
+    blocks = re.findall(r'```bash\n(.*?)\n```', text, re.S)
+    enqueue = [block for block in blocks if 'ENQUEUE_RC=$?' in block]
+    assert len(enqueue) == 1
+    recipe = enqueue[0]
+    values = {'derived_slug':'fixture--w1','work_item_slug':'fixture','worker_model':'provider/opaque-model',
+              'dispatch_route':'compiled','brief_file':'','context_file':str(context_path),'framework':'codex',
+              'worktree_id':'fixture-worktree' if fixed else '', 'execution_dir':str(repo) if fixed else '', 'team_lead':'fixture-lead'}
+    for name, value in values.items():
+        recipe = recipe.replace('{{' + name + '}}', value)
+    assert '{{' not in recipe
+    row_path = enqueue_recipe(recipe); row = json.loads(row_path.read_bytes())
+    assert row['extra_context'] == context
+    assert row['model'] == 'provider/opaque-model' and row['framework'] == 'codex'
+    if fixed:
+        assert row['worktree_id'] == 'fixture-worktree' and row['execution_dir'] == str(repo)
+        launched = binder.launch_session(context, framework='codex', slug='fixture--w1', execution_root=str(repo), kdir=store)
+        collected = binder.session_reference(context, kdir=store)
+        assert collected['reference'] == launched['reference']
+        assert prefix in launched['payload'].encode() and suffix in launched['payload'].encode()
+        assert binder.validate_dispatch(ref['manifest_path'], ref['manifest_sha256'])['wrapper'] == wrapper
+    else:
+        assert not {'worktree_id', 'execution_dir'} & row.keys()
+        prepared = context['position_preparation']
+        assert prepared['composition']['wrapper'] == wrapper
+        assert prepared['composition']['prefix'].encode() == prefix
+        assert prepared['composition']['suffix'].encode() == suffix
+        assert not (item/'position-dispatch'/b['dispatch_attempt_id']).exists()
+    return {'position':'worker','framework':'codex','mode':'implement-composed','queue_path':str(row_path),'kdir':str(store)}
+
 def spec_sessions(frameworks):
     document = {'schema_version': 1, 'track': 'full', 'investigations': [
         {'id': 'external', 'kind': 'fixed', 'question': 'External skill and agent applicability', 'complexity': 'simple', 'prefetch': []},
@@ -172,11 +251,13 @@ def spec_sessions(frameworks):
         assert not (item / 'position-dispatch' / payload['bindings']['dispatch_attempt_id']).exists()
         context_path = temporary / ('ordinary-context-' + inv['id'] + '.json')
         context_path.write_text(json.dumps(context))
-        (instances / 'fixture.json').touch()
-        result = json.loads(call(['bash', str(repo / 'scripts/session-request.sh'), '--type', 'worker', '--slug', 'fixture--w1',
-                                 '--anywhere', '--framework', payload['framework'], '--model', payload['model'],
-                                 '--context', str(context_path), '--kdir', str(store), '--json']).stdout)
-        row_path = store / result['path']
+        blocks = re.findall(r'```bash\n(.*?)\n\s*```', (repo/'skills/spec/SKILL.md').read_text(), re.S)
+        recipes = [textwrap.dedent(block) for block in blocks if 'lore session request --type worker --slug "<slug>--w<n>"' in block]
+        assert len(recipes) == 1
+        recipe = recipes[0].replace('<slug>--w<n>', 'fixture--w1').replace('[--worktree-id <id> --execution-dir <path>]', '')
+        values = {'MODEL':payload['model'], 'FRAMEWORK':payload['framework'], 'CONTEXT_FILE':str(context_path)}
+        assignments = '\n'.join(name + '=' + shlex.quote(value) for name, value in values.items())
+        row_path = enqueue_recipe(assignments + '\n' + recipe)
         row = json.loads(row_path.read_bytes())
         assert row['extra_context'] == context
         assert row['placement_stance'] == 'required_dir' and row['required_project_dir'] == str(repo)
@@ -681,6 +762,8 @@ elif scenario=='launch':
         request(broken, fixed=False, flags=('--model','opaque'), ok=False)
     _, _, _, spec_examples = spec_sessions(('codex', 'codex', 'codex'))
     examples.extend({key: value for key, value in example.items() if key != 'payload'} for example in spec_examples[:1])
+    examples.append(implement_session_recipe())
+    implement_session_recipe(fixed=True)
     (temporary/'examples.json').write_text(json.dumps(examples,indent=2))
     print(json.dumps(examples))
 elif scenario=='archive':
