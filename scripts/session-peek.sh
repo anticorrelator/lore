@@ -203,7 +203,7 @@ RESPONSE_FILE="$SESSIONS_DIR/peek-responses/${REQUEST_ID}.json"
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
 while :; do
   if [[ -f "$RESPONSE_FILE" ]]; then
-    RESP="$(cat "$RESPONSE_FILE")"
+    RESP="$(cat "$RESPONSE_FILE" | python3 "$SCRIPT_DIR/coordinate_watch_state.py" peek)"
     rm -f "$RESPONSE_FILE"
     if [[ $JSON_MODE -eq 1 ]]; then
       json_output "$RESP"
@@ -215,6 +215,7 @@ while :; do
     else
       printf '%s' "$RESP" | jq -r '.rows[]?'
     fi
+    printf '%s' "$RESP" | python3 "$SCRIPT_DIR/coordinate_watch_state.py" peek-text
     if [[ "$READY" == "true" ]]; then
       echo "[session] peek '$SLUG': ready=true"
     else

@@ -1,249 +1,33 @@
 #!/usr/bin/env bash
-# coordinate-watch.sh — Sleep until something you are watching needs you, then
-# wake with enough state to act on it.
-#
-# This is the board-scoped counterpart to `lore session wait`. Wait watches one
-# session, so N live sessions cost N watchers, N hand-composed stop sets, and N
-# cursors to carry between wakes. Watch needs no arguments at all: it follows the
-# session journal from a cursor it manages itself and returns on the first row a
-# coordinator can act on. Re-arming after a wake is the same call.
-#
-# A wake is not just "something happened". It carries the matched row, what the
-# watcher concluded about it, which authority it consulted to conclude that, and
-# so the caller can decide what to do without a round of manual re-reading.
-#
-# A wake does not have to start with a row. A machine that suspends with a window
-# open freezes that window silently, and a frozen window looks exactly like a
-# healthy quiet board. A clock comparison covers that, ending the window when this
-# machine has plainly been asleep. See "Suspension skew".
-#
-# Usage:
-#   lore coordinate watch [--arc <slug>]...
-#                         [--until <events>] [--since <cursor>]
-#                         [--timeout <sec>] [--pending-stale <sec>]
-#                         [--peek-timeout <sec>]
-#                         [--spawn-gap <sec>]
-#                         [--owner-pid <pid>] [--owner-tmux <name>]
-#                         [--tmux-server <name>]
-#                         [--wake-shaped] [--kdir <path>] [--json]
-#
-# Scoping:
-#   --arc <slug>      Wake only on rows belonging to a work item the arc declares
-#                     in its `members[]`. Repeatable; with no --arc the watch
-#                     stays board-wide, which is what a seat owning the whole
-#                     board wants. A row belongs when its `.slug` matches a
-#                     member or its `links.work_item` does — worker sessions run
-#                     under a derived `<work-item>--w<n>` slug, so a slug-only
-#                     test would drop every worker row. Membership is declared,
-#                     not inferred: items merely carrying the arc's project label
-#                     are not included, so an arc whose members[] is empty
-#                     contributes nothing. A scope that expands to no work items
-#                     at all is refused rather than falling back to the whole
-#                     board.
-#
-#                     Arc is the only scoping key. Work is grouped into arcs and
-#                     watched by arc; a second key naming individual items would
-#                     be a second way to say the same thing.
-#
-#   Actionable rows carrying neither identity key still wake a scoped watch, as
-#   labeled "unattributed" advisories. Such a row cannot be scoped in or out on
-#   the evidence it carries, and dropping it would turn a real event into
-#   silence.
-#
-#   Each distinct scope keeps its own cursor, so two seats watching different
-#   scopes on one store do not overwrite each other's position.
-#
-# Options:
-#   --until <events>  Comma-separated event names to wake on. Default is the
-#                     actionable set: closed, close_failed, orphaned, request_expired,
-#                     worktree_quarantined, terminus_reached, needs_input,
-#                     modal_blocked, restore_refused — every edge where a session
-#                     ended or parked waiting on somebody. Names are validated
-#                     against the journal's event vocabulary up front, so a typo
-#                     is a usage error rather than a watch that never returns.
-#   --since <cursor>  Start from this cursor instead of the persisted one. An
-#                     explicit value wins over the cursor file. Treat it as
-#                     opaque: pass back a cursor this verb, `lore session wait`,
-#                     or `lore session events` reported, never one you computed.
-#   --timeout <sec>   How long to sleep before giving up (default: 600). Exit 2.
-#                     Run this in the background rather than in the foreground of
-#                     a harness turn — a foreground command is killed long before
-#                     ten minutes are up, and a killed watcher reads as a hang.
-#                     The default is the cadence a seat can count on: a window
-#                     ends at least every ten minutes, and a board with nothing
-#                     to report ends it with a quiet wake rather than silence.
-#   --pending-stale <sec>
-#                     Also wake when a spawn request has been sitting in the
-#                     pending queue this long without being claimed (default:
-#                     300; 0 disables). A request nobody claims never reaches the
-#                     journal, so no journal watcher can see it — a request
-#                     pinned to an instance that died between enqueue and claim
-#                     parks silently and the board looks merely quiet.
-#   --peek-timeout <sec>
-#                     Budget for the screen read that confirms a parked session
-#                     is still parked (default: 10; 0 skips the read). See
-#                     "Classification" below.
-#   --spawn-gap <sec> How young a session may be before a screen-confirmed park is
-#                     demoted to a `spawn-gap` advisory (default: 90; 0 disables
-#                     the age gate). See "Classification".
-#   --owner-pid <pid> / --owner-tmux <name> / --tmux-server <name>
-#                     Liveness handles for the seat this watcher reports to; the
-#                     same two handles a coordination worktree lease records
-#                     (--tmux-server defaults to lore-tui). See "Owner liveness".
-#   --wake-shaped     Exit 2 at every terminal that could be re-armed from, and
-#                     write the wake body to stderr. See "Exit codes".
-#   --kdir <path>     Knowledge-store override (test isolation).
-#   --json            Emit one result object instead of plain rows (see below).
-#
-# Classification:
-#   Some events state their own outcome — a `closed` row is the whole story. The
-#   park-shaped ones (needs_input, modal_blocked) do not: they say a session
-#   stopped, not whether it is still stopped now. For those the watcher confirms
-#   before waking, and every wake names the authority it used:
-#
-#     hook-row          The row itself carried the state, from a lifecycle
-#                       emitter. This wins outright: when the row is
-#                       authoritative the screen is not consulted for that
-#                       session at all. Two authorities that can disagree are
-#                       where disagreement bugs live, so one is suppressed rather
-#                       than blended with the other. `modal_blocked` is the one
-#                       exception, and it is not a blend — the screen takes the
-#                       classification over entirely. See "Transient modals".
-#     screen-signature  The row was park-shaped and carried no state of its own,
-#                       so the watcher peeked the session and matched the result
-#                       against the strict signature set (see lib.sh's
-#                       session_park_classify). The signature set is versioned and
-#                       the version travels in the wake, so a matcher-contract
-#                       change is visible instead of silently reclassifying parks.
-#     owner-handle      The wake came from the owner-liveness check.
-#     none              Nothing to classify — a quiet timeout, an unclaimed spawn
-#                       request, or the clock comparison, none of which read a
-#                       session's state at all.
-#
-#   A screen signature that fires is then age-gated. Between a pane being spawned
-#   and its first prompt being submitted, a session renders a genuinely ready
-#   composer — the strict signature is truthful about the screen and wrong about
-#   the session, because "has not started" and "stopped, waiting on somebody" look
-#   the same there. So before a screen-confirmed park is promoted to `confirmed`,
-#   the row is joined against its own session's `spawned`/`claimed` row in the
-#   journal; a session younger than --spawn-gap is demoted to an advisory labeled
-#   `spawn-gap`. The age gate applies only to the screen-signature authority: a
-#   hook row carrying emitter state is a positive claim about why the session
-#   parked, not an inference from screen shape, so the same ambiguity does not
-#   reach it. Every wake reports what the gate did in
-#   `classification.spawn_gap`, including when it left the confirmation standing.
-#
-# Transient modals:
-#   A `modal_blocked` row is the one emitter claim that routinely stops being true
-#   before anyone can act on it. Some harnesses raise a modal and clear it
-#   themselves within a second — under bypass-permissions the seat never had a
-#   decision to make — so the row is true when written and stale when read, and
-#   promoting it on the row alone costs the seat a full turn per flash.
-#
-#   So on a `modal_blocked` row the screen decides the tier, whether or not the
-#   row carries emitter state. A modal on the screen confirms; a screen showing
-#   anything else demotes to an advisory labeled `modal-not-on-screen`, which ages
-#   and escalates like any other — a modal that keeps re-presenting and never
-#   survives a peek is a session in trouble, and the demotion delays that wake by
-#   a tier rather than silencing it. Nothing debounces on the emitter side: the
-#   row lands the moment the modal appears, and only the wake tier softens.
-#
-#   Absence of evidence never demotes. A peek that cannot answer — no instance
-#   hosts the session, the round trip fails, `--peek-timeout 0` — leaves the row's
-#   claim standing at `confirmed` on `hook-row` authority. Every wake on a modal
-#   row reports what the gate did in `classification.modal_gate`, including when
-#   it left the confirmation standing. Other park events are untouched: their
-#   emitter state is a claim about a condition that does not clear itself.
-#
-#   Strictness governs the wake's tier, never whether it wakes. A park nothing
-#   confirmed wakes as a labeled `advisory` naming why no signature fired. The
-#   seat is asleep and the watcher is its only observer, so there is no state in
-#   which staying quiet is the safe answer.
-#
-# Suspension skew:
-#   A laptop that sleeps with a window open freezes that window silently. Wall
-#   time keeps moving across a suspension and monotonic time does not, so the
-#   difference between how much of each elapsed since the window opened is the
-#   suspension and nothing else, to within scheduling jitter of well under a
-#   second.
-#
-#   The quiet wake reports that difference as `clock_skew.skew_seconds` and
-#   leaves the reading to the seat: a window whose clocks disagree by minutes
-#   computed every age it holds against a stopped clock, and the board is worth
-#   re-joining before quiet is believed.
-#
-# Owner liveness:
-#   With a handle passed, each poll checks whether the seat this watcher reports
-#   to is still there. Not-alive is a hint rather than a verdict — registry and
-#   process removal run ahead of the final journal append — so the watcher waits
-#   out a short grace, reads the journal exactly once more, and only then exits 3
-#   without a cursor rewind. Exit 3 is the one terminal that is not re-armable.
-#
-#   The check is stop-biased: only a positive proof of life counts. An answer
-#   that cannot be obtained (no permission to signal the pid, no tmux binary)
-#   reads as not-alive here, the opposite of the seat lease's bias, because a
-#   watcher that outlives its seat is a runaway while a lease that reclaims a live
-#   seat's checkout destroys work.
-#
-# The cursor:
-#   Persisted at $KNOWLEDGE_DIR/_coordination/watch-cursor-<identity>-<scope>.json
-#   as {schema_version, cursor, updated_at}. Identity is canonical store + owner
-#   handle + normalized declared arcs; scope is the expanded member-slug set.
-#   rewritten on every exit that reached the journal. That is what makes the
-#   re-arm argument-free: the next call resumes exactly where this one stopped, so
-#   no row is replayed and none is skipped. The first-ever run for a scope has no
-#   file and baselines at the journal's current end ("wake on what happens next"),
-#   which means it will not replay history the board has already dealt with.
-#
-#   On a match the cursor is the boundary immediately after the matched row, not
-#   the end of the read that found it. One read can carry several actionable
-#   rows; only the first is handed to the caller, so persisting the read's end
-#   would drop the rest permanently. The no-match exits (advisory, timeout,
-#   reader failure) withhold nothing, so they carry the read's end cursor.
-#
-# Output (plain): the matched event row, then the wake body as {"wake": {...}},
-#   then a final {"next_cursor": N} row. A pending-staleness wake emits an
-#   advisory row in place of the event row. Timeout emits no event row. Every row
-#   is JSON on stdout; tell them apart by shape — has("event"), has("advisory"),
-#   has("wake"), has("next_cursor").
-#
-# Output (--json): one object — the wake body, which is a superset of
-#   `session wait`'s matched shape:
-#     {schema_version, outcome, tier, authority, signature_version,
-#      classification: {state, label, reason, peek, spawn_gap, modal_gate},
-#      clock_skew: {wall_elapsed_seconds, monotonic_elapsed_seconds,
-#                   skew_seconds} | null,
-#      matched, pending,
-#      scope: {mode, slugs, arcs, cursor_file}, next_cursor, until}
-#   There is no top-level `slug`: session identity lives on the matched row.
-#
-#   `outcome` is one of: matched, pending_stale, owner_gone, timeout,
-#   internal_error.
-#
-# Exit codes (local to this verb):
-#   0  a matching row landed, or a stale pending request was found
-#   1  error (bad args, unknown --until event, unknown arc, missing store)
-#   2  timed out with nothing to report — the ordinary re-arm branch, not a
-#      failure: just call the verb again
-#   3  the owner handle stopped proving live and one final journal read found
-#      nothing — stop; do not re-arm
-#   4  internal error: the reference reader failed on all three attempts
-#
-#   Under --wake-shaped every re-armable terminal (match, advisory, timeout)
-#   exits 2 instead, and the wake body is written to stderr. One exit code for
-#   "here is a wake, arm again" is what a harness continuation channel can act on
-#   uniformly; 3 and 4 keep their meanings because neither should be re-armed.
-#
-# This verb only reads the journal. It never appends to it — the journal keeps
-# exactly one writer (session-event-append.sh), so every signal this watcher
-# originates, including its classifications and the pending-staleness advisory,
-# is printed to the caller rather than written where somebody could read it back
-# as a lifecycle event.
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: coordinate-watch.sh [--arc SLUG]... [--until EVENTS] [--since CURSOR]
+       [--timeout SECONDS] [--owner-pid PID | --owner-tmux NAME]
+       [--tmux-server NAME] [--durable] [--wake-shaped] [--kdir PATH] [--json]
+       [--reconcile-interval SECONDS] [--reconcile-budget SECONDS]
+       [--peek-timeout SECONDS] [--pending-stale SECONDS] [--spawn-gap SECONDS]
+
+Watch scoped journal events and current session observations. Activity is separate
+from input eligibility. Unknown or unavailable observation cannot confirm a park.
+Default heartbeat is 600 seconds; reconciliation runs every 15 seconds with an
+8-second budget and at most four concurrent peers, rotating across larger scopes.
+
+--durable retains each wake_id until coordinate status --wake-id ID acknowledges
+that exact receipt. Owner identity is required. Unacknowledged unchanged wakes
+retry on the heartbeat cadence; new facts can wake promptly. Raw calls without
+--durable retain cursor-based compatibility. --spawn-gap is a compatibility option;
+current lifecycle observation determines activity.
+
+Exit 0: event/advisory; 2: quiet heartbeat; 3: owner gone; 4: reader failure.
+--wake-shaped sends re-armable output to stderr with exit 2. It makes no worker
+input and does not itself provide a harness continuation capability.
+EOF
+}
 
 UNTIL="${SESSION_ACTIONABLE_EVENTS// /,}"
 SINCE=""
@@ -251,21 +35,14 @@ SINCE_SET=0
 TIMEOUT=600
 PENDING_STALE=300
 PEEK_TIMEOUT=10
-# The spawn-paste gap, measured rather than guessed. Live wakes on 2026-08-03 put
-# false confirmations — a ready composer on a session that had not taken its first
-# turn — at 11s and 13s past the session's start row, and true parks (a real
-# completion message sitting at a real prompt) at ~600s and ~900s. 90s is the
-# geometric middle of that separation: ~7x the widest observed spawn gap and ~7x
-# under the earliest observed true park, so both ends have an order of magnitude
-# to drift into before the gate starts being wrong. It errs generous on purpose —
-# a demoted true park still wakes the seat as an advisory, while a promoted spawn
-# gap sends the seat to steer a session that is still booting, which is the
-# failure this gate exists to stop.
 SPAWN_GAP=90
 OWNER_PID=""
 OWNER_TMUX=""
 TMUX_SERVER="lore-tui"
 WAKE_SHAPED=0
+DURABLE=0
+RECONCILE_INTERVAL=15
+RECONCILE_BUDGET=8
 KDIR_OVERRIDE=""
 JSON_MODE=0
 CURSOR_SCHEMA_VERSION=1
@@ -288,12 +65,12 @@ while [[ $# -gt 0 ]]; do
     --owner-tmux) OWNER_TMUX="${2:-}"; shift 2 ;;
     --tmux-server) TMUX_SERVER="${2:-}"; shift 2 ;;
     --wake-shaped) WAKE_SHAPED=1; shift ;;
+    --durable) DURABLE=1; shift ;;
+    --reconcile-interval) RECONCILE_INTERVAL="${2:-}"; shift 2 ;;
+    --reconcile-budget) RECONCILE_BUDGET="${2:-}"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="${2:-}"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    # The header comment above is the help text. This range ends on its last
-    # line; a header that grows past it prints truncated, which --help itself
-    # cannot notice.
-    -h|--help) sed -n '2,235p' "$0"; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
       echo "Usage: coordinate-watch.sh [--arc <slug>]... [--until <events>] [--since <cursor>] [--timeout <sec>] [--pending-stale <sec>] [--peek-timeout <sec>] [--spawn-gap <sec>] [--owner-pid <pid>] [--owner-tmux <name>] [--tmux-server <name>] [--wake-shaped] [--kdir <path>] [--json]" >&2
@@ -319,6 +96,8 @@ check_non_negative() {
     || fail "invalid $flag: '$value' (must be a non-negative integer${tail:+; $tail})"
 }
 
+check_non_negative --reconcile-interval "$RECONCILE_INTERVAL"
+check_non_negative --reconcile-budget "$RECONCILE_BUDGET"
 check_non_negative --timeout "$TIMEOUT"
 check_non_negative --pending-stale "$PENDING_STALE" "0 disables"
 check_non_negative --peek-timeout "$PEEK_TIMEOUT" "0 disables"
@@ -441,6 +220,13 @@ fi
 IDENTITY_KEY="$(watcher_identity_hash "$KNOWLEDGE_DIR" "$IDENTITY_OWNER_KIND" \
   "$IDENTITY_OWNER_VALUE" "$TMUX_SERVER" ${SCOPE_ARCS+"${SCOPE_ARCS[@]}"})"
 CURSOR_FILE="$COORD_DIR/watch-cursor-$IDENTITY_KEY-$SCOPE_SUFFIX.json"
+DELIVERY_FILE="$COORD_DIR/watch-delivery-$IDENTITY_KEY.json"
+OBSERVATION_FILE="$COORD_DIR/watch-observation-$IDENTITY_KEY-$SCOPE_SUFFIX.json"
+WATCH_HELPER="$SCRIPT_DIR/coordinate_watch_state.py"
+if [[ $DURABLE -eq 1 && "$IDENTITY_OWNER_KIND" == "none" ]]; then
+  fail "--durable requires --owner-pid or --owner-tmux for receipt identity"
+fi
+IDENTITY_JSON="$(jq -cn --arg key "$IDENTITY_KEY" --arg kind "$IDENTITY_OWNER_KIND" --arg value "$IDENTITY_OWNER_VALUE" --arg server "$TMUX_SERVER" --arg scope "$SCOPE_SUFFIX" '{key:$key,owner_kind:$kind,owner_value:$value,tmux_server:$server,scope:$scope}')"
 
 if [[ $SCOPED -eq 1 ]]; then
   SCOPE_SLUGS_JSON="$(printf '%s\n' "${SCOPE_SLUGS[@]}" | LC_ALL=C sort -u | jq -R . | jq -s -c .)"
@@ -457,6 +243,14 @@ UNTIL_JSON="$(printf '%s\n' "${UNTIL_TOKENS[@]}" | jq -R . | jq -s -c .)"
 # --- Cursor persistence ------------------------------------------------------
 
 read_cursor_file() {
+  if [[ $DURABLE -eq 1 ]]; then
+    local observed
+    observed="$(python3 "$WATCH_HELPER" cursor --path "$DELIVERY_FILE")" || return 1
+    if [[ "$observed" != "null" ]]; then
+      printf '%s\n' "$observed"
+      return 0
+    fi
+  fi
   [[ -f "$CURSOR_FILE" ]] || return 1
   local value
   value="$(jq -r 'if (.cursor | type) == "number" and .cursor >= 0 then .cursor else empty end' \
@@ -494,14 +288,15 @@ WAKE_PENDING="[]"           # JSON
 WAKE_SPAWN_GAP="null"       # JSON
 WAKE_MODAL_GATE="null"      # JSON
 WAKE_CLOCK_SKEW="null"      # JSON
+CURRENT_OBSERVATIONS='{"current":[],"delta":[],"unavailable":[],"complete":false}'
+CURRENT_DELTA='[]'
+LAST_RECONCILE=0
 
 # emit_wake <cursor> <exit-code> <message>
 # The single terminal. Non-zero terminals print their JSON by hand: json_output
 # hard-exits 0, which would erase the composed exit code.
 emit_wake() {
   local cursor="$1" code="$2" message="$3" payload
-
-  [[ "$cursor" == "null" ]] || write_cursor_file "$cursor"
 
   payload="$(jq -cn \
     --argjson schema "$WAKE_SCHEMA_VERSION" \
@@ -524,6 +319,7 @@ emit_wake() {
     --arg cursor_file "$(basename "$CURSOR_FILE")" \
     --argjson nc "$cursor" \
     --argjson until "$UNTIL_JSON" \
+    --argjson current "$CURRENT_OBSERVATIONS" --argjson delta "$CURRENT_DELTA" \
     '{schema_version: $schema, outcome: $outcome, tier: $tier, authority: $authority,
       signature_version: $signature_version,
       classification: {state: $state, label: $label, reason: $reason,
@@ -532,7 +328,13 @@ emit_wake() {
       clock_skew: $clock_skew,
       matched: $matched, pending: $pending,
       scope: {mode: $mode, slugs: $slugs, arcs: $arcs, cursor_file: $cursor_file},
-      next_cursor: $nc, until: $until}')"
+      next_cursor: $nc, until: $until, current_observations:$current, current_delta:$delta}')"
+
+  if [[ $DURABLE -eq 1 ]]; then
+    payload="$(printf '%s' "$payload" | python3 "$WATCH_HELPER" publish --path "$DELIVERY_FILE" --identity "$IDENTITY_JSON" --interval "$TIMEOUT")" || fail "could not persist wake; cursor remains uncommitted"
+  fi
+  [[ "$cursor" == "null" ]] || write_cursor_file "$cursor"
+  printf '%s' "$payload" | python3 "$WATCH_HELPER" consume --path "$OBSERVATION_FILE" >/dev/null || fail "could not commit observation delta"
 
   if [[ $JSON_MODE -eq 1 ]]; then
     printf '%s\n' "$payload"
@@ -586,8 +388,13 @@ first_match_record() {
     --argjson slugs "$SCOPE_SLUGS_JSON" \
     --argjson scoped "$SCOPED" \
     "$SESSION_SCOPE_JQ_PREDICATE"'
+    .records as $records |
     first(
-      .records[]
+      $records[] as $candidate
+      | $candidate
+      | select((.event.event != "needs_input" and .event.event != "modal_blocked") or
+          ([ $records[] | select(.next_cursor > $candidate.next_cursor and .event.slug == $candidate.event.slug)
+             | select(.event.event == "resumed" or .event.event == "closed" or .event.event == "recovered" or .event.event == "spawned") ] | length == 0))
       | select(.event.event as $e | $until | index($e))
       | (.event | scope_state($scoped; $slugs)) as $scope
       | select($scope.matched)
@@ -657,156 +464,27 @@ park_shaped() {
   return 1
 }
 
-# spawn_gap_record <signature> <age-json> <resolution>
-# Compose the wake's `classification.spawn_gap` object. It is filled on every
-# screen-confirmed park, including the ones the gate leaves standing: a seat that
-# can see the gate ran and what it found can tell a correct confirmation from one
-# nobody checked.
-spawn_gap_record() {
-  jq -cn --argjson threshold "$SPAWN_GAP" --arg signature "$1" \
-    --argjson age "$2" --arg resolution "$3" \
-    '{threshold_seconds: $threshold, age_seconds: $age,
-      signature: $signature, resolution: $resolution}'
-}
-
-# spawn_gap_demotes <slug> <row-ts> <signature-label>
-# Fill WAKE_SPAWN_GAP with what the age gate concluded, and return 0 when the
-# screen's confirmation belongs at advisory tier instead of `confirmed`.
-#
-# Absence of evidence never demotes. A row with no timestamp to measure from and
-# a reader that would not answer both leave the confirmation standing: the gate
-# corrects one specific, observed misreading, and turning it into a general
-# distrust of confirmations would cost the tier its meaning.
-spawn_gap_demotes() {
-  local slug="$1" row_ts="$2" signature="$3" age status=0
-
-  if [[ "$SPAWN_GAP" -eq 0 ]]; then
-    WAKE_SPAWN_GAP="$(spawn_gap_record "$signature" null "disabled")"
-    return 1
-  fi
-  if [[ -z "$row_ts" ]]; then
-    WAKE_SPAWN_GAP="$(spawn_gap_record "$signature" null "row-has-no-timestamp")"
-    return 1
-  fi
-
-  age="$(session_events_start_age "$EVENTS_SH" "$KNOWLEDGE_DIR" "$slug" "$row_ts" "$SPAWN_GAP")" \
-    || status=$?
-  case "$status" in
-    0) ;;
-    # No start row inside the window is itself the answer: the session began
-    # before the window opened, so it is past the gap by construction.
-    1) WAKE_SPAWN_GAP="$(spawn_gap_record "$signature" null "no-start-row-in-window")"
-       return 1 ;;
-    *) WAKE_SPAWN_GAP="$(spawn_gap_record "$signature" null "start-row-unreadable")"
-       return 1 ;;
-  esac
-
-  if [[ "$age" -ge "$SPAWN_GAP" ]]; then
-    WAKE_SPAWN_GAP="$(spawn_gap_record "$signature" "$age" "older-than-threshold")"
-    return 1
-  fi
-  WAKE_SPAWN_GAP="$(spawn_gap_record "$signature" "$age" "demoted")"
-  return 0
-}
-
-# What the last peek_session call read off the screen, as the response reported
-# them: either may be empty when the response omitted the field.
-PEEK_READY=""
-PEEK_BLOCKED=""
-
-# peek_session <slug>
-# Ask the owning instance's readiness gate about <slug>, fill WAKE_PEEK with what
-# came back, and leave the two fields a classifier needs in PEEK_READY and
-# PEEK_BLOCKED.
-#
-# Returns non-zero when the peek did not answer at all; WAKE_PEEK then carries the
-# error and the two fields are empty. What an unanswered screen means for the tier
-# is the caller's to decide — it is not the same answer on every path.
-#
-# The results travel in globals rather than on stdout because WAKE_PEEK has to
-# survive the call: a command substitution would run this in a subshell and the
-# peek evidence would never reach the wake body.
 peek_session() {
   local slug="$1" out status=0
 
-  PEEK_READY=""
-  PEEK_BLOCKED=""
-  out="$(bash "$PEEK_SH" "$slug" --json --timeout "$PEEK_TIMEOUT" --kdir "$KNOWLEDGE_DIR" 2>/dev/null)" \
-    || status=$?
+  out="$(printf '%s' "$CURRENT_OBSERVATIONS" | jq -c --arg slug "$slug" '[.current[]? | select(.slug == $slug) | .peek][0] // null')"
+  if [[ "$out" == "null" ]]; then
+    out="$(bash "$PEEK_SH" "$slug" --json --timeout "$PEEK_TIMEOUT" --kdir "$KNOWLEDGE_DIR" 2>/dev/null)" || status=$?
+  fi
   if [[ $status -ne 0 ]]; then
     WAKE_PEEK="$(jq -n --arg e "$(printf '%s' "$out" | jq -r '.error // "peek did not answer"' 2>/dev/null || echo 'peek did not answer')" \
       '{consulted: true, ready: null, blocked_reason: null, error: $e}')"
     return 1
   fi
 
-  PEEK_READY="$(printf '%s' "$out" | jq -r 'if (.ready | type) == "boolean" then (.ready | tostring) else "" end' 2>/dev/null || echo "")"
-  PEEK_BLOCKED="$(printf '%s' "$out" | jq -r '.blocked_reason // ""' 2>/dev/null || echo "")"
-  WAKE_PEEK="$(jq -n --arg r "$PEEK_READY" --arg b "$PEEK_BLOCKED" \
-    '{consulted: true,
-      ready: (if $r == "" then null else ($r == "true") end),
-      blocked_reason: (if $b == "" then null else $b end),
-      error: null}')"
+  WAKE_PEEK="$(printf '%s' "$out" | jq -c '. + {consulted:true,error:null}')"
 }
 
-# modal_gate_record <resolution> <screen-reason-json> <signature>
-# Compose the wake's `classification.modal_gate`. It is filled on every
-# `modal_blocked` row the gate reaches, including the ones it leaves confirmed: a
-# seat that can see the gate ran and what the screen held can tell a modal still
-# waiting from one nobody checked.
-modal_gate_record() {
-  jq -cn --arg resolution "$1" --argjson screen_reason "$2" --arg signature "$3" \
-    '{resolution: $resolution, screen_reason: $screen_reason,
-      signature: (if $signature == "" then null else $signature end)}'
-}
-
-# modal_gate <event> <slug>
-# Decide, for a `modal_blocked` row, whether a modal is still on the screen.
-#
-# Exit: 0 the screen holds no modal — the tier belongs at advisory;
-#       1 the modal is on the screen — confirm it, on the screen's authority;
-#       2 nothing could answer, or the row is not a modal row at all — whatever
-#         the caller already concluded stands.
-#
-# Absence of evidence never demotes, which is why 1 and 2 are distinct: 1 is the
-# screen upholding the row, 2 is nobody having looked. The gate corrects one
-# specific, observed misreading — a modal the harness cleared itself before anyone
-# read the row — and turning it into a general distrust of emitter state would
-# cost `confirmed` its meaning.
-modal_gate() {
-  local event="$1" slug="$2" verdict label reason_json
-
-  [[ "$event" == "modal_blocked" ]] || return 2
-  if [[ "$PEEK_TIMEOUT" -eq 0 ]]; then
-    WAKE_MODAL_GATE="$(modal_gate_record "screen-classification-disabled" null "")"
-    return 2
-  fi
-  if [[ -z "$slug" ]]; then
-    WAKE_MODAL_GATE="$(modal_gate_record "row-has-no-slug-to-peek" null "")"
-    return 2
-  fi
-  if ! peek_session "$slug"; then
-    WAKE_MODAL_GATE="$(modal_gate_record "peek-unavailable" null "")"
-    return 2
-  fi
-
-  IFS=$'\t' read -r verdict label <<< "$(session_park_classify modal_blocked "$PEEK_READY" "$PEEK_BLOCKED")"
-  reason_json="$(jq -n --arg b "$PEEK_BLOCKED" 'if $b == "" then null else $b end')"
-  if [[ "$verdict" == "confirmed" ]]; then
-    WAKE_MODAL_GATE="$(modal_gate_record "modal-on-screen" "$reason_json" "$label")"
-    return 1
-  fi
-  WAKE_MODAL_GATE="$(modal_gate_record "demoted" "$reason_json" "$label")"
-  return 0
-}
-
-# classify_match <row-json> <unattributed>
-# Fill the WAKE_* classification fields for one matched journal row.
 classify_match() {
-  local row="$1" unattributed="$2" event slug row_ts row_reason gate verdict label
+  local row="$1" unattributed="$2" event slug row_reason
 
   event="$(printf '%s' "$row" | jq -r '.event')"
   slug="$(printf '%s' "$row" | jq -r '.slug // ""')"
-  row_ts="$(printf '%s' "$row" | jq -r '.ts // ""')"
   row_reason="$(printf '%s' "$row" | jq -r '.reason // ""')"
 
   if [[ "$unattributed" == "true" ]]; then
@@ -827,76 +505,26 @@ classify_match() {
     return 0
   fi
 
-  # An emitter that recorded why the session parked is the authority for that
-  # session; the screen is not consulted alongside it. Suppressed, not blended —
-  # two authorities that can disagree produce wakes nobody can act on.
-  #
-  # The exception is a modal, and it is a handover rather than a blend: a modal
-  # the harness clears itself outlives the row that reported it, so the screen
-  # takes the classification over entirely and the row keeps only its reason.
-  if [[ -n "$row_reason" ]]; then
-    WAKE_REASON="$(jq -n --arg r "$row_reason" '$r')"
-    gate=0
-    modal_gate "$event" "$slug" || gate=$?
-    case "$gate" in
-      0)
-        WAKE_AUTHORITY="screen-signature"
-        WAKE_STATE="park_unconfirmed"
-        WAKE_LABEL="modal-not-on-screen"
-        WAKE_TIER="advisory"
-        return 0
-        ;;
-      1)
-        WAKE_TIER="confirmed"
-        WAKE_AUTHORITY="screen-signature"
-        WAKE_STATE="confirmed_park"
-        WAKE_LABEL="modal-signature"
-        return 0
-        ;;
-    esac
-    WAKE_TIER="confirmed"
-    WAKE_AUTHORITY="hook-row"
-    WAKE_STATE="confirmed_park"
-    WAKE_LABEL="row-carries-emitter-state"
-    return 0
-  fi
-
-  if [[ "$PEEK_TIMEOUT" -eq 0 || -z "$slug" ]]; then
-    WAKE_AUTHORITY="hook-row"
-    WAKE_STATE="park_unconfirmed"
-    if [[ -z "$slug" ]]; then
-      WAKE_LABEL="row-has-no-slug-to-peek"
-    else
-      WAKE_LABEL="screen-classification-disabled"
-    fi
-    WAKE_TIER="advisory"
-    return 0
-  fi
-
-  WAKE_AUTHORITY="screen-signature"
+  WAKE_TIER="advisory"
+  WAKE_AUTHORITY="none"
   WAKE_STATE="park_unconfirmed"
+  WAKE_REASON="$(jq -cn --arg r "$row_reason" '$r')"
+  if [[ "$PEEK_TIMEOUT" -eq 0 || -z "$slug" ]]; then
+    WAKE_LABEL="observation-unavailable"
+    return 0
+  fi
   if ! peek_session "$slug"; then
     WAKE_LABEL="peek-unavailable"
-    WAKE_TIER="advisory"
     return 0
   fi
+  local classified
+  classified="$(jq -cn --argjson row "$row" --argjson peek "$WAKE_PEEK" '{row:$row,peek:$peek}' | python3 "$WATCH_HELPER" classify)"
+  WAKE_TIER="$(printf '%s' "$classified" | jq -r '.tier')"
+  WAKE_AUTHORITY="$(printf '%s' "$classified" | jq -r '.authority')"
+  WAKE_STATE="$(printf '%s' "$classified" | jq -r '.state')"
+  WAKE_LABEL="$(printf '%s' "$classified" | jq -r '.label')"
+  WAKE_PEEK="$(printf '%s' "$WAKE_PEEK" | jq -c --argjson c "$classified" '. + {observation:$c.observation}')"
 
-  IFS=$'\t' read -r verdict label <<< "$(session_park_classify "$event" "$PEEK_READY" "$PEEK_BLOCKED")"
-  WAKE_LABEL="$label"
-  if [[ "$verdict" == "confirmed" ]]; then
-    # The screen agrees the session is parked. Whether that means "stopped and
-    # waiting" or only "has not started yet" is what the age gate settles — the
-    # two are indistinguishable on the screen alone.
-    if spawn_gap_demotes "$slug" "$row_ts" "$label"; then
-      WAKE_LABEL="spawn-gap"
-      WAKE_TIER="advisory"
-      return 0
-    fi
-    WAKE_TIER="confirmed"
-    WAKE_STATE="confirmed_park"
-    return 0
-  fi
-  WAKE_TIER="advisory"
 }
 
 # clock_pair — "<wall><TAB><monotonic>", the two clocks read together.
@@ -973,9 +601,34 @@ emit_matched_from_record() {
   cursor="$(printf '%s' "$record" | jq -r '.next_cursor')"
   WAKE_OUTCOME="matched"
   WAKE_MATCHED="$row"
+  reconcile_current
   classify_match "$row" "$(printf '%s' "$record" | jq -r '.scope.unattributed')"
   emit_wake "$cursor" 0 \
     "[coordinate] wake: $(printf '%s' "$row" | jq -r '.event') on '$(printf '%s' "$row" | jq -r '.slug // "(no slug)"')' — tier=$WAKE_TIER authority=$WAKE_AUTHORITY state=$WAKE_STATE label=$WAKE_LABEL"
+}
+
+reconcile_current() {
+  local current_time
+  current_time=$(date +%s)
+  if [[ $LAST_RECONCILE -gt 0 && $((current_time - LAST_RECONCILE)) -lt $RECONCILE_INTERVAL ]]; then
+    return 0
+  fi
+  CURRENT_OBSERVATIONS="$(python3 "$WATCH_HELPER" sweep --kdir "$KNOWLEDGE_DIR" --scripts "$SCRIPT_DIR" --path "$OBSERVATION_FILE" --scope "$SCOPE_SLUGS_JSON" --budget "$RECONCILE_BUDGET" --peek-timeout "$PEEK_TIMEOUT")" || CURRENT_OBSERVATIONS='{"current":[],"delta":[],"unavailable":[{"error":"reconciliation-failed"}],"complete":false}'
+  CURRENT_DELTA="$(printf '%s' "$CURRENT_OBSERVATIONS" | jq -c '.delta')"
+  LAST_RECONCILE=$(date +%s)
+}
+
+replay_pending() {
+  [[ $DURABLE -eq 1 ]] || return 0
+  local payload outcome code=0
+  payload="$(printf '%s' "$CURRENT_OBSERVATIONS" | python3 "$WATCH_HELPER" pending --path "$DELIVERY_FILE")" || fail "could not read durable wake"
+  [[ "$payload" != "null" ]] || return 0
+  outcome="$(printf '%s' "$payload" | jq -r '.outcome')"
+  [[ "$outcome" == "timeout" ]] && code=2
+  if [[ $JSON_MODE -eq 1 ]]; then printf '%s\n' "$payload"; else jq -cn --argjson wake "$payload" '{wake:$wake}'; fi
+  echo "[coordinate] pending receipt: $(printf '%s' "$payload" | jq -r '.wake_id'); acknowledge with coordinate status --wake-id after reading" >&2
+  if [[ $WAKE_SHAPED -eq 1 ]]; then printf '%s\n' "$payload" >&2; code=2; fi
+  exit "$code"
 }
 
 CLOCK_WALL0=""
@@ -993,6 +646,17 @@ while :; do
   # No match: nothing was withheld from the caller, so the batch cursor is the
   # row after the last row this read consumed, and advancing to it is correct.
   CURSOR="$NEXT"
+  reconcile_current
+  if [[ "$(printf '%s' "$CURRENT_DELTA" | jq '[.[] | select(.observation.activity == "idle" or .observation.activity == "blocked" or .observation.activity == "unknown")] | length')" -gt 0 ]]; then
+    WAKE_OUTCOME="current_delta"
+    WAKE_TIER="advisory"
+    if [[ "$(printf '%s' "$CURRENT_DELTA" | jq '[.[] | select(.observation.fresh == true and (.observation.activity == "idle" or .observation.activity == "blocked"))] | length')" -gt 0 ]]; then WAKE_TIER="confirmed"; fi
+    WAKE_AUTHORITY="observation"
+    WAKE_STATE="current_observation"
+    WAKE_LABEL="current-session-delta"
+    emit_wake "$CURSOR" 0 "[coordinate] current session activity changed in scope"
+  fi
+  replay_pending
 
   # A journal row always wins: it is the real event, and the pending check is
   # only there for the case where no row will ever come.

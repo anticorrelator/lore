@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# coordinate-status.sh — Read-only cross-substrate coordination projection.
-#
-# This composer owns no state and invokes only the published pure readers for
-# session and retro data. Work, scorecard, and evolve inputs are already-
-# published artifacts without narrower read folds, so they are opened directly.
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,19 +13,23 @@ CEREMONY_DISPOSITION_VOCAB="unhandled handled"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: coordinate-status.sh [--kdir <path>] [--json]
+Usage: coordinate-status.sh [--kdir <path>] [--json] [--wake-id <id>]
 
-Render a read-only, five-source coordination projection. The JSON envelope is
-schema version 1; human output renders the same source manifest and bucket rows.
+Render a five-source coordination projection. Without --wake-id this is read-only.
+--wake-id includes that owner-bound delivery receipt and explicitly acknowledges
+it after output succeeds. A receipt does not report that follow-up work completed.
+The JSON envelope is schema version 1.
 EOF
 }
 
 KDIR_OVERRIDE=""
 JSON_MODE=0
+WAKE_ID=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --kdir) KDIR_OVERRIDE="${2:-}"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
+    --wake-id) WAKE_ID="${2:-}"; [[ -n "$WAKE_ID" ]] || { echo "--wake-id requires an exact wake identity" >&2; exit 1; }; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Error: unknown argument '$1'" >&2; usage; exit 1 ;;
   esac
@@ -46,6 +44,7 @@ else
 fi
 [[ -d "$KNOWLEDGE_DIR" ]] || die "knowledge store not found at: $KNOWLEDGE_DIR"
 
+export WAKE_ID
 export SESSION_EVENT_VOCAB RETRO_ACTION_VOCAB CEREMONY_OUTCOME_VOCAB \
   CEREMONY_DISPOSITION_VOCAB
 
@@ -1273,8 +1272,17 @@ projection = {
     "buckets": buckets,
 }
 
+wake_id = os.environ.get("WAKE_ID")
+if wake_id:
+    sys.path.insert(0, str(scripts))
+    from coordinate_watch_state import wake_receipt
+    projection["wake_receipt"] = wake_receipt(kdir, wake_id)
+
 if json_mode:
-    print(json.dumps(projection, ensure_ascii=False, indent=2, sort_keys=False))
+    rendered = json.dumps(projection, ensure_ascii=False, indent=2, sort_keys=False)
+    print(rendered, flush=True)
+    if wake_id:
+        wake_receipt(kdir, wake_id, acknowledge=True)
     raise SystemExit(0)
 
 print(f"Lore coordinate status (observed {observed_at})")
@@ -1337,4 +1345,7 @@ for key, label in labels:
         print(f"    source={row['source_id']} rule={row['classification']['rule_id']}: {row['classification']['rule_text']}")
         print(f"    locator={row['evidence']['locator']}")
         print(f"    facts={compact(row['observed_facts'])}")
+if wake_id:
+    print("\nWake receipt: " + json.dumps(projection["wake_receipt"]), flush=True)
+    wake_receipt(kdir, wake_id, acknowledge=True)
 PYEOF

@@ -1537,56 +1537,15 @@ SESSION_PARK_SHAPED_EVENTS="needs_input modal_blocked"
 # Version of the signature set session_park_classify accepts. It travels in the
 # consumer's output so a matcher-contract change surfaces there instead of
 # silently reclassifying parks. Bump it whenever the accepted set below changes.
-SESSION_PARK_SIGNATURE_VERSION=3
+SESSION_PARK_SIGNATURE_VERSION=4
 
-# session_park_classify <trigger> <ready> <blocked_reason>
-# Compare one peek result against the strict signature set for <trigger> and print
-# "<verdict><TAB><label>" (exit 0 either way).
-#
-#   verdict  `confirmed` when the screen strictly agrees the session is still
-#            parked; `unconfirmed` otherwise.
-#   label    which signature fired, or the reason none did. An unconfirmed park
-#            is a labeled result, never a dropped one — the label is what the
-#            caller reports.
-#
-# <trigger> is the journal event that put the question: "this row says the session
-# parked; is it still parked?"
-#
-# <ready> is a peek response's `.ready` (`true`/`false`) and <blocked_reason> its
-# `.blocked_reason`, whose vocabulary is the send/peek readiness gate's:
-# generating, modal, no-signature, no-contract, error.
-#
-# The strict sets are deliberately narrow. A session that emitted modal_blocked
-# but renders as generating is not parked now — on some harnesses that row fires
-# at turn cadence on healthy sessions — so it does not confirm.
 session_park_classify() {
-  local trigger="$1" ready="$2" reason="$3"
-  case "$trigger" in
-    modal_blocked)
-      if [[ "$ready" == "false" && "$reason" == "modal" ]]; then
-        printf 'confirmed\tmodal-signature\n'
-        return 0
-      fi
-      ;;
-    needs_input)
-      if [[ "$ready" == "true" ]]; then
-        printf 'confirmed\tcomposer-awaiting-input\n'
-        return 0
-      fi
-      if [[ "$reason" == "modal" ]]; then
-        printf 'confirmed\tmodal-signature\n'
-        return 0
-      fi
-      ;;
-  esac
-  case "$reason" in
-    generating)   printf 'unconfirmed\tscreen-reports-generating\n' ;;
-    no-signature) printf 'unconfirmed\tmatcher-found-no-known-signature\n' ;;
-    no-contract)  printf 'unconfirmed\tharness-has-no-gate-contract\n' ;;
-    error)        printf 'unconfirmed\tscreen-read-failed\n' ;;
-    '')           printf 'unconfirmed\tpeek-returned-no-reason\n' ;;
-    *)            printf 'unconfirmed\tunrecognized-blocked-reason\n' ;;
-  esac
+  local trigger="$1" activity="$2" fresh="$3"
+  if [[ "$fresh" == "true" ]]; then
+    if [[ "$activity" == "blocked" ]]; then printf 'confirmed\tcurrent-blocked\n'; return 0; fi
+    if [[ "$trigger" == "needs_input" && "$activity" == "idle" ]]; then printf 'confirmed\tcurrent-idle\n'; return 0; fi
+  fi
+  printf 'unconfirmed\tcurrent-%s\n' "${activity:-unknown}"
 }
 
 # --- How long a session has been running, from its own start row ---

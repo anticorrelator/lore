@@ -1089,7 +1089,7 @@ cmd_run() {
   # that can still deliver a wake, so it must die with the wrapper: an orphaned
   # watcher holding it would block every re-arm for a whole window while having
   # no channel left to wake anyone through.
-  "$WATCH_SH" --wake-shaped --timeout "$WINDOW" \
+  "$WATCH_SH" --wake-shaped --durable --timeout "$WINDOW" \
     --kdir "$KNOWLEDGE_DIR" \
     "${owner_args[@]}" \
     ${SCOPE_ARGS+"${SCOPE_ARGS[@]}"} \

@@ -444,6 +444,8 @@ def reconcile_operations(kdir, key):
                     response = kdir / '_sessions/peek-responses' / (saved['request_id'] + '.json')
                     data = read(response)
                     if data is not None:
+                        from coordinate_watch_state import observation
+                        data['observation'] = observation(data)
                         receipt(kdir, manifest, saved['request_id'], operation, 'observed', response=data)
                         continue
                 else:
@@ -510,7 +512,7 @@ def operate_attempt(args, kdir, manifest):
                     time.sleep(.15)
                 current.update(outcome='uncertain', outcome_confirmed=False)
             return current
-        raise RuntimeError('session has ended; durable state is available with inspect')
+        raise RuntimeError('session has ended; no live screen is available; inspect retains durable state')
     ensure(kdir, manifest['host_key'], manifest['source_dir'])
     deadline = time.monotonic() + args.timeout
     live = owner(kdir, manifest)
@@ -563,6 +565,8 @@ def operate_attempt(args, kdir, manifest):
         while time.monotonic() < deadline:
             data = read(response)
             if data is not None:
+                from coordinate_watch_state import observation
+                data['observation'] = observation(data)
                 result = receipt(kdir, manifest, rid, 'peek', 'observed', response=data)
                 response.unlink(missing_ok=True)
                 return result
@@ -650,6 +654,8 @@ def main(argv=None):
         print(f"{result.get('handle', args.handle)}: {result.get('outcome', result.get('state', 'observed'))}")
         if args.verb == 'peek':
             print('\n'.join(result.get('response', {}).get('rows', [])))
+            from coordinate_watch_state import peek_summary
+            print(peek_summary(result.get('response', {})))
         if result.get('request_id'):
             print('request: ' + result['request_id'])
         if args.verb == 'close' and result.get('disposition'):

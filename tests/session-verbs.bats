@@ -3210,79 +3210,29 @@ watch_json() {
   [[ "$output" == *"expands to no work items"* ]]
 }
 
-@test "watch: a wake names its tier, classifying authority, and signature version" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
-  [ "$status" -eq 2 ]
-
-  # An emitter that recorded why the session parked is the authority for it; the
-  # screen is not consulted alongside a row that already answers the question.
-  # (`modal_blocked` is the one park event whose emitter state is peek-conditional
-  # — see "Transient modal flashes" below.)
+@test "watch: reason-bearing historical parks require current observation" {
   echo '{"event":"needs_input","slug":"feature-x","reason":"awaiting-review"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
-  local out; out="$(watch_json --timeout 0)"
-  echo "$out" | jq -e '.tier=="confirmed" and .authority=="hook-row"'
-  echo "$out" | jq -e '.classification.state=="confirmed_park" and .classification.reason=="awaiting-review"'
-  echo "$out" | jq -e '.classification.peek==null and .classification.modal_gate==null'
-  echo "$out" | jq -e '(.signature_version|type)=="number"'
+  local out; out="$(watch_json --since 0 --peek-timeout 1 --timeout 0)"
+  echo "$out" | jq -e '.tier=="advisory" and .authority=="none" and .classification.reason=="awaiting-review"'
+  echo "$out" | jq -e '.classification.state=="park_unconfirmed" and .signature_version==4'
 }
 
-@test "watch: a park nothing could confirm wakes as a labeled advisory, never silently" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
-  [ "$status" -eq 2 ]
-
-  # A park-shaped row with no emitter state sends the watcher to the screen. No
-  # instance hosts this session, so no strict signature can fire — and the wake
-  # still happens, carrying the reason it could not be confirmed.
+@test "watch: unavailable observation remains an explicit advisory" {
   echo '{"event":"needs_input","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
-  local out; out="$(watch_json --peek-timeout 1 --timeout 0)"
-  echo "$out" | jq -e '.outcome=="matched" and .matched.event=="needs_input"'
-  echo "$out" | jq -e '.tier=="advisory" and .authority=="screen-signature"'
-  echo "$out" | jq -e '.classification.state=="park_unconfirmed" and .classification.label=="peek-unavailable"'
-  echo "$out" | jq -e '.classification.peek.consulted==true and (.classification.peek.error|test("no live instance"))'
+  local out; out="$(watch_json --since 0 --peek-timeout 1 --timeout 0)"
+  echo "$out" | jq -e '.outcome=="matched" and .tier=="advisory" and .authority=="none"'
+  echo "$out" | jq -e '.classification.label=="peek-unavailable" and .classification.peek.consulted==true'
 }
 
-@test "watch: --peek-timeout 0 keeps the row as the only authority and still wakes" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"
-  [ "$status" -eq 2 ]
+@test "watch: disabled peek never confirms current park from input eligibility" {
   echo '{"event":"needs_input","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
-  local out; out="$(watch_json --peek-timeout 0 --timeout 0)"
-  echo "$out" | jq -e '.outcome=="matched" and .tier=="advisory" and .authority=="hook-row"'
-  echo "$out" | jq -e '.classification.label=="screen-classification-disabled" and .classification.peek==null'
+  local out; out="$(watch_json --since 0 --peek-timeout 0 --timeout 0)"
+  echo "$out" | jq -e '.outcome=="matched" and .tier=="advisory" and .authority=="none"'
+  echo "$out" | jq -e '.classification.label=="observation-unavailable" and .classification.peek==null'
 }
 
-# --- The spawn-paste gap ---------------------------------------------------
-#
-# A pane that has been spawned but not yet handed its first prompt renders a
-# genuinely ready composer, so the strict `needs_input` signature fires — truthful
-# about the screen, wrong about the session. These pin the age gate that tells
-# that apart from a real park, and pin that it only ever moves the tier.
-
-# An RFC3339 stamp <age> seconds in the past.
-seconds_ago() {
-  python3 -c 'import sys,datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(seconds=float(sys.argv[1]))).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$1"
-}
-
-# Append a journal row for <slug> stamped <age> seconds ago. Written straight to
-# the file rather than through the sole writer, because the age gate joins on
-# `ts` and the writer only ever stamps now.
-write_event_ago() {
-  local event="$1" slug="$2" age="$3"
-  mkdir -p "$TEST_KDIR/_sessions"
-  printf '{"event":"%s","slug":"%s","ts":"%s","links":{}}\n' \
-    "$event" "$slug" "$(seconds_ago "$age")" >> "$TEST_KDIR/_sessions/events.jsonl"
-}
-
-# Answer the next peek request with a ready composer, standing in for the owning
-# TUI instance. One response per call — a peek deletes the response it reads.
-#
-# The request is consumed, as the real instance consumes the ones it serves.
-# Leaving it behind would hand the next responder a request nobody is waiting on,
-# and the peek that IS waiting would time out instead.
-answer_peek_ready() {
-  local slug="$1"
+answer_peek_observation() {
+  local slug="$1" activity="$2" ready="${3:-true}"
   ( local f="" rid _i
     for _i in $(seq 1 100); do
       f="$(ls "$TEST_KDIR/_sessions/peek-requests"/*.json 2>/dev/null | head -1)"
@@ -3293,201 +3243,78 @@ answer_peek_ready() {
     rid="$(jq -r .request_id "$f")"
     rm -f "$f"
     mkdir -p "$TEST_KDIR/_sessions/peek-responses"
-    printf '%s\n' '{"request_id":"'"$rid"'","slug":"'"$slug"'","captured_at":"t","ready":true,"blocked_reason":"","rows":["> "]}' \
+    jq -cn --arg rid "$rid" --arg slug "$slug" --arg activity "$activity" --argjson ready "$ready" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '{request_id:$rid,slug:$slug,captured_at:$at,ready:$ready,rows:["fixture"],observation:{schema_version:1,activity:$activity,authority:"screen-signature",observed_at:$at,session_id:$slug,session_handle:$slug,generation:"generation-a",instance:"inst-a",can_accept_input:$ready,fresh:true,max_age_seconds:5,evidence:{matcher:"fixture"}}}' \
       > "$TEST_KDIR/_sessions/peek-responses/$rid.json" ) &
 }
 
-@test "watch: a park confirmed by the screen seconds after spawn is demoted, not suppressed" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
+@test "watch: startup observation is advisory even with an eligible composer" {
   write_instance inst-a feature-x
-  write_event_ago spawned feature-x 11
-  write_event_ago needs_input feature-x 0
-  answer_peek_ready feature-x
+  echo '{"event":"needs_input","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  answer_peek_observation feature-x starting
   local out; out="$(watch_json --since 0 --peek-timeout 10 --timeout 0)"
   wait
-
-  # The wake still happens, and it still carries the screen evidence: the
-  # signature really did fire, and a seat that cannot see that cannot audit the
-  # demotion.
-  echo "$out" | jq -e '.outcome=="matched" and .matched.event=="needs_input"'
-  echo "$out" | jq -e '.authority=="screen-signature" and .classification.peek.ready==true'
-
-  # What moves is the tier. The row is not a confirmed park, because the composer
-  # it matched belongs to a session that has not started.
-  echo "$out" | jq -e '.tier=="advisory" and .classification.state=="park_unconfirmed"'
-  echo "$out" | jq -e '.classification.label=="spawn-gap"'
-  echo "$out" | jq -e '.classification.spawn_gap.resolution=="demoted"'
-  echo "$out" | jq -e '.classification.spawn_gap.signature=="composer-awaiting-input"'
-  echo "$out" | jq -e '.classification.spawn_gap.age_seconds < .classification.spawn_gap.threshold_seconds'
+  echo "$out" | jq -e '.tier=="advisory" and .classification.label=="current-starting" and .classification.peek.ready==true'
 }
 
-@test "watch: the same signature well into a run still confirms the park" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
+@test "watch: working observation is not a park although input is eligible" {
   write_instance inst-a feature-x
-  write_event_ago spawned feature-x 600
-  write_event_ago needs_input feature-x 0
-  answer_peek_ready feature-x
+  echo '{"event":"needs_input","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  answer_peek_observation feature-x working
   local out; out="$(watch_json --since 0 --peek-timeout 10 --timeout 0)"
   wait
-
-  # A start row older than the gate's window is itself the answer: this session is
-  # long past the spawn gap, so the signature means what it says.
-  echo "$out" | jq -e '.tier=="confirmed" and .classification.state=="confirmed_park"'
-  echo "$out" | jq -e '.classification.label=="composer-awaiting-input"'
-  echo "$out" | jq -e '.classification.spawn_gap.resolution=="no-start-row-in-window"'
+  echo "$out" | jq -e '.tier=="advisory" and .classification.label=="current-working" and .classification.peek.ready==true'
 }
 
-@test "watch: a demoted spawn-gap advisory ages and escalates like any other" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
+@test "watch: fresh idle observation confirms the current park" {
   write_instance inst-a feature-x
-  write_event_ago spawned feature-x 11
-  write_event_ago needs_input feature-x 0
-  answer_peek_ready feature-x
+  echo '{"event":"needs_input","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  answer_peek_observation feature-x idle
   local out; out="$(watch_json --since 0 --peek-timeout 10 --timeout 0)"
   wait
-  echo "$out" | jq -e '.tier=="advisory" and .classification.label=="spawn-gap"'
-
-  # A session that never starts keeps re-presenting this row, and it keeps
-  # arriving — the demotion moves the tier, it never silences the wake.
-  sleep 1
-  answer_peek_ready feature-x
-  out="$(watch_json --since 0 --peek-timeout 10 --timeout 0)"
-  wait
-  echo "$out" | jq -e '.tier=="advisory" and .classification.label=="spawn-gap"'
+  echo "$out" | jq -e '.tier=="confirmed" and .classification.state=="confirmed_park" and .classification.label=="current-idle"'
 }
 
-@test "watch: --spawn-gap 0 turns the age gate off and the screen confirms alone" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
+@test "watch: old-generation park cannot borrow a new generation idle screen" {
   write_instance inst-a feature-x
-  write_event_ago spawned feature-x 11
-  write_event_ago needs_input feature-x 0
-  answer_peek_ready feature-x
+  echo '{"event":"needs_input","slug":"feature-x","links":{"generation":"older-generation"}}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  answer_peek_observation feature-x idle
+  local out; out="$(watch_json --since 0 --peek-timeout 10 --timeout 0)"
+  wait
+  echo "$out" | jq -e '.tier=="advisory" and .classification.peek.observation.fresh==false'
+}
+
+@test "watch: a missing historical timestamp does not weaken fresh current observation" {
+  write_instance inst-a feature-x
+  echo '{"event":"needs_input","slug":"feature-x","links":{}}' >> "$TEST_KDIR/_sessions/events.jsonl"
+  answer_peek_observation feature-x idle
   local out; out="$(watch_json --since 0 --peek-timeout 10 --spawn-gap 0 --timeout 0)"
   wait
-  echo "$out" | jq -e '.tier=="confirmed" and .classification.label=="composer-awaiting-input"'
-  echo "$out" | jq -e '.classification.spawn_gap.resolution=="disabled"'
+  echo "$out" | jq -e '.tier=="confirmed" and .classification.peek.observation.activity=="idle"'
 }
 
-@test "watch: a park row with no timestamp keeps its confirmation rather than losing a tier" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  write_instance inst-a feature-x
-  write_event_ago spawned feature-x 11
-  # No ts on the row the gate would measure from: the age cannot be computed at
-  # all. Absence of evidence must not demote — the gate corrects one observed
-  # misreading, it does not make every confirmation suspect.
-  echo '{"event":"needs_input","slug":"feature-x","links":{}}' >> "$TEST_KDIR/_sessions/events.jsonl"
-  answer_peek_ready feature-x
-  local out; out="$(watch_json --since 0 --peek-timeout 10 --timeout 0)"
-  wait
-  echo "$out" | jq -e '.tier=="confirmed" and .classification.state=="confirmed_park"'
-  echo "$out" | jq -e '.classification.spawn_gap.resolution=="row-has-no-timestamp"'
-  echo "$out" | jq -e '.classification.spawn_gap.age_seconds==null'
-}
-
-# --- Transient modal flashes -----------------------------------------------
-
-# Answer the next peek request with an explicit readiness verdict, standing in for
-# the owning TUI instance. One response per call — a peek deletes what it reads.
-answer_peek_with() {
-  local slug="$1" ready="$2" blocked="$3"
-  ( local f="" rid _i
-    for _i in $(seq 1 100); do
-      f="$(ls "$TEST_KDIR/_sessions/peek-requests"/*.json 2>/dev/null | head -1)"
-      if [ -n "$f" ]; then break; fi
-      sleep 0.1
-    done
-    [ -n "$f" ] || exit 0
-    rid="$(jq -r .request_id "$f")"
-    rm -f "$f"
-    mkdir -p "$TEST_KDIR/_sessions/peek-responses"
-    jq -n --arg r "$rid" --arg s "$slug" --argjson ready "$ready" --arg b "$blocked" \
-      '{request_id: $r, slug: $s, captured_at: "t", ready: $ready,
-        blocked_reason: $b, rows: ["x"]}' \
-      > "$TEST_KDIR/_sessions/peek-responses/$rid.json" ) &
-}
-
-#
-# Some harnesses raise a modal and clear it themselves inside a second — under
-# bypass-permissions the seat never had a decision to make. The emitter's row was
-# true when it was written and is stale by the time anyone reads it, so the row
-# alone cannot say whether a modal is still waiting. These pin the peek gate that
-# tells a live modal from a flash, and pin that it only ever moves the tier.
-
-@test "watch: a modal_blocked row whose modal cleared before the peek is demoted" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
+@test "watch: modal history is demoted when current observation is working" {
   write_instance inst-a feature-x
   echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
-  answer_peek_with feature-x false generating
+  answer_peek_observation feature-x working false
   local out; out="$(watch_json --since 0 --peek-timeout 10 --timeout 0)"
   wait
-
-  # The wake still happens and still carries the emitter's claim: the row is the
-  # reason the seat is awake, and a seat that cannot see the claim cannot audit
-  # the demotion.
-  echo "$out" | jq -e '.outcome=="matched" and .matched.event=="modal_blocked"'
-  echo "$out" | jq -e '.classification.reason=="modal"'
-
-  # What moves is the tier. The screen is generating with no modal on it, so
-  # nothing is waiting on the seat right now.
-  echo "$out" | jq -e '.tier=="advisory" and .authority=="screen-signature"'
-  echo "$out" | jq -e '.classification.state=="park_unconfirmed"'
-  echo "$out" | jq -e '.classification.label=="modal-not-on-screen"'
-  echo "$out" | jq -e '.classification.modal_gate.resolution=="demoted"'
-  echo "$out" | jq -e '.classification.modal_gate.screen_reason=="generating"'
-  echo "$out" | jq -e '.classification.modal_gate.signature=="screen-reports-generating"'
-  echo "$out" | jq -e '.classification.peek.consulted==true and .classification.peek.ready==false'
+  echo "$out" | jq -e '.tier=="advisory" and .classification.label=="current-working" and .classification.reason=="modal"'
 }
 
-@test "watch: a modal still on the screen keeps the row's confirmed tier" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
+@test "watch: a currently blocked observation confirms the modal park" {
   write_instance inst-a feature-x
   echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
-  answer_peek_with feature-x false modal
+  answer_peek_observation feature-x blocked false
   local out; out="$(watch_json --since 0 --peek-timeout 10 --timeout 0)"
   wait
-
-  # A modal the seat can still answer is exactly the wake this gate protects.
-  echo "$out" | jq -e '.tier=="confirmed" and .authority=="screen-signature"'
-  echo "$out" | jq -e '.classification.state=="confirmed_park" and .classification.label=="modal-signature"'
-  echo "$out" | jq -e '.classification.modal_gate.resolution=="modal-on-screen"'
-  echo "$out" | jq -e '.classification.reason=="modal"'
+  echo "$out" | jq -e '.tier=="confirmed" and .classification.label=="current-blocked"'
 }
 
-@test "watch: a demoted transient-modal advisory ages and escalates like any other" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  write_instance inst-a feature-x
-  echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
-  answer_peek_with feature-x false generating
-  local out; out="$(watch_json --since 0 --peek-timeout 10 --timeout 0)"
-  wait
-  echo "$out" | jq -e '.tier=="advisory" and .classification.label=="modal-not-on-screen"'
-
-  # A modal that keeps re-appearing without ever surviving a peek keeps waking the
-  # seat: the demotion moves the tier, it never silences the row.
-  sleep 1
-  answer_peek_with feature-x false generating
-  out="$(watch_json --since 0 --peek-timeout 10 --timeout 0)"
-  wait
-  echo "$out" | jq -e '.tier=="advisory" and .classification.label=="modal-not-on-screen"'
-}
-
-@test "watch: a modal row no screen can answer keeps its confirmation" {
-  : > "$TEST_KDIR/_sessions/events.jsonl"
-  # No instance hosts this session, so the peek cannot answer. Absence of evidence
-  # must not demote — the gate corrects one observed misreading, it does not make
-  # every emitter claim suspect.
+@test "watch: an unavailable modal observation never confirms historical park" {
   echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
   local out; out="$(watch_json --since 0 --peek-timeout 1 --timeout 0)"
-  echo "$out" | jq -e '.tier=="confirmed" and .authority=="hook-row"'
-  echo "$out" | jq -e '.classification.label=="row-carries-emitter-state"'
-  echo "$out" | jq -e '.classification.modal_gate.resolution=="peek-unavailable"'
-  echo "$out" | jq -e '.classification.peek.consulted==true'
-
-  # Turning the screen off entirely lands in the same place, by the same rule.
-  out="$(watch_json --since 0 --peek-timeout 0 --timeout 0)"
-  echo "$out" | jq -e '.tier=="confirmed" and .authority=="hook-row"'
-  echo "$out" | jq -e '.classification.modal_gate.resolution=="screen-classification-disabled"'
-  echo "$out" | jq -e '.classification.peek==null'
+  echo "$out" | jq -e '.tier=="advisory" and .classification.label=="peek-unavailable"'
 }
 
 @test "watch: an unclaimed spawn request rides the wake as a pending advisory" {
