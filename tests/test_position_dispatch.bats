@@ -275,14 +275,16 @@ The packet premise needs a scoped correction; the report retains that finding.
     assert (item/'spec-dispatch.json').read_bytes() == first_bytes
     assert replay['directives'][2]['payload'] == payload
     saved_log=(item/'execution-log.md').read_bytes()
-    for broken in ('completion_input','position_dispatch'):
+    for broken in ('completion_input','position_dispatch','model','route','framework'):
         damaged=copy.deepcopy(replay)
         for key in ('status','artifact_path','artifact_sha256'):
             damaged.pop(key,None)
         if broken=='completion_input':
             damaged['directives'][2]['payload'][broken]['position_dispatch']['manifest_sha256']='0'*64
-        else:
+        elif broken=='position_dispatch':
             del damaged['directives'][2]['payload'][broken]
+        else:
+            damaged['directives'][2]['payload'][broken]={'model':'different-model','route':'session','framework':'opencode'}[broken]
         (item/'execution-log.md').unlink()
         (item/'spec-dispatch.json').write_text(json.dumps(damaged,sort_keys=True,separators=(',',':')))
         spec_open(document,ok=False)

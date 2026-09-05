@@ -256,13 +256,21 @@ source_shape.update(lead_template_version=lead_template_version,
                     legacy_template_path=legacy_template if legacy else None)
 source_fp = hashlib.sha256(canonical(source_shape)).hexdigest()
 
+def resolved_launch(inv):
+    request = inv.get("dispatch", {})
+    target = request.get("framework", researcher_route["target_framework"])
+    route = request.get("route", "native")
+    if route == "native" and target != framework:
+        route = "codex-chaperone"
+    return target, route, request.get("model", researcher_route["native_binding"])
+
 previous = None
 if Path(artifact_path).is_file():
     previous = json.loads(Path(artifact_path).read_bytes())
 if previous and previous.get("input_fingerprint") == input_fp and previous.get("source_fingerprint") == source_fp:
     if len(previous["directives"]) != len(normalized):
         reject("published investigation count differs from the declared input")
-    for directive in previous["directives"]:
+    for directive, inv in zip(previous["directives"], normalized):
         reference = directive["payload"].get("position_dispatch")
         if not legacy and not isinstance(reference, dict):
             reject("published investigator reference is missing")
@@ -271,6 +279,15 @@ if previous and previous.get("input_fingerprint") == input_fp and previous.get("
                                                expected={"work_item": slug, "position": "investigator"})
             frozen = resolved["manifest"]
             payload = directive["payload"]
+            target, route, model = resolved_launch(inv)
+            expected_fields = {"framework": target, "route": route, "model": model,
+                               "investigation_id": inv["id"], "question": inv["question"],
+                               "complexity": inv["complexity"]}
+            if any(payload.get(key) != value for key, value in expected_fields.items()):
+                reject("published investigator launch differs from the declared input")
+            expected_assignment = {"investigation_id": inv["id"], "question": inv["question"], "complexity": inv["complexity"]}
+            if json.loads(frozen["bindings"]["assignment"]) != expected_assignment:
+                reject("published investigator assignment differs from the declared input")
             if payload["prompt"] != Path(resolved["payload_path"]).read_text() or payload["bindings"] != frozen["bindings"]:
                 reject("published investigator input differs from its immutable dispatch")
             if payload["session_context"] != {"dispatch_guidance": payload["prompt"], "position_dispatch": reference}:
@@ -303,11 +320,7 @@ for ordinal, inv in enumerate(normalized, 1):
                        provenance="explicit-legacy-template")
     else:
         request = inv.get("dispatch", {})
-        target = request.get("framework", researcher_route["target_framework"])
-        route = request.get("route", "native")
-        if route == "native" and target != framework:
-            route = "codex-chaperone"
-        model = request.get("model", researcher_route["native_binding"])
+        target, route, model = resolved_launch(inv)
         descriptor = descriptors[target]
         bindings = request.get("bindings")
         if bindings is None:
