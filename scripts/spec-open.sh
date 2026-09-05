@@ -307,6 +307,32 @@ if previous and previous.get("input_fingerprint") == input_fp and previous.get("
                                             "artifact_sha256": hashlib.sha256(artifact_bytes).hexdigest()}))
     raise SystemExit(0)
 
+# The collector's note closes every compiled investigator payload. It is
+# emitted prose, retained as wrapper-suffix.md and covered by the wrapper
+# identity, so a change here changes the recorded wrapper version.
+COLLECTOR_NOTE = """
+## From the collector
+
+A spec lead dispatched you to answer one investigation for one work item. The identity envelope above is the binder's record of this dispatch; the values you need are in it.
+
+- Your question is `position_dispatch.bindings.assignment`, a JSON object with `investigation_id`, `question`, and `complexity`. The question is the scope; a finding outside it goes under Worker leads or Unknowns.
+- The `Packet-id:` line above names your packet, and `lore packet show <id>` renders it. Its entries were retrieved for this question at one declared scale and are candidates to test against the code, not answers.
+- No `Revision-id:` line means no plan revision exists yet; this investigation runs before the plan. Say so under Unknowns where it matters instead of inferring a task or revision.
+- `position_dispatch.manifest_path` is the immutable manifest for this attempt. Your report needs its digest, and a manifest cannot carry its own, so compute it: `shasum -a 256 <manifest_path>` (or `sha256sum`). The collector holds the digest the binder returned at publication and checks your header against it; agreement ties your report to this attempt and to nothing else.
+
+Write the report in the investigator shape the brief names: Question, Findings, Key files, Implications, Assertions, Observations, optional Narrative, Worker leads, Unknowns. Directly after the `**Question:**` line, add three header lines, plain, one per line:
+
+```
+Template-version: <position_dispatch.producer.template_version, from the envelope>
+Position-dispatch-manifest: <position_dispatch.manifest_path, verbatim>
+Position-dispatch-sha256: <the digest you computed>
+```
+
+Findings are copied into the plan verbatim, so write each to stand alone. Assertions have no count; each grounded one carries file, line range, verbatim snippet, its normalized hash, a falsifier, and a significance. `None` is complete under Assertions and Observations when nothing grounded or nothing surprising came up. If you append an assertion to `task-claims.jsonl` yourself, it goes through `evidence-append.sh` with `producer_role` `researcher` (that writer's legacy name for this position), `task_id` set to your `investigation_id`, and `report_id` and `dispatch_attempt_id` copied from the envelope; then give that assertion its `claim_id` in the report, so the collector does not write the row a second time.
+
+Return the complete report as your final message. The collector lands it at the assigned report destination through the sole report writer, appends the remaining assertions canonically, and only then runs the completion check that reads your headers against the reference it holds. Nothing on your side completes that sequence early, and a task tool marked complete before the report is landed leaves the check reading an empty destination; return, and stop. A correction you made to a packet entry is already recorded by `lore verify`; when it would change the ground under another investigation in this wave, say so plainly in Findings, because the collector reads Findings while the other investigations are still running.
+""".encode("utf-8")
+
 directives = []
 handle_slots = {}
 for ordinal, inv in enumerate(normalized, 1):
@@ -348,7 +374,7 @@ for ordinal, inv in enumerate(normalized, 1):
         identity_headers = "".join(f"{key}: {value}\n" for key, value in header_fields.items()).encode()
         reference = binder.publish(descriptor, bindings, kdir, dispatch_guidance.encode(),
                                    native_model=model if route == "native" else None,
-                                   prefix=identity_headers, required=("packet_id", "packet_pointer"),
+                                   prefix=identity_headers, suffix=COLLECTOR_NOTE, required=("packet_id", "packet_pointer"),
                                    wrapper={"template_id": "spec-open", "template_version": source_shape["wrapper"]["sha256"][:12],
                                             "path": source_shape["wrapper"]["path"],
                                             "sha256": source_shape["wrapper"]["sha256"]})
