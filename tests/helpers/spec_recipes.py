@@ -239,7 +239,9 @@ def exercise_synthesis(f):
     work = json.loads(f.recipe("work-show", "projection retains one latest summary per packet identity").stdout)
     summaries = [row for row in work["evidence"]["packet_summary"] if row["packet_id"] == packet_id]
     assert len(summaries) == 1 and summaries[0]["delivery_stage"] == "synthesized"
-    assert summaries[0]["synthesis"] == latest["synthesis"] and summaries[0]["superseded_rows"] == 1
+    assert summaries[0]["synthesis"] == {"by": latest["synthesis"]["by"],
+        **{key: len(latest["synthesis"][key]) for key in ("kept", "dropped", "added")}}
+    assert summaries[0]["superseded_rows"] == 1
     context = compile_and_wrap(f, bindings_file, position="investigator", route="session")
     enqueue(f, context)
     selected = host_reference(f, context)
