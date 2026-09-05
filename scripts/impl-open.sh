@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # impl-open.sh — Prepare the /implement dispatch manifest for a work item
 # Usage: impl-open.sh <ref> (--all | --task <id> ...)
-#        [--fallback-scale-set <buckets>] [--template-version <hash>] [--json]
+#        [--fallback-scale-set <buckets>] [--template-version <hash>]
+#        [--compiled-positions] [--json]
 #
 # Prepare-and-return emitter for /implement Steps 2–3.6. Computes the
 # bash-scriptable dispatch envelope and returns it; the LEAD executes every
@@ -32,6 +33,18 @@
 #   - the four lead-inline gate conditions as SEPARATE fields (single_task,
 #     prescriptive, no_persistent_advisor, no_required_consultation) — never
 #     an aggregate eligibility boolean; the lead reads conditions and decides
+#   - with --compiled-positions: the worker and designer compiler descriptors
+#     for the active framework under position_descriptors, plus on every
+#     TaskCreate entry `position: worker`, `position_binding_inputs` (work
+#     item, task, revision, packet id and pointer, dispatch attempt, and the
+#     exact assignment copied from the entry) and
+#     `position_binding_absence_reasons` for the inputs a legacy item lacks.
+#     Persistent advisor entries gain `position: designer` and
+#     `position_mode: consultation`. These are binding ingredients, not a
+#     launch envelope: report id and path, execution root, and consultation
+#     identity are still supplied by the caller after placement, and nothing
+#     is published here. Without the flag the envelope is unchanged and
+#     position_descriptors is null.
 #
 # Manifest contract (D2): first element is TeamCreate, then TaskCreate per
 # eligible task in tasks.json order, then TaskUpdate wiring ops whose
@@ -72,7 +85,8 @@ COMPILED_POSITIONS=0
 usage() {
   cat >&2 <<EOF
 Usage: lore impl open <ref> (--all | --task <id> ...)
-                      [--fallback-scale-set <buckets>] [--template-version <hash>] [--json]
+                      [--fallback-scale-set <buckets>] [--template-version <hash>]
+                      [--compiled-positions] [--json]
 
 Selection (exactly one mode is required — no default):
   --all                 every task in tasks.json
@@ -81,6 +95,15 @@ Selection (exactly one mode is required — no default):
   --fallback-scale-set  scale buckets (comma-separated: $VALID_BUCKETS)
                         declared for fallback-branch prefetch; units needing
                         the fallback are returned as needs-prefetch when omitted
+  --compiled-positions  return the active framework's worker and designer
+                        compiler descriptors and put position binding inputs
+                        on each TaskCreate entry (position, work item, task,
+                        revision, packet id and pointer, dispatch attempt,
+                        assignment) with reasons for any input a legacy item
+                        cannot supply. Persistent advisors are marked as
+                        designer consultation. Nothing is published: report
+                        identity and execution root are bound by the caller
+                        after placement. Omitted, the envelope is the legacy one.
 
 Exit codes: 0 manifest emitted, 1 error/no match, 2 ambiguous reference
 EOF
@@ -137,7 +160,7 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     --*)
-      fail "Unknown flag: $1. Accepted flags are --all, --task, --fallback-scale-set, --template-version, and --json."
+      fail "Unknown flag: $1. Accepted flags are --all, --task, --fallback-scale-set, --template-version, --compiled-positions, and --json."
       ;;
     *)
       if [[ -z "$REF" ]]; then
