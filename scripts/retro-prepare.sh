@@ -187,6 +187,9 @@ run_reader() {
 WINDOW_START_NORM=$(printf '%s' "$WINDOW_JSON" | jq -r .start)
 WINDOW_END_NORM=$(printf '%s' "$WINDOW_JSON" | jq -r .end)
 run_reader cycle_work bash "$SCRIPT_DIR/load-work-item.sh" "$SLUG" --json
+run_reader packet_assessments python3 "$SCRIPT_DIR/packet-assessments-read.py" \
+  --kdir "$KDIR" --cycle-work "$TMP_DIR/cycle_work.out" \
+  --window-start "$WINDOW_START_NORM" --window-end "$WINDOW_END_NORM" --json
 run_reader due_queue bash "$SCRIPT_DIR/retro-queue.sh" queue --cycle-id "$SLUG" \
   --window-start "$WINDOW_START_NORM" --window-end "$WINDOW_END_NORM" --json
 run_reader scorecard_rows bash "$SCRIPT_DIR/scorecard-read.sh" rows \
@@ -203,11 +206,16 @@ python3 - "$TMP_DIR" "$PREPARED" "$SLUG" "$ARCHIVED" "$WINDOW_JSON" "$DUE_DISPOS
 import hashlib,json,os,runpy,sys
 
 tmp,out_path,slug,archived_raw,window_raw,due_disposition,due_warning,evidence_helper,prior_pack_path=sys.argv[1:]
+sys.path.insert(0,os.path.dirname(evidence_helper))
 identity_projection=runpy.run_path(evidence_helper)["identity_projection"]
+packet_delivery=runpy.run_path(os.path.join(os.path.dirname(evidence_helper),"packet-assessments-read.py"))["packet_delivery"]
+rubric_helper=runpy.run_path(os.path.join(os.path.dirname(evidence_helper),"retro-rubric.py"))
+rubric=rubric_helper["validate_frozen"](rubric_helper["load_rubric"]())
 window=json.loads(window_raw); archived=archived_raw=="true"
 
 SOURCE_REGISTRY=[
  ("cycle_work",f"lore work show {slug} --json",f"_work/{'_archive/' if archived else ''}{slug}","snapshot","missing-cycle-nonzero"),
+ ("packet_assessments",f"packet-assessments-read.py --kdir <knowledge-root> --cycle-work <captured-cycle_work-json> --window-start {window['start']} --window-end {window['end']} --json","_packets/assessments.jsonl","cycle-assessment-summary","read-with-zero-observations"),
  ("due_queue",f"lore retro queue --cycle-id {slug} --window-start {window['start']} --window-end {window['end']} --json","_scorecards/retro-deferred-queue.jsonl","half-open-window","versioned-empty-fold"),
  ("scorecard_rows",f"lore scorecard rows --window-start {window['start']} --window-end {window['end']} --json","_scorecards/rows.jsonl","half-open-window","[]"),
  ("scorecard_current","lore scorecard current --json","_scorecards/_current.json","snapshot","versioned-empty-summary"),
@@ -215,6 +223,8 @@ SOURCE_REGISTRY=[
  ("journal",f"lore journal read --since {window['start']} --until {window['end']} --json","_meta/effectiveness-journal.jsonl","half-open-window","[]"),
 ]
 FACT_REGISTRY={
+ "packet_delivery":["cycle_work"],
+ "packet_assessments":["packet_assessments","cycle_work"],
  "cycle_artifacts":["cycle_work"],
  "task_context_backlinks":["cycle_work"],
  "session_retrieval_friction_packets":["session_events","journal"],
@@ -240,6 +250,13 @@ def load_reader(source_id):
  try: obj=json.loads(data) if data.strip() else None
  except Exception as exc:
   return None,{"coverage":"unreadable","warnings":[str(exc)],"reason":"invalid-reader-output","cursor":None}
+ if source_id=="packet_assessments":
+  if (not isinstance(obj,dict) or obj.get("reader_contract_version")!="1"
+      or not {"coverage","status","reason","summary"} <= obj.keys()
+      or obj["coverage"] not in {"read","absent","unreadable"}):
+   return None,{"coverage":"unreadable","warnings":[],"reason":"invalid-reader-output","cursor":None}
+  return obj,{"coverage":obj["coverage"],"warnings":[],"reason":obj["reason"],"cursor":None,
+              "identity":hashlib.sha256(canonical(obj)).hexdigest()}
  identity_obj=obj
  if source_id=="cycle_work" and isinstance(obj,dict):
   identity_obj=identity_projection(obj)
@@ -253,7 +270,7 @@ for sid,reader,resolved,projection_mode,empty_shape in SOURCE_REGISTRY:
  manifest.append({"source_id":sid,"reader":reader,"resolved_source":resolved,
   "reader_contract_version":"2" if sid=="cycle_work" else "1","projection_mode":projection_mode,"stable_empty_shape":empty_shape,
   "coverage":meta["coverage"],"content_identity":meta.get("identity"),"cursor":meta.get("cursor"),
-  "window_field":"[start,end)" if projection_mode=="half-open-window" else None,
+  "window_field":"assessed_at [start,end)" if sid=="packet_assessments" else "[start,end)" if projection_mode=="half-open-window" else None,
   "warnings":meta["warnings"],"reason":meta["reason"]})
 
 def fact(status,source_ids,values=None,reason=None):
@@ -284,6 +301,12 @@ facts={
  "telemetry_attribution_rework":fact("available",FACT_REGISTRY["telemetry_attribution_rework"],{"telemetry_rows":sum(1 for r in rows if r.get("kind")=="telemetry" or r.get("tier")=="telemetry"),"correction_rows":sum(1 for r in rows if r.get("tier")=="correction")}) if isinstance(objects.get("scorecard_rows"),list) else fact("absent",FACT_REGISTRY["telemetry_attribution_rework"],reason="scorecard-rows-absent"),
 }
 
+# Compatibility fact above still reads session events and journal entries only.
+facts["packet_delivery"]=dict(packet_delivery(work),source_ids=FACT_REGISTRY["packet_delivery"])
+assessment=objects.get("packet_assessments")
+facts["packet_assessments"]=(fact(assessment["status"],FACT_REGISTRY["packet_assessments"],assessment["summary"],assessment["reason"])
+ if isinstance(assessment,dict) else fact("not-computable",FACT_REGISTRY["packet_assessments"],reason="assessment-reader-unavailable"))
+
 def calc(cid,sources,n=None,d=None,value=None,unit="ratio",floor=None,threshold=None,disposition="not-computable",reason=None):
  return {"calculation_id":cid,"calculation_version":"1","source_ids":sources,"numerator":n,"denominator":d,"value":value,"unit":unit,"sample_floor":floor,"threshold":threshold,"disposition":disposition,"reason":reason}
 calcs=[]
@@ -308,12 +331,13 @@ fixed_health={"state":state,"calculation_ids":[c["calculation_id"] for c in sele
 
 input_fp=hashlib.sha256(canonical({"schema_version":1,"slug":slug,"window":window})).hexdigest()
 source_shape=[{k:r[k] for k in ("source_id","reader_contract_version","reader","projection_mode","resolved_source","coverage","content_identity","cursor","window_field","warnings")} for r in manifest]
-source_fp=hashlib.sha256(canonical({"sources":source_shape,"calculations":[{"calculation_id":c,"calculation_version":"1"} for c in CALC_REGISTRY]})).hexdigest()
+source_fp=hashlib.sha256(canonical({"rubric":rubric,"packet_delivery":facts["packet_delivery"],"sources":source_shape,"calculations":[{"calculation_id":c,"calculation_version":"1"} for c in CALC_REGISTRY]})).hexdigest()
 pack_id=hashlib.sha256(canonical({"input_fingerprint":input_fp,"source_fingerprint":source_fp})).hexdigest()
 work_title=work.get("title","") if isinstance(work,dict) else ""
 pack={"schema_version":1,"pack_id":pack_id,"input_fingerprint":input_fp,"source_fingerprint":source_fp,"artifact_sha256":None,
  "cycle":{"slug":slug,"title":work_title,"archived":archived,"cycle_type":None},"window":window,
  "due_claim":{"attempted":due_disposition!="absent","outcome_ids":[],"disposition":due_disposition,"warning":due_warning or None},
+ "rubric":rubric,
  "source_manifest":manifest,
  "source_data":{sid:identity_projection(obj) if sid=="cycle_work" and isinstance(obj,dict) else obj for sid,obj in objects.items()},
  "facts":facts,"calculations":calcs,"fixed_health":fixed_health,
