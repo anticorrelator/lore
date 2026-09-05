@@ -24,7 +24,10 @@ Read this template when emitting `plan.md` in Step 5 (abstract sections) and Ste
        3. `**Tempting narrower implementation:**` heading — the spec author names the tempting narrower implementation that
           would appear successful while violating the anchor.
 
-     Verifier-enforced fields (load-bearing for Step 5.6 gate): anchor body and `**Scope delta:**` line.
+     Fields 1 and 2 are rendered at the abstract stage (Step 5), because `lore plan revise` runs the anchor verifier on
+     every publication and the abstract revision cannot be published without them; the concrete stage (Step 5b item 0)
+     preserves them and adds field 3.
+     Verifier-enforced fields (load-bearing for every publication and the Step 5.6 gate): anchor body and `**Scope delta:**` line.
      Template-only field (not verifier-enforced): `**Tempting narrower implementation:**` body. -->
 <anchor body verbatim from `_meta.json.intent_anchor`>
 

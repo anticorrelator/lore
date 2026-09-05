@@ -70,7 +70,7 @@ Refused by the collector:
 - A grounded assertion (one carrying a `falsifier`) missing a non-empty string `claim`, `file`, `line_range`, `exact_snippet`, `normalized_snippet_hash` or `falsifier`, or whose `significance` is not exactly `low`, `medium` or `high`. Prose in `significance` is refused; explanatory weight belongs in `implications` or `why_this_work_needs_it`.
 - A grounded assertion that does not match exactly one canonical row in `task-claims.jsonl` under this attempt's test — `task_id` equal to the bound task when the manifest binds one, otherwise `report_id` and `dispatch_attempt_id` equal to the manifest's — with the same `claim`, `line_range`, `exact_snippet`, `normalized_snippet_hash` and `falsifier`, a `file` resolving to the same path under the execution root, and, when the assertion carries a `claim_id`, that id.
 - A matched row whose `producer_role` is not `researcher`, that fails `validate-tier2.sh`, whose `captured_at_sha` is not a commit in the execution root, or whose `exact_snippet` is not found within `line_range` of its `file` at that commit. A snippet from an uncommitted edit, or a `file` outside the root, is refused as a source-anchor mismatch.
-- An assertion without a `falsifier` whose `claim_id` names no unique canonical row, or whose `file` does not exist under the execution root. Such an entry is otherwise an observation: no row is required for it, and when its `claim_id` does resolve, that row is validated under the same attempt test and counted with the others.
+- An assertion without a `falsifier` whose `claim_id` names no unique canonical row, or whose `file`, joined to the execution root, is not an existing file. That join is the only check on such a `file`: an absolute path or a `..` traversal that lands on an existing file outside the root is accepted here, whereas a canonical grounded row's `file` has to resolve inside the root (it is made relative to the root before the source is read). Such an entry is otherwise an observation: no row is required for it, and when its `claim_id` does resolve, that row is validated under the same attempt test and counted with the others.
 - A `**Tier 2 evidence:**` section, when present, that is not `none` or a YAML list of distinct non-empty claim ids each resolving to one canonical row under the attempt test. An `**Artifacts:**` section, when present, is checked as for a worker report.
 - A manifest that binds `task_id` without `revision_id` or the reverse, or that carries no packet id or pointer.
 
@@ -81,24 +81,24 @@ Required by the protocol and not checked by the collector:
 - A pre-plan row's `task_id` equal to the investigation id. Pre-plan rows are bound by `report_id` and `dispatch_attempt_id`, and the task label is not compared; Step 3 of the spec skill writes the investigation id there.
 - Key files that are the files the findings rest on. Existence and absoluteness are checked; relevance is not.
 
-A report that passes typed completion, in outline:
+A report that passes typed completion, in outline. The source coordinates are real: `scripts/coordinate-report.sh` at commit `2edd5765a345dd0742e0f6c2df9c5a5c0293e84d` (file sha256 `5d41ee3718ce9ccf1efda22221978a80dd4c097a815a2df220b1ef21b03922d8`) refuses an existing destination at lines 141–143 with `refuse 4`, and the hash below is `scripts/snippet_normalize.py --hash` over the snippet. The three values in angle brackets are the attempt's own identities — the compiled version, the manifest path and its digest — and the canonical row this assertion matches has to carry `captured_at_sha` naming a commit under the execution root that holds these lines:
 
 ```
 **Question:** Which writer lands compiled reports?
-Template-version: 1f2e3d4c5b6a
-Position-dispatch-manifest: /store/_work/item/position-dispatch/spec-a1b2/manifest.json
-Position-dispatch-sha256: <64 lowercase hex>
+Template-version: <12-hex version of the compiled brief>
+Position-dispatch-manifest: <absolute path of this attempt's manifest.json>
+Position-dispatch-sha256: <64 lowercase hex over that manifest>
 **Findings:**
-- coordinate-report.sh lands the body at worker-reports/<report-id>.md and refuses an existing path (scripts/coordinate-report.sh lines 40-58).
+- coordinate-report.sh lands the body at worker-reports/<report-id>.md and refuses an existing destination with exit 4 before writing anything (scripts/coordinate-report.sh lines 141-143).
 **Key files:**
 - /checkout/scripts/coordinate-report.sh
 **Implications:** Retries need a fresh report id.
 **Assertions:**
-- claim: "coordinate-report.sh refuses an existing report path"
+- claim: "coordinate-report.sh refuses an existing report path with exit 4"
   file: scripts/coordinate-report.sh
-  line_range: "52-54"
-  exact_snippet: "exit 4"
-  normalized_snippet_hash: <sha256 of the normalized snippet>
+  line_range: "141-143"
+  exact_snippet: 'refuse 4 "a report is already landed at $DEST'
+  normalized_snippet_hash: b28d60c806cd4349366a6117fbf2ef3d0ca786af1a7e1ab00d71a2c728b2fe94
   falsifier: "the writer overwrites an existing report path"
   significance: medium
 **Observations:** None
@@ -110,7 +110,7 @@ The same report fails typed completion when `Key files` reads `/checkout/scripts
 
 ## Designer outputs
 
-**Planning mode** writes into the work item: the choice, its reason, the assumption it rests on, the alternative rejected, and any explained open question with what would close it. Plan changes publish through `lore plan revise --author-role designer`. Design records stay in the work item as dated history and are indexed by `lore why` and `lore tradeoffs`; no knowledge entry is minted for a decision. A bound planning attempt also lands a short design record at its `report_path` through `lore coordinate report`, so the seat can check which brief produced the design: the header lines `Template-version:`, `Position-dispatch-manifest:` and `Position-dispatch-sha256:` (taken from the envelope and the digest the designer computes, exactly as an investigator does), then `**Revision:**` naming the published revision id, `**Decisions:**`, `**Open questions:**` and `**Tier 2 evidence:**` as a YAML list of claim ids or `none`. The typed collector reads worker and investigator positions only, so a design record is checked by the seat's header comparison against its held reference and by reading the published revision; nothing types a completion row for it.
+**Planning mode** writes into the work item: the choice, its reason, the assumption it rests on, the alternative rejected, and any explained open question with what would close it. Plan changes publish through `lore plan revise --author-role designer`. Design records stay in the work item as dated history; `lore why` and `lore tradeoffs` index the decisions where they are published — `plan.md`, `notes.md`, `design.md` and `rationale*.md` at the item root are the files the history scanner reads — so a decision reaches history through the published plan or a note, and the design record landed under `worker-reports/` is not itself scanned. No knowledge entry is minted for a decision. A bound planning attempt also lands a short design record at its `report_path` through `lore coordinate report`, so the seat can check which brief produced the design: the header lines `Template-version:`, `Position-dispatch-manifest:` and `Position-dispatch-sha256:` (taken from the envelope and the digest the designer computes, exactly as an investigator does), then `**Revision:**` naming the published revision id, `**Decisions:**`, `**Open questions:**` and `**Tier 2 evidence:**` as a YAML list of claim ids or `none`. The typed collector reads worker and investigator positions only, so a design record is checked by the seat's header comparison against its held reference and by reading the published revision; nothing types a completion row for it.
 
 **Consultation mode** replies to the requesting worker:
 
@@ -136,7 +136,7 @@ A review attempt is prepared by `lore plan review prepare` and sealed once by `l
 - `dispositions.json`, schema 1: `outcome` (`completed | failed | skipped | needs-decision`), `verdict`, `reason` (null unless skipped or needs-decision), `judgments` as `{purpose, judgment, rationale, result_ids}` with the prepared purpose present, and `dispositions` as `{finding, disposition, reason}`.
 - Evaluator manifest: `{evaluator_locator, evaluator_template_version, framework, model, final_round}`, where the template version is the compiled reviewer brief's 12-hex version.
 
-Seal validates each cited result ID against `results.jsonl` and freezes the rows into `cited-results.json`. Empty `result_ids` records that no execution evidence was cited. The ledger carries no executor state and creates no result row. Filing confers no acceptance, checkoff, archive, or anchor-coverage authority; those are authored decisions recorded with `lore plan revise --decision-for`.
+Seal validates each cited result ID against `results.jsonl` and freezes the rows into `cited-results.json`. Empty `result_ids` records that no execution evidence was cited. The ledger carries no executor state and creates no result row. Filing confers no acceptance, checkoff, archive, or anchor-coverage authority. Each of those has its own record and writer: anchor coverage, review requirement and the dispatch decision are the three metadata decisions `lore plan revise --decision-for <revision> --decision-id <token> --decisions <file>` records against a revision; gate acceptance is the seat's, recorded in `notes.md` (`lore work note`) or as its own sealed review; a task is checked off through `lore work check`; an item is archived through `lore work archive`.
 
 ## Writers and identities
 
