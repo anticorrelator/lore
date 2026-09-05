@@ -35,7 +35,7 @@ import yaml
 
 original, temporary, scenario = sys.argv[1:]
 original, temporary = Path(original).resolve(), Path(temporary).resolve()
-if os.environ.get('POSITION_DISPATCH_FIXTURES') and scenario in ('native', 'session', 'launch', 'native-selection', 'spec', 'spec-native', 'spec-session', 'implement-envelope'):
+if os.environ.get('POSITION_DISPATCH_FIXTURES') and scenario in ('native', 'session', 'launch', 'native-selection', 'spec', 'spec-native', 'spec-session', 'implement-envelope', 'spec-report-fields'):
     temporary = Path(os.environ['POSITION_DISPATCH_FIXTURES']).resolve() / scenario
     temporary.mkdir(parents=True, exist_ok=False)
 repo, home = temporary / 'checkout', temporary / 'home'
@@ -522,6 +522,8 @@ elif scenario == 'spec-report-fields':
     hook = ['bash', str(repo / 'scripts/task-completed-capture-check.sh')]
     cases = [
         ('valid', None), ('empty', None),
+        ('key-capital-none', None), ('key-none', None), ('key-list-empty', None),
+        ('observation-external', None), ('observation-parent', None), ('trailing-newlines', None),
         ('observations-unstructured', None), ('significance-unequal', None),
         ('preplan-task-vocabulary', None), ('observation-canonical-ref', None),
         ('observation-missing-ref', 'observation canonical claim reference missing or ambiguous'),
@@ -559,7 +561,8 @@ elif scenario == 'spec-report-fields':
                'significance': 'low', 'report_id': b['report_id'],
                'dispatch_attempt_id': b['dispatch_attempt_id'],
                'position_dispatch': {key: ref[key] for key in ('manifest_path', 'manifest_sha256')}}
-        if name != 'empty':
+        observation_only = name in ('observation-external', 'observation-parent')
+        if name != 'empty' and not observation_only:
             call(['bash', str(repo / 'scripts/evidence-append.sh'), '--work-item', 'fixture', '--kdir', str(store)], input=json.dumps(row).encode())
         assertion = {key: row[key] for key in ('claim_id', 'claim', 'file', 'line_range', 'exact_snippet', 'normalized_snippet_hash', 'falsifier', 'significance')}
         if name == 'significance': assertion['significance'] = 'This affects collection.'
@@ -567,6 +570,11 @@ elif scenario == 'spec-report-fields':
         if name in ('observation-canonical-ref', 'observation-missing-ref'):
             assertion.pop('falsifier')
             if name == 'observation-missing-ref': assertion['claim_id'] = 'missing-canonical-row'
+        if observation_only:
+            external = temporary / (name + '.txt')
+            external.write_text('External observation without a canonical source claim.\n')
+            assertion = {'claim': 'An external observation file exists.',
+                         'file': str(external) if name == 'observation-external' else '../' + external.name}
         key = str(repo / 'fixture.txt')
         if name == 'key-line': key += ':1'
         if name == 'key-relative': key = 'fixture.txt'
@@ -574,17 +582,21 @@ elif scenario == 'spec-report-fields':
                    'Position-dispatch-manifest': ref['manifest_path'], 'Position-dispatch-sha256': ref['manifest_sha256'],
                    'Report-id': 'different-report' if name == 'wrong-header' else b['report_id']}
         report = ''.join(f'{key}: {value}\n' for key, value in headers.items())
-        report += '**Question:** Which committed bytes ground the report?\n**Findings:** The named bytes are inspectable.\n**Key files:**\n' + yaml.safe_dump([key])
+        key_body = {'key-capital-none': 'None\n', 'key-none': 'none\n', 'key-list-empty': '[]\n'}.get(name, yaml.safe_dump([key]))
+        report += '**Question:** Which committed bytes ground the report?\n**Findings:** The named bytes are inspectable.\n**Key files:**\n' + key_body
         report += '**Implications:** Retain the source identity.\n**Assertions:**\n' + yaml.safe_dump([] if name == 'empty' else [assertion])
         observations = '[unparsed prose with no YAML fields' if name == 'observations-unstructured' else 'None'
         report += '**Observations:** ' + observations + '\n**Worker leads:** None\n**Unknowns:** None\n'
         if name == 'plain-claim-ids': report += '**Tier 2 evidence:**\n' + row['claim_id'] + '\n'
+        if name == 'trailing-newlines': report += '\n\n\n'
         completion = {'position_dispatch': ref, 'lore_task_id': b['task_id']}
         # Missing durable output fails even when a complete response exists in memory.
         missing = call(hook, ok=False, input=json.dumps(completion).encode())
         assert b'durable report missing' in missing.stderr
         call(['bash', str(repo / 'scripts/coordinate-report.sh'), 'fixture', '--report-id', b['report_id'], '--kdir', str(store)], input=report.encode())
         before = Path(b['report_path']).read_bytes()
+        assert before == report.rstrip('\n').encode() + b'\n'
+        if name == 'trailing-newlines': assert before != report.encode()
         result = call(hook, ok=reason is None, input=json.dumps(completion).encode())
         if reason: assert reason.encode() in result.stderr, (name, result.stderr)
         repeat = call(['bash', str(repo / 'scripts/coordinate-report.sh'), 'fixture', '--report-id', b['report_id'], '--kdir', str(store)], ok=False, input=report.encode())

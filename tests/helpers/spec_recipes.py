@@ -6,6 +6,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -53,6 +54,29 @@ class SpecFixture(Fixture):
                            SKILL_FILE=repo / "skills/spec/SKILL.md", SLUG="recipes")
         assert Path(shutil.which("lore", path=self.env["PATH"])).resolve() == repo / "cli/lore"
         self.timings = []
+        self.connections = []
+        self.external_inventories = {}
+
+    def connection(self, name, *, producer, consumer, value, actor, revision=None, attempt=None):
+        self.connections.append(dict(name=name, producer=producer, consumer=consumer, value=str(value),
+                                     actor=actor, revision=revision, attempt=attempt))
+        self.data("handoff-trace.json", self.connections)
+
+    def external(self, skill, namespace, name, scenario, expected=0, **values):
+        """Use the shared extractor to run a consuming skill in the same store."""
+        if namespace not in self.external_inventories:
+            self.external_inventories[namespace] = inventory(self.repo / "skills" / skill / "SKILL.md", namespace)
+        document, bodies = self.external_inventories[namespace]
+        consumer = copy.copy(self)
+        consumer.document, consumer.bodies = document, bodies
+        consumer.rows = {row["id"]: row for row in document["recipes"]}
+        assert set(values) <= set(consumer.rows[name]["inputs"]), (name, "undeclared external inputs")
+        self.values.update(values)
+        consumer.save = lambda: self.data(namespace + "-inventory.json", document)
+        try:
+            return consumer.run(name, {key: self.values[key] for key in consumer.rows[name]["inputs"]}, scenario, expected)
+        finally:
+            self.sequence = consumer.sequence
 
     def recipe(self, name, scenario, expected=0, **values):
         assert set(values) <= set(self.rows[name]["inputs"]), (name, "undeclared supplied inputs", set(values) - set(self.rows[name]["inputs"]))
@@ -394,10 +418,12 @@ def inline_attempt(f, *, name="inline", empty=False):
                  ROW_FILE=f.data(name + "-claim.json", claim))
         claims.append(claim)
     source = f.investigator_report(b, reference, claims)
+    source.write_bytes(source.read_bytes() + b"\n\n\n")
     f.recipe("land-report", "land the complete inline report before checking identity",
              REPORT_ID=b["report_id"], REPORT_BODY_FILE=source)
     report = Path(b["report_path"])
-    assert report.read_bytes() == source.read_bytes()
+    assert report.read_bytes() == source.read_bytes().rstrip(b"\n") + b"\n"
+    assert report.read_bytes() != source.read_bytes()
     f.recipe("check-identity", "compare headers with the independently held reference",
              REPORT_PATH=report, REFERENCE_FILE=reference_file)
     claim_rows = rows(f.store / "_work/recipes/task-claims.jsonl")
@@ -406,7 +432,7 @@ def inline_attempt(f, *, name="inline", empty=False):
     assert {row["producer_role"] for row in claim_rows} <= {"researcher"}
     assert not (f.store / "_work/recipes/spec-dispatch.json").exists()
     f.recipe("land-report", "retry cannot overwrite the original report", expected=4)
-    assert report.read_bytes() == source.read_bytes()
+    assert report.read_bytes() == source.read_bytes().rstrip(b"\n") + b"\n"
     return b, reference, report
 
 
@@ -556,8 +582,15 @@ def exercise_full(f):
         f.recipe("investigator-bindings", "declare ordinary full-wave placement for " + inv["id"], PACKET_ID=packet_id,
                  INVESTIGATION_ID=inv["id"], QUESTION=inv["question"], COMPLEXITY=inv["complexity"],
                  REPORT_ID="full-" + inv["id"], EXECUTION_ROOT="", BINDINGS_FILE=bindings_dir / (inv["id"] + ".json"))
-    model = f.recipe("resolve-role-model", "resolve the configured investigation model", ROLE="researcher", CEREMONY="spec").stdout.decode().strip()
-    assert model == "gpt-6-astra"
+    settings_path = f.root / "data/config/settings.json"
+    settings = json.loads(settings_path.read_text())
+    settings["harnesses"]["claude-code"] = {"roles": {"lead": "opus", "researcher": "opus", "default": "opus"}}
+    settings["harnesses"]["codex"]["ceremony_roles"] = {"spec": {"researcher": "gpt-6-astra-high"}}
+    settings_path.write_text(json.dumps(settings))
+    f.env["LORE_FRAMEWORK"] = "claude-code"
+    model = f.recipe("resolve-role-model", "resolve target Codex while the active lead is Claude",
+                     ROLE="researcher", CEREMONY="spec", TARGET_FRAMEWORK="codex").stdout.decode().strip()
+    assert model == "gpt-6-astra-high"
     draft = f.data("investigations-draft.json", document)
     declared = f.root / "investigations.json"
     f.recipe("declare-dispatch", "full mode explicitly selects ordinary sessions", INVESTIGATIONS_DRAFT=draft,
@@ -565,6 +598,12 @@ def exercise_full(f):
     shaped = json.loads(declared.read_text())
     assert all(inv["dispatch"]["route"] == "session" and inv["dispatch"]["bindings"]["execution_root"] is None
                for inv in shaped["investigations"])
+    assert all(inv["dispatch"]["model"] == model for inv in shaped["investigations"])
+    f.recipe("declare-dispatch", "negative input substitutes the incompatible active-framework model", MODEL="opus")
+    refused = f.recipe("spec-open", "the active Claude model is not a target Codex binding", expected=1)
+    assert b"model" in (refused.stdout + refused.stderr).lower()
+    assert not (item / "spec-dispatch.json").exists()
+    f.recipe("declare-dispatch", "carry the resolver's emitted binding unchanged", MODEL=model)
     opened = json.loads(f.recipe("spec-open", "prepare the full wave with both fixed questions").stdout)
     assert opened["status"] == "created" and len(opened["directives"]) == 3
     frozen = (item / "spec-dispatch.json").read_bytes()
@@ -581,7 +620,10 @@ def exercise_full(f):
         f.recipe("directive-context", "retain admitted full-wave context " + name, DISPATCH_JSON=dispatch_file,
                  INVESTIGATION_ID=name, CONTEXT_FILE=context_file, REFERENCE_FILE=f.root / (name + "-pending-reference.json"))
         f.recipe("session-reference", "an unlaunched preparation has no published reference", expected=1, CONTEXT_FILE=context_file)
-        queued = enqueue(f, context_file)
+        queued = enqueue(f, context_file, framework=payload["framework"], model=payload["model"])
+        assert queued["model"] == model
+        f.connection("target model", producer="resolve-role-model", consumer="declare-dispatch -> spec-open -> request-session",
+                     value=model, actor="spec-lead", attempt=payload["bindings"]["dispatch_attempt_id"])
         selected = host_reference(f, context_file)
         assert selected["bindings"]["report_id"] == payload["bindings"]["report_id"]
         reports.append(collect_external_report(f, selected, name))
@@ -617,7 +659,7 @@ def exercise_full(f):
         name = newer["investigation_id"]
         context_file = f.root / (name + "-followup-context.json")
         f.recipe("directive-context", "read the freshly prepared continuation context", INVESTIGATION_ID=name, CONTEXT_FILE=context_file)
-        enqueue(f, context_file)
+        enqueue(f, context_file, framework=directive["payload"]["framework"], model=directive["payload"]["model"])
         followup_selected = host_reference(f, context_file)
         collect_external_report(f, followup_selected, name + "-followup")
     assert all(Path(path).read_bytes() == raw for path, raw in old_reports.items())
@@ -637,8 +679,11 @@ def exercise_native(f):
     settings = json.loads(settings_path.read_text())
     settings["harnesses"]["codex"]["roles"]["researcher"] = "gpt-6-astra-high"
     settings_path.write_text(json.dumps(settings))
+    model = f.recipe("resolve-role-model", "resolve the native model and effort before declaration", ROLE="researcher",
+                     CEREMONY="spec", TARGET_FRAMEWORK="codex").stdout.decode().strip()
+    assert model == "gpt-6-astra-high"
     f.recipe("declare-dispatch", "native opt-in leaves the existing open default intact", INVESTIGATIONS_DRAFT=draft,
-             BINDINGS_DIR="", TARGET_FRAMEWORK="codex", MODEL="gpt-6-astra-high", INVESTIGATIONS_JSON=declared)
+             BINDINGS_DIR="", TARGET_FRAMEWORK="codex", MODEL=model, INVESTIGATIONS_JSON=declared)
     opened = json.loads(f.recipe("spec-open", "prepare native input without invoking a live tool").stdout)
     for directive in opened["directives"]:
         packet_id = directive["payload"]["bindings"]["packet_id"]
@@ -727,8 +772,25 @@ def exercise_designer(f):
     enqueue(f, context)
     selected = host_reference(f, context)
     assert selected["producer"]["template_id"] == "position/designer/codex"
-    # This is the declared external designer response, not an invented writer row.
-    authored_plan(f, item)
+    # Only the sections delivered to the abstract author may enter this response.
+    wrapper = Path(f.values["SUFFIX_FILE"]).read_text()
+    owned = wrapper.split("sections your stage owns:", 1)[1].split("for abstract", 1)[0]
+    assert "Intent Anchor" in owned, "abstract wrapper omitted its publication prerequisite"
+    anchor = abstract_input["anchor"]
+    assert anchor == json.loads((item / "_meta.json").read_text())["intent_anchor"]
+    abstract = ("# Recipe behavior\n## Goal\nKeep source history inspectable.\n"
+                "## Narrative\nThe investigation grounds this design.\n"
+                "## Design Decisions\n### D1: Preserve history\n"
+                "**Decision:** Retain source and report identity.\n"
+                "**Rationale:** A later reader can recover the source-history basis.\n"
+                "## Architecture Diagram\n```text\nsource -> report -> plan\n```\n")
+    (item / "plan.md").write_text(abstract)
+    refused = f.recipe("publish-revision", "an anchor-less fresh abstract cannot publish", expected=1,
+                       REASON="Attempt the incomplete abstract response.", AUTHOR_ROLE="spec-lead")
+    assert b"anchor" in (refused.stdout + refused.stderr).lower()
+    assert not (item / "revisions.jsonl").exists() and not (item / "reviews").exists()
+    abstract += "## Intent Anchor\n" + anchor + "\n\n**Scope delta:** none — anchor preserved unchanged\n"
+    (item / "plan.md").write_text(abstract)
     published = json.loads(f.recipe("publish-revision", "publish the abstract before its design gate",
                                    REASON="Record the independently authored abstract design.", AUTHOR_ROLE="spec-lead").stdout)
     abstract_revision = published["revision_id"]
@@ -736,6 +798,9 @@ def exercise_designer(f):
     snapshot = item / "revisions" / abstract_revision / "plan.md"
     assert snapshot.read_bytes() == (item / "plan.md").read_bytes()
     assert not json.loads((item / "tasks.json").read_text()).get("tasks")
+    f.connection("fresh abstract anchor", producer="designer-assignment.anchor and author-wrapper owned sections",
+                 consumer="publish-revision", value=anchor, actor="planning-designer", revision=abstract_revision,
+                 attempt=abstract_binding["dispatch_attempt_id"])
     note = f.root / "accepted-design.md"
     note.write_text("Fixture coordinator read the whole abstract revision " + abstract_revision + " and accepts the design.\n")
     f.recipe("work-note", "seat acceptance is recorded separately from the designer output", NOTE_FILE=note)
@@ -803,6 +868,70 @@ def exercise_designer(f):
     f.finish({"investigator-packet", "packet-synthesis", "investigator-bindings", "compile-position", "author-wrapper", "prepare-session",
               "request-session", "session-reference", "land-report", "check-identity", "typed-completion", "designer-assignment",
               "designer-packet", "designer-bindings", "publish-revision", "work-note", "plan-decision", "bind-attempt", "read-payload"})
+
+
+def exercise_consultation(f):
+    item = f.create_item()
+    authored_plan(f, item, concrete=True)
+    revision = json.loads(f.recipe("publish-revision", "publish the requesting worker's real task",
+                                  REASON="Prepare a task-domain consultation.", AUTHOR_ROLE="spec-lead").stdout)["revision_id"]
+    opened = json.loads(f.lore("impl", "open", "recipes", "--all", "--compiled-positions", "--json").stdout)
+    task = next(row for row in opened["manifest"] if row["op"] == "TaskCreate")
+    worker = task["position_binding_inputs"]
+    assert worker["task_id"] == "task-1" and worker["revision_id"] == revision
+    impl = lambda name, scenario, **values: f.external("implement", "implement", name, scenario, **values)
+    packet = json.loads(impl("designer-packet", "build the consultation packet through the existing implement handoff",
+                            DOMAIN="storage", QUESTION="Where is the committed source?", SCALE_SET="implementation").stdout)
+    packet_id = packet["packet_id"]
+    impl("synthesize-packet", "synthesize this consultation before binding", PACKET_ID=packet_id,
+         SYNTHESIS_FILE=f.data("consultation-synthesis.json", {"dropped": [], "added": []}))
+    request = f.root / "consultation-request.md"
+    request.write_text("## Consultation\nconsultation-id: storage-question\ndomain: storage\nreason: Locate committed source.\nquestion: Where is the committed source?\ntask: task-1\n")
+    binding_file = f.root / "consultation-bindings.json"
+    impl("designer-bindings", "worker identity is carried in the assignment with a session-scoped envelope",
+         REQUEST_FILE=request, ADVISOR_NAME="storage-advisor", WORKER_NAME=worker["task_id"], TASK_ID=worker["task_id"],
+         REVISION_ID=revision, EXECUTION_ROOT=f.code, BINDINGS_FILE=binding_file)
+    bindings = json.loads(binding_file.read_text())
+    assert bindings["mode"] == "consultation" and bindings["task_id"] is None and bindings["revision_id"] is None
+    assigned = json.loads(bindings["assignment"])
+    assert assigned["task_id"] == worker["task_id"] and assigned["revision_id"] == revision
+    assert assigned["request"] == request.read_text()
+    assert bindings["consultation_id"] == "storage-question" and bindings["domain"] == "storage"
+    impl("compile-position", "compile the consultation-specific producer", POSITION="designer", TARGET_FRAMEWORK="codex",
+         GUIDANCE_FILE=f.root / "consult-guidance.md", DESCRIPTOR_FILE=f.root / "consult-descriptor.json")
+    impl("author-wrapper", "read the actual consultation reply contract", SKILL_FILE=f.repo / "skills/implement/SKILL.md",
+         WRAPPER_FILE=f.root / "consult-wrapper.json", PREFIX_FILE=f.root / "consult-prefix.md", SUFFIX_FILE=f.root / "consult-suffix.md",
+         ROUTE="designer", WORK_TITLE="Recipe behavior", TEAM_NAME="", LEAD_NAME="", PLACEMENT_NOTE="Use the assigned root.", TIER2_EXTRACT_FILE="")
+    suffix = Path(f.values["SUFFIX_FILE"]).read_text()
+    assert "advisor-acknowledged: true" in suffix and "reply_destination" in suffix
+    reference = json.loads(impl("bind-attempt", "bind a fresh consultation attempt with its own packet",
+                                REQUIRED_BINDINGS="packet_id packet_pointer", NATIVE_MODEL="").stdout)
+    f.connection("task-domain commission", producer="implement designer-bindings", consumer="implement bind-attempt",
+                 value=packet_id, actor="implement-lead", revision=revision, attempt=bindings["dispatch_attempt_id"])
+    impl("synthesize-packet", "the worker packet remains a different identity", PACKET_ID=worker["packet_id"],
+         SYNTHESIS_FILE=f.data("worker-synthesis.json", {"dropped": [], "added": []}))
+    bad = dict(bindings, **{key: worker[key] for key in ("task_id", "revision_id", "packet_id", "packet_pointer")})
+    bad_file = f.data("wrong-task-packet.json", bad)
+    failure = impl("bind-attempt", "a worker packet cannot supply a fresh designer attempt", expected=1, BINDINGS_FILE=bad_file)
+    assert b"dispatch_attempt_id mismatch" in failure.stdout + failure.stderr
+    f.values["BINDINGS_FILE"] = binding_file
+    manifest = json.loads(Path(reference["manifest_path"]).read_text())
+    version = manifest["producer"]["template_version"]
+    reply = Path(bindings["reply_destination"])
+    reply.parent.mkdir(parents=True, exist_ok=True)
+    reply.write_text("**Revision:** " + revision + "\n**Decisions:** Preserve history.\n")
+    impl("check-reply", "a planning record cannot substitute for a consultation reply", expected=1,
+         REPLY_FILE=reply, CONSULTATION_ID=bindings["consultation_id"], DESIGNER_TEMPLATE_VERSION=version)
+    reply.write_text(f"consultation-id: {bindings['consultation_id']}\nhandler: agent\nadvisor_template_version: {version}\nadvisor-acknowledged: true\n**Domain:** storage\n**Guidance:** Read tracked in the assigned root.\n**Key files:**\n- {f.code / 'tracked'}\n")
+    impl("check-reply", "the reply joins the actual consultation identity")
+    impl("consult-log", "file the acknowledged reply through the canonical consultation writer", HANDLER="agent",
+         QUESTION="Where is the committed source?", ANSWER=reply.read_text(), SKILL_TEMPLATE_VERSION="",
+         ADVISOR_TEMPLATE_VERSION=version, MANIFEST_PATH=reference["manifest_path"], MANIFEST_SHA256=reference["manifest_sha256"],
+         LEAD_TEMPLATE_VERSION=digest((f.repo / "skills/implement/SKILL.md").read_bytes())[:12])
+    transcript = rows(item / "consultation-transcript.jsonl")
+    assert len(transcript) == 1 and transcript[0]["consultation_id"] == bindings["consultation_id"]
+    f.values["SKILL_FILE"] = f.repo / "skills/spec/SKILL.md"
+    f.finish({"publish-revision"})
 
 
 def review_inputs(f, name, *, outcome="completed", verdict="PASS", reason=None, evaluator="spec-lead"):
@@ -1029,7 +1158,7 @@ def merge_coverage(source, paths, destination):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenario", required=True, choices=("inventory", "coverage", "synthesis", "entry", "inline", "full", "native", "designer", "reviews", "finalize", "stewardship"))
+    parser.add_argument("--scenario", required=True, choices=("inventory", "coverage", "synthesis", "entry", "inline", "full", "native", "designer", "consultation", "reviews", "finalize", "stewardship"))
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--prose-ref")
     parser.add_argument("--source", type=Path)
@@ -1041,9 +1170,9 @@ def main():
         empty = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--scenario", "unknown", "--root", str(args.root / "empty-spec")], capture_output=True)
         assert empty.returncode == 2 and b"invalid choice" in empty.stderr
         assert not (args.root / "empty-spec").exists()
-    elif args.scenario in ("synthesis", "entry", "inline", "full", "native", "designer", "reviews", "finalize", "stewardship"):
+    elif args.scenario in ("synthesis", "entry", "inline", "full", "native", "designer", "consultation", "reviews", "finalize", "stewardship"):
         implementation = compose_source(Path(__file__).resolve().parents[2], args.root / "source", args.prose_ref)
-        {"synthesis": exercise_synthesis, "entry": exercise_entry, "inline": exercise_inline, "full": exercise_full, "native": exercise_native, "designer": exercise_designer, "reviews": exercise_reviews, "finalize": exercise_finalize, "stewardship": exercise_stewardship}[args.scenario](SpecFixture(implementation, args.root / "case"))
+        {"synthesis": exercise_synthesis, "entry": exercise_entry, "inline": exercise_inline, "full": exercise_full, "native": exercise_native, "designer": exercise_designer, "consultation": exercise_consultation, "reviews": exercise_reviews, "finalize": exercise_finalize, "stewardship": exercise_stewardship}[args.scenario](SpecFixture(implementation, args.root / "case"))
     elif args.scenario == "coverage":
         assert args.source, "coverage requires the exact spec source"
         args.root.mkdir(parents=True, exist_ok=True)
