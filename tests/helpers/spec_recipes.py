@@ -174,13 +174,80 @@ def synthesized_packet(f, recipe, *, role, **values):
     result = json.loads(f.recipe(recipe, "build fresh " + role + " packet", **values).stdout)
     packet_id = result["packet_id"]
     packet = json.loads(f.lore("packet", "show", packet_id, "--json").stdout)
-    assert packet["recipient_role"] == role
-    brief = f.root / (packet_id + "-brief")
-    dispositions = f.data(packet_id + "-dispositions.json", {"kept": [], "dropped": [], "added": []})
-    f.recipe("packet-synthesis", "record applicability before delivering " + role + " packet",
-             PACKET_ID=packet_id, DISPOSITIONS_FILE=dispositions, BRIEF_DIR=brief)
-    assert (brief / "packet-synthesis.md").is_file()
-    return packet_id, brief
+    assert packet["recipient_role"] == role and packet["delivery_stage"] == "assembled"
+    dispositions = f.data(packet_id + "-synthesis.json", {"dropped": [], "added": []})
+    f.recipe("packet-synthesis", "record explicit keep-all applicability before binding " + role,
+             PACKET_ID=packet_id, SYNTHESIS_FILE=dispositions)
+    latest = json.loads(f.lore("packet", "show", packet_id, "--json").stdout)
+    assert latest["delivery_stage"] == "synthesized" and latest["synthesis"]["by"] == "spec-lead"
+    assert latest["content"] == packet["content"]
+    delivered = f.data(packet_id + "-delivery.json", latest)
+    return packet_id, delivered
+
+
+def exercise_synthesis(f):
+    item = f.create_item()
+    assert set(f.rows["packet-synthesis"]["inputs"]) == {"PACKET_ID", "SYNTHESIS_FILE"}
+    entries = []
+    tokens = ("KEEP-BODY-CONTENT-5921", "DROP-BODY-CONTENT-5921")
+    for label, token in zip(("retained", "unneeded"), tokens):
+        before = knowledge_entries(f)
+        f.lore("capture", "--insight", "Source history synthesis " + label + " fixture convention.",
+               "--example", token + "\n### Nested example heading\n" + token + "-TAIL",
+               "--category", "conventions", "--scale", "implementation", "--producer-role", "spec-lead", "--work-item", "recipes")
+        created = knowledge_entries(f) - before
+        assert len(created) == 1
+        entries.append(created.pop())
+    packet = json.loads(f.recipe("investigator-packet", "assemble candidate source history before applicability",
+                                INVESTIGATION_ID="synthesis", QUERY="source history synthesis", SCALE_SET="implementation").stdout)
+    packet_id = packet["packet_id"]
+    candidate = json.loads(f.lore("packet", "show", packet_id, "--json").stdout)
+    assert candidate["delivery_stage"] == "assembled"
+    paths = [str(p.relative_to(f.store)) for p in entries]
+    assert set(paths) <= {e["path"] for e in candidate["delivered_entries"]}
+    assert all(token in candidate["content"] for token in tokens)
+    candidate_file = f.data("candidate-packet.json", candidate)
+    bindings_file = f.root / "synthesis-bindings.json"
+    f.recipe("investigator-bindings", "bind the candidate identity before testing its delivery stage",
+             PACKET_ID=packet_id, INVESTIGATION_ID="synthesis", QUESTION="Which source history conventions apply?",
+             COMPLEXITY="simple", REPORT_ID="synthesis-report", EXECUTION_ROOT="", BINDINGS_FILE=bindings_file)
+    failed = compile_and_wrap(f, bindings_file, position="investigator", route="session", expected=1)
+    assert b"synthesi" in (failed.stdout + failed.stderr).lower()
+    assert not (item / "position-dispatch").exists()
+    before = knowledge_entries(f)
+    f.lore("capture", "--insight", "An independent delivery boundary fixture convention.", "--example", "ADDED-BODY-CONTENT-5921",
+           "--category", "conventions", "--scale", "implementation", "--producer-role", "spec-lead", "--work-item", "recipes")
+    created = knowledge_entries(f) - before
+    assert len(created) == 1
+    added = str(created.pop().relative_to(f.store))
+    spec = f.data("synthesis-dispositions.json", {
+        "dropped": [{"path": paths[1], "reason": "This question needs only the retained source-history convention."}],
+        "added": [{"path": added, "reason": "Delivery identity is needed and was absent from the candidate set."}]})
+    f.recipe("packet-synthesis", "curate rendered delivery through the native writer before handoff", PACKET_ID=packet_id, SYNTHESIS_FILE=spec)
+    latest = json.loads(f.lore("packet", "show", packet_id, "--json").stdout)
+    assert latest["delivery_stage"] == "synthesized"
+    assert latest["synthesis"]["dropped"] == json.loads(spec.read_text())["dropped"]
+    assert latest["synthesis"]["added"] == json.loads(spec.read_text())["added"]
+    assert paths[1] not in {e["path"] for e in latest["delivered_entries"]}
+    assert tokens[0] in latest["content"] and "ADDED-BODY-CONTENT-5921" in latest["content"]
+    assert tokens[1] not in latest["content"] and tokens[1] + "-TAIL" not in latest["content"]
+    rendered = f.recipe("seat-packet-show", "the receiver renders the latest synthesized row", PACKET_ID=packet_id).stdout.decode()
+    assert tokens[0] in rendered and "ADDED-BODY-CONTENT-5921" in rendered and tokens[1] not in rendered
+    history = [row for row in rows(f.store / "_packets/packets.jsonl") if row["packet_id"] == packet_id]
+    assert [row["delivery_stage"] for row in history] == ["assembled", "synthesized"]
+    assert history[0] == json.loads(candidate_file.read_text())
+    work = json.loads(f.recipe("work-show", "projection retains one latest summary per packet identity").stdout)
+    summaries = [row for row in work["evidence"]["packet_summary"] if row["packet_id"] == packet_id]
+    assert len(summaries) == 1 and summaries[0]["delivery_stage"] == "synthesized"
+    assert summaries[0]["synthesis"] == latest["synthesis"] and summaries[0]["superseded_rows"] == 1
+    context = compile_and_wrap(f, bindings_file, position="investigator", route="session")
+    enqueue(f, context)
+    selected = host_reference(f, context)
+    collect_external_report(f, selected, "synthesized")
+    assert selected["bindings"]["packet_id"] == packet_id and selected["delivery_proven"] is False
+    f.finish({"investigator-packet", "packet-synthesis", "investigator-bindings", "compile-position", "author-wrapper",
+              "prepare-session", "seat-packet-show", "work-show", "request-session", "session-reference", "land-report",
+              "check-identity", "typed-completion"})
 
 
 def exercise_entry(f):
@@ -225,7 +292,34 @@ def exercise_entry(f):
         stream.write("\n## Strategy\nRetain every prior report verbatim.\n")
     assert json.loads(r("spec-start", "existing strategy remains available on resume").stdout)["strategy_present"]
     r("knowledge-search", "local investigation explicitly declares its retrieval scale", TOPIC="source history", SCALE_SET="implementation", LIMIT=5)
+    norm_inputs = [
+        ("conventions", "Source history fixtures retain the committed first line. INCLUDED-NORM-CONTENT-8271"),
+        ("preferences", "Visual layout fixtures use a compact margin. EXCLUDED-NORM-CONTENT-8271"),
+    ]
+    norm_paths = []
+    for category, insight in norm_inputs:
+        before = knowledge_entries(f)
+        f.lore("capture", "--insight", insight, "--category", category, "--scale", "implementation",
+               "--producer-role", "spec-lead", "--work-item", "recipes")
+        added = knowledge_entries(f) - before
+        assert len(added) == 1
+        norm_paths.append(added.pop())
     discovery = json.loads(r("spec-discover", "retain complete candidate coverage separately from applicability").stdout)
+    discovered_paths = {row["path"] for row in discovery["candidates"]}
+    assert {str(p.relative_to(f.store)) for p in norm_paths} <= discovered_paths
+    complete_discovery = f.data("complete-discovery.json", discovery)
+    full_manifest = f.data("full-permissive-norms.json", [str(p.relative_to(f.store)) for p in norm_paths])
+    # These are explicit authored applicability judgments, not search ranking.
+    applicability = f.data("norm-applicability.json", {
+        "kept": [{"path": str(norm_paths[0].relative_to(f.store)), "reason": "The task preserves committed source history."}],
+        "dropped": [{"path": str(norm_paths[1].relative_to(f.store)), "reason": "The task changes no visual layout."}], "added": []})
+    delivery = f.root / "knowledge-context.md"
+    delivery.write_text(norm_paths[0].read_text())
+    assert "INCLUDED-NORM-CONTENT-8271" in delivery.read_text()
+    assert "EXCLUDED-NORM-CONTENT-8271" not in delivery.read_text()
+    assert "EXCLUDED-NORM-CONTENT-8271" in norm_paths[1].read_text()
+    assert json.loads(complete_discovery.read_text()) == discovery
+    assert len(json.loads(full_manifest.read_text())) == 2 and json.loads(applicability.read_text())["dropped"]
     assert discovery["provenance"]["applicability_decided"] is False
     assert len(discovery["coverage"]) >= 9
     assert any(row["status"] == "missing" for row in discovery["coverage"])
@@ -238,7 +332,7 @@ def exercise_entry(f):
               "seat-packet-show", "work-show", "knowledge-search", "spec-discover"})
 
 
-def compile_and_wrap(f, bindings_file, *, position, route, model="", framework="codex"):
+def compile_and_wrap(f, bindings_file, *, position, route, model="", framework="codex", expected=0):
     b = json.loads(bindings_file.read_text())
     stem = b["dispatch_attempt_id"]
     f.recipe("compile-position", "compile the " + position + " for " + route,
@@ -250,8 +344,10 @@ def compile_and_wrap(f, bindings_file, *, position, route, model="", framework="
              PLACEMENT_NOTE="Read committed fixture source in the assigned physical root.")
     if b["execution_root"] is None:
         context = f.root / (stem + "-context.json")
-        f.recipe("prepare-session", "prepare the host-owned execution root without a launch claim",
-                 SESSION_SLUG="recipes--w1", CONTEXT_FILE=context)
+        result = f.recipe("prepare-session", "prepare the host-owned execution root without a launch claim", expected=expected,
+                          SESSION_SLUG="recipes--w1", CONTEXT_FILE=context)
+        if expected:
+            return result
         prepared = json.loads(context.read_text())["position_preparation"]
         assert prepared["bindings"]["execution_root"] is None
         assert not (f.store / "_work/recipes/position-dispatch" / stem).exists()
@@ -317,6 +413,22 @@ def exercise_inline(f):
     authored_plan(f, item)
     b, reference, report = inline_attempt(f)
     inline_attempt(f, name="inline-empty", empty=True)
+    before_capture = knowledge_entries(f)
+    producer_version = json.loads(Path(reference["manifest_path"]).read_text())["producer"]["template_version"]
+    captured = f.recipe("capture-observation", "capture the investigator finding when collected, with a separate seat filer",
+                        INSIGHT="The investigator observed that independently collected report identity remains separate from prepared model input.",
+                        SCALE="implementation", PRODUCER_ROLE="researcher", CAPTURER_ROLE="spec-lead",
+                        SOURCE_ARTIFACT_IDS=b["report_id"], TEMPLATE_VERSION=producer_version)
+    created = knowledge_entries(f) - before_capture
+    assert len(created) == 1
+    captured_text = next(iter(created)).read_text()
+    assert "producer_role: researcher" in captured_text and "capturer_role: spec-lead" in captured_text
+    assert "source_artifact_ids: " + b["report_id"] in captured_text
+    before_invalid = knowledge_entries(f)
+    rejected = f.recipe("capture-observation", "investigator-derived capture refuses missing source identity", expected=1,
+                        SOURCE_ARTIFACT_IDS="")
+    assert b"source" in (rejected.stdout + rejected.stderr).lower()
+    assert knowledge_entries(f) == before_invalid
     manifest = json.loads(Path(reference["manifest_path"]).read_text())
     lead_version = digest((f.repo / "skills/spec/SKILL.md").read_bytes())[:12]
     f.recipe("log-worker-leads", "worker leads preserve producer, filer and attempt reference",
@@ -359,6 +471,8 @@ def host_reference(f, context_file, *, framework="codex", root=None):
 
 
 def enqueue(f, context_file, *, framework="codex", model="gpt-6-astra", fixed=False):
+    # The declared fixture host remains live while these serial steps execute.
+    (f.store / "_sessions/instances/fixture.json").touch()
     result = f.recipe("request-session", "enqueue " + ("fixed" if fixed else "ordinary") + " prepared session",
                       SESSION_SLUG="recipes--w1", TARGET_FRAMEWORK=framework, MODEL=model, CONTEXT_FILE=context_file,
                       TARGET_INSTANCE="", MIN_VINTAGE="", WORKTREE_ID="fixture-worktree" if fixed else "",
@@ -396,7 +510,7 @@ def refuse_missing_placement(f, context_file):
            "inputs": declared, "exit_code": result.returncode, "output": str(output)})
 
 
-def land_designer_record(f, selected, revision, name):
+def land_designer_record(f, selected, revision, name, claim_id=None):
     reference, bindings = selected["reference"], selected["bindings"]
     manifest = json.loads(Path(reference["manifest_path"]).read_text())
     report = f.root / (name + "-design-record.md")
@@ -406,7 +520,8 @@ Position-dispatch-sha256: {reference['manifest_sha256']}
 **Revision:** {revision}
 **Decisions:** Preserve source and report history in the published plan.
 **Open questions:** None
-**Tier 2 evidence:** none
+**Tier 2 evidence:**
+{("- " + claim_id) if claim_id else "none"}
 """)
     f.recipe("land-report", "retain the independently commissioned designer's durable record", REPORT_BODY_FILE=report,
              REPORT_ID=bindings["report_id"])
@@ -471,6 +586,41 @@ def exercise_full(f):
     assert len(reports) == 3 and all(p.is_file() for p in reports)
     assert json.loads(f.recipe("spec-open", "collection does not rewrite full-wave preparation").stdout)["directives"] == opened["directives"]
     assert (item / "spec-dispatch.json").read_bytes() == frozen
+    old_reports = {str(p): p.read_bytes() for p in reports}
+    old_bundles = tree_hashes(item / "position-dispatch")
+    followup = document["investigations"][-1]
+    followup["question"] += " Which prior source fact needs a targeted follow-up?"
+    packet_id, _ = synthesized_packet(f, "investigator-packet", role="investigator", INVESTIGATION_ID=followup["id"],
+                                      QUERY=followup["question"], SCALE_SET="implementation")
+    f.recipe("investigator-bindings", "targeted follow-up receives a fresh report and attempt", PACKET_ID=packet_id,
+             INVESTIGATION_ID=followup["id"], QUESTION=followup["question"], COMPLEXITY=followup["complexity"],
+             REPORT_ID="full-code-followup", EXECUTION_ROOT="", BINDINGS_FILE=bindings_dir / "code.json")
+    draft.write_text(json.dumps(document))
+    f.recipe("declare-dispatch", "declare the changed question with its new identities")
+    refused = f.recipe("spec-open", "a changed wave cannot reuse already-published session attempts", expected=1)
+    assert b"published session differs from admitted content" in refused.stderr
+    assert (item / "spec-dispatch.json").read_bytes() == frozen
+    for inv in document["investigations"][:2]:
+        packet_id, _ = synthesized_packet(f, "investigator-packet", role="investigator", INVESTIGATION_ID=inv["id"],
+                                          QUERY=inv["question"], SCALE_SET="implementation")
+        f.recipe("investigator-bindings", "the retained fixed question also gets a fresh wave attempt", PACKET_ID=packet_id,
+                 INVESTIGATION_ID=inv["id"], QUESTION=inv["question"], COMPLEXITY=inv["complexity"],
+                 REPORT_ID="full-" + inv["id"] + "-followup", EXECUTION_ROOT="", BINDINGS_FILE=bindings_dir / (inv["id"] + ".json"))
+    f.recipe("declare-dispatch", "declare fresh attempts for the complete follow-up wave")
+    retried = json.loads(f.recipe("spec-open", "prepare the follow-up wave without relabeling prior reports").stdout)
+    dispatch_file.write_text(json.dumps(retried))
+    for previous, directive in zip(opened["directives"], retried["directives"]):
+        newer = directive["payload"]
+        assert newer["bindings"]["dispatch_attempt_id"] != previous["payload"]["bindings"]["dispatch_attempt_id"]
+        name = newer["investigation_id"]
+        context_file = f.root / (name + "-followup-context.json")
+        f.recipe("directive-context", "read the freshly prepared continuation context", INVESTIGATION_ID=name, CONTEXT_FILE=context_file)
+        enqueue(f, context_file)
+        followup_selected = host_reference(f, context_file)
+        collect_external_report(f, followup_selected, name + "-followup")
+    assert all(Path(path).read_bytes() == raw for path, raw in old_reports.items())
+    current_bundles = tree_hashes(item / "position-dispatch")
+    assert all(current_bundles[path] == value for path, value in old_bundles.items())
     f.finish({"investigator-packet", "packet-synthesis", "investigator-bindings", "resolve-role-model", "declare-dispatch",
               "spec-open", "directive-context", "request-session", "session-reference", "land-report", "check-identity", "typed-completion"})
 
@@ -488,6 +638,10 @@ def exercise_native(f):
     f.recipe("declare-dispatch", "native opt-in leaves the existing open default intact", INVESTIGATIONS_DRAFT=draft,
              BINDINGS_DIR="", TARGET_FRAMEWORK="codex", MODEL="gpt-6-astra-high", INVESTIGATIONS_JSON=declared)
     opened = json.loads(f.recipe("spec-open", "prepare native input without invoking a live tool").stdout)
+    for directive in opened["directives"]:
+        packet_id = directive["payload"]["bindings"]["packet_id"]
+        bound_packet = json.loads(f.lore("packet", "show", packet_id, "--json").stdout)
+        assert bound_packet["delivery_stage"] == "assembled" and bound_packet["synthesis_waiver"]
     payload = opened["directives"][-1]["payload"]
     ref = payload["position_dispatch"]
     native = json.loads(f.recipe("native-input", "retain exact native model, effort and prompt fields",
@@ -588,7 +742,11 @@ def exercise_designer(f):
     f.recipe("designer-assignment", "concrete planning refuses an absent accepted revision", expected=1,
              STAGE="concrete", ACCEPTED_REVISION="", DISPOSITIONS_FILE=disposition, ASSIGNMENT_FILE=continuation)
     f.recipe("designer-assignment", "concrete continuation names the accepted revision and dispositions", ACCEPTED_REVISION=abstract_revision)
+    continuation_input = json.loads(continuation.read_text())
     assert abstract_revision in continuation.read_text()
+    assert str(snapshot) in continuation_input.values(), "the assignment must name the exact frozen accepted plan"
+    accepted_dispositions = json.loads(disposition.read_text())
+    assert accepted_dispositions in continuation_input.values(), "mutable dispositions must be embedded in the bound assignment"
     next_packet, _ = synthesized_packet(f, "designer-packet", role="designer", TOPIC="source history concrete plan", SCALE_SET="subsystem")
     assert next_packet != packet_id
     next_bindings = f.root / "concrete-bindings.json"
@@ -604,6 +762,12 @@ def exercise_designer(f):
     enqueue(f, fixed_context, fixed=True)
     concrete_selected = host_reference(f, fixed_context)
     assert concrete_selected["reference"] == reference
+    disposition.write_text(json.dumps({"changed_after_binding": "MUTABLE-DISPOSITIONS-DRIFT-4819"}))
+    retained = f.recipe("read-payload", "the accepted continuation retains dispositions despite input-file drift", REFERENCE_FILE=ref_file).stdout
+    frozen_assignment = json.loads(json.loads(Path(reference["manifest_path"]).read_text())["bindings"]["assignment"])
+    assert accepted_dispositions in frozen_assignment.values()
+    assert b"MUTABLE-DISPOSITIONS-DRIFT-4819" not in retained
+    assert str(snapshot).encode() in retained
     authored_plan(f, item, concrete=True)
     concrete_revision = json.loads(f.recipe("publish-revision", "concrete tasks publish after the accepted abstract").stdout)["revision_id"]
     assert concrete_revision != abstract_revision
@@ -620,6 +784,15 @@ def exercise_designer(f):
     local_ref = compile_and_wrap(f, Path(f.values["BINDINGS_FILE"]), position="designer", route="inline")
     actual = f.recipe("read-payload", "short mode reads the compiled planning designer", REFERENCE_FILE=local_ref).stdout
     assert b"planning" in actual and abstract_revision.encode() in actual
+    inline_bindings = json.loads(Path(f.values["BINDINGS_FILE"]).read_text())
+    inline_reference = json.loads(local_ref.read_text())
+    claim = f.investigator_claim(inline_bindings, inline_reference, "short-design-source", producer="spec-lead")
+    claim["task_id"] = "spec-synthesis"
+    row_file = f.data("short-design-source.json", claim)
+    f.recipe("append-tier2", "seat-authored short design retains spec-lead attribution", ROW_FILE=row_file)
+    recorded = rows(item / "task-claims.jsonl")
+    assert [row["producer_role"] for row in recorded if row["claim_id"] == claim["claim_id"]] == ["spec-lead"]
+    land_designer_record(f, {"reference": inline_reference, "bindings": inline_bindings}, concrete_revision, "short", claim["claim_id"])
     f.finish({"investigator-packet", "packet-synthesis", "investigator-bindings", "compile-position", "author-wrapper", "prepare-session",
               "request-session", "session-reference", "land-report", "check-identity", "typed-completion", "designer-assignment",
               "designer-packet", "designer-bindings", "publish-revision", "work-note", "plan-decision", "bind-attempt", "read-payload"})
@@ -729,13 +902,20 @@ def exercise_finalize(f):
     registry = f.store / "_sessions/instances/fixture.json"
     registry.write_text(json.dumps({"name": "fixture", "project_dir": str(f.code), "sessions": [
         {"slug": "recipes", "type": "spec", "request_id": "fixture-spawn-request"}]}))
-    f.recipe("journal-step", "unhosted milestone is a silent no-op", STEP_ID="spec:investigation", STEP_LABEL="Investigation complete")
+    session_before = tree_hashes(f.store / "_sessions")
+    f.recipe("journal-step", "unhosted milestone invokes no session writer", STEP_ID="spec:investigation", STEP_LABEL="Investigation complete")
+    assert tree_hashes(f.store / "_sessions") == session_before
     f.env.update(LORE_SESSION_INSTANCE="fixture", LORE_SESSION_SLUG="recipes", LORE_SESSION_TYPE="spec")
     for step, label in (("investigation", "Investigation complete"), ("design", "Design complete"), ("plan-ready", "Plan ready")):
         f.recipe("journal-step", "journal the durable " + step + " milestone", STEP_ID="spec:" + step, STEP_LABEL=label)
         before = tree_hashes(f.store / "_sessions")
         f.recipe("journal-step", "identical milestone replay is idempotent")
         assert tree_hashes(f.store / "_sessions") == before
+    events = rows(f.store / "_sessions/events.jsonl")
+    assert [row["step_id"] for row in events if row["event"] == "step_completed"] == [
+        "spec:investigation", "spec:design", "spec:plan-ready"]
+    assert all(row["slug"] == "recipes" and row["session_type"] == "spec" for row in events if row["event"] == "step_completed")
+    assert not any(row["event"] == "close_requested" for row in events)
     registry_bytes = registry.read_bytes()
     registry.unlink()
     warned = f.recipe("journal-step", "milestone failure warns without rolling back the plan", STEP_ID="spec:warning", STEP_LABEL="Warning fixture")
@@ -752,6 +932,11 @@ def exercise_finalize(f):
     (item / "plan.md").write_text(original)
     f.recipe("spec-finalize", "successful finalization publishes the authored current revision")
     first_revision = json.loads((item / "tasks.json").read_text())["revision_id"]
+    events = rows(f.store / "_sessions/events.jsonl")
+    assert [row["event"] for row in events if row["event"] in ("step_completed", "close_requested")] == [
+        "step_completed", "step_completed", "step_completed", "close_requested"]
+    assert next(row for row in events if row["event"] == "close_requested")["reason"] == "protocol_terminus"
+    assert rows(f.store / "_scorecards/rows.jsonl") != telemetry_before
     f.recipe("spec-finalize", "unchanged finalization retains the existing revision")
     assert json.loads((item / "tasks.json").read_text())["revision_id"] == first_revision
     authored_plan(f, item, concrete=True, retrieval="legacy")
@@ -835,7 +1020,7 @@ def merge_coverage(source, paths, destination):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenario", required=True, choices=("inventory", "coverage", "entry", "inline", "full", "native", "designer", "reviews", "finalize", "stewardship"))
+    parser.add_argument("--scenario", required=True, choices=("inventory", "coverage", "synthesis", "entry", "inline", "full", "native", "designer", "reviews", "finalize", "stewardship"))
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--prose-ref")
     parser.add_argument("--source", type=Path)
@@ -847,13 +1032,25 @@ def main():
         empty = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--scenario", "unknown", "--root", str(args.root / "empty-spec")], capture_output=True)
         assert empty.returncode == 2 and b"invalid choice" in empty.stderr
         assert not (args.root / "empty-spec").exists()
-    elif args.scenario in ("entry", "inline", "full", "native", "designer", "reviews", "finalize", "stewardship"):
+    elif args.scenario in ("synthesis", "entry", "inline", "full", "native", "designer", "reviews", "finalize", "stewardship"):
         implementation = compose_source(Path(__file__).resolve().parents[2], args.root / "source", args.prose_ref)
-        {"entry": exercise_entry, "inline": exercise_inline, "full": exercise_full, "native": exercise_native, "designer": exercise_designer, "reviews": exercise_reviews, "finalize": exercise_finalize, "stewardship": exercise_stewardship}[args.scenario](SpecFixture(implementation, args.root / "case"))
+        {"synthesis": exercise_synthesis, "entry": exercise_entry, "inline": exercise_inline, "full": exercise_full, "native": exercise_native, "designer": exercise_designer, "reviews": exercise_reviews, "finalize": exercise_finalize, "stewardship": exercise_stewardship}[args.scenario](SpecFixture(implementation, args.root / "case"))
     elif args.scenario == "coverage":
         assert args.source, "coverage requires the exact spec source"
         args.root.mkdir(parents=True, exist_ok=True)
         merge_coverage(args.source, args.inventories, args.root / "inventory.json")
+        changed = args.root / "changed-current-spec.md"
+        changed.write_bytes(args.source.read_bytes() + b"\nChanged current protocol input.\n")
+        for source, paths, reason in ((changed, args.inventories, "scenario source changed"),
+                                      (args.source, [], "empty coverage selection")):
+            try:
+                merge_coverage(source, paths, args.root / "negative-inventory.json")
+            except AssertionError as exc:
+                assert reason in str(exc), str(exc)
+            else:
+                raise AssertionError("aggregate admitted " + reason)
+        assert not (args.root / "negative-inventory.json").exists()
+        print("Current-source aggregate rejects changed protocol bytes and empty selection")
 
 
 if __name__ == "__main__":

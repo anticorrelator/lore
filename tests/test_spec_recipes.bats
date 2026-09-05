@@ -29,6 +29,11 @@ spec_scenario() {
   [[ "$output" == *"All three namespaces"* ]]
 }
 
+@test "spec synthesis recipes curate rendered delivery before binding and project one latest packet" {
+  run spec_scenario synthesis
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
 @test "spec entry recipes preserve standalone ordering, seat packets and resume states" {
   run spec_scenario entry
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
@@ -73,11 +78,16 @@ spec_scenario() {
   local output_root="${SPEC_RECIPE_OUTPUT_ROOT:-$BATS_SUITE_TMPDIR/spec-recipes}"
   local inventories=()
   local scenario
-  for scenario in entry inline full native designer reviews finalize stewardship; do
+  for scenario in synthesis entry inline full native designer reviews finalize stewardship; do
     inventories+=("$output_root/$scenario/case/inventory.json")
   done
+  local current_source="$REPO_DIR/skills/spec/SKILL.md"
+  if [ -n "${SPEC_RECIPE_PROSE_REF:-}" ]; then
+    current_source="$CASE_ROOT/current-spec.md"
+    git -C "$REPO_DIR" show "$SPEC_RECIPE_PROSE_REF:skills/spec/SKILL.md" > "$current_source"
+  fi
   run python3 "$REPO_DIR/tests/helpers/spec_recipes.py" --scenario coverage \
-    --root "$output_root/coverage" --source "$output_root/entry/source/skills/spec/SKILL.md" \
+    --root "$output_root/coverage" --source "$current_source" \
     --inventories "${inventories[@]}"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
