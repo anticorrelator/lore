@@ -27,7 +27,7 @@ import yaml
 
 original, temporary, scenario = sys.argv[1:]
 original, temporary = Path(original).resolve(), Path(temporary).resolve()
-if os.environ.get('POSITION_DISPATCH_FIXTURES') and scenario in ('native', 'session', 'launch', 'native-selection', 'spec', 'spec-native', 'implement-envelope'):
+if os.environ.get('POSITION_DISPATCH_FIXTURES') and scenario in ('native', 'session', 'launch', 'native-selection', 'spec', 'spec-native', 'spec-session', 'implement-envelope'):
     temporary = Path(os.environ['POSITION_DISPATCH_FIXTURES']).resolve() / scenario
     temporary.mkdir(parents=True, exist_ok=False)
 repo, home = temporary / 'checkout', temporary / 'home'
@@ -145,6 +145,45 @@ def request(b, position='worker', framework='codex', extra=None, flags=(), ok=Tr
 
 def pending():
     return list((store / '_sessions/requests/pending').glob('*.json'))
+
+def spec_sessions(frameworks):
+    document = {'schema_version': 1, 'track': 'full', 'investigations': [
+        {'id': 'external', 'kind': 'fixed', 'question': 'External skill and agent applicability', 'complexity': 'simple', 'prefetch': []},
+        {'id': 'preferences', 'kind': 'fixed', 'question': 'Preferences and conventions applicability', 'complexity': 'simple', 'prefetch': []},
+        {'id': 'code', 'kind': 'lead-authored', 'question': 'Which fixture bytes exist?', 'complexity': 'moderate', 'prefetch': []}]}
+    for inv, framework in zip(document['investigations'], frameworks):
+        b = unbound_fixture('investigator', 'spec-ordinary-' + inv['id'])
+        b['assignment'] = json.dumps({'investigation_id': inv['id'], 'question': inv['question'], 'complexity': inv['complexity']})
+        b['report_path'] = str(item / 'worker-reports' / (b['report_id'] + '.md'))
+        b['execution_root'] = None
+        b['absence_reasons']['execution_root'] = 'The ordinary session host supplies its physical worktree.'
+        inv['dispatch'] = {'framework': framework, 'route': 'session', 'model': 'opus' if framework == 'claude-code' else 'research-model' if framework == 'codex' else 'anthropic/opus', 'bindings': b}
+    source = temporary / 'ordinary-investigations.json'
+    source.write_text(json.dumps(document))
+    args = ['bash', str(repo / 'scripts/spec-open.sh'), 'fixture', '--investigations', str(source), '--json']
+    opened = json.loads(call(args).stdout)
+    examples = []
+    for inv, directive in zip(document['investigations'], opened['directives']):
+        payload = directive['payload']
+        context = payload['session_context']
+        assert payload['publication_state'] == 'pending-execution-root'
+        assert payload['prompt'] is payload['position_dispatch'] is payload['completion_input'] is None
+        assert context['position_preparation']['bindings']['execution_root'] is None
+        assert not (item / 'position-dispatch' / payload['bindings']['dispatch_attempt_id']).exists()
+        context_path = temporary / ('ordinary-context-' + inv['id'] + '.json')
+        context_path.write_text(json.dumps(context))
+        (instances / 'fixture.json').touch()
+        result = json.loads(call(['bash', str(repo / 'scripts/session-request.sh'), '--type', 'worker', '--slug', 'fixture--w1',
+                                 '--anywhere', '--framework', payload['framework'], '--model', payload['model'],
+                                 '--context', str(context_path), '--kdir', str(store), '--json']).stdout)
+        row_path = store / result['path']
+        row = json.loads(row_path.read_bytes())
+        assert row['extra_context'] == context
+        assert row['placement_stance'] == 'required_dir' and row['required_project_dir'] == str(repo)
+        assert not {'execution_dir', 'worktree_id'} & row.keys()
+        examples.append({'position': 'investigator', 'framework': payload['framework'], 'mode': 'spec-' + inv['id'],
+                         'queue_path': str(row_path), 'kdir': str(store), 'payload': payload})
+    return args, document, opened, examples
 
 if scenario == 'implement-envelope':
     assert item == temporary/'home/.lore/_work/fixture'
@@ -331,6 +370,96 @@ The packet premise needs a scoped correction; the report retains that finding.
         spec_open(conflicting,ok=False)
     (temporary/'spec-examples.json').write_text(json.dumps(examples,indent=2)+'\n')
     print('spec compiled bytes, original replay, fresh retries, legacy input, bound sessions and identity refusals checked')
+
+elif scenario == 'spec-claims':
+    call(['git', 'init', '-q'])
+    call(['git', 'config', 'user.name', 'Fixture'])
+    call(['git', 'config', 'user.email', 'fixture@example.invalid'])
+    (repo / 'fixture.txt').write_text('grounded fixture bytes\n')
+    call(['git', 'add', 'fixture.txt']); call(['git', 'commit', '-qm', 'Fixture source'])
+    sha = call(['git', 'rev-parse', 'HEAD']).stdout.decode().strip()
+    document = {'schema_version': 1, 'track': 'full', 'investigations': [
+        {'id': 'external', 'kind': 'fixed', 'question': 'External skill and agent applicability', 'complexity': 'simple', 'prefetch': []},
+        {'id': 'preferences', 'kind': 'fixed', 'question': 'Preferences and conventions applicability', 'complexity': 'simple', 'prefetch': []}]}
+    for inv in document['investigations']:
+        b = fixture('investigator', 'grounded-' + inv['id'])
+        b['assignment'] = json.dumps({'investigation_id': inv['id'], 'question': inv['question'], 'complexity': inv['complexity']})
+        b['report_path'] = str(item / 'worker-reports' / (b['report_id'] + '.md'))
+        inv['dispatch'] = {'framework': 'codex', 'route': 'session', 'model': 'research-model', 'bindings': b}
+    source = temporary / 'grounded-investigations.json'; source.write_text(json.dumps(document))
+    opened = json.loads(call(['bash', str(repo / 'scripts/spec-open.sh'), 'fixture', '--investigations', str(source), '--json']).stdout)
+    from snippet_normalize import hash_normalized
+    for inv, directive in zip(document['investigations'], opened['directives']):
+        payload = directive['payload']; b = payload['bindings']; ref = payload['position_dispatch']
+        correct = inv['id'] == 'preferences'
+        row = {'claim_id': 'claim-' + inv['id'], 'tier': 'task-evidence', 'claim': 'The fixture contains grounded fixture bytes.',
+               'producer_role': 'researcher', 'protocol_slot': 'spec', 'task_id': b['task_id'] if correct else inv['id'],
+               'scale': 'implementation', 'file': str(repo / 'fixture.txt'), 'line_range': '1-1',
+               'exact_snippet': 'grounded fixture bytes', 'normalized_snippet_hash': hash_normalized('grounded fixture bytes'),
+               'falsifier': 'The committed first line differs.', 'why_this_work_needs_it': 'Exercise bound investigator completion.',
+               'captured_at_sha': sha, 'change_context': {'summary': 'Fixture source', 'changed_files': [str(repo / 'fixture.txt')], 'diff_ref': None},
+               'significance': 'low', 'report_id': b['report_id'], 'dispatch_attempt_id': b['dispatch_attempt_id']}
+        call(['bash', str(repo / 'scripts/evidence-append.sh'), '--work-item', 'fixture', '--kdir', str(store)], input=json.dumps(row).encode())
+        headers = {'Template-version': payload['producer']['template_version'], 'Position-dispatch-manifest': ref['manifest_path'],
+                   'Position-dispatch-sha256': ref['manifest_sha256'], 'Packet-id': b['packet_id'], 'Report-id': b['report_id'],
+                   'Dispatch-attempt-id': b['dispatch_attempt_id'], 'Revision-id': b['revision_id']}
+        assertion = {key: row[key] for key in ('claim_id', 'claim', 'file', 'line_range', 'exact_snippet', 'normalized_snippet_hash', 'falsifier', 'significance')}
+        report = ''.join(f'{key}: {value}\n' for key, value in headers.items()) + '**Question:** ' + inv['question'] + '\n**Findings:** The committed fixture contains the named bytes.\n**Key files:** None\n**Implications:** Bound evidence retains the task identity.\n**Assertions:**\n' + yaml.safe_dump([assertion]) + '**Observations:** None\n**Worker leads:** None\n**Unknowns:** None\n'
+        call(['bash', str(repo / 'scripts/coordinate-report.sh'), 'fixture', '--report-id', b['report_id'], '--kdir', str(store), '--json'], input=report.encode())
+        result = call(['bash', str(repo / 'scripts/task-completed-capture-check.sh')], ok=correct, input=json.dumps(payload['completion_input']).encode())
+        if not correct:
+            assert b'assertion has no unique matching canonical claim' in result.stderr
+    print('grounded self-emission rejects investigation labels for bound tasks and accepts the actual bound task')
+
+elif scenario == 'spec-session':
+    args, document, opened, examples = spec_sessions(('claude-code', 'codex', 'opencode'))
+    original_artifact = (item / 'spec-dispatch.json').read_bytes()
+    assert json.loads(call(args).stdout)['status'] == 'reused'
+    assert (item / 'spec-dispatch.json').read_bytes() == original_artifact
+    saved_log = (item / 'execution-log.md').read_bytes()
+    # Recovery without an atom must still revalidate every admitted field.
+    for field in ('completion_input', 'prompt', 'producer', 'bindings', 'session_context'):
+        damaged = json.loads(original_artifact)
+        payload = damaged['directives'][1]['payload']
+        if field == 'session_context':
+            payload[field]['position_preparation']['composition']['suffix'] += 'Altered collector'
+        else:
+            payload[field] = {'changed': True}
+        (item / 'spec-dispatch.json').write_text(json.dumps(damaged))
+        (item / 'execution-log.md').unlink()
+        call(args, ok=False)
+        (item / 'spec-dispatch.json').write_bytes(original_artifact)
+        (item / 'execution-log.md').write_bytes(saved_log)
+    for example in examples:
+        payload = example['payload']; context = payload['session_context']
+        pending = context['position_preparation']
+        root = repo / ('physical-' + example['framework']); root.mkdir()
+        refused(lambda: binder.session_reference(context, kdir=store))
+        launched = binder.launch_session(context, framework=example['framework'], slug='fixture--w1', execution_root=str(root), kdir=store)
+        selected = json.loads(call(['python3', str(repo / 'scripts/position-bind.py'), 'session-reference', '--kdir', str(store)], input=json.dumps(context).encode()).stdout)
+        assert selected['reference'] == launched['reference']
+        assert selected['bindings']['execution_root'] == str(root)
+        assert selected['delivery_proven'] is False and selected['publication_state'] == 'prepared'
+        assert selected['completion_input']['lore_task_id'] is None
+        bundle = Path(launched['reference']['manifest_path']).parent
+        assert (bundle / 'wrapper-prefix.md').read_text() == pending['composition']['prefix']
+        assert (bundle / 'wrapper-suffix.md').read_text() == pending['composition']['suffix']
+        assert (bundle / 'wrapper-source.md').read_text() == pending['composition']['wrapper_source']
+        assert launched['payload'].endswith(pending['composition']['suffix'])
+        assert json.loads(call(args).stdout)['directives'] == opened['directives']
+        for field in ('prefix', 'suffix', 'wrapper_source'):
+            changed = copy.deepcopy(context)
+            changed['position_preparation']['composition'][field] += 'changed'
+            refused(lambda: binder.session_reference(changed, kdir=store))
+        changed = copy.deepcopy(context); changed['position_preparation']['bindings']['assignment'] += 'changed'
+        refused(lambda: binder.session_reference(changed, kdir=store))
+        fixed = {'dispatch_guidance': launched['payload'], 'position_dispatch': launched['reference']}
+        refused(lambda: binder.launch_session(fixed, framework=example['framework'], slug='fixture--w1', execution_root=str(repo), kdir=store), 'execution_root mismatch')
+        # The host retains the admitted wrapper source even if its live file changes.
+        script = repo / 'scripts/spec-open.sh'; old = script.read_bytes(); script.write_bytes(old + b'\n# source drift\n')
+        assert binder.launch_session(context, framework=example['framework'], slug='fixture--w1', execution_root=str(root), kdir=store)['reference'] == launched['reference']
+        script.write_bytes(old)
+    print('ordinary spec queue, physical root binding, wrapper bytes, independent reference collection and replay/tamper controls checked')
 
 elif scenario == 'spec-native':
     document={'schema_version':1,'track':'full','investigations':[
@@ -540,6 +669,8 @@ elif scenario=='launch':
     for field in binder.TASK_BINDINGS:
         broken=copy.deepcopy(bad);broken[field]=None;broken['absence_reasons'][field]='missing'
         request(broken, fixed=False, flags=('--model','opaque'), ok=False)
+    _, _, _, spec_examples = spec_sessions(('codex', 'codex', 'codex'))
+    examples.extend({key: value for key, value in example.items() if key != 'payload'} for example in spec_examples[:1])
     (temporary/'examples.json').write_text(json.dumps(examples,indent=2))
     print(json.dumps(examples))
 elif scenario=='archive':
@@ -802,5 +933,15 @@ PY
 
 @test "implement compiled envelopes preserve canonical native inputs, foreign targets and legacy identities" {
   run exercise_binding implement-envelope
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "ordinary spec sessions bind physical roots and collect independent prepared references" {
+  run exercise_binding spec-session
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "bound spec investigator claims preserve task identity through canonical completion" {
+  run exercise_binding spec-claims
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }

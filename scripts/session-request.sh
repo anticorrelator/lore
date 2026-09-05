@@ -479,7 +479,7 @@ fi
 # extra_context into a slash-command argument (`/spec <slug> -- <ctx>`), where a
 # multi-line block does not belong; those launches meet the floor through the
 # harness's own admission gate instead.
-if [[ "$TYPE" == "worker" && $POSITION_PROVIDED -eq 0 ]]; then
+if [[ "$TYPE" == "worker" && $POSITION_PROVIDED -eq 0 ]] && ! printf '%s' "$EXTRA_JSON" | jq -e 'has("position_preparation")' >/dev/null 2>&1; then
   [[ "$EXTRA_JSON" != "null" ]] || \
     fail "--context is required for --type worker (the composed brief is the session's whole prompt)"
   WORKER_PROMPT="$(printf '%s' "$EXTRA_JSON" | jq -r '.dispatch_guidance // empty')"
@@ -712,6 +712,13 @@ if [[ $POSITION_PROVIDED -eq 1 ]]; then
   EXTRA_JSON="$(printf '%s' "$EXTRA_JSON" | LORE_FRAMEWORK="$FRAMEWORK" python3 "$SCRIPT_DIR/position-bind.py" session \
     --position "$POSITION" --framework "$FRAMEWORK" --slug "$SLUG" --packet-id "$PACKET_ID" \
     --execution-root "$EXECUTION_DIR" --kdir "$KNOWLEDGE_DIR")" || fail "position preparation failed; nothing was enqueued"
+fi
+
+if [[ $POSITION_PROVIDED -eq 0 ]] && printf '%s' "$EXTRA_JSON" | jq -e 'has("position_preparation")' >/dev/null 2>&1; then
+  [[ "$TYPE" == "worker" ]] || fail "position preparation requires --type worker"
+  [[ -z "$EXECUTION_DIR" ]] || fail "pending position preparation requires ordinary host placement"
+  EXTRA_JSON="$(printf '%s' "$EXTRA_JSON" | python3 "$SCRIPT_DIR/position-bind.py" admit-session \
+    --framework "$FRAMEWORK" --slug "$SLUG" --kdir "$KNOWLEDGE_DIR")" || fail "position preparation failed; nothing was enqueued"
 fi
 
 PENDING_DIR="$KNOWLEDGE_DIR/_sessions/requests/pending"

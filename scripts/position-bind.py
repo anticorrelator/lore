@@ -207,19 +207,7 @@ def validate_dispatch(manifest_path, manifest_sha256=None, *, expected=None):
     return m
 
 
-def publish(descriptor, bindings, kdir, guidance, *, required=(), wrapper=None, prefix=b'', suffix=b'', contract_delivery='referenced', native_model=None):
-    """Freeze one composed payload and its native definition, or verify an identical retry."""
-    if not re.fullmatch('[0-9a-f]{64}', descriptor.get('descriptor_sha256', '')):
-        raise ValueError('descriptor_sha256 is required')
-    d = validate_descriptor(descriptor)
-    packet = validate_bindings(bindings, d['position'], kdir, required)
-    if contract_delivery not in ('referenced', 'included'):
-        raise ValueError('contract_delivery must be referenced or included')
-    run(['bash', str(SCRIPTS / 'validate-dispatch-guidance.sh')], data=guidance)
-    # The compiler normalizes its timestamp; dispatch preserves the admitted bytes.
-    from position_compile import normalize_guidance
-    if normalize_guidance(guidance) != read(Path(d['guidance_path'])):
-        raise ValueError('guidance identity differs from selected compilation; compile with the admitted guidance')
+def validate_wrapper(wrapper, prefix, suffix, wrapper_source=None):
     if not isinstance(prefix, bytes) or not isinstance(suffix, bytes):
         raise ValueError('prefix and suffix must be bytes')
     for content in (prefix, suffix):
@@ -227,14 +215,17 @@ def publish(descriptor, bindings, kdir, guidance, *, required=(), wrapper=None, 
         if b'\x00' in content or b'lore-dispatch-guidance:v1:' in content:
             raise ValueError('wrapper content cannot carry another guidance floor')
     if wrapper is not None:
+        wrapper_source = read(Path(wrapper['path'])) if wrapper_source is None else wrapper_source
         if set(wrapper) != {'template_id', 'template_version', 'path', 'sha256'} or not nonempty(wrapper['template_id']) or not re.fullmatch('[0-9a-f]{12}', wrapper['template_version']):
             raise ValueError('invalid wrapper identity')
-        if digest(read(Path(wrapper['path']))) != wrapper['sha256']:
+        if digest(wrapper_source) != wrapper['sha256']:
             raise ValueError('wrapper source digest mismatch')
     elif prefix or suffix:
         raise ValueError('wrapper content requires wrapper identity')
-    root = kdir.resolve() / '_work' / bindings['work_item'] / 'position-dispatch' / bindings['dispatch_attempt_id']
-    manifest_path = root / 'manifest.json'
+    return wrapper_source
+
+
+def payload_components(d, bindings, manifest_path, guidance, prefix, suffix, contract_delivery):
     # A manifest cannot embed its own digest. Reports carry this path and the
     # digest returned after publication; all other identity fields are in-band.
     envelope = encoded({'position_dispatch': {'manifest_path': str(manifest_path),
@@ -250,6 +241,26 @@ def publish(descriptor, bindings, kdir, guidance, *, required=(), wrapper=None, 
     components = [(name, data) for name, data in components if data]
     if contract_delivery == 'included':
         components.append(('report_contract', b'\n' + read(Path(d['contract_references'][0]['path']))))
+    return components
+
+
+def publish(descriptor, bindings, kdir, guidance, *, required=(), wrapper=None, prefix=b'', suffix=b'', contract_delivery='referenced', native_model=None, wrapper_source=None):
+    """Freeze one composed payload and its native definition, or verify an identical retry."""
+    if not re.fullmatch('[0-9a-f]{64}', descriptor.get('descriptor_sha256', '')):
+        raise ValueError('descriptor_sha256 is required')
+    d = validate_descriptor(descriptor)
+    packet = validate_bindings(bindings, d['position'], kdir, required)
+    if contract_delivery not in ('referenced', 'included'):
+        raise ValueError('contract_delivery must be referenced or included')
+    run(['bash', str(SCRIPTS / 'validate-dispatch-guidance.sh')], data=guidance)
+    # The compiler normalizes its timestamp; dispatch preserves the admitted bytes.
+    from position_compile import normalize_guidance
+    if normalize_guidance(guidance) != read(Path(d['guidance_path'])):
+        raise ValueError('guidance identity differs from selected compilation; compile with the admitted guidance')
+    wrapper_source = validate_wrapper(wrapper, prefix, suffix, wrapper_source)
+    root = kdir.resolve() / '_work' / bindings['work_item'] / 'position-dispatch' / bindings['dispatch_attempt_id']
+    manifest_path = root / 'manifest.json'
+    components = payload_components(d, bindings, manifest_path, guidance, prefix, suffix, contract_delivery)
     payload = b''.join(data for _, data in components)
     files = {'payload.md': payload, 'descriptor.json': encoded(descriptor), 'bindings.json': encoded(bindings),
              'guidance.md': guidance, 'native.md': read(Path(d['artifact_path']))}
@@ -264,7 +275,7 @@ def publish(descriptor, bindings, kdir, guidance, *, required=(), wrapper=None, 
     if packet is not None:
         files['packet.json'] = encoded(packet)
     if wrapper is not None:
-        files['wrapper-source.md'] = read(Path(wrapper['path']))
+        files['wrapper-source.md'] = wrapper_source
     for name, data in (('wrapper-prefix.md', prefix), ('wrapper-suffix.md', suffix)):
         if data:
             files[name] = data
@@ -492,24 +503,125 @@ def prepare_session(context, *, position, framework, slug, execution_root, packe
     return {'dispatch_guidance': Path(ref['payload_path']).read_text(), 'position_dispatch': ref}
 
 
+def prepare_session_input(descriptor, bindings, kdir, guidance, *, slug=None, wrapper=None, prefix=b'', suffix=b''):
+    """Validate inputs whose final execution directory belongs to the session host."""
+    pending = {'position': descriptor['position'], 'framework': descriptor['framework'], 'slug': slug,
+               'packet_id': bindings['packet_id'], 'bindings': bindings, 'descriptor': descriptor,
+               'guidance': guidance.decode()}
+    if wrapper is not None or prefix or suffix:
+        source = validate_wrapper(wrapper, prefix, suffix)
+        pending['composition'] = {'wrapper': wrapper, 'wrapper_source': source.decode(),
+                                  'prefix': prefix.decode(), 'suffix': suffix.decode()}
+    validate_session_preparation(pending, kdir=kdir)
+    context = {'position_preparation': pending}
+    bundle = kdir.resolve() / '_work' / bindings['work_item'] / 'position-dispatch' / bindings['dispatch_attempt_id']
+    for prior in bundle.parent.glob('*/manifest.json'):
+        if prior.parent != bundle and json.loads(read(prior))['bindings']['report_id'] == bindings['report_id']:
+            raise ValueError('report_id already belongs to another attempt')
+    if bundle.exists():
+        session_reference(context, kdir=kdir)
+    return context
+
+
+def validate_session_preparation(pending, *, kdir, framework=None, slug=None, validate_inputs=True):
+    required = {'position', 'framework', 'slug', 'packet_id', 'bindings', 'descriptor', 'guidance'}
+    if not isinstance(pending, dict) or not required <= set(pending) or set(pending) - required - {'composition'}:
+        raise ValueError('invalid pending position preparation')
+    b, d = pending['bindings'], pending['descriptor']
+    if (framework is not None and pending['framework'] != framework or
+            slug is not None and (slug.rsplit('--w', 1)[0] != b['work_item'] or pending['slug'] not in (None, slug)) or
+            pending['packet_id'] != b['packet_id']):
+        raise ValueError('pending session identity mismatch')
+    if pending['slug'] is not None and pending['slug'].rsplit('--w', 1)[0] != b['work_item']:
+        raise ValueError('pending session work item mismatch')
+    if b['execution_root'] is not None or 'execution_root' not in b['absence_reasons']:
+        raise ValueError('pending root must be explicitly absent')
+    if d['framework'] != pending['framework'] or d['position'] != pending['position']:
+        raise ValueError('pending producer mismatch')
+    if not re.fullmatch('[0-9a-f]{64}', d.get('descriptor_sha256', '')):
+        raise ValueError('descriptor_sha256 is required')
+    if validate_inputs:
+        validate_bindings(b, pending['position'], kdir, session_required_bindings(pending['position']), pending_root=True)
+        validate_descriptor(d)
+        from position_compile import normalize_guidance
+        guidance = pending['guidance'].encode()
+        run(['bash', str(SCRIPTS / 'validate-dispatch-guidance.sh')], data=guidance)
+        if normalize_guidance(guidance) != read(Path(d['guidance_path'])):
+            raise ValueError('guidance identity differs from selected compilation')
+    options = {}
+    if 'composition' in pending:
+        c = pending['composition']
+        if not isinstance(c, dict) or set(c) != {'wrapper', 'wrapper_source', 'prefix', 'suffix'}:
+            raise ValueError('invalid pending wrapper composition')
+        options = {'wrapper': c['wrapper'], 'wrapper_source': c['wrapper_source'].encode(),
+                   'prefix': c['prefix'].encode(), 'suffix': c['suffix'].encode()}
+        validate_wrapper(**options)
+    if validate_inputs:
+        render_activation(d, b['dispatch_attempt_id'])
+    return options
+
+
+def session_reference(context, *, kdir):
+    """Read the final prepared reference independently of the agent's report."""
+    if set(context) == {'position_preparation'}:
+        pending = context['position_preparation']
+        options = validate_session_preparation(pending, kdir=kdir)
+        b = copy.deepcopy(pending['bindings'])
+        path = kdir.resolve() / '_work' / b['work_item'] / 'position-dispatch' / b['dispatch_attempt_id'] / 'manifest.json'
+        raw = read(path)
+        m = validate_dispatch(path, digest(raw))
+        b['execution_root'] = m['bindings']['execution_root']
+        del b['absence_reasons']['execution_root']
+        validate_bindings(b, pending['position'], kdir, session_required_bindings(pending['position']))
+        if m['bindings'] != b or m['wrapper'] != options.get('wrapper') or m.get('dispatch_route') == 'native-subagent':
+            raise ValueError('published session differs from admitted bindings or wrapper')
+        members = {'descriptor.json': encoded(pending['descriptor']), 'guidance.md': pending['guidance'].encode()}
+        for key, name in (('wrapper_source', 'wrapper-source.md'), ('prefix', 'wrapper-prefix.md'), ('suffix', 'wrapper-suffix.md')):
+            value = options.get(key, b'')
+            if value:
+                members[name] = value
+            elif name in m['files']:
+                raise ValueError('published session has unassigned wrapper content')
+        if any(read(path.parent / name) != value for name, value in members.items()):
+            raise ValueError('published session differs from admitted content')
+        components = payload_components(pending['descriptor'], b, path, pending['guidance'].encode(),
+                                        options.get('prefix', b''), options.get('suffix', b''), 'referenced')
+        if read(path.parent / 'payload.md') != b''.join(data for _, data in components):
+            raise ValueError('published session payload differs from admitted composition')
+        activation = render_activation(pending['descriptor'], b['dispatch_attempt_id'])
+        if read(path.parent / 'launch.json') != encoded(activation):
+            raise ValueError('published session activation differs from admitted producer')
+        ref = {'manifest_path': str(path), 'manifest_sha256': digest(raw),
+               'payload_path': m['payload']['path'], 'payload_sha256': m['payload']['sha256'],
+               'native_path': m['native']['path'], 'native_sha256': m['native']['sha256']}
+    elif set(context) == {'dispatch_guidance', 'position_dispatch'}:
+        ref = context['position_dispatch']
+        m = validate_dispatch(ref['manifest_path'], ref['manifest_sha256'])
+        if read(Path(ref['payload_path'])).decode() != context['dispatch_guidance']:
+            raise ValueError('queued payload mismatch')
+    else:
+        raise ValueError('invalid position session context')
+    if Path(m['kdir']) != kdir.resolve() or Path(m['work_item_path']) != kdir.resolve() / '_work' / m['bindings']['work_item']:
+        raise ValueError('session reference store mismatch')
+    validate_bindings(m['bindings'], m['producer']['position'], kdir, session_required_bindings(m['producer']['position']))
+    for kind in ('payload', 'native'):
+        if ref[kind + '_path'] != m[kind]['path'] or ref[kind + '_sha256'] != m[kind]['sha256']:
+            raise ValueError('mixed dispatch reference')
+    return {'reference': ref, 'completion_input': {'position_dispatch': ref, 'lore_task_id': m['bindings']['task_id']},
+            'bindings': m['bindings'], 'producer': m['producer'], 'publication_state': 'prepared', 'delivery_proven': False}
+
+
 def launch_session(context, *, framework, slug, execution_root, kdir):
     """Bind to the host's validated directory and return the frozen native launch input."""
     expected = {'framework': framework, 'work_item': slug.rsplit('--w', 1)[0], 'execution_root': execution_root}
     if set(context) == {'position_preparation'}:
         pending = context['position_preparation']
-        if set(pending) != {'position', 'framework', 'slug', 'packet_id', 'bindings', 'descriptor', 'guidance'}:
-            raise ValueError('invalid pending position preparation')
-        if pending['framework'] != framework or pending['slug'] != slug or pending['packet_id'] != pending['bindings']['packet_id']:
-            raise ValueError('pending session identity mismatch')
+        options = validate_session_preparation(pending, kdir=kdir, framework=framework, slug=slug, validate_inputs=False)
         b = copy.deepcopy(pending['bindings'])
-        if b['execution_root'] is not None or 'execution_root' not in b['absence_reasons']:
-            raise ValueError('pending root must be explicitly absent')
         b['execution_root'] = execution_root
         del b['absence_reasons']['execution_root']
         d = pending['descriptor']
-        if d['framework'] != framework or d['position'] != pending['position']:
-            raise ValueError('pending producer mismatch')
-        ref = publish(d, b, kdir, pending['guidance'].encode(), required=session_required_bindings(d['position']))
+        ref = publish(d, b, kdir, pending['guidance'].encode(), required=session_required_bindings(d['position']), **options)
     elif set(context) == {'dispatch_guidance', 'position_dispatch'}:
         ref = context['position_dispatch']
     else:
@@ -562,6 +674,12 @@ def main():
     for name in ('framework', 'slug', 'execution-root'):
         launch.add_argument('--' + name, required=True)
     launch.add_argument('--kdir', required=True, type=Path)
+    for verb in ('session-reference', 'admit-session'):
+        operation = verbs.add_parser(verb)
+        operation.add_argument('--kdir', required=True, type=Path)
+        if verb == 'admit-session':
+            operation.add_argument('--framework', required=True)
+            operation.add_argument('--slug', required=True)
     session = verbs.add_parser('session')
     for name in ('position', 'framework', 'slug', 'execution-root', 'packet-id'):
         session.add_argument('--' + name, required=True)
@@ -574,6 +692,13 @@ def main():
     elif args.verb == 'launch':
         result = launch_session(json.load(sys.stdin), framework=args.framework, slug=args.slug,
                                 execution_root=args.execution_root, kdir=args.kdir)
+    elif args.verb == 'session-reference':
+        result = session_reference(json.load(sys.stdin), kdir=args.kdir)
+    elif args.verb == 'admit-session':
+        result = json.load(sys.stdin)
+        if set(result) != {'position_preparation'}:
+            raise ValueError('invalid position session context')
+        validate_session_preparation(result['position_preparation'], kdir=args.kdir, framework=args.framework, slug=args.slug)
     elif args.verb == 'resolve':
         result = resolve_dispatch(args.manifest, args.sha256)
     elif args.verb == 'session':
