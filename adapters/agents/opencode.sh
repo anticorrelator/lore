@@ -297,6 +297,25 @@ cmd_smoke() {
   printf '  %-24s %-13s %s\n' resolve_model_for_role "$routing_shape"  "provider/model binding split at spawn boundary"
 }
 
+cmd_native_launch() {
+  python3 - "$@" <<'PYTHON'
+import hashlib
+import json
+from pathlib import Path
+import sys
+import yaml
+raw = Path(sys.argv[1]).read_bytes()
+name = 'position-' + hashlib.sha256(raw + sys.argv[2].encode()).hexdigest()
+_, frontmatter, prompt = raw.decode().split('---\n', 2)
+header = yaml.safe_load(frontmatter)
+# Session selection promotes the same scoped definition to a primary agent.
+definition = dict(header, mode='primary', prompt=prompt)
+print(json.dumps({'args': ['--agent', name],
+                  'env': {'OPENCODE_CONFIG_CONTENT': json.dumps({'agent': {name: definition}})},
+                  'prompt_flag': '--prompt'}))
+PYTHON
+}
+
 cmd_render_position() {
   require_opencode
   local position="${1:-}" body="${2:-}"
@@ -314,6 +333,7 @@ cmd_render_position() {
 # --- Dispatch ---
 cmd="${1:-}"
 case "$cmd" in
+  native_launch)            shift; cmd_native_launch "$@" ;;
   render_position)          shift; cmd_render_position          "$@" ;;
   spawn)                    shift; cmd_spawn                    "$@" ;;
   wait)                     shift; cmd_wait                     "$@" ;;

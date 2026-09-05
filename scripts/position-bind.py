@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import os
 import fcntl
 import json
 from pathlib import Path
@@ -38,7 +40,7 @@ def absolute(value, field):
     return Path(value).resolve()
 
 
-def validate_bindings(bindings, position, kdir, required=(), *, preparation=True):
+def validate_bindings(bindings, position, kdir, required=(), *, preparation=True, pending_root=False, archived=False):
     """Validate explicit identities against the canonical packet without inventing bindings."""
     if not isinstance(bindings, dict) or set(bindings) != {*FIELDS, 'absence_reasons'}:
         raise ValueError('bindings must contain every declared field and absence_reasons')
@@ -48,6 +50,8 @@ def validate_bindings(bindings, position, kdir, required=(), *, preparation=True
     if set(required) - set(FIELDS):
         raise ValueError('unknown required binding')
     required = set(CORE) | set(required)
+    if pending_root:
+        required.discard("execution_root")
     if position not in POSITIONS:
         raise ValueError('invalid position')
     if position == 'designer':
@@ -74,10 +78,11 @@ def validate_bindings(bindings, position, kdir, required=(), *, preparation=True
     if bindings['revision_id'] is not None and not re.fullmatch(r'[0-9a-f]{12}', bindings['revision_id']):
         raise ValueError('invalid revision_id')
     item = kdir.resolve() / '_work' / bindings['work_item']
-    if not item.is_dir() or item.is_symlink():
+    physical_item = kdir.resolve() / '_archive' / bindings['work_item'] if archived else item
+    if not physical_item.is_dir() or physical_item.is_symlink():
         raise ValueError('work item must exist in the selected store')
-    execution = absolute(bindings['execution_root'], 'execution_root')
-    if preparation and (not execution.is_dir() or str(execution) != bindings['execution_root']):
+    execution = absolute(bindings['execution_root'], 'execution_root') if bindings['execution_root'] is not None else None
+    if execution is not None and (str(execution) != bindings['execution_root'] or (preparation and not execution.is_dir())):
         raise ValueError('execution_root must name the final physical directory')
     report = absolute(bindings['report_path'], 'report_path')
     if not report.is_relative_to(item) or str(report) != bindings['report_path']:
@@ -105,9 +110,27 @@ def file_record(path, data):
     return {'path': str(path), 'sha256': digest(data), 'bytes': len(data)}
 
 
+def resolve_manifest_path(manifest_path):
+    """Resolve only an original _work reference or its exact _archive counterpart."""
+    path = Path(manifest_path)
+    if not path.is_absolute() or path.name != 'manifest.json':
+        raise ValueError('invalid dispatch manifest path')
+    # <store>/<tier>/<item>/position-dispatch/<attempt>/manifest.json
+    if path.parent.parent.name != 'position-dispatch' or path.parents[3].name not in ('_work', '_archive'):
+        raise ValueError('invalid dispatch manifest location')
+    original = path.parents[4] / '_work' / path.parents[2].name / 'position-dispatch' / path.parent.name / path.name
+    archived = path.parents[4] / '_archive' / path.parents[2].name / 'position-dispatch' / path.parent.name / path.name
+    if path == archived and original.parents[2].exists():
+        raise ValueError('active and archived item conflict')
+    resolved = original if original.parents[2].exists() else archived
+    if resolved.is_symlink() or resolved.resolve() != resolved:
+        raise ValueError('dispatch reference cannot follow symlinks')
+    return resolved
+
+
 def validate_dispatch(manifest_path, manifest_sha256=None, *, expected=None):
     """Resolve a prepared producer reference; this does not establish delivery or acceptance."""
-    path = Path(manifest_path)
+    path = resolve_manifest_path(manifest_path)
     raw = path.read_bytes()
     if manifest_sha256 is not None and digest(raw) != manifest_sha256:
         raise ValueError('dispatch manifest digest mismatch')
@@ -115,13 +138,15 @@ def validate_dispatch(manifest_path, manifest_sha256=None, *, expected=None):
     if m['schema_version'] != 1 or m['state'] != 'prepared':
         raise ValueError('unsupported dispatch manifest')
     root = path.parent.resolve()
-    if path.name != 'manifest.json' or root != Path(m['work_item_path']) / 'position-dispatch' / m['bindings']['dispatch_attempt_id']:
+    recorded_root = Path(m['work_item_path']) / 'position-dispatch' / m['bindings']['dispatch_attempt_id']
+    original_item = Path(m['kdir']) / '_work' / m['bindings']['work_item']
+    if Path(m['work_item_path']) != original_item or resolve_manifest_path(recorded_root / 'manifest.json') != path:
         raise ValueError('dispatch manifest location mismatch')
     if {p.name for p in root.iterdir()} != {'manifest.json', *m['files']}:
         raise ValueError('dispatch bundle membership mismatch')
     for name, record in m['files'].items():
         target = root / name
-        if target.is_symlink() or target.resolve().parent != root or record != file_record(target, target.read_bytes()):
+        if target.is_symlink() or target.resolve().parent != root or record != file_record(recorded_root / name, target.read_bytes()):
             raise ValueError(f'dispatch content mismatch: {name}')
     descriptor = json.loads((root / 'descriptor.json').read_bytes())
     validated = validate_descriptor(descriptor)
@@ -133,11 +158,11 @@ def validate_dispatch(manifest_path, manifest_sha256=None, *, expected=None):
         raise ValueError('dispatch bindings snapshot mismatch')
     if (root / 'native.md').read_bytes() != Path(validated['artifact_path']).read_bytes():
         raise ValueError('dispatch native definition mismatch')
-    if m['native'] != {'path': str(root / 'native.md'), 'sha256': validated['artifact_sha256'],
+    if m['native'] != {'path': str(recorded_root / 'native.md'), 'sha256': validated['artifact_sha256'],
                         'surface': validated['native_surface'], 'source_path': validated['artifact_path']}:
         raise ValueError('dispatch native reference mismatch')
     payload = (root / 'payload.md').read_bytes()
-    if m['payload'] != file_record(root / 'payload.md', payload):
+    if m['payload'] != file_record(recorded_root / 'payload.md', payload):
         raise ValueError('dispatch payload reference mismatch')
     offset = 0
     for component in m['accounting']['payload_components']:
@@ -148,7 +173,7 @@ def validate_dispatch(manifest_path, manifest_sha256=None, *, expected=None):
     native_bytes = len((root / 'native.md').read_bytes()) if validated['native_surface']['consumption'] == 'agent-definition' else 0
     if offset != len(payload) or m['accounting']['payload_bytes'] != offset or m['accounting']['native_definition_bytes'] != native_bytes or m['accounting']['prepared_input_bytes'] != offset + native_bytes:
         raise ValueError('dispatch byte accounting mismatch')
-    packet = validate_bindings(m['bindings'], m['producer']['position'], Path(m['kdir']), m['required_bindings'], preparation=False)
+    packet = validate_bindings(m['bindings'], m['producer']['position'], Path(m['kdir']), m['required_bindings'], preparation=False, archived=root != recorded_root)
     if packet is not None and encoded(packet) != (root / 'packet.json').read_bytes():
         raise ValueError('canonical packet changed after preparation')
     for key, value in (expected or {}).items():
@@ -204,6 +229,7 @@ def publish(descriptor, bindings, kdir, guidance, *, required=(), wrapper=None, 
     payload = b''.join(data for _, data in components)
     files = {'payload.md': payload, 'descriptor.json': encoded(descriptor), 'bindings.json': encoded(bindings),
              'guidance.md': guidance, 'native.md': read(Path(d['artifact_path']))}
+    files['launch.json'] = encoded(render_activation(d, bindings['dispatch_attempt_id']))
     if packet is not None:
         files['packet.json'] = encoded(packet)
     if wrapper is not None:
@@ -254,6 +280,29 @@ def publish(descriptor, bindings, kdir, guidance, *, required=(), wrapper=None, 
             'native_path': str(root / 'native.md'), 'native_sha256': digest(files['native.md'])}
 
 
+def render_activation(descriptor, attempt):
+    profile = json.loads(read(SCRIPTS.parent / 'adapters/capabilities.json'))['frameworks'][descriptor['framework']]
+    operation = profile.get('position_compilation', {}).get('activation_operation')
+    if operation != 'native_launch':
+        raise ValueError('native activation unavailable')
+    result = json.loads(run(['bash', str(SCRIPTS.parent / 'adapters/agents' / (descriptor['framework'] + '.sh')),
+                             operation, descriptor['artifact_path'], attempt],
+                            env=dict(os.environ, LORE_FRAMEWORK=descriptor['framework'])))
+    if set(result) != {'args', 'env', 'prompt_flag'} or not isinstance(result['args'], list) or not isinstance(result['env'], dict):
+        raise ValueError('invalid native activation')
+    return result
+
+
+def resolve_dispatch(manifest_path, manifest_sha256, *, expected=None):
+    """Validate recorded bytes and return their current paths, without changing identity."""
+    if not isinstance(manifest_sha256, str) or not re.fullmatch('[0-9a-f]{64}', manifest_sha256):
+        raise ValueError('manifest_sha256 is required')
+    manifest = validate_dispatch(manifest_path, manifest_sha256, expected=expected)
+    root = resolve_manifest_path(manifest_path).parent
+    return {'manifest': manifest, 'resolved_manifest_path': str(root / 'manifest.json'),
+            'payload_path': str(root / 'payload.md'), 'native_path': str(root / 'native.md')}
+
+
 def prepare_session(context, *, position, framework, slug, execution_root, packet_id, kdir):
     """Prepare the exact extra_context consumed by the existing worker prompt path."""
     allowed = {'bindings', 'descriptor', 'guidance_file', 'class', 'ceremony'}
@@ -262,11 +311,11 @@ def prepare_session(context, *, position, framework, slug, execution_root, packe
     b = context['bindings']
     if not isinstance(b, dict):
         raise ValueError('bindings must be an object')
-    expected = {'work_item': slug.rsplit('--w', 1)[0], 'execution_root': execution_root, 'packet_id': packet_id}
+    expected = {'work_item': slug.rsplit('--w', 1)[0], 'execution_root': execution_root or None, 'packet_id': packet_id}
     for key, value in expected.items():
         if b.get(key) != value:
             raise ValueError(f'session {key} conflicts with bindings')
-    validate_bindings(b, position, kdir, TASK_BINDINGS)
+    validate_bindings(b, position, kdir, TASK_BINDINGS, pending_root=not execution_root)
     existing = kdir / '_work' / b['work_item'] / 'position-dispatch' / b['dispatch_attempt_id'] / 'manifest.json'
     if existing.exists():
         m = validate_dispatch(existing, expected={'position': position, 'framework': framework, **expected})
@@ -285,8 +334,60 @@ def prepare_session(context, *, position, framework, slug, execution_root, packe
         d = context.get('descriptor') or compile_position(position, framework, kdir, Path(context['guidance_file']) if context.get('guidance_file') else None)
         if d['position'] != position or d['framework'] != framework:
             raise ValueError('session descriptor position/framework mismatch')
+        if not re.fullmatch('[0-9a-f]{64}', d.get('descriptor_sha256', '')):
+            raise ValueError('descriptor_sha256 is required')
+        validate_descriptor(d)
+        from position_compile import normalize_guidance
+        run(['bash', str(SCRIPTS / 'validate-dispatch-guidance.sh')], data=guidance)
+        if normalize_guidance(guidance) != read(Path(d['guidance_path'])):
+            raise ValueError('guidance identity differs from selected compilation')
+        render_activation(d, b['dispatch_attempt_id'])
+        if not execution_root:
+            return {'position_preparation': {'position': position, 'framework': framework, 'slug': slug,
+                    'packet_id': packet_id, 'bindings': b, 'descriptor': d, 'guidance': guidance.decode()}}
         ref = publish(d, b, kdir, guidance, required=TASK_BINDINGS)
     return {'dispatch_guidance': Path(ref['payload_path']).read_text(), 'position_dispatch': ref}
+
+
+def launch_session(context, *, framework, slug, execution_root, kdir):
+    """Bind to the host's validated directory and return the frozen native launch input."""
+    expected = {'framework': framework, 'work_item': slug.rsplit('--w', 1)[0], 'execution_root': execution_root}
+    if set(context) == {'position_preparation'}:
+        pending = context['position_preparation']
+        if set(pending) != {'position', 'framework', 'slug', 'packet_id', 'bindings', 'descriptor', 'guidance'}:
+            raise ValueError('invalid pending position preparation')
+        if pending['framework'] != framework or pending['slug'] != slug or pending['packet_id'] != pending['bindings']['packet_id']:
+            raise ValueError('pending session identity mismatch')
+        b = copy.deepcopy(pending['bindings'])
+        if b['execution_root'] is not None or 'execution_root' not in b['absence_reasons']:
+            raise ValueError('pending root must be explicitly absent')
+        b['execution_root'] = execution_root
+        del b['absence_reasons']['execution_root']
+        d = pending['descriptor']
+        if d['framework'] != framework or d['position'] != pending['position']:
+            raise ValueError('pending producer mismatch')
+        ref = publish(d, b, kdir, pending['guidance'].encode(), required=TASK_BINDINGS)
+    elif set(context) == {'dispatch_guidance', 'position_dispatch'}:
+        ref = context['position_dispatch']
+    else:
+        raise ValueError('invalid position session context')
+    resolved = resolve_dispatch(ref['manifest_path'], ref['manifest_sha256'], expected=expected)
+    m = resolved['manifest']
+    if Path(m['kdir']) != kdir.resolve() or Path(m['work_item_path']) != Path(resolved['resolved_manifest_path']).parents[2]:
+        raise ValueError('launch requires the active work item in the selected store')
+    validate_bindings(m['bindings'], m['producer']['position'], kdir, TASK_BINDINGS)
+    for kind in ('payload', 'native'):
+        if ref[kind + '_path'] != m[kind]['path'] or ref[kind + '_sha256'] != m[kind]['sha256']:
+            raise ValueError('mixed dispatch reference')
+    payload = read(Path(resolved['payload_path'])).decode()
+    if 'dispatch_guidance' in context and context['dispatch_guidance'] != payload:
+        raise ValueError('queued payload mismatch')
+    root = Path(resolved['resolved_manifest_path']).parent
+    descriptor = json.loads(read(root / 'descriptor.json'))
+    activation = render_activation(descriptor, m['bindings']['dispatch_attempt_id'])
+    if read(root / 'launch.json') != encoded(activation):
+        raise ValueError('native activation changed after publication')
+    return {'reference': ref, 'payload': payload, 'activation': activation, 'producer': m['producer']}
 
 
 def main():
@@ -303,12 +404,24 @@ def main():
     check = verbs.add_parser('validate')
     check.add_argument('manifest', type=Path)
     check.add_argument('--sha256')
+    resolve = verbs.add_parser('resolve')
+    resolve.add_argument('manifest', type=Path)
+    resolve.add_argument('--sha256', required=True)
+    launch = verbs.add_parser('launch')
+    for name in ('framework', 'slug', 'execution-root'):
+        launch.add_argument('--' + name, required=True)
+    launch.add_argument('--kdir', required=True, type=Path)
     session = verbs.add_parser('session')
     for name in ('position', 'framework', 'slug', 'execution-root', 'packet-id'):
         session.add_argument('--' + name, required=True)
     session.add_argument('--kdir', required=True, type=Path)
     args = parser.parse_args()
-    if args.verb == 'session':
+    if args.verb == 'launch':
+        result = launch_session(json.load(sys.stdin), framework=args.framework, slug=args.slug,
+                                execution_root=args.execution_root, kdir=args.kdir)
+    elif args.verb == 'resolve':
+        result = resolve_dispatch(args.manifest, args.sha256)
+    elif args.verb == 'session':
         result = prepare_session(json.load(sys.stdin), position=args.position, framework=args.framework,
                                  slug=args.slug, execution_root=args.execution_root, packet_id=args.packet_id, kdir=args.kdir.resolve())
     elif args.verb == 'validate':

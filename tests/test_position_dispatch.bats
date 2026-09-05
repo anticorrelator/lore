@@ -27,7 +27,7 @@ import yaml
 
 original, temporary, scenario = sys.argv[1:]
 original, temporary = Path(original).resolve(), Path(temporary).resolve()
-if os.environ.get('POSITION_DISPATCH_FIXTURES') and scenario in ('native', 'session'):
+if os.environ.get('POSITION_DISPATCH_FIXTURES') and scenario in ('native', 'session', 'launch'):
     temporary = Path(os.environ['POSITION_DISPATCH_FIXTURES']).resolve() / scenario
     temporary.mkdir(parents=True, exist_ok=False)
 repo, home = temporary / 'checkout', temporary / 'home'
@@ -125,13 +125,13 @@ def compile(position='worker', framework='codex'):
 def bind(d,b,g=None,**kw):
     return binder.publish(d,b,store,g or guidance(),**kw)
 
-def request(b, position='worker', framework='codex', extra=None, flags=(), ok=True):
+def request(b, position='worker', framework='codex', extra=None, flags=(), ok=True, fixed=True):
     (instances / 'fixture.json').touch()
     context = {'bindings': b, **(extra or {})}
     path = temporary / 'context.json'; path.write_text(json.dumps(context))
     return call(['bash', str(repo / 'scripts/session-request.sh'), '--type', 'worker', '--slug', 'fixture--w1', '--anywhere',
-                 '--position', position, '--framework', framework, '--packet', b['packet_id'], '--worktree-id', 'fixture-worktree',
-                 '--execution-dir', str(repo), '--context', str(path), '--kdir', str(store), '--json', *flags], ok=ok)
+                 '--position', position, '--framework', framework, '--packet', b['packet_id'] or '',
+                 *(['--worktree-id', 'fixture-worktree', '--execution-dir', str(repo)] if fixed else []), '--context', str(path), '--kdir', str(store), '--json', *flags], ok=ok)
 
 def pending():
     return list((store / '_sessions/requests/pending').glob('*.json'))
@@ -169,6 +169,54 @@ if scenario == 'native':
             examples.append({'position':position,'framework':framework,**ref,'template_version':d['template_version']})
     (temporary/'examples.json').write_text(json.dumps(examples,indent=2))
     print(json.dumps(examples))
+elif scenario=='launch':
+    examples=[]
+    for fw in ('claude-code', 'codex', 'opencode'):
+        for position,mode in [('worker',None),('investigator',None),('designer','planning'),('designer','consultation'),('reviewer',None)]:
+            b=fixture(position, fw+'-'+position+'-'+str(mode), mode=mode)
+            b['execution_root']=None; b['absence_reasons']['execution_root']='ordinary host supplies final directory'
+            r=json.loads(request(b, position, fw, flags=('--model','provider/opaque-model'), fixed=False).stdout)
+            row_path=store/r['path']; row=json.loads(row_path.read_bytes())
+            assert set(row['extra_context'])=={'position_preparation'}
+            assert not (item/'position-dispatch'/b['dispatch_attempt_id']).exists()
+            examples.append({'position':position,'framework':fw,'mode':mode,'queue_path':str(row_path),'kdir':str(store)})
+    # Admission validates pending roots without weakening any other identity.
+    bad=fixture(attempt='invalid-pending'); bad['execution_root']=None
+    bad['absence_reasons']['execution_root']='host supplies root'
+    for field in binder.TASK_BINDINGS:
+        broken=copy.deepcopy(bad);broken[field]=None;broken['absence_reasons'][field]='missing'
+        request(broken, fixed=False, flags=('--model','opaque'), ok=False)
+    (temporary/'examples.json').write_text(json.dumps(examples,indent=2))
+    print(json.dumps(examples))
+elif scenario=='archive':
+    refs=[]
+    for fw in ('claude-code','codex','opencode'):
+        d=compile('reviewer',fw);b=fixture('reviewer','archive-'+fw)
+        execution=repo/('execution-'+fw);execution.mkdir();b['execution_root']=str(execution)
+        refs.append(bind(d,b));execution.rmdir()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        list(pool.map(lambda r:binder.resolve_dispatch(r['manifest_path'],r['manifest_sha256']),refs))
+    archived=store/'_archive/fixture';archived.parent.mkdir();item.rename(archived)
+    for ref in refs:
+        result=binder.resolve_dispatch(ref['manifest_path'],ref['manifest_sha256'])
+        assert result['manifest']['work_item_path']==str(item)
+        assert Path(result['payload_path']).is_relative_to(archived)
+        moved=Path(result['resolved_manifest_path'])
+        binder.resolve_dispatch(moved,ref['manifest_sha256'])
+        refused(lambda:binder.resolve_dispatch(moved,'0'*64),'digest mismatch')
+        native=moved.parent/'native.md';raw=native.read_bytes();native.unlink()
+        refused(lambda:binder.resolve_dispatch(moved,ref['manifest_sha256']),'membership mismatch');native.write_bytes(raw)
+        dependency=Path(result['manifest']['contract_references'][0]['path']);raw=dependency.read_bytes();dependency.unlink()
+        refused(lambda:binder.resolve_dispatch(moved,ref['manifest_sha256']));dependency.write_bytes(raw)
+    refused(lambda:binder.resolve_dispatch(refs[0]['manifest_path'],refs[1]['manifest_sha256']),'digest mismatch')
+    unrelated=store/'elsewhere';archived.rename(unrelated)
+    refused(lambda:binder.resolve_dispatch(refs[0]['manifest_path'],refs[0]['manifest_sha256']))
+    refused(lambda:binder.resolve_dispatch(unrelated/'position-dispatch/archive-claude-code/manifest.json',refs[0]['manifest_sha256']))
+    unrelated.rename(archived)
+    # Active item with the same slug cannot borrow an archived attempt.
+    item.mkdir()
+    refused(lambda:binder.resolve_dispatch(refs[0]['manifest_path'],refs[0]['manifest_sha256']))
+    refused(lambda:binder.resolve_dispatch(archived/'position-dispatch/archive-claude-code/manifest.json',refs[0]['manifest_sha256']),'conflict')
 elif scenario=='session':
     examples=[]
     for position,mode in [('designer','planning'),('reviewer',None),('designer','consultation'),('investigator',None),('worker',None)]:
@@ -224,8 +272,6 @@ elif scenario=='invalid':
     request(b,extra={'prompt':'must not shadow validated bytes'},ok=False)
     request(b,extra={'bindings':dict(b,mode='planning')},ok=False)
     request(db,'designer',extra={'bindings':dict(db,mode='invented')},ok=False)
-    for fw in ('claude-code','opencode'):
-        p=request(b,framework=fw,ok=False); assert b'no agent selector' in p.stdout+p.stderr
     call(['bash',str(repo/'scripts/session-request.sh'),'--type','chat','--anywhere','--position','worker','--kdir',str(store)],ok=False)
     assert not pending()
 elif scenario=='retry':
@@ -293,7 +339,7 @@ PY
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
 
-@test "position binding refuses invalid modes, missing or conflicting identities and unsupported native sessions" {
+@test "position binding refuses invalid modes, missing or conflicting identities and incompatible sessions" {
   run exercise_binding invalid
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
@@ -310,5 +356,15 @@ PY
 
 @test "binding preserves replay guidance and counts included contracts and wrapper identity separately" {
   run exercise_binding replay
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "ordinary position queue preparation covers all frameworks and both designer modes" {
+  run exercise_binding launch
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "immutable dispatch resolver survives only sanctioned item archival" {
+  run exercise_binding archive
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }

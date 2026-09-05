@@ -277,6 +277,24 @@ cmd_smoke() {
   printf '  %-24s %-13s %s\n' resolve_model_for_role "single"          "--model <id> (single-provider harness)"
 }
 
+cmd_native_launch() {
+  python3 - "$@" <<'PYTHON'
+import hashlib
+import json
+from pathlib import Path
+import sys
+import yaml
+raw = Path(sys.argv[1]).read_bytes()
+name = 'position-' + hashlib.sha256(raw + sys.argv[2].encode()).hexdigest()
+_, frontmatter, prompt = raw.decode().split('---\n', 2)
+header = yaml.safe_load(frontmatter)
+tools = [tool.strip() for tool in header['tools'].split(',')]
+definition = {'description': header['description'], 'prompt': prompt, 'tools': tools}
+print(json.dumps({'args': ['--agents', json.dumps({name: definition}), '--agent', name,
+                           '--tools', ','.join(tools)], 'env': {}, 'prompt_flag': '--'}))
+PYTHON
+}
+
 cmd_render_position() {
   require_claude_code
   local position="${1:-}" body="${2:-}"
@@ -294,6 +312,7 @@ cmd_render_position() {
 # --- Dispatch ---
 cmd="${1:-}"
 case "$cmd" in
+  native_launch)            shift; cmd_native_launch "$@" ;;
   render_position)          shift; cmd_render_position          "$@" ;;
   spawn)                    shift; cmd_spawn                    "$@" ;;
   wait)                     shift; cmd_wait                     "$@" ;;

@@ -2,6 +2,7 @@ package work
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -41,11 +42,12 @@ const SpecTrackShort = "short"
 // durable contract. The mode flags below them (ShortMode, SkipConfirm,
 // FollowupMode, FindingIndex) select which branch of buildInitialPrompt runs.
 type SessionDescriptor struct {
-	Type         string // spec|implement|chat
-	Slug         string
-	Title        string
-	ExtraContext string
-	Initiator    string // agent|human
+	Type            string // spec|implement|chat
+	Slug            string
+	Title           string
+	ExtraContext    string
+	PositionContext json.RawMessage
+	Initiator       string // agent|human
 
 	// AutoClose is the per-request override the exit ladder consults: nil defers
 	// to Initiator (agent auto-closes, human holds open), a set value forces the

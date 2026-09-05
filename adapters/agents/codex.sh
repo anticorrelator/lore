@@ -320,6 +320,10 @@ cmd_smoke() {
   printf '  %-24s %-13s %s\n' resolve_model_for_role "$routing_shape"  "bare model id (single-provider harness)"
 }
 
+cmd_native_launch() {
+  printf '%s\n' '{"args":[],"env":{},"prompt_flag":""}'
+}
+
 cmd_render_position() {
   require_codex
   local position="${1:-}" body="${2:-}"
@@ -334,6 +338,7 @@ cmd_render_position() {
 # --- Dispatch ---
 cmd="${1:-}"
 case "$cmd" in
+  native_launch)            shift; cmd_native_launch "$@" ;;
   render_position)          shift; cmd_render_position          "$@" ;;
   spawn)                    shift; cmd_spawn                    "$@" ;;
   wait)                     shift; cmd_wait                     "$@" ;;

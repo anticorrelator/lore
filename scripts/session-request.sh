@@ -270,7 +270,6 @@ if [[ $POSITION_PROVIDED -eq 1 ]]; then
   esac
   [[ $FRAMEWORK_PROVIDED -eq 1 ]] || fail "--position requires explicit --framework"
   [[ -n "$PACKET_ID" ]] || fail "--position requires --packet"
-  [[ -n "$WORKTREE_ID" && -n "$EXECUTION_DIR" ]] || fail "--position requires --worktree-id and --execution-dir fixed before publication"
 fi
 
 # A worker session's slug is its identity — the derived <work-item-slug>--w<n>
@@ -676,9 +675,6 @@ REQUIRED_TARGET_REF="$(session_source_target_ref)"
 
 if [[ $POSITION_PROVIDED -eq 1 ]]; then
   [[ "$EXTRA_JSON" != "null" ]] || fail "--position requires JSON context.bindings"
-  # Native-definition activation needs a launcher selector; text alone cannot
-  # enforce the definition's tools or permissions.
-  [[ "$FRAMEWORK" == "codex" ]] || fail "position worker sessions cannot activate native definitions on '$FRAMEWORK': the session launcher has no agent selector"
   POSITION_ROLE="$POSITION"
   POSITION_MODE="$(printf '%s' "$EXTRA_JSON" | jq -r '.bindings.mode // empty')"
   POSITION_CLASS="$(printf '%s' "$EXTRA_JSON" | jq -r '.class // empty')"
