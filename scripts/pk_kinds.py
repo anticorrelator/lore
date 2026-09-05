@@ -316,8 +316,9 @@ def _render_section(spec: SectionSpec, candidates: list[dict], budget: int,
             "kind_status": entry.get("kind_status"),
             "subsystem": entry.get("subsystem"),
             "entry": entry,
+            "rendered": block,
         }
-        for entry, mode, _ in blocks
+        for entry, mode, block in blocks
     ]
     rendered = header + "".join(block for _, _, block in blocks)
     return {

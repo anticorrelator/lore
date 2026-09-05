@@ -43,6 +43,30 @@ or attempt. Assembly writes through `packet-append.sh` and retains the
 renderer’s `manifest_load` provenance. It does not publish a revision or create
 a dispatch attempt.
 
+What `build` returns is a candidate set. Synthesize it before it travels:
+
+```bash
+lore packet synthesize <packet-id> --by coordinator \
+  --drop <path> "<why the receiver should not carry it>" \
+  --add <path> "<why the receiver needs it and retrieval missed it>"
+```
+
+`--spec <file.json>` takes the same dispositions as `{"dropped": [...],
+"added": [...]}` when there are many. Kept is everything delivered and not
+dropped; each drop and add names a reason. The verb appends a superseding row
+under the same id at `delivery_stage: synthesized`, removes each dropped
+entry's recorded block from the content by exact bytes, appends added entries
+and — when anything was dropped — a `## Left out by synthesis` list the
+receiver can read, and recomputes the per-scale counts over what remains.
+Only delivered paths can be dropped; only knowledge entries (category-dir
+`.md` files inside the store) not already delivered can be added; a packet is
+synthesized once per pull, checked sequentially. Preparing a dispatch
+(`position-bind`) against a packet whose latest row is not synthesized is
+refused unless the builder recorded a `synthesis_waiver` — which `spec-open`
+does for the investigator packets it builds itself, the one place assembly and
+dispatch share a verb; pointer-only surfaces do not enforce it. `show` returns
+the latest row and names the synthesis, the waiver, or their absence.
+
 Pass `--packet <id>` to managed `lore session start` or raw
 `lore session request --type worker` to put one pointer
 line after the guidance floor and before the brief. For a harness-native spawn,
