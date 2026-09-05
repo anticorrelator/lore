@@ -59,6 +59,11 @@ spec_scenario() {
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
 
+@test "spec documented-report recipes check committed example coordinates and normalization" {
+  run spec_scenario documented-report
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
 @test "spec consultation recipes retain the implement task-domain handoff" {
   run spec_scenario consultation
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
@@ -93,7 +98,7 @@ spec_scenario() {
   local output_root="${SPEC_RECIPE_OUTPUT_ROOT:-$BATS_SUITE_TMPDIR/spec-recipes}"
   local inventories=()
   local scenario
-  for scenario in synthesis entry inline full native designer consultation gate-design gate-plan reviews finalize stewardship; do
+  for scenario in synthesis entry inline full native designer documented-report consultation gate-design gate-plan reviews finalize stewardship; do
     inventories+=("$output_root/$scenario/case/inventory.json")
   done
   local current_source="$REPO_DIR/skills/spec/SKILL.md"
