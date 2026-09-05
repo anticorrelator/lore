@@ -476,6 +476,16 @@ check the rule against its origin. Each row names its status: **in skill**
 reduced to a habit), or **retired** (stopped doing work). Rows leave the log by
 the lifecycle stated in § The role of the skill.
 
+### Commons-reshape arc, 2026-09-05 (n=1)
+
+1. **The control checkout stays on `main`; seat edits happen in a seat-allocated
+   worktree.** A one-file regression fix was made by checking out a fix branch in the
+   control checkout; two workers spawned in that nine-minute window derived their
+   placement from it and recorded the transient branch as their teardown
+   `target_ref`, which was then deleted at merge. The ref had to be recreated so
+   teardown had a target. `lore coordinate worktree allocate` costs seconds and keeps
+   the checkout every session is cut from on `main`. *In skill.*
+
 ### Session-queues arc, 2026-07-16 (n=1 each, ~1h wall clock lost)
 
 1. **Amending plan.md after spec finalization invalidates tasks.json's checksum** —
