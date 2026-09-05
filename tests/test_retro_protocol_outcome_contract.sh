@@ -31,6 +31,12 @@ required_step1 = [
     "best-effort DUE claim failed",
     "MUST warn and continue",
     "never a precondition",
+    "fold version 2",
+    "vocabulary version 1",
+    "latest `deferred`",
+    "`unhandled_due`",
+    "keeps a cycle claimable",
+    "`due_claim`",
 ]
 for token in required_step1:
     assert token in step1, f"retro Step 1 missing semantic token/relationship: {token}"

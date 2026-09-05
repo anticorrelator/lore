@@ -149,31 +149,61 @@ PY
 # fold after the attempt so the manifest describes the state used by the pack.
 DUE_DISPOSITION="absent"
 DUE_WARNING=""
+DUE_IDS='[]'
+DUE_HANDLE_RC=""
 set +e
-DUE_BEFORE=$(LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPT_DIR/retro-queue.sh" queue --cycle-id "$SLUG" --json 2>"$TMP_DIR/due-before.err")
+LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPT_DIR/retro-queue.sh" queue --cycle-id "$SLUG" --json >"$TMP_DIR/due-before.out" 2>"$TMP_DIR/due-before.err"
 DUE_READ_RC=$?
 set -e
 if [[ $DUE_READ_RC -eq 0 ]]; then
-  DUE_IDS=$(printf '%s' "$DUE_BEFORE" | jq -r '.unhandled_due[].outcome_id' 2>/dev/null || true)
-  if [[ -n "$DUE_IDS" ]]; then
-    set +e
-    LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPT_DIR/retro-queue.sh" handle --cycle-id "$SLUG" \
-      --action dispatched --handled-by retro-lead --json >"$TMP_DIR/due-handle.out" 2>"$TMP_DIR/due-handle.err"
-    DUE_HANDLE_RC=$?
-    set -e
-    if [[ $DUE_HANDLE_RC -eq 0 ]]; then DUE_DISPOSITION="handled"; else
-      DUE_DISPOSITION="failed"
-      DUE_WARNING="best-effort DUE claim failed"
-      warn "$DUE_WARNING"
+  if DUE_IDS=$(jq -ce '
+    if .fold_version == "2" and .vocabulary_version == "1" and
+       (.unhandled_due | type) == "array" and
+       all(.unhandled_due[]; .outcome == "due" and .disposition == "unhandled" and
+           (.outcome_id | type) == "string")
+    then [.unhandled_due[].outcome_id] else error("invalid DUE queue contract") end
+  ' "$TMP_DIR/due-before.out" 2>"$TMP_DIR/due-before.err"); then
+    if [[ "$DUE_IDS" != '[]' ]]; then
+      set +e
+      LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPT_DIR/retro-queue.sh" handle --cycle-id "$SLUG" \
+        --action dispatched --handled-by retro-lead --json >"$TMP_DIR/due-handle.out" 2>"$TMP_DIR/due-handle.err"
+      DUE_HANDLE_RC=$?
+      set -e
+      if [[ $DUE_HANDLE_RC -eq 0 ]] && jq -e '
+        (.outcome_ids | type) == "array" and (.matched | type) == "number" and
+        (.appended | type) == "number" and (.idempotent | type) == "number"
+      ' "$TMP_DIR/due-handle.out" >/dev/null 2>&1; then DUE_DISPOSITION="handled"; else
+        DUE_DISPOSITION="failed"
+        DUE_WARNING="best-effort DUE claim failed (retro-queue.sh handle, exit $DUE_HANDLE_RC): $(cat "$TMP_DIR/due-handle.err")"
+      fi
     fi
   else
-    DUE_DISPOSITION="absent"
+    DUE_IDS='[]'
+    DUE_DISPOSITION="failed"
+    DUE_WARNING="DUE queue reader returned invalid contract: $(cat "$TMP_DIR/due-before.err")"
   fi
 else
   DUE_DISPOSITION="failed"
-  DUE_WARNING="DUE queue reader failed"
-  warn "$DUE_WARNING"
+  DUE_WARNING="DUE queue reader failed (retro-queue.sh queue, exit $DUE_READ_RC): $(cat "$TMP_DIR/due-before.err")"
 fi
+[[ -z "$DUE_WARNING" ]] || warn "$DUE_WARNING"
+python3 - "$TMP_DIR" "$DUE_DISPOSITION" "$DUE_WARNING" "$DUE_IDS" "$DUE_READ_RC" "$DUE_HANDLE_RC" <<'PY'
+import json, os, sys
+tmp, disposition, warning, ids, read_rc, handle_rc = sys.argv[1:]
+result = {}
+if disposition == "handled":
+    with open(os.path.join(tmp, "due-handle.out")) as handle:
+        result = json.load(handle)
+claim = {"attempted": bool(handle_rc), "candidate_outcome_ids": json.loads(ids),
+         "outcome_ids": result.get("outcome_ids", []), "disposition": disposition,
+         "warning": warning or None, "reader_exit_code": int(read_rc),
+         "writer_exit_code": int(handle_rc) if handle_rc else None,
+         "reader": "retro-queue.sh queue", "writer": "retro-queue.sh handle",
+         "matched": result.get("matched"), "appended": result.get("appended"),
+         "idempotent": result.get("idempotent")}
+with open(os.path.join(tmp, "due-claim.json"), "w") as handle:
+    json.dump(claim, handle)
+PY
 
 run_reader() {
   local source_id="$1"; shift
@@ -187,6 +217,9 @@ run_reader() {
 WINDOW_START_NORM=$(printf '%s' "$WINDOW_JSON" | jq -r .start)
 WINDOW_END_NORM=$(printf '%s' "$WINDOW_JSON" | jq -r .end)
 run_reader cycle_work bash "$SCRIPT_DIR/load-work-item.sh" "$SLUG" --json
+run_reader packet_assessments python3 "$SCRIPT_DIR/packet-assessments-read.py" \
+  --kdir "$KDIR" --cycle-work "$TMP_DIR/cycle_work.out" \
+  --window-start "$WINDOW_START_NORM" --window-end "$WINDOW_END_NORM" --json
 run_reader due_queue bash "$SCRIPT_DIR/retro-queue.sh" queue --cycle-id "$SLUG" \
   --window-start "$WINDOW_START_NORM" --window-end "$WINDOW_END_NORM" --json
 run_reader scorecard_rows bash "$SCRIPT_DIR/scorecard-read.sh" rows \
@@ -199,15 +232,21 @@ run_reader journal bash "$SCRIPT_DIR/journal.sh" read \
 
 PREPARED="$TMP_DIR/prepared.json"
 set +e
-python3 - "$TMP_DIR" "$PREPARED" "$SLUG" "$ARCHIVED" "$WINDOW_JSON" "$DUE_DISPOSITION" "$DUE_WARNING" "$SCRIPT_DIR/work-evidence.py" "$ARTIFACT" <<'PY'
+python3 - "$TMP_DIR" "$PREPARED" "$SLUG" "$ARCHIVED" "$WINDOW_JSON" "$SCRIPT_DIR/work-evidence.py" "$ARTIFACT" <<'PY'
 import hashlib,json,os,runpy,sys
 
-tmp,out_path,slug,archived_raw,window_raw,due_disposition,due_warning,evidence_helper,prior_pack_path=sys.argv[1:]
+tmp,out_path,slug,archived_raw,window_raw,evidence_helper,prior_pack_path=sys.argv[1:]
+sys.path.insert(0,os.path.dirname(evidence_helper))
 identity_projection=runpy.run_path(evidence_helper)["identity_projection"]
+packet_delivery=runpy.run_path(os.path.join(os.path.dirname(evidence_helper),"packet-assessments-read.py"))["packet_delivery"]
+rubric_helper=runpy.run_path(os.path.join(os.path.dirname(evidence_helper),"retro-rubric.py"))
+rubric=rubric_helper["validate_frozen"](rubric_helper["load_rubric"]())
 window=json.loads(window_raw); archived=archived_raw=="true"
+with open(os.path.join(tmp,"due-claim.json")) as handle: due_claim=json.load(handle)
 
 SOURCE_REGISTRY=[
  ("cycle_work",f"lore work show {slug} --json",f"_work/{'_archive/' if archived else ''}{slug}","snapshot","missing-cycle-nonzero"),
+ ("packet_assessments",f"packet-assessments-read.py --kdir <knowledge-root> --cycle-work <captured-cycle_work-json> --window-start {window['start']} --window-end {window['end']} --json","_packets/assessments.jsonl","cycle-assessment-summary","read-with-zero-observations"),
  ("due_queue",f"lore retro queue --cycle-id {slug} --window-start {window['start']} --window-end {window['end']} --json","_scorecards/retro-deferred-queue.jsonl","half-open-window","versioned-empty-fold"),
  ("scorecard_rows",f"lore scorecard rows --window-start {window['start']} --window-end {window['end']} --json","_scorecards/rows.jsonl","half-open-window","[]"),
  ("scorecard_current","lore scorecard current --json","_scorecards/_current.json","snapshot","versioned-empty-summary"),
@@ -215,6 +254,8 @@ SOURCE_REGISTRY=[
  ("journal",f"lore journal read --since {window['start']} --until {window['end']} --json","_meta/effectiveness-journal.jsonl","half-open-window","[]"),
 ]
 FACT_REGISTRY={
+ "packet_delivery":["cycle_work"],
+ "packet_assessments":["packet_assessments","cycle_work"],
  "cycle_artifacts":["cycle_work"],
  "task_context_backlinks":["cycle_work"],
  "session_retrieval_friction_packets":["session_events","journal"],
@@ -240,6 +281,13 @@ def load_reader(source_id):
  try: obj=json.loads(data) if data.strip() else None
  except Exception as exc:
   return None,{"coverage":"unreadable","warnings":[str(exc)],"reason":"invalid-reader-output","cursor":None}
+ if source_id=="packet_assessments":
+  if (not isinstance(obj,dict) or obj.get("reader_contract_version")!="1"
+      or not {"coverage","status","reason","summary"} <= obj.keys()
+      or obj["coverage"] not in {"read","absent","unreadable"}):
+   return None,{"coverage":"unreadable","warnings":[],"reason":"invalid-reader-output","cursor":None}
+  return obj,{"coverage":obj["coverage"],"warnings":[],"reason":obj["reason"],"cursor":None,
+              "identity":hashlib.sha256(canonical(obj)).hexdigest()}
  identity_obj=obj
  if source_id=="cycle_work" and isinstance(obj,dict):
   identity_obj=identity_projection(obj)
@@ -253,7 +301,7 @@ for sid,reader,resolved,projection_mode,empty_shape in SOURCE_REGISTRY:
  manifest.append({"source_id":sid,"reader":reader,"resolved_source":resolved,
   "reader_contract_version":"2" if sid=="cycle_work" else "1","projection_mode":projection_mode,"stable_empty_shape":empty_shape,
   "coverage":meta["coverage"],"content_identity":meta.get("identity"),"cursor":meta.get("cursor"),
-  "window_field":"[start,end)" if projection_mode=="half-open-window" else None,
+  "window_field":"outcome time [start,end); transitions < end in append order" if sid=="due_queue" else "assessed_at [start,end)" if sid=="packet_assessments" else "[start,end)" if projection_mode=="half-open-window" else None,
   "warnings":meta["warnings"],"reason":meta["reason"]})
 
 def fact(status,source_ids,values=None,reason=None):
@@ -284,6 +332,12 @@ facts={
  "telemetry_attribution_rework":fact("available",FACT_REGISTRY["telemetry_attribution_rework"],{"telemetry_rows":sum(1 for r in rows if r.get("kind")=="telemetry" or r.get("tier")=="telemetry"),"correction_rows":sum(1 for r in rows if r.get("tier")=="correction")}) if isinstance(objects.get("scorecard_rows"),list) else fact("absent",FACT_REGISTRY["telemetry_attribution_rework"],reason="scorecard-rows-absent"),
 }
 
+# Compatibility fact above still reads session events and journal entries only.
+facts["packet_delivery"]=dict(packet_delivery(work),source_ids=FACT_REGISTRY["packet_delivery"])
+assessment=objects.get("packet_assessments")
+facts["packet_assessments"]=(fact(assessment["status"],FACT_REGISTRY["packet_assessments"],assessment["summary"],assessment["reason"])
+ if isinstance(assessment,dict) else fact("not-computable",FACT_REGISTRY["packet_assessments"],reason="assessment-reader-unavailable"))
+
 def calc(cid,sources,n=None,d=None,value=None,unit="ratio",floor=None,threshold=None,disposition="not-computable",reason=None):
  return {"calculation_id":cid,"calculation_version":"1","source_ids":sources,"numerator":n,"denominator":d,"value":value,"unit":unit,"sample_floor":floor,"threshold":threshold,"disposition":disposition,"reason":reason}
 calcs=[]
@@ -308,12 +362,13 @@ fixed_health={"state":state,"calculation_ids":[c["calculation_id"] for c in sele
 
 input_fp=hashlib.sha256(canonical({"schema_version":1,"slug":slug,"window":window})).hexdigest()
 source_shape=[{k:r[k] for k in ("source_id","reader_contract_version","reader","projection_mode","resolved_source","coverage","content_identity","cursor","window_field","warnings")} for r in manifest]
-source_fp=hashlib.sha256(canonical({"sources":source_shape,"calculations":[{"calculation_id":c,"calculation_version":"1"} for c in CALC_REGISTRY]})).hexdigest()
+source_fp=hashlib.sha256(canonical({"rubric":rubric,"packet_delivery":facts["packet_delivery"],"sources":source_shape,"calculations":[{"calculation_id":c,"calculation_version":"1"} for c in CALC_REGISTRY]})).hexdigest()
 pack_id=hashlib.sha256(canonical({"input_fingerprint":input_fp,"source_fingerprint":source_fp})).hexdigest()
 work_title=work.get("title","") if isinstance(work,dict) else ""
 pack={"schema_version":1,"pack_id":pack_id,"input_fingerprint":input_fp,"source_fingerprint":source_fp,"artifact_sha256":None,
  "cycle":{"slug":slug,"title":work_title,"archived":archived,"cycle_type":None},"window":window,
- "due_claim":{"attempted":due_disposition!="absent","outcome_ids":[],"disposition":due_disposition,"warning":due_warning or None},
+ "due_claim":due_claim,
+ "rubric":rubric,
  "source_manifest":manifest,
  "source_data":{sid:identity_projection(obj) if sid=="cycle_work" and isinstance(obj,dict) else obj for sid,obj in objects.items()},
  "facts":facts,"calculations":calcs,"fixed_health":fixed_health,
@@ -323,7 +378,7 @@ pack={"schema_version":1,"pack_id":pack_id,"input_fingerprint":input_fp,"source_
 try:
  with open(prior_pack_path,encoding="utf-8") as handle: previous=json.load(handle)
  prior_body={k:v for k,v in previous.items() if k!="artifact_sha256"}
- if previous.get("pack_id")==pack_id and previous.get("artifact_sha256")==hashlib.sha256(canonical(prior_body)).hexdigest():
+ if due_claim["disposition"]=="absent" and previous.get("pack_id")==pack_id and previous.get("artifact_sha256")==hashlib.sha256(canonical(prior_body)).hexdigest():
   pack["due_claim"]=previous["due_claim"]
 except (OSError,ValueError,TypeError,KeyError,AttributeError):
  pass

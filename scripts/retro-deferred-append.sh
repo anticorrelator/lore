@@ -161,6 +161,8 @@ if os.path.isfile(queue):
                 row = json.loads(line)
             except (ValueError, TypeError):
                 continue
+            if not isinstance(row, dict):
+                continue
             oid = row.get("outcome_id")
             if row.get("outcome") != "due" or not oid:
                 continue
@@ -172,11 +174,11 @@ if os.path.isfile(queue):
 if outcome_id:
     target_ids = [outcome_id] if outcome_id in outcomes else []
 else:
-    # Cycle-wide handling means "claim every still-unhandled DUE for this
-    # cycle." Previously handled identities are outside this operation: an
-    # earlier coordinator disposition must be a no-op when direct /retro starts.
+    # Match fold version 2 eligibility: never disposed or latest deferred.
+    # Terminal dispatched/skipped outcomes remain outside a cycle-wide claim.
     target_ids = [oid for oid, row in outcomes.items()
-                  if row.get("cycle_id") == cycle_id and not handled.get(oid)]
+                  if row.get("cycle_id") == cycle_id
+                  and (not handled.get(oid) or handled[oid][-1].get("action") == "deferred")]
 
 if not target_ids:
     if outcome_id:
@@ -191,15 +193,17 @@ rows = []
 for oid in target_ids:
     existing = handled.get(oid, [])
     if existing:
-        if all(r.get("action") == action and r.get("handled_by") == handled_by for r in existing):
+        latest = existing[-1]
+        if latest.get("action") == action and latest.get("handled_by") == handled_by:
             idempotent += 1
             continue
-        conflicts.append({
-            "outcome_id": oid,
-            "existing": [{"action": r.get("action"), "handled_by": r.get("handled_by")} for r in existing],
-            "requested": {"action": action, "handled_by": handled_by},
-        })
-        continue
+        if latest.get("action") != "deferred":
+            conflicts.append({
+                "outcome_id": oid,
+                "existing": [{"action": r.get("action"), "handled_by": r.get("handled_by")} for r in existing],
+                "requested": {"action": action, "handled_by": handled_by},
+            })
+            continue
     source = outcomes[oid]
     rows.append({
         "schema_version": "2",

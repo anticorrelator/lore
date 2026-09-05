@@ -113,6 +113,8 @@ def main():
                     "redacted_retro_prose": "",
                     "behavioral_health": [],
                     "scores": None,
+                    "rubric_id": "legacy-unversioned",
+                    "rubric_version": None,
                     "window_state": None,
                     "tripped_checks": [],
                 })
@@ -121,6 +123,8 @@ def main():
                 scores = entry.get("scores") or {}
 
                 if role == "retro":
+                    r["rubric_id"] = entry.get("rubric_id") or "legacy-unversioned"
+                    r["rubric_version"] = entry.get("rubric_version")
                     r["redacted_retro_prose"] = redact_prose(obs)
                     r["scores"] = {k: v for k, v in scores.items() if isinstance(v, (int, float, str, list))}
                     r["window_state"] = scores.get("window_state")

@@ -9,7 +9,7 @@ argument_description: "[work item name or slug]"
 
 Ask one question: did the knowledge system make this work meaningfully better?
 
-The ceremony has hands, not a borrowed head. `lore retro prepare` assembles the reproducible evidence envelope. The retro lead interprets that evidence, scores the dimensions, answers the behavioral checks, names causes, and chooses whether any proposal is substantive. `lore retro file` preserves those explicit commitments through the existing writers. Neither verb diagnoses the system or decides what should change.
+The ceremony has hands, not a borrowed head. `lore retro prepare` assembles the reproducible evidence envelope and freezes into it the rubric the judgment will be made under. The retro lead interprets that evidence, scores the dimensions or records why one could not be scored, answers the behavioral checks, names causes, and chooses whether any proposal is substantive. `lore retro file` preserves those explicit commitments through the existing writers, under the rubric identity the pack froze. Neither verb diagnoses the system or decides what should change.
 
 A completed retro may honestly conclude `no-substantive-suggestion`. Healthy silence is an outcome, not a missing step.
 
@@ -18,7 +18,7 @@ A completed retro may honestly conclude `no-substantive-suggestion`. Healthy sil
 The lead owns every judgment that could change the meaning of the cycle:
 
 - causal interpretation and remedy selection;
-- D1–D5 scores and rationales;
+- D1–D5 scores and rationales, and D6's score or its `not-assessable` disposition;
 - behavioral-health prose, including Check 7;
 - escalation and scale-access judgments;
 - channel-flag selection;
@@ -40,7 +40,7 @@ Run these steps in order:
 1. Select one cycle and explicit UTC window; invoke `prepare`.
 2. Verify pack completeness and read its facts, calculations, and fixed-health state.
 3. Interpret the cycle and author all diagnostic judgments.
-4. Build the exact v1 judgment manifest, including a suggestion outcome.
+4. Build the exact v2 judgment manifest, naming the frozen rubric and including a suggestion outcome.
 5. Invoke `file`; recover an accepted partial filing by exact replay.
 6. Report the evidence state first and the qualitative coda second.
 
@@ -61,14 +61,14 @@ lore retro prepare "$ARG" \
 
 Both bounds are required because Lore has no canonical retro-window inference. The returned `cycle_id` is the canonical slug. Preserve the artifact path, `pack_id`, and SHA for Steps 4 and 5.
 
-**DUE lifecycle compatibility.** The queue vocabulary remains `done | deferred | skipped | due`. A DUE begins as `record_type=outcome` with `disposition=unhandled`; its transition is a separate `record_type=disposition` with `disposition=handled` and an action from `dispatched | deferred | skipped`. `lore retro queue` remains the public fold. Prepare performs a best-effort DUE claim equivalent to:
+**DUE lifecycle compatibility.** The queue vocabulary remains `done | deferred | skipped | due`. A DUE begins as `record_type=outcome` with `disposition=unhandled`; its transition is a separate `record_type=disposition` with `disposition=handled` and an action from `dispatched | deferred | skipped`. `lore retro queue` remains the public fold, now at fold version 2 with vocabulary version 1: dispositions fold per outcome in append order, a latest `deferred` action leaves the outcome in `unhandled_due` with its handling record beside it, and a latest `dispatched` or `skipped` handles it. A coordinator's deferral keeps a cycle claimable by a later retrospective; it does not close it. Prepare performs a best-effort DUE claim equivalent to:
 
 ```bash
 lore retro handle --cycle-id "$SLUG" \
   --action dispatched --handled-by retro-lead
 ```
 
-If the queue reader fails, prepare warns `DUE queue reader failed`; if the claim write itself fails, it warns `best-effort DUE claim failed`. It MUST warn and continue in either case: the claim is never a precondition for the retro, never changes the selected cycle, and never creates another run obligation.
+If the queue reader fails, prepare warns `DUE queue reader failed`; if the claim write itself fails, it warns `best-effort DUE claim failed`. It MUST warn and continue in either case: the claim is never a precondition for the retro, never changes the selected cycle, and never creates another run obligation. The pack's `due_claim` records what the attempt did — the candidate and appended outcome IDs, the reader and writer exit codes, the disposition, and any warning — so a failed claim is a fact in the pack rather than a silent success.
 
 ### Step 2: Gather Evidence
 
@@ -80,8 +80,8 @@ The top-level object is exactly:
 
 ```text
 schema_version, pack_id, input_fingerprint, source_fingerprint,
-artifact_sha256, cycle, window, due_claim, source_manifest, facts,
-calculations, fixed_health, provenance
+artifact_sha256, cycle, window, due_claim, rubric, source_manifest,
+source_data, facts, calculations, fixed_health, provenance
 ```
 
 Identity layers answer different questions:
@@ -93,13 +93,21 @@ Identity layers answer different questions:
 
 Never substitute one identity for another.
 
-The required v1 sources are `cycle_work`, `due_queue`, `scorecard_rows`, `scorecard_current`, `session_events`, and `journal`. Every source row carries `reader`, `resolved_source`, `reader_contract_version`, `projection_mode`, `stable_empty_shape`, `coverage`, `content_identity`, `cursor`, `window_field`, `warnings`, and `reason`. Coverage is exactly `read | absent | unreadable | stale | not-computable`.
+The required v1 sources are `cycle_work`, `packet_assessments`, `due_queue`, `scorecard_rows`, `scorecard_current`, `session_events`, and `journal`. Every source row carries `reader`, `resolved_source`, `reader_contract_version`, `projection_mode`, `stable_empty_shape`, `coverage`, `content_identity`, `cursor`, `window_field`, `warnings`, and `reason`. Coverage is exactly `read | absent | unreadable | stale | not-computable`.
 
 The registered reader is the reader prepare executes — never a paraphrase or a sibling implementation path. History readers take the caller's half-open `[start,end)` window and return their declared stable empty shape; `cycle_work` and `scorecard_current` stay snapshots because filtering them by event time would misstate their meaning. Content identity hashes only the stable projection fields capable of changing pack facts.
 
 Each reader seam is one versioned contract: command, window or snapshot semantics, success shape, stable empty shape, malformed-source behavior, and the fact-relevant projection. A semantic change to any of these increments that seam's `reader_contract_version` and updates its writer-driven contract test in the same change. Never add a sibling reader beside a canonical one — extend the existing namespace, or retire the old surface in the same change that replaces it.
 
 Style, compression, and reorganization of this skill travel with the semantic change they describe. A standalone prose pass after behavior or contract tests have moved leaves three descriptions of one seam; keep prose, reader, and test moving as one mutation chain.
+
+#### Rubric identity
+
+The pack's `rubric` member is the frozen declaration prepare read from `skills/retro/rubric.json`: `rubric_id`, `rubric_version`, the ordered `dimensions` with their `dimension_id`, `journal_key`, `name`, five `anchors`, and `allow_not_assessable`, plus `rubric_sha256` and the exact `rubric_text`. The `rubric_id` is `retro-rubric`. The `rubric_version` is the 12-hex prefix of the SHA-256 over the rubric file's bytes, the same construction `template-version.sh` uses for a template. The whole descriptor is part of the pack's source fingerprint, so a pack prepared before a rubric edit and one prepared after it are different packs with different identities.
+
+The judgment names the `rubric_id` and `rubric_version` it was made under. Filing checks them against the descriptor frozen in the pack, never against the rubric file on disk at filing time, so a rubric edit between prepare and file is a refusal to correct rather than a silent rescoring under a contract nobody saw. Editing this skill's prose leaves the rubric version unchanged; editing the rubric file's bytes changes it, and that is the intended way to start a new scoring series. The anchors written under each dimension below and the anchors in the rubric file say the same thing, and when one moves the other moves in the same change.
+
+The declared dimensions are `D1` `d1_delivery`, `D2` `d2_quality`, `D3` `d3_gaps`, `D4` `d4_alignment`, `D5` `d5_spec_utility`, and `D6` `d6_packet_utility`. The first five keep the meanings, anchors, and journal keys they have always had. Only `D6` may be `not-assessable`.
 
 #### The cycle_work projection
 
@@ -138,7 +146,9 @@ The projection's `review_summary` lists every review attempt as `{attempt_id, st
 
 Treat the bundle as a record of the last close, not as current revision truth. Where the bundle and the revision-bound result history disagree, the disagreement is a fact about timing to report, and the result history is the record that names revisions. A missing bundle is `absent`. That establishes only that no bundle exists, not why. A bundle that exists but does not parse is `unreadable`. Neither state says anything about the work's outcome.
 
-The required fact groups are `cycle_artifacts`, `task_context_backlinks`, `session_retrieval_friction_packets`, `review_events`, `scale_signals`, `scorecard_eligibility_deltas`, and `telemetry_attribution_rework`. A fact group is `available | absent | not-computable`; non-available facts carry `values: null` and a reason.
+The required fact groups are `cycle_artifacts`, `task_context_backlinks`, `session_retrieval_friction_packets`, `review_events`, `scale_signals`, `scorecard_eligibility_deltas`, `telemetry_attribution_rework`, `packet_delivery`, and `packet_assessments`. A fact group is `available | absent | not-computable`; non-available facts carry `values: null` and a reason.
+
+`packet_delivery` is read from the `cycle_work` packet summary: how many distinct packets this cycle built, how many stayed assembled candidate sets, how many a dispatcher synthesized or waived, the kept/dropped/added totals with the packets excluded from each total and why, and the binding, delivery-state, and receipt-state counts. `packet_assessments` is the registered `packet_assessments` reader's cycle summary: eligible and observed packets, observations kept distinct per packet and per recipient transcript, confirmed and unconfirmed dispatches, and for each verdict class — `unused`, `harmful`, `missing`, `unattributed_retrieval` — how many observations could be assessed, how many findings they carried, and how many could not be assessed with their reasons. A class with `findings: 0` was assessed and found clean; a class with `findings: null` was not assessable. The full observation summaries sit in `source_data.packet_assessments`, keyed by opaque identities: transcript paths, queries, and verdict bodies never enter the pack. `session_retrieval_friction_packets` keeps its name and its two existing sources, session events and journal entries; it does not read packets, and the two facts above are where packet evidence lives.
 
 Every calculation row names its calculation/version, source IDs, numerator, denominator, value, unit, sample floor, threshold, disposition, and reason. Disposition is exactly `green | tripped | abstained | not-computable`.
 
@@ -150,6 +160,7 @@ Treat each state literally:
 - `not-computable` means the published substrate cannot support the statistic.
 - `absent`, `unreadable`, `unsupported`, and `stale` are evidence states, never favorable verdicts.
 - `fixed_health.state=not-computable` withholds `normal`; it does not imply `pipeline-degraded` and does not invite the lead to guess.
+- a `not-assessable` D6 is an abstention on record with its reason; it is never a score, and no numeric D6 stands in for it.
 
 The load-bearing calculations consume only the versioned published projections. Missing, unreadable, stale, malformed, or below-floor evidence keeps the calculation's emitted `not-computable` or `abstained` disposition and its reason — never green. An empty window is below sample, not proof of health.
 
@@ -183,7 +194,7 @@ Reports, review artifacts, result attempts, and claims are inside the `cycle_wor
 
 #### Dimension scores
 
-Score every dimension from 1–5 and give a concrete rationale. Do not adjust a score merely to agree with a deterministic headline; disagreement between the two is diagnostic.
+Score D1–D5 from 1–5, score D6 from 1–5 or record why it cannot be scored, and give a concrete rationale for each. Do not adjust a score merely to agree with a deterministic headline; disagreement between the two is diagnostic. Each dimension's anchor line below is the same text the frozen rubric carries.
 
 ##### D1 — Knowledge Delivery
 
@@ -222,6 +233,25 @@ Judge whether cited knowledge actually shaped implementation. Decorative referen
 Judge whether the spec reduced unnecessary exploration while leaving intended discovery work free to discover.
 
 `5` spec-guided with no escalation | `4` minor exploration or one escalation | `3` several independent reads or two to three escalations | `2` frequent exploration and divergence | `1` no meaningful guidance
+
+##### D6 — Packet Utility
+
+Judge whether the packets built for this cycle gave their recipients useful prior knowledge at the point they needed it, kept irrelevant and harmful material out of their way, and reduced rediscovery of what the store already held. This is a judgment about use. The pack hands you four different kinds of evidence about a packet, and the score rests on the fourth:
+
+- **Construction.** A packet was assembled: one retrieval pass produced a candidate set. `facts.packet_delivery` counts these as `unique_packets` and `assembled_candidates`.
+- **Synthesis.** A dispatcher read the candidate set and recorded what it kept, dropped, and added, or waived synthesis with a reason. `synthesized_packets`, `synthesis_counts`, and `waivers` describe that judgment. It is the dispatcher's read of the packet, not the recipient's.
+- **Receipt.** `receipt_state_counts.delivered`, and `dispatch_confirmed` on an assessment observation, say a recipient session ran with the packet in hand. Receipt is not use.
+- **Observed utility.** The assessor read a recipient's transcript and recorded findings per class in `facts.packet_assessments`: entries delivered and never used, entries that misled, knowledge the recipient needed and the packet lacked, retrieval the recipient did that the packet should have covered. Beside those findings sit the recipient's own outcomes in the `cycle_work` envelopes — what a report says it had to derive, what its claims and verification events cite.
+
+A synthesized packet is evidence of construction and of one colleague's judgment, not evidence that anyone read it. `dispatch_confirmed` is evidence of receipt, not of usefulness. Counts describe opportunity and gaps: how many packets, how many recipients were observed, how much went unused, what could not be assessed. They inform the score and never produce it. No arithmetic over `packet_delivery` or `packet_assessments` yields a D6 value, and an assessor's silence — a class that was not assessable, a recipient with no observation — is not a clean bill.
+
+`5` recipients worked from packet entries at the point of need, with no harmful material and no rediscovery of what the packet carried | `4` packet entries shaped the work with one minor gap: a little unused material, or one rediscovery the packet could have spared | `3` the packet was topical but the recipient rediscovered much of it, or unused material outweighed what was used | `2` the packet mostly missed the need: recipients derived their prior knowledge elsewhere while it carried irrelevant or stale material | `1` packet material misled a recipient or obstructed the work
+
+D6 is the one dimension that may abstain. When the cycle built no eligible packets, or when no recipient-use evidence exists — every verdict class not assessable, no observation inside the window, an assessment source that is absent or unreadable — record `disposition: not-assessable` with `score: null`, a `reason`, and the evidence references that show the gap. The judgment stays in the filing artifact; no numeric D6 reaches the journal or a scored row. Do not translate absence into a number: a 1 says the packet misled someone, a 3 says it half-helped, a 5 says it was used well, and none of those is what missing evidence says. A scored D6 needs concrete packet evidence and a recipient outcome to read it against.
+
+Evidence references for D6 look like `source:packet_assessments`, `pack:/facts/packet_delivery`, `pack:/facts/packet_assessments/values/classes/unused`, `pack:/source_data/packet_assessments/summary/observation_summaries/0`, and the `cycle_work` report envelope of the recipient whose work the score rests on. An abstention cites the fact group itself — `pack:/facts/packet_delivery` or `pack:/facts/packet_assessments`, with `source:packet_assessments` — because a group whose status is `absent` or `not-computable` carries `values: null` and no pointer beneath it resolves.
+
+D5 and D6 coexist on a new cycle and measure different things. D5 asks whether the spec spared the workers needless exploration; D6 asks whether the packet carried prior knowledge to the point of need. Neither replaces the other, and a D6 that cannot be scored says nothing about D5.
 
 #### Escalation, scale, and channel judgments
 
@@ -262,18 +292,20 @@ Respect each calculation's source-coverage and disposition fields. Source drift,
 
 ### Step 4: Author the Judgment Manifest
 
-Build a v1 object with exactly:
+Build a v2 object with exactly:
 
 ```text
-schema_version, cycle_id, pack_id, pack_sha256, actor, model,
-key_finding, most_actionable_gap, dimension_judgments,
+schema_version, cycle_id, pack_id, pack_sha256, rubric_id, rubric_version,
+actor, model, key_finding, most_actionable_gap, dimension_judgments,
 behavioral_health, causal_diagnoses, escalation_judgment,
 scale_access_judgment, channel_flags, suggestion_outcome, suggestions
 ```
 
-Set `pack_sha256` to the pack's `artifact_sha256`, not the serialized file digest.
+`schema_version` is `2`. Set `pack_sha256` to the pack's `artifact_sha256`, not the serialized file digest. Copy `rubric_id` and `rubric_version` from the pack's `rubric` member; filing refuses a manifest whose identity differs from the frozen descriptor.
 
-`dimension_judgments` is ordered exactly D1–D5. Each row is `{dimension_id, score, rationale, evidence_refs}`. `behavioral_health` is an ordered array of `{check_id, answer, evidence_refs}` and includes Check 7. `causal_diagnoses` is an array of `{diagnosis_id, interpretation, evidence_refs}` and may be empty.
+`dimension_judgments` is ordered exactly D1–D6. Each row is `{dimension_id, disposition, score, rationale, evidence_refs}`. A scored row has `disposition: scored` and an integer `score` from 1 to 5. A `not-assessable` row has `score: null` and adds a non-empty `reason`; only D6 may carry it. Every row keeps a non-empty rationale and at least one resolving evidence reference, abstentions included. `behavioral_health` is an ordered array of `{check_id, answer, evidence_refs}` and includes Check 7. `causal_diagnoses` is an array of `{diagnosis_id, interpretation, evidence_refs}` and may be empty.
+
+A pack with no `rubric` member is a retained legacy pack. It takes the v1 manifest — the same root without `rubric_id` and `rubric_version`, `schema_version` 1, and `dimension_judgments` ordered exactly D1–D5 as `{dimension_id, score, rationale, evidence_refs}` — and files into its original sink set. A rubric-bound pack refuses a v1 manifest, and a legacy pack refuses a v2 one. Replaying a retained legacy filing never adds a D6, a guessed version, or a dimension row it did not originally have.
 
 The three conditional fields — `escalation_judgment`, `scale_access_judgment`, and `channel_flags` — are never absent or null:
 
@@ -308,7 +340,9 @@ lore retro file "$SLUG" \
 
 The authoritative `retro-filing.json` is a single immutable assignment for the cycle. `judgment_accepted=true` means that assignment exists and matches. `filing_complete=true` means every required sanctioned sink exists and the terminal `event_type=retro-filing` telemetry row has landed.
 
-The immutable assignment requires primary, behavioral, escalation, proposal, scale-access, channel-flag, and completion-telemetry sinks. Their replay identities are unchanged: the primary, behavioral, and escalation journal rows match on `role + work_item + filing_id + sink`; each substantive proposal on that journal identity plus its `proposal ordinal`; scale access on `cycle_id` with exact writer-field equality; channel flags on `cycle_id + role + slot + signal_type` with exact field equality; completion telemetry on `event_type=retro-filing + filing_id`.
+The immutable assignment requires primary, behavioral, escalation, proposal, scale-access, channel-flag, dimension, and completion-telemetry sinks. Their replay identities are unchanged: the primary, behavioral, and escalation journal rows match on `role + work_item + filing_id + sink`; each substantive proposal on that journal identity plus its `proposal ordinal`; scale access on `cycle_id` with exact writer-field equality; channel flags on `cycle_id + role + slot + signal_type` with exact field equality; each dimension row on `filing_id + rubric_id + rubric_version + dimension_id`; completion telemetry on `event_type=retro-filing + filing_id`.
+
+The primary journal row carries the numeric scores under their journal keys and the `rubric_id` and `rubric_version` at the entry root; `scores` holds numbers only. Each scored dimension also lands one `scorecard:dimension:<id>` row through the scorecard writer: `kind=scored`, `tier=template`, `template_id=retro-rubric`, `template_version=<rubric_version>`, `metric=<journal_key>`, `value=<score>`, `sample_size=1`, `calibration_state=pre-calibration`, `verdict_source=retro-lead`, with the filing, pack, model, window bounds, rationale, and evidence references beside them. A `not-assessable` D6 has no journal key and no scored row; its judgment lives in the filing artifact alone. These rows are observations kept for later comparison. They are pre-calibration, they satisfy no calibrated evidence floor, and they rate no agent.
 
 Every write goes through its sanctioned writer: `journal.sh`, `retro-scale-access-append.sh`, `retro-channel-flag-append.sh`, or `scorecard-append.sh`. The verb never appends their files directly. Completion telemetry is last.
 
@@ -335,9 +369,32 @@ Then report, in order:
 3. causal diagnoses;
 4. escalation, scale-access, and channel judgments;
 5. behavioral-health answers, with Check 7 visible;
-6. D1–D5 as the narrative coda;
+6. D1–D6 as the narrative coda, with a `not-assessable` D6 reported as such and never as a number;
 7. `substantive` suggestion titles or the explicit `no-substantive-suggestion` outcome.
 
 When health is `pipeline-degraded` or `not-computable`, do not place pass/weak/fail prose above the evidence warning. When a below-floor calculation abstains, say `abstained: below-sample`; never translate it to weak, fail, or green.
 
 `/retro` never edits proposal targets. `/evolve` remains the only consumer that applies substantive `retro-evolution` suggestions. A no-suggestion filing gives `/evolve` nothing to consume, by design.
+
+### Reading scores across the rubric boundary
+
+Historical journal entries carry `d5_spec_utility` and no rubric identity. New entries carry `rubric_id` and `rubric_version` at the entry root, and `d6_packet_utility` beside `d5_spec_utility` whenever D6 was scored. The journal reader labels an unversioned entry `legacy-unversioned` with a null version at read time and leaves its stored bytes untouched; no historical score is renamed, re-keyed, or given a version it never had. Nothing pools these series. When you want to look across the boundary, choose the columns yourself:
+
+```bash
+lore journal query --role retro --extract-scores --json |
+  jq '[.[] | {date: .timestamp, rubric_id, rubric_version,
+              d5_spec_utility: .scores.d5_spec_utility,
+              d6_packet_utility: .scores.d6_packet_utility}]'
+```
+
+Example output, with an illustrative version:
+
+```json
+[
+  {"date":"2026-07-01","rubric_id":"legacy-unversioned","rubric_version":null,"d5_spec_utility":3,"d6_packet_utility":null},
+  {"date":"2026-09-06","rubric_id":"retro-rubric","rubric_version":"3f9a1c2b7d4e","d5_spec_utility":4,"d6_packet_utility":4},
+  {"date":"2026-09-12","rubric_id":"retro-rubric","rubric_version":"3f9a1c2b7d4e","d5_spec_utility":4,"d6_packet_utility":null}
+]
+```
+
+The first row predates the rubric declaration: its version is unknown and it never had a D6. The third row was scored under the current rubric and abstained on D6, so its null means `not-assessable`, not zero and not lost data. D5 and D6 share a 1–5 range and have no common scale: one measures what the spec spared, the other what the packet carried. A change in either column across rows is a fact about two different judgments made on two different cycles; it becomes an improvement or a regression only once someone has argued why, and this reader will not argue it for you. The scorecard's aggregate readers group scored rows by `(template_id, template_version, metric)`, so a rubric edit starts a new series rather than extending the old one, and a comparison across versions is likewise one you make and defend.
