@@ -108,6 +108,16 @@ Seal validates each cited result ID against `results.jsonl` and freezes the rows
 
 A file a position wants to change and does not find here is written through the verb that owns it, or reported as a gap. Snippet hashes for Tier 2 rows come from `scripts/snippet_normalize.py`.
 
+## The dispatch reference on Tier 2 rows
+
+A compiled attempt is identified by its dispatch manifest: the absolute path of the `manifest.json` the binder published for it and that file's sha256. The report carries the pair as the header lines `Position-dispatch-manifest:` and `Position-dispatch-sha256:`; the wrapper for your route says where the two values come from (the envelope's `position_dispatch.manifest_path` and a digest you compute, or the two environment variables on a session). A Tier 2 row from a compiled attempt carries the same pair as one optional object field:
+
+```
+"position_dispatch": {"manifest_path": "<the Position-dispatch-manifest value>", "manifest_sha256": "<the Position-dispatch-sha256 value>"}
+```
+
+Copy both values from the same place your report headers take them. Do not derive them from the brief you are reading or from any template on disk: the readers resolve the pair against the immutable manifest and check that it binds this work item and task, and a pair that does not resolve reads as unknown attribution, never as some current template's version. `validate-tier2.sh` checks only the shape of the field; `evidence-append.sh` resolves it and stores the projection beside the row; a row without the field is a legacy row and is read as before. The `producer_role` on the row keeps the mapping in the next section; a row whose role disagrees with the position the manifest records is stored with unknown attribution and its reason, not refused, so the claim survives and the mismatch stays visible. Every position emits the field the same way: investigator assertions, designer rows in either mode, reviewer rows, worker claims. A consultation reply carries no pair of its own; the lead files the designer's reference from the bound consultation attempt when it logs the reply.
+
 ## Legacy producer roles at the writer boundary
 
 `scripts/validate-tier2.sh` accepts `producer_role` values `researcher`, `worker`, `advisor`, `spec-lead`, and `implement-lead`. `lore verify` and the session terminus accept the position names directly. The mapping at the Tier 2 boundary is:
