@@ -17,7 +17,7 @@ The observation includes its authority, capture time, session generation, owning
 
 Peek returns the screen rows, framework, screen geometry, and recognized modal details. Use `--raw` for ANSI styling. The screen is the current terminal viewport, not the entire transcript. Its extent is explicit so a short screen is not mistaken for a complete response. When the result depends on work outside that screen, read the worker's saved artifact. A successful peek observes state; it never submits terminal input.
 
-For a blocked session, read the modal title and options, choose the intended response, and use `lore session answer` with an expectation copied from that observation. The answer verb rechecks its own input boundary. An old peek is evidence of what was seen then, not permission to answer a changed dialog.
+For a blocked session, read the modal title and options. When `modal.answerable` is true, choose the intended response and use `lore session answer` with an expectation copied from that observation. Otherwise use the harness's supported interaction; visible option labels do not imply numbered-answer support. The answer verb rechecks its own input boundary. An old peek is evidence of what was seen then, not permission to answer a changed dialog.
 
 ## Watcher behavior
 
