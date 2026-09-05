@@ -55,6 +55,8 @@ Show the script output directly.
 ---
 
 ### `<name>` (load/resume — default when name given but no command matches)
+`lore work show <slug> --json` now returns the item's **evidence** beside its plan, notes, and log: revisions (`lore plan revise`), close-criteria results (`lore criteria run`, current or stale), sealed reviews (`lore plan review`), and the packets each attempt received. The retrospective and the dashboard read the same projection. A plan is changed through `lore plan revise <slug>`, which records the change as progress or as a real one with a recoverable snapshot; `tasks.json` is never edited by hand.
+
 ```bash
 lore work show "<slug>"
 ```
@@ -198,6 +200,8 @@ Run **list**. Show the script output directly — no additional processing or su
 ---
 
 ## Workstream Stewardship
+
+Size the work first: a *fix* (no decision), a *decision* (one rationale row), a *change* (a plan — intents, constraints, close criteria — across working sets), an *arc* (across sessions). Decisions and working sets set the kind, never line count, and moving between kinds mid-stream is ordinary — note it and carry on.
 
 Grouping stays current because agents keep it current — the user should not have to assign items by hand. Whenever a listing or update puts the work map in front of you:
 

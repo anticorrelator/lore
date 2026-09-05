@@ -31,6 +31,8 @@ Quick-add directly to a category directory (bypasses inbox):
 ---
 
 ### `search <query>`
+Results carry a **byline** — who captured the entry, during what work, how long ago — and, on conventions that came out of a piece of work, a `history:` pointer. The byline locates context and never names a model; it is not a trust signal. For the reasoning behind a piece of code rather than the rule about it, `lore why <file:line>` and `lore tradeoffs <topic>` return a `### From the record` section: dated design decisions and notes from the work items that shaped that file or subsystem, active and archived. Those are history, pull-only, never pushed into a packet or a session-start load — a decision is re-decided when its context changes, and the record shows whether the context still holds.
+
 ```bash
 lore search "<query>" --type knowledge --scale-set <bucket>
 ```

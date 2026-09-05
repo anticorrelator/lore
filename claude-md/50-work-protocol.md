@@ -12,6 +12,10 @@ Work items persist in the project's `_work/` directory (path resolved by `lore r
 
 **Builtin plan mode (where the harness exposes one — e.g., Claude Code's `EnterPlanMode`/`ExitPlanMode`) produces ephemeral plans** that live in the harness's transient plan storage (resolved via `resolve_harness_install_path ephemeral_plans`; `unsupported` on harnesses without one) and are lost across sessions. Only use it for quick, small-scope planning that doesn't need to survive the current session. For anything that warrants persistence — multi-step work, design decisions, cross-session tasks — use `/work` instead.
 
+### Size the Work Before You Start
+
+Four kinds of work, read off the work rather than the diff: a *fix* restores specified behavior with no decision in it; a *decision* has a real fork and gets one rationale row; a *change* has to split across working sets and gets a plan — intents, constraints, close criteria per task; an *arc* has to split across sessions. Decisions and working sets set the kind, never line count. A fix can uncover a fork mid-stream and a large change can turn out routine — moving between kinds is ordinary; note it and carry on.
+
 ### Every Work Item Gets Persisted
 
 ALL planning work MUST create durable artifacts in `_work/` — whether triggered by `/work`, a harness's builtin plan mode, or inline design discussion. **No ephemeral plans.**
@@ -34,5 +38,6 @@ Create a work item proactively when ANY apply:
 Before compaction or at break points, capture progress to `notes.md` — `lore work note <slug>` for a quick mechanical append, or the `/work update` skill flow for a session-summarizing entry.
 
 ### Cross-References
+- A plan changes through `lore plan revise <slug>`, never by editing `tasks.json`; `lore work show <slug> --json` returns the item's evidence — revisions, results, reviews, packets — beside its plan, notes, and log.
 - Work items -> knowledge: `[[knowledge:conventions#Pattern Name]]`
 - Knowledge -> work items: `[[work:auth-refactor]]`

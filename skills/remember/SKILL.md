@@ -189,6 +189,8 @@ If capture constraints were provided in Step 1, apply them as an additional filt
 
 #### Manual Capture
 
+Every capture passes `--producer-role <position> --work-item <slug>`. Entries render a byline — who left them, during what work, how long ago — wherever an agent reads them; an entry captured without those fields shows no byline, and a byline is how the next reader finds the context behind the claim.
+
 When capturing interactively (outside Step 5's automated flow), use the CLI directly. The `--scale` flag is required — missing it is an error, not a default:
 
 ```bash

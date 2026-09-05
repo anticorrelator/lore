@@ -17,6 +17,7 @@ The full scale rubric (4 definitions + boundary tests + ±1 query pattern) lives
 Every entry in the knowledge store carries provenance and a falsifier you can check against the code, so run `lore search "<topic>"` before Grep, Glob, or Explore agents — a verified hit is cheaper than re-deriving the same insight from source. The store documents conventions, architecture, past decisions, and gotchas that raw code exploration cannot surface; if it has a relevant entry, use it.
 - Knowledge is auto-loaded on session start (index + priority files within budget), delivered between `=== Project Knowledge ===` and `=== End Project Knowledge ===` markers
 - **Delivery check:** if session-start output has work items but NO `=== Project Knowledge ===` block, the knowledge hook failed or timed out — recover with `bash ~/.lore/scripts/load-knowledge.sh` before relying on session context
+- Entries you are handed carry a **byline** — who captured them, during what work, how long ago (`captured by a worker during "…", 12 days ago`). It locates the context; it is not a signal of how much to trust the entry, and it never names a model.
 - Domain files (`domains/`) are NOT loaded at startup — read them on-demand via the index
 - When starting work in a specific area, check the index for a relevant domain file and read it
 - **The test:** if you're about to Grep for how something works, a convention, or why a decision was made — search knowledge first

@@ -460,6 +460,12 @@ with exact slug, event, and field inspection only until the replacement contract
 are green. That raw-poll posture is scoped to the migration window, not standing
 guidance.
 
+## The evidence spine — verbs the seat reads and writes
+
+`lore work show <slug> --json` returns `reader_contract_version: 2` with an `evidence` object: `revision` (head row), `result_summary` (per task and criterion: latest state, stale flag and reason), `review_summary` (attempts, sealed or open, cited results), `packet_summary` (per attempt: packet id, revision, delivery stage), and `sources` (coverage envelopes for tasks, reports, claims, the legacy close bundle — `read | absent | unreadable | unsupported`). The retrospective's `cycle_work` reader consumes exactly this projection; the TUI's evidence pages read it too.
+
+`lore plan revise <slug>` publishes a revision after an authored plan edit or a checkbox; `--decision-for <revision-id>` appends a decision record (anchor coverage; dispatch: proceed, wait, or reuse a named review) without creating a new revision. `lore criteria run <slug> <task-id> <criterion-id> --execution-worktree <root> --packet-id <id>` (or `--revision <rid> --unbound-reason <text>` outside a dispatch) executes a declared criterion and appends the result; a recovery by result id republishes without re-running. `lore plan review prepare <slug> --attempt <id> --revision <rid> --purpose <criterion-adequacy|integration>` freezes the reviewed input; `lore plan review seal` publishes output, dispositions, and the evaluator manifest in one rename. `lore packet build --work-item <slug> --role <position> --scale-set <buckets> --caller <role> [--task <id>] [--thin-floor <n>] [--flag <reason>]…` returns the status object; `lore packet show <id>` renders the packet. All flags and refusals are in each verb's `--help`.
+
 ## Calibrations
 
 The evidence log behind the skill's rules. A rule lives in SKILL.md clean — no

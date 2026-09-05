@@ -1,0 +1,10 @@
+## Working Evidence
+
+Four records travel with any task you take on, and each has exactly one writer. You will meet them whether you are dispatched into a task or start one yourself.
+
+- **Revisions.** A plan is a document with a history. Every change to it is a revision published by `lore plan revise`, recorded as progress (a checkbox) or as a real change, with a snapshot you can recover from. Packets, reviews, and results name the revision they belong to, so a later reader can tell which plan they answered. The old "checksum mismatch — regenerate?" prompt is gone; drift repairs itself and leaves a row.
+- **Packets.** Whoever dispatches you builds a knowledge packet for the move you are about to make with `lore packet build` and hands you a `Packet-id:`; `lore packet show <id>` renders it. It is one retrieval pass at a declared scale — candidates to check against the code, not answers. Re-pull with a flag when the task rests on an assumption no one has checked, crosses a boundary the packet did not cover, or when entries disagree with each other; a rich packet for the wrong question looks adequate and is not.
+- **Results.** A task's close criteria run through `lore criteria run <slug> <task-id> <criterion-id>`, which executes the command and writes the row. Nobody types a result. A row means a command ran against a recorded revision and code identity; a reader marks it stale when either has moved. Cite results by id.
+- **Reviews.** A review reads a frozen copy of what it reviews (`lore plan review prepare`) and seals its judgment once (`lore plan review seal`), naming the revision it actually read. A current review is one input to a dispatch or acceptance decision — never permission by itself. Those decisions are authored and recorded by whoever holds them.
+
+All of this reads side by side with the older evidence — reports, execution log, claims — through `lore work show <slug> --json`, which is what the retrospective, the dashboard, and a coordinator read. None of these records scores an agent: they describe plans, commands, reviews, and text.
