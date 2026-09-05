@@ -121,7 +121,7 @@ def emit_claim(cid, ref=None):
         attribution = project({'position_dispatch':ref})
         if attribution['status']=='resolved':
             position = attribution['position']
-            row['producer_role'] = {'investigator':'researcher','worker':'worker','reviewer':'worker','designer':'advisor' if attribution['bindings']['mode']=='consultation' else 'spec-lead'}[position]
+            row['producer_role'] = {'investigator':'researcher','worker':'worker','reviewer':'advisor','designer':'advisor' if attribution['bindings']['mode']=='consultation' else 'spec-lead'}[position]
     script('evidence-append.sh','--work-item','fixture', input=json.dumps(row).encode())
     return json.loads((item/'task-claims.jsonl').read_text().splitlines()[-1])
 
@@ -294,5 +294,58 @@ assert project({'position_dispatch':ref})['status']=='resolved'
 (temporary/'commands.json').write_text(json.dumps(commands,indent=2))
 (temporary/'fixture-index.json').write_text(json.dumps({'isolated_test_data':True,'source':str(original),'attempts':[{'producer':d,'bindings':b,'position_dispatch':r} for d,b,r in refs]},indent=2))
 print(f'PASS: {len(refs)} compiled attempts, canonical report/claim/consultation/log writers, legacy/unknown/archive/failure controls; fixtures: {temporary}')
+PY
+}
+
+@test "canonical bold and plain routing labels reach the existing off-scale writer" {
+  python3 - "$REPO" "$CASE_ROOT" <<'PY'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+repo, temporary = map(Path, sys.argv[1:])
+store = temporary/'store';store.mkdir()
+env = dict(os.environ, LORE_KNOWLEDGE_DIR=str(store), LORE_DATA_DIR=str(store))
+subprocess.run(['bash',str(repo/'scripts/create-work.sh'),'--title','Routing fixture','--slug','routing-fixture'],env=env,check=True,capture_output=True)
+for label, role in [('Surfaced concerns','worker'),('Worker leads','researcher')]:
+    for bold in (False, True):
+        heading = f'**{label}:**' if bold else label+':'
+        payload = f'{role} {"bold" if bold else "plain"} fixture'
+        subprocess.run(['bash',str(repo/'scripts/write-execution-log.sh'),'--slug','routing-fixture','--source','implement-lead',
+                        '--template-version','123456abcdef'],input=f'{heading}\n- {payload}\n**Blockers:** none\n',
+                       text=True,env=env,check=True,capture_output=True)
+rows = [json.loads(line) for line in (store/'_work/routing-fixture/off_scale_routes.jsonl').read_text().splitlines()]
+assert len(rows)==4, rows
+assert {row['payload'] for row in rows} == {'- worker bold fixture','- worker plain fixture','- researcher bold fixture','- researcher plain fixture'}, rows
+assert {row['producer_role'] for row in rows} == {'worker','researcher'}, rows
+assert all(row['template_version']=='123456abcdef' for row in rows), rows
+PY
+}
+
+@test "actual log append refusal is nonzero and malformed CLI references never append" {
+  python3 - "$REPO" "$CASE_ROOT" <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import sys
+repo, temporary = map(Path, sys.argv[1:])
+store = temporary/'store';store.mkdir()
+env = dict(os.environ, LORE_KNOWLEDGE_DIR=str(store), LORE_DATA_DIR=str(store))
+subprocess.run(['bash',str(repo/'scripts/create-work.sh'),'--title','Append fixture','--slug','append-fixture'],env=env,check=True,capture_output=True)
+args = ['bash',str(repo/'scripts/write-execution-log.sh'),'--slug','append-fixture','--source','implement-lead']
+subprocess.run(args,input=b'Initial entry',env=env,check=True,capture_output=True)
+log = store/'_work/append-fixture/execution-log.md'; before=log.read_bytes()
+for flags in [ ['--position-dispatch-manifest','','--position-dispatch-sha256',''],
+               ['--position-dispatch-manifest','/invalid/manifest.json','--position-dispatch-sha256','bad-digest'] ]:
+    failed = subprocess.run(args+flags,input=b'Malformed reference',env=env,capture_output=True)
+    assert failed.returncode != 0 and log.read_bytes()==before, failed
+log.chmod(0o444)
+try:
+    failed = subprocess.run(args,input=b'Refused append',env=env,capture_output=True)
+    assert failed.returncode != 0 and log.read_bytes()==before, failed
+    assert b'execution-log append failed' in failed.stderr and b'Entry written' not in failed.stdout, failed
+finally:
+    log.chmod(0o644)
 PY
 }

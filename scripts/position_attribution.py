@@ -55,7 +55,7 @@ def legacy_role(attribution):
     position = attribution.get('position')
     if position == 'designer':
         return 'advisor' if attribution.get('bindings', {}).get('mode') == 'consultation' else 'spec-lead'
-    return {'investigator': 'researcher', 'worker': 'worker', 'reviewer': 'worker'}.get(position)
+    return {'investigator': 'researcher', 'worker': 'worker', 'reviewer': 'advisor'}.get(position)
 
 
 def project(record, *, expected=None):
