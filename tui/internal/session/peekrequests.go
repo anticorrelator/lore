@@ -16,6 +16,10 @@ import (
 // Raw selects the ANSI variant in the response. Peek is a read, not a lifecycle
 // transition, so it emits no journal events.
 type PeekRequest struct {
+	Summary        bool   `json:"summary,omitempty"`
+	Lines          int    `json:"lines,omitempty"`
+	Before         string `json:"before,omitempty"`
+	MaxBytes       int    `json:"max_bytes,omitempty"`
 	RequestID      string `json:"request_id"`
 	Slug           string `json:"slug"`
 	TargetInstance string `json:"target_instance"`
@@ -75,17 +79,20 @@ type PeekModal struct {
 // rows from the same snapshot the readiness gate uses; Ready/BlockedReason carry
 // that gate's classification. ANSI is populated only when the request set Raw.
 type PeekResponse struct {
-	Framework     string      `json:"framework"`
-	Observation   Observation `json:"observation"`
-	Screen        PeekScreen  `json:"screen"`
-	Modal         *PeekModal  `json:"modal,omitempty"`
-	RequestID     string      `json:"request_id"`
-	Slug          string      `json:"slug"`
-	CapturedAt    string      `json:"captured_at"`
-	Ready         bool        `json:"ready"`
-	BlockedReason string      `json:"blocked_reason,omitempty"`
-	Rows          []string    `json:"rows"`
-	ANSI          string      `json:"ansi,omitempty"`
+	Summary       bool         `json:"summary,omitempty"`
+	Error         string       `json:"error,omitempty"`
+	History       *PeekHistory `json:"history,omitempty"`
+	Framework     string       `json:"framework"`
+	Observation   Observation  `json:"observation"`
+	Screen        PeekScreen   `json:"screen"`
+	Modal         *PeekModal   `json:"modal,omitempty"`
+	RequestID     string       `json:"request_id"`
+	Slug          string       `json:"slug"`
+	CapturedAt    string       `json:"captured_at"`
+	Ready         bool         `json:"ready"`
+	BlockedReason string       `json:"blocked_reason,omitempty"`
+	Rows          []string     `json:"rows"`
+	ANSI          string       `json:"ansi,omitempty"`
 }
 
 // PeekRequestsDir is the peek-request surface under a _sessions/ directory.
@@ -193,4 +200,50 @@ func GCPeekResponses(sessionsDir string, maxAge time.Duration) {
 			os.Remove(path)
 		}
 	}
+}
+
+type PeekHistory struct {
+	ScreenBuffer       string   `json:"screen_buffer"`
+	Source             string   `json:"source"`
+	SnapshotID         string   `json:"snapshot_id"`
+	CapturedAt         string   `json:"captured_at"`
+	ExpiresAt          string   `json:"expires_at"`
+	Generation         string   `json:"generation"`
+	RetainedRows       int      `json:"retained_rows"`
+	SnapshotRows       int      `json:"snapshot_rows"`
+	Start              int      `json:"start"`
+	End                int      `json:"end"`
+	Rows               []string `json:"rows"`
+	ANSI               string   `json:"ansi,omitempty"`
+	Bytes              int      `json:"bytes"`
+	ByteLimit          int      `json:"byte_limit"`
+	Truncated          bool     `json:"truncated"`
+	RetentionTruncated bool     `json:"retention_truncated"`
+	RowTruncated       bool     `json:"row_truncated"`
+	More               bool     `json:"more"`
+	NextCursor         string   `json:"next_cursor,omitempty"`
+	Available          bool     `json:"available"`
+	Limitation         string   `json:"limitation"`
+}
+
+func (p PeekResponse) MarshalJSON() ([]byte, error) {
+	type plain PeekResponse
+	data, err := json.Marshal(plain(p))
+	if err != nil {
+		return nil, err
+	}
+	if !p.Summary && p.History == nil && p.Error == "" {
+		return data, nil
+	}
+	var fields map[string]json.RawMessage
+	if err = json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	delete(fields, "rows")
+	delete(fields, "ansi")
+	if p.Summary {
+		delete(fields, "history")
+		delete(fields, "screen")
+	}
+	return json.Marshal(fields)
 }

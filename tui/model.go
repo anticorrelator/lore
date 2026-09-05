@@ -313,9 +313,11 @@ type model struct {
 	// the same request. Keyed by request id (unlike pendingClose, which is keyed
 	// by slug): multiple send/peek requests can target one slug. An entry is
 	// cleared when its consume Cmd reports back.
-	pendingSend   map[string]bool
-	pendingAnswer map[string]bool
-	pendingPeek   map[string]bool
+	pendingSend        map[string]bool
+	pendingAnswer      map[string]bool
+	peekHistory        *peekHistoryCache
+	peekHistoryPending int
+	pendingPeek        map[string]bool
 	// pendingSendVerify holds gate-passing sends whose paste reached the composer
 	// but whose outcome is not yet journaled: the `sent` row defers until a
 	// post-inject observation confirms the composer submitted. Keyed by request id.

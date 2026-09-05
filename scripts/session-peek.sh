@@ -5,6 +5,10 @@
 #   lore session peek <slug> [--raw] [--timeout <sec>] [options]
 #
 # Options:
+#   --summary          Current observation/modal only; excludes terminal bulk.
+#   --lines <N>        Read 1..500 retained display rows (default page: 100).
+#   --before <cursor>  Read older rows from the same snapshot (expires in 2 minutes).
+#   --max-bytes <N>    History content budget, 1..16384 bytes (default: 4096).
 #   --raw              Include the ANSI-styled screen render, not just plain rows.
 #   --timeout <sec>    Response poll budget (default: 15 ≈ 3 poll ticks).
 #   --requested-by <w> Who requested it (default: $LORE_SESSION_INSTANCE, else $USER).
@@ -34,6 +38,12 @@ source "$SCRIPT_DIR/lib.sh"
 
 SLUG_ARG=""
 RAW=0
+SUMMARY=0
+HISTORY_LINES=0
+HISTORY_LINES_SET=0
+MAX_BYTES_SET=0
+BEFORE=""
+MAX_BYTES=0
 TIMEOUT=15
 REQUESTED_BY=""
 TTL=30
@@ -43,6 +53,16 @@ JSON_MODE=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --raw) RAW=1; shift ;;
+    --summary) SUMMARY=1; shift ;;
+    --lines|--before|--max-bytes)
+      [[ $# -ge 2 && -n "$2" ]] || { echo "Missing value for $1" >&2; exit 1; }
+      case "$1" in
+        --lines) HISTORY_LINES="$2"; HISTORY_LINES_SET=1 ;;
+        --before) BEFORE="$2" ;;
+        --max-bytes) MAX_BYTES="$2"; MAX_BYTES_SET=1 ;;
+      esac
+      shift 2 ;;
+
     --timeout) TIMEOUT="$2"; shift 2 ;;
     --requested-by) REQUESTED_BY="$2"; shift 2 ;;
     --ttl) TTL="$2"; shift 2 ;;
@@ -73,6 +93,14 @@ fail() {
   fi
   die "$msg"
 }
+
+[[ "$HISTORY_LINES" =~ ^[0-9]+$ && ${#HISTORY_LINES} -le 3 && "$MAX_BYTES" =~ ^[0-9]+$ && ${#MAX_BYTES} -le 5 ]] || fail "invalid history limit"
+HISTORY_LINES=$((10#$HISTORY_LINES))
+MAX_BYTES=$((10#$MAX_BYTES))
+[[ ( $HISTORY_LINES_SET -eq 0 || $HISTORY_LINES -gt 0 ) && ( $MAX_BYTES_SET -eq 0 || $MAX_BYTES -gt 0 ) ]] || fail "history limits must be positive"
+[[ $HISTORY_LINES -le 500 && $MAX_BYTES -le 16384 ]] || fail "history limits exceed 500 rows or 16384 bytes"
+[[ ${#BEFORE} -le 512 ]] || fail "invalid history cursor"
+if [[ $SUMMARY -eq 1 && ( $RAW -eq 1 || $HISTORY_LINES -ne 0 || -n "$BEFORE" || $MAX_BYTES -ne 0 ) ]]; then fail "--summary cannot combine with --raw or history options"; fi
 
 command -v jq &>/dev/null || fail "jq is required but not found on PATH"
 command -v python3 &>/dev/null || fail "python3 is required but not found on PATH"
@@ -189,9 +217,13 @@ ROW="$(jq -n \
   --arg slug "$SLUG" \
   --arg target "$TARGET_INSTANCE" \
   --argjson raw "$RAW_JSON" \
+  --argjson summary "$SUMMARY" \
+  --argjson lines "$HISTORY_LINES" \
+  --arg before "$BEFORE" \
+  --argjson max_bytes "$MAX_BYTES" \
   --arg requested_by "$REQUESTED_BY" \
   --arg requested_at "$REQUESTED_AT" \
-  '{request_id: $request_id, slug: $slug, target_instance: $target, raw: $raw, requested_by: $requested_by, requested_at: $requested_at}')"
+  '{request_id: $request_id, slug: $slug, target_instance: $target, raw: $raw, summary: ($summary == 1), lines: $lines, before: $before, max_bytes: $max_bytes, requested_by: $requested_by, requested_at: $requested_at}')"
 
 TMP="$(mktemp "$PEEK_DIR/.tmp.${REQUEST_ID}.XXXXXX")"
 printf '%s\n' "$ROW" > "$TMP"
@@ -205,15 +237,27 @@ while :; do
   if [[ -f "$RESPONSE_FILE" ]]; then
     RESP="$(cat "$RESPONSE_FILE" | python3 "$SCRIPT_DIR/coordinate_watch_state.py" peek)"
     rm -f "$RESPONSE_FILE"
+    if [[ $SUMMARY -eq 1 ]]; then RESP="$(printf '%s' "$RESP" | jq 'del(.rows,.ansi,.history,.screen) | .summary=true')"; fi
+    if [[ $HISTORY_LINES -ne 0 || -n "$BEFORE" || $MAX_BYTES -ne 0 ]]; then
+      if ! printf '%s' "$RESP" | jq -e '.history != null or .error != null' >/dev/null; then fail "history-unsupported-by-host"; fi
+    fi
+    if printf '%s' "$RESP" | jq -e '.error != null and .error != ""' >/dev/null; then
+      if [[ $JSON_MODE -eq 1 ]]; then printf '%s\n' "$RESP"; else printf '%s' "$RESP" | jq -r '.error' >&2; fi
+      exit 1
+    fi
     if [[ $JSON_MODE -eq 1 ]]; then
       json_output "$RESP"
     fi
     READY="$(printf '%s' "$RESP" | jq -r '.ready')"
     REASON="$(printf '%s' "$RESP" | jq -r '.blocked_reason // ""')"
     if [[ $RAW -eq 1 ]]; then
-      printf '%s' "$RESP" | jq -r '.ansi // ""'
+      printf '%s' "$RESP" | jq -r '.history.ansi // .ansi // ""'
     else
-      printf '%s' "$RESP" | jq -r '.rows[]?'
+      printf '%s' "$RESP" | jq -r '(.history.rows // .rows // [])[]'
+    fi
+    if [[ $SUMMARY -eq 1 ]]; then printf '%s' "$RESP" | jq -c '{observation,modal}'; exit 0; fi
+    if printf '%s' "$RESP" | jq -e '.history != null' >/dev/null; then
+      printf '%s' "$RESP" | jq -c '.history | del(.rows,.ansi)'
     fi
     printf '%s' "$RESP" | python3 "$SCRIPT_DIR/coordinate_watch_state.py" peek-text
     if [[ "$READY" == "true" ]]; then
