@@ -249,7 +249,7 @@ A synthesized packet is evidence of construction and of one colleague's judgment
 
 D6 is the one dimension that may abstain. When the cycle built no eligible packets, or when no recipient-use evidence exists — every verdict class not assessable, no observation inside the window, an assessment source that is absent or unreadable — record `disposition: not-assessable` with `score: null`, a `reason`, and the evidence references that show the gap. The judgment stays in the filing artifact; no numeric D6 reaches the journal or a scored row. Do not translate absence into a number: a 1 says the packet misled someone, a 3 says it half-helped, a 5 says it was used well, and none of those is what missing evidence says. A scored D6 needs concrete packet evidence and a recipient outcome to read it against.
 
-Evidence references for D6 look like `source:packet_assessments`, `pack:/facts/packet_delivery`, `pack:/facts/packet_assessments/values/classes/unused`, `pack:/source_data/packet_assessments/summary/observation_summaries/0`, and the `cycle_work` report envelope of the recipient whose work the score rests on. An abstention typically cites `pack:/facts/packet_delivery/values/unique_packets` or `pack:/facts/packet_assessments/values/observations` to show what was missing.
+Evidence references for D6 look like `source:packet_assessments`, `pack:/facts/packet_delivery`, `pack:/facts/packet_assessments/values/classes/unused`, `pack:/source_data/packet_assessments/summary/observation_summaries/0`, and the `cycle_work` report envelope of the recipient whose work the score rests on. An abstention cites the fact group itself — `pack:/facts/packet_delivery` or `pack:/facts/packet_assessments`, with `source:packet_assessments` — because a group whose status is `absent` or `not-computable` carries `values: null` and no pointer beneath it resolves.
 
 D5 and D6 coexist on a new cycle and measure different things. D5 asks whether the spec spared the workers needless exploration; D6 asks whether the packet carried prior knowledge to the point of need. Neither replaces the other, and a D6 that cannot be scored says nothing about D5.
 
@@ -378,7 +378,7 @@ When health is `pipeline-degraded` or `not-computable`, do not place pass/weak/f
 
 ### Reading scores across the rubric boundary
 
-Historical journal entries carry `d5_spec_utility` and no rubric identity. New entries carry `d6_packet_utility` beside it, with `rubric_id` and `rubric_version` at the entry root. The journal reader labels an unversioned entry `legacy-unversioned` with a null version at read time and leaves its stored bytes untouched; no historical score is renamed, re-keyed, or given a version it never had. Nothing pools these series. When you want to look across the boundary, choose the columns yourself:
+Historical journal entries carry `d5_spec_utility` and no rubric identity. New entries carry `rubric_id` and `rubric_version` at the entry root, and `d6_packet_utility` beside `d5_spec_utility` whenever D6 was scored. The journal reader labels an unversioned entry `legacy-unversioned` with a null version at read time and leaves its stored bytes untouched; no historical score is renamed, re-keyed, or given a version it never had. Nothing pools these series. When you want to look across the boundary, choose the columns yourself:
 
 ```bash
 lore journal query --role retro --extract-scores --json |
