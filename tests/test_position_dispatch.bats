@@ -1079,6 +1079,14 @@ elif scenario=='synthesis':
     b=fixture('investigator','waived-attempt');b.update(task_id=None,revision_id=None,packet_id='pkt-waived',packet_pointer=pointer(store,'pkt-waived'))
     b['absence_reasons'].update(task_id='Investigation precedes tasks.',revision_id='No plan revision exists.')
     bind(compile('investigator'),b)
+    # Re-validation of an existing publication is not a preparation: an assembled packet bound before the rule still validates there.
+    hist={'packet_id':'pkt-historical','packet_scope':'task','work_item':'fixture','task_id':'task-1','revision_id':revision,
+          'dispatch_attempt_id':'historical-attempt','source_head':committed['source_head'],'session_id':None,'phase':None,'arm':None,'task_scale_set':'implementation'}
+    build_packet(store,hist,assembly=('Historical content',{}),role='worker',scales=['implementation'])
+    hb=fixture(attempt='historical-fixture');hb.update(packet_id='pkt-historical',packet_pointer=pointer(store,'pkt-historical'),dispatch_attempt_id='historical-attempt',report_id='report-historical')
+    hb['report_path']=str(item/'worker-reports/report-historical.md')
+    assert binder.validate_bindings(hb,'worker',store,('task_id','revision_id','packet_id','packet_pointer'),preparation=False)['delivery_stage']=='assembled'
+    refused(lambda: binder.validate_bindings(hb,'worker',store,('task_id','revision_id','packet_id','packet_pointer')),'candidate set nobody has synthesized')
 elif scenario=='renderer-drift':
     d=compile(framework='claude-code')
     old=bind(d,fixture(attempt='before-drift'))
