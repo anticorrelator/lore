@@ -766,6 +766,25 @@ def review_requirement_projection(history, revision):
                 "value": None, "revision_id": None, "decision_id": None, "inherited_from_revision": None}
 
 
+def packet_summary(rows, records):
+    """One entry per packet id. Rows supersede by append (assembled, then synthesized), so the latest row
+    describes the packet; superseded_rows counts the history behind it."""
+    summary, order = {}, []
+    for row, record in zip(rows, records):
+        packet_id = row.get("packet_id")
+        if packet_id not in summary:
+            order.append(packet_id)
+        prior = summary.get(packet_id)
+        summary[packet_id] = {"packet_id": packet_id, "task_id": row.get("task_id"),
+                              "dispatch_attempt_id": row.get("dispatch_attempt_id"),
+                              "revision_id": row.get("revision_id"),
+                              "binding": record["binding"], "receipt": record["receipt"],
+                              "delivery_stage": record.get("delivery_stage"),
+                              "synthesis": record.get("synthesis"), "synthesis_waiver": record.get("synthesis_waiver"),
+                              "superseded_rows": (prior["superseded_rows"] + 1) if prior else 0}
+    return [summary[k] for k in order]
+
+
 def project(item_dir, knowledge_dir, *, packet_ledger=None):
     item, root = Path(item_dir).absolute(), Path(knowledge_dir).absolute()
     tasks = read_file(item / "tasks.json", root, json_file=True, versions={"1"})
@@ -841,6 +860,12 @@ def project(item_dir, knowledge_dir, *, packet_ledger=None):
                 record["packet_id"] = row.get("packet_id")
                 record["task_id"] = row.get("task_id")
                 record["receipt"] = "delivered" if row.get("delivery_stage") == "delivered" else "unknown"
+                record["delivery_stage"] = row.get("delivery_stage")
+                synthesis = row.get("synthesis") if isinstance(row.get("synthesis"), dict) else None
+                record["synthesis"] = ({"by": synthesis.get("by"), "kept": len(synthesis.get("kept") or []),
+                                        "dropped": len(synthesis.get("dropped") or []), "added": len(synthesis.get("added") or [])}
+                                       if synthesis else None)
+                record["synthesis_waiver"] = row.get("synthesis_waiver") if isinstance(row.get("synthesis_waiver"), dict) else None
                 if index in source["invalid_rows"]:
                     record["binding"] = {"state": "invalid", "reason": "invalid-packet-attribution"}
             if name == "outcomes":
@@ -892,11 +917,7 @@ def project(item_dir, knowledge_dir, *, packet_ledger=None):
             summary["freshness"] = {"state": "unknown", "reasons": ["result-history-" + sources["results"]["state"]]}
     return {"schema_version": EVIDENCE_SCHEMA_VERSION, "reader_contract_version": READER_CONTRACT_VERSION,
             "sources": sources, "revision": revision, "review_summary": review_summary,
-            "packet_summary": [{"packet_id": row.get("packet_id"), "task_id": row.get("task_id"),
-                                "dispatch_attempt_id": row.get("dispatch_attempt_id"),
-                                "revision_id": row.get("revision_id"),
-                                "binding": record["binding"], "receipt": record["receipt"]}
-                               for row, record in zip(sources["packets"]["rows"], sources["packets"]["records"])],
+            "packet_summary": packet_summary(sources["packets"]["rows"], sources["packets"]["records"]),
             "result_summary": [latest[k] for k in sorted(latest)]}
 
 

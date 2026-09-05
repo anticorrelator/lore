@@ -451,6 +451,10 @@ def exercise_recipes(repo, root, source):
         paths(prefix)
         run("normalize-bindings", prefix, REPORT_ID=prefix, EXECUTION_ROOT=root_path if root_path is not None else f.code)
         b = json.loads(v["BINDINGS_FILE"].read_text())
+        # The lead's judgment over the candidate set travels with the packet; an empty pair of lists is a recorded judgment too.
+        synthesized = obj(run("synthesize-packet", prefix + " packet synthesized before binding", PACKET_ID=b["packet_id"],
+                              SYNTHESIS_FILE=f.data(prefix + "-synthesis.json", {"dropped": [], "added": []})))
+        assert synthesized["delivery_stage"] == "synthesized" and synthesized["packet_id"] == b["packet_id"]
         run("compile-position", prefix, POSITION="worker", TARGET_FRAMEWORK=framework)
         run("author-wrapper", prefix, ROUTE=route)
         return b
@@ -608,6 +612,8 @@ def exercise_recipes(repo, root, source):
     run("designer-bindings", "missing consultation identity refused", expected=1)
     run("compile-position", "designer consultation compilation", POSITION="designer", TARGET_FRAMEWORK="codex")
     run("author-wrapper", "designer consultation wrapper", ROUTE="designer")
+    run("synthesize-packet", "designer packet synthesized before binding",
+        SYNTHESIS_FILE=f.data("designer-synthesis.json", {"dropped": [], "added": []}))
     designer_ref = bind("designer bound to its own packet", REQUIRED_BINDINGS="packet_id packet_pointer", NATIVE_MODEL="gpt-6-astra-high")
     designer_version = json.loads(Path(designer_ref["manifest_path"]).read_text())["producer"]["template_version"]
     reply = root / "reply.md"

@@ -105,6 +105,10 @@ def validate_bindings(bindings, position, kdir, required=(), *, preparation=True
             raise ValueError('canonical packet dispatch_attempt_id mismatch')
         if packet.get('recipient_role') != position:
             raise ValueError('canonical packet position mismatch')
+        if preparation and packet.get('delivery_stage') != 'synthesized' and not packet.get('synthesis_waiver'):
+            raise ValueError(f"packet {bindings['packet_id']} is a candidate set nobody has synthesized; run "
+                             f"`lore packet synthesize {bindings['packet_id']} --by <position> [--drop PATH REASON]... [--add PATH REASON]...` "
+                             "and bind again, or record a synthesis_waiver when the packet is built")
         if bindings['packet_pointer'] != pointer(kdir, bindings['packet_id']):
             raise ValueError('canonical packet pointer mismatch')
     elif bindings['packet_pointer'] is not None:
