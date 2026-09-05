@@ -263,8 +263,14 @@ if previous and previous.get("input_fingerprint") == input_fp and previous.get("
     for directive in previous["directives"]:
         reference = directive["payload"].get("position_dispatch")
         if reference:
-            binder.resolve_dispatch(reference["manifest_path"], reference["manifest_sha256"],
-                                    expected={"work_item": slug, "position": "investigator"})
+            resolved = binder.resolve_dispatch(reference["manifest_path"], reference["manifest_sha256"],
+                                               expected={"work_item": slug, "position": "investigator"})
+            frozen = resolved["manifest"]
+            payload = directive["payload"]
+            if payload["prompt"] != Path(resolved["payload_path"]).read_text() or payload["bindings"] != frozen["bindings"]:
+                reject("published investigator input differs from its immutable dispatch")
+            if payload["session_context"] != {"dispatch_guidance": payload["prompt"], "position_dispatch": reference}:
+                reject("published investigator session context differs from its immutable dispatch")
     artifact_bytes = canonical(previous)
     Path(output_path).write_text(json.dumps({"artifact": previous, "artifact_text": artifact_bytes.decode(),
                                             "artifact_sha256": hashlib.sha256(artifact_bytes).hexdigest()}))
