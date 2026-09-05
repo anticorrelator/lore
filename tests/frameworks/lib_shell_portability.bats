@@ -60,8 +60,8 @@ setup() {
 }
 
 @test "lib.sh: resolve_agent_template works for every shipped template under zsh" {
-  for tmpl in worker researcher advisor classifier curator correctness-gate \
-              reverse-auditor structure-analyst crossref-scout; do
+  for path in "$REPO_DIR"/agents/*.md; do
+    tmpl="$(basename "$path" .md)"
     run zsh -c "source '$LIB_SH' && resolve_agent_template '$tmpl'"
     [ "$status" -eq 0 ] || {
       echo "resolve_agent_template '$tmpl' failed under zsh: $output" >&2

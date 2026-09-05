@@ -314,11 +314,20 @@ try:
             fail('semantic plan bytes cannot be recorded as progress')
         kind = 'progress' if progress and args.kind != 'semantic' else 'semantic'
         if kind == 'progress' and old_tasks is not None:
-            # Completion may change generated status/checksum, but changes to
-            # commands, constraints, or dependencies still need a semantic row.
+            # Estimates read current source sizes; they are advisory, even when
+            # a checkoff regenerates them after the source was edited. Compiled
+            # estimates also carry immutable dispatch references, which bind
+            # the producer and must remain part of the semantic projection.
+            def estimate_identity(value):
+                if isinstance(value, list):
+                    return [estimate_identity(v) for v in value]
+                if isinstance(value, dict):
+                    return value.get('dispatch_context', {}).get('position_dispatch')
+                return None
             def without_progress(value):
                 if isinstance(value, dict):
-                    return {k: without_progress(v) for k, v in value.items()
+                    return {k: (estimate_identity(v) if k == 'context_cost_estimate' else without_progress(v))
+                            for k, v in value.items()
                             if k not in {'plan_checksum', 'generated_at', 'revision_id', 'status', 'completed'}}
                 if isinstance(value, list):
                     return [without_progress(v) for v in value]

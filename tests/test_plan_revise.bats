@@ -463,3 +463,83 @@ assert rows[2]['change_categories']['constraint']==['task-1'],rows[2]
 PY
   [ "$status" -eq 0 ]
 }
+
+@test "source-size estimate drift permits progress and retains refreshed snapshot" {
+  source_file="$LORE_DATA_DIR/alpha.py"
+  printf 'small' > "$source_file"
+  replace_plan 'src/alpha.py' "$source_file"
+  adopt
+  python3 - "$source_file" <<'PYTHON'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_text('larger source\n' * 500)
+PYTHON
+  replace_plan '- [ ] Build alpha' '- [x] Build alpha'
+  run revise --kind progress
+  [ "$status" -eq 0 ]
+  run python3 - "$ITEM" <<'PYTHON'
+import json, pathlib, sys
+p=pathlib.Path(sys.argv[1])
+rows=[json.loads(line) for line in (p/'revisions.jsonl').read_text().splitlines()]
+a,b=[json.loads((p/row['tasks_path']).read_text()) for row in rows]
+assert rows[-1]['kind']=='progress'
+assert rows[-1]['dispatch_decision']['disposition']=='proceed'
+assert a['tasks'][0]['context_cost_estimate'] != b['tasks'][0]['context_cost_estimate']
+assert a['tasks'][0]['close_criteria'] == b['tasks'][0]['close_criteria']
+PYTHON
+  [ "$status" -eq 0 ]
+}
+
+@test "dependency and constraint changes refuse progress" {
+  adopt
+  replace_plan ' [depends-on: task-1]' ''
+  run revise --kind progress
+  [ "$status" -ne 0 ]
+  [ "$(row_count)" = 1 ]
+  replace_plan 'Beta module.' 'Beta module with a new constraint.'
+  run revise --kind progress
+  [ "$status" -ne 0 ]
+  [ "$(row_count)" = 1 ]
+}
+
+@test "generated commands constraints dependencies and dispatch identities remain semantic" {
+  adopt
+  altered="$LORE_DATA_DIR/scripts"
+  mkdir "$altered"
+  for file in "$REPO_DIR"/scripts/*; do
+    ln -s "$file" "$altered/$(basename "$file")"
+  done
+  rm "$altered/plan-revise.sh" "$altered/generate-tasks.py"
+  cp "$REVISE" "$altered/plan-revise.sh"
+  cat > "$altered/generate-tasks.py" <<'PYTHON'
+import json, os, subprocess, sys
+result = subprocess.run([sys.executable, os.environ['ORIGINAL_GENERATOR'], *sys.argv[1:]], capture_output=True)
+sys.stderr.buffer.write(result.stderr)
+if result.returncode:
+    sys.exit(result.returncode)
+data = json.loads(result.stdout)
+task = data['tasks'][0]
+field = os.environ['MUTATED_FIELD']
+if field == 'argv':
+    task['close_criteria'][0]['argv'] = ['false']
+elif field == 'criterion':
+    task['close_criteria'][0]['expected_exit'] = 1
+elif field == 'dependency':
+    task['blockedBy'] = ['task-2']
+elif field == 'constraint':
+    task['constraints'] = ['a new requirement']
+elif field == 'estimate-dispatch':
+    task['context_cost_estimate']['dispatch_context'] = {'position_dispatch': {'manifest_path': '/tmp/manifest.json', 'manifest_sha256': 'a' * 64}}
+else:
+    task['position_binding'] = {'position_id': 'different', 'version': 'changed'}
+print(json.dumps(data))
+PYTHON
+  export ORIGINAL_GENERATOR="$REPO_DIR/scripts/generate-tasks.py"
+  for field in argv criterion dependency constraint dispatch estimate-dispatch; do
+    export MUTATED_FIELD="$field"
+    run bash "$altered/plan-revise.sh" revision-fixture --kind progress
+    [ "$status" -ne 0 ]
+    [[ "$output" == *'semantic generated-task change'* ]]
+    [ "$(row_count)" = 1 ]
+  done
+}
