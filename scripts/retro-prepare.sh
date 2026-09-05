@@ -149,31 +149,61 @@ PY
 # fold after the attempt so the manifest describes the state used by the pack.
 DUE_DISPOSITION="absent"
 DUE_WARNING=""
+DUE_IDS='[]'
+DUE_HANDLE_RC=""
 set +e
-DUE_BEFORE=$(LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPT_DIR/retro-queue.sh" queue --cycle-id "$SLUG" --json 2>"$TMP_DIR/due-before.err")
+LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPT_DIR/retro-queue.sh" queue --cycle-id "$SLUG" --json >"$TMP_DIR/due-before.out" 2>"$TMP_DIR/due-before.err"
 DUE_READ_RC=$?
 set -e
 if [[ $DUE_READ_RC -eq 0 ]]; then
-  DUE_IDS=$(printf '%s' "$DUE_BEFORE" | jq -r '.unhandled_due[].outcome_id' 2>/dev/null || true)
-  if [[ -n "$DUE_IDS" ]]; then
-    set +e
-    LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPT_DIR/retro-queue.sh" handle --cycle-id "$SLUG" \
-      --action dispatched --handled-by retro-lead --json >"$TMP_DIR/due-handle.out" 2>"$TMP_DIR/due-handle.err"
-    DUE_HANDLE_RC=$?
-    set -e
-    if [[ $DUE_HANDLE_RC -eq 0 ]]; then DUE_DISPOSITION="handled"; else
-      DUE_DISPOSITION="failed"
-      DUE_WARNING="best-effort DUE claim failed"
-      warn "$DUE_WARNING"
+  if DUE_IDS=$(jq -ce '
+    if .fold_version == "2" and .vocabulary_version == "1" and
+       (.unhandled_due | type) == "array" and
+       all(.unhandled_due[]; .outcome == "due" and .disposition == "unhandled" and
+           (.outcome_id | type) == "string")
+    then [.unhandled_due[].outcome_id] else error("invalid DUE queue contract") end
+  ' "$TMP_DIR/due-before.out" 2>"$TMP_DIR/due-before.err"); then
+    if [[ "$DUE_IDS" != '[]' ]]; then
+      set +e
+      LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPT_DIR/retro-queue.sh" handle --cycle-id "$SLUG" \
+        --action dispatched --handled-by retro-lead --json >"$TMP_DIR/due-handle.out" 2>"$TMP_DIR/due-handle.err"
+      DUE_HANDLE_RC=$?
+      set -e
+      if [[ $DUE_HANDLE_RC -eq 0 ]] && jq -e '
+        (.outcome_ids | type) == "array" and (.matched | type) == "number" and
+        (.appended | type) == "number" and (.idempotent | type) == "number"
+      ' "$TMP_DIR/due-handle.out" >/dev/null 2>&1; then DUE_DISPOSITION="handled"; else
+        DUE_DISPOSITION="failed"
+        DUE_WARNING="best-effort DUE claim failed (retro-queue.sh handle, exit $DUE_HANDLE_RC): $(cat "$TMP_DIR/due-handle.err")"
+      fi
     fi
   else
-    DUE_DISPOSITION="absent"
+    DUE_IDS='[]'
+    DUE_DISPOSITION="failed"
+    DUE_WARNING="DUE queue reader returned invalid contract: $(cat "$TMP_DIR/due-before.err")"
   fi
 else
   DUE_DISPOSITION="failed"
-  DUE_WARNING="DUE queue reader failed"
-  warn "$DUE_WARNING"
+  DUE_WARNING="DUE queue reader failed (retro-queue.sh queue, exit $DUE_READ_RC): $(cat "$TMP_DIR/due-before.err")"
 fi
+[[ -z "$DUE_WARNING" ]] || warn "$DUE_WARNING"
+python3 - "$TMP_DIR" "$DUE_DISPOSITION" "$DUE_WARNING" "$DUE_IDS" "$DUE_READ_RC" "$DUE_HANDLE_RC" <<'PY'
+import json, os, sys
+tmp, disposition, warning, ids, read_rc, handle_rc = sys.argv[1:]
+result = {}
+if disposition == "handled":
+    with open(os.path.join(tmp, "due-handle.out")) as handle:
+        result = json.load(handle)
+claim = {"attempted": bool(handle_rc), "candidate_outcome_ids": json.loads(ids),
+         "outcome_ids": result.get("outcome_ids", []), "disposition": disposition,
+         "warning": warning or None, "reader_exit_code": int(read_rc),
+         "writer_exit_code": int(handle_rc) if handle_rc else None,
+         "reader": "retro-queue.sh queue", "writer": "retro-queue.sh handle",
+         "matched": result.get("matched"), "appended": result.get("appended"),
+         "idempotent": result.get("idempotent")}
+with open(os.path.join(tmp, "due-claim.json"), "w") as handle:
+    json.dump(claim, handle)
+PY
 
 run_reader() {
   local source_id="$1"; shift
@@ -202,16 +232,17 @@ run_reader journal bash "$SCRIPT_DIR/journal.sh" read \
 
 PREPARED="$TMP_DIR/prepared.json"
 set +e
-python3 - "$TMP_DIR" "$PREPARED" "$SLUG" "$ARCHIVED" "$WINDOW_JSON" "$DUE_DISPOSITION" "$DUE_WARNING" "$SCRIPT_DIR/work-evidence.py" "$ARTIFACT" <<'PY'
+python3 - "$TMP_DIR" "$PREPARED" "$SLUG" "$ARCHIVED" "$WINDOW_JSON" "$SCRIPT_DIR/work-evidence.py" "$ARTIFACT" <<'PY'
 import hashlib,json,os,runpy,sys
 
-tmp,out_path,slug,archived_raw,window_raw,due_disposition,due_warning,evidence_helper,prior_pack_path=sys.argv[1:]
+tmp,out_path,slug,archived_raw,window_raw,evidence_helper,prior_pack_path=sys.argv[1:]
 sys.path.insert(0,os.path.dirname(evidence_helper))
 identity_projection=runpy.run_path(evidence_helper)["identity_projection"]
 packet_delivery=runpy.run_path(os.path.join(os.path.dirname(evidence_helper),"packet-assessments-read.py"))["packet_delivery"]
 rubric_helper=runpy.run_path(os.path.join(os.path.dirname(evidence_helper),"retro-rubric.py"))
 rubric=rubric_helper["validate_frozen"](rubric_helper["load_rubric"]())
 window=json.loads(window_raw); archived=archived_raw=="true"
+with open(os.path.join(tmp,"due-claim.json")) as handle: due_claim=json.load(handle)
 
 SOURCE_REGISTRY=[
  ("cycle_work",f"lore work show {slug} --json",f"_work/{'_archive/' if archived else ''}{slug}","snapshot","missing-cycle-nonzero"),
@@ -270,7 +301,7 @@ for sid,reader,resolved,projection_mode,empty_shape in SOURCE_REGISTRY:
  manifest.append({"source_id":sid,"reader":reader,"resolved_source":resolved,
   "reader_contract_version":"2" if sid=="cycle_work" else "1","projection_mode":projection_mode,"stable_empty_shape":empty_shape,
   "coverage":meta["coverage"],"content_identity":meta.get("identity"),"cursor":meta.get("cursor"),
-  "window_field":"assessed_at [start,end)" if sid=="packet_assessments" else "[start,end)" if projection_mode=="half-open-window" else None,
+  "window_field":"outcome time [start,end); transitions < end in append order" if sid=="due_queue" else "assessed_at [start,end)" if sid=="packet_assessments" else "[start,end)" if projection_mode=="half-open-window" else None,
   "warnings":meta["warnings"],"reason":meta["reason"]})
 
 def fact(status,source_ids,values=None,reason=None):
@@ -336,7 +367,7 @@ pack_id=hashlib.sha256(canonical({"input_fingerprint":input_fp,"source_fingerpri
 work_title=work.get("title","") if isinstance(work,dict) else ""
 pack={"schema_version":1,"pack_id":pack_id,"input_fingerprint":input_fp,"source_fingerprint":source_fp,"artifact_sha256":None,
  "cycle":{"slug":slug,"title":work_title,"archived":archived,"cycle_type":None},"window":window,
- "due_claim":{"attempted":due_disposition!="absent","outcome_ids":[],"disposition":due_disposition,"warning":due_warning or None},
+ "due_claim":due_claim,
  "rubric":rubric,
  "source_manifest":manifest,
  "source_data":{sid:identity_projection(obj) if sid=="cycle_work" and isinstance(obj,dict) else obj for sid,obj in objects.items()},
@@ -347,7 +378,7 @@ pack={"schema_version":1,"pack_id":pack_id,"input_fingerprint":input_fp,"source_
 try:
  with open(prior_pack_path,encoding="utf-8") as handle: previous=json.load(handle)
  prior_body={k:v for k,v in previous.items() if k!="artifact_sha256"}
- if previous.get("pack_id")==pack_id and previous.get("artifact_sha256")==hashlib.sha256(canonical(prior_body)).hexdigest():
+ if due_claim["disposition"]=="absent" and previous.get("pack_id")==pack_id and previous.get("artifact_sha256")==hashlib.sha256(canonical(prior_body)).hexdigest():
   pack["due_claim"]=previous["due_claim"]
 except (OSError,ValueError,TypeError,KeyError,AttributeError):
  pass

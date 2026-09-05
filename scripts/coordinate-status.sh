@@ -167,13 +167,13 @@ def run_reader(name, *args):
         return None, f"invalid JSON from published reader: {exc}", None
 
 
-def version_errors(envelope, label, vocabulary_versions=(EXPECTED_VERSION,)):
+def version_errors(envelope, label, vocabulary_versions=(EXPECTED_VERSION,), fold_versions=(EXPECTED_VERSION,)):
     errors = []
     fold = envelope.get("fold_version")
     vocab = envelope.get("vocabulary_version")
     if fold is None:
         errors.append(f"{label} missing fold_version declaration")
-    elif str(fold) != EXPECTED_VERSION:
+    elif str(fold) not in fold_versions:
         errors.append(f"{label} unknown fold_version={fold}")
     if vocab is None:
         errors.append(f"{label} missing vocabulary_version declaration")
@@ -686,7 +686,7 @@ retro_fold = retro_vocab = None
 if retro_error:
     retro_errors.append(f"retro queue reader failed: {retro_error}")
 elif retro is not None:
-    errs, retro_fold, retro_vocab = version_errors(retro, "retro queue")
+    errs, retro_fold, retro_vocab = version_errors(retro, "retro queue", fold_versions=("2",))
     retro_errors.extend(errs)
 if retro_warning:
     retro_errors.append(f"retro queue reader warning: {retro_warning}")
@@ -728,7 +728,7 @@ if retro_errors:
         schema_version=retro_fold, vocabulary_version=retro_vocab,
     )
 else:
-    source_row("retro-queue", "ok", "1", "1", retro_locator)
+    source_row("retro-queue", "ok", retro_fold, retro_vocab, retro_locator)
 
 
 # --- evolve-staging -------------------------------------------------------

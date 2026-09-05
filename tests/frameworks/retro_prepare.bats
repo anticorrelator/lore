@@ -616,3 +616,93 @@ PY
   [ "$status" -ne 0 ]
   [[ "$output" == *pack-build-failed* ]]
 }
+
+@test "prepare claims resurfaced deferrals with original IDs and preserves claim provenance on replay" {
+  queue="$TEST_KDIR/_scorecards/retro-deferred-queue.jsonl"
+  oid=$(jq -r 'select(.record_type == "outcome") | .outcome_id' "$queue")
+  run bash "$REPO_DIR/scripts/retro-queue.sh" handle --outcome-id "$oid" --action deferred --handled-by coordinate --json
+  [ "$status" -eq 0 ]
+  cp "$queue" "$TEST_KDIR/original-queue"
+  run_prepare
+  [ "$(wc -l < "$queue" | tr -d ' ')" -eq 3 ]
+  head -n 2 "$queue" > "$TEST_KDIR/retained-queue"
+  cmp "$TEST_KDIR/original-queue" "$TEST_KDIR/retained-queue"
+  pack="$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+  jq -e --arg oid "$oid" '
+    .due_claim.attempted and .due_claim.disposition == "handled" and
+    .due_claim.candidate_outcome_ids == [$oid] and .due_claim.outcome_ids == [$oid] and
+    .due_claim.writer == "retro-queue.sh handle" and .due_claim.writer_exit_code == 0 and
+    .due_claim.appended == 1 and .due_claim.warning == null and
+    .source_data.due_queue.fold_version == "2" and .source_data.due_queue.vocabulary_version == "1" and
+    .source_data.due_queue.counts.unhandled_due == 0 and
+    .source_data.due_queue.handled_due[0].handling.handled_by == "retro-lead" and
+    .rubric.rubric_id == "retro-rubric"
+  ' "$pack"
+  cp "$pack" "$TEST_KDIR/first-pack"
+  run_prepare
+  cmp "$pack" "$TEST_KDIR/first-pack"
+  [ "$(wc -l < "$queue" | tr -d ' ')" -eq 3 ]
+}
+
+# Copy the scripts to inject failures only at the public queue front. All other
+# readers and preparation still execute normally against the isolated store.
+queue_failure_front() {
+  cp -R "$REPO_DIR/scripts" "$TEST_KDIR/scripts"
+  ln -s "$REPO_DIR/skills" "$TEST_KDIR/skills"
+  ln -s "$REPO_DIR/adapters" "$TEST_KDIR/adapters"
+  mv "$TEST_KDIR/scripts/retro-queue.sh" "$TEST_KDIR/scripts/retro-queue-real.sh"
+  cat > "$TEST_KDIR/scripts/retro-queue.sh" <<'SH'
+#!/usr/bin/env bash
+if [[ "$1" == "$FAIL_QUEUE_OPERATION" ]]; then
+  echo "injected $1 evidence failure" >&2
+  exit 23
+fi
+exec bash "$(dirname "$0")/retro-queue-real.sh" "$@"
+SH
+  PREPARE="$TEST_KDIR/scripts/retro-prepare.sh"
+}
+
+@test "prepare writer failure warns with attempted IDs and does not block the evidence pack" {
+  queue_failure_front
+  export FAIL_QUEUE_OPERATION=handle
+  run bash "$PREPARE" cycle-a --window-start "$WINDOW_START" --window-end "$WINDOW_END" --json
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"best-effort DUE claim failed"* ]]
+  [[ "$output" == *"exit 23"* ]]
+  jq -e '
+    .due_claim.attempted and .due_claim.disposition == "failed" and
+    (.due_claim.candidate_outcome_ids | length) == 1 and .due_claim.outcome_ids == [] and
+    .due_claim.reader_exit_code == 0 and .due_claim.writer_exit_code == 23 and
+    (.due_claim.warning | contains("injected handle evidence failure")) and
+    .source_data.due_queue.counts.unhandled_due == 1
+  ' "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+  [ "$(wc -l < "$TEST_KDIR/_scorecards/retro-deferred-queue.jsonl" | tr -d ' ')" -eq 1 ]
+}
+
+@test "prepare reader failure records an unattempted claim and unreadable source without blocking" {
+  queue_failure_front
+  export FAIL_QUEUE_OPERATION=queue
+  run bash "$PREPARE" cycle-a --window-start "$WINDOW_START" --window-end "$WINDOW_END" --json
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"DUE queue reader failed"* ]]
+  jq -e '
+    .due_claim.attempted == false and .due_claim.disposition == "failed" and
+    .due_claim.reader_exit_code == 23 and .due_claim.writer_exit_code == null and
+    .due_claim.outcome_ids == [] and
+    (.due_claim.warning | contains("injected queue evidence failure")) and
+    .source_data.due_queue == null and
+    any(.source_manifest[]; .source_id == "due_queue" and .coverage == "unreadable")
+  ' "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+}
+
+@test "coordinate status accepts fold two and deferred rows retain the unhandled vocabulary" {
+  run bash "$REPO_DIR/scripts/retro-queue.sh" handle --cycle-id cycle-a --action deferred --handled-by coordinate --json
+  [ "$status" -eq 0 ]
+  run bash "$REPO_DIR/scripts/coordinate-status.sh" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    any(.buckets.needs_judgment[]; .source_id == "retro-queue") and
+    all(.source_manifest[] | select(.source_id == "retro-queue");
+        .schema_version == "2" and .vocabulary_version == "1" and .read_status == "ok")
+  '
+}

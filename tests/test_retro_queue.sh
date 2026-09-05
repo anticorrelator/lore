@@ -57,7 +57,7 @@ done
 STATUS=$(bash "$QUEUE_FRONT" queue --kdir "$KDIR" --json)
 RC=$?
 assert_zero "queue fold exits zero" "$RC"
-assert_eq "queue fold declares fold version" "1" \
+assert_eq "queue fold declares fold version" "2" \
   "$(printf '%s' "$STATUS" | jq -r '.fold_version')"
 assert_eq "queue fold declares vocabulary version" "1" \
   "$(printf '%s' "$STATUS" | jq -r '.vocabulary_version')"
@@ -130,7 +130,7 @@ done
 ACTION_STATUS=$(bash "$QUEUE_FRONT" queue --kdir "$KDIR" --json)
 assert_eq "queue fold mirrors dispatched|deferred|skipped action vocabulary" \
   "deferred,dispatched,skipped" \
-  "$(printf '%s' "$ACTION_STATUS" | jq -r '[.handled_due[].handling.action] | unique | sort | join(",")')"
+  "$(printf '%s' "$ACTION_STATUS" | jq -r '[.handled_due[].handling.action, .unhandled_due[].handling.action // empty] | unique | sort | join(",")')"
 bash "$QUEUE_FRONT" handle --outcome-id "$OID" --action maybe \
   --handled-by coordinator --kdir "$KDIR" >/dev/null 2>&1
 assert_nonzero "appender rejects action tokens outside the closed vocabulary" "$?"
@@ -148,6 +148,129 @@ assert_eq "coordinate retro action mirror matches the sole appender" \
 bash "$CLI" retro handle --cycle-id absent --action dispatched \
   --handled-by retro-lead --kdir "$KDIR" >/dev/null
 assert_zero "lore retro handle treats a cycle with no DUE as a no-op" "$?"
+
+# Historical fixtures are local data, never copied from the live queue.
+python3 - "$KDIR" "$QUEUE_FRONT" <<'PY'
+import json, pathlib, subprocess, sys
+root, front = pathlib.Path(sys.argv[1]), sys.argv[2]
+fixture = root / 'historical'
+fixture.mkdir()
+(fixture / '_scorecards').mkdir()
+queue = fixture / '_scorecards/retro-deferred-queue.jsonl'
+cycle = 'implement-runs-on-packets-positions-standalone-com'
+ids = ['retro-due-fbc86be878f847b295ec342a09d0b0c5',
+       'retro-due-473a9cc0745043849a628ae38cfe457f']
+def due(oid, ts, cycle=cycle, event='spec-finalize'):
+    return dict(schema_version='2', kind='retro_deferred', record_type='outcome',
+                outcome_id=oid, cycle_id=cycle, event_type=event, outcome='due',
+                disposition='unhandled', ts=ts, reason='always-stratum',
+                stratum='new_template_version', rate=1)
+def transition(row, action, ts, actor='coordinate'):
+    return dict(schema_version='2', kind='retro_deferred', record_type='disposition',
+                outcome_id=row['outcome_id'], cycle_id=row['cycle_id'],
+                event_type=row['event_type'], outcome='due', disposition='handled',
+                action=action, handled_by=actor, ts=ts, handled_at=ts)
+def write(rows):
+    queue.write_text(''.join(json.dumps(r, sort_keys=True) + '\n' for r in rows))
+    return queue.read_bytes()
+def call(*args, success=True):
+    result = subprocess.run(['bash', front, *args, '--kdir', str(fixture), '--json'],
+                            capture_output=True, text=True)
+    assert (result.returncode == 0) == success, (args, result.stdout, result.stderr)
+    return json.loads(result.stdout) if success else result
+
+a=due(ids[0], '2026-09-01T11:57:34Z')
+b=due(ids[1], '2026-09-01T15:08:24Z', event='impl-close')
+rows=[a,b,transition(a,'deferred','2026-09-01T15:14:04Z'),
+          transition(b,'deferred','2026-09-01T15:14:05Z')]
+original=write(rows)
+fold=call('queue')
+assert [r['outcome_id'] for r in fold['unhandled_due']]==ids
+assert all(r['disposition']=='unhandled' and r['handling']['action']=='deferred'
+           for r in fold['unhandled_due'])
+assert queue.read_bytes()==original
+replay=call('handle','--cycle-id',cycle,'--action','deferred','--handled-by','coordinate')
+assert (replay['matched'],replay['appended'],replay['idempotent'])==(2,0,2)
+assert queue.read_bytes()==original
+claimed=call('handle','--cycle-id',cycle,'--action','dispatched','--handled-by','retro-lead')
+assert claimed['outcome_ids']==ids and claimed['appended']==2
+later=queue.read_bytes()
+assert later.startswith(original) and len(later.splitlines())==6
+assert call('queue')['counts']['unhandled_due']==0
+assert call('handle','--cycle-id',cycle,'--action','dispatched','--handled-by','retro-lead')['appended']==0
+for oid in ids:
+    assert call('handle','--outcome-id',oid,'--action','dispatched','--handled-by','retro-lead')['idempotent']==1
+    for action,actor in [('skipped','retro-lead'),('deferred','coordinate'),('dispatched','someone-else')]:
+        call('handle','--outcome-id',oid,'--action',action,'--handled-by',actor,success=False)
+assert queue.read_bytes()==later
+
+# Recreate the 19-deferral shape across cycles, plus never-disposed and terminal
+# outcomes. The writer's eligible set must exactly match the reader's set.
+rows19=list(rows)
+for n in range(17):
+    row=due(f'census-{n}', '2026-09-01T12:00:00Z', cycle=f'other-{n%3}')
+    rows19.extend([row,transition(row,'deferred','2026-09-01T15:00:00Z')])
+fresh=due('fresh','2026-09-01T12:00:00Z')
+terminal=due('terminal','2026-09-01T12:00:00Z')
+rows19.extend([fresh,terminal,transition(terminal,'skipped','2026-09-01T15:00:00Z')])
+original=write(rows19)
+fold=call('queue')
+assert sum(r.get('handling',{}).get('action')=='deferred' for r in fold['unhandled_due'])==19
+expected={r['outcome_id'] for r in fold['unhandled_due'] if r['cycle_id']==cycle}
+claim=call('handle','--cycle-id',cycle,'--action','skipped','--handled-by','retro-lead')
+assert set(claim['outcome_ids'])==expected==set(ids+['fresh'])
+assert queue.read_bytes().startswith(original)
+assert call('queue')['counts']['unhandled_due']==17
+for oid in ids:
+    assert call('handle','--outcome-id',oid,'--action','skipped','--handled-by','retro-lead')['idempotent']==1
+    call('handle','--outcome-id',oid,'--action','dispatched','--handled-by','retro-lead',success=False)
+
+# A changed deferring actor is a new nonterminal transition; same latest actor
+# and action replay exactly, even though older handling rows differ.
+original=write(rows)
+call('handle','--outcome-id',ids[0],'--action','deferred','--handled-by','reviewer')
+assert len(queue.read_bytes().splitlines())==5 and queue.read_bytes().startswith(original)
+assert call('handle','--outcome-id',ids[0],'--action','deferred','--handled-by','reviewer')['idempotent']==1
+assert call('handle','--outcome-id',ids[0],'--action','skipped','--handled-by','reviewer')['appended']==1
+
+# Append order decides ties and clock reversals. Window bounds select outcome
+# times, while transitions use only the exclusive upper bound.
+start,end='2026-09-01T10:00:00Z','2026-09-01T20:00:00Z'
+window_rows=[]
+for oid,ts,transitions in [
+    ('at-start',start,[('deferred','2026-09-01T11:00:00Z'),('skipped','2026-09-01T11:00:00Z')]),
+    ('before-start','2026-09-01T09:59:59Z',[('deferred','2026-09-01T12:00:00Z')]),
+    ('at-end',end,[]),
+    ('terminal-before-start',start,[('dispatched','2026-09-01T09:00:00Z')]),
+    ('terminal-at-end',start,[('deferred',start),('dispatched',end)]),
+    ('clock-reversal',start,[('deferred','2026-09-01T12:00:00Z'),('skipped','2026-09-01T11:00:00Z')]),
+    ('offset-start','2026-09-01T06:00:00-04:00',[]),
+]:
+    row=due(oid,ts)
+    window_rows.append(row)
+    window_rows.extend(transition(row,action,time) for action,time in transitions)
+window_rows.extend(dict(schema_version='1',outcome=action,cycle_id=cycle,ts=start)
+                   for action in ['done','deferred','skipped'])
+original=write(window_rows)
+bounded=call('queue','--cycle-id',cycle,'--window-start',start,'--window-end',end)
+assert {r['outcome_id'] for r in bounded['unhandled_due']}=={'terminal-at-end','offset-start'}
+assert {r['outcome_id'] for r in bounded['handled_due']}=={'at-start','terminal-before-start','clock-reversal'}
+assert bounded['counts']['deferred']==bounded['counts']['done']==bounded['counts']['skipped']==1
+assert bounded['window_semantics']['transitions']=='transition time < end; no lower bound'
+assert call('queue')['counts']['handled_due']==4
+assert queue.read_bytes()==original
+# With no cutoff, the cycle claim matches the full reader even after ties.
+expected={r['outcome_id'] for r in call('queue')['unhandled_due']}
+claimed=call('handle','--cycle-id',cycle,'--action','dispatched','--handled-by','retro-lead')
+assert set(claimed['outcome_ids'])==expected
+assert call('queue')['counts']['unhandled_due']==0
+assert queue.read_bytes().startswith(original)
+for args in [('--window-start',start),('--window-start',end,'--window-end',start),
+             ('--window-start',start,'--window-end',start)]:
+    call('queue',*args,success=False)
+print('Historical transitions, 19-deferral eligibility, replay/conflicts, and outcome windows passed')
+PY
+assert_zero "isolated historical and bounded transition fixtures" "$?"
 
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]
