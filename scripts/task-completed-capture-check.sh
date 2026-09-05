@@ -72,8 +72,8 @@ def fields(text):
             require(header[1] not in headers, f'duplicate report header: {header[1]}')
             headers[header[1]] = header[2].strip()
         elif current is not None:
-            # Schema-1 Task is a header even though section readers also accept it.
-            if current == 'Task' and header:
+            # Identity headers can follow the opening Task or Question label.
+            if current in ('Task', 'Question') and header:
                 require(header[1] not in headers, f'duplicate report header: {header[1]}')
                 headers[header[1]] = header[2].strip()
             else:
@@ -87,6 +87,156 @@ def marked(value):
     text = value.get('task_description') or ''
     return bool(re.search(r'^[ \t]*(?:\*\*)?(?:position[-_]dispatch|compiled[-_]position|'
                           r'template[-_]id:[ \t]*position/)', text, re.I | re.M))
+
+
+def validate_artifacts(artifacts, sections, binding, manifest, item, ids):
+    require(isinstance(artifacts, list) and artifacts, 'Artifacts must index durable evidence')
+    evidence = runpy.run_path(str(scripts / 'work-evidence.py'))
+    result_ids = set()
+    for artifact in artifacts:
+        require(isinstance(artifact, dict) and all(isinstance(artifact.get(key), str) and artifact[key].strip()
+                    for key in ('path', 'kind', 'writer', 'identity')), 'invalid artifact entry')
+        target = Path(artifact['path'])
+        if not target.is_absolute():
+            base = Path(binding['execution_root']) if artifact['kind'] == 'source' else item
+            target = base / target
+        require(target.is_file(), f'artifact missing: {target}')
+        identity = artifact['identity']
+        if artifact['kind'] == 'source':
+            root = Path(binding['execution_root'])
+            relative = str(target.resolve().relative_to(root))
+            if identity not in (artifact['path'], str(target), relative):
+                require(re.fullmatch(r'[0-9a-f]{7,40}', identity), 'source identity must be a revision or its path')
+                command(['git', '-C', str(root), 'cat-file', '-e', f'{identity}:{relative}'])
+        elif artifact['kind'] == 'tier2-claims':
+            require(target.resolve() == (item / 'task-claims.jsonl').resolve() and identity in ids and
+                    artifact['writer'] == 'evidence-append.sh', 'artifact claim is not a referenced canonical row')
+        elif artifact['kind'] == 'result' or identity.startswith('result-'):
+            source = evidence['read_ledger'](item / 'results.jsonl', item, {'1'})
+            evidence['validate_records'](source, 'results')
+            require(source['state'] == 'read', 'canonical result history unavailable')
+            rows = [row for row in source['rows'] if row.get('result_id') == identity]
+            require(len(rows) == 1, 'canonical result missing or ambiguous')
+            row = rows[0]
+            require(artifact['writer'] == 'criteria-run.sh', 'result artifact requires canonical writer')
+            refs = evidence['references'](row, item, Path(manifest['kdir']))
+            allowed_paths = {(item / ref['reference']).resolve() for ref in refs}
+            allowed_paths.add((item / 'results.jsonl').resolve())
+            require(target.resolve() in allowed_paths, 'result artifact path mismatch')
+            result_ids.add(identity)
+            require(all(row.get(key) == binding[key] for key in
+                        ('task_id', 'revision_id', 'packet_id', 'dispatch_attempt_id')), 'result binding mismatch')
+            require(all(ref['state'] == 'read' for ref in evidence['references'](row, item, Path(manifest['kdir']))),
+                    'canonical result artifact missing or corrupt')
+    cited_results = set(re.findall(r'\bresult-[A-Za-z0-9_-]+', sections.get('Checks', '')))
+    require(cited_results <= result_ids, 'Checks cites a result without a validated artifact')
+
+
+def validate_investigator(headers, sections, binding, producer, item, path, sha, manifest):
+    required = {'Template-version': producer['template_version'],
+                'Position-dispatch-manifest': path, 'Position-dispatch-sha256': sha}
+    for label, value in required.items():
+        require(headers.get(label) == value, f'report {label} missing or mismatched')
+    # The assigned reference supplies identity; these optional restatements cannot override it.
+    optional = {'Report-id': binding['report_id'], 'Work-item': binding['work_item'],
+                'Producer-role': 'investigator', 'Harness': producer['framework'],
+                'Template-id': producer['template_id'], 'Compiled-position': 'investigator',
+                'Packet-id': binding['packet_id'], 'Revision-id': binding['revision_id'],
+                'Dispatch-attempt-id': binding['dispatch_attempt_id']}
+    for label, value in optional.items():
+        if label in headers:
+            require(value is not None and headers[label] == value, f'report {label} mismatched')
+    for label in ('Question', 'Findings', 'Key files', 'Implications', 'Assertions',
+                  'Observations', 'Worker leads', 'Unknowns'):
+        require(sections.get(label), f'missing or empty report section: {label}')
+    key_files = yaml.safe_load(sections['Key files'])
+    if key_files not in ('None', 'none', []):
+        key_files = [key_files] if isinstance(key_files, str) else key_files
+        require(isinstance(key_files, list), 'invalid investigator Key files')
+        for filename in key_files:
+            require(isinstance(filename, str) and Path(filename).is_absolute() and Path(filename).is_file(),
+                    'investigator Key files must reference existing absolute files')
+    require(bool(binding['task_id']) == bool(binding['revision_id']),
+            'investigator task and revision must both be bound or explicitly absent')
+    require(binding['packet_id'] and binding['packet_pointer'], 'investigator completion requires assigned packet')
+    assertions = yaml.safe_load(sections['Assertions'])
+    empty = assertions in ([], 'None', 'none') or assertions == [{'claim': 'None'}]
+    require(empty or isinstance(assertions, list), 'malformed investigator Assertions')
+    canonical_path = item / 'task-claims.jsonl'
+    canonical = ([json.loads(line) for line in canonical_path.read_text().splitlines() if line.strip()]
+                 if canonical_path.is_file() and (not empty or 'Tier 2 evidence' in sections) else [])
+    require(all(isinstance(row, dict) for row in canonical), 'invalid canonical claim row')
+    root = Path(binding['execution_root'])
+    ids = []
+
+    def validate_claim(row):
+        cid = row.get('claim_id')
+        require(row.get('producer_role') == 'researcher', f'canonical claim producer mismatch: {cid}')
+        if binding['task_id'] is not None:
+            require(row.get('task_id') == binding['task_id'], f'canonical claim task mismatch: {cid}')
+        else:
+            # Pre-plan rows retain their writer's task vocabulary and bind this attempt separately.
+            require(all(row.get(key) == binding[key] for key in ('report_id', 'dispatch_attempt_id')),
+                    f'pre-plan canonical claim report/attempt mismatch: {cid}')
+        command(['bash', str(scripts / 'validate-tier2.sh')], input=json.dumps(row))
+        target = (root / row['file']).resolve()
+        relative = str(target.relative_to(root))
+        revision = row['captured_at_sha']
+        require(isinstance(revision, str) and re.fullmatch(r'[0-9a-f]{7,40}', revision),
+                'canonical assertion requires source revision')
+        source = command(['git', '-C', str(root), 'show', f'{revision}:{relative}'])
+        start, end = map(int, row['line_range'].split('-'))
+        lines = source.splitlines()
+        require(1 <= start <= end <= len(lines) and row['exact_snippet'] in '\n'.join(lines[start - 1:end]),
+                'canonical assertion source anchor mismatch')
+
+    if not empty:
+        for assertion in assertions:
+            require(isinstance(assertion, dict) and isinstance(assertion.get('claim'), str) and assertion['claim'].strip(),
+                    'malformed investigator assertion entry')
+            # A statement without a falsifier is an observation, not a canonical assertion.
+            if not assertion.get('falsifier'):
+                if 'file' in assertion:
+                    require(isinstance(assertion['file'], str) and (root / assertion['file']).is_file(),
+                            'observation source reference missing')
+                if 'claim_id' in assertion:
+                    rows = [row for row in canonical if row.get('claim_id') == assertion['claim_id']]
+                    require(len(rows) == 1, 'observation canonical claim reference missing or ambiguous')
+                    validate_claim(rows[0])
+                    ids.append(rows[0]['claim_id'])
+                continue
+            keys = ('claim', 'file', 'line_range', 'exact_snippet', 'normalized_snippet_hash', 'falsifier')
+            require(all(isinstance(assertion.get(key), str) and assertion[key].strip() for key in keys) and
+                    assertion.get('significance') in ('low', 'medium', 'high'), 'malformed grounded investigator assertion')
+            matches = [row for row in canonical if
+                       (row.get('task_id') == binding['task_id'] if binding['task_id'] is not None else
+                        all(row.get(key) == binding[key] for key in ('report_id', 'dispatch_attempt_id'))) and
+                       (not assertion.get('claim_id') or row.get('claim_id') == assertion['claim_id']) and
+                       all(row.get(key) == assertion[key] for key in keys if key != 'file') and
+                       isinstance(row.get('file'), str) and
+                       (root / row['file']).resolve() == (root / assertion['file']).resolve()]
+            require(len(matches) == 1, 'assertion has no unique matching canonical claim for assigned task/report/attempt')
+            row = matches[0]
+            require(sum(other.get('claim_id') == row['claim_id'] for other in canonical) == 1,
+                    'canonical claim identity is ambiguous')
+            validate_claim(row)
+            ids.append(row['claim_id'])
+    if 'Tier 2 evidence' in sections:
+        body = sections['Tier 2 evidence']
+        refs = [] if body == 'none' else yaml.safe_load(body)
+        require(isinstance(refs, list) and all(isinstance(cid, str) and cid for cid in refs) and
+                len(refs) == len(set(refs)), 'invalid Tier 2 evidence references')
+        for cid in refs:
+            rows = [row for row in canonical if row.get('claim_id') == cid]
+            require(len(rows) == 1, f'canonical claim missing or ambiguous: {cid}')
+            validate_claim(rows[0])
+        ids.extend(refs)
+    if 'Artifacts' in sections:
+        validate_artifacts(yaml.safe_load(sections['Artifacts']), sections, binding, manifest, item, ids)
+    else:
+        require(not re.search(r'\bresult-[A-Za-z0-9_-]+', sections.get('Checks', '')),
+                'Checks cites a result without a validated artifact')
+    # The spec collector owns plan incorporation and execution-log reduction.
 
 
 try:
@@ -114,9 +264,16 @@ try:
     require(isinstance(path, str) and Path(path).is_absolute() and
             isinstance(sha, str) and re.fullmatch(r'[0-9a-f]{64}', sha),
             'compiled completion requires absolute manifest_path and full manifest_sha256')
+    if 'lore_task_id' in metadata and 'lore_task_id' in event:
+        require(metadata['lore_task_id'] == event['lore_task_id'], 'conflicting Lore task mappings')
     task_id = metadata.get('lore_task_id', event.get('lore_task_id', native_id))
-    require(isinstance(task_id, str) and task_id, 'compiled completion requires independent task identity')
-    expected = {'task_id': task_id, 'position': 'worker'}
+    nullable_task = 'lore_task_id' in metadata or 'lore_task_id' in event
+    independent_attempt = all(isinstance(event.get(key), str) and event[key]
+                              for key in ('report_id', 'dispatch_attempt_id'))
+    require((isinstance(task_id, str) and task_id) or
+            (task_id is None and (nullable_task or independent_attempt)),
+            'compiled completion requires independent task identity or explicit absent mapping')
+    expected = {'task_id': task_id}
     if team and team.startswith(('impl-', 'spec-')):
         expected['work_item'] = team.split('-', 1)[1]
     for key in ('work_item', 'report_id', 'dispatch_attempt_id', 'packet_id', 'revision_id', 'position', 'framework'):
@@ -125,15 +282,22 @@ try:
             expected[key] = event[key]
     manifest = binder.validate_dispatch(path, sha, expected=expected)
     binding, producer = manifest['bindings'], manifest['producer']
-    require(all(binding.get(key) for key in binder.TASK_BINDINGS), 'compiled task completion requires task/revision/packet bindings')
+    require(producer['position'] in ('worker', 'investigator'),
+            'unsupported compiled completion position: ' + producer['position'])
     item = Path(manifest['work_item_path'])
     report_path = Path(binding['report_path'])
     require(report_path.is_file() and not report_path.is_symlink(), 'durable report missing at assigned report path')
     report = report_path.read_text()
     supplied = event.get('task_description')
-    if supplied:
+    if supplied or (producer['position'] == 'investigator' and supplied is not None):
         require(supplied.rstrip('\n') == report.rstrip('\n'), 'task description differs from durable report')
     headers, sections = fields(report)
+    if producer['position'] == 'investigator':
+        validate_investigator(headers, sections, binding, producer, item, path, sha, manifest)
+        print('[task-completed] compiled report validated; investigator collection remains with the caller', file=sys.stderr)
+        sys.exit(0)
+    require(isinstance(task_id, str) and task_id and all(binding.get(key) for key in binder.TASK_BINDINGS),
+            'compiled task completion requires task/revision/packet bindings')
     required_headers = {'Report-schema': '1', 'Report-id': binding['report_id'],
                         'Work-item': binding['work_item'], 'Producer-role': 'worker',
                         'Harness': producer['framework'], 'Template-version': producer['template_version'],
@@ -189,47 +353,8 @@ try:
                     ('claim', 'why_future_agent_cares', 'falsifier', 'source_artifact_ids')), 'invalid Tier 3 candidate')
             require(isinstance(candidate['source_artifact_ids'], list) and
                     all(cid in ids for cid in candidate['source_artifact_ids']), 'Tier 3 candidate references unreported claims')
-    artifacts = yaml.safe_load(sections['Artifacts'])
-    require(isinstance(artifacts, list) and artifacts, 'Artifacts must index durable evidence')
+    validate_artifacts(yaml.safe_load(sections['Artifacts']), sections, binding, manifest, item, ids)
     evidence = runpy.run_path(str(scripts / 'work-evidence.py'))
-    result_ids = set()
-    for artifact in artifacts:
-        require(isinstance(artifact, dict) and all(isinstance(artifact.get(key), str) and artifact[key].strip()
-                    for key in ('path', 'kind', 'writer', 'identity')), 'invalid artifact entry')
-        target = Path(artifact['path'])
-        if not target.is_absolute():
-            base = Path(binding['execution_root']) if artifact['kind'] == 'source' else item
-            target = base / target
-        require(target.is_file(), f'artifact missing: {target}')
-        identity = artifact['identity']
-        if artifact['kind'] == 'source':
-            root = Path(binding['execution_root'])
-            relative = str(target.resolve().relative_to(root))
-            if identity not in (artifact['path'], str(target), relative):
-                require(re.fullmatch(r'[0-9a-f]{7,40}', identity), 'source identity must be a revision or its path')
-                command(['git', '-C', str(root), 'cat-file', '-e', f'{identity}:{relative}'])
-        elif artifact['kind'] == 'tier2-claims':
-            require(target.resolve() == (item / 'task-claims.jsonl').resolve() and identity in ids and
-                    artifact['writer'] == 'evidence-append.sh', 'artifact claim is not a referenced canonical row')
-        elif artifact['kind'] == 'result' or identity.startswith('result-'):
-            source = evidence['read_ledger'](item / 'results.jsonl', item, {'1'})
-            evidence['validate_records'](source, 'results')
-            require(source['state'] == 'read', 'canonical result history unavailable')
-            rows = [row for row in source['rows'] if row.get('result_id') == identity]
-            require(len(rows) == 1, 'canonical result missing or ambiguous')
-            row = rows[0]
-            require(artifact['writer'] == 'criteria-run.sh', 'result artifact requires canonical writer')
-            refs = evidence['references'](row, item, Path(manifest['kdir']))
-            allowed_paths = {(item / ref['reference']).resolve() for ref in refs}
-            allowed_paths.add((item / 'results.jsonl').resolve())
-            require(target.resolve() in allowed_paths, 'result artifact path mismatch')
-            result_ids.add(identity)
-            require(all(row.get(key) == binding[key] for key in
-                        ('task_id', 'revision_id', 'packet_id', 'dispatch_attempt_id')), 'result binding mismatch')
-            require(all(ref['state'] == 'read' for ref in evidence['references'](row, item, Path(manifest['kdir']))),
-                    'canonical result artifact missing or corrupt')
-    cited_results = set(re.findall(r'\bresult-[A-Za-z0-9_-]+', sections['Checks']))
-    require(cited_results <= result_ids, 'Checks cites a result without a validated artifact')
     history = evidence['read_ledger'](item / 'revisions.jsonl', item, {'1'})
     evidence['validate_records'](history, 'revisions')
     require(history['state'] == 'read', 'revision history unavailable')

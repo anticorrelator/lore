@@ -366,6 +366,7 @@ assert_eq "legacy worker without Convention handling exits 0 (pass)" "$_EXIT" "0
 # Successful fixture evidence is published by the compiler, binder, report,
 # claim and result writers in an isolated copy of this checkout.
 python3 - "$REPO_DIR" "$TEST_DIR" <<'COMPILED_TESTS' || FAIL=$((FAIL + 1))
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import importlib.util
 import json
@@ -403,6 +404,8 @@ from position_compile import compile_position
 from packet_builder import build_packet, pointer
 api = runpy.run_path(str(repo / 'scripts/work-evidence.py'))
 checks, fixtures = [], []
+pending_worker_failures = []
+defer_worker_failures = True
 
 
 def call(args, data=None, ok=True):
@@ -514,6 +517,9 @@ Dispatch-attempt-id: {name}
 
 
 def check(name, event, expected=0, contains=None, framework='codex'):
+    if expected == 2 and defer_worker_failures:
+        pending_worker_failures.append((name, event, expected, contains, framework))
+        return
     hook_env = dict(env, LORE_FRAMEWORK=framework)
     p = subprocess.run(['bash', 'scripts/task-completed-capture-check.sh'], input=json.dumps(event), text=True, env=hook_env, capture_output=True)
     assert p.returncode == expected, f'{name}: expected {expected}, got {p.returncode}: {p.stderr}'
@@ -574,6 +580,10 @@ check('native metadata supplies assigned report and plan task identity', native,
 retry = fixture('retry')
 check('fresh retry report identity', retry)
 check('old report cannot complete new attempt', {**retry, 'task_description':valid['task_description']}, 2, 'differs from durable')
+# These failures stop before the writer; mutable consultation/log checks remain sequential.
+defer_worker_failures = False
+with ThreadPoolExecutor(max_workers=4) as pool:
+    list(pool.map(lambda case: check(*case), pending_worker_failures))
 (repo / 'agents/worker.md').write_text('Changed installed template.\n')
 check('changed installed template does not alter recorded attribution', valid)
 (item / 'plan.md').write_text(plan + '\nA new revision.\n')
@@ -607,6 +617,191 @@ transcript = item / 'consultation-transcript.jsonl'
 transcript.rename(item / 'saved-transcript.jsonl')
 check('later revision cannot erase assigned consultation requirement', consult, 2, 'transcript')
 (item / 'saved-transcript.jsonl').rename(transcript)
+
+# Investigator checks are read-only; publish fixtures sequentially, then validate concurrently.
+pending_investigator_checks = []
+
+
+def investigator_check(*args, **kwargs):
+    pending_investigator_checks.append((args, kwargs))
+
+
+worker_item = item
+item = store / '_work/preplan'; item.mkdir()
+(item / '_meta.json').write_text(json.dumps({'title': 'Pre-plan investigation', 'source_checkout': str(repo)}))
+investigator = compile_position('investigator', 'codex', store, None)
+
+
+def investigation(name, assertions='None', observations='None', edit=None, land=True, bound=False, position=None):
+    active = worker_item if bound else item
+    slug = active.name
+    packet = 'pkt-investigator-' + name
+    packet_row = {'packet_id': packet, 'packet_scope': 'task' if bound else 'session',
+                  'work_item': slug, 'task_id': 'task-1' if bound else None,
+                  'session_id': None, 'phase': None, 'arm': None, 'task_scale_set': 'implementation'}
+    if bound:
+        packet_row.update(revision_id=publication['revision_id'], dispatch_attempt_id=name,
+                          source_head=publication['source_head'])
+    build_packet(store, packet_row, assembly=('Isolated investigator packet.', {}),
+                 role=position or 'investigator', scales=['implementation'])
+    binding = dict.fromkeys(binder.FIELDS)
+    binding.update(work_item=slug, task_id=packet_row['task_id'], revision_id=packet_row.get('revision_id'),
+                   packet_id=packet, packet_pointer=pointer(store, packet), dispatch_attempt_id=name,
+                   assignment='Investigate completion identity.', report_id='report-' + name,
+                   report_path=str(active / 'worker-reports' / ('report-' + name + '.md')), execution_root=str(repo))
+    binding['absence_reasons'] = {key: 'No plan yet.' if key in ('task_id', 'revision_id') else 'Not applicable.'
+                                  for key, value in binding.items() if value is None}
+    selected = compile_position(position, 'codex', store, None) if position else investigator
+    reference = binder.publish(selected, binding, store, guidance)
+    report = f"""**Question:** A human-readable question, not an identity
+Template-version: {selected['template_version']}
+Position-dispatch-manifest: {reference['manifest_path']}
+Position-dispatch-sha256: {reference['manifest_sha256']}
+**Findings:**
+- Report and attempt identity come from the assigned reference.
+**Key files:** {source}
+**Implications:** The collector can check the landed report.
+**Assertions:**
+{assertions}
+**Observations:** {observations}
+**Worker leads:** None
+**Unknowns:** Native tool delivery was not exercised.
+"""
+    if edit:
+        report = edit(report)
+    if land:
+        call(['bash', 'scripts/coordinate-report.sh', slug, '--report-id', binding['report_id'], '--kdir', str(store)], data=report)
+    report_bytes = Path(binding['report_path']).read_bytes() if land else report.encode()
+    fixtures.append({'reference': reference, 'binding': binding, 'report_sha256': hashlib.sha256(report_bytes).hexdigest(), 'landed': land})
+    return {'lore_task_id': binding['task_id'], 'position_dispatch': reference, 'task_description': report}
+
+
+invest = investigation('preplan-empty')
+investigator_check('pre-plan investigator empty evidence uses typed validation without team tools', invest)
+assert not (item / 'plan.md').exists() and not (item / 'revisions.jsonl').exists()
+assert not (item / 'task-claims.jsonl').exists() and not (item / 'execution-log.md').exists()
+pre_manifest = json.loads(Path(invest['position_dispatch']['manifest_path']).read_text())
+pre_packet = json.loads((Path(invest['position_dispatch']['manifest_path']).parent / 'packet.json').read_text())
+assert pre_packet['schema_version'] == '1' and pre_packet.get('dispatch_attempt_id') is None
+assert pre_manifest['bindings']['revision_id'] is None and pre_manifest['bindings']['task_id'] is None
+investigator_check('independent report and attempt can bind standalone absent task',
+      {**{k:v for k,v in invest.items() if k != 'lore_task_id'},
+       'report_id': 'report-preplan-empty', 'dispatch_attempt_id': 'preplan-empty'})
+investigator_check('standalone missing absent mapping and assigned attempt refuses',
+      {k:v for k,v in invest.items() if k != 'lore_task_id'}, 2, 'independent task identity')
+investigator_check('investigator marker alone cannot claim completion without native tools',
+      {'compiled_position': 'investigator', 'task_description': invest['task_description']}, 2, 'assigned position_dispatch')
+investigator_check('missing investigator report blocks', investigation('invest-missing', land=False), 2, 'durable report missing')
+for key, value in [('position', 'worker'), ('report_id', 'wrong-report'), ('dispatch_attempt_id', 'wrong-attempt'),
+                   ('lore_task_id', 'task-1'), ('revision_id', '000000000000')]:
+    investigator_check('investigator independent ' + key + ' mismatch', {**invest, key:value}, 2)
+investigator_check('investigator malformed reference blocks', {**invest, 'position_dispatch':{}}, 2, 'manifest_path')
+investigator_check('investigator unknown position has explicit unsupported outcome',
+      investigation('unsupported-reviewer', position='reviewer'), 2, 'unsupported compiled completion position')
+# Corrupt an already landed report to test its reader without republishing the same dispatch.
+report_path = Path(pre_manifest['bindings']['report_path'])
+corruptions = base / 'report-corruptions'; corruptions.mkdir()
+
+
+def corrupt_investigator(name, edit, contains=None):
+    original_bytes = report_path.read_bytes()
+    body = edit(invest['task_description'])
+    artifact = corruptions / (name + '.md')
+    artifact.write_text(body)
+    try:
+        report_path.write_text(body)
+        check(name, {**invest, 'task_description':body}, 2, contains)
+    finally:
+        report_path.write_bytes(original_bytes)
+
+
+corrupt_investigator('investigator missing reference', lambda s:
+                    '\n'.join(line for line in s.splitlines() if not line.startswith('Position-dispatch-')), 'Position-dispatch-manifest')
+corrupt_investigator('investigator mismatched reference', lambda s:
+                    s.replace('Position-dispatch-sha256: ', 'Position-dispatch-sha256: wrong'), 'Position-dispatch-sha256')
+corrupt_investigator('investigator version mismatch', lambda s:
+                    s.replace(investigator['template_version'], '000000000000'), 'Template-version')
+corrupt_investigator('investigator optional producer mismatch', lambda s:
+                    s.replace('**Findings:**', 'Producer-role: worker\n**Findings:**'), 'Producer-role')
+corrupt_investigator('investigator optional report id mismatch', lambda s: 'Report-id: wrong-report\n' + s, 'Report-id')
+for label in ('Question', 'Findings', 'Key files', 'Implications', 'Assertions', 'Observations', 'Worker leads', 'Unknowns'):
+    corrupt_investigator('investigator missing ' + label, lambda s, label=label:
+                        s.replace('**' + label + ':**', '**Omitted:**'), None if label == 'Question' else label)
+corrupt_investigator('investigator missing key source', lambda s:
+                    s.replace('**Key files:** ' + str(source), '**Key files:** ' + str(repo / 'missing')), 'Key files')
+corrupt_investigator('investigator duplicate version', lambda s:
+                    s.replace('**Findings:**', 'Template-version: ' + investigator['template_version'] + '\n**Findings:**'), 'duplicate report header')
+for label in ('Assertions', 'Observations'):
+    corrupt_investigator('investigator blank ' + label, lambda s, label=label:
+                        s.replace('**' + label + ':**' + ('\n' if label == 'Assertions' else ' ') + 'None', '**' + label + ':**'), label)
+corrupt_investigator('investigator unbacked assertion', lambda s:
+                    s.replace('**Assertions:**\nNone', '**Assertions:**\n' + yaml.safe_dump([observation])), 'canonical claim')
+corrupt_investigator('observation canonical reference is checked', lambda s:
+                    s.replace('**Assertions:**\nNone', '**Assertions:**\n- claim: A tentative explanation.\n  claim_id: missing-row'), 'canonical claim reference')
+investigator_check('investigator cannot substitute unlanded question text', {**invest, 'task_description':invest['task_description'].replace(
+      'A human-readable question, not an identity', 'Another question')}, 2, 'differs from durable')
+report_path.rename(report_path.with_suffix('.saved'))
+report_path.mkdir()
+check('investigator durable report must be regular file', invest, 2, 'durable report missing')
+report_path.rmdir()
+report_path.symlink_to(report_path.with_suffix('.saved'))
+check('investigator durable report cannot be symlink', invest, 2)
+report_path.unlink(); report_path.with_suffix('.saved').rename(report_path)
+investigator_check('investigator empty assertion list has no quota', investigation('assertion-list', assertions='[]'))
+investigator_check('statement without falsifier remains an observation', investigation('observation-only',
+      assertions='- claim: A tentative explanation.', observations='A possible explanation remains untested.',
+      edit=lambda s: 'Report-schema: 1\n' + s))
+
+research_claim = dict(claim, claim_id='research-claim', producer_role='researcher', protocol_slot='spec-step-3',
+                      task_id='native-investigation-9', report_id='report-research-assertion', dispatch_attempt_id='research-assertion')
+call(['bash', 'scripts/evidence-append.sh', '--work-item', 'preplan', '--kdir', str(store)], data=json.dumps(research_claim))
+assertion_report = investigation('research-assertion', assertions=yaml.safe_dump([observation]))
+investigator_check('pre-plan assertion matches canonical researcher row and committed anchor', assertion_report)
+investigator_check('same canonical assertion cannot satisfy another pre-plan attempt',
+      investigation('wrong-assertion-attempt', assertions=yaml.safe_dump([observation])), 2, 'report/attempt')
+investigator_check('investigator failed evidence append remains blocking', investigation('failed-invest-append',
+      edit=lambda s: s + '**Tier 2 evidence:**\n- failed-append\n'), 2, 'canonical claim')
+wrong_source = dict(research_claim, claim_id='wrong-anchor', report_id='report-wrong-anchor',
+                    dispatch_attempt_id='wrong-anchor', line_range='2-2')
+call(['bash', 'scripts/evidence-append.sh', '--work-item', 'preplan', '--kdir', str(store)], data=json.dumps(wrong_source))
+investigator_check('canonical schema alone does not prove assertion source anchor', investigation('wrong-anchor',
+      assertions=yaml.safe_dump([{**observation, 'line_range':'2-2'}])), 2, 'source anchor mismatch')
+wrong_role = dict(research_claim, claim_id='wrong-research-role', producer_role='worker',
+                  report_id='report-wrong-research-role', dispatch_attempt_id='wrong-research-role')
+call(['bash', 'scripts/evidence-append.sh', '--work-item', 'preplan', '--kdir', str(store)], data=json.dumps(wrong_role))
+investigator_check('investigator cannot cite worker evidence as researcher', investigation('wrong-research-role',
+      assertions=yaml.safe_dump([{**observation, 'claim_id':'wrong-research-role'}])), 2, 'producer mismatch')
+source_artifact = [{'path':str(source), 'kind':'source', 'writer':'worker', 'identity':source_sha}]
+investigator_check('investigator optional source references validated', investigation('invest-source', edit=lambda s:
+      s + '**Artifacts:**\n' + yaml.safe_dump(source_artifact)))
+investigator_check('investigator missing optional source reference blocks', investigation('invest-bad-source', edit=lambda s:
+      s + '**Artifacts:**\n' + yaml.safe_dump([{**source_artifact[0], 'path':str(repo / 'missing')}])) , 2, 'artifact missing')
+investigator_check('investigator claimed result requires canonical artifact', investigation('invest-result', edit=lambda s:
+      s + '**Checks:** result-missing\n'), 2, 'validated artifact')
+
+native_dir = home / '.claude/tasks/spec-preplan'; native_dir.mkdir(parents=True)
+(native_dir / '9.json').write_text(json.dumps({'id':'9', 'metadata':{'position_dispatch':invest['position_dispatch'], 'lore_task_id':None}}))
+native_invest = {'team_name':'spec-preplan', 'task_id':'9', 'task_description':invest['task_description']}
+investigator_check('native investigator metadata explicitly maps absent Lore task', native_invest, framework='claude-code')
+investigator_check('native investigator conflicting nullable mapping refuses', {**native_invest, 'lore_task_id':'9'}, 2, 'conflicting Lore task', framework='claude-code')
+(native_dir / '10.json').write_text(json.dumps({'id':'10', 'metadata':{'position_dispatch':invest['position_dispatch']}}))
+investigator_check('native question label never supplies absent task mapping', {**native_invest, 'task_id':'10'}, 2, 'task_id mismatch', framework='claude-code')
+investigator_check('native investigator conflicting assigned reference refuses', {**native_invest, 'position_dispatch':assertion_report['position_dispatch']},
+      2, 'conflicting assigned dispatch', framework='claude-code')
+log_before = (worker_item / 'execution-log.md').read_bytes()
+bound_claim = dict(claim, claim_id='bound-research-claim', producer_role='researcher', protocol_slot='spec-step-3')
+call(['bash', 'scripts/evidence-append.sh', '--work-item', 'fixture', '--kdir', str(store)], data=json.dumps(bound_claim))
+investigator_check('plan-bound investigator uses explicit Lore task and researcher contract', investigation('bound-investigator', bound=True,
+      assertions=yaml.safe_dump([{**observation, 'claim_id':'bound-research-claim'}])))
+with ThreadPoolExecutor(max_workers=4) as pool:
+    list(pool.map(lambda case: check(*case[0], **case[1]), pending_investigator_checks))
+assert (worker_item / 'execution-log.md').read_bytes() == log_before
+assert not (item / 'execution-log.md').exists()
+# Collector-owned log failure does not become an invented investigator completion write.
+(item / 'execution-log.md').mkdir()
+check('investigator validation does not write collector-owned execution log', invest)
+(item / 'execution-log.md').rmdir()
+item = worker_item
 
 (base / 'fixtures.json').write_text(json.dumps(fixtures, indent=2) + '\n')
 (base / 'checks.json').write_text(json.dumps(checks, indent=2) + '\n')
