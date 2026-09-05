@@ -608,6 +608,7 @@ def main():
     parser.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--root", type=Path, required=True)
     args = parser.parse_args()
+    args.root = args.root.resolve()
     if args.scenario == "inventory":
         extraction_controls(args.root)
     elif args.scenario == "plan":
