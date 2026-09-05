@@ -297,6 +297,12 @@ cmd_smoke() {
   printf '  %-24s %-13s %s\n' resolve_model_for_role "$routing_shape"  "provider/model binding split at spawn boundary"
 }
 
+cmd_native_selection() {
+  require_opencode
+  echo 'Error: native subagent selection unavailable: OpenCode task dispatch guidance is unverified' >&2
+  return 1
+}
+
 cmd_native_launch() {
   python3 - "$@" <<'PYTHON'
 import hashlib
@@ -333,6 +339,7 @@ cmd_render_position() {
 # --- Dispatch ---
 cmd="${1:-}"
 case "$cmd" in
+  native_selection)         shift; cmd_native_selection "$@" ;;
   native_launch)            shift; cmd_native_launch "$@" ;;
   render_position)          shift; cmd_render_position          "$@" ;;
   spawn)                    shift; cmd_spawn                    "$@" ;;

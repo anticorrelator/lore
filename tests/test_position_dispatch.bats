@@ -27,7 +27,7 @@ import yaml
 
 original, temporary, scenario = sys.argv[1:]
 original, temporary = Path(original).resolve(), Path(temporary).resolve()
-if os.environ.get('POSITION_DISPATCH_FIXTURES') and scenario in ('native', 'session', 'launch'):
+if os.environ.get('POSITION_DISPATCH_FIXTURES') and scenario in ('native', 'session', 'launch', 'native-selection'):
     temporary = Path(os.environ['POSITION_DISPATCH_FIXTURES']).resolve() / scenario
     temporary.mkdir(parents=True, exist_ok=False)
 repo, home = temporary / 'checkout', temporary / 'home'
@@ -169,6 +169,80 @@ if scenario == 'native':
             examples.append({'position':position,'framework':framework,**ref,'template_version':d['template_version']})
     (temporary/'examples.json').write_text(json.dumps(examples,indent=2))
     print(json.dumps(examples))
+elif scenario=='native-selection':
+    scope=home/'.claude/agents';scope.mkdir(parents=True)
+    examples=[]
+    for position in binder.POSITIONS:
+        d=compile(position,'claude-code')
+        raw=Path(d['artifact_path']).read_bytes()
+        original_header=yaml.safe_load(raw.split(b'---\n',2)[1])
+        original_body=raw.split(b'---\n',2)[2]
+        refs=[]
+        for model in ('opus','sonnet'):
+            b=fixture(position,position+'-'+model,mode='planning' if position=='designer' else None)
+            g=guidance()
+            ref=bind(d,b,g,native_model=model);refs.append(ref)
+            m=binder.validate_dispatch(ref['manifest_path'],ref['manifest_sha256'])
+            root=Path(ref['manifest_path']).parent
+            selection=json.loads((root/'selection.json').read_bytes())
+            registered=(root/'selection.md').read_bytes()
+            header=yaml.safe_load(registered.split(b'---\n',2)[1])
+            assert header==dict(original_header,name=selection['tool_input']['subagent_type'])
+            assert registered.split(b'---\n',2)[2]==original_body
+            assert selection['tool']=='Agent' and selection['tool_input']['model']==model
+            assert m['accounting']['native_definition_bytes']==len(registered)
+            assert m['accounting']['prepared_input_bytes']==m['accounting']['payload_bytes']+len(registered)
+            assert 'launch.json' not in m['files']
+            assert bind(d,b,g,native_model=model)==ref
+            refused(lambda:bind(d,b,g,native_model='haiku'),'changed payload')
+            refused(lambda:binder.native_input(ref['manifest_path'],ref['manifest_sha256'],scope),'missing')
+            receipt=binder.register_native(ref['manifest_path'],ref['manifest_sha256'],scope)
+            assert binder.register_native(ref['manifest_path'],ref['manifest_sha256'],scope)==receipt
+            path=Path(receipt['registration']['path']);assert path.read_bytes()==registered
+            selected=binder.native_input(ref['manifest_path'],ref['manifest_sha256'],scope)
+            assert selected['tool_input']['prompt']==Path(ref['payload_path']).read_text()
+            assert selected['readiness']=={'kind':'native-agent-inventory','selection_name':header['name']}
+            assert 'ready' not in selected and 'delivery_proven' not in selected
+            path.write_bytes(registered+b'changed')
+            refused(lambda:binder.register_native(ref['manifest_path'],ref['manifest_sha256'],scope),'conflicts')
+            refused(lambda:binder.native_input(ref['manifest_path'],ref['manifest_sha256'],scope),'differs')
+            path.unlink();path.symlink_to(root/'selection.md')
+            refused(lambda:binder.register_native(ref['manifest_path'],ref['manifest_sha256'],scope),'conflicts')
+            path.unlink();binder.register_native(ref['manifest_path'],ref['manifest_sha256'],scope)
+            refused(lambda:binder.launch_session({'position_dispatch':ref,'dispatch_guidance':Path(ref['payload_path']).read_text()},framework='claude-code',slug='fixture--w1',execution_root=str(repo),kdir=store),'cannot launch as a session')
+            if position=='worker' and model=='opus':
+                output=call(['python3',str(repo/'scripts/position-bind.py'),'native-input',ref['manifest_path'],'--sha256',ref['manifest_sha256'],'--scope',str(scope)])
+                assert json.loads(output.stdout)==selected
+                call(['python3',str(repo/'scripts/position-bind.py'),'native-input',ref['manifest_path'],'--sha256',ref['manifest_sha256'],'--scope',str(scope),'--ready'],ok=False)
+                refused(lambda:binder.register_native(ref['manifest_path'],ref['manifest_sha256'],home/'.claude/missing'),'existing physical')
+            examples.append({'producer':m['producer'],'reference':ref,'selection':selection,'registration':receipt,'prepared_tool_input':selected})
+        a,b=(binder.validate_dispatch(r['manifest_path']) for r in refs)
+        assert a['producer']==b['producer'] and a['selection']['sha256']!=b['selection']['sha256']
+        assert (Path(refs[0]['manifest_path']).parent/'selection.md').read_bytes()!=(Path(refs[1]['manifest_path']).parent/'selection.md').read_bytes()
+    d=compile('worker','codex');b=fixture(attempt='codex-native')
+    ref=bind(d,b,native_model='gpt-6-astra-high');m=binder.validate_dispatch(ref['manifest_path'],ref['manifest_sha256'])
+    selected=binder.native_input(ref['manifest_path'],ref['manifest_sha256'])
+    assert selected['tool']=='spawn_agent'
+    assert selected['tool_input']=={'message':Path(ref['payload_path']).read_text(),'model':'gpt-6-astra','reasoning_effort':'high'}
+    assert Path(d['body_path']).read_bytes() in selected['tool_input']['message'].encode()
+    assert m['accounting']['native_definition_bytes']==0
+    assert m['accounting']['prepared_input_bytes']==len(selected['tool_input']['message'].encode())
+    assert selected['registration'] is None
+    refused(lambda:binder.register_native(ref['manifest_path'],ref['manifest_sha256'],scope),'does not use')
+    refused(lambda:binder.native_input(ref['manifest_path'],ref['manifest_sha256'],scope),'does not accept')
+    examples.append({'producer':m['producer'],'reference':ref,'prepared_tool_input':selected})
+    d=compile('worker','opencode');b=fixture(attempt='opencode-native-unavailable')
+    refused(lambda:bind(d,b,native_model='anthropic/opus'),'native subagent selection unavailable')
+    assert not (item/'position-dispatch'/b['dispatch_attempt_id']).exists()
+    bind(d,b)
+    archived=store/'_archive/fixture';archived.parent.mkdir();item.rename(archived)
+    for example in examples:
+        ref=example['reference']
+        resolved=binder.resolve_dispatch(ref['manifest_path'],ref['manifest_sha256'])
+        assert resolved['manifest']['dispatch_route']=='native-subagent'
+        refused(lambda:binder.native_input(ref['manifest_path'],ref['manifest_sha256'],scope),'active work item')
+    (temporary/'examples.json').write_text(json.dumps(examples,indent=2))
+    print(json.dumps({'examples_path':str(temporary/'examples.json'),'count':len(examples)}))
 elif scenario=='launch':
     examples=[]
     for fw in ('claude-code', 'codex', 'opencode'):
@@ -415,5 +489,10 @@ PY
 
 @test "pre-plan packets preserve explicit absence while dispatch attempts remain independently bound" {
   run exercise_binding preplan
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "native subagent selection retains exact activation bytes and requires separate live readiness" {
+  run exercise_binding native-selection
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }

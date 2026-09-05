@@ -320,6 +320,22 @@ cmd_smoke() {
   printf '  %-24s %-13s %s\n' resolve_model_for_role "$routing_shape"  "bare model id (single-provider harness)"
 }
 
+cmd_native_selection() {
+  require_codex
+  [[ "$(cap subagents)" != none ]] || { echo 'Error: native subagents unavailable' >&2; return 1; }
+  [[ $# -eq 3 ]] || { echo 'Error: native_selection requires artifact, attempt, and model' >&2; return 1; }
+  validate_role_model_binding default "$3" || return 1
+  local routing_keys
+  routing_keys=$(split_codex_model_variant "$3")
+  python3 - "$routing_keys" <<'PYTHON'
+import json
+import sys
+binding = dict(part.split('=', 1) for part in sys.argv[1].split())
+print(json.dumps({'tool': 'spawn_agent', 'tool_input': binding, 'prompt_field': 'message',
+                  'registration': None, 'readiness': {'kind': 'native-tool-schema', 'tool': 'spawn_agent'}}))
+PYTHON
+}
+
 cmd_native_launch() {
   printf '%s\n' '{"args":[],"env":{},"prompt_flag":""}'
 }
@@ -338,6 +354,7 @@ cmd_render_position() {
 # --- Dispatch ---
 cmd="${1:-}"
 case "$cmd" in
+  native_selection)         shift; cmd_native_selection "$@" ;;
   native_launch)            shift; cmd_native_launch "$@" ;;
   render_position)          shift; cmd_render_position          "$@" ;;
   spawn)                    shift; cmd_spawn                    "$@" ;;

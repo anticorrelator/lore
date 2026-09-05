@@ -176,7 +176,25 @@ def validate_dispatch(manifest_path, manifest_sha256=None, *, expected=None):
         if not isinstance(size, int) or size <= 0 or digest(payload[offset:offset + size]) != component['sha256']:
             raise ValueError('dispatch component accounting mismatch')
         offset += size
-    native_bytes = len((root / 'native.md').read_bytes()) if validated['native_surface']['consumption'] == 'agent-definition' else 0
+    native_member = 'native.md'
+    if m.get('dispatch_route') not in (None, 'native-subagent'):
+        raise ValueError('unsupported dispatch route')
+    if m.get('dispatch_route') == 'native-subagent':
+        selection = json.loads((root / 'selection.json').read_bytes())
+        if m.get('selection') != file_record(recorded_root / 'selection.json', encoded(selection)):
+            raise ValueError('native selection reference mismatch')
+        registration = selection['registration']
+        native_member = 'selection.md' if registration is not None else 'native.md'
+        if registration is not None and registration != {
+                'filename': selection['tool_input']['subagent_type'] + '.md',
+                'sha256': digest((root / native_member).read_bytes()),
+                'bytes': len((root / native_member).read_bytes())}:
+            raise ValueError('native registration reference mismatch')
+        if 'launch.json' in m['files']:
+            raise ValueError('native subagent cannot carry session activation')
+    elif any(name in m['files'] for name in ('selection.json', 'selection.md')) or 'selection' in m:
+        raise ValueError('native selection requires its dispatch route')
+    native_bytes = len((root / native_member).read_bytes()) if validated['native_surface']['consumption'] == 'agent-definition' else 0
     if offset != len(payload) or m['accounting']['payload_bytes'] != offset or m['accounting']['native_definition_bytes'] != native_bytes or m['accounting']['prepared_input_bytes'] != offset + native_bytes:
         raise ValueError('dispatch byte accounting mismatch')
     packet = validate_bindings(m['bindings'], m['producer']['position'], Path(m['kdir']), m['required_bindings'], preparation=False, archived=root != recorded_root)
@@ -189,7 +207,7 @@ def validate_dispatch(manifest_path, manifest_sha256=None, *, expected=None):
     return m
 
 
-def publish(descriptor, bindings, kdir, guidance, *, required=(), wrapper=None, prefix=b'', suffix=b'', contract_delivery='referenced'):
+def publish(descriptor, bindings, kdir, guidance, *, required=(), wrapper=None, prefix=b'', suffix=b'', contract_delivery='referenced', native_model=None):
     """Freeze one composed payload and its native definition, or verify an identical retry."""
     if not re.fullmatch('[0-9a-f]{64}', descriptor.get('descriptor_sha256', '')):
         raise ValueError('descriptor_sha256 is required')
@@ -235,7 +253,14 @@ def publish(descriptor, bindings, kdir, guidance, *, required=(), wrapper=None, 
     payload = b''.join(data for _, data in components)
     files = {'payload.md': payload, 'descriptor.json': encoded(descriptor), 'bindings.json': encoded(bindings),
              'guidance.md': guidance, 'native.md': read(Path(d['artifact_path']))}
-    files['launch.json'] = encoded(render_activation(d, bindings['dispatch_attempt_id']))
+    if native_model is None:
+        files['launch.json'] = encoded(render_activation(d, bindings['dispatch_attempt_id']))
+    else:
+        selection, registration = render_selection(d, bindings['dispatch_attempt_id'], native_model)
+        files['selection.json'] = encoded(selection)
+        if registration is not None:
+            files['selection.md'] = registration
+    native_member = 'selection.md' if 'selection.md' in files else 'native.md'
     if packet is not None:
         files['packet.json'] = encoded(packet)
     if wrapper is not None:
@@ -254,11 +279,13 @@ def publish(descriptor, bindings, kdir, guidance, *, required=(), wrapper=None, 
          'files': {name: file_record(root / name, data) for name, data in files.items()},
          'accounting': {'unit': 'bytes', 'payload_bytes': len(payload),
                         'payload_components': [{'name': name, 'bytes': len(data), 'sha256': digest(data)} for name, data in components],
-                        'native_definition_bytes': len(files['native.md']) if d['native_surface']['consumption'] == 'agent-definition' else 0,
-                        'prepared_input_bytes': len(payload) + (len(files['native.md']) if d['native_surface']['consumption'] == 'agent-definition' else 0),
+                        'native_definition_bytes': len(files[native_member]) if d['native_surface']['consumption'] == 'agent-definition' else 0,
+                        'prepared_input_bytes': len(payload) + (len(files[native_member]) if d['native_surface']['consumption'] == 'agent-definition' else 0),
                         'contract_delivery': contract_delivery,
                         'referenced_contract_bytes': d['accounting']['on_demand_contract_bytes'],
                         'delivery_proven': False}}
+    if native_model is not None:
+        m.update(dispatch_route='native-subagent', selection=file_record(root / 'selection.json', files['selection.json']))
     files['manifest.json'] = encoded(m)
     root.parent.mkdir(parents=True, exist_ok=True)
     if root.parent.is_symlink() or root.is_symlink() or root.parent.resolve() != root.parent:
@@ -286,7 +313,7 @@ def publish(descriptor, bindings, kdir, guidance, *, required=(), wrapper=None, 
             'native_path': str(root / 'native.md'), 'native_sha256': digest(files['native.md'])}
 
 
-def render_activation(descriptor, attempt):
+def invoke_adapter(descriptor, operation_field, *arguments):
     profile = json.loads(read(SCRIPTS.parent / 'adapters/capabilities.json'))['frameworks'][descriptor['framework']]
     if profile.get('position_compilation') != descriptor['native_surface']:
         raise ValueError('compiled native surface changed; recompile before activation')
@@ -295,15 +322,109 @@ def render_activation(descriptor, attempt):
     retained = next((component for component in descriptor['components'] if component['name'] == adapter_name), None)
     if retained != {'name': adapter_name, 'bytes': len(adapter_bytes), 'sha256': digest(adapter_bytes)}:
         raise ValueError('compiled native renderer changed; recompile before activation')
-    operation = profile.get('position_compilation', {}).get('activation_operation')
-    if operation != 'native_launch':
-        raise ValueError('native activation unavailable')
+    operation = profile.get('position_compilation', {}).get(operation_field)
+    if not isinstance(operation, str) or not re.fullmatch(r'[a-z_]+', operation):
+        raise ValueError('native adapter operation unavailable')
     result = json.loads(run(['bash', str(SCRIPTS.parent / 'adapters/agents' / (descriptor['framework'] + '.sh')),
-                             operation, descriptor['artifact_path'], attempt],
+                             operation, descriptor['artifact_path'], *arguments],
                             env=dict(os.environ, LORE_FRAMEWORK=descriptor['framework'])))
+    return result
+
+
+def render_activation(descriptor, attempt):
+    result = invoke_adapter(descriptor, 'activation_operation', attempt)
     if set(result) != {'args', 'env', 'prompt_flag'} or not isinstance(result['args'], list) or not isinstance(result['env'], dict):
         raise ValueError('invalid native activation')
     return result
+
+
+def render_selection(descriptor, attempt, model):
+    if not nonempty(model) or any(char.isspace() for char in model):
+        raise ValueError('native selection requires an explicit model binding')
+    selection = invoke_adapter(descriptor, 'selection_operation', attempt, model)
+    if set(selection) != {'tool', 'tool_input', 'prompt_field', 'registration', 'readiness'}:
+        raise ValueError('invalid native selection')
+    if not nonempty(selection['tool']) or not isinstance(selection['tool_input'], dict) or not nonempty(selection['prompt_field']):
+        raise ValueError('invalid native tool input')
+    if selection['prompt_field'] in selection['tool_input'] or not isinstance(selection['readiness'], dict):
+        raise ValueError('invalid native readiness contract')
+    registration = selection['registration']
+    content = None
+    if registration is not None:
+        if set(registration) != {'filename', 'content'} or not nonempty(registration['content']):
+            raise ValueError('invalid native registration')
+        name = token(selection['tool_input'].get('subagent_type'), 'subagent_type')
+        if registration['filename'] != name + '.md':
+            raise ValueError('native registration name mismatch')
+        content = registration['content'].encode()
+        selection['registration'] = {'filename': name + '.md', 'sha256': digest(content), 'bytes': len(content)}
+    elif descriptor['native_surface']['consumption'] != 'prompt-text':
+        raise ValueError('native agent definition requires registration')
+    selection['model_binding'] = model
+    return selection, content
+
+
+def native_selection(manifest_path, manifest_sha256):
+    resolved = resolve_dispatch(manifest_path, manifest_sha256)
+    m = resolved['manifest']
+    if m.get('dispatch_route') != 'native-subagent':
+        raise ValueError('dispatch was not prepared for a native subagent')
+    root = Path(resolved['resolved_manifest_path']).parent
+    if root.parents[1] != Path(m['work_item_path']):
+        raise ValueError('native selection requires an active work item')
+    validate_bindings(m['bindings'], m['producer']['position'], Path(m['kdir']), m['required_bindings'])
+    stored = json.loads(read(root / 'selection.json'))
+    selection, registration = render_selection(json.loads(read(root / 'descriptor.json')),
+                                               m['bindings']['dispatch_attempt_id'], stored['model_binding'])
+    if stored != selection or (registration is not None and read(root / 'selection.md') != registration):
+        raise ValueError('native selection changed after publication')
+    return resolved, selection, registration
+
+
+def registration_path(selection, scope):
+    if scope is None:
+        raise ValueError('native definition requires an explicit registration scope')
+    scope = Path(scope)
+    if not scope.is_absolute() or scope.resolve() != scope or not scope.is_dir() or scope.name != 'agents' or scope.parent.name != '.claude':
+        raise ValueError('registration scope must be an existing physical .claude/agents directory')
+    return scope / selection['registration']['filename']
+
+
+def register_native(manifest_path, manifest_sha256, scope):
+    _, selection, content = native_selection(manifest_path, manifest_sha256)
+    if content is None:
+        raise ValueError('this native selection does not use a registration file')
+    target = registration_path(selection, scope)
+    handle, staged = tempfile.mkstemp(prefix='.position-', dir=target.parent)
+    try:
+        with os.fdopen(handle, 'wb') as stream:
+            stream.write(content)
+        try:
+            os.link(staged, target)
+        except FileExistsError:
+            pass
+        if target.is_symlink() or not target.is_file() or target.read_bytes() != content:
+            raise ValueError('native registration conflicts with retained bytes')
+    finally:
+        os.unlink(staged)
+    return {'registration': file_record(target, content), 'readiness': selection['readiness']}
+
+
+def native_input(manifest_path, manifest_sha256, scope=None):
+    resolved, selection, content = native_selection(manifest_path, manifest_sha256)
+    registration = None
+    if content is not None:
+        target = registration_path(selection, scope)
+        if target.is_symlink() or not target.is_file() or target.read_bytes() != content:
+            raise ValueError('native registration is missing or differs from retained bytes')
+        registration = file_record(target, content)
+    elif scope is not None:
+        raise ValueError('text native selection does not accept a registration scope')
+    tool_input = dict(selection['tool_input'])
+    tool_input[selection['prompt_field']] = read(Path(resolved['payload_path'])).decode()
+    return {'manifest_path': str(manifest_path), 'manifest_sha256': manifest_sha256,
+            'tool': selection['tool'], 'tool_input': tool_input,
+            'registration': registration, 'readiness': selection['readiness']}
 
 
 def resolve_dispatch(manifest_path, manifest_sha256, *, expected=None):
@@ -335,6 +456,8 @@ def prepare_session(context, *, position, framework, slug, execution_root, packe
             raise ValueError('report_id already belongs to another attempt')
     if existing.exists():
         m = validate_dispatch(existing, expected={'position': position, 'framework': framework, **expected})
+        if m.get('dispatch_route') == 'native-subagent':
+            raise ValueError('native subagent dispatch cannot be replayed as a session')
         if m['bindings'] != b or m['wrapper'] is not None:
             raise ValueError('changed session bindings for existing attempt')
         if context.get('descriptor') is not None and json.loads((existing.parent / 'descriptor.json').read_bytes()) != context['descriptor']:
@@ -389,6 +512,8 @@ def launch_session(context, *, framework, slug, execution_root, kdir):
         raise ValueError('invalid position session context')
     resolved = resolve_dispatch(ref['manifest_path'], ref['manifest_sha256'], expected=expected)
     m = resolved['manifest']
+    if m.get('dispatch_route') == 'native-subagent':
+        raise ValueError('native subagent dispatch cannot launch as a session')
     if Path(m['kdir']) != kdir.resolve() or Path(m['work_item_path']) != Path(resolved['resolved_manifest_path']).parents[2]:
         raise ValueError('launch requires the active work item in the selected store')
     validate_bindings(m['bindings'], m['producer']['position'], kdir, TASK_BINDINGS)
@@ -412,11 +537,17 @@ def main():
     bind = verbs.add_parser('bind')
     for name in ('descriptor', 'bindings', 'kdir', 'guidance-file'):
         bind.add_argument('--' + name, required=True, type=Path)
+    bind.add_argument('--native-model')
     bind.add_argument('--require', action='append', default=[])
     bind.add_argument('--wrapper', type=Path)
     bind.add_argument('--prefix-file', type=Path)
     bind.add_argument('--suffix-file', type=Path)
     bind.add_argument('--contract-delivery', choices=('referenced', 'included'), default='referenced')
+    for verb in ('register-native', 'native-input'):
+        native = verbs.add_parser(verb)
+        native.add_argument('manifest', type=Path)
+        native.add_argument('--sha256', required=True)
+        native.add_argument('--scope', type=Path, required=verb == 'register-native')
     check = verbs.add_parser('validate')
     check.add_argument('manifest', type=Path)
     check.add_argument('--sha256')
@@ -432,7 +563,11 @@ def main():
         session.add_argument('--' + name, required=True)
     session.add_argument('--kdir', required=True, type=Path)
     args = parser.parse_args()
-    if args.verb == 'launch':
+    if args.verb == 'register-native':
+        result = register_native(args.manifest, args.sha256, args.scope)
+    elif args.verb == 'native-input':
+        result = native_input(args.manifest, args.sha256, args.scope)
+    elif args.verb == 'launch':
         result = launch_session(json.load(sys.stdin), framework=args.framework, slug=args.slug,
                                 execution_root=args.execution_root, kdir=args.kdir)
     elif args.verb == 'resolve':
@@ -447,7 +582,7 @@ def main():
                          read(args.guidance_file), required=args.require,
                          wrapper=json.loads(read(args.wrapper)) if args.wrapper else None,
                          prefix=read(args.prefix_file) if args.prefix_file else b'',
-                         suffix=read(args.suffix_file) if args.suffix_file else b'', contract_delivery=args.contract_delivery)
+                         suffix=read(args.suffix_file) if args.suffix_file else b'', contract_delivery=args.contract_delivery, native_model=args.native_model)
     print(json.dumps(result))
 
 

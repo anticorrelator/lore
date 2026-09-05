@@ -223,7 +223,7 @@
         "fields": ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "total_tokens", "model"],
         "notes": "Assistant rows in ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl carry message.usage (input/output/cache_read/cache_creation) and message.model; session_spend sums them and derives total_tokens. Deterministic transcript binding via --session-id at spawn (binding: session-id-flag), so TUI-hosted claude-code sessions close with real token counts."
       },
-      "position_compilation": {"format": "agent-markdown", "consumption": "agent-definition", "activation_operation": "native_launch", "evidence": "claude-code-subagents"},
+      "position_compilation": {"format": "agent-markdown", "consumption": "agent-definition", "activation_operation": "native_launch", "selection_operation": "native_selection", "evidence": "claude-code-subagents"},
       "install_paths": {
         "instructions":     "$HOME/.claude/CLAUDE.md",
         "skills":           "$HOME/.claude/skills",
@@ -397,7 +397,7 @@
         "fields": ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "reasoning_output_tokens", "total_tokens", "cost_usd", "model"],
         "notes": "The live sqlite store (~/.local/share/opencode/opencode.db) keys assistant message.data tokens (input/output/reasoning/cache.read/write/total) and a per-message dollar cost by session id; session_spend sums them (basis: store) and degrades to duration-only when only the stale storage/ JSON is reachable. partial because no deterministic session binding exists at spawn, so TUI-hosted opencode sessions stay duration-only in v1."
       },
-      "position_compilation": {"format": "agent-markdown", "consumption": "agent-definition", "activation_operation": "native_launch", "evidence": "opencode-subagents"},
+      "position_compilation": {"format": "agent-markdown", "consumption": "agent-definition", "activation_operation": "native_launch", "selection_operation": "native_selection", "evidence": "opencode-subagents"},
       "install_paths": {
         "instructions":     "$HOME/.config/opencode/AGENTS.md",
         "skills":           "$HOME/.agents/skills",
@@ -568,7 +568,7 @@
         "fields": ["input_tokens", "output_tokens", "cache_read_input_tokens", "reasoning_output_tokens", "total_tokens", "model"],
         "notes": "Rollout token_count events carry cumulative total_token_usage (input/cached_input/output/reasoning/total); session_spend reads the terminal one and normalizes cached_input_tokens -> cache_read_input_tokens (basis: rollout). partial because no deterministic session->rollout binding exists at spawn — rollout paths are date-nested, not addressable by a spawn-time session id — so TUI-hosted codex sessions stay duration-only in v1; the artifact itself parses fully given an explicit --transcript path."
       },
-      "position_compilation": {"format": "prompt", "consumption": "prompt-text", "activation_operation": "native_launch", "evidence": "codex-subagents"},
+      "position_compilation": {"format": "prompt", "consumption": "prompt-text", "activation_operation": "native_launch", "selection_operation": "native_selection", "evidence": "codex-subagents"},
       "install_paths": {
         "instructions":     "$HOME/.codex/AGENTS.md",
         "skills":           "$HOME/.codex/skills",
