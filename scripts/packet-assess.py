@@ -152,6 +152,12 @@ def load_packets(knowledge_dir):
                 rows.append(row)
     except OSError:
         pass
+    # Rows supersede by append under one packet_id (assembled, then synthesized); the
+    # latest row is the packet that was handed on, so one verdict is owed per id.
+    latest = {}
+    for row in rows:
+        latest[row.get("packet_id")] = row
+    rows = [row for row in rows if latest.get(row.get("packet_id")) is row]
     return rows, corrupt
 
 

@@ -77,9 +77,14 @@ def select(args, item):
             raise ValueError('packet binding and unbound reason are mutually exclusive')
         packets = ledger(root / '_packets' / 'packets.jsonl', 'packets')
         matches = [p for p in packets if p.get('packet_id') == args.packet_id]
-        if len(matches) != 1:
-            raise ValueError('packet must identify exactly one record')
-        packet = matches[0]
+        if not matches:
+            raise ValueError('packet must identify a recorded packet')
+        # Rows supersede by append (assembled, then synthesized); the latest row is the packet,
+        # and every row in the chain must agree on the identity the result binds to.
+        packet = matches[-1]
+        if any(m.get(k) != packet.get(k) for m in matches
+               for k in ('schema_version', 'work_item', 'task_id', 'revision_id', 'dispatch_attempt_id')):
+            raise ValueError('packet supersede chain disagrees on identity')
         if str(packet.get('schema_version')) != '2':
             raise ValueError('selected packet has no immutable revision binding')
         if packet.get('work_item') != args.slug or packet.get('task_id') != args.task_id:
