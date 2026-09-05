@@ -96,7 +96,8 @@ class ReviewFixture(Fixture):
         self.namespace = namespace
         settings = self.root / "data/config/settings.json"
         config = json.loads(settings.read_text())
-        config["harnesses"]["codex"]["roles"]["advisor"] = "gpt-6-astra-high"
+        config["harnesses"]["codex"]["roles"]["advisor"] = "gpt-6-astra"
+        config["harnesses"]["codex"]["ceremony_roles"] = {"spec": {"advisor": "gpt-6-astra-high"}}
         settings.write_text(json.dumps(config))
         self.model_input = self.root / "evaluator-input.txt"
         self.model_args = self.root / "evaluator-argv.json"
@@ -197,6 +198,8 @@ def install_sources(repo, root, source_root):
     env.update(HOME=str(home), LORE_DATA_DIR=str(data), XDG_CONFIG_HOME=str(root / "config"),
                XDG_DATA_HOME=str(data), XDG_CACHE_HOME=str(root / "cache"))
     env = isolated_go_environment(repo, root, env)
+    env["PATH"] = str(target / "cli") + os.pathsep + env["PATH"]
+    assert Path(shutil.which("lore", path=env["PATH"])).resolve() == target / "cli/lore"
     proc = subprocess.run(["bash", str(target / "install.sh"), "--framework", "claude-code"],
                           cwd=target, env=env, capture_output=True)
     (root / "install.log").write_bytes(proc.stdout + proc.stderr)
@@ -225,6 +228,46 @@ def compose_source(repo, target, source_root):
             destination.mkdir(exist_ok=True)
             shutil.copy2(source, destination / "SKILL.md")
     return target
+
+
+def unavailable_evaluator(f, item, run, prepare, v):
+    """No evaluator output is recorded as absence, never a completed review."""
+    v.update(REASON="Prepare an invocation whose evaluator is unavailable.", MODEL="gpt-6-astra-high")
+    bound = prepare("no-evaluator")
+    prefix = "design" if "design-slice" in f.rows else "plan"
+    if prefix == "design":
+        run("design-slice", "unavailable evaluator starts from the new prepared design")
+    run(prefix + "-prompt-round-1", "unavailable evaluator receives the newly prepared input")
+    f.model_response.write_text("")
+    response = f.root / "no-evaluator-response.md"
+    result = run("codex-submit", "empty evaluator response refuses before review normalization", expected=1, RESPONSE_FILE=response)
+    assert b"no output" in result.stderr and response.read_bytes() == b""
+    evidence_file = f.root / "no-evaluator-evidence.json"
+    run("file-unavailable", "unavailable outcome requires an explicit reason", expected=1, REASON="", EVIDENCE_FILE=evidence_file)
+    result = run("file-unavailable", "real schema-1 absence records skipped evaluator without a response", REASON="Fixture evaluator could not produce a response.", MODEL="")
+    assert json.loads(result.stdout)["outcome"] == "skipped"
+    evidence = json.loads(evidence_file.read_text())
+    assert evidence["schema_version"] == 1
+    assert evidence["final_round"] is None and evidence["disposition_ledger_sha256"] is None and evidence["model"] is None
+    assert evidence["source_plan_sha256"] == digest(Path(bound["plan_file"]).read_bytes())
+    assert not (Path(bound["prepared_dir"]) / "sealed").exists()
+    result = run("file-outcome", "absence evidence cannot certify a completed review", expected=1, OUTCOME="completed", VERDICT="UNAVAILABLE", REASON="")
+    assert b"null" in result.stdout + result.stderr
+    assert not (item / "results.jsonl").exists()
+
+
+def identity_controls(f, item, run, v):
+    original = dict(v)
+    result = run("read-prepared", "caller supplied wrong prepared directory refuses", expected=1, PREPARED_DIR=item)
+    assert b"prepared path" in result.stderr
+    v.update(original)
+    wrong_ceremony = "spec-post-plan" if v["CEREMONY"] == "spec-design" else "spec-design"
+    result = run("read-prepared", "caller supplied wrong ceremony refuses", expected=1, CEREMONY=wrong_ceremony)
+    assert b"caller named" in result.stderr
+    v.update(original)
+    result = run("read-prepared", "caller supplied wrong revision refuses", expected=1, REVISION_ID="0" * 12)
+    assert b"holds revision" in result.stderr
+    v.update(original)
 
 
 def all_accepted(f, item, skill, run, prepare, v):
@@ -257,7 +300,7 @@ def all_accepted(f, item, skill, run, prepare, v):
     published = json.loads(run("publish-revision", "seat publishes accepted edits after final evaluated round").stdout)
     assert published["revision_id"] != reviewed_revision
     assert not (item / "reviews/all-accept-unreviewed").exists()
-    v.update(ATTEMPT_ID=reviewed_attempt, REVISION_ID=reviewed_revision, PREPARED_PATH=reviewed_prepared_path,
+    v.update(ATTEMPT_ID=reviewed_attempt, REVISION_ID=reviewed_revision, PREPARED_PATH=reviewed_prepared_path, PREPARED_DIR=str(Path(reviewed_prepared_path).parent),
              ROUND1_RESPONSE_FILE=v["RESPONSE_FILE"], ROUND2_RESPONSE_FILE="", REVIEW_OUTPUT=f.root / "all-accept-output.md",
              DISPOSITIONS_FILE=f.root / "all-accept-dispositions.json", OUTCOME="completed", REASON="",
              JUDGMENT="concerns", RATIONALE="The judgment concerns the original evaluated revision; accepted edits are unreviewed.",
@@ -312,6 +355,7 @@ def exercise_design(repo, root, source_root):
         v["REVISION_ID"] = published["revision_id"]
         prepared = json.loads(run("prepare-review", "prepare exact committed revision", ATTEMPT_ID=attempt).stdout)
         v["PREPARED_PATH"] = prepared["prepared_path"]
+        v["PREPARED_DIR"] = str(Path(prepared["prepared_path"]).parent)
         v["CEREMONY"] = "spec-design"
         bound = json.loads(run("read-prepared", "commissioned read validates the supplied immutable identity").stdout)
         for key in ("plan_file", "tasks_file", "anchor_file"):
@@ -404,9 +448,11 @@ def exercise_design(repo, root, source_root):
     assert b"snapshot reference" in bad.stdout + bad.stderr
     prepared_json.write_bytes(original)
     f.lore("plan", "review", "prepare", v["SLUG"], "--attempt-id", "wrong-ceremony", "--ceremony", "spec-post-plan", "--revision", v["REVISION_ID"], "--purpose", "criterion-adequacy")
-    run("read-prepared", "wrong ceremony refuses before evaluation", expected=1, ATTEMPT_ID="wrong-ceremony")
-    run("read-prepared", "unavailable evidence refuses explicitly", expected=1, ATTEMPT_ID="unavailable")
+    run("read-prepared", "wrong ceremony refuses before evaluation", expected=1, ATTEMPT_ID="wrong-ceremony", PREPARED_DIR=item / "reviews/wrong-ceremony")
+    run("read-prepared", "unavailable evidence refuses explicitly", expected=1, ATTEMPT_ID="unavailable", PREPARED_DIR=item / "reviews/unavailable")
     all_accepted(f, item, skill, run, prepare, v)
+    identity_controls(f, item, run, v)
+    unavailable_evaluator(f, item, run, prepare, v)
     f.finish()
 
 
@@ -443,6 +489,7 @@ def exercise_plan(repo, root, source_root):
         v["REVISION_ID"] = published["revision_id"]
         result = json.loads(run("prepare-review", "freeze full task plan and anchor", ATTEMPT_ID=attempt).stdout)
         v["PREPARED_PATH"] = result["prepared_path"]
+        v["PREPARED_DIR"] = str(Path(result["prepared_path"]).parent)
         bound = json.loads(run("read-prepared", "commissioned input uses supplied attempt and revision").stdout)
         assert bound["task_count"] == 2, bound
         for key in ("plan_file", "tasks_file", "anchor_file"):
@@ -550,6 +597,8 @@ def exercise_plan(repo, root, source_root):
     run("file-outcome", "unavailable evaluator stays skipped with null evidence", ATTEMPT_ID="unavailable", OUTCOME="skipped", VERDICT="UNAVAILABLE", REASON="Fixture evaluator unavailable.", EVIDENCE_FILE=evidence)
     run("file-outcome", "unavailable evidence cannot claim a completed review", expected=1, ATTEMPT_ID="unavailable-completed", OUTCOME="completed", REASON="")
     all_accepted(f, item, skill, run, prepare, v)
+    identity_controls(f, item, run, v)
+    unavailable_evaluator(f, item, run, prepare, v)
     f.finish()
 
 
