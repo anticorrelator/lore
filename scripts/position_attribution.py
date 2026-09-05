@@ -50,6 +50,14 @@ def resolve_reference(reference, *, expected=None):
     return binder.resolve_dispatch(**reference, expected=expected)
 
 
+def legacy_role(attribution):
+    """Map a resolved position onto the existing evidence producer vocabulary."""
+    position = attribution.get('position')
+    if position == 'designer':
+        return 'advisor' if attribution.get('bindings', {}).get('mode') == 'consultation' else 'spec-lead'
+    return {'investigator': 'researcher', 'worker': 'worker', 'reviewer': 'worker'}.get(position)
+
+
 def project(record, *, expected=None):
     result = dict.fromkeys(('position_dispatch', 'template_id', 'template_version', 'template_path',
                             'position', 'framework', 'bindings', 'wrapper'))
@@ -76,6 +84,8 @@ def project(record, *, expected=None):
         for key in ('work_item', 'report_id', 'revision_id', 'packet_id', 'dispatch_attempt_id'):
             if key in record and record[key] != manifest['bindings'][key]:
                 raise ValueError(f'report {key} does not match dispatch')
+        if 'producer_role' in record and record['producer_role'] != legacy_role(dict(producer, bindings=manifest['bindings'])):
+            raise ValueError('evidence producer role does not match position')
         result.update({key: producer[key] for key in ('position', 'framework', 'template_id', 'template_version')})
         result.update(template_path=manifest['native']['source_path'], bindings=manifest['bindings'], wrapper=manifest['wrapper'])
         return dict(result, status='resolved', reason=None)
