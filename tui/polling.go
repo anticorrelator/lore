@@ -237,6 +237,7 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 		cmds = append(cmds, m.syncInstanceCmd(), readInstancesCmd(m.sessionsDir), m.queueTickCmd(),
 			scanCloseRequestsCmd(m.sessionsDir, m.instanceName, hosted, closeIDToSlug),
 			scanSendRequestsCmd(m.sessionsDir, m.instanceName, hosted),
+			scanInterruptRequestsCmd(m.sessionsDir, m.instanceName),
 			scanAnswerRequestsCmd(m.sessionsDir, m.instanceName, hosted),
 			scanPeekRequestsCmd(m.sessionsDir, m.instanceName, hosted),
 			m.sessionsRefreshCmd())

@@ -1149,3 +1149,47 @@ rather than growing this contract.**
 Downstream items build against the schemas and event vocabulary **exactly as fixed
 here**. Changing a row shape or an event name is re-opening the design decision, not
 a silent edit.
+
+
+### Interrupt the current turn
+
+`lore session interrupt HANDLE --json` resolves one fresh live owner and freezes
+its native session, launch request, worktree epoch, process, owner PID and owner
+start identity. The request expires after 15 seconds. The owning runtime must
+advertise `interrupt-current-turn-v1` in `runtime_capabilities`; older owners
+are rejected before enqueueing. Missing identity, replacement owners, unsupported
+harnesses, modal-owned input and screens without current activity are refused.
+The operation never starts a host, closes a session, or escalates to process
+termination.
+
+The runtime checks the live terminal immediately before sending ESC. This targets
+the turn active when the owner handles the request; it does not identify or
+promise to interrupt an earlier observed turn. `interrupt_requested` records
+intent, `interrupt_attempted` records the durable attempt boundary, and
+`interrupt_refused` or `interrupt_uncertain` records the outcome. An attempt can
+be refused by the final screen/expiry check. A successful ESC write remains
+uncertain because the terminal transport cannot prove that the turn ended.
+Durable delivery records prohibit replay after an ambiguous attempt, including
+recovery. The CLI's `turn_ended` is null, not a completion assertion.
+
+Provider reconnect/request errors take precedence over generic interrupt chrome
+in observations. `progress_observed_at` and `progress_age_seconds` describe the
+last change to meaningful visible output; `observed_at` describes screen capture
+freshness. Animated activity/status rows do not refresh output progress. After
+120 seconds without such progress, `suspected_stall` is advisory only: long tools
+remain working and no interruption is automatic. Output changes are evidence of
+output, not proof that the task advanced or completed.
+
+Transient unknown screen paints remain visible in current observations while
+preserving the last meaningful session-generation state. Receipt acknowledgment
+remembers semantic observations independently of current samples; unchanged
+repaints do not repeat an acknowledged intervention. New modal signatures,
+meaningful state transitions and new generations remain actionable. Unacknowledged
+wakes retain their original identity for redelivery. A receipt never certifies
+that an action was completed.
+
+Claude composer recognition follows matching rule boundaries around the prompt
+at narrow widths and consistent split-pane dividers. Held text and interactive
+prompts still refuse injection. Synthetic terminal fixtures cover these layouts;
+they do not reconstruct the original reported diff-screen failure, whose terminal
+geometry was not retained. The diff footer alone does not determine readiness.

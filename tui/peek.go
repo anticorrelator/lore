@@ -70,6 +70,9 @@ func respondPeekCmd(sessionsDir, requestID string, resp session.PeekResponse) te
 // request, classifies readiness with the same gate the send path uses, and
 // dispatches the response write-back. The screen read runs here in Update.
 func (m model) handlePeekRequestScan(msg peekRequestScanMsg) (model, tea.Cmd) {
+	if m.observationProgress == nil {
+		m.observationProgress = make(map[string]observationProgress)
+	}
 	if m.peekHistory != nil {
 		m.peekHistory.expire(time.Now())
 	}

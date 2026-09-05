@@ -652,6 +652,8 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case managedWorktreeQuiescedMsg:
 		return m.handleManagedWorktreeQuiesced(msg)
 
+	case interruptScanMsg:
+		return m.handleInterruptScan(msg)
 	case sendRequestScanMsg:
 		return m.handleSendRequestScan(msg)
 
