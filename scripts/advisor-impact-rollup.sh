@@ -211,7 +211,7 @@ if not consultations:
 # loop. `handler: lead` and `handler: skill` entries are silently skipped —
 # they attribute via LEAD_TEMPLATE_VERSION / future skill-impact rollup, not
 # via this writer. The scorecard row shape downstream is unchanged.
-by_advisor: dict[str, list[dict]] = defaultdict(list)
+by_advisor: dict[tuple[str, str], list[dict]] = defaultdict(list)
 errors: list[str] = []
 VALID_HANDLERS = {"lead", "skill", "agent"}
 
@@ -354,7 +354,7 @@ for row in rows:
     appended.append(f"{row['template_version']}/{row['metric']}")
 
 if json_mode:
-    print(json.dumps({"status": "appended", "rows": appended, "advisors": list(by_advisor.keys())}, indent=2))
+    print(json.dumps({"status": "appended", "rows": appended, "advisors": [version for _, version in by_advisor], "producers": [{"template_id": ident, "template_version": version} for ident, version in by_advisor]}, indent=2))
 else:
     print(f"[advisor-impact] appended {len(appended)} rows across {len(by_advisor)} advisors")
 PYEOF
