@@ -759,9 +759,13 @@ operation: a request file in, a response file out. The request at
 raw, requested_by, requested_at}`. The owning instance snapshots the session's
 screen on its poll tick and writes `peek-responses/<request_id>.json`
 (tmp + atomic rename) carrying `{request_id, slug, captured_at, ready,
-blocked_reason, rows[]}` — the plain-text screen rows from the same snapshot the
-send gate uses, plus that gate's readiness classification; `--raw` adds the ANSI
-render under `ansi`. The requesting CLI polls for the response up to `--timeout`
+blocked_reason, rows[]}`, plus `framework`, `observation`, `screen`, and recognized
+`modal` details. `ready` is input eligibility; `observation.activity` independently
+states lifecycle evidence, with identity, generation, timestamp, authority,
+freshness, and a matcher explanation. `--raw` adds the ANSI render under `ansi`.
+See [Session observation](session-observation.md) for interpretation and watcher
+receipt semantics. Managed peek retains this snapshot inside its operation
+receipt's `response` field. The requesting CLI polls for the response up to `--timeout`
 (default 15s ≈ 3 poll ticks), prints it, and **deletes it** (the requester is the
 sole consumer). The owning instance garbage-collects orphaned responses older than
 5 minutes on its scan. **Peek emits no journal events** — it is a read, not a

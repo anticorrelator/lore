@@ -37,6 +37,8 @@ done
 TOKENS="$(python3 - "$SKILL" "$WATCH" <<'PYEOF'
 import re
 import sys
+import datetime
+from pathlib import Path
 
 skill_path, watch_path = sys.argv[1], sys.argv[2]
 skill = open(skill_path, encoding="utf-8").read()
@@ -79,7 +81,15 @@ def emitted(names):
 print("block_tier\t%s" % " ".join(block_tokens("wake tier")))
 print("verb_tier\t%s" % " ".join(emitted(["WAKE_TIER", "tier"])))
 print("block_authority\t%s" % " ".join(block_tokens("authority")))
-print("verb_authority\t%s" % " ".join(emitted(["WAKE_AUTHORITY"])))
+sys.path.insert(0, str(Path(watch_path).parent))
+from coordinate_watch_state import classify
+sources = set(emitted(["WAKE_AUTHORITY"]))
+for authority in ("runtime", "screen-signature"):
+    peek = {"observation": {"schema_version": 1, "activity": "idle",
+            "authority": authority, "observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "fresh": True, "session_id": "fixture", "generation": "fixture-1"}}
+    sources.add(classify({"event": "needs_input"}, peek)["authority"])
+print("verb_authority\t%s" % " ".join(sorted(sources)))
 PYEOF
 )" || { fail "vocabulary extraction failed"; echo "Results: $PASS passed, $FAIL failed"; exit 1; }
 
@@ -106,7 +116,7 @@ assert_eq "wake authorities: block and verb agree" "$BLOCK_AUTHORITY" "$VERB_AUT
 # written to pin, so a silent rewrite of the block itself does not pass by
 # agreeing with a verb renamed in the same commit.
 assert_eq "wake tiers are the canonical three" "advisory confirmed quiet" "$BLOCK_TIER"
-assert_eq "wake authorities are the canonical four" "hook-row none owner-handle screen-signature" "$BLOCK_AUTHORITY"
+assert_eq "wake authorities are the canonical six" "hook-row none observation owner-handle runtime screen-signature" "$BLOCK_AUTHORITY"
 
 # session-reference.md is where the seat reads what a tier or an authority means.
 # A renamed token that reaches only the verb and the block leaves the reference

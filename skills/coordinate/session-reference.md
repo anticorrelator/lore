@@ -398,44 +398,15 @@ into the same predicate — membership is declared, never inferred from project
 labels. An actionable row carrying neither key bypasses scope and wakes as a
 labeled unattributed advisory rather than being dropped.
 
-The board-wide cursor lives at `_coordination/watch-cursor.json`; each distinct
-scope persists its own cursor file beside it under a scope-derived name, so
-concurrent scoped seats never race one position. Cursors are written atomically
-on every exit path; precedence is `--since` > cursor file > journal end, and the
-first-ever run baselines at journal end. An explicit `--since` rewrites the
-persisted cursor on exit, so a ledgered cursor is seat-handoff material, never
-watcher feed — the verb owns its position, and any window resumes from it with no
-cursor arguments at all.
+Cursor and delivery identity include the canonical store, owner handle, and declared scope. The cursor is stored under `_coordination/watch-cursor-<identity>-<scope>.json`; the first run baselines at journal end and an explicit `--since` remains an opaque reader cursor. The installed arm path adds `--durable`. Direct callers may opt in with that flag and an owner handle.
 
-Classification: on a park-shaped row the watcher peek-confirms through the owning
-instance's shared readiness gate before waking. A strict match against the
-versioned per-harness signature set wakes `confirmed`; no strict match wakes
-`advisory` carrying the labeled reason no signature fired; a window reaching its
-deadline with nothing actionable wakes `quiet` with the cursor position.
-Strictness selects tier, never existence. `--peek-timeout
-<sec>` bounds the round-trip through the owning instance, and `0` skips the peek
-entirely — a skipped peek still wakes, at `advisory` tier with the skip as its
-label, because no classification outcome may end in silence. When the matched row itself carries authoritative lifecycle state,
-that state is final and the screen is not consulted for that session — authority
-`hook-row`, suppression, never blending; otherwise authority `screen-signature`.
-`modal_blocked` is the sole exception, and it is a handover rather than a blend:
-some harnesses clear their own modals within a second, so the screen classifies
-every modal row whatever the emitter said. A modal on the screen confirms; any
-other screen demotes to an advisory labelled `modal-not-on-screen`, which ages
-normally. A screen that cannot answer leaves the row's claim confirmed on
-`hook-row` authority — absence of evidence never demotes. `classification.modal_gate`
-reports what the gate found on every modal row, including the ones it left standing.
-Every wake body names its authority (`hook-row`, `screen-signature`, `owner-handle` on an owner-gone exit, or `none` on a quiet window) and the signature-set version consulted, so
-matcher-contract drift (the codex composer-badge class — see Calibrations below)
-is detectable rather than silent; signatures are versioned and refreshable.
+Durable observation advances its cursor together with a pending wake payload before output. The payload retains its `wake_id` until the recipient runs `lore coordinate status --wake-id <id>`. That command returns the saved wake alongside the board, then acknowledges after successfully writing its output. Repeated acknowledgment is idempotent; a different owner cannot acknowledge the wake. Receipt does not mean its requested intervention is complete. Undelivered wakes remain available after restart, and redelivery retains the same id. Current observations accompany old evidence so an old park is not presented as a fresh confirmation.
 
-The wake payload is five-part: tier, authority, signature version, the matched row
-or advisory, and the next cursor. Cross-board context is a deliberate read —
-`lore coordinate status` when steering needs it, never an embedded snapshot. One
-signal rides the wake from outside the board projection: `--pending-stale
-<sec>` (default 300, `0` disables) wakes on a pending request older than the
-threshold, age read from the row's `requested_at`, never mtime, which claim
-retries rewrite; a journal match outranks an advisory in the same poll.
+Classification consumes `observation.activity`, never `ready`. A fresh known idle or blocked state can produce `confirmed`; unavailable, unknown, stale, or superseded evidence is `advisory`. A deadline with nothing actionable is `quiet`. A reason on a historical event does not establish that the worker is still parked. Peek reports the screen, framework, input eligibility, lifecycle evidence, worker generation, owning instance, and recognized modal details. Managed peek JSON wraps these under `response`; raw peek JSON returns the snapshot directly.
+
+The watcher reconciles live sessions periodically as well as reading journal events. `--reconcile-interval` defaults to 15 seconds and `--reconcile-budget` to 8 seconds. Bounded concurrent reads rotate through larger session sets; unavailable or deferred observations are explicit. Each wake carries `current_observations` and `current_delta`, so missed journal edges can still bring a worker to attention. These are session observations; `coordinate status` remains the cross-substrate board.
+
+Quiet windows retain the default 600-second cadence and produce real coordinator wakes through the supported harness transport. Pending quiet receipts do not create an immediate re-wake loop or hide newly actionable observations. `--pending-stale <sec>` (default 300, `0` disables) still covers requests no host has claimed. Authority is `hook-row`, `screen-signature`, `runtime`, `observation`, `owner-handle`, or `none`, with signature versions and evidence preserved.
 
 Direct-call exits: 0 match or advisory, 2 timeout (cursor persisted), 3 owner
 gone, 4 reader failure after bounded retries — never read 4 as timeout.

@@ -70,7 +70,9 @@ crash interrupts outcome verification, `delivery-uncertain` preserves the unknow
 outcome and forbids automatic replay. The coordinator can inspect and decide how
 to proceed. A timeout likewise does not prove that input was undelivered.
 
-`peek` returns the current screen and readiness evidence. `answer` still requires
+`peek` returns current activity separately from input readiness, with session identity,
+freshness, screen evidence, and recognized modal details. See
+[Session observation](session-observation.md). `answer` still requires
 an observed modal expectation and an explicit choice. `wait` persists its own
 observation position; callers need not carry byte offsets for individual managed
 sessions. `inspect` reads durable state and receipts after the process is gone.
