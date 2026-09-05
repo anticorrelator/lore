@@ -258,7 +258,7 @@ func (h *sessionHostModel) publishReady() error {
 	if err := h.runtime.recoverHostDeliveries(); err != nil {
 		return err
 	}
-	return hostAtomicJSON(h.options.ReadyFile, map[string]any{"schema_version": 1, "host_key": h.options.Key, "instance_name": h.runtime.instanceName, "pid": os.Getpid(), "source_dir": h.options.SourceDir, "knowledge_dir": h.options.KnowledgeDir, "ready": true})
+	return hostAtomicJSON(h.options.ReadyFile, map[string]any{"schema_version": 1, "host_key": h.options.Key, "instance_name": h.runtime.instanceName, "pid": os.Getpid(), "source_dir": h.options.SourceDir, "knowledge_dir": h.options.KnowledgeDir, "ready": true, "runtime_capabilities": session.RuntimeCapabilities()})
 }
 func (h *sessionHostModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd

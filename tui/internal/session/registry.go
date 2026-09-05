@@ -61,7 +61,8 @@ type Instance struct {
 	RuntimeCapabilities []string `json:"runtime_capabilities,omitempty"`
 	adoptionPath        string   // scan-only source, including an abandoned claim
 
-	Revision int64 `json:"revision,omitempty"`
+	Revision            int64    `json:"revision,omitempty"`
+	RuntimeCapabilities []string `json:"runtime_capabilities,omitempty"`
 
 	HostKey          string    `json:"host_key,omitempty"`
 	Role             string    `json:"role,omitempty"`
@@ -77,8 +78,8 @@ type Instance struct {
 	// BuildTime is the orderable vintage: the commit's committer-date for a
 	// release build, the binary mtime for a dev build (both ISO 8601 UTC). A row
 	// written by an older binary carries neither and reads as vintage-unknown —
-	// never rejected by min_vintage filtering (degradation is additive, not
-	// breaking). BuildTime, not BuildSHA, is the comparable quantity because a
+	// unable to satisfy an explicit min_vintage floor. BuildTime, not BuildSHA,
+	// is the comparable quantity because a
 	// SHA has no read-side ordering.
 	BuildSHA  string `json:"build_sha,omitempty"`
 	BuildTime string `json:"build_time,omitempty"`

@@ -1,9 +1,9 @@
 package session
 
-// InterruptCurrentTurnCapability means this runtime consumes expiring,
-// exact-session interrupt requests and persists ESC attempt outcomes.
 const InterruptCurrentTurnCapability = "interrupt-current-turn-v1"
+const PositionPreparationCapability = "position-preparation-v1"
 
+// RuntimeCapabilities describes the executing binary, not its source checkout.
 func RuntimeCapabilities() []string {
-	return []string{InterruptCurrentTurnCapability}
+	return []string{InterruptCurrentTurnCapability, PositionPreparationCapability}
 }

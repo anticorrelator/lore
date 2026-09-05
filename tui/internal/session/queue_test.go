@@ -116,8 +116,7 @@ func TestQueueTickTargeting(t *testing.T) {
 
 // TestQueueTickMinVintage exercises the read-side vintage filter mirroring the
 // targeting filter: a request requiring a minimum vintage is claimed by an
-// instance at-or-newer, skipped by an older one, and — the additive-degradation
-// invariant — always claimed by a vintage-unknown instance.
+// instance at-or-newer, skipped by an older or vintage-unknown instance.
 func TestQueueTickMinVintage(t *testing.T) {
 	const cutoff = "2026-07-06T00:00:00Z"
 	newer := "2026-07-06T12:00:00Z"
@@ -145,13 +144,12 @@ func TestQueueTickMinVintage(t *testing.T) {
 		t.Fatal("min_vintage-gated request should remain pending for an older instance")
 	}
 
-	// A vintage-unknown instance ("" build time) is never rejected — additive
-	// degradation: an old binary predating the field still claims.
+	// An explicit floor requires evidence even when runtime vintage is unknown.
 	dir = t.TempDir()
 	plantPending(t, dir, Request{RequestID: "v3", Type: "spec", Slug: strp("c"), Initiator: "agent", MinVintage: strp(cutoff)})
 	res, _ = QueueTick(dir, "me", "", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
-	if res.Claimed == nil || res.Claimed.RequestID != "v3" {
-		t.Fatalf("vintage-unknown instance was wrongly rejected by min_vintage: %+v", res.Claimed)
+	if res.Claimed != nil {
+		t.Fatalf("vintage-unknown instance claimed a request with an explicit floor: %+v", res.Claimed)
 	}
 }
 

@@ -1675,7 +1675,11 @@ func materializePosition(d SessionDescriptor, framework, root, kdir string) (*po
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command("python3", filepath.Join(repo, "scripts", "position-bind.py"), "launch",
+	python, err := positionPython(repo)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(python, filepath.Join(repo, "scripts", "position-bind.py"), "launch",
 		"--framework", framework, "--slug", d.Slug, "--execution-root", root, "--kdir", kdir)
 	cmd.Stdin = bytes.NewReader(d.PositionContext)
 	cmd.Dir = root
@@ -1683,7 +1687,7 @@ func materializePosition(d SessionDescriptor, framework, root, kdir string) (*po
 	cmd.Stderr = &stderr
 	data, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("position binding: %w: %s", err, stderr.String())
+		return nil, fmt.Errorf("position binding via %s: %w: %s", python, err, stderr.String())
 	}
 	var launch positionLaunch
 	if err := json.Unmarshal(data, &launch); err != nil {
@@ -1770,7 +1774,7 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 		}
 		position, err := materializePosition(d, activeFramework, worktreeDir, knowledgeDir)
 		if err != nil {
-			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse position spawn: %w", err)}
+			return StreamErrorMsg{Slug: slug, Err: &LaunchAdmissionError{fmt.Errorf("refuse position spawn: %w", err)}}
 		}
 		var positionEnv []string
 		if position != nil {
@@ -1784,6 +1788,12 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 		harnessBinary, err := config.HarnessBinary(activeFramework)
 		if err != nil {
 			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve harness binary: %w", err)}
+		}
+
+		if d.Type == SessionWorker {
+			if err := preflightHarness(activeFramework, harnessBinary); err != nil {
+				return StreamErrorMsg{Slug: slug, Err: err}
+			}
 		}
 
 		// Build args: start with user-configured harness flags

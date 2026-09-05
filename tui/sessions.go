@@ -453,6 +453,20 @@ func (m model) queueTickCmd() tea.Cmd {
 		liveSlugs[slug] = true
 	}
 	return func() tea.Msg {
+		// Queue ticks may overlap when a dependency probe outlasts the poll
+		// interval. Only one pass per runtime can inspect or claim at a time.
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return queueTickResultMsg{err: err}
+		}
+		lock, err := hostLock(filepath.Join(dir, ".queue-admission-"+name+".lock"), true)
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return queueTickResultMsg{}
+		}
+		if err != nil {
+			return queueTickResultMsg{err: err}
+		}
+		defer lock.Close()
+
 		var expiryErr error
 		if expiryScript != "" {
 			cmd := exec.Command("bash", expiryScript, "--kdir", kdir)
@@ -467,10 +481,15 @@ func (m model) queueTickCmd() tea.Cmd {
 				live[inst.Name] = true
 			}
 		}
-		res, err := session.QueueTickForHost(dir, name, vintage, projectDir, m.hostKey, live,
+		res, err := session.QueueTickForHostAdmission(dir, name, vintage, projectDir, m.hostKey, live,
 			func(slug string) bool { return planDocs[slug] },
 			func(slug string) bool { return liveSlugs[slug] },
-			time.Now(), session.ReclaimAfter)
+			time.Now(), session.ReclaimAfter, func(req session.Request) error {
+				if req.Type != "worker" {
+					return nil
+				}
+				return work.PreflightWorker(req.FrameworkValue(), len(req.PositionContext()) > 0)
+			})
 		if err == nil {
 			err = expiryErr
 		} else if expiryErr != nil {
@@ -1201,7 +1220,7 @@ func parseStartedISO(iso string) time.Time {
 // emitSpawnFailedCmd returns the request to pending with an incremented attempt
 // count and a recorded reason, then journals `spawn_failed`. The return-to-
 // pending is the durable transition and lands first.
-func emitSpawnFailedCmd(dir, script, kdir, requestID, reason, actor string) tea.Cmd {
+func emitSpawnFailedCmd(dir, script, kdir, requestID, reason, actor string, deterministic ...bool) tea.Cmd {
 	return func() tea.Msg {
 		req, err := session.ReadClaimed(dir, requestID)
 		if err != nil {
@@ -1213,7 +1232,12 @@ func emitSpawnFailedCmd(dir, script, kdir, requestID, reason, actor string) tea.
 		req.LastError = &reason
 		req.ClaimedBy = nil
 		req.ClaimedAt = nil
-		if err := session.ReturnToPending(dir, req); err != nil {
+		terminal := len(deterministic) > 0 && deterministic[0]
+		if terminal {
+			if err := session.ArchiveFailedClaim(dir, req); err != nil {
+				return journalResultMsg{err: err}
+			}
+		} else if err := session.ReturnToPending(dir, req); err != nil {
 			return journalResultMsg{err: err}
 		}
 		ev := session.Event{
@@ -1225,7 +1249,14 @@ func emitSpawnFailedCmd(dir, script, kdir, requestID, reason, actor string) tea.
 			RequestID:     requestID,
 			Reason:        reason,
 		}
-		return journalResultMsg{err: session.AppendEvent(script, kdir, ev)}
+		if err := session.AppendEvent(script, kdir, ev); err != nil {
+			return journalResultMsg{err: err}
+		}
+		if terminal {
+			ev.Event = session.EventAbandoned
+			return journalResultMsg{err: session.AppendEvent(script, kdir, ev)}
+		}
+		return journalResultMsg{}
 	}
 }
 
@@ -1314,7 +1345,8 @@ func (m model) handleQueueTickResult(msg queueTickResultMsg) (model, tea.Cmd) {
 	}
 	for _, ev := range msg.result.Abandoned {
 		cmds = append(cmds, journalCmd(script, kdir, session.Event{
-			Event:         session.EventAbandoned,
+			Event: session.EventAbandoned,
+			Slug:  ev.Slug, SessionType: ev.SessionType, Initiator: ev.Initiator,
 			ActorInstance: session.StrPtr(m.instanceName),
 			RequestID:     ev.RequestID,
 			Reason:        ev.Reason,

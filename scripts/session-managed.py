@@ -139,6 +139,7 @@ def ready(kdir, key, source):
     registry = read(kdir / '_sessions/instances' / (data['instance_name'] + '.json'), {})
     if registry.get('host_key') != key or registry.get('role') != 'session-host':
         return None
+    data['runtime_capabilities'] = sorted(capabilities(data) & capabilities(registry))
     return data
 
 
@@ -169,12 +170,29 @@ def binary(kdir):
     return output
 
 
+def capabilities(status):
+    values = status.get('runtime_capabilities', [])
+    return set(values) if isinstance(values, list) and all(isinstance(v, str) for v in values) else set()
+
+
+def require_capabilities(status):
+    required = {'position-preparation-v1'}
+    missing = required - capabilities(status)
+    if missing:
+        raise RuntimeError('running host ' + str(status.get('instance_name', '(unknown)'))
+                           + ' lacks runtime capability ' + ', '.join(sorted(missing))
+                           + '; coordinate host replacement before retrying; host was not restarted')
+    return status
+
+
 def ensure(kdir, key, source, timeout=45):
     directory = host_dir(kdir, key)
     deadline = time.monotonic() + timeout
     while True:
         with lock(directory / 'ensure.lock'):
             status = ready(kdir, key, source)
+            if status:
+                require_capabilities(status)
             if not held(directory / 'supervisor.lock'):
                 executable = binary(kdir)
                 directory.mkdir(parents=True, exist_ok=True)
@@ -326,8 +344,10 @@ def enqueue_start(kdir, manifest):
     if not existing:
         status = ensure(kdir, key, source)
         with lock(host_dir(kdir, key) / 'ensure.lock'):
-            if not ready(kdir, key, source):
+            current = ready(kdir, key, source)
+            if not current:
                 raise RuntimeError('host withdrew readiness; retry the same start key')
+            require_capabilities(current)
             with lock(kdir / '_sessions/source-locks' / (manifest['work_item'] + '.lock')):
                 meta_path = kdir / '_work' / manifest['work_item'] / '_meta.json'
                 meta = read(meta_path, {})
