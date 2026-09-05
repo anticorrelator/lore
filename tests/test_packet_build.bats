@@ -344,7 +344,7 @@ else:
     print('accepted')
 PY
 )
-  [[ "$REFUSED" == refused:*"did not record a rendered block"* ]]
+  [[ "$REFUSED" == refused:*"did not record a locatable rendered block"* ]]
   run bash "$PACKET" synthesize pkt-noblocks --by lead
   [ "$status" -eq 0 ]
 }

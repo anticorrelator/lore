@@ -109,7 +109,7 @@ gap dimensions; "miner" is the demand-led capture miner
 |---|---|---|
 | `packet_id` | non-empty string | assessor (joins verdicts to deliveries); experiment (packet identity across arms) |
 | `packet_scope` | `session` \| `task` | assessor (selects assessment mode); experiment (task rows only) |
-| `delivery_stage` | `assembled` \| `synthesized` \| `delivered` | assessor (assesses the latest row per id); dispatch preparation (refuses a latest row that is not `synthesized` unless a `synthesis_waiver` was recorded). Stage records preparation, never receipt; assessments live in their own ledger |
+| `delivery_stage` | `assembled` \| `synthesized` \| `delivered` | assessor (assesses the latest row per id); dispatch preparation (refuses a latest row that is not `synthesized` unless a `synthesis_waiver` was recorded). `assembled` and `synthesized` record preparation without proving receipt; `delivered` is the stage the evidence reader projects as receipt; assessments live in their own ledger |
 | `session_id` | string or null | assessor (transcript join); experiment (session grouping) |
 | `work_item` | string or null | experiment (matched-task pairing); /retro D2/D3 (cycle scoping) |
 | `phase` | string, integer, or null | experiment (pairing); /retro D2/D3 |
