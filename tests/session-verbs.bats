@@ -39,6 +39,7 @@ setup() {
   command -v jq >/dev/null 2>&1 || skip "jq required"
   command -v python3 >/dev/null 2>&1 || skip "python3 required"
   TEST_KDIR="$(mktemp -d)"
+  TEST_KDIR="$(cd "$TEST_KDIR" && pwd -P)"
   mkdir -p "$TEST_KDIR/_sessions"
   WATCH_CURSOR="_coordination/watch-cursor-$(bash -c 'source "$1"; watcher_identity_hash "$2" none "" lore-tui' _ "$LIB" "$TEST_KDIR")-board.json"
   # These tests run inside a live session as often as not, and --prefer-cwd now
