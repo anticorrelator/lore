@@ -27,7 +27,7 @@ import yaml
 
 original, temporary, scenario = sys.argv[1:]
 original, temporary = Path(original).resolve(), Path(temporary).resolve()
-if os.environ.get('POSITION_DISPATCH_FIXTURES') and scenario in ('native', 'session', 'launch', 'native-selection', 'spec', 'spec-native'):
+if os.environ.get('POSITION_DISPATCH_FIXTURES') and scenario in ('native', 'session', 'launch', 'native-selection', 'spec', 'spec-native', 'implement-envelope'):
     temporary = Path(os.environ['POSITION_DISPATCH_FIXTURES']).resolve() / scenario
     temporary.mkdir(parents=True, exist_ok=False)
 repo, home = temporary / 'checkout', temporary / 'home'
@@ -146,7 +146,72 @@ def request(b, position='worker', framework='codex', extra=None, flags=(), ok=Tr
 def pending():
     return list((store / '_sessions/requests/pending').glob('*.json'))
 
-if scenario == 'spec':
+if scenario == 'implement-envelope':
+    assert item == temporary/'home/.lore/_work/fixture'
+    assert item.resolve().is_relative_to(temporary)
+    start=json.loads(call(['bash',str(repo/'scripts/impl-start.sh'),'fixture','--compiled-positions','--json']).stdout)
+    assert set(start['position_descriptors']['codex'])=={'worker','designer'}
+    for d in start['position_descriptors']['codex'].values(): validate_descriptor(d)
+    legacy=json.loads(call(['bash',str(repo/'scripts/impl-start.sh'),'fixture','--json']).stdout)
+    assert legacy['position_descriptors'] is None
+    assert start['template_versions']==legacy['template_versions']
+    opened=json.loads(call(['bash',str(repo/'scripts/impl-open.sh'),'fixture','--all','--compiled-positions','--json']).stdout)
+    for d in opened['position_descriptors']['codex'].values(): validate_descriptor(d)
+    task=next(t for t in opened['manifest'] if t['op']=='TaskCreate')
+    inputs=task['position_binding_inputs'];packet=show(store,inputs['packet_id'])
+    assert task['position']=='worker'
+    assert inputs['packet_pointer']==pointer(store,inputs['packet_id'])
+    assert inputs['assignment']==task['description']
+    assert all(inputs[key]==packet.get(key) for key in ('task_id','revision_id','dispatch_attempt_id','work_item'))
+    assert not {'execution_root','report_path','report_id'} & inputs.keys()
+    assert not (item/'position-dispatch').exists()
+    b=dict.fromkeys(binder.FIELDS);b.update(inputs)
+    b.update(report_id='implement-envelope-report',report_path=str(item/'worker-reports/implement-envelope-report.md'),execution_root=str(repo))
+    b['absence_reasons']={key:'not applicable to this worker' for key,value in b.items() if value is None}
+    g=guidance();guidance_path=temporary/'dispatch-guidance.md';guidance_path.write_bytes(g)
+    d=compile_position('worker','codex',store,guidance_path)
+    wrapper_path=repo/'skills/implement/templates/worker-spawn.md'
+    wrapper_hash=hashlib.sha256(wrapper_path.read_bytes()).hexdigest()
+    wrapper={'template_id':'implement/worker-spawn','template_version':wrapper_hash[:12],'path':str(wrapper_path),'sha256':wrapper_hash}
+    ref=bind(d,b,g,wrapper=wrapper,native_model='gpt-6-astra-high',required=('task_id','revision_id','packet_id','packet_pointer'))
+    m=binder.validate_dispatch(ref['manifest_path'],ref['manifest_sha256'])
+    selected=binder.native_input(ref['manifest_path'],ref['manifest_sha256'])
+    assert m['producer']['template_version']==d['template_version']
+    assert m['wrapper']==wrapper and m['producer']['template_version']!=wrapper['template_version']
+    assert m['producer']['template_version']!=legacy['template_versions']['worker']
+    assert selected['tool_input']=={'message':Path(ref['payload_path']).read_text(),'model':'gpt-6-astra','reasoning_effort':'high'}
+    assert m['bindings']['assignment']==task['description']
+    assert m['accounting']['delivery_proven'] is False
+    assert hashlib.sha256(Path(ref['manifest_path']).read_bytes()).hexdigest()==ref['manifest_sha256']
+    before={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in Path(ref['manifest_path']).parent.iterdir()}
+    legacy_open=json.loads(call(['bash',str(repo/'scripts/impl-open.sh'),'fixture','--all','--json']).stdout)
+    assert legacy_open['position_descriptors'] is None
+    assert all('position_binding_inputs' not in t for t in legacy_open['manifest'] if t['op']=='TaskCreate')
+    after={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in Path(ref['manifest_path']).parent.iterdir()}
+    assert before==after
+    saved=env.copy()
+    try:
+        env.update(LORE_FRAMEWORK='claude-code',LORE_MODEL_LEAD='opus',LORE_MODEL_WORKER='opus',LORE_MODEL_ADVISOR='opus',LORE_MODEL_WORKER_MECHANICAL='codex/gpt-6-astra-high')
+        routed=json.loads(call(['bash',str(repo/'scripts/impl-start.sh'),'fixture','--compiled-positions','--json']).stdout)
+        assert set(routed['position_descriptors'])=={'claude-code','codex'}
+        route=routed['worker_class_routes']['mechanical']
+        assert route['source_framework']=='claude-code' and route['target_framework']=='codex'
+        assert route['native_binding']=='gpt-6-astra-high'
+        for target,positions in routed['position_descriptors'].items():
+            for position,descriptor in positions.items():
+                assert descriptor['framework']==target and descriptor['position']==position
+                validate_descriptor(descriptor)
+    finally:
+        env.clear();env.update(saved)
+    examples={'start':start,'opened':opened,'legacy_start':legacy,'reference':ref,'prepared_tool_input':selected,'foreign_start':routed,
+              'limits':'Prepared envelope and current wrapper identity only; no authored wrapper payload, model launch, live readiness, report landing, or acceptance.'}
+    (temporary/'examples.json').write_text(json.dumps(examples,indent=2))
+    registration=repo/'scripts/template-registry-register.sh'
+    registration.write_text('#!/usr/bin/env bash\nexit 19\n')
+    call(['bash',str(repo/'scripts/impl-start.sh'),'fixture','--compiled-positions','--json'],ok=False)
+    call(['bash',str(repo/'scripts/impl-open.sh'),'fixture','--all','--compiled-positions','--json'],ok=False)
+    print(json.dumps({'examples_path':str(temporary/'examples.json'),'checks':'compiled and legacy envelopes, canonical native preparation, separate wrapper identity, foreign target descriptors, registry refusal'}))
+elif scenario == 'spec':
     document = {'schema_version': 1, 'track': 'full', 'investigations': [
         {'id': 'external', 'kind': 'fixed', 'question': 'External skill and agent applicability', 'complexity': 'simple', 'prefetch': []},
         {'id': 'preferences', 'kind': 'fixed', 'question': 'Preferences and conventions applicability', 'complexity': 'simple', 'prefetch': []},
@@ -730,5 +795,10 @@ PY
 
 @test "spec native dispatch selects Claude definitions and preserves foreign and pre-plan session routes" {
   run exercise_binding spec-native
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "implement compiled envelopes preserve canonical native inputs, foreign targets and legacy identities" {
+  run exercise_binding implement-envelope
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
