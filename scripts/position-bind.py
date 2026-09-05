@@ -94,9 +94,15 @@ def validate_bindings(bindings, position, kdir, required=(), *, preparation=True
     packet = None
     if bindings['packet_id'] is not None:
         packet = show(kdir, bindings['packet_id'])
-        for field in ('work_item', 'task_id', 'revision_id', 'dispatch_attempt_id'):
+        for field in ('work_item', 'task_id', 'revision_id'):
             if packet.get(field) != bindings[field]:
                 raise ValueError(f'canonical packet {field} mismatch')
+        unbound_packet = (packet.get('schema_version') == '1' and
+                          packet.get('revision_id') is None and
+                          packet.get('dispatch_attempt_id') is None and
+                          nonempty(packet.get('unbound_reason')))
+        if not unbound_packet and packet.get('dispatch_attempt_id') != bindings['dispatch_attempt_id']:
+            raise ValueError('canonical packet dispatch_attempt_id mismatch')
         if packet.get('recipient_role') != position:
             raise ValueError('canonical packet position mismatch')
         if bindings['packet_pointer'] != pointer(kdir, bindings['packet_id']):
@@ -282,6 +288,13 @@ def publish(descriptor, bindings, kdir, guidance, *, required=(), wrapper=None, 
 
 def render_activation(descriptor, attempt):
     profile = json.loads(read(SCRIPTS.parent / 'adapters/capabilities.json'))['frameworks'][descriptor['framework']]
+    if profile.get('position_compilation') != descriptor['native_surface']:
+        raise ValueError('compiled native surface changed; recompile before activation')
+    adapter_name = 'adapters/agents/' + descriptor['framework'] + '.sh'
+    adapter_bytes = read(SCRIPTS.parent / adapter_name)
+    retained = next((component for component in descriptor['components'] if component['name'] == adapter_name), None)
+    if retained != {'name': adapter_name, 'bytes': len(adapter_bytes), 'sha256': digest(adapter_bytes)}:
+        raise ValueError('compiled native renderer changed; recompile before activation')
     operation = profile.get('position_compilation', {}).get('activation_operation')
     if operation != 'native_launch':
         raise ValueError('native activation unavailable')

@@ -330,6 +330,39 @@ elif scenario=='replay':
     assert Path(ref['payload_path']).read_bytes()==row['extra_context']['dispatch_guidance'].encode()
     gp.write_bytes(g.replace(b'=== Standing defaults in force (rendered ',b'=== Standing defaults in force (rendered changed-'))
     request(b,extra={'descriptor':d,'guidance_file':str(gp)},ok=False)
+elif scenario=='preplan':
+    row={'packet_id':'pkt-preplan','packet_scope':'session','work_item':'fixture','task_id':None,
+         'session_id':None,'phase':None,'arm':None,'task_scale_set':'implementation'}
+    build_packet(store,row,assembly=('Pre-plan investigation.',{}),role='investigator',scales=['implementation'])
+    b=fixture('investigator','independent-attempt')
+    b.update(task_id=None,revision_id=None,packet_id='pkt-preplan',packet_pointer=pointer(store,'pkt-preplan'))
+    b['absence_reasons'].update(task_id='Investigation precedes tasks.',revision_id='No plan revision exists.')
+    d=compile('investigator')
+    ref=bind(d,b)
+    m=binder.validate_dispatch(ref['manifest_path'],ref['manifest_sha256'])
+    assert m['bindings']['dispatch_attempt_id']=='independent-attempt'
+    assert show(store,'pkt-preplan').get('dispatch_attempt_id') is None
+    conflict=copy.deepcopy(b);conflict['task_id']='task-1';del conflict['absence_reasons']['task_id']
+    refused(lambda: bind(d,conflict),'task_id mismatch')
+    bound=fixture('investigator','bound-attempt');bound['dispatch_attempt_id']='wrong-attempt'
+    refused(lambda: bind(d,bound),'dispatch_attempt_id mismatch')
+elif scenario=='renderer-drift':
+    d=compile(framework='claude-code')
+    old=bind(d,fixture(attempt='before-drift'))
+    adapter=repo/'adapters/agents/claude-code.sh'
+    adapter.write_bytes(adapter.read_bytes()+b'\n# Different renderer revision.\n')
+    refused(lambda: bind(d,fixture(attempt='stale-renderer')), 'renderer changed')
+    assert not (item/'position-dispatch/stale-renderer').exists()
+    binder.resolve_dispatch(old['manifest_path'],old['manifest_sha256'])
+    fresh=compile(framework='claude-code')
+    assert fresh['template_version'] != d['template_version']
+    bind(fresh,fixture(attempt='fresh-renderer'))
+    capabilities=repo/'adapters/capabilities.json'
+    profiles=json.loads(capabilities.read_bytes())
+    profiles['frameworks']['claude-code']['position_compilation']['activation_operation']='unsupported'
+    capabilities.write_text(json.dumps(profiles))
+    refused(lambda: bind(fresh,fixture(attempt='stale-surface')), 'surface changed')
+    binder.resolve_dispatch(old['manifest_path'],old['manifest_sha256'])
 else:
     raise AssertionError(scenario)
 PY
@@ -372,5 +405,15 @@ PY
 
 @test "immutable dispatch resolver survives only sanctioned item archival" {
   run exercise_binding archive
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "activation refuses renderer or surface drift while historical dispatches remain readable" {
+  run exercise_binding renderer-drift
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "pre-plan packets preserve explicit absence while dispatch attempts remain independently bound" {
+  run exercise_binding preplan
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
