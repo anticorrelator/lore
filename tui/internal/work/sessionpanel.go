@@ -1650,6 +1650,51 @@ func leadSeatForSessionType(t string) (role, ceremony string) {
 	}
 }
 
+type positionLaunch struct {
+	Payload    string            `json:"payload"`
+	Reference  map[string]string `json:"reference"`
+	Producer   map[string]string `json:"producer"`
+	Activation struct {
+		Args       []string          `json:"args"`
+		Env        map[string]string `json:"env"`
+		PromptFlag string            `json:"prompt_flag"`
+	} `json:"activation"`
+}
+
+func materializePosition(d SessionDescriptor, framework, root, kdir string) (*positionLaunch, error) {
+	if len(d.PositionContext) == 0 {
+		return nil, nil
+	}
+	if d.Type != SessionWorker || d.Model == "" {
+		return nil, fmt.Errorf("position launch requires worker session and resolved model")
+	}
+	if _, err := config.HarnessPositionActivation(framework); err != nil {
+		return nil, err
+	}
+	repo, err := config.LoreRepoDir()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command("python3", filepath.Join(repo, "scripts", "position-bind.py"), "launch",
+		"--framework", framework, "--slug", d.Slug, "--execution-root", root, "--kdir", kdir)
+	cmd.Stdin = bytes.NewReader(d.PositionContext)
+	cmd.Dir = root
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	data, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("position binding: %w: %s", err, stderr.String())
+	}
+	var launch positionLaunch
+	if err := json.Unmarshal(data, &launch); err != nil {
+		return nil, err
+	}
+	if launch.Payload == "" || launch.Reference["manifest_sha256"] == "" || launch.Producer["framework"] != framework {
+		return nil, fmt.Errorf("incomplete position launch")
+	}
+	return &launch, nil
+}
+
 // StartTerminalCmd spawns the harness subprocess for the descriptor's session
 // inside a PTY and returns SessionProcessStartedMsg with the PTY master, exec.Cmd,
 // and a channel of raw byte chunks read from the PTY. The PTY master is the
@@ -1722,6 +1767,19 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve TUI launch framework: %w", err)}
 			}
 			activeFramework = resolved
+		}
+		position, err := materializePosition(d, activeFramework, worktreeDir, knowledgeDir)
+		if err != nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse position spawn: %w", err)}
+		}
+		var positionEnv []string
+		if position != nil {
+			initialPrompt = position.Payload
+			for key, value := range position.Activation.Env {
+				positionEnv = append(positionEnv, key+"="+value)
+			}
+			positionEnv = append(positionEnv, "LORE_POSITION_DISPATCH_MANIFEST="+position.Reference["manifest_path"],
+				"LORE_POSITION_DISPATCH_SHA256="+position.Reference["manifest_sha256"])
 		}
 		harnessBinary, err := config.HarnessBinary(activeFramework)
 		if err != nil {
@@ -1840,6 +1898,12 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 				args = append(args, "--session-id", id)
 			}
 		}
+		if position != nil {
+			args = append(args, position.Activation.Args...)
+			if position.Activation.PromptFlag != "" {
+				args = append(args, position.Activation.PromptFlag)
+			}
+		}
 		args = append(args, initialPrompt)
 
 		// Under tmux hosting the harness runs in a detached tmux session and the
@@ -1878,6 +1942,7 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 					}
 				}
 				extras := append([]string{"LORE_FRAMEWORK=" + activeFramework}, sessionEnv.vars()...)
+				extras = append(extras, positionEnv...)
 				pid, terr := createTmuxSession(name, worktreeDir, width, height, extras, harnessBinary, args)
 				if terr != nil {
 					notices = append(notices, OperatorNotice{
@@ -1912,6 +1977,7 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 			cmd.Dir = worktreeDir
 			cmd.Env = append(os.Environ(), "LORE_FRAMEWORK="+activeFramework)
 			cmd.Env = append(cmd.Env, sessionEnv.vars()...)
+			cmd.Env = append(cmd.Env, positionEnv...)
 			// Do NOT set cmd.Stderr = io.Discard here: with a PTY the subprocess's
 			// stdin/stdout/stderr are all wired to the PTY slave, so claude's full
 			// TUI output (including stderr) is captured by the emulator. Discarding

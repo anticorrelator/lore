@@ -25,12 +25,8 @@
 # First write wins; subsequent writers skip. This matches the concurrency contract
 # described in task-35 for auto-register-at-first-spawn.
 #
-# Concurrency: the registry is updated via tmpfile + atomic rename (mv). Two
-# concurrent writes may race, but the loser is harmless — both writes produce
-# an equivalent row for a new pair, and both are no-ops for an existing pair.
-# Consumers (/retro, /evolve) read the file at a later time and see the
-# winning version. Not safe for high-rate concurrent writes, but sufficient for
-# agent-spawn registration which is inherently low-frequency and idempotent.
+# A process lock covers the entire read/modify/rename sequence. The lock
+# file stays in place so concurrent openers always lock the same inode.
 
 set -euo pipefail
 
@@ -119,6 +115,22 @@ SCORECARDS_DIR="$KNOWLEDGE_DIR/_scorecards"
 REGISTRY_FILE="$SCORECARDS_DIR/template-registry.json"
 mkdir -p "$SCORECARDS_DIR"
 
+# Re-enter under a kernel-managed lock; process exit releases it on failure.
+if [[ "${LORE_REGISTRY_LOCK_HELD:-}" != "$REGISTRY_FILE" ]]; then
+  exec python3 - "$0" "$REGISTRY_FILE" "$TEMPLATE_ID" "$TEMPLATE_VERSION" "$TEMPLATE_PATH" "$DESCRIPTION" "$KNOWLEDGE_DIR" "$JSON_MODE" <<'PYLOCK'
+import fcntl, os, subprocess, sys
+script, registry, ident, version, path, description, kdir, json_mode = sys.argv[1:]
+with open(registry + ".lock", "a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    env = dict(os.environ, LORE_REGISTRY_LOCK_HELD=registry)
+    args = ["bash", script, "--template-id", ident, "--template-version", version,
+            "--template-path", path, "--description", description, "--kdir", kdir]
+    if json_mode == "1":
+        args.append("--json")
+    raise SystemExit(subprocess.call(args, env=env))
+PYLOCK
+fi
+
 # Seed the README on first scorecard-dir use (consistency with scorecard-append.sh).
 if [[ ! -f "$SCORECARDS_DIR/README.md" ]]; then
   "$SCRIPT_DIR/seed-scorecards-readme.sh" "$SCORECARDS_DIR" 2>/dev/null || true
@@ -129,6 +141,9 @@ if [[ ! -f "$REGISTRY_FILE" ]]; then
   printf '{"schema_version":"1","entries":[]}\n' > "$REGISTRY_FILE"
 fi
 
+jq -e '.schema_version == "1" and (.entries | type == "array")' "$REGISTRY_FILE" >/dev/null \
+  || fail "malformed template registry: $REGISTRY_FILE"
+
 # --- INSERT OR IGNORE ---
 # Check existence first to short-circuit (ignore path is hot).
 EXISTS=$(jq --arg id "$TEMPLATE_ID" --arg ver "$TEMPLATE_VERSION" \
@@ -136,6 +151,17 @@ EXISTS=$(jq --arg id "$TEMPLATE_ID" --arg ver "$TEMPLATE_VERSION" \
   "$REGISTRY_FILE" 2>/dev/null || echo "false")
 
 RELPATH="${REGISTRY_FILE#$KNOWLEDGE_DIR/}"
+
+if [[ "$TEMPLATE_ID" == position/* ]]; then
+  [[ "$TEMPLATE_VERSION" =~ ^[0-9a-f]{12}$ && -f "$TEMPLATE_PATH" ]] \
+    || fail "compiled template registration requires a retained artifact and 12-hex version"
+  if [[ "$EXISTS" == "true" ]]; then
+    RECORDED_PATH=$(jq -r --arg id "$TEMPLATE_ID" --arg ver "$TEMPLATE_VERSION" \
+      '.entries[] | select(.template_id == $id and .template_version == $ver) | .template_path' "$REGISTRY_FILE")
+    [[ "$RECORDED_PATH" == "$TEMPLATE_PATH" ]] \
+      || fail "compiled template identity is already registered to a different retained artifact"
+  fi
+fi
 
 if [[ "$EXISTS" == "true" ]]; then
   if [[ $JSON_MODE -eq 1 ]]; then

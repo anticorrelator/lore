@@ -1263,6 +1263,7 @@ func descriptorFromRequest(req session.Request) work.SessionDescriptor {
 		Slug:             req.SessionSlug(),
 		Title:            req.SessionSlug(),
 		ExtraContext:     req.ExtraContextText(),
+		PositionContext:  req.PositionContext(),
 		Initiator:        req.Initiator,
 		AutoClose:        req.AutoClose,
 		RoutingOverrides: req.RoutingOverrides,

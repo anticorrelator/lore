@@ -2,6 +2,8 @@
 # write-execution-log.sh — Append an entry to a work item's execution-log.md
 # Usage: write-execution-log.sh --slug <slug> --source <source> [--phase <phase>] [--template-version <hash>]
 #        [--captured-at-branch <name>] [--captured-at-sha <sha>] [--captured-at-merge-base-sha <sha>]
+#        [--position-dispatch-manifest <path> --position-dispatch-sha256 <hash>]
+#        [--filing-template-version <hash>] [--producer-role <legacy-role>]
 #        Entry body is read from stdin.
 # Creates execution-log.md if missing (with header).
 # Sources: implement-lead | spec-lead | remember | manual | audit | impl-verb | spec-verb | ceremony
@@ -29,6 +31,12 @@ SLUG=""
 SOURCE=""
 PHASE=""
 TEMPLATE_VERSION=""
+POSITION_MANIFEST=""
+POSITION_SHA256=""
+POSITION_MANIFEST_SET=0
+POSITION_SHA256_SET=0
+FILING_TEMPLATE_VERSION=""
+ROUTE_PRODUCER_ROLE=""
 CAPTURED_AT_BRANCH=""
 CAPTURED_AT_SHA=""
 CAPTURED_AT_MERGE_BASE_SHA=""
@@ -51,6 +59,14 @@ while [[ $# -gt 0 ]]; do
       TEMPLATE_VERSION="$2"
       shift 2
       ;;
+    --filing-template-version)
+      FILING_TEMPLATE_VERSION="$2"; shift 2 ;;
+    --producer-role)
+      ROUTE_PRODUCER_ROLE="$2"; shift 2 ;;
+    --position-dispatch-manifest)
+      POSITION_MANIFEST="$2"; POSITION_MANIFEST_SET=1; shift 2 ;;
+    --position-dispatch-sha256)
+      POSITION_SHA256="$2"; POSITION_SHA256_SET=1; shift 2 ;;
     --captured-at-branch)
       CAPTURED_AT_BRANCH="$2"
       shift 2
@@ -89,6 +105,15 @@ case "$SOURCE" in
     ;;
 esac
 
+if [[ $POSITION_MANIFEST_SET -ne 0 || $POSITION_SHA256_SET -ne 0 ]] && [[ -z "$POSITION_MANIFEST" || -z "$POSITION_SHA256" ]]; then
+  echo "[execution-log] Error: position dispatch flags must be supplied together" >&2
+  exit 1
+fi
+case "$ROUTE_PRODUCER_ROLE" in
+  ""|worker|researcher|advisor|spec-lead|implement-lead) ;;
+  *) echo "[execution-log] Error: invalid --producer-role" >&2; exit 1 ;;
+esac
+
 # --- Resolve paths ---
 KNOWLEDGE_DIR=$(resolve_knowledge_dir)
 WORK_DIR="$KNOWLEDGE_DIR/_work"
@@ -114,6 +139,23 @@ fi
 # --- Read entry body from stdin ---
 ENTRY_BODY=$(cat)
 
+ATTRIBUTION=$(printf '%s' "$ENTRY_BODY" | PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c '
+import json, sys
+from position_attribution import project, report_record, validate_reference
+record = report_record(sys.stdin.read())
+path, sha, slug, producer_version, filing_version = sys.argv[1:]
+if path or sha:
+    supplied = {"manifest_path": path, "manifest_sha256": sha}
+    validate_reference(supplied)
+    if "position_dispatch" in record and record["position_dispatch"] != supplied:
+        raise SystemExit("log body and filing reference differ")
+    record["position_dispatch"] = supplied
+if filing_version:
+    record["producer_template_version"] = producer_version
+print(json.dumps(project(record, expected={"work_item": slug})))
+' "$POSITION_MANIFEST" "$POSITION_SHA256" "$SLUG" "$TEMPLATE_VERSION" "$FILING_TEMPLATE_VERSION")
+ATTRIBUTION_STATUS=$(printf '%s' "$ATTRIBUTION" | jq -r '.status')
+
 # --- Build entry header ---
 TIMESTAMP=$(timestamp_iso)
 
@@ -133,17 +175,25 @@ if [[ -z "$CAPTURED_AT_MERGE_BASE_SHA" ]]; then
   CAPTURED_AT_MERGE_BASE_SHA=$(captured_at_merge_base_sha)
 fi
 
-# --- Append entry ---
-{
-  echo "## $TIMESTAMP | source: $SOURCE$PHASE_LABEL"
-  if [[ -n "$TEMPLATE_VERSION" ]]; then
-    echo "Template-version: $TEMPLATE_VERSION"
+# A single printf reports any failed write in the complete entry.
+LOG_LINES=("## $TIMESTAMP | source: $SOURCE$PHASE_LABEL")
+if [[ -n "$TEMPLATE_VERSION" ]]; then
+  LOG_LINES+=("Template-version: $TEMPLATE_VERSION")
+fi
+if [[ -n "$FILING_TEMPLATE_VERSION" ]]; then
+  LOG_LINES+=("Filing-template-version: $FILING_TEMPLATE_VERSION")
+fi
+if [[ "$ATTRIBUTION_STATUS" != "legacy" ]]; then
+  LOG_LINES+=("Producer-attribution: $ATTRIBUTION")
+  if [[ -n "$POSITION_MANIFEST" || -n "$POSITION_SHA256" ]]; then
+    LOG_LINES+=("Position-dispatch-manifest: $POSITION_MANIFEST" "Position-dispatch-sha256: $POSITION_SHA256")
   fi
-  echo "Captured-at: branch=$CAPTURED_AT_BRANCH sha=$CAPTURED_AT_SHA merge-base-sha=$CAPTURED_AT_MERGE_BASE_SHA"
-  echo ""
-  echo "$ENTRY_BODY"
-  echo ""
-} >> "$LOG_FILE"
+fi
+LOG_LINES+=("Captured-at: branch=$CAPTURED_AT_BRANCH sha=$CAPTURED_AT_SHA merge-base-sha=$CAPTURED_AT_MERGE_BASE_SHA" "" "$ENTRY_BODY" "")
+if ! printf '%s\n' "${LOG_LINES[@]}" >> "$LOG_FILE"; then
+  echo "[execution-log] Error: execution-log append failed: $LOG_FILE" >&2
+  exit 1
+fi
 
 echo "[execution-log] Entry written to $LOG_FILE"
 
@@ -168,12 +218,17 @@ CYCLE_ID="${SLUG}-${TIMESTAMP}"
 # Pass the entry body via an env var so the python heredoc does not compete
 # with its own stdin. `_LORE_ENTRY_BODY` is an implementation detail — not a
 # public interface.
-_LORE_ENTRY_BODY="$ENTRY_BODY" python3 - "$SCRIPT_DIR/off-scale-append.sh" "$SLUG" "$CYCLE_ID" "$TEMPLATE_VERSION" << 'PYEOF'
+ROUTE_TEMPLATE_VERSION="$TEMPLATE_VERSION"
+if [[ "$ATTRIBUTION_STATUS" != "legacy" ]]; then
+  ROUTE_TEMPLATE_VERSION=$(printf '%s' "$ATTRIBUTION" | jq -r '.template_version // "unknown"')
+fi
+_LORE_ENTRY_BODY="$ENTRY_BODY" python3 - "$SCRIPT_DIR/off-scale-append.sh" "$SLUG" "$CYCLE_ID" "$ROUTE_TEMPLATE_VERSION" "$ROUTE_PRODUCER_ROLE" << 'PYEOF'
 import os
+import re
 import subprocess
 import sys
 
-helper, slug, cycle_id, template_version = sys.argv[1:5]
+helper, slug, cycle_id, template_version, producer_role = sys.argv[1:6]
 body = os.environ.get("_LORE_ENTRY_BODY", "")
 
 FIELD_MAP = {
@@ -181,12 +236,19 @@ FIELD_MAP = {
     "Worker leads:":      {"source": "researcher", "producer_role": "researcher", "protocol_slot": "Worker-leads"},
 }
 
+if producer_role:
+    FIELD_MAP["Surfaced concerns:"]["producer_role"] = producer_role
+
+def field_line(line):
+    return re.sub(r"^\*\*(Surfaced concerns|Worker leads):\*\*", r"\1:", line.lstrip())
+
+
 def iter_routes(text):
     lines = text.splitlines()
     i = 0
     while i < len(lines):
         line = lines[i]
-        stripped = line.lstrip()
+        stripped = field_line(line)
         matched_prefix = None
         for prefix in FIELD_MAP:
             if stripped.startswith(prefix):
@@ -206,7 +268,7 @@ def iter_routes(text):
             cont = lines[j]
             if not cont.strip():
                 break
-            cont_stripped = cont.lstrip()
+            cont_stripped = field_line(cont)
             if any(cont_stripped.startswith(p) for p in FIELD_MAP):
                 break
             is_indented = cont.startswith((" ", "\t"))

@@ -320,9 +320,43 @@ cmd_smoke() {
   printf '  %-24s %-13s %s\n' resolve_model_for_role "$routing_shape"  "bare model id (single-provider harness)"
 }
 
+cmd_native_selection() {
+  require_codex
+  [[ "$(cap subagents)" != none ]] || { echo 'Error: native subagents unavailable' >&2; return 1; }
+  [[ $# -eq 3 ]] || { echo 'Error: native_selection requires artifact, attempt, and model' >&2; return 1; }
+  validate_role_model_binding default "$3" || return 1
+  local routing_keys
+  routing_keys=$(split_codex_model_variant "$3")
+  python3 - "$routing_keys" <<'PYTHON'
+import json
+import sys
+binding = dict(part.split('=', 1) for part in sys.argv[1].split())
+print(json.dumps({'tool': 'spawn_agent', 'tool_input': binding, 'prompt_field': 'message',
+                  'registration': None, 'readiness': {'kind': 'native-tool-schema', 'tool': 'spawn_agent'}}))
+PYTHON
+}
+
+cmd_native_launch() {
+  printf '%s\n' '{"args":[],"env":{},"prompt_flag":""}'
+}
+
+cmd_render_position() {
+  require_codex
+  local position="${1:-}" body="${2:-}"
+  case "$position" in
+    investigator|designer|worker|reviewer) ;;
+    *) echo "Error: invalid position '$position'" >&2; return 1 ;;
+  esac
+  [[ -f "$body" && -s "$body" ]] || { echo 'Error: missing position body' >&2; return 1; }
+  cat "$body"
+}
+
 # --- Dispatch ---
 cmd="${1:-}"
 case "$cmd" in
+  native_selection)         shift; cmd_native_selection "$@" ;;
+  native_launch)            shift; cmd_native_launch "$@" ;;
+  render_position)          shift; cmd_render_position          "$@" ;;
   spawn)                    shift; cmd_spawn                    "$@" ;;
   wait)                     shift; cmd_wait                     "$@" ;;
   send_message)             shift; cmd_send_message             "$@" ;;
@@ -339,6 +373,8 @@ case "$cmd" in
 Usage: $(basename "$0") <subcommand> [args]
 
 Subcommands (mirroring adapters/agents/README.md §Operation Surface):
+  render_position <position> <body-file>
+                            Render a native position artifact on stdout.
   spawn <role> <task_prompt> [model_override]
                             Emit delegate:TaskCreate directive (single-
                             provider; bare model id only; optional

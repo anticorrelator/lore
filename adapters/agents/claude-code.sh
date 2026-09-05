@@ -277,9 +277,69 @@ cmd_smoke() {
   printf '  %-24s %-13s %s\n' resolve_model_for_role "single"          "--model <id> (single-provider harness)"
 }
 
+cmd_native_selection() {
+  require_claude_code
+  [[ "$(cap subagents)" != none ]] || { echo 'Error: native subagents unavailable' >&2; return 1; }
+  [[ $# -eq 3 ]] || { echo 'Error: native_selection requires artifact, attempt, and model' >&2; return 1; }
+  validate_role_model_binding default "$3" || return 1
+  python3 - "$@" <<'PYTHON'
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+raw = Path(sys.argv[1]).read_bytes()
+activation = json.dumps({'attempt': sys.argv[2], 'model': sys.argv[3]}, sort_keys=True).encode()
+name = 'lore-position-' + hashlib.sha256(raw + b'\0' + activation).hexdigest()
+_, header, body = raw.decode().split('---\n', 2)
+header, count = re.subn(r'^name: [^\n]+$', 'name: ' + name, header, flags=re.MULTILINE)
+if count != 1:
+    raise ValueError('native definition requires one name')
+content = '---\n' + header + '---\n' + body
+print(json.dumps({'tool': 'Agent', 'tool_input': {'subagent_type': name, 'model': sys.argv[3]},
+                  'prompt_field': 'prompt', 'registration': {'filename': name + '.md', 'content': content},
+                  'readiness': {'kind': 'native-agent-inventory', 'selection_name': name}}))
+PYTHON
+}
+
+cmd_native_launch() {
+  python3 - "$@" <<'PYTHON'
+import hashlib
+import json
+from pathlib import Path
+import sys
+import yaml
+raw = Path(sys.argv[1]).read_bytes()
+name = 'position-' + hashlib.sha256(raw + sys.argv[2].encode()).hexdigest()
+_, frontmatter, prompt = raw.decode().split('---\n', 2)
+header = yaml.safe_load(frontmatter)
+tools = [tool.strip() for tool in header['tools'].split(',')]
+definition = {'description': header['description'], 'prompt': prompt, 'tools': tools}
+print(json.dumps({'args': ['--agents', json.dumps({name: definition}), '--agent', name,
+                           '--tools', ','.join(tools)], 'env': {}, 'prompt_flag': '--'}))
+PYTHON
+}
+
+cmd_render_position() {
+  require_claude_code
+  local position="${1:-}" body="${2:-}"
+  case "$position" in
+    investigator|designer|worker|reviewer) ;;
+    *) echo "Error: invalid position '$position'" >&2; return 1 ;;
+  esac
+  [[ -f "$body" && -s "$body" ]] || { echo 'Error: missing position body' >&2; return 1; }
+  local tools="Read, Glob, Grep, Bash"
+  [[ "$position" != worker ]] || tools="$tools, Write, Edit"
+  printf '%s\n' '---' "name: position-$position" "description: $position" "tools: $tools" '---'
+  cat "$body"
+}
+
 # --- Dispatch ---
 cmd="${1:-}"
 case "$cmd" in
+  native_selection)         shift; cmd_native_selection "$@" ;;
+  native_launch)            shift; cmd_native_launch "$@" ;;
+  render_position)          shift; cmd_render_position          "$@" ;;
   spawn)                    shift; cmd_spawn                    "$@" ;;
   wait)                     shift; cmd_wait                     "$@" ;;
   send_message)             shift; cmd_send_message             "$@" ;;
@@ -295,6 +355,8 @@ case "$cmd" in
 Usage: $(basename "$0") <subcommand> [args]
 
 Subcommands (mirroring adapters/agents/README.md §Operation Surface):
+  render_position <position> <body-file>
+                            Render a native position artifact on stdout.
   spawn <role> <task_prompt> [model_override]
                             Emit TaskCreate delegation directive.
   wait <spawn_handle>       Emit TaskList polling delegation directive.

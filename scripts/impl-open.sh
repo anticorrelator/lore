@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # impl-open.sh — Prepare the /implement dispatch manifest for a work item
 # Usage: impl-open.sh <ref> (--all | --task <id> ...)
-#        [--fallback-scale-set <buckets>] [--template-version <hash>] [--json]
+#        [--fallback-scale-set <buckets>] [--template-version <hash>]
+#        [--compiled-positions] [--json]
 #
 # Prepare-and-return emitter for /implement Steps 2–3.6. Computes the
 # bash-scriptable dispatch envelope and returns it; the LEAD executes every
@@ -32,6 +33,18 @@
 #   - the four lead-inline gate conditions as SEPARATE fields (single_task,
 #     prescriptive, no_persistent_advisor, no_required_consultation) — never
 #     an aggregate eligibility boolean; the lead reads conditions and decides
+#   - with --compiled-positions: the worker and designer compiler descriptors
+#     for the active framework under position_descriptors, plus on every
+#     TaskCreate entry `position: worker`, `position_binding_inputs` (work
+#     item, task, revision, packet id and pointer, dispatch attempt, and the
+#     exact assignment copied from the entry) and
+#     `position_binding_absence_reasons` for the inputs a legacy item lacks.
+#     Persistent advisor entries gain `position: designer` and
+#     `position_mode: consultation`. These are binding ingredients, not a
+#     launch envelope: report id and path, execution root, and consultation
+#     identity are still supplied by the caller after placement, and nothing
+#     is published here. Without the flag the envelope is unchanged and
+#     position_descriptors is null.
 #
 # Manifest contract (D2): first element is TeamCreate, then TaskCreate per
 # eligible task in tasks.json order, then TaskUpdate wiring ops whose
@@ -47,7 +60,11 @@
 # resolve-manifest's --delivery-json sidecar). A legacy append failure warns;
 # a bound append failure stops dispatch.
 # Each TaskCreate manifest entry carries its packet_id so the lead can thread
-# it into the worker Task prompt for dispatch confirmation.
+# it into the worker Task prompt for dispatch confirmation. With
+# --compiled-positions, compiling the active framework's positions also
+# retains each compilation under the store's _templates/positions tree and
+# registers its version in the template registry (idempotent for identical
+# bytes); no dispatch artifact is published here.
 #
 # Exit codes:
 #   0  manifest emitted (possibly empty with explanatory status)
@@ -67,11 +84,13 @@ SELECT_TASKS=()
 FALLBACK_SCALE_SET=""
 TEMPLATE_VERSION=""
 JSON_MODE=0
+COMPILED_POSITIONS=0
 
 usage() {
   cat >&2 <<EOF
 Usage: lore impl open <ref> (--all | --task <id> ...)
-                      [--fallback-scale-set <buckets>] [--template-version <hash>] [--json]
+                      [--fallback-scale-set <buckets>] [--template-version <hash>]
+                      [--compiled-positions] [--json]
 
 Selection (exactly one mode is required — no default):
   --all                 every task in tasks.json
@@ -80,6 +99,15 @@ Selection (exactly one mode is required — no default):
   --fallback-scale-set  scale buckets (comma-separated: $VALID_BUCKETS)
                         declared for fallback-branch prefetch; units needing
                         the fallback are returned as needs-prefetch when omitted
+  --compiled-positions  return the active framework's worker and designer
+                        compiler descriptors and put position binding inputs
+                        on each TaskCreate entry (position, work item, task,
+                        revision, packet id and pointer, dispatch attempt,
+                        assignment) with reasons for any input a legacy item
+                        cannot supply. Persistent advisors are marked as
+                        designer consultation. Nothing is published: report
+                        identity and execution root are bound by the caller
+                        after placement. Omitted, the envelope is the legacy one.
 
 Exit codes: 0 manifest emitted, 1 error/no match, 2 ambiguous reference
 EOF
@@ -95,6 +123,10 @@ fail() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --compiled-positions)
+      COMPILED_POSITIONS=1
+      shift
+      ;;
     --all)
       SELECT_ALL=1
       shift
@@ -132,7 +164,7 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     --*)
-      fail "Unknown flag: $1. Accepted flags are --all, --task, --fallback-scale-set, --template-version, and --json."
+      fail "Unknown flag: $1. Accepted flags are --all, --task, --fallback-scale-set, --template-version, --compiled-positions, and --json."
       ;;
     *)
       if [[ -z "$REF" ]]; then
@@ -273,7 +305,7 @@ SELECT_TASKS_CSV=$(IFS=','; echo "${SELECT_TASKS[*]-}")
 PAYLOAD=$(_LORE_CEREMONY_JSON="$CEREMONY_JSON" python3 - "$ITEM_DIR" "$SLUG" \
   "$SELECT_ALL" "$SELECT_TASKS_CSV" \
   "$FALLBACK_SCALE_SET" "$FRAMEWORK" "$ENFORCEMENT" "$TEAM_MESSAGING" \
-  "$SCRIPT_DIR" "$LORE_REPO_DIR" "$CHECKSUM_LINE" "$TEMPLATE_VERSION" <<'PYEOF'
+  "$SCRIPT_DIR" "$LORE_REPO_DIR" "$CHECKSUM_LINE" "$TEMPLATE_VERSION" "$COMPILED_POSITIONS" <<'PYEOF'
 import json
 import os
 import re
@@ -283,7 +315,7 @@ import uuid
 
 (item_dir, slug, select_all, tasks_csv, fallback_scale_set,
  framework, enforcement, team_messaging, script_dir, repo_dir,
- checksum_line, template_version) = sys.argv[1:13]
+ checksum_line, template_version, compiled_positions) = sys.argv[1:14]
 
 ceremony_skills = json.loads(os.environ.get("_LORE_CEREMONY_JSON", "[]"))
 
@@ -865,6 +897,31 @@ lead_inline_conditions = {
 for entry in prior_knowledge:
     entry.pop("unit_key", None)
 
+position_descriptors = None
+if compiled_positions == '1':
+    from pathlib import Path
+    sys.path.insert(0, script_dir)
+    from position_compile import compile_position
+    from packet_builder import pointer
+    position_descriptors = {framework: {position: compile_position(position, framework, Path(knowledge_dir), None)
+                                       for position in ('worker', 'designer')}}
+    for entry in manifest:
+        if entry['op'] != 'TaskCreate':
+            continue
+        bindings = {'work_item': slug, 'task_id': entry['local_id'],
+                    'revision_id': entry.get('revision_id'), 'packet_id': entry.get('packet_id'),
+                    'dispatch_attempt_id': entry.get('dispatch_attempt_id'),
+                    'assignment': entry['description'],
+                    'packet_pointer': pointer(knowledge_dir, entry['packet_id']) if entry.get('packet_id') else None}
+        entry['position'] = 'worker'
+        entry['position_binding_inputs'] = bindings
+        entry['position_binding_absence_reasons'] = {
+            key: 'legacy-unbound'
+            for key, value in bindings.items() if value is None}
+    for advisor in persistent_advisors:
+        advisor['position'] = 'designer'
+        advisor['position_mode'] = 'consultation'
+
 print(json.dumps({
     "slug": slug,
     "title": title,
@@ -890,6 +947,7 @@ print(json.dumps({
     "skill_invocation_map": skill_invocation_map,
     "ceremony_injected": ceremony_injected,
     "advisors": persistent_advisors,
+    "position_descriptors": position_descriptors,
     "lead_inline_conditions": lead_inline_conditions,
     "warnings": warnings,
 }, ensure_ascii=False))

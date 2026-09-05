@@ -24,6 +24,10 @@
 #                      Omitted (default) defers to --initiator (agent auto-closes,
 #                      human holds open); true forces auto-close, false holds open.
 #   --requested-by <w> Who enqueued it (default: $LORE_SESSION_INSTANCE, else $USER).
+#   --position <p>    Worker only: investigator | designer | worker | reviewer.
+#                      Requires explicit framework, model or bound role, packet,
+#                      managed execution directory, and JSON context.bindings.
+#                      Designer bindings.mode is planning or consultation.
 #   --packet <id>     Insert a packet pointer after the worker guidance floor.
 #   --context <t|file> Task content handed to prompt composition — the brief alone,
 #                      with no guidance floor of your own. Value is read from a file
@@ -142,6 +146,8 @@ AUTO_CLOSE=""
 REQUESTED_BY=""
 CONTEXT=""
 PACKET_ID=""
+POSITION=""
+POSITION_PROVIDED=0
 KDIR_OVERRIDE=""
 JSON_MODE=0
 MANAGED_REQUEST_ID=""
@@ -174,6 +180,7 @@ while [[ $# -gt 0 ]]; do
     --requested-by) REQUESTED_BY="$2"; shift 2 ;;
     --context) CONTEXT="$2"; shift 2 ;;
     --packet) PACKET_ID="$2"; shift 2 ;;
+    --position) POSITION="$2"; POSITION_PROVIDED=1; shift 2 ;;
     --route) ROUTE_SPECS+=("$2"); shift 2 ;;
     --min-vintage) MIN_VINTAGE="$2"; shift 2 ;;
     --track) TRACK="$2"; shift 2 ;;
@@ -262,6 +269,16 @@ case "$TYPE" in
   "") fail "missing required field: --type (one of spec, implement, chat, worker)" ;;
   *) fail "invalid --type: '$TYPE' (must be one of spec, implement, chat, worker)" ;;
 esac
+
+if [[ $POSITION_PROVIDED -eq 1 ]]; then
+  [[ "$TYPE" == "worker" ]] || fail "--position requires --type worker"
+  case "$POSITION" in
+    investigator|designer|worker|reviewer) ;;
+    *) fail "invalid --position: '$POSITION'" ;;
+  esac
+  [[ $FRAMEWORK_PROVIDED -eq 1 ]] || fail "--position requires explicit --framework"
+  [[ -n "$PACKET_ID" ]] || fail "--position requires --packet"
+fi
 
 # A worker session's slug is its identity — the derived <work-item-slug>--w<n>
 # the claiming TUI keys panels, tmux names, and journal rows on. Unlike spec (which
@@ -470,7 +487,7 @@ fi
 # extra_context into a slash-command argument (`/spec <slug> -- <ctx>`), where a
 # multi-line block does not belong; those launches meet the floor through the
 # harness's own admission gate instead.
-if [[ "$TYPE" == "worker" ]]; then
+if [[ "$TYPE" == "worker" && $POSITION_PROVIDED -eq 0 ]] && ! printf '%s' "$EXTRA_JSON" | jq -e 'has("position_preparation")' >/dev/null 2>&1; then
   [[ "$EXTRA_JSON" != "null" ]] || \
     fail "--context is required for --type worker (the composed brief is the session's whole prompt)"
   WORKER_PROMPT="$(printf '%s' "$EXTRA_JSON" | jq -r '.dispatch_guidance // empty')"
@@ -498,7 +515,7 @@ else
   KNOWLEDGE_DIR="$(resolve_knowledge_dir)"
 fi
 [[ -d "$KNOWLEDGE_DIR" ]] || fail "knowledge store not found at: $KNOWLEDGE_DIR"
-if [[ -n "$PACKET_ID" ]]; then
+if [[ -n "$PACKET_ID" && $POSITION_PROVIDED -eq 0 ]]; then
   [[ "$TYPE" == "worker" ]] || fail "--packet requires --type worker"
   PACKET_LINE=$(python3 "$SCRIPT_DIR/packet_builder.py" --kdir "$KNOWLEDGE_DIR" pointer "$PACKET_ID") || fail "packet could not be resolved"
   EXTRA_JSON=$(printf '%s' "$EXTRA_JSON" | python3 -c '
@@ -663,6 +680,54 @@ esac
 # compares it against what the source clone has checked out. It is read from the
 # dispatching session and is absent when there is no session to read.
 REQUIRED_TARGET_REF="$(session_source_target_ref)"
+
+if [[ $POSITION_PROVIDED -eq 1 ]]; then
+  [[ "$EXTRA_JSON" != "null" ]] || fail "--position requires JSON context.bindings"
+  POSITION_ROLE="$POSITION"
+  POSITION_MODE="$(printf '%s' "$EXTRA_JSON" | jq -r '.bindings.mode // empty')"
+  POSITION_CLASS="$(printf '%s' "$EXTRA_JSON" | jq -r '.class // empty')"
+  POSITION_CEREMONY="$(printf '%s' "$EXTRA_JSON" | jq -r '.ceremony // empty')"
+  case "$POSITION" in
+    investigator) POSITION_ROLE=researcher ;;
+    designer)
+      case "$POSITION_MODE" in
+        planning) POSITION_ROLE=lead ;;
+        consultation) POSITION_ROLE=advisor ;;
+        *) fail "designer requires explicit planning or consultation mode" ;;
+      esac ;;
+    worker)
+      case "$POSITION_CLASS" in
+        "") POSITION_ROLE=worker ;;
+        mechanical|judgment-dense) POSITION_ROLE="worker-$POSITION_CLASS" ;;
+        *) fail "invalid worker class: '$POSITION_CLASS'" ;;
+      esac ;;
+  esac
+  [[ "$POSITION" == "worker" || -z "$POSITION_CLASS" ]] || fail "class is valid only for worker position"
+  if [[ $MODEL_PROVIDED -eq 0 ]]; then
+    # Request overrides use the same environment layer as the claiming side,
+    # including the fallback role for a class-qualified worker.
+    MODEL="$(
+      for spec in "${ROUTE_SPECS[@]+${ROUTE_SPECS[@]}}"; do
+        [[ -n "$spec" ]] || continue
+        route_env="LORE_MODEL_$(printf '%s' "${spec%%=*}" | tr '[:lower:]-' '[:upper:]_')"
+        export "$route_env=${spec#*=}"
+      done
+      export LORE_FRAMEWORK="$FRAMEWORK"
+      resolve_model_for_role "$POSITION_ROLE" "$POSITION_CEREMONY"
+    )" || fail "could not resolve position model; pass --model or configure '$POSITION_ROLE'"
+    [[ -n "$MODEL" ]] || fail "position model is unbound; pass --model"
+  fi
+  EXTRA_JSON="$(printf '%s' "$EXTRA_JSON" | LORE_FRAMEWORK="$FRAMEWORK" python3 "$SCRIPT_DIR/position-bind.py" session \
+    --position "$POSITION" --framework "$FRAMEWORK" --slug "$SLUG" --packet-id "$PACKET_ID" \
+    --execution-root "$EXECUTION_DIR" --kdir "$KNOWLEDGE_DIR")" || fail "position preparation failed; nothing was enqueued"
+fi
+
+if [[ $POSITION_PROVIDED -eq 0 ]] && printf '%s' "$EXTRA_JSON" | jq -e 'has("position_preparation")' >/dev/null 2>&1; then
+  [[ "$TYPE" == "worker" ]] || fail "position preparation requires --type worker"
+  [[ -z "$EXECUTION_DIR" ]] || fail "pending position preparation requires ordinary host placement"
+  EXTRA_JSON="$(printf '%s' "$EXTRA_JSON" | python3 "$SCRIPT_DIR/position-bind.py" admit-session \
+    --framework "$FRAMEWORK" --slug "$SLUG" --kdir "$KNOWLEDGE_DIR")" || fail "position preparation failed; nothing was enqueued"
+fi
 
 PENDING_DIR="$KNOWLEDGE_DIR/_sessions/requests/pending"
 mkdir -p "$PENDING_DIR"

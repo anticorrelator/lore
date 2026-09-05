@@ -168,6 +168,9 @@ export ADVISOR_JSON_MODE="$JSON_MODE"
 python3 <<'PYEOF'
 import json, os, subprocess, sys
 from collections import defaultdict
+from pathlib import Path
+sys.path.insert(0, str(Path(os.environ["ADVISOR_APPEND_SCRIPT"]).parent))
+from position_attribution import project
 
 raw = os.environ.get("ADVISOR_CONSULTATIONS_JSON", "").strip()
 work_item = os.environ["ADVISOR_WORK_ITEM"]
@@ -208,7 +211,7 @@ if not consultations:
 # loop. `handler: lead` and `handler: skill` entries are silently skipped —
 # they attribute via LEAD_TEMPLATE_VERSION / future skill-impact rollup, not
 # via this writer. The scorecard row shape downstream is unchanged.
-by_advisor: dict[str, list[dict]] = defaultdict(list)
+by_advisor: dict[tuple[str, str], list[dict]] = defaultdict(list)
 errors: list[str] = []
 VALID_HANDLERS = {"lead", "skill", "agent"}
 
@@ -255,7 +258,25 @@ for i, entry in enumerate(consultations):
                 f"entry {i}: was_followed=false requires non-empty rationale_if_not_followed"
             )
             continue
-    by_advisor[advisor].append(entry)
+    expected = {"work_item": work_item, "position": "designer", "mode": "consultation"}
+    expected.update({key: entry[key] for key in ("consultation_id", "domain") if key in entry})
+    producer = project(entry, expected=expected)
+    ident = "advisor"
+    if producer["status"] == "unknown":
+        print(f"[advisor-impact] unknown compiled advisor attribution: {producer['reason']}", file=sys.stderr)
+        continue
+    if producer["status"] == "resolved":
+        if advisor != producer["template_version"]:
+            errors.append(f"entry {i}: advisor_template_version differs from compiled producer")
+            continue
+        registration = subprocess.run(["bash", str(Path(append_script).with_name("template-registry-register.sh")),
+            "--kdir", kdir, "--template-id", producer["template_id"], "--template-version", advisor,
+            "--template-path", producer["template_path"]], capture_output=True, text=True)
+        if registration.returncode:
+            print("[advisor-impact] compiled advisor registration failed; attribution unknown", file=sys.stderr)
+            continue
+        ident = producer["template_id"]
+    by_advisor[(ident, advisor)].append(entry)
 
 if errors:
     for e in errors:
@@ -273,7 +294,7 @@ if not by_advisor:
     sys.exit(0)
 
 rows: list[dict] = []
-for advisor, entries in by_advisor.items():
+for (ident, advisor), entries in by_advisor.items():
     followed_count = sum(1 for e in entries if e["was_followed"])
     n = len(entries)
     advice_followed_rate = followed_count / n
@@ -282,7 +303,7 @@ for advisor, entries in by_advisor.items():
     # rollup divides by |reports| to get the rate across reports.
     rows.append({
         "schema_version": "1",
-        "template_id": "advisor",
+        "template_id": ident,
         "template_version": advisor,
         "metric": "consultation_rate",
         "value": 1.0,
@@ -300,7 +321,7 @@ for advisor, entries in by_advisor.items():
     # advice_followed_rate row: averaged over consultations in this report.
     rows.append({
         "schema_version": "1",
-        "template_id": "advisor",
+        "template_id": ident,
         "template_version": advisor,
         "metric": "advice_followed_rate",
         "value": advice_followed_rate,
@@ -335,7 +356,7 @@ for row in rows:
     appended.append(f"{row['template_version']}/{row['metric']}")
 
 if json_mode:
-    print(json.dumps({"status": "appended", "rows": appended, "advisors": list(by_advisor.keys())}, indent=2))
+    print(json.dumps({"status": "appended", "rows": appended, "advisors": [version for _, version in by_advisor], "producers": [{"template_id": ident, "template_version": version} for ident, version in by_advisor]}, indent=2))
 else:
     print(f"[advisor-impact] appended {len(appended)} rows across {len(by_advisor)} advisors")
 PYEOF

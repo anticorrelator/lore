@@ -211,6 +211,9 @@ set +e
 RESULT=$(python3 - "$CANDIDATES_FILE" "$ITEM_DIR/task-claims.jsonl" "$SLUG" \
   "$SCRIPT_DIR/lore-promote.sh" "$LEAD_TV" "$WORKER_TV" "$ADVISOR_TV" <<'PYEOF'
 import json, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[4]).parent))
+from position_attribution import project, legacy_role
 
 (cand_path, claims_path, slug, promote_sh,
  lead_tv, worker_tv, advisor_tv) = sys.argv[1:8]
@@ -245,6 +248,7 @@ else:
                 sys.exit(1)
 
 claim_ids = set()
+claims = {}
 try:
     with open(claims_path, encoding="utf-8") as f:
         for line in f:
@@ -257,6 +261,7 @@ try:
                 continue
             if isinstance(row, dict) and row.get("claim_id"):
                 claim_ids.add(row["claim_id"])
+                claims[row["claim_id"]] = row
 except FileNotFoundError:
     pass
 
@@ -303,11 +308,40 @@ for i, cand in enumerate(candidates, 1):
         role = "implement-lead"
         role_defaulted = True
         cand = {**cand, "producer_role": role}
-    if role not in ROLE_TV:
+    tv = ROLE_TV.get(role)
+    producers = [project(claims[sid], expected={"work_item": slug,
+                 **({"task_id": claims[sid]["task_id"]} if claims[sid].get("task_id") else {})}) for sid in sids]
+    compiled = [p for p in producers if p["status"] != "legacy"]
+    if not compiled and role not in ROLE_TV:
         rejected.append({"claim_id": cid,
                          "reason": f"no template-version attribution for producer_role '{role}'"})
         continue
-    tv = ROLE_TV[role]
+    if compiled:
+        identities = {(p["template_id"], p["template_version"]) for p in compiled}
+        if (len(compiled) != len(producers) or len(identities) != 1
+                or any(p["status"] != "resolved" for p in compiled)):
+            rejected.append({"claim_id": cid, "reason": "source claims have unknown or mixed compiled producer attribution"})
+            continue
+        producer = compiled[0]
+        if role != legacy_role(producer):
+            rejected.append({"claim_id": cid, "reason": "candidate producer_role does not match compiled source producer"})
+            continue
+        supplied = project(cand, expected={"work_item": slug})
+        if supplied["status"] != "legacy":
+            if (supplied["status"] != "resolved" or
+                    (supplied["template_id"], supplied["template_version"]) not in identities or
+                    supplied["position_dispatch"] not in [p["position_dispatch"] for p in compiled]):
+                rejected.append({"claim_id": cid, "reason": "candidate compiled reference contradicts its source claims"})
+                continue
+            producer = supplied
+        registration = subprocess.run(["bash", str(Path(promote_sh).with_name("template-registry-register.sh")),
+            "--template-id", producer["template_id"], "--template-version", producer["template_version"],
+            "--template-path", producer["template_path"]], capture_output=True, text=True)
+        if registration.returncode:
+            rejected.append({"claim_id": cid, "reason": "compiled producer registration failed"})
+            continue
+        tv = producer["template_version"]
+        cand = dict(cand, position_dispatch=producer["position_dispatch"], producer_attribution=producer)
 
     argv = ["bash", promote_sh, "--work-item", slug, "--producer-role", role]
     if tv:

@@ -3,7 +3,7 @@
 # Usage: impl-check-report.sh <ref> --task <id> --report <file>
 #        [--transcript <file>] [--woven-norm <label>]...
 #        [--provider-status <full|partial|unavailable>] [--spawned-advisors <csv>]
-#        [--template-version <hash>] [--json]
+#        [--revision <12hex>] [--template-version <hash>] [--json]
 #
 # Absorbs the mechanical half of /implement Step 4 report verification:
 #
@@ -56,6 +56,7 @@ VALID_PROVIDER_STATUSES="full|partial|unavailable"
 
 REF=""
 TASK_ID=""
+REVISION_ID=""
 REPORT_FILE=""
 TRANSCRIPT_FILE=""
 TRANSCRIPT_SET=0
@@ -74,7 +75,7 @@ Usage: lore impl check-report <ref> --task <id> --report <file>
                               [--transcript <file>] [--woven-norm <label>]...
                               [--provider-status <full|partial|unavailable>]
                               [--spawned-advisors <csv>]
-                              [--template-version <hash>] [--json]
+                              [--revision <12hex>] [--template-version <hash>] [--json]
 
 Mechanically verify a worker completion report: Tier 2 claim_id
 cross-reference (blocking), required-consultation acknowledgement (blocking),
@@ -109,6 +110,10 @@ while [[ $# -gt 0 ]]; do
       TASK_ID="${1#--task=}"
       shift
       ;;
+    --revision)
+      REVISION_ID="${2:-}"; shift 2 ;;
+    --revision=*)
+      REVISION_ID="${1#--revision=}"; shift ;;
     --report)
       REPORT_FILE="${2:-}"
       shift 2
@@ -174,7 +179,7 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     --*)
-      fail "Unknown flag: $1. Accepted flags are --task, --report, --transcript, --woven-norm, --provider-status, --spawned-advisors, --template-version, and --json."
+      fail "Unknown flag: $1. Accepted flags are --task, --report, --revision, --transcript, --woven-norm, --provider-status, --spawned-advisors, --template-version, and --json."
       ;;
     *)
       if [[ -z "$REF" ]]; then
@@ -251,12 +256,12 @@ fi
 # --- Required-consultation domains, keyed by the task id the caller holds ----
 # A missing tasks.json is not "no domains required" — it is an unanswerable
 # question, so it refuses rather than silently passing the blocking check.
-if [[ ! -f "$ITEM_DIR/tasks.json" ]]; then
+if [[ -z "$REVISION_ID" && ! -f "$ITEM_DIR/tasks.json" ]]; then
   fail "no tasks.json for '$SLUG', so the domains task '$TASK_ID' requires cannot be read. Generate it first: lore work tasks $SLUG"
 fi
 
 set +e
-REQUIRED_DOMAINS=$(python3 - "$ITEM_DIR/tasks.json" "$SLUG" "$TASK_ID" <<'DOMAINS_PY'
+REQUIRED_DOMAINS=$(python3 - "$ITEM_DIR/tasks.json" "$SLUG" "$TASK_ID" "$REVISION_ID" "$SCRIPT_DIR" <<'DOMAINS_PY'
 import json
 import re
 import sys
@@ -264,9 +269,25 @@ import sys
 tasks_file, slug, task_id = sys.argv[1:4]
 
 try:
+    revision, scripts = sys.argv[4:6]
+    if revision:
+        from pathlib import Path
+        import runpy
+        if not re.fullmatch('[0-9a-f]{12}', revision):
+            raise ValueError('invalid revision identity')
+        item = Path(tasks_file).parent
+        evidence = runpy.run_path(str(Path(scripts) / 'work-evidence.py'))
+        history = evidence['read_ledger'](item / 'revisions.jsonl', item, {'1'})
+        evidence['validate_records'](history, 'revisions')
+        rows = [r for r in history['rows'] if r.get('record_type', 'revision') == 'revision' and r.get('revision_id') == revision]
+        if history['state'] != 'read' or history.get('invalid_rows') or len(rows) != 1:
+            raise ValueError('revision unavailable or invalid')
+        if any(ref['state'] != 'read' for ref in evidence['references'](rows[0], item, item.parents[1])):
+            raise ValueError('revision snapshot unavailable or corrupt')
+        tasks_file = str(item / rows[0]['tasks_path'])
     with open(tasks_file, encoding="utf-8") as f:
         data = json.load(f)
-except ValueError as e:
+except (ValueError, OSError, KeyError) as e:
     print(f"tasks.json for '{slug}' is not valid JSON: {e}", file=sys.stderr)
     sys.exit(1)
 
@@ -358,7 +379,7 @@ fi
 # Exit 64 from the checker is a validation error (message on stdout); any
 # other non-zero is an internal failure.
 set +e
-RESULT=$(CR_REPORT_FILE="$REPORT_FILE" \
+RESULT=$(PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" CR_SLUG="$SLUG" CR_TASK_ID="$TASK_ID" CR_REVISION_ID="$REVISION_ID" CR_REPORT_FILE="$REPORT_FILE" \
   CR_CLAIMS_FILE="$ITEM_DIR/task-claims.jsonl" \
   CR_REQUIRED_DOMAINS="$REQUIRED_DOMAINS" \
   CR_TRANSCRIPT_FILE="$TRANSCRIPT_FILE" \
@@ -407,7 +428,13 @@ def split_sections(text):
 
 
 with open(os.environ["CR_REPORT_FILE"], encoding="utf-8") as f:
-    sections = split_sections(f.read())
+    report_text = f.read()
+    sections = split_sections(report_text)
+from position_attribution import project, report_record
+expected = {"work_item": os.environ["CR_SLUG"], "task_id": os.environ["CR_TASK_ID"]}
+if os.environ["CR_REVISION_ID"]:
+    expected["revision_id"] = os.environ["CR_REVISION_ID"]
+producer_attribution = project(report_record(report_text), expected=expected)
 
 fail_reasons = []
 
@@ -470,9 +497,35 @@ if consultations_present:
             m = re.match(r"^\s+([A-Za-z_][\w-]*):\s*(.*)$", line)
             if m and cur is not None:
                 cur[m.group(1)] = clean(m.group(2))
+transcript_entries = []
+if os.environ["CR_TRANSCRIPT_SET"] == "1":
+    with open(os.environ["CR_TRANSCRIPT_FILE"], encoding="utf-8") as transcript:
+        for line in transcript:
+            try:
+                row = json.loads(line)
+                if isinstance(row, dict):
+                    transcript_entries.append(row)
+            except ValueError:
+                pass
 for e in entries:
+    recorded = [row for row in transcript_entries if row.get("consultation_id") == e.get("consultation_id") and row.get("domain") == e.get("domain") and "position_dispatch" in row]
+    if recorded:
+        refs = [row["position_dispatch"] for row in recorded]
+        if any(ref != refs[0] for ref in refs[1:]):
+            e["attribution_error"] = "ambiguous consultation dispatch references"
+        if "position_dispatch" not in e:
+            e["position_dispatch"] = refs[0]
     if "was_followed" in e:
         e["was_followed"] = str(e["was_followed"]).lower() == "true"
+    if "position_dispatch" in e:
+        try:
+            if isinstance(e["position_dispatch"], str):
+                e["position_dispatch"] = json.loads(e["position_dispatch"])
+        except (ValueError, TypeError):
+            pass
+        if recorded and e["position_dispatch"] != recorded[0]["position_dispatch"]:
+            e["attribution_error"] = "report and transcript dispatch references differ"
+        e["producer_attribution"] = project(e, expected={"work_item": os.environ["CR_SLUG"], "position": "designer", "mode": "consultation", "consultation_id": e.get("consultation_id"), "domain": e.get("domain")})
 
 # --- 2. Required-consultation acknowledgement -------------------------------
 required = [clean(d) for d in
@@ -601,7 +654,9 @@ else:
         stripped_ids = []
         for e in agent_entries:
             ident = e.get("advisor_template_version") or e.get("advisor") or ""
-            if ident and ident in spawned:
+            attribution = e.get("producer_attribution")
+            attributed = attribution is None or (attribution["status"] == "resolved" and attribution["template_version"] == ident)
+            if ident and ident in spawned and attributed:
                 verified_ids.append(ident)
                 rollup_payload.append(e)
             else:
@@ -617,6 +672,8 @@ else:
 guard["invalid_entries"] = invalid_entries
 
 print(json.dumps({
+    "producer_attribution": producer_attribution,
+    "consultation_attribution": [{"consultation_id": e.get("consultation_id"), "producer_attribution": e["producer_attribution"]} for e in entries if "producer_attribution" in e],
     "tier2": tier2,
     "required_consultations": required_check,
     "convention_handling": convention,
@@ -716,6 +773,7 @@ rollup = f"Advisor rollup: {rollup_status}"
 if rollup_reason:
     rollup += f" ({rollup_reason})"
 lines.append(rollup)
+lines.append("Checked-report-producer-attribution: " + json.dumps(result["producer_attribution"]))
 print("\n".join(lines))
 PYEOF
 )
@@ -744,6 +802,8 @@ if json_mode == "1":
     print(json.dumps({
         "slug": slug,
         "task_id": task_id,
+        "producer_attribution": result["producer_attribution"],
+        "consultation_attribution": result["consultation_attribution"],
         "mechanical_pass": result["mechanical_pass"],
         "fail_reasons": result["fail_reasons"],
         "findings": {

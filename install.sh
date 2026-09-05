@@ -85,6 +85,7 @@ if ! $_fw_valid; then
   exit 1
 fi
 unset _fw _fw_valid
+export LORE_FRAMEWORK="$FRAMEWORK"
 
 # --- Helpers ---
 info()  { echo "  [lore] $*"; }
@@ -139,6 +140,11 @@ if $UNINSTALL; then
     fi
     agents_dir=$(resolve_install_path agents "$fw")
     if [ "$agents_dir" != "unsupported" ] && [ -d "$agents_dir" ]; then
+      for position_file in "$LORE_REPO_DIR"/agents/positions/*.md; do
+        [ -f "$position_file" ] || continue
+        target="$agents_dir/position-$(basename "$position_file" .md)-$fw.md"
+        if [ -L "$target" ]; then dry rm -f "$target"; fi
+      done
       for agent_file in "$LORE_REPO_DIR"/agents/*.md; do
         agent_name="$(basename "$agent_file")"
         target="$agents_dir/$agent_name"
@@ -826,9 +832,19 @@ else
     info "Linking agent: $agent_name -> $target"
     dry ln -s "$agent_file" "$target"
   done
-  if [ "$FRAMEWORK" = "codex" ]; then
-    info "Note: codex reads TOML agents natively; .md symlinks installed for orchestration-adapter use"
-  fi
+  for position_file in "$LORE_REPO_DIR"/agents/positions/*.md; do
+    [ -f "$position_file" ] || continue
+    position="$(basename "$position_file" .md)"
+    if $DRY_RUN; then
+      info "Would compile position: $position ($FRAMEWORK) -> $AGENTS_DIR"
+      continue
+    fi
+    descriptor=$(bash "$LORE_REPO_DIR/scripts/position-compile.sh" "$position" --framework "$FRAMEWORK" --kdir "$LORE_DATA_DIR")
+    artifact=$(printf '%s' "$descriptor" | jq -er '.artifact_path')
+    target=$(printf '%s' "$descriptor" | jq -er '.install_target')
+    info "Linking position: $target -> $artifact"
+    ln -sfn "$artifact" "$target"
+  done
 fi
 
 # --- 5. Inject hooks/permissions via per-harness adapter (T25/T26/T27/T28) ---

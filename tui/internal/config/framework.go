@@ -118,6 +118,9 @@ func loadUserFrameworkConfig() userFrameworkConfig {
 // install_paths and resolver helpers touch. Other framework fields are
 // ignored here.
 type capabilitiesProfile struct {
+	PositionCompilation struct {
+		ActivationOperation string `json:"activation_operation"`
+	} `json:"position_compilation"`
 	DisplayName    string             `json:"display_name"`
 	Binary         string             `json:"binary"`
 	InstallPaths   map[string]string  `json:"install_paths"`
@@ -1466,4 +1469,17 @@ func readSettingsRoleString(dotPath string) string {
 		return ""
 	}
 	return v
+}
+
+// HarnessPositionActivation resolves the existing adapter's position launch operation.
+func HarnessPositionActivation(framework string) (string, error) {
+	caps, err := loadCapabilitiesFile()
+	if err != nil {
+		return "", err
+	}
+	profile, ok := caps.Frameworks[framework]
+	if !ok || profile.PositionCompilation.ActivationOperation != "native_launch" {
+		return "", fmt.Errorf("position activation unavailable for %q", framework)
+	}
+	return profile.PositionCompilation.ActivationOperation, nil
 }

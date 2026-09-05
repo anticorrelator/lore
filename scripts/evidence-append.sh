@@ -199,6 +199,18 @@ if [[ ! -d "$WORK_DIR" ]]; then
   die "work item not found: $WORK_DIR"
 fi
 
+# Resolve only recorded references; the filing task cannot supply a fallback producer.
+ROW=$(printf '%s' "$ROW" | PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c '
+import json, sys
+from position_attribution import project
+row = json.load(sys.stdin)
+if "position_dispatch" in row:
+    row["producer_attribution"] = project(row, expected={"work_item": sys.argv[1], "task_id": row["task_id"]})
+elif "producer_attribution" in row:
+    raise SystemExit("producer_attribution requires position_dispatch")
+print(json.dumps(row))
+' "$WORK_ITEM")
+
 TARGET="$WORK_DIR/task-claims.jsonl"
 
 # --- Compact to one line and append ---

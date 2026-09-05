@@ -87,6 +87,8 @@ for fw_id, fw in data.get("frameworks", {}).items():
     mr = fw.get("model_routing") or {}
     if mr.get("evidence"):
         ids.add(mr["evidence"])
+    pc = fw.get("position_compilation") or {}
+    if pc.get("evidence"): ids.add(pc["evidence"])
     st = fw.get("spend_telemetry") or {}
     if st.get("evidence"):
         ids.add(st["evidence"])
@@ -750,5 +752,18 @@ if "subagents=none" not in text or "spec-short" not in text:
     print("spec contract must reserve spec-short collapse for subagents=none")
     sys.exit(1)
 ' "$CAPS"
+  [ "$status" -eq 0 ]
+}
+
+@test "position compilation declares native consumption with indexed evidence" {
+  run python3 - "$CAPS" <<'PYTEST'
+import json, sys
+profiles = json.load(open(sys.argv[1]))["frameworks"]
+for fw, profile in profiles.items():
+    cell = profile["position_compilation"]
+    assert cell["format"] == ("prompt" if fw == "codex" else "agent-markdown")
+    assert cell["consumption"] == ("prompt-text" if fw == "codex" else "agent-definition")
+    assert cell["evidence"] == profile["capabilities"]["subagents"]["evidence"]
+PYTEST
   [ "$status" -eq 0 ]
 }

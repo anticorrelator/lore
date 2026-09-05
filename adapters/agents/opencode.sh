@@ -297,9 +297,51 @@ cmd_smoke() {
   printf '  %-24s %-13s %s\n' resolve_model_for_role "$routing_shape"  "provider/model binding split at spawn boundary"
 }
 
+cmd_native_selection() {
+  require_opencode
+  echo 'Error: native subagent selection unavailable: OpenCode task dispatch guidance is unverified' >&2
+  return 1
+}
+
+cmd_native_launch() {
+  python3 - "$@" <<'PYTHON'
+import hashlib
+import json
+from pathlib import Path
+import sys
+import yaml
+raw = Path(sys.argv[1]).read_bytes()
+name = 'position-' + hashlib.sha256(raw + sys.argv[2].encode()).hexdigest()
+_, frontmatter, prompt = raw.decode().split('---\n', 2)
+header = yaml.safe_load(frontmatter)
+# Session selection promotes the same scoped definition to a primary agent.
+definition = dict(header, mode='primary', prompt=prompt)
+print(json.dumps({'args': ['--agent', name],
+                  'env': {'OPENCODE_CONFIG_CONTENT': json.dumps({'agent': {name: definition}})},
+                  'prompt_flag': '--prompt'}))
+PYTHON
+}
+
+cmd_render_position() {
+  require_opencode
+  local position="${1:-}" body="${2:-}"
+  case "$position" in
+    investigator|designer|worker|reviewer) ;;
+    *) echo "Error: invalid position '$position'" >&2; return 1 ;;
+  esac
+  [[ -f "$body" && -s "$body" ]] || { echo 'Error: missing position body' >&2; return 1; }
+  local edit=deny
+  [[ "$position" != worker ]] || edit=allow
+  printf '%s\n' '---' "description: $position" 'mode: subagent' 'permission:' "  edit: $edit" '  bash: allow' '---'
+  cat "$body"
+}
+
 # --- Dispatch ---
 cmd="${1:-}"
 case "$cmd" in
+  native_selection)         shift; cmd_native_selection "$@" ;;
+  native_launch)            shift; cmd_native_launch "$@" ;;
+  render_position)          shift; cmd_render_position          "$@" ;;
   spawn)                    shift; cmd_spawn                    "$@" ;;
   wait)                     shift; cmd_wait                     "$@" ;;
   send_message)             shift; cmd_send_message             "$@" ;;
@@ -315,6 +357,8 @@ case "$cmd" in
 Usage: $(basename "$0") <subcommand> [args]
 
 Subcommands (mirroring adapters/agents/README.md §Operation Surface):
+  render_position <position> <body-file>
+                            Render a native position artifact on stdout.
   spawn <role> <task_prompt> [model_override]
                             Emit delegate:TaskCreate directive with
                             provider/model split for multi-provider

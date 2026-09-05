@@ -320,6 +320,20 @@ func (r Request) ExtraContextText() string {
 	return obj.DispatchGuidance
 }
 
+// PositionContext retains preparation or a published reference for validation at spawn.
+func (r Request) PositionContext() json.RawMessage {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(r.ExtraContext, &obj) != nil {
+		return nil
+	}
+	for _, key := range []string{"position_preparation", "position_dispatch"} {
+		if _, ok := obj[key]; ok {
+			return append(json.RawMessage(nil), r.ExtraContext...)
+		}
+	}
+	return nil
+}
+
 // RequestsDir is the queue root under a _sessions/ directory.
 func RequestsDir(sessionsDir string) string {
 	return filepath.Join(sessionsDir, "requests")

@@ -166,8 +166,10 @@ fi
 # quoting hazards on the (potentially large) JSON array.
 DECISION=$(_LORE_TASK_ATTR="$TASK_ATTRIBUTION" python3 - \
   "$ROWS_FILE" "$SLUG" "$TERMINUS" "$TEMPLATE_VERSION" "$VERDICT" \
-  "$ROUTINE_RATE" "$FIRST_K" "$DATE" <<'PYEOF'
+  "$ROUTINE_RATE" "$FIRST_K" "$DATE" "$SCRIPT_DIR" <<'PYEOF'
 import hashlib, json, os, sys
+sys.path.insert(0, sys.argv[9])
+from position_attribution import project
 
 rows_file, slug, terminus, template_version, verdict, rate_str, first_k_str, date = sys.argv[1:9]
 routine_rate = float(rate_str)
@@ -175,13 +177,30 @@ first_k = int(first_k_str)
 task_attr_raw = os.environ.get("_LORE_TASK_ATTR", "")
 
 def is_hex12(s):
-    return bool(s) and len(s) == 12 and all(c in "0123456789abcdef" for c in s)
+    return isinstance(s, str) and len(s) == 12 and all(c in "0123456789abcdef" for c in s)
 
 # This cycle's distinct routing pairs (judgment_class, worker_model).
 current_pairs = set()
+current_producers = set()
+
+def producer_versions(entries, work_item=None):
+    versions = set()
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        attempts = entry.get("producer_attempts")
+        for producer in attempts if isinstance(attempts, list) else []:
+            if not isinstance(producer, dict):
+                continue
+            actual = project(producer, expected={"work_item": work_item} if work_item else None)
+            if actual["status"] == "resolved":
+                versions.add((actual["template_id"], actual["template_version"]))
+    return versions
 if task_attr_raw.strip():
     try:
-        for e in json.loads(task_attr_raw):
+        current_entries = json.loads(task_attr_raw)
+        current_producers = producer_versions(current_entries, slug)
+        for e in current_entries:
             if isinstance(e, dict):
                 current_pairs.add((e.get("judgment_class"), e.get("worker_model")))
     except ValueError:
@@ -197,6 +216,7 @@ if task_attr_raw.strip():
 # brand-new template re-asks the question and re-triggers, a safe over-trigger.)
 tv_hex = is_hex12(template_version)
 tv_seen = False
+producer_seen = set()
 pair_counts = {}
 if os.path.isfile(rows_file):
     with open(rows_file, encoding="utf-8") as f:
@@ -212,7 +232,11 @@ if os.path.isfile(rows_file):
                 continue  # exclude this cycle's own rows from prior-calibration reads
             if tv_hex and r.get("template_version") == template_version:
                 tv_seen = True
+            pair = (r.get("template_id"), r.get("template_version"))
+            if pair in current_producers:
+                producer_seen.add(pair)
             attr = r.get("task_attribution")
+            producer_seen.update(producer_versions(attr, r.get("work_item")) & current_producers)
             if isinstance(attr, list):
                 for e in attr:
                     if isinstance(e, dict):
@@ -221,7 +245,8 @@ if os.path.isfile(rows_file):
 
 # Deterministic always-strata (exempt from routine_rate).
 strata = []
-if tv_hex and not tv_seen:
+new_producers = sorted(current_producers - producer_seen)
+if (tv_hex and not tv_seen) or new_producers:
     strata.append("new_template_version")
 first_k_pairs = [p for p in sorted(current_pairs, key=lambda p: (str(p[0]), str(p[1])))
                  if pair_counts.get(p, 0) < first_k]
@@ -256,6 +281,8 @@ print(json.dumps({
     "cycle_id": slug,
     "event_type": terminus,
     "template_version": template_version or None,
+    "new_producer_versions": [{"template_id": ident, "template_version": version}
+                              for ident, version in new_producers],
     "verdict": verdict or None,
     "rate": routine_rate,
     "coin": coin,

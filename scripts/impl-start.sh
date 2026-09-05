@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # impl-start.sh — /implement Step 1 envelope: resolve, validate, assemble the start struct
-# Usage: bash impl-start.sh <ref> [--branch <name>] [--json]
+# Usage: bash impl-start.sh <ref> [--branch <name>] [--compiled-positions] [--json]
 #
 # Absorbs the Step 1 bookkeeping of /implement:
 #   - resolve <ref> to a canonical slug (delegates to resolve-work-ref.sh)
@@ -10,11 +10,22 @@
 #     anchor-coverage verdict belongs to the lead (gate-anchor verb); this
 #     script computes facts only and never adjudicates
 #   - write the branch cache via cache-branch.sh (skipped for archived items,
-#     non-fatal on failure) — the only artifact this verb writes
+#     non-fatal on failure) — the only artifact this verb writes without
+#     --compiled-positions; with it, compilation also retains each position
+#     under the store's _templates/positions/<position>/<framework>/<version>
+#     and registers that version in the template registry
 #   - parse prior task-claims.jsonl into per-task and per-file maps
 #   - resolve role->model bindings (lead, worker, advisor) and the three
 #     template versions (implement SKILL.md, worker, advisor templates);
 #     each resolution failure degrades to "" with a stderr warning
+#   - with --compiled-positions, compile the worker and designer position
+#     briefs for the active framework and for every resolved worker-class or
+#     advisor target framework, and return the validated compiler
+#     descriptors under position_descriptors. The legacy template_versions
+#     keep their lead, worker, and advisor meanings beside them. Without the
+#     flag position_descriptors is null and nothing is compiled. A descriptor
+#     is a snapshot of what compiles at start; dispatch compiles its selected
+#     target again against invocation-fresh guidance and binds that.
 #
 # --branch affects fuzzy resolution (tier 5) only; the cache write always
 # uses the actual current branch.
@@ -33,9 +44,14 @@ REF=""
 BRANCH=""
 BRANCH_SET=0
 JSON_MODE=0
+COMPILED_POSITIONS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --compiled-positions)
+      COMPILED_POSITIONS=1
+      shift
+      ;;
     --branch)
       BRANCH="${2:-}"
       BRANCH_SET=1
@@ -52,13 +68,26 @@ while [[ $# -gt 0 ]]; do
       ;;
     --help|-h)
       cat >&2 <<EOF
-Usage: lore impl start <ref> [--branch <name>] [--json]
+Usage: lore impl start <ref> [--branch <name>] [--compiled-positions] [--json]
 
 Resolve a work item and return the /implement start struct: title, verbatim
 intent anchor, plan unit and unchecked-task counts, prior Tier 2 claims maps,
 role->model bindings, template versions, and branch-cache status.
 
-Writes only the branch cache; makes no judgments.
+  --compiled-positions  also compile the worker and designer position briefs
+                        for the active framework and every resolved target
+                        framework, returning their descriptors under
+                        position_descriptors. Omit it and the struct describes
+                        the legacy templates only, with position_descriptors
+                        null. A descriptor snapshots what compiles now; the
+                        dispatch that uses it compiles again with fresh
+                        guidance, so a start descriptor is never itself a
+                        launch identity.
+
+Writes the branch cache. With --compiled-positions it also retains each
+compiled position under the store's _templates/positions tree and registers
+its version in the template registry, both idempotent for identical bytes.
+Makes no judgments.
 
 Exit codes:
   0  start struct printed
@@ -68,7 +97,7 @@ EOF
       exit 0
       ;;
     --*)
-      _msg="Unknown flag: $1. Accepted flags are --branch and --json."
+      _msg="Unknown flag: $1. Accepted flags are --branch, --compiled-positions, and --json."
       if [[ $JSON_MODE -eq 1 ]]; then
         json_error "$_msg"
       fi
@@ -95,7 +124,7 @@ if [[ -z "$REF" ]]; then
     json_error "Missing required argument: <ref>"
   fi
   echo "[impl] Error: Missing required argument: <ref>" >&2
-  echo "Usage: lore impl start <ref> [--branch <name>] [--json]" >&2
+  echo "Usage: lore impl start <ref> [--branch <name>] [--compiled-positions] [--json]" >&2
   exit 1
 fi
 
@@ -232,13 +261,34 @@ LEAD_TV=$(template_version_or_empty lead "$LORE_REPO_DIR/skills/implement/SKILL.
 WORKER_TV=$(template_version_or_empty worker "$(resolve_agent_template worker 2>/dev/null || true)")
 ADVISOR_TV=$(template_version_or_empty advisor "$(resolve_agent_template advisor 2>/dev/null || true)")
 
+POSITION_DESCRIPTORS='null'
+if [[ "$COMPILED_POSITIONS" -eq 1 ]]; then
+  ACTIVE_FRAMEWORK=$(resolve_active_framework)
+  ADVISOR_ROUTE=$(resolve_route_for_role advisor implement)
+  POSITION_DESCRIPTORS=$(python3 - "$SCRIPT_DIR" "$KNOWLEDGE_DIR" "$ACTIVE_FRAMEWORK" \
+    "$WORKER_MECHANICAL_ROUTE" "$WORKER_STANDARD_ROUTE" "$WORKER_JUDGMENT_DENSE_ROUTE" "$ADVISOR_ROUTE" <<'POSITIONS_PY'
+import json
+from pathlib import Path
+import sys
+scripts, kdir, framework, *routes = sys.argv[1:]
+sys.path.insert(0, scripts)
+from position_compile import compile_position
+targets = {framework}
+targets.update(json.loads(route)['target_framework'] for route in routes if route)
+print(json.dumps({target: {position: compile_position(position, target, Path(kdir), None)
+                          for position in ('worker', 'designer')}
+                  for target in sorted(targets)}))
+POSITIONS_PY
+  )
+fi
+
 # --- Assemble and emit the start struct -------------------------------------
 PAYLOAD=$(python3 - "$ITEM_DIR" "$SLUG" "$ARCHIVED" "$PHASES" "$TASK_HEADINGS" "$UNCHECKED" \
   "$CACHE_STATUS" "$CURRENT_BRANCH" \
   "$LEAD_MODEL" "$WORKER_MODEL" "$ADVISOR_MODEL" \
   "$LEAD_TV" "$WORKER_TV" "$ADVISOR_TV" \
   "$WORKER_MECHANICAL_MODEL" "$WORKER_STANDARD_MODEL" "$WORKER_JUDGMENT_DENSE_MODEL" \
-  "$WORKER_MECHANICAL_ROUTE" "$WORKER_STANDARD_ROUTE" "$WORKER_JUDGMENT_DENSE_ROUTE" <<'PYEOF'
+  "$WORKER_MECHANICAL_ROUTE" "$WORKER_STANDARD_ROUTE" "$WORKER_JUDGMENT_DENSE_ROUTE" "$POSITION_DESCRIPTORS" <<'PYEOF'
 import json
 import os
 import sys
@@ -246,7 +296,7 @@ import sys
 (item_dir, slug, archived, phases, task_headings, unchecked, cache_status, branch,
  lead_m, worker_m, advisor_m, lead_tv, worker_tv, advisor_tv,
  worker_mech_m, worker_std_m, worker_jd_m,
- worker_mech_r, worker_std_r, worker_jd_r) = sys.argv[1:21]
+ worker_mech_r, worker_std_r, worker_jd_r, position_descriptors) = sys.argv[1:22]
 
 def route_or_none(raw):
     return json.loads(raw) if raw else None
@@ -303,6 +353,7 @@ print(json.dumps({
         "judgment-dense": route_or_none(worker_jd_r),
     },
     "template_versions": {"lead": lead_tv, "worker": worker_tv, "advisor": advisor_tv},
+    "position_descriptors": json.loads(position_descriptors),
 }))
 PYEOF
 )

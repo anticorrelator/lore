@@ -66,6 +66,7 @@ Commands:
   test         Run lore test suites (see: lore test protocols)
   criteria     Execute plan-owned criteria (see: lore criteria run --help)
   plan         Publish plan revisions and authored decisions (see: lore plan --help)
+  position     Compile a native position brief (see: lore position --help)
   packet       Build or inspect a dispatch knowledge packet
   dispatch     Render dispatch-time guidance (see: lore dispatch --help)
   annotate     Record a retrieval friction annotation
@@ -2482,6 +2483,15 @@ case "$1" in
   coordinate)
     shift
     cmd_coordinate "$@"
+    ;;
+  position)
+    shift
+    if [[ "${1:---help}" == compile ]]; then
+      shift
+      exec "$SCRIPTS_DIR/position-compile.sh" "$@"
+    fi
+    echo 'Usage: lore position compile <position> --framework <framework> [--kdir PATH]'
+    [[ "${1:---help}" == --help || "${1:-}" == -h ]]
     ;;
   packet)
     shift
