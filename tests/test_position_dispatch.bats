@@ -274,7 +274,7 @@ elif scenario=='launch':
         examples=list(pool.map(exercise_launch,cases))
     b=unbound_fixture('investigator','ordinary-preplan-opencode')
     b['execution_root']=None;b['absence_reasons']['execution_root']='ordinary host supplies final directory'
-    r=json.loads(request(b,'investigator','opencode',flags=('--model','anthropic/opus'),fixed=False).stdout)
+    r=json.loads(request(b,'investigator','opencode',flags=('--model','provider/opaque-model'),fixed=False).stdout)
     row_path=store/r['path'];row=json.loads(row_path.read_bytes())
     prepared=row['extra_context']['position_preparation']
     assert prepared['bindings']['task_id'] is None and prepared['bindings']['revision_id'] is None
