@@ -667,6 +667,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case peekRequestScanMsg:
 		return m.handlePeekRequestScan(msg)
 
+	case peekHistoryCapturedMsg:
+		return m.handlePeekHistoryCaptured(msg)
+
 	case peekRespondedMsg:
 		return m.handlePeekResponded(msg)
 

@@ -557,7 +557,7 @@ def operate_attempt(args, kdir, manifest):
     elif args.verb == 'close':
         row['reason'] = args.reason or 'coordinator'
     elif args.verb == 'peek':
-        row['raw'] = args.raw
+        row.update(raw=args.raw, summary=args.summary, lines=args.lines, before=args.before, max_bytes=args.max_bytes)
     receipt(kdir, manifest, rid, args.verb, 'uncertain', detail='Intent persisted; operation outcome pending.', request=row)
     publish_operation(kdir, manifest, args.verb, row)
     if args.verb == 'peek':
@@ -567,7 +567,12 @@ def operate_attempt(args, kdir, manifest):
             if data is not None:
                 from coordinate_watch_state import observation
                 data['observation'] = observation(data)
-                result = receipt(kdir, manifest, rid, 'peek', 'observed', response=data)
+                if args.summary:
+                    data = {key: value for key, value in data.items() if key not in {'rows', 'ansi', 'history', 'screen'}}
+                    data['summary'] = True
+                if (args.lines or args.before or args.max_bytes) and 'history' not in data and not data.get('error'):
+                    data['error'] = 'history-unsupported-by-host'
+                result = receipt(kdir, manifest, rid, 'peek', 'peek_failed' if data.get('error') else 'observed', response=data)
                 response.unlink(missing_ok=True)
                 return result
             time.sleep(.1)
@@ -608,6 +613,10 @@ def main(argv=None):
     parser.add_argument('--registration-id')
     parser.add_argument('--reason')
     parser.add_argument('--raw', action='store_true')
+    parser.add_argument('--summary', action='store_true')
+    parser.add_argument('--lines', type=int, default=0)
+    parser.add_argument('--before', default='')
+    parser.add_argument('--max-bytes', type=int, default=0)
     parser.add_argument('--wait', action='store_true')
     parser.add_argument('--until')
     parser.add_argument('--host-key')
@@ -626,6 +635,12 @@ def main(argv=None):
         if not managed:
             os.execv('/bin/bash', ['bash', str(SCRIPTS / ('session-' + verb + '.sh')), *argv[1:]])
     args = parser.parse_args(argv)
+    if (any(arg == '--lines' or arg.startswith('--lines=') for arg in argv) and args.lines < 1) or (any(arg == '--max-bytes' or arg.startswith('--max-bytes=') for arg in argv) and args.max_bytes < 1):
+        parser.error('history limits must be positive')
+    if args.summary and (args.raw or args.lines or args.before or args.max_bytes):
+        parser.error('--summary cannot combine with --raw or history options')
+    if not 0 <= args.lines <= 500 or not 0 <= args.max_bytes <= 16384 or len(args.before) > 512:
+        parser.error('history limits exceed 500 rows or 16384 bytes, or cursor is invalid')
     if args.verb == '_supervise':
         return supervise(args)
     if args.timeout < 0:
@@ -653,7 +668,16 @@ def main(argv=None):
     else:
         print(f"{result.get('handle', args.handle)}: {result.get('outcome', result.get('state', 'observed'))}")
         if args.verb == 'peek':
-            print('\n'.join(result.get('response', {}).get('rows', [])))
+            response = result.get('response', {})
+            history = response.get('history', {})
+            if not args.summary:
+                print(history.get('ansi', response.get('ansi', '')) if args.raw else '\n'.join(history.get('rows', response.get('rows', []))))
+            if history:
+                print(json.dumps({key: value for key, value in history.items() if key not in {'rows', 'ansi'}}))
+            if response.get('modal'):
+                print(json.dumps(response['modal']))
+            if response.get('error'):
+                print(response['error'], file=sys.stderr)
             from coordinate_watch_state import peek_summary
             print(peek_summary(result.get('response', {})))
         if result.get('request_id'):
@@ -666,7 +690,7 @@ def main(argv=None):
                 print('retained result: ' + disposition['result_ref'])
             if disposition['composition_judgment_required']:
                 print('Integration judgment required.')
-    return 1 if result.get('outcome') == 'uncertain' else (3 if result.get('outcome', '').endswith(('_refused', '_failed', '_expired', '_cancelled')) else 0)
+    return 1 if result.get('response', {}).get('error') or result.get('outcome') == 'uncertain' else (3 if result.get('outcome', '').endswith(('_refused', '_failed', '_expired', '_cancelled')) else 0)
 
 
 if __name__ == '__main__':

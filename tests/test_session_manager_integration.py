@@ -38,7 +38,7 @@ def render(message="ready"):
     if state == "settled":
         message = {"claude-code": "✻ Worked for 4s", "codex": "─ Worked for 1m 23s ───", "opencode": "▣ Build · GPT-4o mini · 2.3s"}[framework]
         rows += ["Background display refresh " + str(time.monotonic())]
-    if state == "working":
+    if state == "working" or state.startswith("history:"):
         rows = ["esc interrupt" if framework == "opencode" else "• Working (4s • esc to interrupt)"] + rows
     elif state == "modal":
         rows = {
@@ -61,6 +61,11 @@ while True:
         requested = "composer"
     if requested != state:
         state = requested
+        if state.startswith("history:"):
+            batch = state.split(":", 1)[1]
+            output = "\x1b[H\x1b[2J" + "".join("\x1b[32mhistory-" + batch + "-" + str(i).zfill(4) + "\x1b[0m\r\n" for i in range(160))
+            os.write(1, output.encode())
+            record("history", batch=batch)
         render()
     if not select.select([0], [], [], 0.1)[0]:
         if state == "settled":
@@ -243,6 +248,12 @@ class ManagedSessionIntegration(unittest.TestCase):
                 self.assertTrue(obs["observed_at"])
                 self.assertEqual(peek["framework"], framework)
                 self.assertTrue(obs["evidence"]["matcher"])
+                _, compact = self.session("peek", handle, "--summary")
+                compact = compact["response"]
+                self.assertEqual(compact["observation"]["activity"], "working", compact)
+                self.assertFalse(compact.get("rows"))
+                self.assertFalse(compact.get("ansi"))
+                self.assertNotIn("history", compact)
                 control.write_text("settled")
                 settled = self.peek_activity(handle, "idle")
                 self.assertEqual(settled["observation"]["activity"], "idle", settled)
@@ -267,6 +278,54 @@ class ManagedSessionIntegration(unittest.TestCase):
                 control.write_text("composer")
                 self.session("close", handle)
 
+    def test_peek_history_is_bounded_and_stable_while_output_changes(self):
+        handle = self.start("codex", "history")["handle"]
+        control = self.state_dir / handle
+        control.write_text("history:first")
+        self.until(lambda: any(e.get("batch") == "first" for e in self.events()))
+        self.peek_activity(handle, "working")
+        before_messages = [e for e in self.events() if e["event"] == "message"]
+        _, receipt = self.session("peek", handle, "--lines", "50", "--max-bytes", "4096")
+        first = receipt["response"]
+        history = first["history"]
+        self.assertTrue(history["available"], first)
+        self.assertTrue(history["more"], first)
+        self.assertTrue(history["next_cursor"])
+        self.assertLessEqual(history["bytes"], 4096)
+        self.assertEqual(first["observation"]["activity"], "working")
+        self.assertIn("history-first-", "\n".join(history["rows"]))
+        self.assertFalse(first.get("rows"))
+        control.write_text("history:second")
+        self.until(lambda: any(e.get("batch") == "second" for e in self.events()))
+        pages = [history]
+        cursor = history["next_cursor"]
+        for _ in range(12):
+            if not cursor:
+                break
+            _, receipt = self.session("peek", handle, "--before", cursor, "--lines", "50")
+            page = receipt["response"]["history"]
+            self.assertEqual(page["snapshot_id"], history["snapshot_id"])
+            self.assertEqual(page["end"], pages[-1]["start"])
+            self.assertNotIn("history-second-", "\n".join(page["rows"]))
+            self.assertLessEqual(page["bytes"], 4096)
+            self.assertEqual(receipt["response"]["observation"]["activity"], "working")
+            pages.append(page)
+            cursor = page.get("next_cursor")
+        self.assertFalse(cursor, "bounded snapshot did not finish paging")
+        self.assertEqual(pages[-1]["start"], 0)
+        _, receipt = self.session("peek", handle, "--lines", "500", "--max-bytes", "128", "--raw")
+        bounded = receipt["response"]["history"]
+        self.assertLessEqual(bounded["bytes"], 128)
+        self.assertTrue(bounded["truncated"] or bounded["more"])
+        other = self.start("claude-code", "different-history")["handle"]
+        result, _ = self.session("peek", other, "--before", history["next_cursor"], check=False)
+        self.assertNotEqual(result.returncode, 0)
+        result, _ = self.session("peek", handle, "--before", "not-a-cursor", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual([e for e in self.events() if e["event"] == "message"], before_messages)
+        current = self.peek_activity(handle, "working")
+        self.assertNotIn("history-first-", "\n".join(current["rows"]))
+
     def test_watcher_recovers_current_state_and_retains_receipt(self):
         handle = self.start("claude-code", "watcher")["handle"]
         self.until(lambda: any(e["event"] == "started" for e in self.events()))
@@ -274,13 +333,16 @@ class ManagedSessionIntegration(unittest.TestCase):
         peek = self.peek_activity(handle, "idle")
         self.assertEqual(peek["observation"]["activity"], "idle", peek)
         cursor = self.run_command([str(REPO / "cli/lore"), "session", "events", "--cursor-only"]).stdout.strip()
-        args = [str(REPO / "cli/lore"), "coordinate", "watch", "--durable", "--owner-pid", str(os.getpid()),
+        args = [str(REPO / "cli/lore"), "coordinate", "watch", "--compact", "--owner-pid", str(os.getpid()),
                 "--timeout", "1", "--pending-stale", "0", "--json"]
         first = self.run_command(args + ["--since", cursor], timeout=30)
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         wake = json.loads(first.stdout)
         self.assertEqual(wake["outcome"], "current_delta", wake)
         self.assertEqual(wake["tier"], "confirmed", wake)
+        self.assertLessEqual(len(first.stdout.encode()), 8192)
+        self.assertNotIn('"rows":', first.stdout)
+        self.assertNotIn('"ansi":', first.stdout)
         second = self.run_command(args, timeout=30)
         replay = json.loads(second.stdout)
         self.assertEqual(replay["wake_id"], wake["wake_id"])
@@ -291,6 +353,11 @@ class ManagedSessionIntegration(unittest.TestCase):
         duplicate = self.run_command(ack_args)
         self.assertEqual(duplicate.returncode, 0, duplicate.stdout + duplicate.stderr)
         self.assertTrue(json.loads(duplicate.stdout)["wake_receipt"]["acknowledged_at"])
+        expanded = self.run_command(ack_args + ["--full-evidence"])
+        self.assertEqual(expanded.returncode, 0, expanded.stdout + expanded.stderr)
+        exact = json.loads(expanded.stdout)["wake_receipt"]["historical_payload"]
+        self.assertEqual(exact["outcome"], "current_delta")
+        self.assertTrue(exact["current_observations"]["current"][0]["peek"]["rows"])
         quiet = self.run_command(args, timeout=30)
         self.assertEqual(quiet.returncode, 2, quiet.stdout + quiet.stderr)
         quiet_wake = json.loads(quiet.stdout)

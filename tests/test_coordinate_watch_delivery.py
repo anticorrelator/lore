@@ -37,6 +37,81 @@ class WatchDelivery(unittest.TestCase):
         value.update(fields)
         return value
 
+    def test_compact_many_peers_and_unicode_stays_bounded_without_losing_evidence(self):
+        rows = []
+        for i in range(60):
+            screen = peek('blocked')
+            screen['rows'] = ['retained-screen-' + str(i) + '界' * 10000]
+            screen['ansi'] = 'retained-ansi'
+            screen['modal'] = {'title': 'decision' + '😀' * 1000, 'answerable': True,
+                               'selected': 1, 'options': [{'number': j, 'label': 'option' + '界' * 500} for j in range(30)]}
+            rows.append({'slug': 'task--w' + str(i), 'peek': screen, 'observation': screen['observation']})
+        original = self.payload(outcome='current_delta', matched=None, current_delta=rows,
+                                current_observations={'current': rows, 'delta': rows, 'complete': True})
+        wake = self.delivery.publish(original, self.identity, 0)
+        before = self.path.read_bytes()
+        compact = m.compact_wake(wake)
+        self.assertLessEqual(len(json.dumps(compact, ensure_ascii=True, indent=2).encode()) + 1, 8192)
+        self.assertGreater(compact['omitted']['sessions'], 0)
+        self.assertGreater(compact['omitted']['strings_truncated'], 0)
+        self.assertNotIn('retained-screen-', json.dumps(compact))
+        self.assertNotIn('retained-ansi', json.dumps(compact))
+        self.assertEqual(compact['full_evidence']['wake_id'], wake['wake_id'])
+        self.assertEqual(self.path.read_bytes(), before)
+        receipt = m.wake_receipt(self.kdir, compact['wake_id'])
+        self.assertEqual(receipt['historical_payload'], original)
+        self.assertIsNone(receipt['acknowledged_at'])
+        self.assertLessEqual(len(json.dumps(m.compact_receipt(receipt), ensure_ascii=True, indent=2).encode()), 8192)
+        self.assertEqual(self.delivery.pending()['wake_id'], wake['wake_id'])
+
+    def test_compact_modal_options_are_explicitly_partial(self):
+        screen = peek('blocked')
+        screen['modal'] = {'title': 'Choose a destination', 'answerable': True, 'selected_option': 2, 'matcher': 'permission-menu',
+                           'options': [{'number': j, 'label': 'choice ' + str(j)} for j in range(9)]}
+        current = {'current': [{'slug': 'task--w1', 'peek': screen}], 'complete': True}
+        wake = self.delivery.publish(self.payload(matched={'event': 'modal_blocked', 'slug': 'task--w1'}, current_observations=current), self.identity, 0)
+        compact = m.compact_wake(wake)
+        modal = compact['sessions'][0]['modal']
+        self.assertEqual(modal['title'], 'Choose a destination')
+        self.assertEqual(modal['selected_option'], 2)
+        self.assertEqual(modal['matcher'], 'permission-menu')
+        self.assertEqual(modal['options_total'], 9)
+        self.assertEqual(modal['options_omitted'], 5)
+        self.assertEqual(len(modal['options']), 4)
+        self.assertTrue(compact['sessions'][0]['observation']['fresh'])
+        self.assertEqual(compact['sessions'][0]['observation']['generation'], 'generation-a')
+
+    def test_compact_revalidates_freshness_before_presenting_confirmed_park(self):
+        current = {'current': [{'slug': 'task--w1', 'peek': peek()}], 'complete': True}
+        wake = self.delivery.publish(self.payload(matched={'event': 'needs_input', 'slug': 'task--w1'}, current_observations=current), self.identity, 0)
+        with patch.object(m.time, 'time', return_value=time.time() + 10):
+            compact = m.compact_wake(wake)
+        self.assertEqual(compact['tier'], 'advisory')
+        self.assertFalse(compact['sessions'][0]['observation']['fresh'])
+        self.assertEqual(compact['sessions'][0]['observation']['activity'], 'unknown')
+
+    def test_compact_abbreviated_identifiers_are_explicitly_marked(self):
+        slug = 'task-' + 'x' * 1000 + '--w1'
+        screen = peek()
+        screen['slug'] = slug
+        screen['observation']['session_id'] = 'id-' + 'x' * 1000
+        original = self.payload(matched={'event': 'closed', 'slug': slug}, current_observations={'current': [{'slug': slug, 'peek': screen}]})
+        compact = m.compact_wake(self.delivery.publish(original, self.identity, 0))
+        self.assertTrue(compact['matched']['slug_truncated'])
+        self.assertTrue(compact['sessions'][0]['slug_truncated'])
+        self.assertTrue(compact['sessions'][0]['observation']['session_id_truncated'])
+        self.assertNotEqual(compact['sessions'][0]['slug'], slug)
+
+    def test_compact_quiet_omits_unchanged_session_bodies(self):
+        current = {'current': [{'slug': f'task--w{i}', 'peek': peek('working')} for i in range(60)], 'complete': True}
+        wake = self.delivery.publish(self.payload(outcome='timeout', tier='quiet', matched=None, current_observations=current), self.identity, 600)
+        compact = m.compact_wake(wake)
+        self.assertNotIn('sessions', compact)
+        self.assertEqual(compact['coverage']['observed_sessions'], 60)
+        self.assertEqual(compact['omitted']['sessions'], 60)
+        self.assertLess(len(json.dumps(compact).encode()), 1500)
+        self.assertIsNone(self.delivery.pending())
+
     def test_working_with_input_eligibility_does_not_confirm_park(self):
         result = m.classify({'event': 'needs_input'}, peek('working'))
         self.assertEqual(result['tier'], 'advisory')
@@ -205,6 +280,58 @@ class WatchCommands(unittest.TestCase):
         with (self.kdir / '_sessions/events.jsonl').open('w') as stream:
             for i, row in enumerate(rows):
                 stream.write(json.dumps(dict(row, event_id=str(i), ts=m.timestamp())) + '\n')
+
+    def test_compact_notification_is_retained_and_full_receipt_is_exact(self):
+        self.journal([{'event': 'closed', 'slug': 'task--w1', 'request_id': 'r1', 'links': {'diagnostic': 'omitted evidence ' * 1000}}])
+        _, first = self.watch('--compact', '--since', '0')
+        self.assertEqual(first['presentation'], 'compact')
+        _, replay = self.watch('--compact')
+        self.assertEqual(first['wake_id'], replay['wake_id'])
+        self.assertNotIn('omitted evidence', json.dumps(first))
+        state = m.read(next((self.kdir / '_coordination').glob('watch-delivery-*.json')))
+        self.assertIsNone(state['wakes'][0].get('acknowledged_at'))
+        argv = ['bash', str(ROOT / 'scripts/coordinate-status.sh'), '--kdir', str(self.kdir), '--wake-id', first['wake_id'], '--json']
+        result = subprocess.run(argv, env=self.env, text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('buckets', json.loads(result.stdout))
+        receipt = json.loads(result.stdout)['wake_receipt']
+        self.assertEqual(receipt['payload']['presentation'], 'compact')
+        self.assertNotIn('historical_payload', receipt)
+        pointer = first['full_evidence']['argv']
+        self.assertEqual(pointer[pointer.index('--kdir') + 1], str(self.kdir.resolve()))
+        other_store = self.kdir / 'different-store'
+        other_store.mkdir()
+        full = subprocess.run(['bash', str(ROOT / 'scripts/coordinate-status.sh'), *pointer[3:]],
+                              cwd=other_store, env=dict(self.env, LORE_KNOWLEDGE_DIR=str(other_store)), text=True, capture_output=True, timeout=30)
+        self.assertEqual(full.returncode, 0, full.stderr)
+        self.assertEqual(set(json.loads(full.stdout)), {'schema_version', 'wake_receipt'})
+        self.assertEqual(json.loads(full.stdout)['wake_receipt']['historical_payload'], state['wakes'][0]['payload'])
+        self.assertTrue(m.read(next((self.kdir / '_coordination').glob('watch-delivery-*.json')))['wakes'][0]['acknowledged_at'])
+        _, quiet = self.watch('--compact')
+        self.assertNotEqual(first['wake_id'], quiet['wake_id'])
+
+    def test_durable_wake_shaped_emits_one_compact_envelope(self):
+        self.journal([{'event': 'closed', 'slug': 'task--w1', 'request_id': 'r1'}])
+        result = subprocess.run(['bash', str(ROOT / 'scripts/coordinate-watch.sh'), '--kdir', str(self.kdir),
+                                 '--owner-pid', str(os.getpid()), '--durable', '--wake-shaped', '--timeout', '0',
+                                 '--pending-stale', '0', '--reconcile-budget', '0', '--since', '0'],
+                                env=self.env, text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, '')
+        compact = json.loads(result.stderr)
+        self.assertEqual(compact['presentation'], 'compact')
+        self.assertLessEqual(len(result.stderr.encode()), 8192)
+        self.assertIsNone(m.wake_receipt(self.kdir, compact['wake_id'])['acknowledged_at'])
+
+    def test_compact_requires_owner_and_full_evidence_requires_exact_receipt(self):
+        result = subprocess.run(['bash', str(ROOT / 'scripts/coordinate-watch.sh'), '--kdir', str(self.kdir), '--compact'],
+                                env=self.env, text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('owner', result.stderr)
+        result = subprocess.run(['bash', str(ROOT / 'scripts/coordinate-status.sh'), '--kdir', str(self.kdir), '--full-evidence'],
+                                env=self.env, text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--wake-id', result.stderr)
 
     def test_shell_lost_output_and_explicit_status_receipt(self):
         self.journal([{'event': 'closed', 'slug': 'task--w1', 'request_id': 'r1'}])

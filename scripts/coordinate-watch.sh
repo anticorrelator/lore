@@ -8,7 +8,7 @@ usage() {
   cat <<'EOF'
 Usage: coordinate-watch.sh [--arc SLUG]... [--until EVENTS] [--since CURSOR]
        [--timeout SECONDS] [--owner-pid PID | --owner-tmux NAME]
-       [--tmux-server NAME] [--durable] [--wake-shaped] [--kdir PATH] [--json]
+       [--tmux-server NAME] [--durable] [--compact] [--wake-shaped] [--kdir PATH] [--json]
        [--reconcile-interval SECONDS] [--reconcile-budget SECONDS]
        [--peek-timeout SECONDS] [--pending-stale SECONDS] [--spawn-gap SECONDS]
 
@@ -24,6 +24,9 @@ retry on the heartbeat cadence; new facts can wake promptly. Raw calls without
 current lifecycle observation determines activity.
 
 Exit 0: event/advisory; 2: quiet heartbeat; 3: owner gone; 4: reader failure.
+--compact implies --durable and requires an owner handle. Its notification is
+bounded to 8KiB, with omitted counts and an exact full-evidence receipt pointer.
+Durable --wake-shaped defaults to compact and emits only on stderr.
 --wake-shaped sends re-armable output to stderr with exit 2. It makes no worker
 input and does not itself provide a harness continuation capability.
 EOF
@@ -41,6 +44,7 @@ OWNER_TMUX=""
 TMUX_SERVER="lore-tui"
 WAKE_SHAPED=0
 DURABLE=0
+COMPACT=0
 RECONCILE_INTERVAL=15
 RECONCILE_BUDGET=8
 KDIR_OVERRIDE=""
@@ -65,6 +69,7 @@ while [[ $# -gt 0 ]]; do
     --owner-tmux) OWNER_TMUX="${2:-}"; shift 2 ;;
     --tmux-server) TMUX_SERVER="${2:-}"; shift 2 ;;
     --wake-shaped) WAKE_SHAPED=1; shift ;;
+    --compact) COMPACT=1; DURABLE=1; shift ;;
     --durable) DURABLE=1; shift ;;
     --reconcile-interval) RECONCILE_INTERVAL="${2:-}"; shift 2 ;;
     --reconcile-budget) RECONCILE_BUDGET="${2:-}"; shift 2 ;;
@@ -86,6 +91,8 @@ fail() {
   fi
   die "$msg"
 }
+
+if [[ $WAKE_SHAPED -eq 1 && $DURABLE -eq 1 ]]; then COMPACT=1; fi
 
 command -v jq &>/dev/null || fail "jq is required but not found on PATH"
 command -v python3 &>/dev/null || fail "python3 is required but not found on PATH"
@@ -342,6 +349,9 @@ emit_wake() {
   [[ "$cursor" == "null" ]] || write_cursor_file "$cursor"
   printf '%s' "$payload" | python3 "$WATCH_HELPER" consume --path "$OBSERVATION_FILE" >/dev/null || fail "could not commit observation delta"
 
+  if [[ $COMPACT -eq 1 ]]; then
+    emit_compact "$payload" "$code"
+  fi
   if [[ $JSON_MODE -eq 1 ]]; then
     printf '%s\n' "$payload"
   else
@@ -636,6 +646,18 @@ emit_current_delta() {
   fi
 }
 
+emit_compact() {
+  local payload="$1" code="$2"
+  payload="$(printf '%s' "$payload" | python3 "$WATCH_HELPER" compact)" || fail "could not render compact wake; full evidence remains retained"
+  if [[ $WAKE_SHAPED -eq 1 ]]; then
+    printf '%s\n' "$payload" >&2
+    case "$code" in 0|2) code=2 ;; esac
+  else
+    printf '%s\n' "$payload"
+  fi
+  exit "$code"
+}
+
 replay_pending() {
   [[ $DURABLE -eq 1 ]] || return 0
   local payload outcome code=0
@@ -643,6 +665,7 @@ replay_pending() {
   [[ "$payload" != "null" ]] || return 0
   outcome="$(printf '%s' "$payload" | jq -r '.outcome')"
   [[ "$outcome" == "timeout" ]] && code=2
+  if [[ $COMPACT -eq 1 ]]; then emit_compact "$payload" "$code"; fi
   if [[ $JSON_MODE -eq 1 ]]; then printf '%s\n' "$payload"; else jq -cn --argjson wake "$payload" '{wake:$wake}'; fi
   echo "[coordinate] pending receipt: $(printf '%s' "$payload" | jq -r '.wake_id'); acknowledge with coordinate status --wake-id after reading" >&2
   if [[ $WAKE_SHAPED -eq 1 ]]; then printf '%s\n' "$payload" >&2; code=2; fi

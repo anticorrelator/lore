@@ -722,3 +722,9 @@ kept for provenance. Live wants stay in SKILL.md.
   86s vs the original 18 min. The interim seat idiom (close it yourself on
   `close_failed` + terminus narration at a resting composer) stays live until running
   TUI instances rebuild with the retry ladder.
+
+### Bounded observation and history
+
+`lore session peek <handle> --summary --json` returns current observation without terminal bulk. Keep ordinary monitoring at this size; use `--lines N` with optional `--max-bytes N` for an explicit retained-history page, then `--before <cursor>` to read earlier pages of the same snapshot. An expired cursor requires a fresh history request. Managed responses nest the live observation and separate history under `response`.
+
+Installed durable wakes are compact and retain full evidence behind `lore coordinate status --wake-id <id> --full-evidence --receipt-only`. Manual `coordinate watch --compact --owner-pid <owner> --json` uses the same compact durable delivery. Compact output names omitted facts; expand the particular evidence needed for a decision, or delegate a large historical investigation with a bounded question. Existing worker artifacts remain the result surface, so this adds no recurring reporting duty or messaging subsystem.

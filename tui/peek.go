@@ -70,6 +70,9 @@ func respondPeekCmd(sessionsDir, requestID string, resp session.PeekResponse) te
 // request, classifies readiness with the same gate the send path uses, and
 // dispatches the response write-back. The screen read runs here in Update.
 func (m model) handlePeekRequestScan(msg peekRequestScanMsg) (model, tea.Cmd) {
+	if m.peekHistory != nil {
+		m.peekHistory.expire(time.Now())
+	}
 	diagnosticCmd := appendDiagnosticsCmd(m.sessionsDir, msg.diagnostics)
 	if len(msg.matched) == 0 {
 		return m, diagnosticCmd
@@ -82,7 +85,7 @@ func (m model) handlePeekRequestScan(msg peekRequestScanMsg) (model, tea.Cmd) {
 		if m.pendingPeek[pr.RequestID] {
 			continue
 		}
-		panel, ok := m.sessionPanels[pr.Slug]
+		_, ok := m.sessionPanels[pr.Slug]
 		if !ok {
 			continue
 		}
@@ -91,35 +94,13 @@ func (m model) handlePeekRequestScan(msg peekRequestScanMsg) (model, tea.Cmd) {
 		}
 		m.pendingPeek[pr.RequestID] = true
 
-		framework := m.sessionHarness(pr.Slug)
-		now := time.Now()
-		obs, snap, state := m.snapshotObservation(pr.Slug, now)
-		resp := session.PeekResponse{RequestID: pr.RequestID, Slug: pr.Slug, CapturedAt: now.UTC().Format(time.RFC3339Nano), Framework: framework, Observation: obs, Ready: obs.CanAcceptInput, Rows: peekRows(framework, snap), Screen: session.PeekScreen{Source: "terminal-emulator", Width: int(snap.Columns), Height: len(snap.Rows), Scope: "viewport", Truncated: false}}
-		if last := panel.LastOutputTime(); !last.IsZero() {
-			resp.Screen.LastOutputAt = last.UTC().Format(time.RFC3339Nano)
+		if pr.Lines != 0 || pr.Before != "" || pr.MaxBytes != 0 || pr.Summary {
+			var cmd tea.Cmd
+			m, cmd = m.handleExtendedPeek(pr)
+			cmds = append(cmds, cmd)
+			continue
 		}
-		resp.BlockedReason = obs.InputBlockedReason
-		if !obs.Fresh {
-			resp.BlockedReason = sendReasonInternal
-		}
-
-		if state.interactive {
-			resp.Modal = &session.PeekModal{Signature: state.numberedModal, SelectedOption: state.selectedOption, Matcher: state.interactiveReason, Answerable: state.numberedModal != nil && state.selectedOption > 0}
-			if state.numberedModal != nil {
-				resp.Modal.Title = state.numberedModal.Title
-				for _, option := range state.numberedModal.Options {
-					resp.Modal.Options = append(resp.Modal.Options, session.PeekModalOption{Number: option.Number, Label: option.Label})
-				}
-			} else if framework == "opencode" {
-				resp.Modal.Title = "Permission required"
-				for _, label := range []string{"Allow once", "Allow always", "Reject"} {
-					resp.Modal.Options = append(resp.Modal.Options, session.PeekModalOption{Label: label})
-				}
-			}
-		}
-		if pr.Raw {
-			resp.ANSI = snap.ANSI
-		}
+		resp := m.peekSnapshot(pr.Slug, pr.RequestID, pr.Raw)
 
 		cmds = append(cmds, respondPeekCmd(m.sessionsDir, pr.RequestID, resp))
 	}
@@ -136,4 +117,39 @@ func (m model) handlePeekResponded(msg peekRespondedMsg) (model, tea.Cmd) {
 		m.flashErr = compactErr("session peek", msg.err)
 	}
 	return m, nil
+}
+
+func (m model) peekSnapshot(slug, requestID string, raw bool) session.PeekResponse {
+	panel := m.sessionPanels[slug]
+	framework := m.sessionHarness(slug)
+	now := time.Now()
+	obs, snap, state := m.snapshotObservation(slug, now)
+	resp := session.PeekResponse{RequestID: requestID, Slug: slug, CapturedAt: now.UTC().Format(time.RFC3339Nano), Framework: framework, Observation: obs, Ready: obs.CanAcceptInput, Rows: peekRows(framework, snap), Screen: session.PeekScreen{Source: "terminal-emulator", Width: int(snap.Columns), Height: len(snap.Rows), Scope: "viewport", Truncated: false}}
+	if last := panel.LastOutputTime(); !last.IsZero() {
+		resp.Screen.LastOutputAt = last.UTC().Format(time.RFC3339Nano)
+	}
+	resp.BlockedReason = obs.InputBlockedReason
+	if !obs.Fresh {
+		resp.BlockedReason = sendReasonInternal
+	}
+
+	if state.interactive {
+		resp.Modal = &session.PeekModal{Signature: state.numberedModal, SelectedOption: state.selectedOption, Matcher: state.interactiveReason, Answerable: state.numberedModal != nil && state.selectedOption > 0}
+		if state.numberedModal != nil {
+			resp.Modal.Title = state.numberedModal.Title
+			for _, option := range state.numberedModal.Options {
+				resp.Modal.Options = append(resp.Modal.Options, session.PeekModalOption{Number: option.Number, Label: option.Label})
+			}
+		} else if framework == "opencode" {
+			resp.Modal.Title = "Permission required"
+			for _, label := range []string{"Allow once", "Allow always", "Reject"} {
+				resp.Modal.Options = append(resp.Modal.Options, session.PeekModalOption{Label: label})
+			}
+		}
+	}
+	if raw {
+		resp.ANSI = snap.ANSI
+	}
+
+	return resp
 }
