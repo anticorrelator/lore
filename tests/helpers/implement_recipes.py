@@ -44,7 +44,7 @@ def inventory(source):
             pending = marker.group(1)
             line = line[marker.end():]
         fence = re.match(r"\s*(`{3,}|~{3,})(.*)\s*$", line)
-        inline = re.match(r"\s*`([^`\n]+)`", line) if marker else None
+        inline = re.fullmatch(r"\s*`([^`\n]+)`\s*", line) if pending else None
         if fence:
             delimiter, info = fence.groups()
             language = info.strip().split()[0] if info.strip() else "text"
@@ -114,7 +114,9 @@ class Fixture:
         self.home, self.store, self.code = [self.root / n for n in ("home", "knowledge", "code")]
         for path in (self.home, self.store, self.code, self.root / "outputs"):
             path.mkdir()
-        self.env = {k: v for k, v in os.environ.items() if not k.startswith(("LORE_", "CLAUDE_", "CODEX_", "GIT_"))}
+        common = {"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TMP", "TEMP", "TZ",
+                  "SYSTEMROOT", "COMSPEC", "PATHEXT"}
+        self.env = {k: v for k, v in os.environ.items() if k in common}
         self.env.update(HOME=str(self.home), LORE_DATA_DIR=str(self.root / "data"),
                         LORE_KNOWLEDGE_DIR=str(self.store), LORE_FRAMEWORK="codex",
                         XDG_CONFIG_HOME=str(self.root / "config"), XDG_DATA_HOME=str(self.root / "data"),
