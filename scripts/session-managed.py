@@ -662,6 +662,14 @@ def main(argv=None):
             print('\n'.join(result.get('response', {}).get('rows', [])))
         if result.get('request_id'):
             print('request: ' + result['request_id'])
+        if args.verb == 'close' and result.get('disposition'):
+            disposition = result['disposition']
+            print('result: ' + disposition['worktree_outcome'])
+            print('cleanup: ' + ('confirmed' if disposition['cleanup_confirmed'] else 'pending'))
+            if disposition.get('result_ref'):
+                print('retained result: ' + disposition['result_ref'])
+            if disposition['composition_judgment_required']:
+                print('Integration judgment required.')
     return 1 if result.get('outcome') == 'uncertain' else (3 if result.get('outcome', '').endswith(('_refused', '_failed', '_expired', '_cancelled')) else 0)
 
 

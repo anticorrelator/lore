@@ -1146,7 +1146,7 @@ EOF
   : > "$TEST_KDIR/_sessions/events.jsonl"
   run bash "$EVENTS" --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.fold_version=="1" and .vocabulary_version=="1"'
+  echo "$output" | jq -e '.fold_version=="1" and .vocabulary_version=="2"'
 }
 
 @test "events: JSON records pair every event with its exact following row boundary" {
