@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # impl-start.sh — /implement Step 1 envelope: resolve, validate, assemble the start struct
-# Usage: bash impl-start.sh <ref> [--branch <name>] [--json]
+# Usage: bash impl-start.sh <ref> [--branch <name>] [--compiled-positions] [--json]
 #
 # Absorbs the Step 1 bookkeeping of /implement:
 #   - resolve <ref> to a canonical slug (delegates to resolve-work-ref.sh)
@@ -15,6 +15,14 @@
 #   - resolve role->model bindings (lead, worker, advisor) and the three
 #     template versions (implement SKILL.md, worker, advisor templates);
 #     each resolution failure degrades to "" with a stderr warning
+#   - with --compiled-positions, compile the worker and designer position
+#     briefs for the active framework and for every resolved worker-class or
+#     advisor target framework, and return the validated compiler
+#     descriptors under position_descriptors. The legacy template_versions
+#     keep their lead, worker, and advisor meanings beside them. Without the
+#     flag position_descriptors is null and nothing is compiled. A descriptor
+#     is a snapshot of what compiles at start; dispatch compiles its selected
+#     target again against invocation-fresh guidance and binds that.
 #
 # --branch affects fuzzy resolution (tier 5) only; the cache write always
 # uses the actual current branch.
@@ -57,11 +65,21 @@ while [[ $# -gt 0 ]]; do
       ;;
     --help|-h)
       cat >&2 <<EOF
-Usage: lore impl start <ref> [--branch <name>] [--json]
+Usage: lore impl start <ref> [--branch <name>] [--compiled-positions] [--json]
 
 Resolve a work item and return the /implement start struct: title, verbatim
 intent anchor, plan unit and unchecked-task counts, prior Tier 2 claims maps,
 role->model bindings, template versions, and branch-cache status.
+
+  --compiled-positions  also compile the worker and designer position briefs
+                        for the active framework and every resolved target
+                        framework, returning their descriptors under
+                        position_descriptors. Omit it and the struct describes
+                        the legacy templates only, with position_descriptors
+                        null. A descriptor snapshots what compiles now; the
+                        dispatch that uses it compiles again with fresh
+                        guidance, so a start descriptor is never itself a
+                        launch identity.
 
 Writes only the branch cache; makes no judgments.
 
@@ -73,7 +91,7 @@ EOF
       exit 0
       ;;
     --*)
-      _msg="Unknown flag: $1. Accepted flags are --branch and --json."
+      _msg="Unknown flag: $1. Accepted flags are --branch, --compiled-positions, and --json."
       if [[ $JSON_MODE -eq 1 ]]; then
         json_error "$_msg"
       fi
@@ -100,7 +118,7 @@ if [[ -z "$REF" ]]; then
     json_error "Missing required argument: <ref>"
   fi
   echo "[impl] Error: Missing required argument: <ref>" >&2
-  echo "Usage: lore impl start <ref> [--branch <name>] [--json]" >&2
+  echo "Usage: lore impl start <ref> [--branch <name>] [--compiled-positions] [--json]" >&2
   exit 1
 fi
 
