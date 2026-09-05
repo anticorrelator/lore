@@ -508,7 +508,8 @@ Dispatch-attempt-id: {name}
         report = edit(report)
     if land:
         call(['bash', 'scripts/coordinate-report.sh', 'fixture', '--report-id', binding['report_id'], '--kdir', str(store)], data=report)
-    fixtures.append({'reference': reference, 'binding': binding, 'report_sha256': hashlib.sha256(report.encode()).hexdigest(), 'landed': land})
+    report_bytes = Path(binding['report_path']).read_bytes() if land else report.encode()
+    fixtures.append({'reference': reference, 'binding': binding, 'report_sha256': hashlib.sha256(report_bytes).hexdigest(), 'landed': land})
     return {'task_id': 'task-1', 'team_name': 'impl-fixture', 'task_description': report, 'position_dispatch': reference}
 
 
@@ -604,6 +605,7 @@ publication = revise()
 transcript = item / 'consultation-transcript.jsonl'
 transcript.rename(item / 'saved-transcript.jsonl')
 check('later revision cannot erase assigned consultation requirement', consult, 2, 'transcript')
+(item / 'saved-transcript.jsonl').rename(transcript)
 
 (base / 'fixtures.json').write_text(json.dumps(fixtures, indent=2) + '\n')
 (base / 'checks.json').write_text(json.dumps(checks, indent=2) + '\n')
