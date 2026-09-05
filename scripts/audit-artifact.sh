@@ -1136,7 +1136,7 @@ if dry_run_flag == "true":
 # paths. Without the _archive-aware branch, the regex would greedily capture
 # '_archive' as the slug for any archived artifact, contaminating downstream
 # routing and producing phantom stubs at $KDIR/_work/_archive/verdicts/.
-_work_match = re.search(r'/_work/([^/]+)(?:/([^/]+))?(?:/|$)', artifact_path)
+_work_match = re.search(r'/(?:_work|_archive)/([^/]+)(?:/([^/]+))?(?:/|$)', artifact_path)
 if _work_match:
     first, second = _work_match.group(1), _work_match.group(2)
     if first == "_archive" and second:

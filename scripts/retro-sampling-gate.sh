@@ -175,7 +175,7 @@ first_k = int(first_k_str)
 task_attr_raw = os.environ.get("_LORE_TASK_ATTR", "")
 
 def is_hex12(s):
-    return bool(s) and len(s) == 12 and all(c in "0123456789abcdef" for c in s)
+    return isinstance(s, str) and len(s) == 12 and all(c in "0123456789abcdef" for c in s)
 
 # This cycle's distinct routing pairs (judgment_class, worker_model).
 current_pairs = set()
@@ -186,7 +186,8 @@ def producer_versions(entries):
     for entry in entries if isinstance(entries, list) else []:
         if not isinstance(entry, dict):
             continue
-        for producer in entry.get("producer_attempts", []):
+        attempts = entry.get("producer_attempts")
+        for producer in attempts if isinstance(attempts, list) else []:
             if (isinstance(producer, dict) and producer.get("status") == "resolved"
                     and is_hex12(producer.get("template_version"))):
                 versions.add((producer.get("template_id"), producer["template_version"]))
