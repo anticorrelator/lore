@@ -369,7 +369,15 @@ journal_boundaries() {
   [ "$status" -eq 0 ]
 }
 
+write_vintage_instance() {
+  write_instance_dir "$1" "$2"
+  local row="$TEST_KDIR/_sessions/instances/$1.json"
+  jq '. + {build_time:"2026-09-05T00:00:00Z"}' "$row" > "$row.tmp"
+  mv "$row.tmp" "$row"
+}
+
 @test "request --framework writes the framework field" {
+  write_vintage_instance admission-fixture "$TEST_KDIR"
   bash "$REQUEST" --type implement --slug wi --framework codex --min-vintage 2026-07-05T12:00:00Z --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.framework == "codex"' "$pending"
@@ -439,6 +447,7 @@ journal_boundaries() {
 }
 
 @test "request --prefer-dir stores the physically-resolved directory" {
+  write_vintage_instance admission-fixture "$TEST_KDIR"
   local target; target="$(mkdir -p "$TEST_KDIR/checkout" && cd "$TEST_KDIR/checkout" && pwd -P)"
   bash "$REQUEST" --type implement --slug wi --prefer-dir "$TEST_KDIR/checkout" --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
@@ -447,6 +456,7 @@ journal_boundaries() {
 }
 
 @test "request --prefer-dir collapses a symlink to its physical target" {
+  write_vintage_instance admission-fixture "$TEST_KDIR"
   mkdir -p "$TEST_KDIR/realdir"
   ln -s "$TEST_KDIR/realdir" "$TEST_KDIR/linkdir"
   local physical; physical="$(cd "$TEST_KDIR/realdir" && pwd -P)"
@@ -457,6 +467,7 @@ journal_boundaries() {
 }
 
 @test "request --prefer-cwd captures the physically-resolved working directory" {
+  write_vintage_instance admission-fixture "$TEST_KDIR"
   mkdir -p "$TEST_KDIR/here"
   local physical; physical="$(cd "$TEST_KDIR/here" && pwd -P)"
   ( cd "$TEST_KDIR/here" && bash "$REQUEST" --type chat --prefer-cwd --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR" )
@@ -503,6 +514,7 @@ journal_boundaries() {
 }
 
 @test "each placement stance alone satisfies the requirement" {
+  write_vintage_instance admission-fixture "$TEST_KDIR"
   mkdir -p "$TEST_KDIR/dir"
   write_instance inst-a existing
   bash "$REQUEST" --type chat --target inst-a --kdir "$TEST_KDIR"
@@ -650,7 +662,7 @@ journal_boundaries() {
   mkdir -p "$TEST_KDIR/clone-a"
   local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
   write_work_item declared "$a"
-  write_instance_dir inst-a "$a"
+  write_vintage_instance inst-a "$a"
   bash "$REQUEST" --type implement --slug declared --requested-by coord-1 \
     --min-vintage 2026-07-05T12:00:00Z --anywhere --kdir "$TEST_KDIR"
   run jq -e --arg d "$a" 'select(.event=="requested")

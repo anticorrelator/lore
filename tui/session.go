@@ -623,7 +623,7 @@ func (m model) handleStreamError(msg work.StreamErrorMsg) (model, tea.Cmd) {
 		if meta.requestID != "" {
 			reason := "pty_start_failed"
 			if msg.Err != nil {
-				reason = compactErr("spawn", msg.Err)
+				reason = "spawn: " + msg.Err.Error()
 			}
 			// A refused worktree allocation is not a failed attempt: the request
 			// declared a placement this instance cannot satisfy, so retrying it here
@@ -632,7 +632,7 @@ func (m model) handleStreamError(msg work.StreamErrorMsg) (model, tea.Cmd) {
 			if errors.As(msg.Err, &refused) {
 				cmds = append(cmds, emitWorktreeRefusedCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, meta.requestID, refused.refusal.Reason, m.instanceName))
 			} else {
-				cmds = append(cmds, emitSpawnFailedCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, meta.requestID, reason, m.instanceName))
+				cmds = append(cmds, emitSpawnFailedCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, meta.requestID, reason, m.instanceName, work.IsLaunchAdmissionError(msg.Err)))
 			}
 		}
 	} else {

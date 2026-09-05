@@ -85,9 +85,10 @@ type Request struct {
 	// BuildTime is older. Filtered read-side, mirroring TargetInstance — the only
 	// difference is the comparison (temporal >= vs string ==). Absent
 	// (omit-when-empty) imposes no requirement; an instance of unknown vintage
-	// passes every requirement (additive degradation, never rejected). Pointer so
+	// cannot satisfy an explicit floor. Pointer so
 	// absent stays distinct from an explicit value.
-	MinVintage *string `json:"min_vintage,omitempty"`
+	MinVintage                  *string  `json:"min_vintage,omitempty"`
+	RequiredRuntimeCapabilities []string `json:"required_runtime_capabilities,omitempty"`
 
 	// Track is the spec depth selector carried to the descriptor's ShortMode
 	// ("short" → short-track /spec). Valid only on a spec request (enforced at
@@ -506,8 +507,11 @@ func AbandonPending(sessionsDir, id string) error {
 // TransitionEvent names one durable queue transition QueueTick performed, so the
 // caller can emit the matching journal row after the fact.
 type TransitionEvent struct {
-	RequestID string
-	Reason    string // reclaim/abandon reason; "" when not applicable
+	Slug        string
+	SessionType string
+	Initiator   string
+	RequestID   string
+	Reason      string // reclaim/abandon reason; "" when not applicable
 }
 
 // QueueTickResult reports every durable change one QueueTick made. The caller
@@ -541,7 +545,7 @@ type QueueTickResult struct {
 // running session, so the request is left pending until the slug frees). A nil
 // slugLive imposes no such gate. myVintage is this instance's build vintage
 // (BuildTime, ISO 8601 UTC), used to filter out requests whose min_vintage this
-// instance does not meet; "" means vintage-unknown, which passes every requirement.
+// instance does not meet; "" means vintage-unknown, which cannot satisfy an explicit floor.
 // myProjectDir is this instance's normalized (physically-resolved) project dir,
 // used to honor a row's prefer_project_dir grace window and to enforce its
 // required_project_dir; "" behaves as an unknown dir that matches nothing (a
@@ -558,6 +562,11 @@ func QueueTick(
 }
 
 func QueueTickForHost(sessionsDir, myName, myVintage, myProjectDir, hostKey string, liveInstances map[string]bool, hasPlanDoc func(string) bool, slugLive func(string) bool, now time.Time, reclaimAfter time.Duration) (QueueTickResult, error) {
+	return QueueTickForHostAdmission(sessionsDir, myName, myVintage, myProjectDir, hostKey, liveInstances, hasPlanDoc, slugLive, now, reclaimAfter, nil)
+}
+
+// QueueTickForHostAdmission checks the executing host before acquiring a claim.
+func QueueTickForHostAdmission(sessionsDir, myName, myVintage, myProjectDir, hostKey string, liveInstances map[string]bool, hasPlanDoc func(string) bool, slugLive func(string) bool, now time.Time, reclaimAfter time.Duration, admit func(Request) error) (QueueTickResult, error) {
 	var res QueueTickResult
 
 	claimedRows, claimedDiagnostics := ScanClaimedWithDiagnostics(sessionsDir)
@@ -620,6 +629,25 @@ func QueueTickForHost(sessionsDir, myName, myVintage, myProjectDir, hostKey stri
 			continue // eviction guard: a session for this slug is already live here;
 			// claiming would silently replace it, so leave the row pending until it frees
 		}
+		if admit != nil {
+			if err := admit(req); err != nil {
+				reason := "host admission: " + err.Error()
+				var temporary interface{ Retryable() bool }
+				if errors.As(err, &temporary) && temporary.Retryable() {
+					res.Diagnostics = append(res.Diagnostics, Diagnostic{Source: "session-admission", Path: pendingPath(sessionsDir, req.RequestID), Message: reason})
+					continue
+				}
+				req.LastError = &reason
+				won, archiveErr := ArchiveRejectedPending(sessionsDir, req)
+				if archiveErr != nil {
+					return res, archiveErr
+				}
+				if won {
+					res.Abandoned = append(res.Abandoned, TransitionEvent{RequestID: req.RequestID, Reason: reason, Slug: req.SessionSlug(), SessionType: req.Type, Initiator: req.Initiator})
+				}
+				continue
+			}
+		}
 		won, err := ClaimRequest(sessionsDir, req.RequestID)
 		if err != nil {
 			return res, fmt.Errorf("claim %q: %w", req.RequestID, err)
@@ -646,6 +674,17 @@ func QueueTickForHost(sessionsDir, myName, myVintage, myProjectDir, hostKey stri
 // temporal comparison, the requirement string equality, and the preference a
 // timing window — all read-side, no writer, no per-instance attempt state.
 func claimableBy(req Request, myName, myVintage, myProjectDir string, now time.Time) bool {
+	for _, required := range req.RequiredRuntimeCapabilities {
+		supported := false
+		for _, capability := range RuntimeCapabilities() {
+			if required == capability {
+				supported = true
+			}
+		}
+		if !supported {
+			return false
+		}
+	}
 	target := req.TargetValue()
 	if target != "" && target != myName {
 		return false
@@ -655,6 +694,14 @@ func claimableBy(req Request, myName, myVintage, myProjectDir string, now time.T
 	}
 	if !requiredDirOK(req, myProjectDir) {
 		return false
+	}
+	if req.Attempts > 0 && req.LastAttemptAt != nil {
+		if at, ok := parseVintage(*req.LastAttemptAt); ok {
+			delay := time.Duration(1<<min(req.Attempts, 5)) * time.Second
+			if now.Sub(at) < delay {
+				return false
+			}
+		}
 	}
 	return preferMatchOK(req, myProjectDir, now)
 }
@@ -699,22 +746,16 @@ func preferMatchOK(req Request, myProjectDir string, now time.Time) bool {
 	return now.Sub(requestedAt) > PreferMatchGrace
 }
 
-// vintageOK reports whether an instance whose build vintage is myVintage may
-// claim a request carrying minVintage. It refuses a claim ONLY on positive
-// evidence the instance is older: both timestamps present AND parseable AND
-// myVintage strictly before minVintage. Every uncertainty passes — an absent
-// requirement, an instance of unknown vintage, or a timestamp that fails to
-// parse — because the substrate's degradation rule is additive: a vintage-
-// unknown instance is never rejected. Both forms are parsed leniently (canonical
-// "...Z" or RFC 3339) so an offset-bearing timestamp still orders correctly.
+// vintageOK requires known, parseable runtime evidence when a floor is present.
+// Requests without a floor retain unrestricted vintage compatibility.
 func vintageOK(minVintage, myVintage string) bool {
-	if minVintage == "" || myVintage == "" {
+	if minVintage == "" {
 		return true
 	}
 	minT, ok1 := parseVintage(minVintage)
 	myT, ok2 := parseVintage(myVintage)
 	if !ok1 || !ok2 {
-		return true
+		return false
 	}
 	return !myT.Before(minT)
 }
