@@ -154,6 +154,29 @@ class ManagedSessions(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'different start intent'):
             self.start(self.args(packet='packet-b'))
 
+    def test_recovered_process_confirms_start_without_spawned_event(self):
+        manifest = dict(handle='task--w123', host_key='key', source_dir=str(self.source), state='enqueued')
+        rows = [dict(event='recovered', slug=manifest['handle'], request_id='own')]
+        with patch.object(m, 'events', return_value=rows), patch.object(m, 'owner', return_value={'instance_name': 'new'}):
+            result = m.await_outcome(self.kdir, manifest, 'own', 'start', 0)
+            self.assertEqual(m.inspect(self.kdir, manifest)['state'], 'running')
+        self.assertEqual(result['outcome'], 'recovered')
+        self.assertTrue(result['outcome_confirmed'])
+
+    def test_timeout_cannot_overwrite_concurrent_confirmed_receipt(self):
+        manifest = {'handle': 'task--w123'}
+        m.receipt(self.kdir, manifest, 'own', 'send', 'sent')
+        result = m.receipt(self.kdir, manifest, 'own', 'send', 'uncertain')
+        self.assertEqual(result['outcome'], 'sent')
+        self.assertTrue(result['outcome_confirmed'])
+
+    def test_ready_runtime_regains_a_missing_supervisor(self):
+        with patch.object(m, 'ready', return_value={'instance_name': 'alive'}), patch.object(m, 'held', return_value=False), patch.object(m, 'binary', return_value=Path('/fake/binary')), patch.object(m.subprocess, 'Popen') as launch:
+            result = m.ensure(self.kdir, 'key', str(self.source), 0)
+        self.assertEqual(result['instance_name'], 'alive')
+        launch.assert_called_once()
+        self.assertIn('_supervise', launch.call_args.args[0])
+
     def test_path_escape_rejected(self):
         for handle in ['../../task--w1', '/tmp/task--w1', 'task--w../evil']:
             with self.assertRaises(RuntimeError):

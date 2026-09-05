@@ -175,8 +175,6 @@ def ensure(kdir, key, source, timeout=45):
     while True:
         with lock(directory / 'ensure.lock'):
             status = ready(kdir, key, source)
-            if status:
-                return status
             if not held(directory / 'supervisor.lock'):
                 executable = binary(kdir)
                 directory.mkdir(parents=True, exist_ok=True)
@@ -185,6 +183,8 @@ def ensure(kdir, key, source, timeout=45):
                                       '--kdir', str(kdir), '--host-key', key, '--workspace', source,
                                       '--binary', str(executable)], stdin=subprocess.DEVNULL,
                                      stdout=log, stderr=log, start_new_session=True, close_fds=True)
+            if status:
+                return status
         if time.monotonic() >= deadline:
             raise RuntimeError(f'host readiness timed out; durable intent retained; see {directory / "host.log"}')
         time.sleep(.1)
@@ -297,6 +297,11 @@ def inspect(kdir, manifest):
 
 
 def receipt(kdir, manifest, rid, operation, outcome, **fields):
+    with lock(kdir / '_sessions/receipt-locks' / (rid + '.lock')):
+        return write_receipt(kdir, manifest, rid, operation, outcome, **fields)
+
+
+def write_receipt(kdir, manifest, rid, operation, outcome, **fields):
     row = dict(handle=manifest['handle'], request_id=rid, operation=operation,
                outcome=outcome, outcome_confirmed=outcome != 'uncertain', at=now(), **fields)
     if outcome == 'uncertain' and fields.get('event', {}).get('reason') == 'delivery-uncertain':
@@ -304,8 +309,10 @@ def receipt(kdir, manifest, rid, operation, outcome, **fields):
     if operation == 'close':
         row['disposition'] = disposition(kdir, manifest['handle'])
     path = kdir / '_sessions/receipts' / manifest['handle'] / (rid + '.json')
+    previous = read(path, {})
+    if outcome == 'uncertain' and (previous.get('outcome_confirmed') or previous.get('terminal_evidence')):
+        return previous
     if outcome == 'uncertain' and 'request' not in row:
-        previous = read(path, {})
         if previous.get('request'):
             row['request'] = previous['request']
     atomic(path, row)
@@ -460,7 +467,7 @@ def reconcile_operations(kdir, key):
 
 def await_outcome(kdir, manifest, rid, operation, timeout):
     deadline = time.monotonic() + timeout
-    terminals = {'start': {'spawned', 'request_expired', 'request_cancelled', 'request_abandoned', 'orphaned'},
+    terminals = {'start': {'spawned', 'recovered', 'request_expired', 'request_cancelled', 'request_abandoned', 'orphaned'},
                  'send': {'sent', 'send_refused', 'send_uncertain'},
                  'answer': {'answered', 'answer_refused', 'answer_uncertain'},
                  'close': {'closed', 'close_failed', 'close_refused', 'close_uncertain'}}[operation]
