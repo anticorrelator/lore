@@ -21,7 +21,8 @@ PYTEST
 }
 
 @test "each candidate CLI runs its own suite from an unrelated working directory" {
-  cd /private/tmp
+  mkdir "$BATS_TEST_TMPDIR/unrelated"
+  cd "$BATS_TEST_TMPDIR/unrelated"
   for owner in alpha beta; do
     candidate="$BATS_TEST_TMPDIR/$owner"
     run bash "$candidate/cli/lore" test protocols -k sentinel
@@ -49,7 +50,7 @@ PYTEST
 
 @test "two candidate copies execute pytest against distinct local test contents" {
   actual_path="${PATH#*:}"
-  command -v pytest >/dev/null || skip "pytest unavailable"
+  PATH="$actual_path" command -v pytest >/dev/null || skip "pytest unavailable"
   for owner in alpha beta; do
     candidate="$BATS_TEST_TMPDIR/$owner"
     cat > "$candidate/tests/protocols/test_owner.py" <<'PYTHON'
