@@ -289,7 +289,8 @@ def disposition(kdir, handle):
                 destination_path=links.get('destination_path'),
                 cleanup_confirmed=cleaned,
                 integrated=outcome == 'worktree_published',
-                composition_judgment_required=outcome in {'worktree_quarantined', 'restore_refused'},
+                composition_judgment_required=(outcome == 'restore_refused' or
+                    (outcome == 'worktree_quarantined' and latest.get('reason') != 'no_changes')),
                 reason=latest.get('reason'))
 
 

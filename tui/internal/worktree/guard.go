@@ -603,6 +603,19 @@ func canonicalExisting(path string) (string, error) {
 	return filepath.Clean(resolved), nil
 }
 
+// UnchangedSinceCapture compares session content, including the index, with its
+// allocation snapshot. Destination movement does not affect this comparison.
+func UnchangedSinceCapture(ctx context.Context, identity Identity) (bool, error) {
+	if err := ValidateIdentity(ctx, identity); err != nil {
+		return false, err
+	}
+	current, _, _, err := inspectGeneration(ctx, identity.CanonicalPath)
+	if err != nil {
+		return false, err
+	}
+	return sameContentGeneration(identity.Captured, current), nil
+}
+
 func sameContentGeneration(left, right Generation) bool {
 	return left.HeadOID == right.HeadOID && left.IndexDigest == right.IndexDigest && left.WorktreeDigest == right.WorktreeDigest
 }

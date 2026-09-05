@@ -184,6 +184,13 @@ files. The retained outcome uses `worktree_quarantined` with reason
 successful result disposition followed by `closed` after observed teardown, or
 `orphaned` during dead-owner recovery. It is not a claim that integration failed.
 
+Automatic teardown retains unchanged checkouts with reason `no_changes` only when
+HEAD, the index, and file contents match their captured generation. These results
+keep preservation refs and cleanup proofs, but require no composition judgment.
+Default waits skip that quarantine notification and still deliver the close; an
+explicit event filter can retrieve it. Source advancement does not change this
+classification, and matching file contents alone cannot hide intervening commits.
+
 Retention preserves the result ref and a binary patch before making the physical
 checkout cleanup-eligible. Snapshot commits preserve the session's committed tip
 as an ancestor, so detached commits and uncommitted changes remain recoverable

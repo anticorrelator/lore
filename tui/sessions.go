@@ -217,7 +217,14 @@ func (m model) handleManagedWorktreeQuiesced(msg managedWorktreeQuiescedMsg) (mo
 
 // retainWorktree is automatic disposition, never authorization to integrate.
 func retainWorktree(ctx context.Context, identity worktree.Identity) (worktree.PublishOutcome, error) {
-	const reason = "integration_pending: result retained for explicit integration"
+	reason := "integration_pending: result retained for explicit integration"
+	unchanged, err := worktree.UnchangedSinceCapture(ctx, identity)
+	if err != nil {
+		return worktree.PublishOutcome{Kind: worktree.OutcomeRestoreRefused, Identity: identity, Reason: err.Error()}, err
+	}
+	if unchanged {
+		reason = "no_changes"
+	}
 	publishable, _, err := worktree.MakePublishable(ctx, identity)
 	if err != nil {
 		return worktree.PublishOutcome{Kind: worktree.OutcomeRestoreRefused, Identity: identity, Reason: err.Error()}, err

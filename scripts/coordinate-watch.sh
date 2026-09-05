@@ -33,6 +33,7 @@ EOF
 }
 
 UNTIL="${SESSION_ACTIONABLE_EVENTS// /,}"
+UNTIL_EXPLICIT=0
 SINCE=""
 SINCE_SET=0
 TIMEOUT=600
@@ -59,7 +60,7 @@ SCOPE_ARCS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --arc) SCOPE_ARCS+=("${2:-}"); shift 2 ;;
-    --until) UNTIL="${2:-}"; shift 2 ;;
+    --until) UNTIL="${2:-}"; UNTIL_EXPLICIT=1; shift 2 ;;
     --since) SINCE="${2:-}"; SINCE_SET=1; shift 2 ;;
     --timeout) TIMEOUT="${2:-}"; shift 2 ;;
     --pending-stale) PENDING_STALE="${2:-}"; shift 2 ;;
@@ -400,7 +401,7 @@ emit_internal_error() {
 # discipline: the more rows a read withholds, the more a batch-end cursor loses.
 first_match_record() {
   printf '%s' "$1" | jq -c \
-    --argjson until "$UNTIL_JSON" \
+    --argjson until "$UNTIL_JSON" --argjson until_explicit "$UNTIL_EXPLICIT" \
     --argjson slugs "$SCOPE_SLUGS_JSON" \
     --argjson scoped "$SCOPED" \
     "$SESSION_SCOPE_JQ_PREDICATE"'
@@ -412,6 +413,7 @@ first_match_record() {
           ([ $records[] | select(.next_cursor > $candidate.next_cursor and .event.slug == $candidate.event.slug)
              | select(.event.event == "resumed" or .event.event == "closed" or .event.event == "recovered" or .event.event == "spawned") ] | length == 0))
       | select(.event.event as $e | $until | index($e))
+      | select($until_explicit == 1 or .event.event != "worktree_quarantined" or .event.reason != "no_changes")
       | (.event | scope_state($scoped; $slugs)) as $scope
       | select($scope.matched)
       | . + {scope: $scope}

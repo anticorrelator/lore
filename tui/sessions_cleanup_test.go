@@ -289,3 +289,91 @@ func TestOrdinaryCloseRetainsCommittedAndDirtyResultsWithoutIntegration(t *testi
 		}
 	}
 }
+
+func TestRetainUnchangedClassification(t *testing.T) {
+	for _, mode := range []string{"advanced-main", "inherited-dirty", "changed-index", "changed-files", "net-zero-commits"} {
+		t.Run(mode, func(t *testing.T) {
+			_, repo, _ := closedSessionWorktree(t, "seed")
+			git := func(path string, args ...string) string {
+				t.Helper()
+				out, err := exec.Command("git", append([]string{"-C", path}, args...)...).CombinedOutput()
+				if err != nil {
+					t.Fatalf("git %v: %v: %s", args, err, out)
+				}
+				return strings.TrimSpace(string(out))
+			}
+			write := func(path, value string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte(value), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "inherited-dirty" {
+				write(filepath.Join(repo, "tracked.txt"), "staged\n")
+				git(repo, "add", "tracked.txt")
+				write(filepath.Join(repo, "tracked.txt"), "unstaged\n")
+				write(filepath.Join(repo, "untracked.txt"), "inherited\n")
+			}
+			ctx := context.Background()
+			identity, err := worktree.Create(ctx, repo, filepath.Join(t.TempDir(), "checkout"), "unchanged")
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity, err = worktree.Transition(identity, worktree.StateActive)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := identity.CanonicalPath
+			switch mode {
+			case "advanced-main":
+				write(filepath.Join(repo, "advanced.txt"), "new source\n")
+				git(repo, "add", ".")
+				git(repo, "commit", "-m", "advance source")
+			case "changed-index":
+				original := git(path, "show", "HEAD:tracked.txt") + "\n"
+				write(filepath.Join(path, "tracked.txt"), "index only\n")
+				git(path, "add", "tracked.txt")
+				write(filepath.Join(path, "tracked.txt"), original)
+			case "changed-files":
+				write(filepath.Join(path, "new.txt"), "output\n")
+			case "net-zero-commits":
+				write(filepath.Join(path, "new.txt"), "output\n")
+				git(path, "add", ".")
+				git(path, "commit", "-m", "add")
+				git(path, "revert", "--no-edit", "HEAD")
+			}
+			head := git(repo, "rev-parse", "HEAD")
+			status := git(repo, "diff", "--binary", "HEAD")
+			index, err := os.ReadFile(filepath.Join(repo, ".git", "index"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tip := git(path, "rev-parse", "HEAD")
+			outcome, err := retainWorktree(ctx, identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantUnchanged := mode == "advanced-main" || mode == "inherited-dirty"
+			if (outcome.Reason == "no_changes") != wantUnchanged {
+				t.Fatalf("reason = %q for %s", outcome.Reason, mode)
+			}
+			if outcome.Kind != worktree.OutcomeWorktreeQuarantined {
+				t.Fatalf("outcome = %+v", outcome)
+			}
+			proof, err := worktree.CleanupSessionCheckout(ctx, outcome.Identity)
+			if err != nil || !proof.Verified {
+				t.Fatalf("cleanup: %+v %v", proof, err)
+			}
+			if got, err := os.ReadFile(filepath.Join(repo, ".git", "index")); err != nil || string(got) != string(index) {
+				t.Fatal("source index changed")
+			}
+			if git(repo, "rev-parse", "HEAD") != head || git(repo, "diff", "--binary", "HEAD") != status {
+				t.Fatal("source changed")
+			}
+			git(repo, "merge-base", "--is-ancestor", tip, outcome.Artifact.OID)
+			if mode == "inherited-dirty" && (git(repo, "show", outcome.Artifact.Ref+":untracked.txt") != "inherited" || git(repo, "show", outcome.Artifact.Ref+":tracked.txt") != "unstaged") {
+				t.Fatal("inherited content lost")
+			}
+		})
+	}
+}
