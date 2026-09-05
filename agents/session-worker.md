@@ -77,6 +77,7 @@ if [[ "$DISPATCH_ROUTE" == "compiled" ]]; then
     --slug "$DERIVED_SLUG" \
     --model "$WORKER_MODEL" \
     --framework "$FRAMEWORK" \
+    --anywhere \
     "${PLACEMENT[@]}" \
     --yes \
     --initiator agent \
@@ -86,6 +87,7 @@ else
     --type worker \
     --slug "$DERIVED_SLUG" \
     --model "$WORKER_MODEL" \
+    --anywhere \
     --yes \
     --initiator agent \
     --context "$BRIEF_FILE"
@@ -94,10 +96,11 @@ ENQUEUE_RC=$?
 ```
 
 - `--type worker` selects the worker session arm; `--slug "$DERIVED_SLUG"` is required for this type (the derived slug is the session identity, so there is no null-slug worker request).
+- `--anywhere` is the placement stance, and the parser refuses a request that states none (`missing placement stance`), because an unstated placement used to be silently routed to any instance and the writer now wants that said out loud. It means "this caller adds no placement of its own"; it does not mean "ignore the item's". The hard filter still comes from the work item in the next bullet, is derived rather than passed, and outranks the stance: the row records `placement_stance: required_dir` when the item declares a checkout, and `--anywhere` writes no queue field of its own. The other stances name an instance or a preferred directory, which this dispatch has no reason to do; a preferred directory the item does not declare would be a second, softer placement beside the item's hard one.
 - On the compiled form, `--framework` and `--model` are still passed explicitly. The context does name a framework — a pending preparation carries it, and a fixed reference's producer does — and admission checks the flag against it, refusing a mismatch rather than reading the framework out of the file; the model is not in the context at all, and the claiming host needs it to spawn. Admission validates a pending preparation — bindings against the canonical packet, descriptor against its retained compilation, guidance identity, wrapper source and composition, activation — and refuses the request with the reason on stderr when any fails; nothing is published at enqueue, and the host inserts the directory it allocates. A fixed reference is already published at a manager-owned directory; the worktree id and directory pair travels on the request so the host can revalidate that exact root, and the pair is refused together with a pending preparation because a pending root belongs to the host. A published attempt is tied to its root, so a context whose attempt was already published under another directory is not re-enqueued; it gets a fresh attempt.
 - `--yes` runs the session autonomously — it suppresses the session's own confirmation gates so the brief runs unattended. It does not weaken any evaluation the session performs; it only closes the interactive prompts a queue-spawned session cannot answer.
 - `--initiator agent` marks the session agent-initiated, which arms best-effort auto-close after the independent `terminus_reached` row. A later `closed` or `close_failed` is cleanup evidence, not completion.
-- Placement needs no flag from you. A slugged request derives it from the base work item's declared source checkout (`source_checkout`, seeded by `lore work source-checkout`) and writes it as the hard `required_project_dir` filter: only an instance whose project directory equals it may claim, and every other live instance leaves the request pending. An item that cannot be placed is refused at write time with the repair named on stderr — no declaration on the item, a declared path that no longer resolves, or a checkout no live instance serves. That refusal is a non-zero `ENQUEUE_RC`: report degraded (§5) exactly as for any other write-time refusal, and leave the repair to {{team_lead}} — a placement flag added to route around the refusal defeats the declaration.
+- Placement itself needs no flag from you beyond the stance. A slugged request derives it from the base work item's declared source checkout (`source_checkout`, seeded by `lore work source-checkout`) and writes it as the hard `required_project_dir` filter: only an instance whose project directory equals it may claim, and every other live instance leaves the request pending. An item that cannot be placed is refused at write time with the repair named on stderr — no declaration on the item, a declared path that no longer resolves, or a checkout no live instance serves. That refusal is a non-zero `ENQUEUE_RC`: report degraded (§5) exactly as for any other write-time refusal, and leave the repair to {{team_lead}} — a placement flag added to route around the refusal defeats the declaration.
 - If your instance fleet may include TUI builds that predate worker-session support or the placement filter, add `--min-vintage <commit-ish|ISO-8601>` naming the newer of the builds that introduced them: a pre-worker instance never claims a request it cannot spawn, and a pre-placement instance cannot see `required_project_dir`, so without the floor it would claim a declaring request it should refuse.
 
 A non-zero `ENQUEUE_RC` means the request was refused at write time (a field validation error, named on stderr) — nothing was enqueued. Report degraded (§5) and stop; {{team_lead}} re-dispatches as a same-harness worker.
