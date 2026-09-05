@@ -24,6 +24,15 @@ rows is how schema drift is detected.
 Packets accept schema versions "1" and "2"; assessments retain version "1".
 Version 2 binds task packets to a committed revision and dispatch attempt.
 Unknown extra fields remain accepted.
+
+Synthesis. A row at delivery_stage "assembled" is a candidate set: one
+retrieval pass, nobody's judgment yet. A row at "synthesized" supersedes it
+under the same packet_id and carries a `synthesis` object — who judged it,
+which delivered paths were kept, which were dropped and why, which were added
+and why. Dropped and kept are disjoint; every dropped or added path names a
+reason. A row at any other stage carries no `synthesis`. A dispatcher that
+hands an assembled packet on records a `synthesis_waiver` (who, why) instead;
+readers treat an assembled packet with neither as not ready to hand on.
 """
 
 from __future__ import annotations
@@ -35,7 +44,7 @@ import os
 import sys
 
 PACKET_SCOPES = ("session", "task")
-DELIVERY_STAGES = ("assembled", "delivered")
+DELIVERY_STAGES = ("assembled", "synthesized", "delivered")
 # Union of the two delivery surfaces' vocabularies: the dispatch manifest
 # renders full|snippet|backlink (pk_manifest.py degradation ladder); the
 # session loader renders full|summary|skipped (load-knowledge.sh budget
@@ -117,6 +126,69 @@ def _check_delivered_entry(entry, idx: int, errors: list[str]) -> None:
         errors.append(f"{prefix}.trust.correction_recency must be a non-empty string or null")
 
 
+def _check_reasoned_paths(items, name: str, errors: list[str]) -> list[str]:
+    paths: list[str] = []
+    if not isinstance(items, list):
+        errors.append(f"synthesis.{name} must be an array")
+        return paths
+    for idx, item in enumerate(items):
+        prefix = f"synthesis.{name}[{idx}]"
+        if not isinstance(item, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        if not _is_nonempty_str(item.get("path")):
+            errors.append(f"{prefix}.path must be a non-empty string")
+        else:
+            paths.append(item["path"])
+        if not isinstance(item.get("reason"), str) or item["reason"].strip() == "":
+            errors.append(f"{prefix}.reason must be a non-empty string")
+    if len(set(paths)) != len(paths):
+        errors.append(f"synthesis.{name} must not repeat a path")
+    return paths
+
+
+def _check_synthesis(row: dict, errors: list[str]) -> None:
+    """The synthesis record travels only on synthesized rows; a waiver only on unsynthesized ones."""
+    stage = row.get("delivery_stage")
+    synthesis = row.get("synthesis")
+    waiver = row.get("synthesis_waiver")
+
+    def _is_text(v):
+        return isinstance(v, str) and v.strip() != ""
+
+    if stage == "synthesized":
+        if not isinstance(synthesis, dict):
+            errors.append("synthesis must be an object when delivery_stage is \"synthesized\"")
+            return
+        if not _is_text(synthesis.get("by")):
+            errors.append("synthesis.by must be a non-empty string")
+        if not _is_nonempty_str(synthesis.get("synthesized_at")):
+            errors.append("synthesis.synthesized_at must be a non-empty string (ISO 8601)")
+        kept = synthesis.get("kept")
+        if not isinstance(kept, list) or any(not _is_nonempty_str(k) for k in kept):
+            errors.append("synthesis.kept must be an array of non-empty path strings")
+            kept = []
+        dropped = _check_reasoned_paths(synthesis.get("dropped"), "dropped", errors)
+        added = _check_reasoned_paths(synthesis.get("added"), "added", errors)
+        if len(set(kept)) != len(kept):
+            errors.append("synthesis.kept must not repeat a path")
+        if set(kept) & set(dropped):
+            errors.append("synthesis.kept and synthesis.dropped must be disjoint")
+        if set(added) & (set(kept) | set(dropped)):
+            errors.append("synthesis.added must not repeat a kept or dropped path")
+        delivered_paths = {e.get("path") for e in row.get("delivered_entries", []) if isinstance(e, dict)}
+        if delivered_paths != set(kept) | set(added):
+            errors.append("delivered_entries must be exactly the kept and added paths of the synthesis")
+        if "synthesis_waiver" in row:
+            errors.append("synthesis_waiver must be absent on a synthesized row")
+        return
+    if synthesis is not None:
+        errors.append("synthesis must be absent unless delivery_stage is \"synthesized\"")
+    if waiver is not None:
+        if not isinstance(waiver, dict) or not _is_text(waiver.get("by")) or not _is_text(waiver.get("reason")):
+            errors.append("synthesis_waiver must be an object with non-empty by and reason")
+
+
 def validate_packet_row(row) -> list[str]:
     """Return a list of violations for a packet (delivery) row; empty == valid."""
     if not isinstance(row, dict):
@@ -189,6 +261,8 @@ def validate_packet_row(row) -> list[str]:
         errors.append("template_version key is required (12-char hex or null)")
     elif row["template_version"] is not None and not _is_template_version(row["template_version"]):
         errors.append("template_version must be a 12-char lowercase hex string or null")
+
+    _check_synthesis(row, errors)
 
     if row.get("schema_version") == "2":
         if scope != "task":
