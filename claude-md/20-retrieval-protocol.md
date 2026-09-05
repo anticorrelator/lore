@@ -24,6 +24,9 @@ Every entry in the knowledge store carries provenance and a falsifier you can ch
 ### Beyond Facts: Theory, Questions, Hypotheses
 Retrieval may hand you three sections beside plain facts, and each carries its own invitation. A `### Theory` entry describes how a subsystem works — it orients you, it never outranks the code, and updating it is part of changing the subsystem it describes. An `### Open questions` entry your session can actually answer is in-scope work, not a detour — answer it and settle the entry. And if your work walks past the settling test a `### Hypotheses` entry names, record what you saw as one corroborating observation via `lore claim corroborate`.
 
+### Design History (Why Is This Shaped This Way)
+`lore why <file:line>` and `lore tradeoffs <topic>` return knowledge results and then a `### From the record` section: the design decisions and notes from the work items — active and archived — that touched that file or subsystem, most recent first, each dated, marked active or archived, with a pointer to the full record. These are history, not policy. A record explains how a convention came to be, which is different from telling you to follow it; a decision is re-decided when its context changes, and the record is there so you can see whether the context still holds. They are pull-only: nothing from this surface is pushed into a packet or a session-start load, so a past decision can inform a new one without arriving as precedent. A convention that came out of a piece of work carries a one-line `history:` pointer under its byline; follow it when a rule looks wrong for the case in front of you.
+
 ### Work Retrieval (Before Manual Exploration)
 Before exploring manually (git log, grep, branch inspection), check for tracked work:
 - If the user asks about status, progress, remaining work, or "what's next" → invoke `/work` first
