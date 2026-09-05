@@ -387,7 +387,8 @@ for ordinal, inv in enumerate(normalized, 1):
             row = {"packet_id": packet_id, "packet_scope": "session", "work_item": slug,
                    "session_id": None, "arm": None, "phase": None, "task_scale_set": ",".join(scales) or None,
                    "task_id": None, "template_version": lead_template_version,
-                   "prefetch_queries": [r["query"] for r in inv["prefetch"]]}
+                   "prefetch_queries": [r["query"] for r in inv["prefetch"]],
+                   "synthesis_waiver": {"by": "spec-lead", "reason": "full-wave investigator dispatch assembles and dispatches in one verb; the wave is judged as a set when the lead writes its questions"}}
             build_packet(kdir, row, role="investigator", caller="spec-lead", scales=scales,
                          assembly=("\n".join(r["content"] for r in knowledge_by_id[inv["id"]]), {}))
             bindings = dict.fromkeys(binder.FIELDS)

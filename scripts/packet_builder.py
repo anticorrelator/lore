@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -27,11 +28,16 @@ def read_rows(kdir):
                     yield json.loads(line)
 
 
+def rows_for(kdir, packet_id):
+    return [row for row in read_rows(kdir) if row.get("packet_id") == packet_id]
+
+
 def show(kdir, packet_id):
-    for row in read_rows(kdir):
-        if row.get("packet_id") == packet_id:
-            return row
-    raise ValueError(f"packet not found: {packet_id}")
+    """The current row for a packet id: rows supersede by append, so the last one wins."""
+    rows = rows_for(kdir, packet_id)
+    if not rows:
+        raise ValueError(f"packet not found: {packet_id}")
+    return rows[-1]
 
 
 def pointer(kdir, packet_id):
@@ -139,6 +145,120 @@ def build_packet(kdir, row, *, directive=None, assembly=None, role="worker", cal
     return status
 
 
+def _strip_md(path):
+    return path[:-3] if path.endswith(".md") else path
+
+
+def _block_boundary(line):
+    return bool(re.match(r"(#### |- \[\[knowledge:|### |## )", line))
+
+
+def _drop_blocks(content, dropped_paths):
+    """Remove each dropped entry's rendered block from the candidate content; return (content, headings)."""
+    headings = {}
+    lines = content.splitlines(keepends=True)
+    kept_lines, skipping = [], False
+    for line in lines:
+        if _block_boundary(line):
+            skipping = False
+            for path in dropped_paths:
+                full = re.match(r"#### (.+?) \(from " + re.escape(path) + r"\)\s*$", line)
+                back = re.match(r"- \[\[knowledge:" + re.escape(_strip_md(path)) + r"(?:#([^\]]+))?\]\]\s*$", line)
+                if full or back:
+                    skipping = True
+                    headings.setdefault(path, (full.group(1) if full else (back.group(1) or path)))
+                    break
+        if not skipping:
+            kept_lines.append(line)
+    return "".join(kept_lines), headings
+
+
+def _entry_from_file(kdir, path):
+    text = (Path(kdir) / path).read_text()
+    heading = next((l[2:].strip() for l in text.splitlines() if l.startswith("# ")), Path(path).stem)
+    scale = re.search(r"scale:\s*([a-z]+)", text)
+    return heading, text, (scale.group(1) if scale else None)
+
+
+def _trust_for(kdir, path):
+    try:
+        from pk_manifest import _trust_snapshot
+        return _trust_snapshot(str(kdir), {"path": path})
+    except Exception:
+        return {"score": None, "status": "unknown", "confidence": "unknown", "correction_recency": None}
+
+
+def synthesize(kdir, packet_id, *, by, dropped=(), added=()):
+    """Supersede an assembled packet with the dispatcher's synthesis of it.
+
+    `dropped` and `added` are sequences of (path, reason). Kept is everything
+    delivered that was not dropped. The synthesized row keeps the packet id and
+    its binding, re-renders the content without the dropped blocks, appends the
+    added entries and a Left-out list, and travels through packet-append.sh.
+    """
+    candidate = show(kdir, packet_id)
+    if candidate.get("delivery_stage") != "assembled":
+        raise ValueError(f"synthesis: packet {packet_id} is {candidate.get('delivery_stage')}, not assembled; re-pull with `lore packet build` to synthesize again")
+    if not by or not str(by).strip():
+        raise ValueError("synthesis: --by must name who synthesized")
+    entries = list(candidate.get("delivered_entries", []))
+    delivered = list(dict.fromkeys(e["path"] for e in entries))
+    drop_paths = [p for p, _ in dropped]
+    add_paths = [p for p, _ in added]
+    for path, reason in list(dropped) + list(added):
+        if not path or not str(reason).strip():
+            raise ValueError("synthesis: every dropped or added path needs a non-empty reason")
+    if len(set(drop_paths)) != len(drop_paths) or len(set(add_paths)) != len(add_paths):
+        raise ValueError("synthesis: a path may be dropped or added once")
+    for path in drop_paths:
+        if path not in delivered:
+            raise ValueError(f"synthesis: {path} is not in the candidate set; only delivered entries can be dropped")
+    for path in add_paths:
+        if path in delivered:
+            raise ValueError(f"synthesis: {path} is already delivered; drop or keep it instead of adding it")
+        if Path(path).is_absolute() or ".." in Path(path).parts or not (Path(kdir) / path).is_file():
+            raise ValueError(f"synthesis: {path} is not a knowledge entry under the store")
+    content, headings = _drop_blocks(candidate.get("content") or "", drop_paths)
+    kept_entries = [e for e in entries if e["path"] not in drop_paths]
+    kept = [p for p in delivered if p not in drop_paths]
+    added_entries, added_blocks = [], []
+    for path, reason in added:
+        heading, text, scale = _entry_from_file(kdir, path)
+        added_blocks.append(f"\n#### {heading} (from {path})\n{text.rstrip()}\n")
+        added_entries.append({"path": path, "scale": scale, "render_mode": "full", "section_role": "synthesis",
+                              "topic": "added by synthesis", "ranking_path": "search-order", "trust": _trust_for(kdir, path)})
+    if added_blocks:
+        content = content.rstrip("\n") + "\n\n### Added by synthesis\n" + "".join(added_blocks)
+    if dropped:
+        content = content.rstrip("\n") + "\n\n## Left out by synthesis\n" + "".join(
+            f"- {headings.get(path, path)} (from {path}) — {reason}\n" for path, reason in dropped)
+    row = dict(candidate)
+    for key in ("delivered_at", "synthesis_waiver"):
+        row.pop(key, None)
+    row.update(delivery_stage="synthesized", content=content, delivered_entries=kept_entries + added_entries,
+               synthesized_from_delivered_at=candidate.get("delivered_at"),
+               synthesis={"by": str(by), "synthesized_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                          "kept": kept, "dropped": [{"path": p, "reason": r} for p, r in dropped],
+                          "added": [{"path": p, "reason": r} for p, r in added]})
+    all_entries = row["delivered_entries"]
+    if not all_entries:
+        row["empty_reason"] = "synthesis dropped every delivered entry"
+    else:
+        row.pop("empty_reason", None)
+    row["trust_snapshot_hash"] = hashlib.sha256(json.dumps(
+        [{"path": e["path"], "trust": e["trust"]} for e in all_entries], sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest()
+    row["entries_per_scale"] = {scale: len({e["path"] for e in all_entries if scale in {s.strip() for s in (e.get("scale") or "").split(",")}})
+                                for scale in row.get("scales_requested", [])}
+    proc = subprocess.run(["bash", str(SCRIPTS / "packet-append.sh"), "--kdir", str(kdir)],
+                          input=json.dumps(row, ensure_ascii=False), capture_output=True, text=True, timeout=60)
+    if proc.returncode:
+        raise ValueError(proc.stderr.strip())
+    return {"packet_id": packet_id, "delivery_stage": "synthesized", "by": str(by), "kept": len(kept),
+            "dropped": len(dropped), "added": len(added), "entries_per_scale": row["entries_per_scale"],
+            "location": str(Path(kdir).resolve() / "_packets/packets.jsonl")}
+
+
 def binding(kdir, slug, task_id):
     if not task_id:
         return {"unbound_reason": "task-not-requested"}
@@ -173,8 +293,28 @@ def main():
         command = commands.add_parser(verb)
         command.add_argument("packet_id")
         command.add_argument("--json", action="store_true")
+    synth = commands.add_parser("synthesize")
+    synth.add_argument("packet_id")
+    synth.add_argument("--by", required=True, help="who is synthesizing (a position or seat)")
+    synth.add_argument("--drop", nargs=2, action="append", default=[], metavar=("PATH", "REASON"))
+    synth.add_argument("--add", nargs=2, action="append", default=[], metavar=("PATH", "REASON"))
+    synth.add_argument("--spec", help="JSON file with dropped and added lists of {path, reason}; merged with --drop/--add")
     args = parser.parse_args()
     kdir = Path(args.kdir).resolve()
+    if args.verb == "synthesize":
+        dropped = [tuple(d) for d in args.drop]
+        added = [tuple(a) for a in args.add]
+        if args.spec:
+            spec = json.loads(Path(args.spec).read_text())
+            if not isinstance(spec, dict) or set(spec) - {"dropped", "added", "by"}:
+                parser.error("--spec must be an object with dropped and/or added lists")
+            for key, target in (("dropped", dropped), ("added", added)):
+                for item in spec.get(key) or []:
+                    if not isinstance(item, dict) or set(item) != {"path", "reason"}:
+                        parser.error(f"--spec {key} entries must be objects with path and reason")
+                    target.append((item["path"], item["reason"]))
+        print(json.dumps(synthesize(kdir, args.packet_id, by=args.by, dropped=dropped, added=added), ensure_ascii=False))
+        return
     if args.verb != "build":
         row = show(kdir, args.packet_id)
         if args.verb == "pointer":
@@ -183,6 +323,13 @@ def main():
             print(json.dumps(row, ensure_ascii=False))
         else:
             print(f"Packet {row['packet_id']} — {row.get('recipient_role', 'unrecorded')} ({row['delivery_stage']})")
+            synthesis = row.get("synthesis")
+            if synthesis:
+                print(f"Synthesis: by {synthesis['by']} — kept {len(synthesis['kept'])}, dropped {len(synthesis['dropped'])}, added {len(synthesis['added'])}")
+            elif row.get("synthesis_waiver"):
+                print("Synthesis waived: " + json.dumps(row["synthesis_waiver"]))
+            else:
+                print("Synthesis: none — this is a candidate set; run `lore packet synthesize` before handing it on")
             print("Binding: " + json.dumps({k: row.get(k) for k in ("work_item", "task_id", "revision_id", "dispatch_attempt_id", "unbound_reason")}))
             print("Flags: " + json.dumps(row.get("flags", [])))
             print("Consultation requirements: " + json.dumps(row.get("consultation_requirements", [])))

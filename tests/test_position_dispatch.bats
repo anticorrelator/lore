@@ -64,7 +64,7 @@ sys.path.insert(0, str(repo / 'scripts'))
 spec = importlib.util.spec_from_file_location('position_bind', repo / 'scripts/position-bind.py')
 binder = importlib.util.module_from_spec(spec); spec.loader.exec_module(binder)
 from position_compile import compile_position, native_prompt, validate_descriptor
-from packet_builder import build_packet, pointer, show
+from packet_builder import build_packet, pointer, show, synthesize
 
 def call(args, ok=True, **kwargs):
     p = subprocess.run(args, cwd=repo, env=env, capture_output=True, **kwargs)
@@ -120,6 +120,7 @@ def fixture(position='worker', attempt='attempt-1', revision=None, mode=None):
     row = {'packet_id': packet_id, 'packet_scope': 'task', 'work_item': 'fixture', 'task_id': 'task-1', 'revision_id': revision,
            'dispatch_attempt_id': attempt, 'source_head': committed['source_head'], 'session_id': None, 'phase': None, 'arm': None, 'task_scale_set': 'implementation'}
     build_packet(store, row, assembly=('Isolated packet content', {}), role=position, scales=['implementation'])
+    synthesize(store, packet_id, by='fixture-lead')
     b = dict.fromkeys(binder.FIELDS)
     b.update(work_item='fixture', task_id='task-1', revision_id=revision, packet_id=packet_id, packet_pointer=pointer(store, packet_id),
              dispatch_attempt_id=attempt, assignment='Inspect actual bytes.\nPreserve Unicode: λ and trailing newline.\n', report_id='report-' + attempt,
@@ -136,6 +137,7 @@ def unbound_fixture(position, attempt, mode=None):
     row={'packet_id':packet_id,'packet_scope':'session','work_item':'fixture','task_id':None,
          'session_id':None,'phase':None,'arm':None,'task_scale_set':'implementation'}
     build_packet(store,row,assembly=('Pre-plan investigation.',{}),role=position,scales=['implementation'])
+    synthesize(store,packet_id,by='fixture-lead')
     b.update(task_id=None,revision_id=None,packet_id=packet_id,packet_pointer=pointer(store,packet_id))
     b['absence_reasons'].update(task_id='No task has been assigned.',revision_id='No plan revision exists.')
     return b
@@ -296,6 +298,7 @@ if scenario == 'implement-envelope':
     assert all(inputs[key]==packet.get(key) for key in ('task_id','revision_id','dispatch_attempt_id','work_item'))
     assert not {'execution_root','report_path','report_id'} & inputs.keys()
     assert not (item/'position-dispatch').exists()
+    synthesize(store,inputs['packet_id'],by='fixture-lead')
     b=dict.fromkeys(binder.FIELDS);b.update(inputs)
     b.update(report_id='implement-envelope-report',report_path=str(item/'worker-reports/implement-envelope-report.md'),execution_root=str(repo))
     b['absence_reasons']={key:'not applicable to this worker' for key,value in b.items() if value is None}
@@ -927,6 +930,7 @@ elif scenario=='preplan':
     row={'packet_id':'pkt-preplan','packet_scope':'session','work_item':'fixture','task_id':None,
          'session_id':None,'phase':None,'arm':None,'task_scale_set':'implementation'}
     build_packet(store,row,assembly=('Pre-plan investigation.',{}),role='investigator',scales=['implementation'])
+    synthesize(store,'pkt-preplan',by='fixture-lead')
     b=fixture('investigator','independent-attempt')
     b.update(task_id=None,revision_id=None,packet_id='pkt-preplan',packet_pointer=pointer(store,'pkt-preplan'))
     b['absence_reasons'].update(task_id='Investigation precedes tasks.',revision_id='No plan revision exists.')

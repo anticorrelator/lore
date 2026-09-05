@@ -65,6 +65,27 @@ claiming receipt. Assessment rows remain separate from the recipient’s packet;
 `show` does not include verdicts. Historical experiment rows retain their
 original collection context.
 
+## Synthesis (candidate set → handed-on packet)
+
+A row at `delivery_stage: assembled` is a **candidate set**: one retrieval
+pass at a declared scale, nobody's judgment yet. Building one and handing it
+on is search pushed down to the receiver. Before dispatch the dispatcher
+reads it and records a synthesis — `lore packet synthesize <id> --by <who>
+[--drop <path> "<reason>"]... [--add <path> "<reason>"]...` — which appends a
+superseding row under the same `packet_id` at `delivery_stage: synthesized`
+carrying `synthesis: {by, synthesized_at, kept, dropped[{path, reason}],
+added[{path, reason}]}`. Its `content` is re-rendered without the dropped
+blocks, with the added entries under `### Added by synthesis`, and with a
+`## Left out by synthesis` list (title, path, reason) so the receiver can see
+what was set aside and pull it back if the reason turns out wrong. Dispatch
+binding refuses an assembled packet unless it carries a `synthesis_waiver:
+{by, reason}`, which a builder records when assembly and dispatch happen in
+one verb with no head between them (the spec full wave). `show` returns the
+latest row; the candidate row stays in the file as history. Retro reads
+synthesis rows beside retrieval-miss telemetry: a dropped entry the receiver
+later searched for, or a kept entry never cited, is one row of evidence
+about the judgment.
+
 ## Packet row schema (v1)
 
 Every field traces to a named consumer. "Experiment" is the

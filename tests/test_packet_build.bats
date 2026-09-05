@@ -203,3 +203,106 @@ PY
   [ "$status" -eq 0 ]
   [ "$(jq -r .recipient_role <<< "$output")" = designer ]
 }
+
+synth_fixture() {
+  # Two entries so a drop leaves something behind; one extra file to add.
+  printf '%s\n' '# Gadget boundary' 'The gadget boundary is separate from the widget boundary.' '<!-- learned: 2026-09-01 | confidence: high | scale: subsystem | status: current -->' > "$TEST_KDIR/conventions/gadget.md"
+  printf '%s\n' '# Sprocket note' 'Sprockets are added by hand when retrieval misses them.' '<!-- learned: 2026-09-01 | confidence: medium | scale: implementation | status: current -->' > "$TEST_KDIR/conventions/sprocket.md"
+  run bash "$PACKET" build --work-item packet-fixture --role worker --caller implement-lead --topic "widget gadget" --scale-set subsystem,implementation
+  [ "$status" -eq 0 ]
+  PKT=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["packet_id"])')
+}
+
+@test "synthesize supersedes the candidate row: drops a block, adds an entry, records reasons, show returns the latest" {
+  synth_fixture
+  run bash "$PACKET" synthesize "$PKT" --by implement-lead \
+    --drop conventions/gadget.md "the worker touches widgets only" \
+    --add conventions/sprocket.md "retrieval missed the sprocket rule the task depends on"
+  [ "$status" -eq 0 ]
+  STATUS_JSON="$output" PKT="$PKT" python3 - <<'PY'
+import json, os
+from pathlib import Path
+s = json.loads(os.environ['STATUS_JSON'])
+assert s['delivery_stage'] == 'synthesized' and s['by'] == 'implement-lead', s
+assert (s['kept'], s['dropped'], s['added']) == (1, 1, 1), s
+rows = [json.loads(l) for l in Path(s['location']).read_text().splitlines() if l.strip()]
+mine = [r for r in rows if r['packet_id'] == os.environ['PKT']]
+assert [r['delivery_stage'] for r in mine] == ['assembled', 'synthesized'], [r['delivery_stage'] for r in mine]
+cand, syn = mine
+assert 'Gadget boundary' in cand['content'] and 'Gadget boundary' not in syn['content'].split('## Left out by synthesis')[0]
+assert 'Widget boundary' in syn['content']
+assert '## Left out by synthesis' in syn['content'] and 'the worker touches widgets only' in syn['content']
+assert '### Added by synthesis' in syn['content'] and 'Sprocket note' in syn['content']
+paths = [e['path'] for e in syn['delivered_entries']]
+assert paths == ['conventions/widget.md', 'conventions/sprocket.md'], paths
+assert syn['synthesis']['kept'] == ['conventions/widget.md']
+assert syn['synthesis']['dropped'] == [{'path': 'conventions/gadget.md', 'reason': 'the worker touches widgets only'}]
+assert syn['synthesis']['added'][0]['path'] == 'conventions/sprocket.md'
+assert syn['synthesized_from_delivered_at'] == cand['delivered_at'] and syn['delivered_at'] >= cand['delivered_at']
+assert syn['trust_snapshot_hash'] != cand['trust_snapshot_hash']
+assert syn['entries_per_scale'] == {'subsystem': 1, 'implementation': 1}, syn['entries_per_scale']
+PY
+  run bash "$PACKET" show "$PKT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"(synthesized)"* ]]
+  [[ "$output" == *"Synthesis: by implement-lead — kept 1, dropped 1, added 1"* ]]
+  [[ "$output" == *"## Left out by synthesis"* ]]
+  run bash "$PACKET" show "$PKT" --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"delivery_stage": "synthesized"'* ]] || [[ "$output" == *'"delivery_stage":"synthesized"'* ]]
+}
+
+@test "synthesize refuses unknown drops, unstored adds, empty reasons, a missing --by, and a second synthesis" {
+  synth_fixture
+  run bash "$PACKET" synthesize "$PKT" --by lead --drop conventions/nowhere.md "not delivered"
+  [ "$status" -ne 0 ]; [[ "$output" == *"not in the candidate set"* ]]
+  run bash "$PACKET" synthesize "$PKT" --by lead --add conventions/missing.md "does not exist"
+  [ "$status" -ne 0 ]; [[ "$output" == *"not a knowledge entry"* ]]
+  run bash "$PACKET" synthesize "$PKT" --by lead --drop conventions/gadget.md ""
+  [ "$status" -ne 0 ]; [[ "$output" == *"reason"* ]]
+  run bash "$PACKET" synthesize "$PKT" --drop conventions/gadget.md "x"
+  [ "$status" -ne 0 ]
+  [ "$(grep -c "\"$PKT\"" "$TEST_KDIR/_packets/packets.jsonl")" -eq 1 ]
+  run bash "$PACKET" synthesize "$PKT" --by lead
+  [ "$status" -eq 0 ]
+  run bash "$PACKET" synthesize "$PKT" --by lead
+  [ "$status" -ne 0 ]; [[ "$output" == *"not assembled"* ]]
+  run bash "$PACKET" show "$PKT"
+  [[ "$output" == *"kept 2, dropped 0, added 0"* ]]
+}
+
+@test "an assembled packet renders as a candidate set and a waiver renders as recorded" {
+  synth_fixture
+  run bash "$PACKET" show "$PKT"
+  [[ "$output" == *"Synthesis: none — this is a candidate set"* ]]
+  # A waiver is recorded by the builder at assembly (spec-open's full wave does this); the writer accepts it only unsynthesized.
+  WAIVED=$(python3 - "$TEST_KDIR" "$REPO_DIR" <<'PY'
+import json, sys
+from pathlib import Path
+kdir, repo = sys.argv[1:]
+sys.path.insert(0, repo + '/scripts')
+from packet_builder import build_packet
+row = {'packet_id': 'pkt-waived', 'packet_scope': 'session', 'session_id': None, 'work_item': 'packet-fixture', 'task_id': None, 'phase': None,
+       'arm': None, 'task_scale_set': 'subsystem', 'synthesis_waiver': {'by': 'spec-lead', 'reason': 'assembled and dispatched in one verb'}}
+build_packet(Path(kdir), row, assembly=('Wave content', {}), role='investigator', caller='spec-lead', scales=['subsystem'])
+print('pkt-waived')
+PY
+)
+  run bash "$PACKET" show "$WAIVED"
+  [[ "$output" == *"Synthesis waived:"* ]]
+  run bash "$PACKET" synthesize "$WAIVED" --by lead
+  [ "$status" -eq 0 ]
+  run bash "$PACKET" show "$WAIVED" --json
+  [[ "$output" != *"synthesis_waiver"* ]]
+}
+
+@test "synthesize accepts a JSON spec file so a lead can record many dispositions at once" {
+  synth_fixture
+  printf '%s\n' '{"dropped":[{"path":"conventions/gadget.md","reason":"outside the worker files"}],"added":[]}' > "$TEST_KDIR/synthesis.json"
+  run bash "$PACKET" synthesize "$PKT" --by implement-lead --spec "$TEST_KDIR/synthesis.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"dropped": 1'* ]]
+  printf '%s\n' '{"dropped":[{"path":"conventions/gadget.md"}]}' > "$TEST_KDIR/bad.json"
+  run bash "$PACKET" synthesize "$PKT" --by implement-lead --spec "$TEST_KDIR/bad.json"
+  [ "$status" -ne 0 ]
+}
