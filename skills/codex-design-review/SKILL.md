@@ -85,7 +85,7 @@ State the identity before reading anything else, so the transcript shows which b
 
 ## Step 2: Select the design slice
 
-The design slice is the prepared `plan.md` up to its first top-level `## Tasks` heading, or the legacy `## Phases` heading on older plans, or the whole file when neither exists. Headings are recognized structurally: a line that opens a level-two heading outside any fenced block. A `## Tasks` line quoted inside a fenced example is text, not a boundary. When an `## Open Questions` section follows the boundary, it is carried into the slice explicitly, so a design whose open questions were written after the tasks still shows them to the reviewer. Tasks themselves are never included — this review is scoped to the abstract design.
+The design slice is the prepared `plan.md` up to its first top-level `## Tasks` heading, or the legacy `## Phases` heading on older plans, or the whole file when neither exists. Headings are recognized structurally: a line that opens a level-two heading outside any fenced block. A `## Tasks` line quoted inside a fenced example is text, not a boundary. When an `## Open Questions` section follows the boundary, it is carried into the slice explicitly, so a design whose open questions were written after the tasks still shows them to the reviewer. Everything before the boundary is kept in the order the plan presents it — title, Goal and Non-Goals, Context or Investigations, Key Assertions, Narrative, Design Decisions, Architecture Diagram, Open Questions — with nothing selected by name. Tasks themselves are never included — this review is scoped to the abstract design.
 
 **Recipe inputs:** PLAN_FILE, DESIGN_FILE.
 <!-- spec-design-review-recipe: design-slice -->
@@ -132,9 +132,9 @@ An `unterminated_fence` of true means a fence never closed and everything after 
 
 ## Step 3: Codex review (Round 1)
 
-Build the prompt from the prepared anchor and the design slice. The anchor is the original intent the design must serve, read from the prepared copy.
+Build the prompt from the prepared anchor and the design slice. The anchor is the original intent the design must serve, read from the prepared copy. The prompt names the artifact — work item and revision — so a proposal that cites text absent from this artifact is recognizable as a mismatch and rejected as one, rather than evaluated as advice about some sibling.
 
-**Recipe inputs:** DESIGN_FILE, ANCHOR_FILE, PROMPT_FILE.
+**Recipe inputs:** SLUG, REVISION_ID, DESIGN_FILE, ANCHOR_FILE, PROMPT_FILE.
 <!-- spec-design-review-recipe: design-prompt-round-1 -->
 ````bash
 {
@@ -208,6 +208,7 @@ Why:        <one sentence tying this to a specific anchor above>
 
 ---
 PROMPT
+printf '\nArtifact under review: work item %s, plan revision %s. Anchor every proposal to text in this artifact.\n' "$SLUG" "$REVISION_ID"
 printf '\n<ANCHOR>\n'; cat "$ANCHOR_FILE"; printf '\n</ANCHOR>\n\n<DESIGN>\n'; cat "$DESIGN_FILE"; printf '\n</DESIGN>\n'
 } > "$PROMPT_FILE"
 ````
@@ -309,7 +310,7 @@ If every proposal was rejected, the plan is unchanged and round 2 rereads the sa
 
 Render the ledger into the round-2 prompt beside the current design slice. The recipe refuses when round 1 left nothing to answer, which is the case Step 4 already routed past this step.
 
-**Recipe inputs:** DESIGN_FILE, ANCHOR_FILE, LEDGER_FILE, PROMPT_FILE.
+**Recipe inputs:** SLUG, REVISION_ID, DESIGN_FILE, ANCHOR_FILE, LEDGER_FILE, PROMPT_FILE.
 <!-- spec-design-review-recipe: design-prompt-round-2 -->
 ```python
 import json, os, sys
@@ -341,6 +342,8 @@ focus your proposals on:
 Same proposal format and 5-proposal cap as Round 1. Do not re-propose accepted items.
 The <ANCHOR> block is unchanged and remains the intent the design must serve.
 """)
+parts.append("\nArtifact under review: work item %s, plan revision %s. Anchor every proposal to text in this artifact.\n" % (
+    os.environ["SLUG"], os.environ["REVISION_ID"]))
 parts.append("\n<ANCHOR>\n%s\n</ANCHOR>\n\n<DESIGN>\n%s\n</DESIGN>\n" % (
     Path(os.environ["ANCHOR_FILE"]).read_text(), Path(os.environ["DESIGN_FILE"]).read_text()))
 Path(os.environ["PROMPT_FILE"]).write_text("".join(parts))

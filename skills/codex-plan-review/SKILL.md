@@ -89,9 +89,9 @@ The whole prepared `plan.md` is the reviewed text: anchor, investigations, desig
 
 ## Step 2: Codex review (Round 1)
 
-Build the prompt from the prepared anchor and the prepared plan. Codex evaluates six criteria, rates each, and proposes concrete edits for anything below ADEQUATE.
+Build the prompt from the prepared anchor and the prepared plan. Codex evaluates six criteria, rates each, and proposes concrete edits for anything below ADEQUATE. The prompt names the artifact — work item and revision — so an edit whose FIND text is absent from this artifact is recognizable as a mismatch and rejected as one, rather than evaluated as advice about some sibling.
 
-**Recipe inputs:** PLAN_FILE, ANCHOR_FILE, PROMPT_FILE.
+**Recipe inputs:** SLUG, REVISION_ID, PLAN_FILE, ANCHOR_FILE, PROMPT_FILE.
 <!-- spec-plan-review-recipe: plan-prompt-round-1 -->
 ````bash
 {
@@ -163,6 +163,7 @@ Rules for proposed edits:
 
 ---
 PROMPT
+printf '\nArtifact under review: work item %s, plan revision %s. Every FIND and AFTER block must quote text from this artifact.\n' "$SLUG" "$REVISION_ID"
 printf '\n<ANCHOR>\n'; cat "$ANCHOR_FILE"; printf '\n</ANCHOR>\n\n<PLAN>\n'; cat "$PLAN_FILE"; printf '\n</PLAN>\n'
 } > "$PROMPT_FILE"
 ````
@@ -273,7 +274,7 @@ If every edit was rejected, the plan is unchanged and round 2 rereads the same a
 
 Render the ledger into the round-2 prompt beside the current prepared plan. The recipe refuses when round 1 left nothing to answer, which is the case Step 3 already routed past this step.
 
-**Recipe inputs:** PLAN_FILE, ANCHOR_FILE, LEDGER_FILE, PROMPT_FILE.
+**Recipe inputs:** SLUG, REVISION_ID, PLAN_FILE, ANCHOR_FILE, LEDGER_FILE, PROMPT_FILE.
 <!-- spec-plan-review-recipe: plan-prompt-round-2 -->
 ```python
 import json, os, sys
@@ -300,6 +301,8 @@ Review the updated plan below. Focus on:
 
 Do not re-propose edits that were accepted. Do not re-propose rejected edits without a new argument. The <ANCHOR> block is unchanged and remains the intent the plan must serve.
 """)
+parts.append("\nArtifact under review: work item %s, plan revision %s. Every FIND and AFTER block must quote text from this artifact.\n" % (
+    os.environ["SLUG"], os.environ["REVISION_ID"]))
 parts.append("\n<ANCHOR>\n%s\n</ANCHOR>\n\n<PLAN>\n%s\n</PLAN>\n" % (
     Path(os.environ["ANCHOR_FILE"]).read_text(), Path(os.environ["PLAN_FILE"]).read_text()))
 Path(os.environ["PROMPT_FILE"]).write_text("".join(parts))
