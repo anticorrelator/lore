@@ -17,7 +17,7 @@ usage() {
   cat >&2 <<'EOF'
 Usage: lore retro file <ref> --pack <json-file> --judgments <json-file> [--json]
 
-Atomically accept one lead-authored v1 judgment assignment, then invoke only
+Atomically accept one lead-authored v1 or rubric-bound v2 judgment assignment, then invoke only
 missing sanctioned sinks. Exact replay is idempotent; semantic reassignment is
 refused. Terminal scorecard telemetry is written last.
 EOF
@@ -100,10 +100,13 @@ trap 'rm -rf "$TMP_DIR"; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 VALIDATED="$TMP_DIR/validated.json"
 set +e
-python3 - "$PACK_FILE" "$JUDGMENTS_FILE" "$VALIDATED" "$SLUG" <<'PY'
+python3 - "$PACK_FILE" "$JUDGMENTS_FILE" "$VALIDATED" "$SLUG" "$SCRIPT_DIR" <<'PY'
 import hashlib,json,sys
 
-pack_path,judgments_path,out_path,slug=sys.argv[1:]
+pack_path,judgments_path,out_path,slug,script_dir=sys.argv[1:]
+import importlib.util
+spec=importlib.util.spec_from_file_location("retro_rubric",script_dir+"/retro-rubric.py")
+rubric_helper=importlib.util.module_from_spec(spec); spec.loader.exec_module(rubric_helper)
 def reject(msg): print(msg,file=sys.stderr); raise SystemExit(1)
 def canonical(v): return json.dumps(v,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()
 def nonempty(v): return isinstance(v,str) and bool(v.strip())
@@ -119,8 +122,15 @@ if not nonempty(claimed) or hashlib.sha256(canonical(body)).hexdigest()!=claimed
 ROOT={"schema_version","cycle_id","pack_id","pack_sha256","actor","model","key_finding","most_actionable_gap",
       "dimension_judgments","behavioral_health","causal_diagnoses","escalation_judgment","scale_access_judgment",
       "channel_flags","suggestion_outcome","suggestions"}
-if not isinstance(raw,dict) or set(raw)!=ROOT: reject("judgment manifest must declare exactly the v1 root fields")
-if raw.get("schema_version")!=1: reject("judgment schema_version must be integer 1")
+version=raw.get("schema_version") if isinstance(raw,dict) else None
+if type(version) is not int or version not in (1,2): reject("judgment schema_version must be integer 1 or 2")
+if version==2:
+ ROOT |= {"rubric_id","rubric_version"}
+ try: rubric=rubric_helper.validate_frozen(pack.get("rubric"))
+ except (ValueError,TypeError) as exc: reject(str(exc))
+ if any(raw.get(k)!=rubric[k] for k in ("rubric_id","rubric_version")): reject("judgment rubric identity differs from frozen pack")
+elif "rubric" in pack: reject("rubric-bound packs require v2 judgments")
+if set(raw)!=ROOT: reject("judgment manifest must declare exactly its version's root fields")
 if raw.get("cycle_id")!=slug: reject("judgment cycle_id does not match resolved cycle")
 if raw.get("pack_id")!=pack.get("pack_id"): reject("judgment pack_id does not match the accepted pack")
 if raw.get("pack_sha256")!=claimed: reject("judgment pack_sha256 must equal the pack artifact_sha256")
@@ -148,13 +158,17 @@ def validate_refs(refs,where):
   reject(f"{where}.evidence_refs does not resolve: {ref}")
 
 dims=raw.get("dimension_judgments")
-if not isinstance(dims,list) or len(dims)!=5: reject("dimension_judgments must contain exactly D1-D5")
-if [d.get("dimension_id") for d in dims if isinstance(d,dict)]!=["D1","D2","D3","D4","D5"]: reject("dimension_judgments must be ordered exactly D1-D5")
-for i,d in enumerate(dims):
- if not isinstance(d,dict) or set(d)!={"dimension_id","score","rationale","evidence_refs"}: reject(f"dimension_judgments[{i}] has invalid fields")
- if type(d.get("score")) is not int or not 1<=d["score"]<=5: reject(f"dimension_judgments[{i}].score must be integer 1..5")
- if not nonempty(d.get("rationale")): reject(f"dimension_judgments[{i}].rationale must be non-empty")
- validate_refs(d.get("evidence_refs"),f"dimension_judgments[{i}]")
+if version==2:
+ try: rubric_helper.validate_judgments(dims,rubric,validate_refs)
+ except (ValueError,TypeError) as exc: reject(str(exc))
+else:
+ if not isinstance(dims,list) or len(dims)!=5: reject("dimension_judgments must contain exactly D1-D5")
+ if [d.get("dimension_id") for d in dims if isinstance(d,dict)]!=["D1","D2","D3","D4","D5"]: reject("dimension_judgments must be ordered exactly D1-D5")
+ for i,d in enumerate(dims):
+  if not isinstance(d,dict) or set(d)!={"dimension_id","score","rationale","evidence_refs"}: reject(f"dimension_judgments[{i}] has invalid fields")
+  if type(d.get("score")) is not int or not 1<=d["score"]<=5: reject(f"dimension_judgments[{i}].score must be integer 1..5")
+  if not nonempty(d.get("rationale")): reject(f"dimension_judgments[{i}].rationale must be non-empty")
+  validate_refs(d.get("evidence_refs"),f"dimension_judgments[{i}]")
 
 behavior=raw.get("behavioral_health")
 if not isinstance(behavior,list) or not behavior: reject("behavioral_health must be a non-empty ordered array")
@@ -219,8 +233,8 @@ for i,row in enumerate(suggestions):
  validate_refs(row.get("evidence_refs"),f"suggestions[{i}]")
 
 semantic={k:raw[k] for k in sorted(raw)}
-filing_id=hashlib.sha256(canonical({"schema_version":1,"cycle_id":slug,"pack_id":pack["pack_id"],"pack_sha256":claimed,"judgments":semantic})).hexdigest()
-artifact={"schema_version":1,"filing_id":filing_id,"cycle_id":slug,"pack_id":pack["pack_id"],"pack_sha256":claimed,"judgments":semantic}
+filing_id=hashlib.sha256(canonical({"schema_version":version,"cycle_id":slug,"pack_id":pack["pack_id"],"pack_sha256":claimed,"judgments":semantic})).hexdigest()
+artifact={"schema_version":version,"filing_id":filing_id,"cycle_id":slug,"pack_id":pack["pack_id"],"pack_sha256":claimed,"judgments":semantic}
 artifact["artifact_sha256"]=hashlib.sha256(canonical(artifact)).hexdigest()
 text=canonical(artifact)
 with open(out_path,"w",encoding="utf-8") as f: json.dump({"artifact":artifact,"text":text.decode(),"file_sha256":hashlib.sha256(text).hexdigest()},f,ensure_ascii=False)
@@ -239,7 +253,7 @@ if [[ -f "$FILING" ]]; then
 import hashlib,json,sys
 try:
  data=open(sys.argv[1],"rb").read(); obj=json.loads(data); claimed=obj.pop("artifact_sha256")
- assert obj.get("schema_version")==1 and claimed==hashlib.sha256(json.dumps(obj,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+ assert obj.get("schema_version") in (1,2) and claimed==hashlib.sha256(json.dumps(obj,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest()
  print(json.dumps({"filing_id":obj.get("filing_id"),"artifact_sha256":claimed,"file_sha256":hashlib.sha256(data).hexdigest()}))
 except Exception as exc: print(str(exc),file=sys.stderr); raise SystemExit(1)
 PY
@@ -280,6 +294,7 @@ write_journal_sink() {
   if [[ "${LORE_RETRO_FILE_FAIL_SINK:-}" == "$sink" ]]; then return 97; fi
   local args=(write --observation "$observation" --context "$role: $SLUG | filing_id=$FILING_ID | sink=$sink" --work-item "$SLUG" --role "$role" --model "$(jq -r '.artifact.judgments.model' "$VALIDATED")")
   [[ -z "$scores" ]] || args+=(--scores "$scores")
+  if [[ "$JUDGMENT_VERSION" == 2 ]]; then args+=(--rubric-id "$RUBRIC_ID" --rubric-version "$RUBRIC_VERSION"); fi
   LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPT_DIR/journal.sh" "${args[@]}" >/dev/null
 }
 
@@ -290,8 +305,18 @@ land_or_write_journal() {
   if write_journal_sink "$role" "$sink" "$observation" "$scores" && has_journal_sink "$role" "$sink"; then completed+=("$sink"); WRITES_MADE=$((WRITES_MADE+1)); else missing+=("$sink"); failed=1; fi
 }
 
+JUDGMENT_VERSION=$(jq -r '.artifact.schema_version' "$VALIDATED")
+RUBRIC_ID=$(jq -r '.artifact.judgments.rubric_id // empty' "$VALIDATED")
+RUBRIC_VERSION=$(jq -r '.artifact.judgments.rubric_version // empty' "$VALIDATED")
 PRIMARY_OBS=$(jq -c '.artifact.judgments | {key_finding,most_actionable_gap,causal_diagnoses}' "$VALIDATED")
 PRIMARY_SCORES=$(jq -c '[.artifact.judgments.dimension_judgments[]] | {d1_delivery:.[0].score,d2_quality:.[1].score,d3_gaps:.[2].score,d4_alignment:.[3].score,d5_spec_utility:.[4].score}' "$VALIDATED")
+if [[ "$JUDGMENT_VERSION" == 2 ]]; then
+  PRIMARY_SCORES=$(jq -c --slurpfile pack "$PACK_FILE" '
+    .artifact.judgments.dimension_judgments as $judgments |
+    [$pack[0].rubric.dimensions[] as $dimension | $judgments[] |
+      select(.dimension_id==$dimension.dimension_id and .disposition=="scored") |
+      {key:$dimension.journal_key,value:.score}] | from_entries' "$VALIDATED")
+fi
 land_or_write_journal retro journal:retro "$PRIMARY_OBS" "$PRIMARY_SCORES"
 
 BEHAVIOR_OBS=$(jq -c '.artifact.judgments.behavioral_health' "$VALIDATED")
@@ -376,6 +401,57 @@ PY
     fi
     i=$((i+1))
   done
+fi
+
+# Each scored dimension is independently retryable under its frozen rubric.
+# Abstentions remain in the accepted judgment and have no numeric sink.
+if [[ "$JUDGMENT_VERSION" == 2 ]]; then
+  python3 - "$VALIDATED" "$PACK_FILE" > "$TMP_DIR/dimension-rows.jsonl" <<'PY'
+import json,sys
+artifact=json.load(open(sys.argv[1]))["artifact"]; pack=json.load(open(sys.argv[2]))
+judgments=artifact["judgments"]; rubric=pack["rubric"]
+for judgment,dimension in zip(judgments["dimension_judgments"],rubric["dimensions"]):
+ if judgment["disposition"]!="scored": continue
+ print(json.dumps({"schema_version":1,"kind":"scored","tier":"template",
+  "template_id":rubric["rubric_id"],"template_version":rubric["rubric_version"],
+  "rubric_id":rubric["rubric_id"],"rubric_version":rubric["rubric_version"],
+  "dimension_id":dimension["dimension_id"],"metric":dimension["journal_key"],
+  "value":judgment["score"],"sample_size":1,"calibration_state":"pre-calibration",
+  "verdict_source":"retro-lead","model":judgments["model"],"filing_id":artifact["filing_id"],
+  "work_item":artifact["cycle_id"],"pack_id":artifact["pack_id"],"pack_sha256":artifact["pack_sha256"],
+  "source_artifact_ids":[artifact["pack_id"],artifact["filing_id"]],
+  "evidence_refs":judgment["evidence_refs"],"rationale":judgment["rationale"],
+  "window_start":pack["window"]["start"],"window_end":pack["window"]["end"]}))
+PY
+  dimension_state() {
+    python3 - "$ROWS" "$1" <<'PY'
+import json,os,sys
+path,want=sys.argv[1],json.loads(sys.argv[2]); matches=[]
+keys=("filing_id","rubric_id","rubric_version","dimension_id")
+if os.path.isfile(path):
+ for line in open(path,encoding="utf-8"):
+  try: row=json.loads(line)
+  except ValueError: continue
+  if all(row.get(k)==want[k] for k in keys): matches.append(row)
+print("missing" if not matches else "landed" if len(matches)==1 and all(matches[0].get(k)==v for k,v in want.items()) else "collision")
+PY
+  }
+  while IFS= read -r dimension_row; do
+    sink="scorecard:dimension:$(jq -r .dimension_id <<<"$dimension_row")"
+    state=$(dimension_state "$dimension_row")
+    if [[ "$state" == landed ]]; then completed+=("$sink")
+    elif [[ "$state" == collision || "${LORE_RETRO_FILE_FAIL_SINK:-}" == "$sink" ]]; then missing+=("$sink"); failed=1
+    else
+      set +e
+      printf '%s\n' "$dimension_row" | LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KDIR" >/dev/null
+      rc=$?
+      set -e
+      if [[ $rc -eq 0 && "$(dimension_state "$dimension_row")" == landed ]]; then
+        completed+=("$sink"); WRITES_MADE=$((WRITES_MADE+1))
+      else missing+=("$sink"); failed=1
+      fi
+    fi
+  done < "$TMP_DIR/dimension-rows.jsonl"
 fi
 
 # The completion marker is deliberately last. A prior sink failure cannot be
