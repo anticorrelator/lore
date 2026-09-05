@@ -336,7 +336,7 @@ if previous and previous.get("input_fingerprint") == input_fp and previous.get("
             frozen = resolved["manifest"]
             payload = directive["payload"]
             target, route, model = resolved_launch(inv)
-            expected_fields = {"framework": target, "route": route, "model": model,
+            expected_fields = {"framework": target, "route": route, "model": model, "publication_state": "prepared",
                                "investigation_id": inv["id"], "question": inv["question"],
                                "complexity": inv["complexity"]}
             if any(payload.get(key) != value for key, value in expected_fields.items()):
