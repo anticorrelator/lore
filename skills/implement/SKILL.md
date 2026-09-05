@@ -56,7 +56,13 @@ Hold those six values for the run. `SCRIPTS_DIR` is the scripts directory beside
 
 They carry the role and model maps, the coordination concurrency ceiling, ceremony registrations, sampling rates and the preference directives by title. Resolve the worker ceiling there and lower it to the runtime capacity you actually have; never replace it with a per-run constant, and treat a missing or malformed concurrency value as one writer seat. Parse arguments: `--model <id>` exports `LORE_MODEL_LEAD` for this run only and touches no worker or advisor binding (per-role `LORE_MODEL_<ROLE>` overrides are honored independently); `--yes` suppresses one prompt, the anchor gate's misaligned-route question, and nothing else — the gate is still evaluated and filed, and the archived-item confirmation stays interactive.
 
-**Bind the seat.** Commissioned entry arrives with a packet id and pointer from the coordinator; check that packet against the move you were given with `lore packet show <id>`, and treat its entries as candidates to verify against the code rather than as receipt. Standalone entry builds the seat's own packet: `lore packet build --work-item "$SLUG" --role coordinator --caller implement-lead --topic "<what this run changes>" --scale-set <bucket>`. A packet identifies assembled context; it is not receipt and not acceptance. Each entry you are handed carries a byline naming who captured it and during what work; the byline locates context and says nothing about how much to trust the entry. Later tasks, consultations and reviews each get their own packet at their declared scale.
+**Bind the seat.** Commissioned entry arrives with a packet id and pointer from the coordinator. Render that packet and check it against the move you were given; its entries are candidates to verify against the code, not receipt and not acceptance:
+
+**Recipe inputs:** PACKET_ID.
+<!-- implement-recipe: seat-packet-show -->
+`lore packet show "$PACKET_ID"`
+
+Each entry you are handed carries a byline naming who captured it and during what work; the byline locates context and says nothing about how much to trust the entry. Standalone entry has no packet yet: the seat builds its own once the start verb below has bound the slug, because the packet writer binds to a work item and nothing before `start` has resolved one. Later tasks, consultations and reviews each get their own packet at their declared scale.
 
 **Start the run through the start verb — the sole entry envelope.** Do not improvise resolution with `ls`, `find` or directory listing, and do not hand-run the plan validation, branch cache, claims parsing or model resolution it absorbs:
 
@@ -65,6 +71,12 @@ They carry the role and model maps, the coordination concurrency ceiling, ceremo
 `lore impl start "$INPUT" --compiled-positions --json`
 
 `start` resolves the reference, validates a structured plan with unchecked work, returns the title and `intent_anchor` verbatim with prior claims, models, template versions and branch-cache status, and compiles the worker and designer briefs for the active framework and every resolved target, returned under `position_descriptors`. Exit `1` is no match, no `plan.md` (run `/spec` first) or no unchecked task — report the verb's message and stop; exit `2` is an ambiguous reference — disambiguate with `AskUserQuestion` from the candidates and re-invoke. Bind from the struct: `SLUG`, `ITEM_DIR` (`$WORK_DIR/<slug>`, or `$WORK_DIR/_archive/<slug>` when `archived: true`, which warns and waits for explicit confirmation, since the writing verbs refuse archived items), `INTENT_ANCHOR`, the three models, `WORKER_TEMPLATE_VERSION` and `ADVISOR_TEMPLATE_VERSION` (legacy meanings kept for the per-run `promote-batch` and `close` flags) and the prior-claims maps. Keep `worker_class_models` as the raw scalar bindings displayed for compatibility, and bind `worker_class_routes` as the structured dispatch map: each class route carries exactly `binding`, `source_framework`, `target_framework`, `native_binding` and `qualified`. Descriptors are snapshots, not launch identities; each dispatch compiles its target again.
+
+Standalone entry builds the seat's packet here, now that `SLUG` is bound. The topic is your judgment — one line naming what this run changes — and `SCALE_SET` is the bucket that judgment sits at, or several comma-separated (`skills/memory/SKILL.md` § Scale-Aware Navigation); the command itself is not a judgment. The verb prints a status object whose `packet_id` you hold as `PACKET_ID` and render with the seat-packet-show recipe, so both routes read their packet the same way:
+
+**Recipe inputs:** SLUG, TOPIC, SCALE_SET.
+<!-- implement-recipe: seat-packet-build -->
+`lore packet build --work-item "$SLUG" --role coordinator --caller implement-lead --topic "$TOPIC" --scale-set "$SCALE_SET"`
 
 Read the item's evidence beside its plan:
 
@@ -259,15 +271,16 @@ else:
         note.append("You run as a hosted worker session, and no lead collects a session's message: land the report yourself with "
                     f"printf '%s' \"$REPORT\" | lore coordinate report {slug} --report-id {b['report_id']}. Exit 4 means a file already exists at that path and the id was used before; "
                     "record that under Blockers as written. Exit 1 means the arguments, environment or an empty body were wrong; read the message and correct the call. "
-                    "After the report has landed and the rows are appended, end the session with lore session close --self --reason protocol_terminus. "
-                    "A required consultation goes in this session's output as a ## Consultation request (consultation-id, domain, reason, question, task); the lead can reach this session with lore session send. "
+                    "After the report has landed and the rows are appended, stop and wait: do not close this session or remove anything from its execution root. "
+                    "Report validation reads every source artifact against that root, and the lead closes the session after acceptance and integration; a correction can still reach you here. "
+                    "A required consultation goes in this session's output as a ## Consultation body: first line exactly ## Consultation, then consultation-id, domain, reason, question, task. The lead can reach this session with lore session send. "
                     "If no reply arrives, record the domain and how long you waited under Blockers rather than implementing past the requirement.")
     elif route == "chaperone":
         note.append("The chaperone that launched you relays your final message verbatim and lands it at the bound report path; do not land it yourself. "
-                    "A required consultation is a ## Consultation request in your output; wait for the reply before implementing past the requirement.")
+                    "A required consultation is a ## Consultation body in your output (first line exactly ## Consultation, then consultation-id, domain, reason, question, task); wait for the reply before implementing past the requirement.")
     else:
         note.append("Return the finished report as your final message; the lead lands it at the bound report path and checks it against its own copy of this attempt's reference. "
-                    "A required consultation travels the same way: return the ## Consultation request (consultation-id, domain, reason, question, task) as your message and stop; "
+                    "A required consultation travels the same way: return the ## Consultation body (first line exactly ## Consultation, then consultation-id, domain, reason, question, task) as your message and stop; "
                     "the reply sent to your name resumes you.")
 extract = Path(E["TIER2_EXTRACT_FILE"]).read_text() if E["TIER2_EXTRACT_FILE"] else ""
 if extract.strip():
