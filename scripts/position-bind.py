@@ -317,6 +317,9 @@ def prepare_session(context, *, position, framework, slug, execution_root, packe
             raise ValueError(f'session {key} conflicts with bindings')
     validate_bindings(b, position, kdir, TASK_BINDINGS, pending_root=not execution_root)
     existing = kdir / '_work' / b['work_item'] / 'position-dispatch' / b['dispatch_attempt_id'] / 'manifest.json'
+    for prior in existing.parent.parent.glob('*/manifest.json'):
+        if prior != existing and json.loads(prior.read_bytes())['bindings']['report_id'] == b['report_id']:
+            raise ValueError('report_id already belongs to another attempt')
     if existing.exists():
         m = validate_dispatch(existing, expected={'position': position, 'framework': framework, **expected})
         if m['bindings'] != b or m['wrapper'] is not None:

@@ -180,6 +180,12 @@ elif scenario=='launch':
             assert set(row['extra_context'])=={'position_preparation'}
             assert not (item/'position-dispatch'/b['dispatch_attempt_id']).exists()
             examples.append({'position':position,'framework':fw,'mode':mode,'queue_path':str(row_path),'kdir':str(store)})
+    occupied=fixture(attempt='occupied-report');bind(compile(),occupied)
+    duplicate=fixture(attempt='duplicate-report')
+    duplicate.update(execution_root=None,report_id=occupied['report_id'],report_path=occupied['report_path'])
+    duplicate['absence_reasons']['execution_root']='host supplies final root'
+    rejected=request(duplicate,fixed=False,flags=('--model','opaque'),ok=False)
+    assert b'report_id already belongs' in rejected.stderr
     # Admission validates pending roots without weakening any other identity.
     bad=fixture(attempt='invalid-pending'); bad['execution_root']=None
     bad['absence_reasons']['execution_root']='host supplies root'
