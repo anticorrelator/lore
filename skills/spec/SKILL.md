@@ -531,16 +531,16 @@ sys.exit("report answers another input; re-dispatch under fresh ids. mismatched:
 
 6. **Run the typed completion check** on every compiled investigator report, dispatched or inline, after the report is landed and its assertions are canonical. `REFERENCE_FILE` is the same file the identity check read; `TASK_ID` is empty before a plan exists and is the bound task otherwise:
 
-   **Recipe inputs:** SCRIPTS_DIR, REFERENCE_FILE, TASK_ID.
-   <!-- spec-recipe: typed-completion -->
-   ```bash
-   python3 - "$REFERENCE_FILE" "$TASK_ID" <<'PY' | bash "$SCRIPTS_DIR/task-completed-capture-check.sh"
-   import json, sys
-   ref = json.load(open(sys.argv[1]))
-   completion = ref.get("completion_input") or {"position_dispatch": ref.get("reference", ref), "lore_task_id": sys.argv[2] or None}
-   print(json.dumps(completion))
-   PY
-   ```
+**Recipe inputs:** SCRIPTS_DIR, REFERENCE_FILE, TASK_ID.
+<!-- spec-recipe: typed-completion -->
+```bash
+python3 - "$REFERENCE_FILE" "$TASK_ID" <<'PY' | bash "$SCRIPTS_DIR/task-completed-capture-check.sh"
+import json, sys
+ref = json.load(open(sys.argv[1]))
+completion = ref.get("completion_input") or {"position_dispatch": ref.get("reference", ref), "lore_task_id": sys.argv[2] or None}
+print(json.dumps(completion))
+PY
+```
 
    The completion input is the directive's `payload.completion_input`, or the `completion_input` that `session-reference` returned, or the bound reference with the task explicitly absent for an inline attempt. Either way it was computed from the published bundle, and no member of it came from the report. Exit 0 means the landed report carries the assigned identity headers, every label the investigator contract requires, Key files that are existing absolute paths, and grounded assertions that each match one canonical row for this attempt whose snippet is found at the named commit and line range under the execution root. Exit 2 names on stderr what did not hold; the constraints that most often fail are listed in `docs/position-report-contracts.md` § Investigator report. The check reads the report at the destination the manifest assigned, which is why landing comes first. It is invoked explicitly on every spec route because no spec route completes through a native `TaskCompleted` hook: a Claude `Agent` subagent returns rather than completing a team task, Codex and OpenCode have no blocking hook, a session ends on its own lifecycle, and the inline seat is not a hook. A pass establishes checkable references. Whether the findings answer the question well enough to synthesize from stays the seat's judgment, and nothing here accepts the investigation on the seat's behalf.
 
@@ -745,22 +745,22 @@ print(json.dumps({k: b[k] for k in ("dispatch_attempt_id", "report_id", "packet_
 
    Compile the designer with `POSITION=designer` (compile-position recipe), author the wrapper (author-wrapper recipe; the planning note is chosen by the bound mode), then either bind inline or for a native or fixed-placement launch (bind-attempt recipe with `REQUIRED_BINDINGS="packet_id packet_pointer"`, `NATIVE_MODEL` set only on a native route; the designer model resolves through the `advisor` role under ceremony `spec`), or prepare an ordinary session whose host supplies the tree:
 
-   **Recipe inputs:** SCRIPTS_DIR, KNOWLEDGE_DIR, DESCRIPTOR_FILE, BINDINGS_FILE, GUIDANCE_FILE, WRAPPER_FILE, PREFIX_FILE, SUFFIX_FILE, SESSION_SLUG, CONTEXT_FILE.
-   <!-- spec-recipe: prepare-session -->
-   ```bash
-   python3 - "$SCRIPTS_DIR" "$KNOWLEDGE_DIR" "$DESCRIPTOR_FILE" "$BINDINGS_FILE" "$GUIDANCE_FILE" "$WRAPPER_FILE" "$PREFIX_FILE" "$SUFFIX_FILE" "$SESSION_SLUG" > "$CONTEXT_FILE" <<'PY'
-   import importlib.util, json, sys
-   from pathlib import Path
-   scripts, kdir, descriptor, bindings, guidance, wrapper, prefix, suffix, slug = sys.argv[1:]
-   sys.path.insert(0, scripts)
-   spec = importlib.util.spec_from_file_location("binder", Path(scripts) / "position-bind.py")
-   binder = importlib.util.module_from_spec(spec); spec.loader.exec_module(binder)
-   context = binder.prepare_session_input(json.loads(Path(descriptor).read_bytes()), json.loads(Path(bindings).read_bytes()),
-                                          Path(kdir), Path(guidance).read_bytes(), slug=slug, wrapper=json.loads(Path(wrapper).read_bytes()),
-                                          prefix=Path(prefix).read_bytes(), suffix=Path(suffix).read_bytes())
-   print(json.dumps(context))
-   PY
-   ```
+**Recipe inputs:** SCRIPTS_DIR, KNOWLEDGE_DIR, DESCRIPTOR_FILE, BINDINGS_FILE, GUIDANCE_FILE, WRAPPER_FILE, PREFIX_FILE, SUFFIX_FILE, SESSION_SLUG, CONTEXT_FILE.
+<!-- spec-recipe: prepare-session -->
+```bash
+python3 - "$SCRIPTS_DIR" "$KNOWLEDGE_DIR" "$DESCRIPTOR_FILE" "$BINDINGS_FILE" "$GUIDANCE_FILE" "$WRAPPER_FILE" "$PREFIX_FILE" "$SUFFIX_FILE" "$SESSION_SLUG" > "$CONTEXT_FILE" <<'PY'
+import importlib.util, json, sys
+from pathlib import Path
+scripts, kdir, descriptor, bindings, guidance, wrapper, prefix, suffix, slug = sys.argv[1:]
+sys.path.insert(0, scripts)
+spec = importlib.util.spec_from_file_location("binder", Path(scripts) / "position-bind.py")
+binder = importlib.util.module_from_spec(spec); spec.loader.exec_module(binder)
+context = binder.prepare_session_input(json.loads(Path(descriptor).read_bytes()), json.loads(Path(bindings).read_bytes()),
+                                       Path(kdir), Path(guidance).read_bytes(), slug=slug, wrapper=json.loads(Path(wrapper).read_bytes()),
+                                       prefix=Path(prefix).read_bytes(), suffix=Path(suffix).read_bytes())
+print(json.dumps(context))
+PY
+```
 
    A prepared session enqueues through the request-session recipe with an empty worktree pair and is collected through the session-reference recipe; a native launch goes through the native-input recipe and its readiness check, and a failed check falls back to a session under fresh identities, never to a generic agent. In short mode the seat reads the payload (read-payload recipe) and does the design work itself under that brief. A coordinator commissioning only the design uses these same recipes and skips the rest of this skill; the artifacts are the same.
 
