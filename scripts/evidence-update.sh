@@ -167,7 +167,7 @@ if [[ $FROM_STDIN -eq 1 ]]; then
     die "no input: --from-stdin requires a JSON object on stdin"
   fi
   MERGE_JSON=$(cat)
-  if [[ -z "${MERGE_JSON// }" ]]; then
+  if [[ "$MERGE_JSON" =~ ^[[:space:]]*$ ]]; then
     die "stdin merge object is empty"
   fi
   if ! printf '%s' "$MERGE_JSON" | jq -e 'type == "object"' >/dev/null 2>&1; then

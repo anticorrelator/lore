@@ -136,7 +136,7 @@ else
   VERDICTS_INPUT=$(cat)
 fi
 
-if [[ -z "${VERDICTS_INPUT// }" ]]; then
+if [[ "$VERDICTS_INPUT" =~ ^[[:space:]]*$ ]]; then
   fail "verdicts input is empty"
 fi
 

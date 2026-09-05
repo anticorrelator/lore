@@ -97,7 +97,7 @@ else
   ROW=$(cat)
 fi
 
-if [[ -z "${ROW// }" ]]; then
+if [[ "$ROW" =~ ^[[:space:]]*$ ]]; then
   die "row is empty"
 fi
 
