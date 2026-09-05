@@ -309,7 +309,8 @@ for i, cand in enumerate(candidates, 1):
         role_defaulted = True
         cand = {**cand, "producer_role": role}
     tv = ROLE_TV.get(role)
-    producers = [project(claims[sid], expected={"work_item": slug}) for sid in sids]
+    producers = [project(claims[sid], expected={"work_item": slug,
+                 **({"task_id": claims[sid]["task_id"]} if claims[sid].get("task_id") else {})}) for sid in sids]
     compiled = [p for p in producers if p["status"] != "legacy"]
     if not compiled and role not in ROLE_TV:
         rejected.append({"claim_id": cid,
