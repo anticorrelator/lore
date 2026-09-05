@@ -35,7 +35,7 @@ import yaml
 
 original, temporary, scenario = sys.argv[1:]
 original, temporary = Path(original).resolve(), Path(temporary).resolve()
-if os.environ.get('POSITION_DISPATCH_FIXTURES') and scenario in ('native', 'session', 'launch', 'native-selection', 'spec', 'spec-native', 'spec-session', 'implement-envelope'):
+if os.environ.get('POSITION_DISPATCH_FIXTURES') and scenario in ('native', 'session', 'launch', 'native-selection', 'spec', 'spec-native', 'spec-session', 'implement-envelope', 'spec-report-fields'):
     temporary = Path(os.environ['POSITION_DISPATCH_FIXTURES']).resolve() / scenario
     temporary.mkdir(parents=True, exist_ok=False)
 repo, home = temporary / 'checkout', temporary / 'home'
@@ -49,7 +49,7 @@ store = home / '.lore'
 settings = {'version': 1, 'harnesses': {'codex': {'roles': {'lead': 'planning-model', 'reviewer': 'review-model', 'worker': 'worker-model', 'researcher': 'research-model', 'advisor': 'advisor-model'}, 'ceremony_roles': {'spec': {'lead': 'spec-model'}}}}}
 (store / 'config/settings.json').write_text(json.dumps(settings))
 item = store / '_work/fixture'
-if scenario != 'implement-envelope':
+if scenario not in ('implement-envelope', 'spec-report-fields'):
     item.mkdir(parents=True)
     (item / '_meta.json').write_text(json.dumps({'title': 'Fixture', 'source_checkout': str(repo)}))
 instances = store / '_sessions/instances'; instances.mkdir(parents=True)
@@ -82,7 +82,7 @@ def refused(fn, message=None):
     else:
         raise AssertionError('expected refusal')
 
-if scenario == 'implement-envelope':
+if scenario in ('implement-envelope', 'spec-report-fields'):
     call([str(repo/'cli/lore'), 'work', 'create', '--title', 'Fixture', '--slug', 'fixture',
           '--intent-anchor', 'Preserve isolated packet history.'])
     call([str(repo/'cli/lore'), 'work', 'source-checkout', 'fixture', '--from-instance', 'fixture'])
@@ -120,7 +120,7 @@ def fixture(position='worker', attempt='attempt-1', revision=None, mode=None):
     row = {'packet_id': packet_id, 'packet_scope': 'task', 'work_item': 'fixture', 'task_id': 'task-1', 'revision_id': revision,
            'dispatch_attempt_id': attempt, 'source_head': committed['source_head'], 'session_id': None, 'phase': None, 'arm': None, 'task_scale_set': 'implementation'}
     build_packet(store, row, assembly=('Isolated packet content', {}), role=position, scales=['implementation'])
-    synthesize(store, packet_id, by='fixture-lead')
+    synthesize(store, packet_id, by='spec-lead')
     b = dict.fromkeys(binder.FIELDS)
     b.update(work_item='fixture', task_id='task-1', revision_id=revision, packet_id=packet_id, packet_pointer=pointer(store, packet_id),
              dispatch_attempt_id=attempt, assignment='Inspect actual bytes.\nPreserve Unicode: λ and trailing newline.\n', report_id='report-' + attempt,
@@ -137,7 +137,7 @@ def unbound_fixture(position, attempt, mode=None):
     row={'packet_id':packet_id,'packet_scope':'session','work_item':'fixture','task_id':None,
          'session_id':None,'phase':None,'arm':None,'task_scale_set':'implementation'}
     build_packet(store,row,assembly=('Pre-plan investigation.',{}),role=position,scales=['implementation'])
-    synthesize(store,packet_id,by='fixture-lead')
+    synthesize(store, packet_id, by='spec-lead')
     b.update(task_id=None,revision_id=None,packet_id=packet_id,packet_pointer=pointer(store,packet_id))
     b['absence_reasons'].update(task_id='No task has been assigned.',revision_id='No plan revision exists.')
     return b
@@ -264,13 +264,16 @@ def spec_sessions(frameworks):
         assert not (item / 'position-dispatch' / payload['bindings']['dispatch_attempt_id']).exists()
         context_path = temporary / ('ordinary-context-' + inv['id'] + '.json')
         context_path.write_text(json.dumps(context))
-        blocks = re.findall(r'```bash\n(.*?)\n\s*```', (repo/'skills/spec/SKILL.md').read_text(), re.S)
-        recipes = [textwrap.dedent(block) for block in blocks if 'lore session request --type worker --slug "<slug>--w<n>"' in block]
-        assert len(recipes) == 1
-        recipe = recipes[0].replace('<slug>--w<n>', 'fixture--w1').replace('[--worktree-id <id> --execution-dir <path>]', '')
-        values = {'MODEL':payload['model'], 'FRAMEWORK':payload['framework'], 'CONTEXT_FILE':str(context_path)}
-        assignments = '\n'.join(name + '=' + shlex.quote(value) for name, value in values.items())
-        row_path = enqueue_recipe(assignments + '\n' + recipe)
+        sys.path.insert(0, str(original / 'tests/helpers'))
+        from implement_recipes import inventory
+        document_inventory, bodies = inventory(repo / 'skills/spec/SKILL.md', 'spec')
+        recipe_row = next(row for row in document_inventory['recipes'] if row['id'] == 'request-session')
+        values = {'SESSION_SLUG': 'fixture--w1', 'MODEL': payload['model'], 'TARGET_FRAMEWORK': payload['framework'],
+                  'CONTEXT_FILE': str(context_path), 'WORKTREE_ID': '', 'EXECUTION_DIR': '',
+                  'TARGET_INSTANCE': '', 'MIN_VINTAGE': ''}
+        assert set(values) == set(recipe_row['inputs'])
+        assignments = '\n'.join('export ' + name + '=' + shlex.quote(value) for name, value in values.items())
+        row_path = enqueue_recipe(assignments + '\n' + bodies['request-session'].decode())
         row = json.loads(row_path.read_bytes())
         assert row['extra_context'] == context
         assert row['placement_stance'] == 'required_dir' and row['required_project_dir'] == str(repo)
@@ -505,6 +508,100 @@ elif scenario == 'spec-claims':
         if not correct:
             assert b'assertion has no unique matching canonical claim' in result.stderr
     print('grounded self-emission rejects investigation labels for bound tasks and accepts the actual bound task')
+
+elif scenario == 'spec-report-fields':
+    # These are authored report inputs. Every packet, claim and report lands
+    # through the same writers used by the collector.
+    call(['git', 'init', '-q'])
+    call(['git', 'config', 'user.name', 'Fixture'])
+    call(['git', 'config', 'user.email', 'fixture@example.invalid'])
+    (repo / 'fixture.txt').write_text('grounded fixture bytes\n')
+    call(['git', 'add', 'fixture.txt']); call(['git', 'commit', '-qm', 'Fixture source'])
+    sha = call(['git', 'rev-parse', 'HEAD']).stdout.decode().strip()
+    from snippet_normalize import hash_normalized
+    hook = ['bash', str(repo / 'scripts/task-completed-capture-check.sh')]
+    cases = [
+        ('valid', None), ('empty', None),
+        ('key-capital-none', None), ('key-none', None), ('key-list-empty', None),
+        ('observation-external', None), ('observation-parent', None), ('trailing-newlines', None),
+        ('observations-unstructured', None), ('significance-unequal', None),
+        ('preplan-task-vocabulary', None), ('observation-canonical-ref', None),
+        ('observation-missing-ref', 'observation canonical claim reference missing or ambiguous'),
+        ('key-line', 'existing absolute files'),
+        ('key-relative', 'existing absolute files'),
+        ('significance', 'malformed grounded investigator assertion'),
+        ('wrong-role', 'canonical claim producer mismatch'),
+        ('outside-root', 'is not in the subpath'),
+        ('missing-revision-file', 'exists on disk, but not in'),
+        ('wrong-header', 'Report-id mismatched'),
+        ('plain-claim-ids', 'invalid Tier 2 evidence references'),
+    ]
+    for name, reason in cases:
+        b = (unbound_fixture if name == 'preplan-task-vocabulary' else fixture)('investigator', 'fields-' + name)
+        if name == 'preplan-task-vocabulary':
+            b['assignment'] = json.dumps({'investigation_id': 'named-investigation', 'question': 'Which bytes exist?', 'complexity': 'simple'})
+        b['report_path'] = str(item / 'worker-reports' / (b['report_id'] + '.md'))
+        ref = bind(compile('investigator'), b)
+        m = binder.validate_dispatch(ref['manifest_path'], ref['manifest_sha256'])
+        source = repo / 'fixture.txt'
+        if name == 'outside-root':
+            source = temporary / 'outside.txt'; source.write_text('grounded fixture bytes\n')
+        elif name == 'missing-revision-file':
+            source = repo / 'uncommitted.txt'; source.write_text('grounded fixture bytes\n')
+        row = {'claim_id': 'claim-fields-' + name, 'tier': 'task-evidence',
+               'claim': 'The source contains grounded fixture bytes.',
+               'producer_role': 'spec-lead' if name == 'wrong-role' else 'researcher',
+               'protocol_slot': 'spec', 'task_id': 'different-legacy-vocabulary' if name == 'preplan-task-vocabulary' else b['task_id'], 'scale': 'implementation',
+               'file': str(source), 'line_range': '1-1', 'exact_snippet': 'grounded fixture bytes',
+               'normalized_snippet_hash': hash_normalized('grounded fixture bytes'),
+               'falsifier': 'The committed first line differs.',
+               'why_this_work_needs_it': 'Check source-bound report collection.',
+               'captured_at_sha': sha, 'change_context': {'summary': 'Fixture source',
+                    'changed_files': [str(source)], 'diff_ref': None},
+               'significance': 'low', 'report_id': b['report_id'],
+               'dispatch_attempt_id': b['dispatch_attempt_id'],
+               'position_dispatch': {key: ref[key] for key in ('manifest_path', 'manifest_sha256')}}
+        observation_only = name in ('observation-external', 'observation-parent')
+        if name != 'empty' and not observation_only:
+            call(['bash', str(repo / 'scripts/evidence-append.sh'), '--work-item', 'fixture', '--kdir', str(store)], input=json.dumps(row).encode())
+        assertion = {key: row[key] for key in ('claim_id', 'claim', 'file', 'line_range', 'exact_snippet', 'normalized_snippet_hash', 'falsifier', 'significance')}
+        if name == 'significance': assertion['significance'] = 'This affects collection.'
+        if name == 'significance-unequal': assertion['significance'] = 'high'
+        if name in ('observation-canonical-ref', 'observation-missing-ref'):
+            assertion.pop('falsifier')
+            if name == 'observation-missing-ref': assertion['claim_id'] = 'missing-canonical-row'
+        if observation_only:
+            external = temporary / (name + '.txt')
+            external.write_text('External observation without a canonical source claim.\n')
+            assertion = {'claim': 'An external observation file exists.',
+                         'file': str(external) if name == 'observation-external' else '../' + external.name}
+        key = str(repo / 'fixture.txt')
+        if name == 'key-line': key += ':1'
+        if name == 'key-relative': key = 'fixture.txt'
+        headers = {'Template-version': m['producer']['template_version'],
+                   'Position-dispatch-manifest': ref['manifest_path'], 'Position-dispatch-sha256': ref['manifest_sha256'],
+                   'Report-id': 'different-report' if name == 'wrong-header' else b['report_id']}
+        report = ''.join(f'{key}: {value}\n' for key, value in headers.items())
+        key_body = {'key-capital-none': 'None\n', 'key-none': 'none\n', 'key-list-empty': '[]\n'}.get(name, yaml.safe_dump([key]))
+        report += '**Question:** Which committed bytes ground the report?\n**Findings:** The named bytes are inspectable.\n**Key files:**\n' + key_body
+        report += '**Implications:** Retain the source identity.\n**Assertions:**\n' + yaml.safe_dump([] if name == 'empty' else [assertion])
+        observations = '[unparsed prose with no YAML fields' if name == 'observations-unstructured' else 'None'
+        report += '**Observations:** ' + observations + '\n**Worker leads:** None\n**Unknowns:** None\n'
+        if name == 'plain-claim-ids': report += '**Tier 2 evidence:**\n' + row['claim_id'] + '\n'
+        if name == 'trailing-newlines': report += '\n\n\n'
+        completion = {'position_dispatch': ref, 'lore_task_id': b['task_id']}
+        # Missing durable output fails even when a complete response exists in memory.
+        missing = call(hook, ok=False, input=json.dumps(completion).encode())
+        assert b'durable report missing' in missing.stderr
+        call(['bash', str(repo / 'scripts/coordinate-report.sh'), 'fixture', '--report-id', b['report_id'], '--kdir', str(store)], input=report.encode())
+        before = Path(b['report_path']).read_bytes()
+        assert before == report.rstrip('\n').encode() + b'\n'
+        if name == 'trailing-newlines': assert before != report.encode()
+        result = call(hook, ok=reason is None, input=json.dumps(completion).encode())
+        if reason: assert reason.encode() in result.stderr, (name, result.stderr)
+        repeat = call(['bash', str(repo / 'scripts/coordinate-report.sh'), 'fixture', '--report-id', b['report_id'], '--kdir', str(store)], ok=False, input=report.encode())
+        assert repeat.returncode == 4 and Path(b['report_path']).read_bytes() == before
+    print('real investigator report fields, source-root restrictions, write-once history and empty assertions checked')
 
 elif scenario == 'spec-session':
     args, document, opened, examples = spec_sessions(('claude-code', 'codex', 'opencode'))
@@ -930,7 +1027,7 @@ elif scenario=='preplan':
     row={'packet_id':'pkt-preplan','packet_scope':'session','work_item':'fixture','task_id':None,
          'session_id':None,'phase':None,'arm':None,'task_scale_set':'implementation'}
     build_packet(store,row,assembly=('Pre-plan investigation.',{}),role='investigator',scales=['implementation'])
-    synthesize(store,'pkt-preplan',by='fixture-lead')
+    synthesize(store, row['packet_id'], by='spec-lead')
     b=fixture('investigator','independent-attempt')
     b.update(task_id=None,revision_id=None,packet_id='pkt-preplan',packet_pointer=pointer(store,'pkt-preplan'))
     b['absence_reasons'].update(task_id='Investigation precedes tasks.',revision_id='No plan revision exists.')
@@ -1108,6 +1205,11 @@ PY
 
 @test "bound spec investigator claims preserve task identity through canonical completion" {
   run exercise_binding spec-claims
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "spec investigator report fields reject malformed paths, roles and source identities" {
+  run exercise_binding spec-report-fields
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
 

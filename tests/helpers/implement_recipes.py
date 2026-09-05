@@ -19,14 +19,17 @@ import yaml
 
 
 EXECUTABLE = {"bash", "sh", "shell", "python", "python3"}
-MARKER = re.compile(r"<!-- implement-recipe: ([a-z0-9]+(?:-[a-z0-9]+)*) -->")
 
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def inventory(source):
+def inventory(source, namespace="implement"):
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", namespace):
+        raise ValueError("invalid recipe namespace: " + namespace)
+    marker_prefix = "<!-- " + namespace + "-recipe:"
+    marker_pattern = re.compile(re.escape(marker_prefix) + r" ([a-z0-9]+(?:-[a-z0-9]+)*) -->")
     raw = source.read_bytes()
     lines = raw.decode().splitlines(keepends=True)
     recipes, examples, bodies = [], [], {}
@@ -41,8 +44,8 @@ def inventory(source):
             inputs = [] if value.lower() == "none" else re.findall(r"\b[A-Z][A-Z0-9_]*\b", value)
             if not inputs and value.lower() != "none":
                 raise ValueError(f"unreadable input declaration at {n + 1}")
-        marker = MARKER.search(line)
-        if "<!-- implement-recipe:" in line and not marker:
+        marker = marker_pattern.search(line)
+        if marker_prefix in line and not marker:
             raise ValueError(f"invalid recipe marker at {n + 1}")
         if marker:
             if pending:
@@ -102,8 +105,8 @@ def inventory(source):
                 recipes=recipes, declarative_examples=examples), bodies
 
 
-def assert_coverage(document, bodies):
-    current, current_bodies = inventory(Path(document["source_path"]))
+def assert_coverage(document, bodies, namespace="implement"):
+    current, current_bodies = inventory(Path(document["source_path"]), namespace)
     if current["source_sha256"] != document["source_sha256"]:
         raise AssertionError("recipe source changed after inventory")
     if current_bodies != bodies:
@@ -173,11 +176,12 @@ def isolated_go_environment(repo, case_root, env):
 
 
 class Fixture:
-    def __init__(self, repo, root, source):
+    def __init__(self, repo, root, source, namespace="implement"):
         self.repo, self.root = repo.resolve(), root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        self.document, self.bodies = inventory(source)
-        validate_declarative_examples(self.document, source)
+        self.document, self.bodies = inventory(source, namespace)
+        if namespace == "implement":
+            validate_declarative_examples(self.document, source)
         self.rows = {r["id"]: r for r in self.document["recipes"]}
         self.home, self.store, self.code = [self.root / n for n in ("home", "knowledge", "code")]
         for path in (self.home, self.store, self.code, self.root / "outputs"):
