@@ -666,6 +666,8 @@ if os.path.isfile(log_path):
             if not tid:
                 match = re.search(r"(?m)^(?:\*\*)?Task:(?:\*\*)?\s*(task-[\w-]+)", section)
                 if not match:
+                    match = re.search(r"(?m)^Check-report task:\s*(task-[\w-]+)", section)
+                if not match:
                     match = re.search(r"(?m)^Report-key:\s*[^/]+/(\S+)", section)
                 tid = match[1] if match else None
             if tid:
