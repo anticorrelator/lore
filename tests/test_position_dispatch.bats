@@ -262,13 +262,16 @@ def spec_sessions(frameworks):
         assert not (item / 'position-dispatch' / payload['bindings']['dispatch_attempt_id']).exists()
         context_path = temporary / ('ordinary-context-' + inv['id'] + '.json')
         context_path.write_text(json.dumps(context))
-        blocks = re.findall(r'```bash\n(.*?)\n\s*```', (repo/'skills/spec/SKILL.md').read_text(), re.S)
-        recipes = [textwrap.dedent(block) for block in blocks if 'lore session request --type worker --slug "<slug>--w<n>"' in block]
-        assert len(recipes) == 1
-        recipe = recipes[0].replace('<slug>--w<n>', 'fixture--w1').replace('[--worktree-id <id> --execution-dir <path>]', '')
-        values = {'MODEL':payload['model'], 'FRAMEWORK':payload['framework'], 'CONTEXT_FILE':str(context_path)}
-        assignments = '\n'.join(name + '=' + shlex.quote(value) for name, value in values.items())
-        row_path = enqueue_recipe(assignments + '\n' + recipe)
+        sys.path.insert(0, str(original / 'tests/helpers'))
+        from implement_recipes import inventory
+        document_inventory, bodies = inventory(repo / 'skills/spec/SKILL.md', 'spec')
+        recipe_row = next(row for row in document_inventory['recipes'] if row['id'] == 'request-session')
+        values = {'SESSION_SLUG': 'fixture--w1', 'MODEL': payload['model'], 'TARGET_FRAMEWORK': payload['framework'],
+                  'CONTEXT_FILE': str(context_path), 'WORKTREE_ID': '', 'EXECUTION_DIR': '',
+                  'TARGET_INSTANCE': '', 'MIN_VINTAGE': ''}
+        assert set(values) == set(recipe_row['inputs'])
+        assignments = '\n'.join('export ' + name + '=' + shlex.quote(value) for name, value in values.items())
+        row_path = enqueue_recipe(assignments + '\n' + bodies['request-session'].decode())
         row = json.loads(row_path.read_bytes())
         assert row['extra_context'] == context
         assert row['placement_stance'] == 'required_dir' and row['required_project_dir'] == str(repo)
@@ -516,6 +519,9 @@ elif scenario == 'spec-report-fields':
     hook = ['bash', str(repo / 'scripts/task-completed-capture-check.sh')]
     cases = [
         ('valid', None), ('empty', None),
+        ('observations-unstructured', None), ('significance-unequal', None),
+        ('preplan-task-vocabulary', None), ('observation-canonical-ref', None),
+        ('observation-missing-ref', 'observation canonical claim reference missing or ambiguous'),
         ('key-line', 'existing absolute files'),
         ('key-relative', 'existing absolute files'),
         ('significance', 'malformed grounded investigator assertion'),
@@ -526,7 +532,9 @@ elif scenario == 'spec-report-fields':
         ('plain-claim-ids', 'invalid Tier 2 evidence references'),
     ]
     for name, reason in cases:
-        b = fixture('investigator', 'fields-' + name)
+        b = (unbound_fixture if name == 'preplan-task-vocabulary' else fixture)('investigator', 'fields-' + name)
+        if name == 'preplan-task-vocabulary':
+            b['assignment'] = json.dumps({'investigation_id': 'named-investigation', 'question': 'Which bytes exist?', 'complexity': 'simple'})
         b['report_path'] = str(item / 'worker-reports' / (b['report_id'] + '.md'))
         ref = bind(compile('investigator'), b)
         m = binder.validate_dispatch(ref['manifest_path'], ref['manifest_sha256'])
@@ -538,7 +546,7 @@ elif scenario == 'spec-report-fields':
         row = {'claim_id': 'claim-fields-' + name, 'tier': 'task-evidence',
                'claim': 'The source contains grounded fixture bytes.',
                'producer_role': 'spec-lead' if name == 'wrong-role' else 'researcher',
-               'protocol_slot': 'spec', 'task_id': b['task_id'], 'scale': 'implementation',
+               'protocol_slot': 'spec', 'task_id': 'different-legacy-vocabulary' if name == 'preplan-task-vocabulary' else b['task_id'], 'scale': 'implementation',
                'file': str(source), 'line_range': '1-1', 'exact_snippet': 'grounded fixture bytes',
                'normalized_snippet_hash': hash_normalized('grounded fixture bytes'),
                'falsifier': 'The committed first line differs.',
@@ -552,6 +560,10 @@ elif scenario == 'spec-report-fields':
             call(['bash', str(repo / 'scripts/evidence-append.sh'), '--work-item', 'fixture', '--kdir', str(store)], input=json.dumps(row).encode())
         assertion = {key: row[key] for key in ('claim_id', 'claim', 'file', 'line_range', 'exact_snippet', 'normalized_snippet_hash', 'falsifier', 'significance')}
         if name == 'significance': assertion['significance'] = 'This affects collection.'
+        if name == 'significance-unequal': assertion['significance'] = 'high'
+        if name in ('observation-canonical-ref', 'observation-missing-ref'):
+            assertion.pop('falsifier')
+            if name == 'observation-missing-ref': assertion['claim_id'] = 'missing-canonical-row'
         key = str(repo / 'fixture.txt')
         if name == 'key-line': key += ':1'
         if name == 'key-relative': key = 'fixture.txt'
@@ -561,7 +573,8 @@ elif scenario == 'spec-report-fields':
         report = ''.join(f'{key}: {value}\n' for key, value in headers.items())
         report += '**Question:** Which committed bytes ground the report?\n**Findings:** The named bytes are inspectable.\n**Key files:**\n' + yaml.safe_dump([key])
         report += '**Implications:** Retain the source identity.\n**Assertions:**\n' + yaml.safe_dump([] if name == 'empty' else [assertion])
-        report += '**Observations:** None\n**Worker leads:** None\n**Unknowns:** None\n'
+        observations = '[unparsed prose with no YAML fields' if name == 'observations-unstructured' else 'None'
+        report += '**Observations:** ' + observations + '\n**Worker leads:** None\n**Unknowns:** None\n'
         if name == 'plain-claim-ids': report += '**Tier 2 evidence:**\n' + row['claim_id'] + '\n'
         completion = {'position_dispatch': ref, 'lore_task_id': b['task_id']}
         # Missing durable output fails even when a complete response exists in memory.

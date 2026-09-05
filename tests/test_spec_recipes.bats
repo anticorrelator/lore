@@ -12,7 +12,7 @@ teardown() {
 
 spec_scenario() {
   python3 -c 'import yaml'
-  local recipe_root="$CASE_ROOT/case"
+  local recipe_root="$BATS_SUITE_TMPDIR/spec-recipes/$1"
   if [ -n "${SPEC_RECIPE_OUTPUT_ROOT:-}" ]; then
     recipe_root="$SPEC_RECIPE_OUTPUT_ROOT/$1"
   fi
@@ -27,4 +27,57 @@ spec_scenario() {
   run spec_scenario inventory
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
   [[ "$output" == *"All three namespaces"* ]]
+}
+
+@test "spec entry recipes preserve standalone ordering, seat packets and resume states" {
+  run spec_scenario entry
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "spec inline recipes land typed investigator reports without a launch claim" {
+  run spec_scenario inline
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "spec full recipes prepare ordinary sessions and collect independent reports" {
+  run spec_scenario full
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "spec native recipes retain prepared bytes and refuse unavailable readiness" {
+  run spec_scenario native
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "spec designer recipes preserve independent planning and accepted continuation inputs" {
+  run spec_scenario designer
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "spec review recipes retain both ceremonies, absence and commissioned gates" {
+  run spec_scenario reviews
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "spec finalize recipes preserve revisions, anchor refusal and hosted milestones" {
+  run spec_scenario finalize
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "spec stewardship recipes retain capture, trust repair and claim lifecycle" {
+  run spec_scenario stewardship
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "spec recipe coverage accounts for every exact authored command" {
+  local output_root="${SPEC_RECIPE_OUTPUT_ROOT:-$BATS_SUITE_TMPDIR/spec-recipes}"
+  local inventories=()
+  local scenario
+  for scenario in entry inline full native designer reviews finalize stewardship; do
+    inventories+=("$output_root/$scenario/case/inventory.json")
+  done
+  run python3 "$REPO_DIR/tests/helpers/spec_recipes.py" --scenario coverage \
+    --root "$output_root/coverage" --source "$output_root/entry/source/skills/spec/SKILL.md" \
+    --inventories "${inventories[@]}"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
