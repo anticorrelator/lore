@@ -72,7 +72,7 @@ CLI_STATUS=$(bash "$CLI" retro queue --kdir "$KDIR" --json)
 assert_eq "lore retro queue exposes the same unhandled fold" "2" \
   "$(printf '%s' "$CLI_STATUS" | jq -r '[.unhandled_due[] | select(.cycle_id=="cycle-a")] | length')"
 
-OID=$(printf '%s' "$STATUS" | jq -r '.unhandled_due[0].outcome_id')
+OID=$(printf '%s' "$STATUS" | jq -r '[.unhandled_due[] | select(.cycle_id == "cycle-a")][0].outcome_id')
 bash "$QUEUE_FRONT" handle --outcome-id "$OID" --action dispatched \
   --handled-by coordinator --kdir "$KDIR" >/dev/null
 assert_zero "handle by outcome identity appends transition" "$?"
