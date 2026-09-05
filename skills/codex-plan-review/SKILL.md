@@ -18,7 +18,7 @@ The review reads immutable prepared bytes: one committed revision's plan, task p
 
 ## Step 1: Bind the reviewed input
 
-The reviewed input is a prepared review attempt: `reviews/<attempt-id>/` under the work item, holding `prepared.json`, `plan.md`, `tasks.json`, and `anchor.md` for one committed revision, published by `lore plan review prepare`. Every round reads those copies. The live `plan.md` is the seat's working file and is never the reviewed input, because a round that read live bytes could rate text no attempt recorded.
+The reviewed input is a prepared review attempt: `reviews/<attempt-id>/` under the work item, holding `prepared.json`, `plan.md`, `tasks.json`, and `anchor.md` for one committed revision, published by `lore plan review prepare`. Every round reads those copies. The live `plan.md` is the seat's working file and is never the reviewed input, because a round that read live bytes could rate text no attempt recorded. The agent evaluating here is that seat itself — the spec lead at its post-plan gate, or a coordinator reviewing on its own authority — so every edit Steps 3 and 5 apply and publish is the plan owner's own decision, and nothing in the exchange hands edit authority to Codex.
 
 Resolve the store and the scripts beside the `lore` you are running, so direct script calls exercise the same checkout as the verbs:
 
