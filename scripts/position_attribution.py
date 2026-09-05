@@ -21,7 +21,8 @@ def validate_reference(value):
 
 def report_record(text):
     labels = {'Position-dispatch-manifest': 'manifest_path', 'Position-dispatch-sha256': 'manifest_sha256',
-              'Compiled-position': 'position', 'Template-id': 'template_id', 'Template-version': 'template_version',
+              'Compiled-position': 'position', 'Template-id': 'template_id', 'Template-version': 'producer_template_version',
+              'Producer-role': 'report_producer_role',
               'Report-id': 'report_id', 'Work-item': 'work_item', 'Revision-id': 'revision_id',
               'Dispatch-attempt-id': 'dispatch_attempt_id', 'Packet-id': 'packet_id'}
     record, reference = {}, {}
@@ -40,6 +41,15 @@ def report_record(text):
     return record
 
 
+def resolve_reference(reference, *, expected=None):
+    """Return the existing binder's validated manifest and archive-aware paths."""
+    validate_reference(reference)
+    spec = importlib.util.spec_from_file_location('_lore_position_bind', Path(__file__).with_name('position-bind.py'))
+    binder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(binder)
+    return binder.resolve_dispatch(**reference, expected=expected)
+
+
 def project(record, *, expected=None):
     result = dict.fromkeys(('position_dispatch', 'template_id', 'template_version', 'template_path',
                             'position', 'framework', 'bindings', 'wrapper'))
@@ -53,16 +63,19 @@ def project(record, *, expected=None):
         if record.get('attribution_error'):
             raise ValueError(record['attribution_error'])
         validate_reference(result['position_dispatch'])
-        # Load lazily so historical records do not require compiler dependencies.
-        spec = importlib.util.spec_from_file_location('_lore_position_bind', Path(__file__).with_name('position-bind.py'))
-        binder = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(binder)
-        resolved = binder.resolve_dispatch(**result['position_dispatch'], expected=expected)
+        resolved = resolve_reference(result['position_dispatch'], expected=expected)
         manifest = resolved['manifest']
         producer = manifest['producer']
         for key in ('position', 'template_id'):
             if key in record and record[key] != producer[key]:
                 raise ValueError(f'recorded {key} does not match dispatch')
+        if 'producer_template_version' in record and record['producer_template_version'] != producer['template_version']:
+            raise ValueError('report template version does not match dispatch')
+        if 'report_producer_role' in record and record['report_producer_role'] != producer['position']:
+            raise ValueError('report producer role does not match position')
+        for key in ('work_item', 'report_id', 'revision_id', 'packet_id', 'dispatch_attempt_id'):
+            if key in record and record[key] != manifest['bindings'][key]:
+                raise ValueError(f'report {key} does not match dispatch')
         result.update({key: producer[key] for key in ('position', 'framework', 'template_id', 'template_version')})
         result.update(template_path=manifest['native']['source_path'], bindings=manifest['bindings'], wrapper=manifest['wrapper'])
         return dict(result, status='resolved', reason=None)
