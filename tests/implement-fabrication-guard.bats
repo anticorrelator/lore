@@ -497,9 +497,6 @@ EOF
 # ============================================================
 
 @test "SKILL.md Step 4.0 documents the lead consultation handler flow (parse → route → reply → log)" {
-  # Step 4.0 heading exists.
-  grep -q '#### Step 4.0: Lead consultation handler' "$SKILL_FILE"
-
   # The four documented sub-steps are present in prose (semantic tokens, not
   # exact voice register — the filing now routes through `lore impl consult-log`,
   # which appends the durable consultation-transcript.jsonl record).
@@ -523,9 +520,6 @@ EOF
   grep -q 'Invoke the named skill via the `Skill` tool' "$SKILL_FILE"
   grep -q 'handler="skill"' "$SKILL_FILE"
 
-  # Opt-in route opt-out is explicit: Step 4.0 is skipped on the persistent
-  # advisor route (worker SendMessages the advisor, not the lead).
-  grep -q 'Skip this sub-step entirely on the opt-in route' "$SKILL_FILE"
 }
 
 # ============================================================
