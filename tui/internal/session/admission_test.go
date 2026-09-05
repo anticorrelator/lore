@@ -78,3 +78,82 @@ func TestTransientAdmissionPreservesPending(t *testing.T) {
 		t.Fatalf("temporary probe discarded intent or claimed: %+v %v", result, err)
 	}
 }
+
+func TestAdmissionRetryMinimumWithFractionalTimestamp(t *testing.T) {
+	at := time.Date(2026, 9, 5, 12, 0, 0, 999999999, time.UTC)
+	stamp := at.Format(time.RFC3339Nano)
+	for _, attempts := range []int{1, 2} {
+		req := Request{Attempts: attempts, LastAttemptAt: &stamp}
+		delay := time.Duration(1<<attempts) * time.Second
+		if claimableBy(req, "me", "", "", at.Add(delay-time.Nanosecond)) {
+			t.Fatalf("attempt %d admitted before minimum delay", attempts)
+		}
+		if !claimableBy(req, "me", "", "", at.Add(delay)) {
+			t.Fatalf("attempt %d refused at minimum delay", attempts)
+		}
+	}
+}
+
+func TestAdmissionArchiveFailureRemainsRecoverable(t *testing.T) {
+	dir := t.TempDir()
+	req := Request{RequestID: "refused", Type: "worker", ExtraContext: json.RawMessage(`{"nested":"original"}`)}
+	plantPending(t, dir, req)
+	reason := "full nested refusal\npermission denied: /state/path"
+	req.LastError = &reason
+	bad := req
+	bad.ExtraContext = json.RawMessage(`invalid json`)
+	if won, err := ArchiveRejectedPending(dir, bad); won || err == nil {
+		t.Fatalf("preparation failure won=%v err=%v", won, err)
+	}
+	if len(ScanPending(dir)) != 1 {
+		t.Fatal("failed diagnosis write removed pending intent")
+	}
+	dest := filepath.Join(dir, "requests", "abandoned", req.RequestID+".json")
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if won, err := ArchiveRejectedPending(dir, req); !won || err == nil {
+		t.Fatalf("forced final rename failure won=%v err=%v", won, err)
+	}
+	if len(ScanPending(dir)) != 0 || len(ScanClaimed(dir)) != 0 {
+		t.Fatal("reserved rejection entered claim circulation")
+	}
+	stages, _ := filepath.Glob(filepath.Join(dir, "requests", "rejecting", "*", "request.json"))
+	if len(stages) != 1 {
+		t.Fatalf("missing recovery evidence: %v", stages)
+	}
+	saved, _, ok := readRow(stages[0], "test")
+	if !ok || saved.LastError == nil || *saved.LastError != reason || saved.Attempts != 0 || string(saved.ExtraContext) != string(req.ExtraContext) {
+		t.Fatalf("incomplete recovery evidence: %+v", saved)
+	}
+	if err := os.Remove(dest); err != nil {
+		t.Fatal(err)
+	}
+	res, err := QueueTickForHostAdmission(dir, "me", "", "", "", nil, noPlan, nil, time.Now(), ReclaimAfter, func(Request) error { t.Fatal("reprobed reserved refusal"); return nil })
+	if err != nil || res.Claimed != nil || len(res.Abandoned) != 1 || res.Abandoned[0].Reason != reason {
+		t.Fatalf("recovery result=%+v err=%v", res, err)
+	}
+	archived, _, ok := readRow(dest, "test")
+	if !ok || archived.LastError == nil || *archived.LastError != reason || archived.Attempts != 0 {
+		t.Fatalf("bad archive: %+v", archived)
+	}
+}
+
+func TestAdmissionRejectionLosesClaimRace(t *testing.T) {
+	dir := t.TempDir()
+	req := Request{RequestID: "race", Type: "worker"}
+	plantPending(t, dir, req)
+	if won, err := ClaimRequest(dir, req.RequestID); !won || err != nil {
+		t.Fatalf("claim: %v %v", won, err)
+	}
+	req.LastError = StrPtr("refusal")
+	if won, err := ArchiveRejectedPending(dir, req); won || err != nil {
+		t.Fatalf("refusal stole claim: %v %v", won, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "requests", "abandoned", req.RequestID+".json")); !os.IsNotExist(err) {
+		t.Fatalf("false terminal refusal: %v", err)
+	}
+	if rows := ScanClaimed(dir); len(rows) != 1 || rows[0].Request.LastError != nil {
+		t.Fatalf("claim mutated: %+v", rows)
+	}
+}

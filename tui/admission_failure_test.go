@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/anticorrelator/lore/tui/internal/session"
@@ -47,7 +48,9 @@ func TestFullSpawnDiagnosticAndDeterministicDisposition(t *testing.T) {
 					}
 				}
 			}
+			beforeFailure := time.Now().UTC()
 			execute(cmd)
+			afterFailure := time.Now().UTC()
 			rows := readEventRows(t, m.config.KnowledgeDir)
 			if len(rows) == 0 || rows[0].Reason != "spawn: "+cause {
 				t.Fatalf("full cause lost: %+v", rows)
@@ -67,6 +70,13 @@ func TestFullSpawnDiagnosticAndDeterministicDisposition(t *testing.T) {
 				pending := session.ScanPending(dir)
 				if len(pending) != 1 || pending[0].Attempts != 1 || pending[0].LastError == nil || *pending[0].LastError != "spawn: "+cause {
 					t.Fatalf("transient retry lost cause: %+v", pending)
+				}
+				if pending[0].LastAttemptAt == nil {
+					t.Fatal("missing retry timestamp")
+				}
+				at, err := time.Parse(time.RFC3339Nano, *pending[0].LastAttemptAt)
+				if err != nil || at.Before(beforeFailure) || at.After(afterFailure) {
+					t.Fatalf("retry timestamp outside actual failure interval: %v %v", at, err)
 				}
 			}
 		})

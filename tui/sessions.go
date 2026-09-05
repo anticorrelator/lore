@@ -1227,7 +1227,7 @@ func emitSpawnFailedCmd(dir, script, kdir, requestID, reason, actor string, dete
 			return journalResultMsg{err: err}
 		}
 		req.Attempts++
-		at := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+		at := time.Now().UTC().Format(time.RFC3339Nano)
 		req.LastAttemptAt = &at
 		req.LastError = &reason
 		req.ClaimedBy = nil

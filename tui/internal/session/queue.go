@@ -568,6 +568,11 @@ func QueueTickForHost(sessionsDir, myName, myVintage, myProjectDir, hostKey stri
 // QueueTickForHostAdmission checks the executing host before acquiring a claim.
 func QueueTickForHostAdmission(sessionsDir, myName, myVintage, myProjectDir, hostKey string, liveInstances map[string]bool, hasPlanDoc func(string) bool, slugLive func(string) bool, now time.Time, reclaimAfter time.Duration, admit func(Request) error) (QueueTickResult, error) {
 	var res QueueTickResult
+	var err error
+	res.Abandoned, err = recoverRejectedPending(sessionsDir)
+	if err != nil {
+		return res, err
+	}
 
 	claimedRows, claimedDiagnostics := ScanClaimedWithDiagnostics(sessionsDir)
 	res.Diagnostics = append(res.Diagnostics, claimedDiagnostics...)
