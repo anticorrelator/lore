@@ -191,7 +191,7 @@ while [[ $# -gt 0 ]]; do
     --host-key) HOST_KEY="$2"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,129p' "$0"; exit 0 ;;
+    -h|--help) awk 'NR > 1 { if ($0 !~ /^#/) exit; print }' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
       echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--target <name> | --prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--framework <claude-code|codex|opencode>] [--worktree-identity <json|file>] [--worktree-id <id> --execution-dir <path>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2

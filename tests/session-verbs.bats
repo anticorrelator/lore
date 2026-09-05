@@ -40,6 +40,7 @@ setup() {
   command -v python3 >/dev/null 2>&1 || skip "python3 required"
   TEST_KDIR="$(mktemp -d)"
   mkdir -p "$TEST_KDIR/_sessions"
+  WATCH_CURSOR="_coordination/watch-cursor-$(bash -c 'source "$1"; watcher_identity_hash "$2" none "" lore-tui' _ "$LIB" "$TEST_KDIR")-board.json"
   # These tests run inside a live session as often as not, and --prefer-cwd now
   # reads the session identity. Clear it so each test declares its own.
   unset LORE_SESSION_INSTANCE LORE_SESSION_SLUG LORE_SESSION_TYPE
@@ -2770,8 +2771,6 @@ EOF
 # hand-carried cursor, one call that re-arms itself. The tests below pin the
 # three things that makes true — the self-managed cursor, board scope, and the
 # pending-queue check that covers the one park no journal watcher can see.
-
-WATCH_CURSOR="_coordination/watch-cursor.json"
 
 # Read the persisted cursor value, or "-" when no cursor file exists.
 watch_cursor() {
