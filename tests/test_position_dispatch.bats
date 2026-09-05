@@ -44,8 +44,9 @@ store = home / '.lore'
 settings = {'version': 1, 'harnesses': {'codex': {'roles': {'lead': 'planning-model', 'reviewer': 'review-model', 'worker': 'worker-model', 'researcher': 'research-model', 'advisor': 'advisor-model'}, 'ceremony_roles': {'spec': {'lead': 'spec-model'}}}}}
 (store / 'config/settings.json').write_text(json.dumps(settings))
 item = store / '_work/fixture'
-item.mkdir(parents=True)
-(item / '_meta.json').write_text(json.dumps({'title': 'Fixture', 'source_checkout': str(repo)}))
+if scenario != 'implement-envelope':
+    item.mkdir(parents=True)
+    (item / '_meta.json').write_text(json.dumps({'title': 'Fixture', 'source_checkout': str(repo)}))
 instances = store / '_sessions/instances'; instances.mkdir(parents=True)
 (instances / 'fixture.json').write_text(json.dumps({'name': 'fixture', 'project_dir': str(repo)}))
 env = {k:v for k,v in os.environ.items() if not k.startswith(('LORE_', 'CLAUDE_'))}
@@ -75,6 +76,11 @@ def refused(fn, message=None):
         if message: assert message in str(exc), str(exc)
     else:
         raise AssertionError('expected refusal')
+
+if scenario == 'implement-envelope':
+    call([str(repo/'cli/lore'), 'work', 'create', '--title', 'Fixture', '--slug', 'fixture',
+          '--intent-anchor', 'Preserve isolated packet history.'])
+    call([str(repo/'cli/lore'), 'work', 'source-checkout', 'fixture', '--from-instance', 'fixture'])
 
 (item / 'plan.md').write_text('''# Fixture
 
