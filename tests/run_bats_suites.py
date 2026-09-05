@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run independent Bats suites concurrently and preserve every exit status."""
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import subprocess
 import sys
 
@@ -17,7 +17,9 @@ def main(paths):
         return 2
     failed = False
     with ThreadPoolExecutor(max_workers=min(4, len(paths))) as pool:
-        for path, result in pool.map(run_suite, paths):
+        pending = [pool.submit(run_suite, path) for path in paths]
+        for completed in as_completed(pending):
+            path, result = completed.result()
             print(f"Suite: {path} (exit {result.returncode})", flush=True)
             sys.stdout.buffer.write(result.stdout)
             sys.stdout.buffer.flush()
