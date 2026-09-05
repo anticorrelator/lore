@@ -213,7 +213,7 @@ RESULT=$(python3 - "$CANDIDATES_FILE" "$ITEM_DIR/task-claims.jsonl" "$SLUG" \
 import json, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[4]).parent))
-from position_attribution import project
+from position_attribution import project, legacy_role
 
 (cand_path, claims_path, slug, promote_sh,
  lead_tv, worker_tv, advisor_tv) = sys.argv[1:8]
@@ -322,6 +322,17 @@ for i, cand in enumerate(candidates, 1):
             rejected.append({"claim_id": cid, "reason": "source claims have unknown or mixed compiled producer attribution"})
             continue
         producer = compiled[0]
+        if role != legacy_role(producer):
+            rejected.append({"claim_id": cid, "reason": "candidate producer_role does not match compiled source producer"})
+            continue
+        supplied = project(cand, expected={"work_item": slug})
+        if supplied["status"] != "legacy":
+            if (supplied["status"] != "resolved" or
+                    (supplied["template_id"], supplied["template_version"]) not in identities or
+                    supplied["position_dispatch"] not in [p["position_dispatch"] for p in compiled]):
+                rejected.append({"claim_id": cid, "reason": "candidate compiled reference contradicts its source claims"})
+                continue
+            producer = supplied
         registration = subprocess.run(["bash", str(Path(promote_sh).with_name("template-registry-register.sh")),
             "--template-id", producer["template_id"], "--template-version", producer["template_version"],
             "--template-path", producer["template_path"]], capture_output=True, text=True)

@@ -258,7 +258,9 @@ for i, entry in enumerate(consultations):
                 f"entry {i}: was_followed=false requires non-empty rationale_if_not_followed"
             )
             continue
-    producer = project(entry, expected={"work_item": work_item})
+    expected = {"work_item": work_item, "position": "designer", "mode": "consultation"}
+    expected.update({key: entry[key] for key in ("consultation_id", "domain") if key in entry})
+    producer = project(entry, expected=expected)
     ident = "advisor"
     if producer["status"] == "unknown":
         print(f"[advisor-impact] unknown compiled advisor attribution: {producer['reason']}", file=sys.stderr)

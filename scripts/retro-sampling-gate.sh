@@ -166,8 +166,10 @@ fi
 # quoting hazards on the (potentially large) JSON array.
 DECISION=$(_LORE_TASK_ATTR="$TASK_ATTRIBUTION" python3 - \
   "$ROWS_FILE" "$SLUG" "$TERMINUS" "$TEMPLATE_VERSION" "$VERDICT" \
-  "$ROUTINE_RATE" "$FIRST_K" "$DATE" <<'PYEOF'
+  "$ROUTINE_RATE" "$FIRST_K" "$DATE" "$SCRIPT_DIR" <<'PYEOF'
 import hashlib, json, os, sys
+sys.path.insert(0, sys.argv[9])
+from position_attribution import project
 
 rows_file, slug, terminus, template_version, verdict, rate_str, first_k_str, date = sys.argv[1:9]
 routine_rate = float(rate_str)
@@ -181,21 +183,23 @@ def is_hex12(s):
 current_pairs = set()
 current_producers = set()
 
-def producer_versions(entries):
+def producer_versions(entries, work_item=None):
     versions = set()
     for entry in entries if isinstance(entries, list) else []:
         if not isinstance(entry, dict):
             continue
         attempts = entry.get("producer_attempts")
         for producer in attempts if isinstance(attempts, list) else []:
-            if (isinstance(producer, dict) and producer.get("status") == "resolved"
-                    and is_hex12(producer.get("template_version"))):
-                versions.add((producer.get("template_id"), producer["template_version"]))
+            if not isinstance(producer, dict):
+                continue
+            actual = project(producer, expected={"work_item": work_item} if work_item else None)
+            if actual["status"] == "resolved":
+                versions.add((actual["template_id"], actual["template_version"]))
     return versions
 if task_attr_raw.strip():
     try:
         current_entries = json.loads(task_attr_raw)
-        current_producers = producer_versions(current_entries)
+        current_producers = producer_versions(current_entries, slug)
         for e in current_entries:
             if isinstance(e, dict):
                 current_pairs.add((e.get("judgment_class"), e.get("worker_model")))
@@ -232,7 +236,7 @@ if os.path.isfile(rows_file):
             if pair in current_producers:
                 producer_seen.add(pair)
             attr = r.get("task_attribution")
-            producer_seen.update(producer_versions(attr) & current_producers)
+            producer_seen.update(producer_versions(attr, r.get("work_item")) & current_producers)
             if isinstance(attr, list):
                 for e in attr:
                     if isinstance(e, dict):

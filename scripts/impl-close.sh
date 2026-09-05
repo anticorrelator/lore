@@ -647,6 +647,7 @@ import json, os, re, sys
 sys.path.insert(0, sys.argv[3])
 from position_attribution import project, report_record
 producer_by_task = {}
+seen_attempts = {}
 context_by_task = {}
 estimate_dispatch_context = None
 log_path = sys.argv[2]
@@ -654,7 +655,10 @@ if os.path.isfile(log_path):
     with open(log_path, encoding="utf-8") as stream:
         for section in re.split(r"(?m)^## ", stream.read()):
             record = report_record(section)
-            record.pop("producer_template_version", None)  # The log header identifies its filer.
+            filing_entry = ("source: impl-verb" in section.partition("\n")[0]
+                            and re.search(r"(?m)^(Consultation:|Check-report task:)", section))
+            if filing_entry:
+                record.pop("producer_template_version", None)
             producer = project(record, expected={"work_item": sys.argv[4]})
             if producer["status"] == "legacy":
                 continue
@@ -665,6 +669,16 @@ if os.path.isfile(log_path):
                     match = re.search(r"(?m)^Report-key:\s*[^/]+/(\S+)", section)
                 tid = match[1] if match else None
             if tid:
+                reference = producer.get("position_dispatch")
+                key = (tid, json.dumps(reference, sort_keys=True)) if reference else None
+                if key is not None and key in seen_attempts:
+                    index = seen_attempts[key]
+                    if producer["status"] == "unknown":
+                        producer_by_task[tid][index] = producer
+                        context_by_task[tid][index] = estimate_dispatch_context(record, expected={"work_item": sys.argv[4]})
+                    continue
+                if key is not None:
+                    seen_attempts[key] = len(producer_by_task.get(tid, []))
                 producer_by_task.setdefault(tid, []).append(producer)
                 if estimate_dispatch_context is None:
                     import runpy
