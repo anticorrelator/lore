@@ -3403,18 +3403,19 @@ answer_peek_observation() {
 }
 
 @test "watch: --help prints the contract without running any verb it cites" {
-  run bash "$WATCH" --help
+  mkdir -p "$BATS_TEST_TMPDIR/help-bin"
+  printf '#!/bin/sh\ntouch "$HELP_SENTINEL"\nexit 99\n' > "$BATS_TEST_TMPDIR/help-bin/lore"
+  chmod +x "$BATS_TEST_TMPDIR/help-bin/lore"
+  export HELP_SENTINEL="$BATS_TEST_TMPDIR/help-ran-command"
+  run env PATH="$BATS_TEST_TMPDIR/help-bin:$PATH" bash "$WATCH" --help
   [ "$status" -eq 0 ]
-  [[ "$output" == *"--arc <slug>"* ]]
+  [[ "$output" == *"--arc SLUG"* ]]
   [[ "$output" == *"--wake-shaped"* ]]
-  [[ "$output" == *"Exit codes"* ]]
-  # The help is a line range over the file's own header comment, so a header that
-  # grew past the range would silently print a truncated contract.
-  [[ "$output" == *"as a lifecycle event."* ]]
-  # The help cites sibling verbs in backticks. Rendering them through a
-  # substituting heredoc would run them — `lore session wait` blocks — so the
-  # backticked text must come back verbatim.
-  [[ "$output" == *'`lore session wait`'* ]]
+  [[ "$output" == *"Exit 0:"* ]]
+  [[ "$output" == *"coordinate status --wake-id ID"* ]]
+  [[ "$output" == *"Activity is separate"* ]]
+  [[ "$output" == *"harness continuation capability."* ]]
+  [ ! -e "$HELP_SENTINEL" ]
 }
 
 # --- Suspension skew --------------------------------------------------------
