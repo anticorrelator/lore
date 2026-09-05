@@ -319,8 +319,8 @@ def resolve_v2(
             if pk_retrieval.entry_path(c["entry"])
         ]
         served_entries = [
-            {"path": pk_retrieval.entry_path(c["entry"]), "render_mode": m, "entry": c["entry"]}
-            for c, m, _ in rendered_blocks
+            {"path": pk_retrieval.entry_path(c["entry"]), "render_mode": m, "entry": c["entry"], "rendered": b}
+            for c, m, b in rendered_blocks
             if pk_retrieval.entry_path(c["entry"])
         ]
 
@@ -457,6 +457,7 @@ def resolve_v2(
                         "topic": sec["topic"],
                         "ranking_path": "search-order",
                         "trust": _trust_snapshot(knowledge_dir, served["entry"]),
+                        "rendered": served.get("rendered"),
                     })
             for sec in kind_sections["sections"]:
                 for served in sec["served_entries"]:
@@ -468,6 +469,7 @@ def resolve_v2(
                         "topic": sec["title"],
                         "ranking_path": "search-order",
                         "trust": _trust_snapshot(knowledge_dir, served["entry"]),
+                        "rendered": served.get("rendered"),
                     })
             tc_path = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "trust-compute.py")

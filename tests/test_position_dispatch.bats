@@ -64,7 +64,7 @@ sys.path.insert(0, str(repo / 'scripts'))
 spec = importlib.util.spec_from_file_location('position_bind', repo / 'scripts/position-bind.py')
 binder = importlib.util.module_from_spec(spec); spec.loader.exec_module(binder)
 from position_compile import compile_position, native_prompt, validate_descriptor
-from packet_builder import build_packet, pointer, show
+from packet_builder import build_packet, pointer, show, synthesize
 
 def call(args, ok=True, **kwargs):
     p = subprocess.run(args, cwd=repo, env=env, capture_output=True, **kwargs)
@@ -120,6 +120,7 @@ def fixture(position='worker', attempt='attempt-1', revision=None, mode=None):
     row = {'packet_id': packet_id, 'packet_scope': 'task', 'work_item': 'fixture', 'task_id': 'task-1', 'revision_id': revision,
            'dispatch_attempt_id': attempt, 'source_head': committed['source_head'], 'session_id': None, 'phase': None, 'arm': None, 'task_scale_set': 'implementation'}
     build_packet(store, row, assembly=('Isolated packet content', {}), role=position, scales=['implementation'])
+    synthesize(store, packet_id, by='fixture-lead')
     b = dict.fromkeys(binder.FIELDS)
     b.update(work_item='fixture', task_id='task-1', revision_id=revision, packet_id=packet_id, packet_pointer=pointer(store, packet_id),
              dispatch_attempt_id=attempt, assignment='Inspect actual bytes.\nPreserve Unicode: λ and trailing newline.\n', report_id='report-' + attempt,
@@ -136,6 +137,7 @@ def unbound_fixture(position, attempt, mode=None):
     row={'packet_id':packet_id,'packet_scope':'session','work_item':'fixture','task_id':None,
          'session_id':None,'phase':None,'arm':None,'task_scale_set':'implementation'}
     build_packet(store,row,assembly=('Pre-plan investigation.',{}),role=position,scales=['implementation'])
+    synthesize(store,packet_id,by='fixture-lead')
     b.update(task_id=None,revision_id=None,packet_id=packet_id,packet_pointer=pointer(store,packet_id))
     b['absence_reasons'].update(task_id='No task has been assigned.',revision_id='No plan revision exists.')
     return b
@@ -296,6 +298,7 @@ if scenario == 'implement-envelope':
     assert all(inputs[key]==packet.get(key) for key in ('task_id','revision_id','dispatch_attempt_id','work_item'))
     assert not {'execution_root','report_path','report_id'} & inputs.keys()
     assert not (item/'position-dispatch').exists()
+    synthesize(store,inputs['packet_id'],by='fixture-lead')
     b=dict.fromkeys(binder.FIELDS);b.update(inputs)
     b.update(report_id='implement-envelope-report',report_path=str(item/'worker-reports/implement-envelope-report.md'),execution_root=str(repo))
     b['absence_reasons']={key:'not applicable to this worker' for key,value in b.items() if value is None}
@@ -927,6 +930,7 @@ elif scenario=='preplan':
     row={'packet_id':'pkt-preplan','packet_scope':'session','work_item':'fixture','task_id':None,
          'session_id':None,'phase':None,'arm':None,'task_scale_set':'implementation'}
     build_packet(store,row,assembly=('Pre-plan investigation.',{}),role='investigator',scales=['implementation'])
+    synthesize(store,'pkt-preplan',by='fixture-lead')
     b=fixture('investigator','independent-attempt')
     b.update(task_id=None,revision_id=None,packet_id='pkt-preplan',packet_pointer=pointer(store,'pkt-preplan'))
     b['absence_reasons'].update(task_id='Investigation precedes tasks.',revision_id='No plan revision exists.')
@@ -955,6 +959,29 @@ elif scenario=='preplan':
     b=unbound_fixture('worker','worker-still-requires-task')
     b['execution_root']=None;b['absence_reasons']['execution_root']='host supplies final root'
     request(b,'worker',fixed=False,ok=False)
+elif scenario=='synthesis':
+    # A just-built packet is a candidate set: preparing a dispatch against it is refused and leaves no artifacts;
+    # synthesis through the published CLI makes the same binding succeed; a builder-recorded waiver also binds.
+    committed=publication(str(item),str(store)); revision=committed['revision_id']
+    row={'packet_id':'pkt-unsynthesized','packet_scope':'task','work_item':'fixture','task_id':'task-1','revision_id':revision,
+         'dispatch_attempt_id':'synth-attempt','source_head':committed['source_head'],'session_id':None,'phase':None,'arm':None,'task_scale_set':'implementation'}
+    build_packet(store,row,assembly=('Candidate content',{}),role='worker',scales=['implementation'])
+    b=fixture(attempt='synth-fixture');b.update(packet_id='pkt-unsynthesized',packet_pointer=pointer(store,'pkt-unsynthesized'),dispatch_attempt_id='synth-attempt',report_id='report-synth')
+    b['report_path']=str(item/'worker-reports/report-synth.md')
+    d=compile()
+    refused(lambda: bind(d,b),'candidate set nobody has synthesized')
+    assert not (item/'position-dispatch'/'synth-attempt').exists()
+    spec=temporary/'synthesis.json';spec.write_text(json.dumps({'dropped':[],'added':[]}))
+    out=call(['bash',str(repo/'scripts/packet.sh'),'synthesize','pkt-unsynthesized','--by','fixture-lead','--spec',str(spec)]).stdout
+    assert json.loads(out)['delivery_stage']=='synthesized'
+    ref=bind(d,b);m=binder.validate_dispatch(ref['manifest_path'],ref['manifest_sha256'])
+    assert m['bindings']['packet_id']=='pkt-unsynthesized'
+    waived={'packet_id':'pkt-waived','packet_scope':'session','work_item':'fixture','task_id':None,'session_id':None,'phase':None,'arm':None,
+            'task_scale_set':'implementation','synthesis_waiver':{'by':'spec-lead','reason':'assembled and dispatched in one verb'}}
+    build_packet(store,waived,assembly=('Wave content',{}),role='investigator',scales=['implementation'])
+    b=fixture('investigator','waived-attempt');b.update(task_id=None,revision_id=None,packet_id='pkt-waived',packet_pointer=pointer(store,'pkt-waived'))
+    b['absence_reasons'].update(task_id='Investigation precedes tasks.',revision_id='No plan revision exists.')
+    bind(compile('investigator'),b)
 elif scenario=='renderer-drift':
     d=compile(framework='claude-code')
     old=bind(d,fixture(attempt='before-drift'))
@@ -1073,5 +1100,10 @@ PY
 
 @test "bound spec investigator claims preserve task identity through canonical completion" {
   run exercise_binding spec-claims
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "an unsynthesized packet refuses dispatch preparation until synthesized through the CLI; a recorded waiver binds" {
+  run exercise_binding synthesis
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }

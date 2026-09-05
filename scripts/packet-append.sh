@@ -185,6 +185,21 @@ if row.get("unbound_reason") == "dispatch-attempt-not-recorded":
             if (prior.get("work_item") == row["work_item"] and prior.get("task_id") == row["task_id"]
                     and prior.get("revision_id") == publication["revision_id"] and prior.get("dispatch_attempt_id")):
                 sys.exit("packet: a dispatch attempt exists; bind the packet to it")
+# Rows supersede by append under one packet_id (assembled, then synthesized, then delivered), and readers take
+# the last row as the packet; so no row appended under an existing id may change what the packet is about.
+packets_path = Path(root) / "_packets/packets.jsonl"
+if packets_path.exists() and row.get("packet_id"):
+    identity = ("schema_version", "packet_scope", "work_item", "task_id", "revision_id", "dispatch_attempt_id",
+                "source_head", "recipient_role", "session_id")
+    for line in packets_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        prior = json.loads(line)
+        if prior.get("packet_id") != row["packet_id"]:
+            continue
+        for key in identity:
+            if prior.get(key) != row.get(key):
+                sys.exit(f"packet: {key} differs from the prior row for packet {row['packet_id']}; a supersede chain keeps its identity")
 if row["schema_version"] == "2":
     try:
         publication = runpy.run_path(os.path.join(scripts, "work-evidence.py"))["publication_for_dispatch"](str(item), root)
