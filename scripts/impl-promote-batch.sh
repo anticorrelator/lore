@@ -308,13 +308,13 @@ for i, cand in enumerate(candidates, 1):
         role = "implement-lead"
         role_defaulted = True
         cand = {**cand, "producer_role": role}
-    if role not in ROLE_TV:
+    tv = ROLE_TV.get(role)
+    producers = [project(claims[sid], expected={"work_item": slug}) for sid in sids]
+    compiled = [p for p in producers if p["status"] != "legacy"]
+    if not compiled and role not in ROLE_TV:
         rejected.append({"claim_id": cid,
                          "reason": f"no template-version attribution for producer_role '{role}'"})
         continue
-    tv = ROLE_TV[role]
-    producers = [project(claims[sid], expected={"work_item": slug}) for sid in sids]
-    compiled = [p for p in producers if p["status"] != "legacy"]
     if compiled:
         identities = {(p["template_id"], p["template_version"]) for p in compiled}
         if (len(compiled) != len(producers) or len(identities) != 1
