@@ -97,7 +97,7 @@ Content identity for `cycle_work` covers every evidence envelope and its substan
 
 - **Generated tasks.** `regen-tasks.sh` writes `tasks.json`. Readers prefer `tasks[]` and flatten `phases[]` for legacy phase plans. Tasks without structured close criteria are legible as legacy with no executable criteria.
 - **Execution log.** Delivered unchanged. Existing reductions and `impl-check-report.sh` behavior are untouched.
-- **Close bundle.** `impl-close.sh` writes a nine-field, unversioned `retro-bundle.json`. The projection reads it as a declared legacy-v0 snapshot of the last close. It is not revision truth. Where it disagrees with revision-bound results, the disagreement is a timing fact to report. Missing is `absent`, malformed is `unreadable`, and neither says anything about the outcome of the work.
+- **Close bundle.** `impl-close.sh` writes a ten-field, unversioned `retro-bundle.json` (the tenth, `task_attribution`, carries per-task producer attribution). The projection reads it as a declared legacy-v0 snapshot of the last close. It is not revision truth. Where it disagrees with revision-bound results, the disagreement is a timing fact to report. Missing is `absent`, malformed is `unreadable`, and neither says anything about the outcome of the work.
 - **Schema-1 packets and outcomes.** Read as unbound: they name no revision, and the projection says so.
 
 ## Producers, shipped and planned, and their record contracts

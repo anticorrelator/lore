@@ -283,7 +283,7 @@ PYEOF
   grep -q '^Capability loop summary: "done"' "$log"
 }
 
-@test "full close writes retro-bundle.json with the nine-field schema" {
+@test "full close writes retro-bundle.json with the ten-field schema" {
   run bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done" \
     --lead-template-version aaaaaaaaaaaa --run-started-at "2026-06-10T00:00:00Z"
   [ "$status" -eq 0 ]
@@ -292,7 +292,9 @@ import json, sys
 b = json.load(open(sys.argv[1]))
 assert set(b) == {"work_item", "tasks_completed", "tier2_claim_ids",
                   "tier3_promoted_ids", "advisor_consultations_count", "blockers",
-                  "template_versions", "captured_at_sha", "run_started_at"}, set(b)
+                  "template_versions", "captured_at_sha", "run_started_at",
+                  "task_attribution"}, set(b)
+assert isinstance(b["task_attribution"], list), b["task_attribution"]
 assert b["work_item"] == "anchored-done"
 assert b["tasks_completed"] == 2
 assert b["tier2_claim_ids"] == ["c1", "c2"]
