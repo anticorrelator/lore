@@ -71,11 +71,11 @@
       "journal_key": "d6_packet_utility",
       "name": "Packet Utility",
       "anchors": {
-        "1": "Packet material actively misled the recipient or obstructed the work.",
-        "2": "Packet material was mostly unhelpful; the recipient had to rediscover relevant prior knowledge.",
-        "3": "Packet material helped in part, with substantial irrelevant material or rediscovery.",
-        "4": "Packet material informed the recipient at the needed point with minor gaps or noise.",
-        "5": "Packet material supplied useful prior knowledge at the needed point and demonstrably reduced rediscovery without harmful material."
+        "5": "recipients worked from packet entries at the point of need, with no harmful material and no rediscovery of what the packet carried",
+        "4": "packet entries shaped the work with one minor gap: a little unused material, or one rediscovery the packet could have spared",
+        "3": "the packet was topical but the recipient rediscovered much of it, or unused material outweighed what was used",
+        "2": "the packet mostly missed the need: recipients derived their prior knowledge elsewhere while it carried irrelevant or stale material",
+        "1": "packet material misled a recipient or obstructed the work"
       },
       "allow_not_assessable": true
     }

@@ -706,3 +706,144 @@ SH
         .schema_version == "2" and .vocabulary_version == "1" and .read_status == "ok")
   '
 }
+
+# One whole cycle through the deployed rubric, prepare, file, journal, and
+# scorecard paths. Fixture-only replicas cannot show that these seams agree.
+write_v2_judgment() {
+  local cycle="$1" pack="$2" out="$3" d6_json="$4"
+  jq -n --arg cycle "$cycle" --arg pack_id "$(jq -r .pack_id "$pack")" \
+    --arg pack_sha "$(jq -r .artifact_sha256 "$pack")" \
+    --arg rubric_id "$(jq -r .rubric.rubric_id "$pack")" \
+    --arg rubric_version "$(jq -r .rubric.rubric_version "$pack")" \
+    --argjson d6 "$d6_json" '{
+    schema_version:2, cycle_id:$cycle, pack_id:$pack_id, pack_sha256:$pack_sha,
+    rubric_id:$rubric_id, rubric_version:$rubric_version,
+    actor:"retro-lead", model:"fixture-model",
+    key_finding:"The pack names its packet evidence and its gaps.",
+    most_actionable_gap:"Recipient-use evidence is thin.",
+    dimension_judgments:[
+      {dimension_id:"D1",disposition:"scored",score:5,rationale:"Delivery complete.",evidence_refs:["source:cycle_work"]},
+      {dimension_id:"D2",disposition:"scored",score:4,rationale:"Evidence quality explicit.",evidence_refs:["pack:/source_manifest"]},
+      {dimension_id:"D3",disposition:"scored",score:4,rationale:"Gaps are named.",evidence_refs:["calculation:channel_contract_drift"]},
+      {dimension_id:"D4",disposition:"scored",score:5,rationale:"Anchor alignment holds.",evidence_refs:["pack:/cycle/slug"]},
+      {dimension_id:"D5",disposition:"scored",score:4,rationale:"Spec was useful.",evidence_refs:["source:journal"]},
+      $d6
+    ],
+    behavioral_health:[{check_id:"C7",answer:"The judgments read the evidence rather than defaulting to green.",evidence_refs:["pack:/fixed_health/state"]}],
+    causal_diagnoses:[],
+    escalation_judgment:{applicability:"not-applicable",reason:"No worker escalation fired."},
+    scale_access_judgment:{applicability:"not-applicable",reason:"No scale comparison applies."},
+    channel_flags:{applicability:"applicable",value:[]},
+    suggestion_outcome:"no-substantive-suggestion", suggestions:[]
+  }' > "$out"
+}
+
+file_json() { echo "$output" | grep '^{' | tail -1; }
+
+@test "complete cycle files rubric-bound judgments through deployed paths and reads separated series" {
+  journal="$TEST_KDIR/_meta/effectiveness-journal.jsonl"
+  rows="$TEST_KDIR/_scorecards/rows.jsonl"
+  # A historical retro entry: numeric D5, no rubric identity, written by the sole writer.
+  run bash "$REPO_DIR/scripts/journal.sh" write --observation "historical retro" --context "retro: cycle-a | legacy" \
+    --work-item cycle-a --role retro --scores '{"d5_spec_utility":3}'
+  [ "$status" -eq 0 ]
+  cp "$journal" "$TEST_KDIR/journal-history"
+  cp "$rows" "$TEST_KDIR/rows-history"
+
+  packet_assessment_fixture
+  run_prepare
+  pack_a="$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+  version_a=$(jq -r .rubric.rubric_version "$pack_a")
+  [[ "$version_a" =~ ^[0-9a-f]{12}$ ]]
+  [ "$version_a" = "$(python3 "$REPO_DIR/scripts/retro-rubric.py" descriptor | jq -r .rubric_version)" ]
+  jq -e '.facts.packet_assessments.values.observations == 1 and
+    .facts.packet_assessments.values.classes.unused.findings == 0 and
+    .facts.packet_assessments.values.classes.missing.findings == null and
+    .facts.packet_delivery.values.receipt_state_counts.delivered == 1' "$pack_a"
+
+  write_v2_judgment cycle-a "$pack_a" "$TEST_KDIR/judgment-a.json" \
+    '{"dimension_id":"D6","disposition":"scored","score":4,"rationale":"One confirmed recipient; unused and harmful classes assessed clean; the missing class was not assessable.","evidence_refs":["source:packet_assessments","pack:/facts/packet_assessments/values/classes/unused","pack:/facts/packet_delivery/values/receipt_state_counts"]}'
+  run bash "$REPO_DIR/scripts/retro-file.sh" cycle-a --pack "$pack_a" --judgments "$TEST_KDIR/judgment-a.json" --json
+  [ "$status" -eq 0 ]
+  file_json | jq -e '.status=="created" and .filing_complete and (.completed_sinks|index("scorecard:dimension:D6")) and .missing_sinks==[]'
+
+  # Historical bytes are an exact prefix; the new identity travels through journal and scorecard.
+  head -c "$(wc -c < "$TEST_KDIR/journal-history")" "$journal" | cmp - "$TEST_KDIR/journal-history"
+  head -c "$(wc -c < "$TEST_KDIR/rows-history")" "$rows" | cmp - "$TEST_KDIR/rows-history"
+  jq -se --arg v "$version_a" 'map(select(.role=="retro" and .work_item=="cycle-a" and .scores!=null and .rubric_id!=null)) |
+    length==1 and .[0].rubric_id=="retro-rubric" and .[0].rubric_version==$v and
+    .[0].scores.d5_spec_utility==4 and .[0].scores.d6_packet_utility==4 and
+    (.[0].scores|to_entries|all(.value|type=="number"))' "$journal"
+  jq -se --arg v "$version_a" 'map(select(.kind=="scored")) | length==6 and
+    all(.tier=="template" and .template_id=="retro-rubric" and .template_version==$v and
+        .calibration_state=="pre-calibration" and .verdict_source=="retro-lead" and .sample_size==1) and
+    (map(.metric)|sort)==["d1_delivery","d2_quality","d3_gaps","d4_alignment","d5_spec_utility","d6_packet_utility"]' "$rows"
+  jq -se '.[-1].event_type=="retro-filing" and .[-1].filing_complete==true' "$rows"
+  cp "$journal" "$TEST_KDIR/journal-after-a"
+  cp "$rows" "$TEST_KDIR/rows-after-a"
+
+  # A second cycle prepared under a changed rubric: prepare runs from an isolated
+  # copy whose rubric bytes differ; the deployed verb files against the frozen pack.
+  bash "$REPO_DIR/scripts/create-work.sh" --title 'Cycle B' --slug cycle-b --intent-anchor 'Second rubric series' --json >/dev/null
+  isolated="$BATS_TEST_TMPDIR/next-rubric"
+  mkdir -p "$isolated/skills/retro"
+  cp -R "$REPO_DIR/scripts" "$isolated/scripts"
+  cp "$REPO_DIR/skills/retro/rubric.json" "$isolated/skills/retro/rubric.json"
+  printf '\n' >> "$isolated/skills/retro/rubric.json"
+  run bash "$isolated/scripts/retro-prepare.sh" cycle-b --window-start "$WINDOW_START" --window-end "$WINDOW_END" --json
+  [ "$status" -eq 0 ]
+  pack_b="$TEST_KDIR/_work/cycle-b/retro-evidence-pack.json"
+  version_b=$(jq -r .rubric.rubric_version "$pack_b")
+  [[ "$version_b" =~ ^[0-9a-f]{12}$ ]]
+  [ "$version_b" != "$version_a" ]
+  jq -e '.facts.packet_delivery.values.unique_packets == 1 and .facts.packet_assessments.values.observations == 0' "$pack_b"
+  write_v2_judgment cycle-b "$pack_b" "$TEST_KDIR/judgment-b.json" \
+    '{"dimension_id":"D6","disposition":"not-assessable","score":null,"reason":"One packet was built and no recipient-use observation exists inside the window.","rationale":"Construction without an observed recipient supports no usefulness verdict.","evidence_refs":["pack:/facts/packet_delivery/values/unique_packets","pack:/facts/packet_assessments/values/observations"]}'
+  run bash "$REPO_DIR/scripts/retro-file.sh" cycle-b --pack "$pack_b" --judgments "$TEST_KDIR/judgment-b.json" --json
+  [ "$status" -eq 0 ]
+  file_json | jq -e '.status=="created" and .filing_complete and ((.completed_sinks|index("scorecard:dimension:D6"))==null) and (.completed_sinks|index("scorecard:dimension:D5"))'
+  jq -e '.judgments.dimension_judgments[5] | .dimension_id=="D6" and .disposition=="not-assessable" and .score==null and (.reason|length)>0 and (.evidence_refs|length)==2' \
+    "$TEST_KDIR/_work/cycle-b/retro-filing.json"
+  head -c "$(wc -c < "$TEST_KDIR/journal-after-a")" "$journal" | cmp - "$TEST_KDIR/journal-after-a"
+  head -c "$(wc -c < "$TEST_KDIR/rows-after-a")" "$rows" | cmp - "$TEST_KDIR/rows-after-a"
+  jq -se --arg v "$version_b" 'map(select(.kind=="scored" and .template_version==$v)) | length==5 and all(.metric!="d6_packet_utility")' "$rows"
+  jq -se --arg v "$version_b" 'map(select(.role=="retro" and .work_item=="cycle-b" and .scores!=null)) |
+    length==1 and .[0].rubric_version==$v and (.[0].scores|has("d6_packet_utility")|not) and .[0].scores.d5_spec_utility==4' "$journal"
+
+  # The opt-in comparison from the skill: explicit columns, unknown history, null for an abstained D6.
+  run bash "$REPO_DIR/scripts/journal.sh" query --role retro --extract-scores --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg a "$version_a" --arg b "$version_b" '
+    [.[] | {date: .timestamp, rubric_id, rubric_version,
+            d5_spec_utility: .scores.d5_spec_utility,
+            d6_packet_utility: .scores.d6_packet_utility}] |
+    length==3 and
+    (.[0] | .rubric_id=="legacy-unversioned" and .rubric_version==null and .d5_spec_utility==3 and .d6_packet_utility==null) and
+    (.[1] | .rubric_id=="retro-rubric" and .rubric_version==$a and .d5_spec_utility==4 and .d6_packet_utility==4) and
+    (.[2] | .rubric_id=="retro-rubric" and .rubric_version==$b and .d5_spec_utility==4 and .d6_packet_utility==null)'
+  run bash "$REPO_DIR/scripts/journal.sh" query --role retro --extract-scores
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"legacy-unversioned@unknown"* && "$output" == *"retro-rubric@$version_a"* && "$output" == *"retro-rubric@$version_b"* ]]
+
+  # The deployed scorecard reader and aggregate grouping keep the two versions as separate series.
+  run bash "$REPO_DIR/scripts/scorecard-read.sh" rows --window-start "$WINDOW_START" --window-end "$FUTURE_END" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg a "$version_a" --arg b "$version_b" 'map(select(.kind=="scored")) | length==11 and (map(.template_version)|unique|sort)==([$a,$b]|sort)'
+  run python3 "$REPO_DIR/scripts/retro-export-aggregate-cells.py" "$rows" 2026-01-01T00:00:00Z fixture
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg a "$version_a" --arg b "$version_b" '
+    (map(select(.metric=="d5_spec_utility")) | length==2 and (map(.template_version)|sort)==([$a,$b]|sort) and all(.n==1 and (.calibrated_only|not))) and
+    (map(select(.metric=="d6_packet_utility")) | length==1 and .[0].template_version==$a)'
+
+  # Exact replay of both filings adds nothing.
+  cp "$journal" "$TEST_KDIR/journal-final"
+  cp "$rows" "$TEST_KDIR/rows-final"
+  run bash "$REPO_DIR/scripts/retro-file.sh" cycle-a --pack "$pack_a" --judgments "$TEST_KDIR/judgment-a.json" --json
+  [ "$status" -eq 0 ]
+  file_json | jq -e '.status=="reused" and .filing_complete'
+  run bash "$REPO_DIR/scripts/retro-file.sh" cycle-b --pack "$pack_b" --judgments "$TEST_KDIR/judgment-b.json" --json
+  [ "$status" -eq 0 ]
+  file_json | jq -e '.status=="reused" and .filing_complete'
+  cmp "$journal" "$TEST_KDIR/journal-final"
+  cmp "$rows" "$TEST_KDIR/rows-final"
+}

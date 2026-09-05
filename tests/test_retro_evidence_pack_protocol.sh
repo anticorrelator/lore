@@ -107,5 +107,97 @@ assert helper["READER_CONTRACT_VERSION"] == "2"
 assert "Reader contract: 2" in doc
 assert '"source_data"' in prepare
 assert "source_data.cycle_work" in text
+
+# --- Rubric identity and D6 are additive: D1–D5, Check 7, and escalation keep their contracts.
+for token in ["D6", "not-assessable"]:
+    assert token in decision_rights, f"lead-owned D6 decision missing: {token}"
+top_level = pack_contract.split("```text", 1)[1].split("```", 1)[0]
+for token in ["rubric", "source_data", "due_claim"]:
+    assert token in top_level, f"pack top-level member missing from the contract: {token}"
+assert "`packet_assessments`" in pack_contract, "packet_assessments is a required source"
+rubric_section = text.split("#### Rubric identity", 1)[1].split("#### The cycle_work projection", 1)[0]
+for token in [
+    "`rubric_id`", "`rubric_version`", "12-hex", "`rubric_text`", "source fingerprint",
+    "frozen in the pack", "never against the rubric file on disk", "Only `D6` may be `not-assessable`",
+    "`d5_spec_utility`", "`d6_packet_utility`",
+]:
+    assert token in rubric_section, f"rubric identity doctrine missing: {token}"
+fact_groups = text.split("The required fact groups are", 1)[1].split("Every calculation row", 1)[0]
+for token in ["`packet_delivery`", "`packet_assessments`", "`findings: 0`", "`findings: null`", "does not read packets", "never enter the pack"]:
+    assert token in fact_groups, f"packet fact doctrine missing: {token}"
+
+d6 = text.split("##### D6 — Packet Utility", 1)[1].split("#### Escalation, scale, and channel judgments", 1)[0]
+for token in [
+    "**Construction.**", "**Synthesis.**", "**Receipt.**", "**Observed utility.**",
+    "not evidence that anyone read it", "`dispatch_confirmed` is evidence of receipt, not of usefulness",
+    "They inform the score and never produce it",
+    "No arithmetic over `packet_delivery` or `packet_assessments` yields a D6 value",
+    "is not a clean bill", "`disposition: not-assessable`", "`score: null`", "`reason`",
+    "no numeric D6 reaches the journal or a scored row", "Do not translate absence into a number",
+    "source:packet_assessments", "pack:/facts/packet_delivery", "pack:/facts/packet_assessments",
+    "D5 and D6 coexist",
+]:
+    assert token in d6, f"D6 doctrine missing: {token}"
+
+# The skill and the frozen rubric carry the same headings, keys, and anchor lines, dimension by dimension.
+rubric = runpy.run_path(str(root / "scripts/retro-rubric.py"))["load_rubric"]()
+assert rubric["rubric_id"] == "retro-rubric"
+assert [d["dimension_id"] for d in rubric["dimensions"]] == ["D1", "D2", "D3", "D4", "D5", "D6"]
+assert [d["journal_key"] for d in rubric["dimensions"]] == [
+    "d1_delivery", "d2_quality", "d3_gaps", "d4_alignment", "d5_spec_utility", "d6_packet_utility"]
+assert [d["allow_not_assessable"] for d in rubric["dimensions"]] == [False] * 5 + [True]
+dimensions = text.split("#### Dimension scores", 1)[1].split("#### Escalation, scale, and channel judgments", 1)[0]
+for d in rubric["dimensions"]:
+    assert f"##### {d['dimension_id']} — {d['name']}" in dimensions, f"{d['dimension_id']} heading differs from rubric"
+    line = " | ".join(f"`{s}` {d['anchors'][s]}" for s in "54321")
+    assert line in dimensions, f"{d['dimension_id']} anchor line differs between skill and rubric"
+# The historical D1–D5 anchors are unchanged by the D6 addition.
+HISTORICAL_ANCHORS = {
+    "D1": "`5` every eligible task delivered with high completeness and cross-cutting delivery intact | `4` most eligible tasks delivered with minor gaps | `3` low annotation quality or spec-only agents lacked available context | `2` eligible tasks with no delivery, unresolved delivery, or a silent pipeline drop | `1` no delivery",
+    "D2": "`5` all relevant/current/right-sized | `4` one minor mismatch | `3` topical but wrong altitude | `2` mostly irrelevant or stale | `1` actively misleading",
+    "D3": "`5` no gaps | `4` one minor gap or only novel discoveries | `3` one significant coverage failure | `2` multiple coverage failures | `1` no knowledge-system support",
+    "D4": "`5` decisions shaped implementation | `4` most influenced, one or two decorative | `3` present but agents chose independently | `2` cited then diverged | `1` no alignment",
+    "D5": "`5` spec-guided with no escalation | `4` minor exploration or one escalation | `3` several independent reads or two to three escalations | `2` frequent exploration and divergence | `1` no meaningful guidance",
+}
+for did, line in HISTORICAL_ANCHORS.items():
+    assert line in dimensions, f"{did} historical anchors changed"
+    declared = next(d for d in rubric["dimensions"] if d["dimension_id"] == did)
+    assert " | ".join(f"`{s}` {declared['anchors'][s]}" for s in "54321") == line, f"{did} rubric anchors changed"
+
+for token in [
+    "rubric_id, rubric_version", "`schema_version` is `2`", "ordered exactly D1–D6",
+    "{dimension_id, disposition, score, rationale, evidence_refs}", "`disposition: scored`", "`score: null`",
+    "only D6 may carry it", "retained legacy pack", "ordered exactly D1–D5", "refuses a v1 manifest",
+]:
+    assert token in manifest, f"v2 manifest doctrine missing: {token}"
+filing = text.split("### Step 5: File and Recover", 1)[1].split("### Step 6: Report", 1)[0]
+for token in [
+    "`filing_id + rubric_id + rubric_version + dimension_id`", "`scorecard:dimension:<id>`",
+    "`template_id=retro-rubric`", "`template_version=<rubric_version>`", "`calibration_state=pre-calibration`",
+    "`scores` holds numbers only", "no journal key and no scored row", "satisfy no calibrated evidence floor", "rate no agent",
+]:
+    assert token in filing, f"dimension sink doctrine missing: {token}"
+assert "a `not-assessable` D6 is an abstention on record" in absence
+assert "D1–D6 as the narrative coda" in text and "never as a number" in text
+assert "Escalation stays qualitative and off scorecards" in text
+assert "Answer in prose; never score the checks." in text
+
+recipe = text.split("### Reading scores across the rubric boundary", 1)[1]
+for token in [
+    "lore journal query --role retro --extract-scores --json", ".scores.d5_spec_utility", ".scores.d6_packet_utility",
+    "legacy-unversioned", '"rubric_version":null', '"d6_packet_utility":null', "no common scale",
+    "Nothing pools these series", "choose the columns yourself", "(template_id, template_version, metric)",
+]:
+    assert token in recipe, f"comparison recipe missing: {token}"
+
+# The verbs implement the contract the prose describes.
+file_verb = (root / "scripts/retro-file.sh").read_text()
+for token in [
+    "rubric-bound packs require v2 judgments", "judgment rubric identity differs from frozen pack",
+    "scorecard:dimension:", '"calibration_state":"pre-calibration"',
+]:
+    assert token in file_verb, f"filing verb contract missing: {token}"
+for token in ['"rubric":rubric', '"packet_assessments"', '"packet_delivery"']:
+    assert token in prepare, f"prepare contract missing: {token}"
 print("retro evidence-pack protocol: PASS")
 PY
