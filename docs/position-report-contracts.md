@@ -24,12 +24,12 @@ The path is the report's identity; the header restates context for a reader who 
 
 | Section | Content | Reader |
 |---|---|---|
-| `**Artifacts:**` | One entry per durable artifact: `path`, `kind`, `writer`, `identity` (a claim ID, a result ID, a report path, a source revision). | Coordinator acceptance reads the artifacts the manifest points at, not the manifest. |
+| `**Artifacts:**` | YAML list, one entry per durable artifact, each with `path`, `kind`, `writer`, `identity`. The typed collector reads the file at `path` and checks `identity` by kind: `kind: source` takes a bare commit hash that holds the file (`git cat-file -e <hash>:<path>` under the execution root) or the exact path itself — a prose composite such as "branch X, commit Y, sha256 Z" is refused; `kind: tier2-claims` names `task-claims.jsonl` with `writer: evidence-append.sh` and a claim ID listed under Tier 2 evidence; `kind: result` (or any identity beginning `result-`) names a `results.jsonl` row with `writer: criteria-run.sh`, and every `result-` ID cited under Checks must appear here. | Coordinator acceptance reads the artifacts the manifest points at, not the manifest; the typed collector refuses a missing file or an identity of the wrong shape. |
 | `**Changes:**` | `<file>: <what changed>` per touched file. | Lead's execution-log reduction; retro `cycle_work`. |
 | `**Checks:**` | One entry per check: the uncertainty, what was read or run, what it showed. Executed criteria are cited by result ID. `None — <why>` is complete. | Coordinator acceptance; the log reduction's `Test result` line. |
 | `**Skills used:**` | Comma-separated skill names or `None`. | Log reduction. |
 | `**Observations:**` | YAML list; each entry carries `claim`, `file`, `line_range`, `exact_snippet`, `normalized_snippet_hash`, `falsifier`, `significance`, and optionally `context_before`, `context_after`, `symbol_anchor`, `extends_observation`. `- claim: "None"` is a complete block. | Log reduction; capture selection. Anchors here are unvalidated until a canonical row carries them. |
-| `**Tier 2 evidence:**` | Claim IDs, one per line, or the single word `none`. Rows already live in `task-claims.jsonl`; no row bodies here. | Report checker joins each ID against the canonical file and refuses a missing one. |
+| `**Tier 2 evidence:**` | A YAML list of claim IDs (`- <claim-id>` per line) or the single word `none`. Rows already live in `task-claims.jsonl`; no row bodies here. The typed collector parses this block as YAML and requires a list of strings, so bare IDs without the `- ` bullet fail typed completion even though the legacy `check-report` reader accepts them. | Report checker joins each ID against the canonical file and refuses a missing one; the typed collector additionally requires each row's `task_id` and `producer_role: worker` to match the attempt. |
 | `**Tier 3 candidates:**` | Optional. YAML list of reusable claims with `claim_id`, `tier: reusable`, `claim`, `producer_role`, `protocol_slot`, `scale`, `why_future_agent_cares`, `falsifier`, `related_files`, `source_artifact_ids` (non-empty, each an ID listed under Tier 2 evidence), `work_item`, `captured_at_sha`. | Promotion through `lore promote`; the label is matched literally and no alias is read. |
 | `**Narrative:**` | Optional prose for synthesis that fits no field. | Coordinator and retro readers. |
 | `**Convention handling:**` | `honored: <label>[ — rationale]` or `diverged: <label> — <why>` per woven norm, or `none in scope` when none was woven. | Report checker completeness; conformance render. |
@@ -60,9 +60,45 @@ Template-version: <12-hex version of the compiled brief>
 
 Findings are copied verbatim into the plan's Investigations section by the spec collector. Assertions become Tier 2 rows through `evidence-append.sh`; there is no assertion count on the compiled path, and an assertion without a falsifier is an observation. Worker leads route through `write-execution-log.sh` to the off-scale writer. Unknowns are read by whoever plans next.
 
+The typed collector (`scripts/task-completed-capture-check.sh`) reads the landed report at the destination the manifest assigned and applies these constraints before the spec collector accepts anything; each one has refused real reports:
+
+- Every label above except Narrative is present and non-empty. `None` is a complete value for Assertions, Observations and Worker leads.
+- **Key files** is parsed as YAML and must be a list of existing **absolute** file paths (one path may be given as a plain string). A `path:line` suffix makes the path not exist and is refused; put line references in Findings or Implications. `None` is accepted when the question touched no file.
+- Each grounded assertion is a mapping with non-empty string `claim`, `file`, `line_range`, `exact_snippet`, `normalized_snippet_hash` and `falsifier`, and a `significance` that is exactly `low`, `medium` or `high`. Prose in `significance` is refused; explanatory weight belongs in `implications` or `why_this_work_needs_it`. An entry with no `falsifier` is an observation and is not matched to a row.
+- Each grounded assertion must match exactly one canonical row in `task-claims.jsonl` for this attempt: `producer_role: researcher`; `task_id` equal to the bound task when the manifest binds one, otherwise `report_id` and `dispatch_attempt_id` equal to the manifest's; the same `claim`, `line_range`, `exact_snippet`, `normalized_snippet_hash`, `falsifier` and `significance`. The row's `file` is resolved under the execution root, its `captured_at_sha` must be a commit in that root, and `exact_snippet` must occur within `line_range` of that file at that commit — a snippet from an uncommitted edit, or a `file` outside the root, is refused as a source-anchor mismatch.
+- Observations, when not `None`, is a YAML list of mappings carrying the same seven fields with the same `significance` enum.
+- The optional restated headers (`Report-id`, `Work-item`, `Packet-id`, `Revision-id`, `Dispatch-attempt-id`, `Producer-role: investigator`) must equal the assigned values when present; the three required headers are `Template-version`, `Position-dispatch-manifest` and `Position-dispatch-sha256`.
+
+A report that passes typed completion, in outline:
+
+```
+**Question:** Which writer lands compiled reports?
+Template-version: 1f2e3d4c5b6a
+Position-dispatch-manifest: /store/_work/item/position-dispatch/spec-a1b2/manifest.json
+Position-dispatch-sha256: <64 lowercase hex>
+**Findings:**
+- coordinate-report.sh lands the body at worker-reports/<report-id>.md and refuses an existing path (scripts/coordinate-report.sh lines 40-58).
+**Key files:**
+- /checkout/scripts/coordinate-report.sh
+**Implications:** Retries need a fresh report id.
+**Assertions:**
+- claim: "coordinate-report.sh refuses an existing report path"
+  file: scripts/coordinate-report.sh
+  line_range: "52-54"
+  exact_snippet: "exit 4"
+  normalized_snippet_hash: <sha256 of the normalized snippet>
+  falsifier: "the writer overwrites an existing report path"
+  significance: medium
+**Observations:** None
+**Worker leads:** None
+**Unknowns:** Whether native transport returns the final message reliably.
+```
+
+The same report fails typed completion when `Key files` reads `/checkout/scripts/coordinate-report.sh:52`, when `significance` reads `medium — the retry contract depends on it`, when `Key files` uses a path relative to the checkout, or when the canonical row for the assertion was appended under `producer_role: spec-lead` or with a `task_id` other than the investigation id the pre-plan row must carry.
+
 ## Designer outputs
 
-**Planning mode** writes into the work item: the choice, its reason, the assumption it rests on, the alternative rejected, and any explained open question with what would close it. Plan changes publish through `lore plan revise`. Design records stay in the work item as dated history and are indexed by `lore why` and `lore tradeoffs`; no knowledge entry is minted for a decision.
+**Planning mode** writes into the work item: the choice, its reason, the assumption it rests on, the alternative rejected, and any explained open question with what would close it. Plan changes publish through `lore plan revise --author-role designer`. Design records stay in the work item as dated history and are indexed by `lore why` and `lore tradeoffs`; no knowledge entry is minted for a decision. A bound planning attempt also lands a short design record at its `report_path` through `lore coordinate report`, so the seat can check which brief produced the design: the header lines `Template-version:`, `Position-dispatch-manifest:` and `Position-dispatch-sha256:` (taken from the envelope and the digest the designer computes, exactly as an investigator does), then `**Revision:**` naming the published revision id, `**Decisions:**`, `**Open questions:**` and `**Tier 2 evidence:**` as a YAML list of claim ids or `none`. The typed collector reads worker and investigator positions only, so a design record is checked by the seat's header comparison against its held reference and by reading the published revision; nothing types a completion row for it.
 
 **Consultation mode** replies to the requesting worker:
 

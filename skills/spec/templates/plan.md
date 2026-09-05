@@ -1,6 +1,6 @@
 # Plan.md Template
 
-Read this template when emitting `plan.md` in Step 5b. The fenced block below is the canonical plan structure the synthesizer copies (HTML comments inline are load-bearing enforcement — keep them with the section they govern).
+Read this template when emitting `plan.md` in Step 5 (abstract sections) and Step 5b (concrete sections). The fenced block below is the canonical plan structure the designer copies (HTML comments inline are load-bearing enforcement — keep them with the section they govern). Comments reach the plan author only; an obligation a worker must act on travels in a task line and its generated brief.
 
 ```markdown Plan.md Template
 # <Work Item Title>
@@ -45,12 +45,15 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
      Write it so a worker reading it for the first time understands what to do. -->
 
 ## Context
-<!-- SHORT BRANCH ONLY: 3-6 bullets summarizing key files, constraints, and patterns found -->
-<!-- FULL BRANCH: delete this section and use ## Investigations instead -->
+<!-- Optional, both modes. 3-6 bullets summarizing key files, constraints, and patterns found.
+     In short mode this is where the seat's own reading is summarized; the findings themselves
+     still go under ## Investigations, because the short reading is an investigation with a
+     landed report. Omit the section when the Investigations entries carry everything. -->
 
 ## Investigations
-<!-- FULL BRANCH ONLY: findings from team-based exploration -->
-<!-- SHORT BRANCH: delete this section and use ## Context instead -->
+<!-- Both modes. One entry per investigation: the dispatched investigators in full mode, and the
+     seat's inline investigation in short mode. Findings and Observations are copied verbatim
+     from the landed report; the entry is not a paraphrase. -->
 
 ### <Topic 1>
 **Question:** <what was investigated>
@@ -60,9 +63,9 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
 **Key files:** `path/to/file.ts`, `path/to/other.ts`
 **Implications:** How this affects the design
 **Observations:**
-- <mechanism-level pattern, design rationale, or structural footprint signal, preserved verbatim from researcher report>
+- <mechanism-level pattern, design rationale, or structural footprint signal, preserved verbatim from the investigator report>
 
-<!-- Note: researcher assertions are emitted to task-claims.jsonl (Tier 2)
+<!-- Note: investigator assertions are emitted to task-claims.jsonl (Tier 2)
      via evidence-append.sh — they do not appear in plan.md. See architecture/artifacts/tier2-evidence-schema.md. -->
 
 ## Design Decisions
@@ -100,7 +103,7 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
      deliverable — never write a task whose only expressible outcome is success. -->
 
 **Verification:**
-<!-- 0–3 observable-behavior criteria, owned by the plan. This is the lead's acceptance bar
+<!-- 0–3 observable-behavior criteria, owned by the plan. This is the seat's acceptance bar
      at plan close — never duplicated into per-task descriptions, and never its own task.
      Task generation renders these bullets into every worker brief as plan-owned close
      criteria; a worker self-checks only the bullets its own diff can affect.
@@ -139,12 +142,12 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
 **Scope:**
 <!-- Optional — files/components workers must NOT modify, plus any output contract.
      `- Output contract:` is the producer's acceptance declaration: what this task fixes that
-     later tasks may rely on. Its prose is for the worker and the lead; the scheduler never
+     later tasks may rely on. Its prose is for the worker and the seat; the scheduler never
      reads it. Ordering comes from the edge — each consuming task ends its line with
      `[depends-on: task-N]`. -->
 - Do not modify: `path/to/file`
 - Output contract: <what this task fixes and later tasks may rely on>
-<!-- optional — executable close criteria for this task; omit the block when the task has none. `lore criteria run` executes the published criterion exactly as written, resolved from the immutable revision: argv is a literal argument list with no implicit shell (name one explicitly if the check needs it), cwd is worktree-relative and must resolve inside the execution root, and any change to argv, cwd, timeout, expected exit, or applicability produces a new criterion version. A check that spans several tasks belongs to a named integration task that owns it. A passing result records only that this command exited as expected against a recorded code identity; whether the criterion is adequate for the task and whether the criteria together cover the original anchor remain the reviewer's judgment. Replace the example argv below with the check this task owns; the sample is an illustration, not a requirement to create scripts/test.sh -->
+<!-- optional — executable close criteria for this task; omit the block when the task has none. `lore criteria run` executes the published criterion exactly as written, resolved from the immutable revision: argv is a literal argument list with no implicit shell (name one explicitly if the check needs it), cwd is worktree-relative and must resolve inside the execution root, and any change to argv, cwd, timeout, expected exit, or applicability produces a new criterion version. A check that spans several tasks belongs to a named integration task that owns it. Budget the timeout from a measured development run of the command, with margin. A passing result records only that this command exited as expected against a recorded code identity; whether the criterion is adequate for the task and whether the criteria together cover the original anchor remain the reviewer's judgment. Replace the example argv below with the check this task owns; the sample is an illustration, not a requirement to create scripts/test.sh -->
 **Close criteria:**
 ```json
 [
@@ -162,10 +165,11 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
 **Knowledge delivery:** full  <!-- optional — omit for default annotation-only delivery -->
 **Retrieval directive:**
 <!-- Optional — omit when the task has no Knowledge context backlinks and no Files entries.
-     Seeds are derived from (a) [[knowledge:...]] backlinks in Knowledge context, and
-     (b) file paths in Files. Deduplication applied. hop_budget defaults to 1.
+     Seeds are derived from (a) [[knowledge:...]] backlinks in Knowledge context, resolved to
+     title vocabulary, and (b) file paths in Files. Deduplication applied. hop_budget defaults to 1.
      scale_set: REQUIRED — declare the appropriate bucket (abstract | architecture | subsystem | implementation); multi-label form (e.g., architecture,subsystem) is allowed for adjacent pairs. Omitting is an error.
-     Consumed by /implement Step 3.1 branch (a) via resolve-manifest.sh → {{prior_knowledge}}. -->
+     Consumed at dispatch: `lore impl open` resolves this directive through the shared packet builder
+     into the task's knowledge packet, which the implement seat synthesizes before the worker reads it. -->
 - seeds: [[knowledge:file#heading]], path/to/file.py
 - hop_budget: 1
 <!-- scale_set: REQUIRED — declare one bucket: abstract | architecture | subsystem | implementation (multi-label form architecture,subsystem etc. allowed for adjacent pairs) -->
@@ -173,33 +177,39 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
 **Knowledge context:**
 <!-- Each entry MUST include a "— why relevant" annotation after the backlink.
      Annotations are implementation-facing: tell the worker what to DO with the entry.
+     Carry only the entries this task's surface needs; the full surfaced set stays in the
+     top-level **Related preferences/conventions:** manifest, and entries set aside for this
+     task are listed with their reasons in the item's norm dispositions record.
      GOOD: "— understand the call graph before modifying resolve_backlinks()"
      BAD:  "— provides context for this task" -->
 - [[knowledge:file#heading]] — why this is relevant to this task
 **Advisors:**
 <!-- Optional — declare domain-expert advisors. By default (no `mode: persistent` suffix), advisor declarations are
-     lead-handled inline on the default `/implement` route: the lead replies to worker consultations using its own
-     investigation/plan/code-read tools (and may invoke a skill via the `Skill` tool if the domain is skill-backed) and
-     does NOT spawn a separate advisor agent.
+     seat-handled inline on the default `/implement` route: the implement seat replies to worker consultations using
+     its own investigation/plan/code-read tools (and may invoke a skill via the `Skill` tool if the domain is
+     skill-backed) and spawns no separate advisor.
 
-     Append `mode: persistent` to opt into the agent route — `/implement` then spawns a persistent advisor agent for the
-     domain, concatenates `scripts/agent-protocols/advisory-consultation.md` onto worker prompts, and emits advisor
-     scorecard rows on shutdown. Reserve `mode: persistent` for cases where calibration-attribution or parallel-
-     consultation throughput earns the ceremony cost. -->
+     Append `mode: persistent` to opt into the compiled-designer route — `/implement` then prepares a designer in
+     consultation mode for the domain, activates it on the first worker request with its own packet and bound
+     attempt, and files each reply through the consultation ledger under the designer's compiled version. Compiled
+     worker prompts carry no advisory mixin; the consultation channel is the `## Consultation` request below.
+     Reserve `mode: persistent` for cases where calibration-attribution or parallel-consultation throughput earns
+     the ceremony cost. -->
 - advisor-name — domain scope. [must-consult|on-demand]
-- advisor-name — domain scope. [must-consult|on-demand] mode: persistent  <!-- opt into agent route; omit suffix for default lead-handled -->
+- advisor-name — domain scope. [must-consult|on-demand] mode: persistent  <!-- opt into the compiled-designer route; omit suffix for default seat-handled -->
 **Consultations required:**
 <!-- Optional — task-level declaration listing consultation domains this task's worker MUST request before
      starting implementation. Replaces the structural meaning of today's `must-consult` mode on a
      task-declared advisor: the worker sends a `## Consultation` request (with `consultation-id`, `domain`,
      `reason`, `question`, and its task id and subject), ends its turn without implementation work, and
-     resumes when the answering side (lead by default, persistent advisor on the opt-in route) replies on
+     resumes when the answering side (seat by default, compiled designer on the opt-in route) replies on
      the next turn boundary.
 
      `/implement` composes this block into the task's own brief and tracks per-worker which required
      consultations are outstanding, keyed by task id. A worker report `**Consultations:**` entry that
-     references a required domain without a matching acknowledged lead-side reply is rejected during
-     worker-progress collection (the gate's teeth replace the legacy `[must-consult]` structural gate).
+     references a required domain without a matching acknowledged reply in the consultation ledger is
+     rejected during worker-progress collection (the gate's teeth replace the legacy `[must-consult]`
+     structural gate).
 
      Absence = no consultations required for this task. -->
 - <domain-label>  <!-- e.g. auth-middleware, serialization, security-review -->
