@@ -252,7 +252,8 @@ digest = ("the two environment variables LORE_POSITION_DISPATCH_MANIFEST and LOR
 note = [f"## From the dispatching lead\n\nThe implement lead for {E['WORK_TITLE']} dispatched you on the {route} route for task {task} of work item {slug}"
         + (f", on team {E['TEAM_NAME']} led by {E['LEAD_NAME']}" if E["TEAM_NAME"] else "") + ". The identity envelope above is the binder's record of this attempt. "
         "Your assignment is position_dispatch.bindings.assignment, the complete task description. The Packet-id line names a packet built for this move; "
-        "lore packet show renders it, and its entries are candidates to check against the code. Revision-id and Dispatch-attempt-id name the plan revision and this attempt. "
+        "lore packet show renders it, and its entries are candidates to check against the code. The lead synthesized it before binding: the Left out by synthesis list at its end names each entry set aside and why, "
+        "and if a reason does not hold for what you find in the code, re-pull the entry with lore search. Revision-id and Dispatch-attempt-id name the plan revision and this attempt. "
         f"Work in position_dispatch.bindings.execution_root and allocate no other tree. {E['PLACEMENT_NOTE']}"]
 if route == "designer":
     note.append("You are the persistent advisor for the domain in position_dispatch.bindings.domain, answering the worker request carried verbatim in the assignment. "
@@ -286,6 +287,14 @@ extract = Path(E["TIER2_EXTRACT_FILE"]).read_text() if E["TIER2_EXTRACT_FILE"] e
 if extract.strip():
     note.append("Prior Tier 2 evidence for this task, from task-claims.jsonl:\n\n" + extract.rstrip() + "\n")
 Path(E["SUFFIX_FILE"]).write_text("\n\n".join(note) + "\n")
+```
+
+Synthesize the packet before you bind. The packet `impl open` or `impl next-batch` built for this task is a candidate set: one retrieval pass at a declared scale, nobody's judgment yet, and handing it on unread is search pushed down to the worker. Read it with `lore packet show`, drop the entries the worker should not carry, add the entries it needs that retrieval missed, and give one reason each. The verb appends a superseding row under the same packet id at `delivery_stage: synthesized`, re-renders the content without the dropped blocks, appends the added entries and a `## Left out by synthesis` list the worker can read and overrule by re-pulling, and recomputes the per-scale counts. `SYNTHESIS_FILE` is a JSON file you write, `{"dropped": [{"path": "...", "reason": "..."}], "added": [{"path": "...", "reason": "..."}]}`; an empty pair of lists is a judgment too and is recorded as one. `position-bind` refuses to prepare a dispatch against an assembled packet and names this repair. The seat packet you read for yourself is not handed on and needs no synthesis:
+
+**Recipe inputs:** PACKET_ID, SYNTHESIS_FILE.
+<!-- implement-recipe: synthesize-packet -->
+```bash
+lore packet synthesize "$PACKET_ID" --by implement-lead --spec "$SYNTHESIS_FILE"
 ```
 
 Bind, or prepare. Every route except an ordinary-placement session binds here, freezing payload, native definition and manifest under `position-dispatch/<attempt-id>/` and returning the six-field reference (`manifest_path`, `manifest_sha256`, `payload_path`, `payload_sha256`, `native_path`, `native_sha256`) — your independent copy of this attempt's identity, held per task and never read back from the report. `REQUIRED_BINDINGS` is `task_id revision_id packet_id packet_pointer` for a worker and `packet_id packet_pointer` for a designer; `NATIVE_MODEL` is set on the two native routes and empty on the chaperone and fixed-session routes, where the payload is consumed as a primary prompt. An identical retry returns the same reference; a changed payload under the same attempt refuses; a real retry mints a fresh attempt and report id:
@@ -405,6 +414,8 @@ The durable consultation record is `$ITEM_DIR/consultation-transcript.jsonl`, on
 **Recipe inputs:** SLUG, DOMAIN, QUESTION, SCALE_SET.
 <!-- implement-recipe: designer-packet -->
 `lore packet build --work-item "$SLUG" --role designer --caller implement-lead --topic "$DOMAIN: $QUESTION" --scale-set "$SCALE_SET"`
+
+This packet is handed on too, so the `synthesize-packet` recipe above runs against it before the consultation is bound, with the same JSON file and the same rule about empty lists.
 
 Then assemble the consultation bindings from the request. The recipe refuses a request that is not a `## Consultation` body with a consultation id, domain and question, because an attempt bound to a malformed request would carry an identity no reply could join:
 
