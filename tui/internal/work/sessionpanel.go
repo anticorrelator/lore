@@ -439,6 +439,7 @@ func (m SessionPanelModel) QuiescentForClose(atInteractivePrompt bool) bool {
 // matchers key on); ANSI is the styled render for peek --raw. BracketedPaste is
 // the live DECSET 2004 state, which decides how an injected message is encoded.
 type ScreenSnapshot struct {
+	Columns        uint16
 	CursorX        uint16
 	CursorY        uint16
 	CursorVisible  bool

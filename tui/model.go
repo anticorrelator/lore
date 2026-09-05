@@ -290,14 +290,12 @@ type model struct {
 	// true, sessions are hosted in tmux (survive crash/restart, adoptable); when
 	// false (tmux absent or LORE_TUI_TMUX=off), spawning/close/quit behave exactly
 	// as the direct-PTY path and no adoption scan runs.
-	tmuxEnabled   bool
-	localSessions map[string]liveSession
-	pendingSpawns map[string]liveSession
-	// sessionIdle records, per local session slug, whether we have already
-	// journaled it as idle (quiescent/needs_input). It is the transition-edge
-	// guard for the needs_input/quiescent/resumed events: emit only when the
-	// incoming needs-input state differs from what we last journaled.
-	sessionIdle map[string]bool
+	tmuxEnabled         bool
+	localSessions       map[string]liveSession
+	pendingSpawns       map[string]liveSession
+	sessionIdle         map[string]bool
+	sessionObservations map[string]session.Observation
+	observationSince    map[string]time.Time
 	// sessionModalBlocked records the last successfully classified modal state
 	// for each local session. The heartbeat emits modal_blocked only on an
 	// unlatched→modal edge; a classified clear deletes the latch so a later entry

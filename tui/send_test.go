@@ -58,7 +58,7 @@ func TestObserveSend(t *testing.T) {
 		// The swallow leaves the chip up even before the quiescence timer trips, so
 		// the pending read must not depend on the needs_input edge.
 		{"pending-chip-not-yet-quiescent", "claude-code", false, ccPasteChipComposerRows, "", obsPending},
-		{"submitted-generating", "claude-code", false, ccGeneratingRows, "", obsSubmitted},
+		{"unobservable-existing-generation", "claude-code", false, ccGeneratingRows, "", obsUnobservable},
 		{"submitted-empty-ready", "claude-code", true, ccComposerRows, "", obsSubmitted},
 		{"submitted-faint-placeholder", "claude-code", true, ccGhostRows, ccGhostANSI, obsSubmitted},
 		{"pending-real-held-input", "claude-code", true, ccHeldRows, ccHeldANSI, obsPending},

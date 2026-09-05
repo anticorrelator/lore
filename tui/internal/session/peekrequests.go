@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/anticorrelator/lore/tui/internal/config"
 )
 
 // PeekRequest is one peek-request row at peek-requests/<request_id>.json,
@@ -22,19 +24,68 @@ type PeekRequest struct {
 	RequestedAt    string `json:"requested_at"`
 }
 
+type ObservationEvidence struct {
+	Matcher string `json:"matcher"`
+	Reason  string `json:"reason"`
+}
+
+type Observation struct {
+	SessionHandle      string              `json:"session_handle"`
+	NativeSessionID    string              `json:"native_session_id,omitempty"`
+	InputBlockedReason string              `json:"input_blocked_reason,omitempty"`
+	SchemaVersion      int                 `json:"schema_version"`
+	Activity           string              `json:"activity"`
+	Authority          string              `json:"authority"`
+	ObservedAt         string              `json:"observed_at"`
+	SessionID          string              `json:"session_id"`
+	Generation         string              `json:"generation"`
+	Instance           string              `json:"instance"`
+	CanAcceptInput     bool                `json:"can_accept_input"`
+	Evidence           ObservationEvidence `json:"evidence"`
+	Fresh              bool                `json:"fresh"`
+	MaxAgeSeconds      int                 `json:"max_age_seconds"`
+}
+
+type PeekScreen struct {
+	Source       string `json:"source"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	Truncated    bool   `json:"truncated"`
+	Scope        string `json:"scope"`
+	LastOutputAt string `json:"last_output_at,omitempty"`
+}
+
+type PeekModalOption struct {
+	Number int    `json:"number,omitempty"`
+	Label  string `json:"label"`
+}
+
+type PeekModal struct {
+	Title          string                         `json:"title,omitempty"`
+	Options        []PeekModalOption              `json:"options,omitempty"`
+	Signature      *config.NumberedModalSignature `json:"signature,omitempty"`
+	SelectedOption int                            `json:"selected_option,omitempty"`
+	Matcher        string                         `json:"matcher"`
+	Answerable     bool                           `json:"answerable"`
+}
+
 // PeekResponse is the substrate's first addressed-response payload, written by
 // the owning instance at peek-responses/<request_id>.json (tmp+atomic-rename)
 // and consumed (deleted) by the requesting CLI. Rows are the plain-text screen
 // rows from the same snapshot the readiness gate uses; Ready/BlockedReason carry
 // that gate's classification. ANSI is populated only when the request set Raw.
 type PeekResponse struct {
-	RequestID     string   `json:"request_id"`
-	Slug          string   `json:"slug"`
-	CapturedAt    string   `json:"captured_at"`
-	Ready         bool     `json:"ready"`
-	BlockedReason string   `json:"blocked_reason,omitempty"`
-	Rows          []string `json:"rows"`
-	ANSI          string   `json:"ansi,omitempty"`
+	Framework     string      `json:"framework"`
+	Observation   Observation `json:"observation"`
+	Screen        PeekScreen  `json:"screen"`
+	Modal         *PeekModal  `json:"modal,omitempty"`
+	RequestID     string      `json:"request_id"`
+	Slug          string      `json:"slug"`
+	CapturedAt    string      `json:"captured_at"`
+	Ready         bool        `json:"ready"`
+	BlockedReason string      `json:"blocked_reason,omitempty"`
+	Rows          []string    `json:"rows"`
+	ANSI          string      `json:"ansi,omitempty"`
 }
 
 // PeekRequestsDir is the peek-request surface under a _sessions/ directory.

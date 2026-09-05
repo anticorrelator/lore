@@ -421,16 +421,16 @@ func TestIdleEventFor(t *testing.T) {
 	}
 }
 
-// TestNeedsInputChangedJournalsTransitions is the end-to-end trace through the
+// TestObservationJournalsTransitions is the end-to-end trace through the
 // real appender: entering needs-input lands one needs_input row, a repeated
 // same-state tick re-emits nothing (edge guard), and resuming lands resumed.
-func TestNeedsInputChangedJournalsTransitions(t *testing.T) {
+func TestObservationJournalsTransitions(t *testing.T) {
 	m := sessionModelWithRealScript(t)
 	kdir := m.config.KnowledgeDir
 
 	// Enter idle: the panel's one idle edge lands one row.
 	var cmd tea.Cmd
-	m, cmd = m.handleNeedsInputChanged(work.NeedsInputChangedMsg{Slug: "demo", NeedsInput: true})
+	m, cmd = m.applySessionObservation("demo", session.Observation{Activity: "idle", Generation: "launch-1"}, time.Now())
 	if !m.sessionIdle["demo"] {
 		t.Fatal("sessionIdle not set on enter")
 	}
@@ -441,7 +441,7 @@ func TestNeedsInputChangedJournalsTransitions(t *testing.T) {
 	}
 
 	// Repeated enter tick in the same state: guard suppresses re-emission.
-	m, cmd = m.handleNeedsInputChanged(work.NeedsInputChangedMsg{Slug: "demo", NeedsInput: true})
+	m, cmd = m.applySessionObservation("demo", session.Observation{Activity: "idle", Generation: "launch-1"}, time.Now())
 	if cmd != nil {
 		t.Fatal("repeated needs-input tick re-emitted")
 	}
@@ -450,7 +450,7 @@ func TestNeedsInputChangedJournalsTransitions(t *testing.T) {
 	}
 
 	// Leave idle: resumed.
-	m, cmd = m.handleNeedsInputChanged(work.NeedsInputChangedMsg{Slug: "demo", NeedsInput: false})
+	m, cmd = m.applySessionObservation("demo", session.Observation{Activity: "working", Generation: "launch-1"}, time.Now())
 	if m.sessionIdle["demo"] {
 		t.Fatal("sessionIdle not cleared on resume")
 	}
@@ -461,7 +461,7 @@ func TestNeedsInputChangedJournalsTransitions(t *testing.T) {
 	}
 
 	// Repeated leave tick: guard suppresses again.
-	_, cmd = m.handleNeedsInputChanged(work.NeedsInputChangedMsg{Slug: "demo", NeedsInput: false})
+	_, cmd = m.applySessionObservation("demo", session.Observation{Activity: "working", Generation: "launch-1"}, time.Now())
 	if cmd != nil {
 		t.Fatal("repeated resume tick re-emitted")
 	}

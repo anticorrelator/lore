@@ -170,6 +170,8 @@ func (m model) finalizeLocalSessionClosed(slug, closeRequestID string) (model, [
 		}
 		delete(m.localSessions, slug)
 		delete(m.sessionIdle, slug)
+		delete(m.sessionObservations, slug)
+		delete(m.observationSince, slug)
 		delete(m.sessionModalBlocked, slug)
 		row := m.instanceRow()
 		return m, []tea.Cmd{func() tea.Msg {
@@ -186,6 +188,8 @@ func (m model) finalizeLocalSessionClosed(slug, closeRequestID string) (model, [
 	}
 	delete(m.localSessions, slug)
 	delete(m.sessionIdle, slug)
+	delete(m.sessionObservations, slug)
+	delete(m.observationSince, slug)
 	delete(m.sessionModalBlocked, slug)
 	return m, []tea.Cmd{
 		m.writeInstanceCmd(),
@@ -530,34 +534,15 @@ func (m model) handleQuiescenceTick(msg work.QuiescenceTickMsg) (model, tea.Cmd)
 		if panel, ok := m.sessionPanels[slug]; ok {
 			sm, cmd := panel.Update(msg)
 			m.sessionPanels[slug] = sm
-			return m, cmd
+			m, observationCmd := m.reconcileSessionObservation(slug)
+			return m, tea.Batch(cmd, observationCmd)
 		}
 	}
 	return m, nil
 }
 
 func (m model) handleNeedsInputChanged(msg work.NeedsInputChangedMsg) (model, tea.Cmd) {
-	// A session panel's quiescence state changed — forward to list for indicator
-	// update and journal the transition. The panel emits this message only on a
-	// real edge; sessionIdle is the emit-site guard so an unchanged state (or an
-	// untracked slug) never re-emits. Type carries the live session's kind so the
-	// active label survives the needs-input update.
-	m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: msg.Slug, Type: m.localSessions[msg.Slug].typ, NeedsInput: msg.NeedsInput})
-
-	ls, tracked := m.localSessions[msg.Slug]
-	if !tracked || m.sessionIdle[msg.Slug] == msg.NeedsInput {
-		return m, nil
-	}
-	if m.sessionIdle == nil {
-		m.sessionIdle = make(map[string]bool)
-	}
-	m.sessionIdle[msg.Slug] = msg.NeedsInput
-
-	script, kdir := m.eventScript, m.config.KnowledgeDir
-	if msg.NeedsInput {
-		return m, journalCmd(script, kdir, m.idleEventFor(msg.Slug, session.EventNeedsInput, ls))
-	}
-	return m, journalCmd(script, kdir, m.idleEventFor(msg.Slug, session.EventResumed, ls))
+	return m.reconcileSessionObservation(msg.Slug)
 }
 
 func (m model) handleStreamComplete(msg work.StreamCompleteMsg) (model, tea.Cmd) {

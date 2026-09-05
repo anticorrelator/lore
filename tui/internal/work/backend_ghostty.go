@@ -200,6 +200,7 @@ func (b *terminalBackend) screenState() (ScreenSnapshot, error) {
 	}
 	b.term.ScrollViewportBottom()
 	var snap ScreenSnapshot
+	snap.Columns, _ = b.term.Cols()
 	snap.CursorX, _ = b.term.CursorX()
 	snap.CursorY, _ = b.term.CursorY()
 	snap.CursorVisible, _ = b.term.CursorVisible()

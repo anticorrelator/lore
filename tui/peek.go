@@ -5,7 +5,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/session"
 )
 
@@ -93,40 +92,35 @@ func (m model) handlePeekRequestScan(msg peekRequestScanMsg) (model, tea.Cmd) {
 		m.pendingPeek[pr.RequestID] = true
 
 		framework := m.sessionHarness(pr.Slug)
-		hasContract := false
-		queuesMidGen := false
-		if framework != "" {
-			if ok, err := config.HarnessSignatureContract(framework); err == nil {
-				hasContract = ok
-			}
-			if ok, err := config.HarnessQueuesMidGeneration(framework); err == nil {
-				queuesMidGen = ok
-			}
+		now := time.Now()
+		obs, snap, state := m.snapshotObservation(pr.Slug, now)
+		resp := session.PeekResponse{RequestID: pr.RequestID, Slug: pr.Slug, CapturedAt: now.UTC().Format(time.RFC3339Nano), Framework: framework, Observation: obs, Ready: obs.CanAcceptInput, Rows: peekRows(framework, snap), Screen: session.PeekScreen{Source: "terminal-emulator", Width: int(snap.Columns), Height: len(snap.Rows), Scope: "viewport", Truncated: false}}
+		if last := panel.LastOutputTime(); !last.IsZero() {
+			resp.Screen.LastOutputAt = last.UTC().Format(time.RFC3339Nano)
+		}
+		resp.BlockedReason = obs.InputBlockedReason
+		if !obs.Fresh {
+			resp.BlockedReason = sendReasonInternal
 		}
 
-		resp := session.PeekResponse{
-			RequestID:  pr.RequestID,
-			Slug:       pr.Slug,
-			CapturedAt: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-		}
-		if snap, serr := panel.ScreenState(); serr != nil {
-			resp.Ready = false
-			resp.BlockedReason = sendReasonInternal
-		} else {
-			ready, reason := false, sendReasonNoContract
-			if framework != "" {
-				ready, reason = sendReadiness(framework, panel.NeedsInput(), hasContract, queuesMidGen, snap)
-			}
-			resp.Ready = ready
-			resp.BlockedReason = reason
-			resp.Rows = peekRows(framework, snap)
-			if pr.Raw {
-				resp.ANSI = snap.ANSI
-			}
-			if reason == sendReasonNoContract {
-				m = m.routeRuntimeNotices([]runtimeNotice{noContractNotice(framework)})
+		if state.interactive {
+			resp.Modal = &session.PeekModal{Signature: state.numberedModal, SelectedOption: state.selectedOption, Matcher: state.interactiveReason, Answerable: state.numberedModal != nil && state.selectedOption > 0}
+			if state.numberedModal != nil {
+				resp.Modal.Title = state.numberedModal.Title
+				for _, option := range state.numberedModal.Options {
+					resp.Modal.Options = append(resp.Modal.Options, session.PeekModalOption{Number: option.Number, Label: option.Label})
+				}
+			} else if framework == "opencode" {
+				resp.Modal.Title = "Permission required"
+				for _, label := range []string{"Allow once", "Allow always", "Reject"} {
+					resp.Modal.Options = append(resp.Modal.Options, session.PeekModalOption{Label: label})
+				}
 			}
 		}
+		if pr.Raw {
+			resp.ANSI = snap.ANSI
+		}
+
 		cmds = append(cmds, respondPeekCmd(m.sessionsDir, pr.RequestID, resp))
 	}
 	if len(cmds) == 0 {

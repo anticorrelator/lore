@@ -237,23 +237,13 @@ const (
 	obsPending                     // the composer still holds the unsent payload
 )
 
-// observeSend classifies a post-inject screen for the deferred-outcome loop. It
-// checks the held-payload signature first (the swallow leaves the composer
-// non-empty regardless of the quiescence timer edge), then treats a generating
-// session or a composer that re-matches its empty-ready signature as submitted.
-// quiescent is the panel's needs_input edge. A framework with no matcher, or a
-// screen that matches neither shape, reads unobservable so the caller waits
-// rather than guessing.
-func observeSend(framework string, quiescent bool, snap work.ScreenSnapshot) sendObs {
+func observeSend(framework string, _ bool, snap work.ScreenSnapshot) sendObs {
 	state, ok := classifyScreen(framework, snap)
 	if !ok {
 		return obsUnobservable
 	}
 	if state.pending || state.heldInput {
 		return obsPending
-	}
-	if !quiescent {
-		return obsSubmitted
 	}
 	if state.composer && !state.interactive {
 		return obsSubmitted
