@@ -12,6 +12,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 import yaml
@@ -164,6 +165,11 @@ class Fixture:
                         XDG_CONFIG_HOME=str(self.root / "config"), XDG_DATA_HOME=str(self.root / "data"),
                         XDG_CACHE_HOME=str(self.root / "cache"),
                         PATH=str(self.repo / "cli") + os.pathsep + self.env["PATH"])
+        go_cache = Path(tempfile.gettempdir()).resolve() / f"lore-implement-go-cache-{os.getuid()}"
+        assert not go_cache.is_relative_to(self.root), "Go caches must be outside the case root"
+        for name in ("modules", "build"):
+            (go_cache / name).mkdir(parents=True, exist_ok=True)
+        self.env.update(GOTOOLCHAIN="local", GOMODCACHE=str(go_cache / "modules"), GOCACHE=str(go_cache / "build"))
         (self.root / "data/config").mkdir(parents=True)
         (self.root / "data/config/settings.json").write_text(json.dumps({"version": 1,
             "coordination": {"max_concurrency": 2}, "harnesses": {"codex": {"roles": {

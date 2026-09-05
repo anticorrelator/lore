@@ -3,9 +3,14 @@
 setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd -P)"
   CASE_ROOT="$(mktemp -d)"
+  export GOTOOLCHAIN=local
+  export GOMODCACHE="${TMPDIR:-/tmp}/lore-implement-go-cache-$(id -u)/modules"
+  export GOCACHE="${TMPDIR:-/tmp}/lore-implement-go-cache-$(id -u)/build"
+  mkdir -p "$GOMODCACHE" "$GOCACHE"
 }
 
 teardown() {
+  chmod -R u+w "$CASE_ROOT"
   rm -rf "$CASE_ROOT"
 }
 
@@ -1045,6 +1050,10 @@ PY
 @test "implement compiled envelopes inventory rejects unmarked commands and unexercised or changed recipes" {
   run python3 "$REPO/tests/helpers/implement_recipes.py" --self-test --root "$CASE_ROOT"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+  # Module caches can leave directories that rm cannot traverse for deletion.
+  mkdir -p "$CASE_ROOT/readonly-cache/package"
+  printf 'cached bytes\n' > "$CASE_ROOT/readonly-cache/package/source"
+  chmod -R a-w "$CASE_ROOT/readonly-cache"
 }
 
 @test "implement compiled envelopes execute the published recipes through isolated writers" {
