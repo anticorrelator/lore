@@ -237,10 +237,20 @@ func worktreeOutcomeEvent(instanceName, slug string, ls liveSession, outcome wor
 		event = session.EventWorktreeQuarantined
 	}
 	links := map[string]string{
-		"worktree_epoch": outcome.Identity.Epoch,
-		"worktree_path":  outcome.Identity.CanonicalPath,
-		"target_ref":     outcome.Identity.TargetRef,
-		"target_oid":     outcome.Identity.TargetOID,
+		"worktree_epoch":    outcome.Identity.Epoch,
+		"worktree_path":     outcome.Identity.CanonicalPath,
+		"target_ref":        outcome.Identity.TargetRef,
+		"target_oid":        outcome.Identity.TargetOID,
+		"worktree_base_oid": outcome.Identity.Captured.HeadOID,
+	}
+	if outcome.WorktreeHeadOID != "" {
+		links["worktree_head_oid"] = outcome.WorktreeHeadOID
+	}
+	if outcome.Observed != nil {
+		links["destination_head_oid"] = outcome.Observed.HeadOID
+	}
+	if outcome.Kind == worktree.OutcomeWorktreeQuarantined {
+		links["reason"] = outcome.Reason
 	}
 	if outcome.Kind == worktree.OutcomePublished {
 		// Which checkout the merge landed in is the one fact an audit cannot

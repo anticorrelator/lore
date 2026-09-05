@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -145,7 +147,7 @@ func TestIdentityRejectsLegacyAndEpochReuse(t *testing.T) {
 	}
 }
 
-func TestPublishExactGenerationUsesGitPatch(t *testing.T) {
+func TestPublishExactGenerationFastForwardsCommittedTip(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
@@ -161,6 +163,10 @@ func TestPublishExactGenerationUsesGitPatch(t *testing.T) {
 	identity, _ = Transition(identity, StateActive)
 	result := []byte("session result\x00\xff\n")
 	writeFile(t, filepath.Join(identity.CanonicalPath, "tracked"), result)
+	git(t, identity.CanonicalPath, "switch", "-c", "result")
+	git(t, identity.CanonicalPath, "add", "tracked")
+	git(t, identity.CanonicalPath, "commit", "-m", "result")
+	tip := strings.TrimSpace(string(gitBytes(t, identity.CanonicalPath, "rev-parse", "HEAD")))
 	identity, artifact, err := MakePublishable(ctx, identity)
 	if err != nil {
 		t.Fatalf("MakePublishable: %v", err)
@@ -173,6 +179,161 @@ func TestPublishExactGenerationUsesGitPatch(t *testing.T) {
 		t.Fatalf("outcome = %+v", outcome)
 	}
 	assertBytes(t, filepath.Join(source, "tracked"), result)
+	if got := strings.TrimSpace(string(gitBytes(t, source, "rev-parse", "HEAD"))); got != tip || outcome.Artifact.OID != tip {
+		t.Fatalf("destination HEAD = %s, artifact = %s, want committed tip %s", got, outcome.Artifact.OID, tip)
+	}
+	if got := gitBytes(t, source, "status", "--porcelain"); len(got) != 0 {
+		t.Fatalf("publish left uncommitted changes: %s", got)
+	}
+}
+
+func TestPublishQuarantinesUnsafeResults(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reason string
+		change func(*testing.T, string, Identity)
+	}{
+		{"base-diverged", "base-diverged", func(t *testing.T, source string, identity Identity) {
+			git(t, source, "commit", "--allow-empty", "-m", "destination advanced")
+		}},
+		{"worktree-unstaged", "worktree-dirty", func(t *testing.T, source string, identity Identity) {
+			writeFile(t, filepath.Join(identity.CanonicalPath, "tracked"), []byte("uncommitted\x00\xff"))
+		}},
+		{"worktree-staged", "worktree-dirty", func(t *testing.T, source string, identity Identity) {
+			writeFile(t, filepath.Join(identity.CanonicalPath, "tracked"), []byte("staged"))
+			git(t, identity.CanonicalPath, "add", "tracked")
+		}},
+		{"worktree-untracked", "worktree-dirty", func(t *testing.T, source string, identity Identity) {
+			writeFile(t, filepath.Join(identity.CanonicalPath, "untracked"), []byte("untracked"))
+		}},
+		{"destination-unstaged", "destination-dirty", func(t *testing.T, source string, identity Identity) {
+			writeFile(t, filepath.Join(source, "tracked"), []byte("keep\x00\xff"))
+		}},
+		{"destination-staged", "destination-dirty", func(t *testing.T, source string, identity Identity) {
+			writeFile(t, filepath.Join(source, "tracked"), []byte("keep staged"))
+			git(t, source, "add", "tracked")
+		}},
+		{"destination-untracked", "destination-dirty", func(t *testing.T, source string, identity Identity) {
+			writeFile(t, filepath.Join(source, "untracked"), []byte("keep untracked"))
+		}},
+		{"destination-ref-locked", "Git fast-forward failed: ref transaction did not confirm prepare", func(t *testing.T, source string, identity Identity) {
+			writeFile(t, filepath.Join(source, ".git", "refs", "heads", "main.lock"), []byte("existing lock"))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			source := filepath.Join(root, "source")
+			initRepository(t, source)
+			writeFile(t, filepath.Join(source, "tracked"), []byte("base"))
+			git(t, source, "add", ".")
+			git(t, source, "commit", "-m", "base")
+			identity, err := Create(ctx, source, filepath.Join(root, "session"), "unsafe")
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity, _ = Transition(identity, StateActive)
+			writeFile(t, filepath.Join(identity.CanonicalPath, "tracked"), []byte("committed result"))
+			git(t, identity.CanonicalPath, "add", ".")
+			git(t, identity.CanonicalPath, "commit", "-m", "result")
+			tc.change(t, source, identity)
+			assertQuarantinedUnchanged(t, source, identity, tc.reason)
+		})
+	}
+}
+
+func TestPublishDivergentStreamRegression(t *testing.T) {
+	for _, advanceAfterSpawn := range []bool{false, true} {
+		name := "destination-unchanged-since-spawn"
+		if advanceAfterSpawn {
+			name = "destination-advanced-after-spawn"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			source := filepath.Join(root, "control")
+			initRepository(t, source)
+			writeFile(t, filepath.Join(source, "tracked"), []byte("old base\x00\xff"))
+			git(t, source, "add", ".")
+			git(t, source, "commit", "-m", "common base")
+			git(t, source, "branch", "stream")
+			writeFile(t, filepath.Join(source, "tracked"), []byte("new control bytes\x00\xfe"))
+			writeFile(t, filepath.Join(source, "main-only"), []byte("keep newer file"))
+			git(t, source, "add", ".")
+			git(t, source, "commit", "-m", "unrelated control change")
+			identity, err := Create(ctx, source, filepath.Join(root, "session"), "divergent-stream")
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity, _ = Transition(identity, StateActive)
+			git(t, identity.CanonicalPath, "switch", "stream")
+			writeFile(t, filepath.Join(identity.CanonicalPath, "stream-only"), []byte("stream result\x00\xfd"))
+			git(t, identity.CanonicalPath, "add", ".")
+			git(t, identity.CanonicalPath, "commit", "-m", "stream result")
+			if advanceAfterSpawn {
+				writeFile(t, filepath.Join(source, "another-main-only"), []byte("keep post-spawn file"))
+				git(t, source, "add", ".")
+				git(t, source, "commit", "-m", "control advanced after spawn")
+			}
+			outcome := assertQuarantinedUnchanged(t, source, identity, "base-diverged")
+			t.Logf("refused divergent stream: reason=%s base=%s destination=%s tip=%s; destination files, HEAD, and index byte-identical; quarantine=%s patch retained", outcome.Reason, identity.Captured.HeadOID, outcome.Observed.HeadOID, outcome.WorktreeHeadOID, outcome.Artifact.Ref)
+		})
+	}
+}
+
+func assertQuarantinedUnchanged(t *testing.T, source string, identity Identity, reason string) PublishOutcome {
+	t.Helper()
+	ctx := context.Background()
+	before := checkoutBytes(t, source)
+	indexPath := strings.TrimSpace(string(gitBytes(t, source, "rev-parse", "--path-format=absolute", "--git-path", "index")))
+	index := readFile(t, indexPath)
+	head := gitBytes(t, source, "rev-parse", "HEAD")
+	identity, artifact, err := MakePublishable(ctx, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := Publish(ctx, identity, artifact, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Kind != OutcomeWorktreeQuarantined || outcome.Reason != reason || !outcome.Identity.CleanupEligible() {
+		t.Fatalf("outcome = %+v, want quarantine %s", outcome, reason)
+	}
+	if after := checkoutBytes(t, source); !reflect.DeepEqual(before, after) {
+		t.Fatalf("destination files changed: before=%v after=%v", before, after)
+	}
+	assertBytes(t, indexPath, index)
+	if after := gitBytes(t, source, "rev-parse", "HEAD"); !bytes.Equal(head, after) {
+		t.Fatal("destination HEAD changed")
+	}
+	if outcome.Artifact.Ref != quarantineRef(identity) || len(readFile(t, outcome.Artifact.PatchPath)) == 0 {
+		t.Fatal("quarantine ref or patch missing")
+	}
+	if got := strings.TrimSpace(string(gitBytes(t, source, "rev-parse", outcome.Artifact.Ref))); got != outcome.Artifact.OID {
+		t.Fatal("quarantine ref not pinned")
+	}
+	return outcome
+}
+
+func checkoutBytes(t *testing.T, root string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == filepath.Join(root, ".git") {
+			return filepath.SkipDir
+		}
+		if !info.IsDir() {
+			files[path] = string(readFile(t, path))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
 }
 
 func TestTeardownPendingRetainsOwnership(t *testing.T) {

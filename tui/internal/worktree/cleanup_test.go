@@ -33,6 +33,8 @@ func TestCleanupRemovesPublishedCheckoutAndPreservesEveryRef(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(sessionPath, "tracked.txt"), []byte("session result\n"))
 	writeFile(t, filepath.Join(sessionPath, "session-only.txt"), []byte("new file\n"))
+	git(t, sessionPath, "add", ".")
+	git(t, sessionPath, "commit", "-m", "result")
 	identity, artifact, err := MakePublishable(ctx, identity)
 	if err != nil {
 		t.Fatalf("MakePublishable: %v", err)

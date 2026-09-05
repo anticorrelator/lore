@@ -557,6 +557,11 @@ func TestAdoptionScan_PublishedSessionJournalsDestinationOnce(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(identity.CanonicalPath, "stream.txt"), []byte("stream\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	for _, args := range [][]string{{"add", "stream.txt"}, {"commit", "-m", "stream result"}} {
+		if out, err := exec.Command("git", append([]string{"-C", identity.CanonicalPath}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
 
 	plantCorpse(t, sessionsDir, "dead-inst", "my-repo", deadPID(t), []session.Session{
 		// ExecutionDir mirrors a real spawn-stamped row (session cwd, no

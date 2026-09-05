@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -66,12 +67,13 @@ type ResultArtifact struct {
 }
 
 type PublishOutcome struct {
-	Kind     OutcomeKind    `json:"kind"`
-	Identity Identity       `json:"identity"`
-	Artifact ResultArtifact `json:"artifact"`
-	Expected Generation     `json:"expected"`
-	Observed *Generation    `json:"observed,omitempty"`
-	Reason   string         `json:"reason,omitempty"`
+	Kind            OutcomeKind    `json:"kind"`
+	Identity        Identity       `json:"identity"`
+	Artifact        ResultArtifact `json:"artifact"`
+	Expected        Generation     `json:"expected"`
+	Observed        *Generation    `json:"observed,omitempty"`
+	Reason          string         `json:"reason,omitempty"`
+	WorktreeHeadOID string         `json:"worktree_head_oid,omitempty"`
 }
 
 type RefusalError struct {
@@ -300,7 +302,7 @@ func MakePublishable(ctx context.Context, identity Identity) (Identity, ResultAr
 	if err != nil {
 		return Identity{}, ResultArtifact{}, err
 	}
-	artifact, err := materializeRef(ctx, identity, resultRef(identity))
+	artifact, err := preserveResult(ctx, identity)
 	if err != nil {
 		return Identity{}, ResultArtifact{}, fmt.Errorf("materialize session result: %w", err)
 	}
@@ -359,42 +361,148 @@ func Publish(ctx context.Context, identity Identity, artifact ResultArtifact, de
 
 	observed, observedRef, observedOID, inspectErr := inspectGeneration(ctx, destinationPath)
 	if inspectErr != nil {
-		return quarantineOutcome(ctx, identity, artifact, nil, "destination identity is unknown: "+inspectErr.Error())
+		return quarantineOutcome(ctx, identity, nil, "destination identity is unknown: "+inspectErr.Error())
 	}
 	base.Observed = &observed
-	if observed != identity.Captured || observedRef != identity.TargetRef || observedOID != identity.TargetOID {
-		return quarantineOutcome(ctx, identity, artifact, &observed, "destination generation no longer matches the captured generation")
-	}
-	patch, err := gitOutput(ctx, identity.CanonicalPath, nil, nil, "diff", "--binary", capturedRef(identity), artifact.OID, "--")
+	head, err := gitString(ctx, identity.CanonicalPath, "rev-parse", "HEAD")
 	if err != nil {
-		return base, fmt.Errorf("build publish patch: %w", err)
+		return base, err
 	}
-	if len(patch) > 0 {
-		if _, err := gitOutput(ctx, destinationPath, patch, nil, "apply", "--check", "--binary", "-"); err != nil {
-			return quarantineOutcome(ctx, identity, artifact, &observed, "Git integration preflight failed: "+err.Error())
-		}
-		latest, latestRef, latestOID, err := inspectGeneration(ctx, destinationPath)
-		if err != nil || latest != identity.Captured || latestRef != identity.TargetRef || latestOID != identity.TargetOID {
-			return quarantineOutcome(ctx, identity, artifact, &latest, "destination generation changed during publish preflight")
-		}
-		if _, err := gitOutput(ctx, destinationPath, patch, nil, "apply", "--binary", "-"); err != nil {
-			return quarantineOutcome(ctx, identity, artifact, &observed, "Git integration failed: "+err.Error())
-		}
+	base.WorktreeHeadOID = head
+	quarantine := func(reason string) (PublishOutcome, error) {
+		outcome, err := quarantineOutcome(ctx, identity, &observed, reason)
+		outcome.WorktreeHeadOID = head
+		return outcome, err
+	}
+	if identity.Captured.HeadOID != observed.HeadOID {
+		return quarantine("base-diverged")
+	}
+	if _, err := gitOutput(ctx, identity.CanonicalPath, nil, nil, "merge-base", "--is-ancestor", identity.Captured.HeadOID, head); err != nil {
+		return quarantine("base-diverged")
+	}
+	dirty, err := isDirty(ctx, identity.CanonicalPath)
+	if err != nil {
+		return base, err
+	}
+	if dirty || head != artifact.OID {
+		return quarantine("worktree-dirty")
+	}
+	dirty, err = isDirty(ctx, destinationPath)
+	if err != nil {
+		return base, err
+	}
+	if dirty {
+		return quarantine("destination-dirty")
+	}
+	if observedRef == "" {
+		return quarantine("destination has no branch")
+	}
+	if observed != identity.Captured || observedRef != identity.TargetRef || observedOID != identity.TargetOID {
+		return quarantine("destination generation no longer matches the captured generation")
+	}
+	latest, latestRef, latestOID, err := inspectGeneration(ctx, destinationPath)
+	if err != nil {
+		return quarantine("destination identity is unknown: " + err.Error())
+	}
+	observed = latest
+	if latest.HeadOID != identity.Captured.HeadOID {
+		return quarantine("base-diverged")
+	}
+	if latest != identity.Captured || latestRef != identity.TargetRef || latestOID != identity.TargetOID {
+		return quarantine("destination-dirty")
+	}
+	if err := fastForward(ctx, observed, observedRef, head); err != nil {
+		return quarantine("Git fast-forward failed: " + err.Error())
 	}
 	next, err := Transition(identity, StatePublished)
 	if err != nil {
 		return base, err
 	}
-	return PublishOutcome{Kind: OutcomePublished, Identity: next, Artifact: artifact, Expected: identity.Captured, Observed: &observed}, nil
+	base.Kind, base.Identity = OutcomePublished, next
+	return base, nil
 }
 
-func quarantineOutcome(ctx context.Context, identity Identity, artifact ResultArtifact, observed *Generation, reason string) (PublishOutcome, error) {
+func fastForward(ctx context.Context, destination Generation, ref, tip string) error {
+	cmd := exec.CommandContext(ctx, "git", "-C", destination.CanonicalPath, "update-ref", "-m", "Fast-forward committed worktree", "--stdin")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	defer stdin.Close()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	defer func() { stdin.Close(); _ = cmd.Wait() }()
+	scanner := bufio.NewScanner(stdout)
+	send := func(command, response string) error {
+		if _, err := io.WriteString(stdin, command+"\n"); err != nil {
+			return err
+		}
+		if response != "" && (!scanner.Scan() || scanner.Text() != response) {
+			return fmt.Errorf("ref transaction did not confirm %s", strings.Fields(command)[0])
+		}
+		return nil
+	}
+	if err := send("start", "start: ok"); err != nil {
+		return err
+	}
+	if err := send("update "+ref+" "+tip+" "+destination.HeadOID, ""); err != nil {
+		return err
+	}
+	if err := send("prepare", "prepare: ok"); err != nil {
+		return err
+	}
+	latest, latestRef, _, err := inspectGeneration(ctx, destination.CanonicalPath)
+	if err != nil {
+		return err
+	}
+	if latest != destination || latestRef != ref {
+		return errors.New("destination generation changed before fast-forward")
+	}
+	if _, err := gitOutput(ctx, destination.CanonicalPath, nil, nil, "read-tree", "-m", "-u", destination.HeadOID, tip); err != nil {
+		return err
+	}
+	if err := send("commit", "commit: ok"); err != nil {
+		if _, restoreErr := gitOutput(ctx, destination.CanonicalPath, nil, nil, "read-tree", "-m", "-u", tip, destination.HeadOID); restoreErr != nil {
+			return fmt.Errorf("%w; restore destination: %v", err, restoreErr)
+		}
+		return err
+	}
+	return nil
+}
+
+func isDirty(ctx context.Context, path string) (bool, error) {
+	status, err := gitOutput(ctx, path, nil, []string{"GIT_OPTIONAL_LOCKS=0"}, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none")
+	return len(status) != 0, err
+}
+
+func preserveResult(ctx context.Context, identity Identity) (ResultArtifact, error) {
+	dirty, err := isDirty(ctx, identity.CanonicalPath)
+	if err != nil {
+		return ResultArtifact{}, err
+	}
+	if dirty {
+		return materializeRef(ctx, identity, resultRef(identity))
+	}
+	head, err := gitString(ctx, identity.CanonicalPath, "rev-parse", "HEAD")
+	if err != nil {
+		return ResultArtifact{}, err
+	}
+	ref := resultRef(identity)
+	if _, err := gitOutput(ctx, identity.CanonicalPath, nil, nil, "update-ref", ref, head); err != nil {
+		return ResultArtifact{}, err
+	}
+	return ResultArtifact{Ref: ref, OID: head}, nil
+}
+
+func quarantineOutcome(ctx context.Context, identity Identity, observed *Generation, reason string) (PublishOutcome, error) {
 	next, quarantined, err := Quarantine(ctx, identity, reason)
 	if err != nil {
 		return PublishOutcome{}, err
-	}
-	if quarantined.OID != artifact.OID {
-		reason += "; session result changed after it became publishable"
 	}
 	return PublishOutcome{Kind: OutcomeWorktreeQuarantined, Identity: next, Artifact: quarantined, Expected: identity.Captured, Observed: observed, Reason: reason}, nil
 }

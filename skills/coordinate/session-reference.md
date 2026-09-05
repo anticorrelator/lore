@@ -153,9 +153,15 @@ identity, path reuse, git-dir or epoch mismatch, destination drift, and integrat
 conflict fail closed. The disposition vocabulary is exactly `published`,
 `restore_refused`, and `worktree_quarantined`: refusal/quarantine leaves the
 destination byte-for-byte unchanged and preserves the candidate under a durable
-result ref/patch. Successful `published` projects to the normal exactly-once
+result ref/patch. Publish fast-forwards the destination branch to the worktree's
+committed tip and updates its working tree from that commit. The allocation base
+must equal the destination's current HEAD, the tip must descend from that base,
+and both working trees must be clean. A failed check quarantines with
+`base-diverged`, `worktree-dirty`, or `destination-dirty` in the row's links;
+the links also carry the allocation base, committed tip, and destination HEAD OIDs.
+Successful `published` projects to the normal exactly-once
 `closed` terminal and adds its own `worktree_published` row naming the destination
-checkout the merge landed in; refusal and quarantine add their named recovery rows.
+checkout that advanced; refusal and quarantine add their named recovery rows.
 None of the three is another close terminal.
 Quarantine preserves content, not the physical directory.
 
@@ -647,13 +653,12 @@ the lifecycle stated in § The role of the skill.
    with a false first explanation, corrected against the journal. *Not yet in skill* —
    the durable fix is the watcher carrying spawn time, or readiness recognizing the
    startup state; see the arc's friction log.
-5. **Session-owned teardown never lands a commit.** Across eleven streams: when the
+5. **Before fast-forward publication, teardown never landed a commit.** Across eleven streams: when the
    seat had moved main, the guard quarantined (correct, empty of anything new); when it
    had not, the guard *published* the result as uncommitted working-tree changes on the
-   control checkout, and the next fast-forward refused to overwrite them. The landing
-   path is always the worker's branch commit — verify the published copies identical,
-   discard, fast-forward or cherry-pick. *Not yet in skill*; belongs in § Verifying and
-   closing once the guard's behavior is settled rather than described.
+   control checkout, and the next fast-forward refused to overwrite them. Current
+   teardown behavior is specified in § Worktree lifecycle and refusal. Coordinator
+   integration continues to use branch commits through merge or cherry-pick.
 
 ## Shipped verb history
 

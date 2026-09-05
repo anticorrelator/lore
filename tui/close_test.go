@@ -83,6 +83,10 @@ func TestCloseDispositionStaleDestinationPreservesHostAndStreamMarkers(t *testin
 	if msg.outcome.Identity.State != worktree.StateQuarantined || msg.outcome.Artifact.Ref == "" || msg.outcome.Artifact.PatchPath == "" {
 		t.Fatalf("quarantine artifact incomplete: %+v", msg.outcome)
 	}
+	ev := worktreeOutcomeEvent(m.instanceName, "demo", ls, msg.outcome)
+	if ev.Links["reason"] != "worktree-dirty" || ev.Links["worktree_base_oid"] != identity.Captured.HeadOID || ev.Links["destination_head_oid"] != identity.Captured.HeadOID || ev.Links["worktree_head_oid"] == "" {
+		t.Fatalf("quarantine links omit refusal evidence: %+v", ev.Links)
+	}
 	m, outcomeCmd := m.handleWorktreeDisposition(msg)
 	if outcomeCmd == nil {
 		t.Fatal("quarantined close did not schedule outcome-before-release persistence")
@@ -1224,6 +1228,11 @@ func TestCloseDispositionPublishJournalsDestination(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(identity.CanonicalPath, "stream.txt"), []byte("stream\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	for _, args := range [][]string{{"add", "stream.txt"}, {"commit", "-m", "stream result"}} {
+		if out, err := exec.Command("git", append([]string{"-C", identity.CanonicalPath}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
 
 	m, _ := baseSessionModel(t)
 	m.eventScript = repoScriptPath(t, "session-event-append.sh")
@@ -1251,6 +1260,9 @@ func TestCloseDispositionPublishJournalsDestination(t *testing.T) {
 	}
 	if ev.Reason != "" {
 		t.Fatalf("published row carries a refusal reason %q", ev.Reason)
+	}
+	if ev.Links["worktree_base_oid"] != identity.Captured.HeadOID || ev.Links["destination_head_oid"] != identity.Captured.HeadOID || ev.Links["worktree_head_oid"] != msg.outcome.Artifact.OID {
+		t.Fatalf("published row omits commit identities: %+v", ev.Links)
 	}
 	if _, carried := ev.Links["expected_generation"]; carried {
 		t.Error("published row carries the expected generation blob")
