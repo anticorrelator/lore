@@ -459,6 +459,16 @@ elif scenario == 'spec-session':
         script = repo / 'scripts/spec-open.sh'; old = script.read_bytes(); script.write_bytes(old + b'\n# source drift\n')
         assert binder.launch_session(context, framework=example['framework'], slug='fixture--w1', execution_root=str(root), kdir=store)['reference'] == launched['reference']
         script.write_bytes(old)
+        adapter = repo / 'adapters/agents' / (example['framework'] + '.sh')
+        old_adapter = adapter.read_bytes(); adapter.write_bytes(old_adapter + b'\n# renderer drift\n')
+        try:
+            assert binder.session_reference(context, kdir=store)['reference'] == launched['reference']
+            refused(lambda: binder.validate_session_preparation(pending, kdir=store), 'renderer changed')
+            refused(lambda: binder.launch_session(context, framework=example['framework'], slug='fixture--w1', execution_root=str(root), kdir=store), 'renderer changed')
+        finally:
+            adapter.write_bytes(old_adapter)
+        changed = copy.deepcopy(context); changed['position_preparation']['activation']['changed'] = True
+        refused(lambda: binder.session_reference(changed, kdir=store), 'activation differs')
     print('ordinary spec queue, physical root binding, wrapper bytes, independent reference collection and replay/tamper controls checked')
 
 elif scenario == 'spec-native':

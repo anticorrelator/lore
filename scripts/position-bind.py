@@ -495,10 +495,10 @@ def prepare_session(context, *, position, framework, slug, execution_root, packe
         run(['bash', str(SCRIPTS / 'validate-dispatch-guidance.sh')], data=guidance)
         if normalize_guidance(guidance) != read(Path(d['guidance_path'])):
             raise ValueError('guidance identity differs from selected compilation')
-        render_activation(d, b['dispatch_attempt_id'])
+        activation = render_activation(d, b['dispatch_attempt_id'])
         if not execution_root:
             return {'position_preparation': {'position': position, 'framework': framework, 'slug': slug,
-                    'packet_id': packet_id, 'bindings': b, 'descriptor': d, 'guidance': guidance.decode()}}
+                    'packet_id': packet_id, 'bindings': b, 'descriptor': d, 'guidance': guidance.decode(), 'activation': activation}}
         ref = publish(d, b, kdir, guidance, required=session_required_bindings(position))
     return {'dispatch_guidance': Path(ref['payload_path']).read_text(), 'position_dispatch': ref}
 
@@ -508,6 +508,7 @@ def prepare_session_input(descriptor, bindings, kdir, guidance, *, slug=None, wr
     pending = {'position': descriptor['position'], 'framework': descriptor['framework'], 'slug': slug,
                'packet_id': bindings['packet_id'], 'bindings': bindings, 'descriptor': descriptor,
                'guidance': guidance.decode()}
+    pending['activation'] = render_activation(descriptor, bindings['dispatch_attempt_id'])
     if wrapper is not None or prefix or suffix:
         source = validate_wrapper(wrapper, prefix, suffix)
         pending['composition'] = {'wrapper': wrapper, 'wrapper_source': source.decode(),
@@ -523,9 +524,9 @@ def prepare_session_input(descriptor, bindings, kdir, guidance, *, slug=None, wr
     return context
 
 
-def validate_session_preparation(pending, *, kdir, framework=None, slug=None, validate_inputs=True):
+def validate_session_preparation(pending, *, kdir, framework=None, slug=None, validate_inputs=True, validate_activation=True):
     required = {'position', 'framework', 'slug', 'packet_id', 'bindings', 'descriptor', 'guidance'}
-    if not isinstance(pending, dict) or not required <= set(pending) or set(pending) - required - {'composition'}:
+    if not isinstance(pending, dict) or not required <= set(pending) or set(pending) - required - {'composition', 'activation'}:
         raise ValueError('invalid pending position preparation')
     b, d = pending['bindings'], pending['descriptor']
     if (framework is not None and pending['framework'] != framework or
@@ -550,14 +551,18 @@ def validate_session_preparation(pending, *, kdir, framework=None, slug=None, va
             raise ValueError('guidance identity differs from selected compilation')
     options = {}
     if 'composition' in pending:
+        if not isinstance(pending.get('activation'), dict):
+            raise ValueError('wrapped session requires admitted activation')
         c = pending['composition']
         if not isinstance(c, dict) or set(c) != {'wrapper', 'wrapper_source', 'prefix', 'suffix'}:
             raise ValueError('invalid pending wrapper composition')
         options = {'wrapper': c['wrapper'], 'wrapper_source': c['wrapper_source'].encode(),
                    'prefix': c['prefix'].encode(), 'suffix': c['suffix'].encode()}
         validate_wrapper(**options)
-    if validate_inputs:
-        render_activation(d, b['dispatch_attempt_id'])
+    if validate_inputs and validate_activation:
+        activation = render_activation(d, b['dispatch_attempt_id'])
+        if 'activation' in pending and pending['activation'] != activation:
+            raise ValueError('pending activation differs from selected producer')
     return options
 
 
@@ -565,7 +570,9 @@ def session_reference(context, *, kdir):
     """Read the final prepared reference independently of the agent's report."""
     if set(context) == {'position_preparation'}:
         pending = context['position_preparation']
-        options = validate_session_preparation(pending, kdir=kdir)
+        options = validate_session_preparation(pending, kdir=kdir, validate_activation=False)
+        if not isinstance(pending.get('activation'), dict):
+            raise ValueError('reference collection requires admitted activation')
         b = copy.deepcopy(pending['bindings'])
         path = kdir.resolve() / '_work' / b['work_item'] / 'position-dispatch' / b['dispatch_attempt_id'] / 'manifest.json'
         raw = read(path)
@@ -588,8 +595,7 @@ def session_reference(context, *, kdir):
                                         options.get('prefix', b''), options.get('suffix', b''), 'referenced')
         if read(path.parent / 'payload.md') != b''.join(data for _, data in components):
             raise ValueError('published session payload differs from admitted composition')
-        activation = render_activation(pending['descriptor'], b['dispatch_attempt_id'])
-        if read(path.parent / 'launch.json') != encoded(activation):
+        if read(path.parent / 'launch.json') != encoded(pending['activation']):
             raise ValueError('published session activation differs from admitted producer')
         ref = {'manifest_path': str(path), 'manifest_sha256': digest(raw),
                'payload_path': m['payload']['path'], 'payload_sha256': m['payload']['sha256'],
@@ -642,6 +648,8 @@ def launch_session(context, *, framework, slug, execution_root, kdir):
     root = Path(resolved['resolved_manifest_path']).parent
     descriptor = json.loads(read(root / 'descriptor.json'))
     activation = render_activation(descriptor, m['bindings']['dispatch_attempt_id'])
+    if 'position_preparation' in context and 'activation' in context['position_preparation'] and context['position_preparation']['activation'] != activation:
+        raise ValueError('pending activation differs from selected producer')
     if read(root / 'launch.json') != encoded(activation):
         raise ValueError('native activation changed after publication')
     return {'reference': ref, 'payload': payload, 'activation': activation, 'producer': m['producer']}
