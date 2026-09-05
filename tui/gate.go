@@ -117,6 +117,9 @@ func (o closeObservation) generating() bool {
 }
 
 func classifyScreen(framework string, snap work.ScreenSnapshot) (screenClass, bool) {
+	if framework == "claude-code" {
+		snap = ccComposerPane(snap)
+	}
 	mm, ok := screenMatchers[framework]
 	if !ok {
 		return screenClass{}, false
@@ -360,7 +363,7 @@ func lastRows(rows []string, n int) []string {
 
 // --- claude-code: a '❯' prompt row flanked by two full-width '─' rules. ---
 var (
-	ccRule      = regexp.MustCompile(`─{80,}`)
+	ccRule      = regexp.MustCompile(`^\s*─{12,}\s*$`)
 	ccPrompt    = regexp.MustCompile(`^\s*[❯>](\s|$)`)
 	ccProceed   = regexp.MustCompile(`(?i)do you want to (proceed|run|allow)`)
 	ccFooter    = regexp.MustCompile(`(?i)esc to cancel|tab to amend|ctrl\+e to explain`)
@@ -377,17 +380,20 @@ func ccComposerReady(rows []string) bool {
 	if ccInteractivePrompt(rows) {
 		return false
 	}
-	rules := 0
-	prompt := false
-	for _, r := range rows {
-		if ccRule.MatchString(r) {
-			rules++
-		}
-		if ccPrompt.MatchString(r) {
-			prompt = true
+	// Require an actual prompt between matching rule boundaries. Rule width
+	// follows the rendered pane, including narrow terminals; a transcript rule
+	// elsewhere does not establish a composer.
+	start := ccComposerRegionStart(rows)
+	for i := start + 1; i+1 < len(rows); i++ {
+		if ccPrompt.MatchString(rows[i]) && ccRule.MatchString(rows[i-1]) {
+			for j := i + 1; j < len(rows); j++ {
+				if ccRule.MatchString(rows[j]) {
+					return len([]rune(strings.TrimSpace(rows[i-1]))) == len([]rune(strings.TrimSpace(rows[j])))
+				}
+			}
 		}
 	}
-	return prompt && rules >= 2
+	return false
 }
 
 func ccInteractivePrompt(rows []string) bool {
@@ -745,4 +751,42 @@ func ocPermissionModal(rows []string) bool {
 		}
 	}
 	return perm && action
+}
+
+// ccComposerPane recognizes a left composer pane bounded by a consistent
+// vertical divider. Without both rules and prompt at that boundary, retain the
+// original screen and let the normal conservative matcher decide.
+func ccComposerPane(snap work.ScreenSnapshot) work.ScreenSnapshot {
+	for i := 1; i+1 < len(snap.Rows); i++ {
+		line := []rune(snap.Rows[i])
+		for col, ch := range line {
+			if (ch != '│' && ch != '┃') || col < 12 {
+				continue
+			}
+			above, below := []rune(snap.Rows[i-1]), []rune(snap.Rows[i+1])
+			if len(above) <= col || len(below) <= col || above[col] != ch || below[col] != ch {
+				continue
+			}
+			if !ccRule.MatchString(string(above[:col])) || !ccRule.MatchString(string(below[:col])) || !ccPrompt.MatchString(string(line[:col])) {
+				continue
+			}
+			rows := append([]string(nil), snap.Rows...)
+			ansi := splitANSIRows(snap.ANSI)
+			for j, row := range rows {
+				runes := []rune(row)
+				if len(runes) > col && runes[col] == ch {
+					rows[j] = string(runes[:col])
+					if j < len(ansi) {
+						if n := strings.IndexRune(ansi[j], ch); n >= 0 {
+							ansi[j] = ansi[j][:n]
+						}
+					}
+				}
+			}
+			snap.Rows = rows
+			snap.ANSI = strings.Join(ansi, "\n")
+			return snap
+		}
+	}
+	return snap
 }

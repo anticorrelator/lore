@@ -34,6 +34,10 @@ type ObservationEvidence struct {
 }
 
 type Observation struct {
+	BlockSignature     string              `json:"block_signature,omitempty"`
+	ProgressObservedAt string              `json:"progress_observed_at,omitempty"`
+	ProgressAgeSeconds float64             `json:"progress_age_seconds,omitempty"`
+	SuspectedStall     bool                `json:"suspected_stall,omitempty"`
 	SessionHandle      string              `json:"session_handle"`
 	NativeSessionID    string              `json:"native_session_id,omitempty"`
 	InputBlockedReason string              `json:"input_blocked_reason,omitempty"`

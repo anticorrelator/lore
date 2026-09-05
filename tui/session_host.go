@@ -402,7 +402,7 @@ func (h *sessionHostModel) sessionTick() tea.Cmd {
 	for slug := range m.localSessions {
 		hosted[slug] = true
 	}
-	cmds := []tea.Cmd{m.syncInstanceCmd(), m.queueTickCmd(), scanSendRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanPeekRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanAnswerRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanCloseRequestsCmd(m.sessionsDir, m.instanceName, hosted, sessionIDIndex(m.localSessions), true)}
+	cmds := []tea.Cmd{scanInterruptRequestsCmd(m.sessionsDir, m.instanceName), m.syncInstanceCmd(), m.queueTickCmd(), scanSendRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanPeekRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanAnswerRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanCloseRequestsCmd(m.sessionsDir, m.instanceName, hosted, sessionIDIndex(m.localSessions), true)}
 	var more []tea.Cmd
 	*m, more = m.advanceCloseLadders()
 	cmds = append(cmds, more...)

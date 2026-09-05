@@ -58,7 +58,8 @@ type Session struct {
 // Instance is one live TUI instance's registry row, stored at
 // instances/<name>.json.
 type Instance struct {
-	adoptionPath string // scan-only source, including an abandoned claim
+	RuntimeCapabilities []string `json:"runtime_capabilities,omitempty"`
+	adoptionPath        string   // scan-only source, including an abandoned claim
 
 	Revision int64 `json:"revision,omitempty"`
 

@@ -1507,8 +1507,9 @@ func (m model) instanceRow() session.Instance {
 		framework = ""
 	}
 	return session.Instance{
-		Revision: time.Now().UnixNano(),
-		HostKey:  m.hostKey, Role: sessionHostRole(m.hostKey),
+		RuntimeCapabilities: session.RuntimeCapabilities(),
+		Revision:            time.Now().UnixNano(),
+		HostKey:             m.hostKey, Role: sessionHostRole(m.hostKey),
 		Name:             m.instanceName,
 		PID:              os.Getpid(),
 		Repo:             m.config.RepoIdentifier,
