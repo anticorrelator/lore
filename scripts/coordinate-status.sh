@@ -13,27 +13,37 @@ CEREMONY_DISPOSITION_VOCAB="unhandled handled"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: coordinate-status.sh [--kdir <path>] [--json] [--wake-id <id>]
+Usage: coordinate-status.sh [--kdir <path>] [--json] [--wake-id <id>] [--full-evidence] [--receipt-only]
 
 Render a five-source coordination projection. Without --wake-id this is read-only.
 --wake-id includes that owner-bound delivery receipt and explicitly acknowledges
 it after output succeeds. A receipt does not report that follow-up work completed.
-The JSON envelope is schema version 1.
+The receipt is compact by default. --full-evidence includes its complete retained
+historical evidence and current presentation; it requires --wake-id.
+--receipt-only omits the board and returns only the requested receipt; it also
+requires --wake-id. The JSON envelope is schema version 1.
 EOF
 }
 
 KDIR_OVERRIDE=""
 JSON_MODE=0
 WAKE_ID=""
+FULL_EVIDENCE=0
+RECEIPT_ONLY=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --kdir) KDIR_OVERRIDE="${2:-}"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
+    --full-evidence) FULL_EVIDENCE=1; shift ;;
+    --receipt-only) RECEIPT_ONLY=1; shift ;;
     --wake-id) WAKE_ID="${2:-}"; [[ -n "$WAKE_ID" ]] || { echo "--wake-id requires an exact wake identity" >&2; exit 1; }; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Error: unknown argument '$1'" >&2; usage; exit 1 ;;
   esac
 done
+
+[[ $FULL_EVIDENCE -eq 0 || -n "$WAKE_ID" ]] || die "--full-evidence requires --wake-id"
+[[ $RECEIPT_ONLY -eq 0 || -n "$WAKE_ID" ]] || die "--receipt-only requires --wake-id"
 
 command -v python3 >/dev/null 2>&1 || die "python3 is required but not found on PATH"
 
@@ -44,7 +54,7 @@ else
 fi
 [[ -d "$KNOWLEDGE_DIR" ]] || die "knowledge store not found at: $KNOWLEDGE_DIR"
 
-export WAKE_ID
+export WAKE_ID FULL_EVIDENCE RECEIPT_ONLY
 export SESSION_EVENT_VOCAB RETRO_ACTION_VOCAB CEREMONY_OUTCOME_VOCAB \
   CEREMONY_DISPOSITION_VOCAB
 
@@ -1275,8 +1285,14 @@ projection = {
 wake_id = os.environ.get("WAKE_ID")
 if wake_id:
     sys.path.insert(0, str(scripts))
-    from coordinate_watch_state import wake_receipt
-    projection["wake_receipt"] = wake_receipt(kdir, wake_id)
+    from coordinate_watch_state import wake_receipt, compact_receipt
+    receipt = wake_receipt(kdir, wake_id)
+    projection["wake_receipt"] = receipt if os.environ.get("FULL_EVIDENCE") == "1" else compact_receipt(receipt)
+    if os.environ.get("RECEIPT_ONLY") == "1":
+        rendered = json.dumps({"schema_version": 1, "wake_receipt": projection["wake_receipt"]}, ensure_ascii=False, indent=2)
+        print(rendered, flush=True)
+        wake_receipt(kdir, wake_id, acknowledge=True)
+        raise SystemExit(0)
 
 if json_mode:
     rendered = json.dumps(projection, ensure_ascii=False, indent=2, sort_keys=False)

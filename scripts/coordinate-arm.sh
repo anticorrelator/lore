@@ -1013,6 +1013,10 @@ wake_disposition() {
 # Exit 2 with the body on stderr: the only shape the rewake channel reads.
 emit_wake() {
   local tier="$1" body="$2"
+  if printf '%s' "$body" | jq -e '.presentation == "compact" and .presentation_version == 1' >/dev/null 2>&1; then
+    printf '%s\n' "$body" >&2
+    exit 2
+  fi
   {
     echo "[coordinate wake] $tier — window ${WINDOW}s, owner $(owner_label)"
     if [[ -n "$body" ]]; then
@@ -1102,10 +1106,6 @@ cmd_run() {
   wait "$WATCH_PID" || watch_status=$?
   WATCH_PID=""
 
-  # Only stderr. Under --wake-shaped the watcher writes its wake body to both
-  # streams, and stderr's copy is the superset — it carries the matched row and
-  # the next cursor that stdout reports separately. Concatenating the two sent
-  # the seat every wake twice.
   local body
   body="$(cat "$err_file")"
 

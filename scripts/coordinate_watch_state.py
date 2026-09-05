@@ -197,7 +197,8 @@ class Delivery:
 
     def present(self, row, current=None):
         payload = dict(row['payload'], wake_id=row['wake_id'], created_at=row['created_at'],
-                       acknowledgment_required=True, recipient=row['identity'])
+                       acknowledgment_required=True, recipient=row['identity'],
+                       evidence_store=str(self.path.parent.parent.resolve()))
         payload['original_observations'] = payload.get('current_observations')
         current = current_snapshot(current) if current is not None else None
         payload['current_observations'] = current if current is not None else {'current': [], 'complete': False, 'unavailable': [{'error': 'not-reconciled-by-receipt'}]}
@@ -326,6 +327,123 @@ def consume_delta(path, payload):
         atomic(path, saved)
 
 
+COMPACT_LIMIT = 8192
+
+
+def compact_wake(payload, budget=COMPACT_LIMIT):
+    omitted = {'sessions': 0, 'pending_requests': 0, 'unavailable': 0, 'modal_options': 0,
+               'strings_truncated': 0, 'terminal_content': True, 'historical_payloads': True}
+
+    def text(value):
+        if not isinstance(value, str):
+            return value if isinstance(value, (bool, int, float)) or value is None else None
+        if len(value.encode('utf-8')) > 160:
+            omitted['strings_truncated'] += 1
+            return value.encode('utf-8')[:160].decode('utf-8', errors='ignore') + '…'
+        return value
+
+    def fields(value, names):
+        result = {}
+        for key in names:
+            if key not in value:
+                continue
+            result[key] = text(value[key])
+            if isinstance(value[key], str) and result[key] != value[key]:
+                result[key + '_truncated'] = True
+        return result
+
+    def observed(value):
+        result = fields(value, ('activity', 'authority', 'observed_at', 'session_id', 'session_handle',
+                                'native_session_id', 'generation', 'instance', 'can_accept_input', 'fresh',
+                                'max_age_seconds', 'age_seconds'))
+        if value.get('evidence'):
+            result['evidence'] = fields(value['evidence'], ('matcher', 'reason'))
+        return result
+
+    current = payload.get('current_observations') or {}
+    result = fields(payload, ('schema_version', 'wake_id', 'outcome', 'tier', 'authority', 'created_at',
+                              'acknowledgment_required', 'next_cursor'))
+    result.update(presentation='compact', presentation_version=1, max_bytes=COMPACT_LIMIT, omitted=omitted)
+    wake_id = payload.get('wake_id')
+    store = payload.get('evidence_store')
+    result['full_evidence'] = {'wake_id': wake_id, 'argv': ['lore', 'coordinate', 'status', '--kdir', store, '--wake-id', wake_id, '--full-evidence', '--receipt-only', '--json']} if wake_id and store else {'available': False, 'reason': 'raw-wake-not-retained'}
+    result['classification'] = fields(payload.get('classification') or {}, ('state', 'label', 'reason'))
+    result['coverage'] = fields(current, ('complete', 'observed_at'))
+    result['coverage']['observed_sessions'] = len(current.get('current', []))
+    matched = payload.get('matched') or {}
+    if matched:
+        result['matched'] = fields(matched, ('event', 'slug', 'request_id', 'ts', 'reason', 'session_id'))
+        result['matched']['historical'] = True
+        links = matched.get('links') or {}
+        references = fields(links, ('generation', 'instance', 'report', 'report_path', 'result_ref', 'source_dir', 'ref', 'path'))
+        if references:
+            result['matched']['references'] = references
+    sessions = []
+    current_confirmation = False
+    seen = set()
+    ordered = list(payload.get('current_delta') or []) + list(current.get('current') or [])
+    if matched.get('slug'):
+        ordered.sort(key=lambda row: row.get('slug') != matched['slug'])
+    for row in ordered:
+        slug = row.get('slug')
+        if slug in seen:
+            continue
+        seen.add(slug)
+        if payload.get('tier') == 'quiet':
+            continue
+        snapshot = next((r for r in current.get('current', []) if r.get('slug') == slug), row)
+        screen = snapshot.get('peek') or {}
+        value = observation(screen if screen.get('observation') else {'observation': snapshot.get('observation')})
+        if (not matched.get('slug') or slug == matched['slug']) and value.get('fresh') and value.get('activity') in {'idle', 'blocked'}:
+            current_confirmation = True
+        entry = dict(fields({'slug': slug}, ('slug',)), observation=observed(value))
+        modal = screen.get('modal')
+        if modal:
+            entry['modal'] = fields(modal, ('title', 'kind', 'matcher', 'selected_option', 'selected', 'answerable', 'reason'))
+            options = modal.get('options') or []
+            entry['modal']['options'] = [fields(option, ('number', 'label', 'selected')) if isinstance(option, dict) else text(option) for option in options[:4]]
+            entry['modal']['options_total'] = len(options)
+            entry['modal']['options_omitted'] = max(0, len(options) - 4)
+            omitted['modal_options'] += max(0, len(options) - 4)
+        sessions.append(entry)
+    if result.get('tier') == 'confirmed' and (matched.get('event') in {'needs_input', 'modal_blocked'} or payload.get('outcome') == 'current_delta'):
+        if not current_confirmation:
+            result['tier'] = 'advisory'
+            result['authority'] = 'none'
+    if sessions:
+        result['sessions'] = sessions[:8]
+    omitted['sessions'] = len(seen) - len(result.get('sessions', []))
+    pending = payload.get('pending') or []
+    if pending:
+        result['pending'] = [fields(row, ('request_id', 'slug', 'target_instance', 'age_seconds', 'age_source')) for row in pending[:4]]
+    omitted['pending_requests'] = max(0, len(pending) - 4)
+    unavailable = current.get('unavailable') or []
+    if unavailable:
+        result['unavailable'] = [fields(row, ('slug', 'error', 'reason')) for row in unavailable[:4]]
+    omitted['unavailable'] = max(0, len(unavailable) - 4)
+    while len(json.dumps(result, ensure_ascii=True, indent=2).encode()) > budget - 256:
+        for key, count in (('sessions', 'sessions'), ('pending', 'pending_requests'), ('unavailable', 'unavailable')):
+            if result.get(key):
+                result[key].pop()
+                omitted[count] += 1
+                break
+        else:
+            for key in ('matched', 'classification', 'coverage'):
+                if result.get(key) and result[key] != {'omitted': True}:
+                    result[key] = {'omitted': True}
+                    break
+            else:
+                raise ValueError('compact wake identity exceeds output budget')
+    return result
+
+
+def compact_receipt(receipt):
+    result = {key: receipt[key] for key in ('wake_id', 'current_observation_available', 'acknowledged_at',
+                                          'acknowledgment_requested', 'action_completed')}
+    result['payload'] = compact_wake(receipt['payload'], budget=6144)
+    return result
+
+
 def peek_summary(peek):
     value = observation(peek)
     lines = ["[session] activity={} authority={} fresh={} age_seconds={} observed_at={} session={} generation={} instance={}".format(value.get('activity', 'unknown'), value.get('authority', 'none'), value['fresh'], value['age_seconds'], value.get('observed_at'), value.get('session_id'), value.get('generation'), value.get('instance')),
@@ -338,7 +456,7 @@ def peek_summary(peek):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['publish', 'pending', 'cursor', 'classify', 'sweep', 'consume', 'peek', 'peek-text', 'current'])
+    parser.add_argument('command', choices=['publish', 'pending', 'cursor', 'classify', 'sweep', 'consume', 'peek', 'peek-text', 'current', 'compact'])
     parser.add_argument('--path')
     parser.add_argument('--kdir')
     parser.add_argument('--scripts')
@@ -357,7 +475,9 @@ def main():
         if args.command == 'peek-text':
             print(peek_summary(payload))
             return
-        if args.command == 'current':
+        if args.command == 'compact':
+            result = compact_wake(payload)
+        elif args.command == 'current':
             result = current_snapshot(payload)
         elif args.command == 'peek':
             result = dict(payload, observation=observation(payload))
