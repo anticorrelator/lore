@@ -10,7 +10,10 @@
 #     anchor-coverage verdict belongs to the lead (gate-anchor verb); this
 #     script computes facts only and never adjudicates
 #   - write the branch cache via cache-branch.sh (skipped for archived items,
-#     non-fatal on failure) — the only artifact this verb writes
+#     non-fatal on failure) — the only artifact this verb writes without
+#     --compiled-positions; with it, compilation also retains each position
+#     under the store's _templates/positions/<position>/<framework>/<version>
+#     and registers that version in the template registry
 #   - parse prior task-claims.jsonl into per-task and per-file maps
 #   - resolve role->model bindings (lead, worker, advisor) and the three
 #     template versions (implement SKILL.md, worker, advisor templates);
@@ -81,7 +84,10 @@ role->model bindings, template versions, and branch-cache status.
                         guidance, so a start descriptor is never itself a
                         launch identity.
 
-Writes only the branch cache; makes no judgments.
+Writes the branch cache. With --compiled-positions it also retains each
+compiled position under the store's _templates/positions tree and registers
+its version in the template registry, both idempotent for identical bytes.
+Makes no judgments.
 
 Exit codes:
   0  start struct printed

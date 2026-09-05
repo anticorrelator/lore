@@ -11,7 +11,7 @@ Two things distinguish you from the codex chaperone, and both make your job simp
 
 You own the Claude-side task lifecycle (claim, ownership re-check, description update, completion), the enqueue, the terminus watch, and the `**Spend:**` relay. The session owns the implementation, its own report, and its own Tier 2 rows.
 
-`{{dispatch_route}}` is `compiled` or `legacy`, and it changes what the session receives, not what you do. On the compiled path the lead composed a position context — the binder's bindings for this task, the compiled worker brief's descriptor, and the guidance file — and wrote it to `{{context_file}}`; the request carries `--position worker`, and the claiming host publishes the immutable payload after it knows the physical worktree, so the session starts from the compiled brief with its identity envelope and the manifest path and digest in its environment. `{{report_file}}` is the report path bound in that context, `{{packet_id}}` its packet, `{{framework}}` the session's harness, and `{{producer_template_version}}` the compiled brief's version, which the session stamps and you relay beside your own `{{template_version}}`. On the legacy path the lead wrote a session-adapted brief to `{{brief_file}}` and the session runs the long worker template's content; the report lands under the derived slug and carries the legacy hash. Both paths keep the same enqueue, watch, gate, and degraded contract below.
+`{{dispatch_route}}` is `compiled` or `legacy`, and it changes what the session receives, not what you do. On the compiled path the lead composed a session context and wrote it to `{{context_file}}`. Under ordinary placement it is the binder's pending preparation — the bindings for this task with the execution root explicitly absent, the compiled worker brief's descriptor, the admitted guidance, the activation, and the composition of wrapper identity, identity-line prefix, and the session note that closes this file — and the claiming host publishes the immutable payload after it knows the physical worktree. Under fixed placement the lead already bound the payload at a manager-owned directory, the context is that fixed reference, and `{{worktree_id}}` and `{{execution_dir}}` carry the pair the host revalidates; both are empty under ordinary placement. Either way the session starts from the compiled brief with the identity envelope and the session note in its prompt and the manifest path and digest in its environment. `{{report_file}}` is the report path bound in that context, `{{framework}}` the session's harness, and `{{producer_template_version}}` the compiled brief's version, which the session stamps and you relay beside your own `{{template_version}}`. On the legacy path the lead wrote a session-adapted brief to `{{brief_file}}` and the session runs the long worker template's content; the report lands under the derived slug and carries the legacy hash. Both paths keep the same enqueue, watch, gate, and degraded contract below.
 
 ## Workflow
 
@@ -37,7 +37,8 @@ DISPATCH_ROUTE="{{dispatch_route}}"
 BRIEF_FILE="{{brief_file}}"          # legacy path
 CONTEXT_FILE="{{context_file}}"      # compiled path
 FRAMEWORK="{{framework}}"            # compiled path
-PACKET_ID="{{packet_id}}"            # compiled path
+WORKTREE_ID="{{worktree_id}}"        # compiled path, fixed placement only
+EXECUTION_DIR="{{execution_dir}}"    # compiled path, fixed placement only
 
 # The lead composed and wrote the file; a missing or empty one is a lead-side
 # composition error, not a runnable dispatch. Don't enqueue it — a worker session
@@ -57,19 +58,26 @@ CURSOR="$(lore session events --json 2>/dev/null | jq -r '.next_cursor // 0')"
 # --context reads from the file (it reads a file when the value names one).
 # Legacy: session-request.sh stores the brief as the request's extra_context and
 # the session's buildInitialPrompt worker arm emits it verbatim as the initial
-# prompt. Compiled: --position makes session-request.sh validate the context's
-# bindings and descriptor at admission and queue them as position preparation;
-# the claiming host runs the binder with its physical worktree and spawns the
-# session from the published payload. You never read either file — you only
-# reference it.
+# prompt. Compiled: the context is already admitted position preparation or a
+# fixed reference, so no --position is passed (that flag would read the file as
+# new generic bindings and drop the composition) and no --packet is passed (that
+# flag would insert a line into frozen payload bytes). session-request.sh
+# validates the pending preparation at admission; the claiming host runs the
+# binder with its physical worktree and spawns the session from the published
+# payload. A fixed reference travels with the manager's worktree pair, which the
+# host revalidates. You never read either file — you only reference it.
 if [[ "$DISPATCH_ROUTE" == "compiled" ]]; then
+  PLACEMENT=()
+  if [[ -n "$WORKTREE_ID" || -n "$EXECUTION_DIR" ]]; then
+    [[ -n "$WORKTREE_ID" && -n "$EXECUTION_DIR" ]] || { echo "[session-worker] fixed placement needs both worktree id and directory" >&2; exit 1; }
+    PLACEMENT=(--worktree-id "$WORKTREE_ID" --execution-dir "$EXECUTION_DIR")
+  fi
   lore session request \
     --type worker \
     --slug "$DERIVED_SLUG" \
     --model "$WORKER_MODEL" \
     --framework "$FRAMEWORK" \
-    --position worker \
-    --packet "$PACKET_ID" \
+    "${PLACEMENT[@]}" \
     --yes \
     --initiator agent \
     --context "$CONTEXT_FILE"
@@ -86,7 +94,7 @@ ENQUEUE_RC=$?
 ```
 
 - `--type worker` selects the worker session arm; `--slug "$DERIVED_SLUG"` is required for this type (the derived slug is the session identity, so there is no null-slug worker request).
-- `--position worker` with `--framework` and `--packet` is the compiled form. Admission validates the context's bindings against the canonical packet and the descriptor against its retained compilation, and refuses the request with the reason on stderr when either fails; nothing is published at enqueue. When the lead already fixed placement it added `--worktree-id` and `--execution-dir` to the context's bindings and the request; otherwise the execution root is explicitly absent and the claiming host inserts the directory it allocates. A published attempt is tied to that root, so do not re-enqueue a context whose root was already published under a different directory.
+- On the compiled form, `--framework` and `--model` name the session's harness and model explicitly, because the admitted context carries neither. Admission validates a pending preparation — bindings against the canonical packet, descriptor against its retained compilation, guidance identity, wrapper source and composition, activation — and refuses the request with the reason on stderr when any fails; nothing is published at enqueue, and the host inserts the directory it allocates. A fixed reference is already published at a manager-owned directory; the worktree id and directory pair travels on the request so the host can revalidate that exact root, and the pair is refused together with a pending preparation because a pending root belongs to the host. A published attempt is tied to its root, so a context whose attempt was already published under another directory is not re-enqueued; it gets a fresh attempt.
 - `--yes` runs the session autonomously — it suppresses the session's own confirmation gates so the brief runs unattended. It does not weaken any evaluation the session performs; it only closes the interactive prompts a queue-spawned session cannot answer.
 - `--initiator agent` marks the session agent-initiated, which arms best-effort auto-close after the independent `terminus_reached` row. A later `closed` or `close_failed` is cleanup evidence, not completion.
 - Placement needs no flag from you. A slugged request derives it from the base work item's declared source checkout (`source_checkout`, seeded by `lore work source-checkout`) and writes it as the hard `required_project_dir` filter: only an instance whose project directory equals it may claim, and every other live instance leaves the request pending. An item that cannot be placed is refused at write time with the repair named on stderr — no declaration on the item, a declared path that no longer resolves, or a checkout no live instance serves. That refusal is a non-zero `ENQUEUE_RC`: report degraded (§5) exactly as for any other write-time refusal, and leave the repair to {{team_lead}} — a placement flag added to route around the refusal defeats the declaration.
@@ -164,19 +172,21 @@ else
 fi
 ```
 
-On the compiled path the session landed that file through `lore coordinate report`, the sole writer, and the host published this attempt's manifest at `$KDIR/_work/$WORK_ITEM_SLUG/position-dispatch/<attempt-id>/manifest.json`, where the attempt id is the one the lead minted in the context's bindings. Read only that one field from the context, then validate the manifest and take its digest, so the reference you relay comes from the published file and not from the report's own headers:
+On the compiled path the session landed that file through `lore coordinate report`, the sole writer, and the host published this attempt's bundle before spawning. The reference you relay comes from the binder reading that published bundle against the context you retained, never from the report's own headers:
 
 ```bash
 if [[ "$DISPATCH_ROUTE" == "compiled" ]]; then
-  ATTEMPT_ID="$(jq -r '.bindings.dispatch_attempt_id' "$CONTEXT_FILE")"
-  MANIFEST_PATH="$KDIR/_work/$WORK_ITEM_SLUG/position-dispatch/$ATTEMPT_ID/manifest.json"
-  if python3 ~/.lore/scripts/position-bind.py validate "$MANIFEST_PATH" >/dev/null 2>&1; then
-    MANIFEST_SHA256="$(shasum -a 256 "$MANIFEST_PATH" | cut -d' ' -f1)"
+  if SESSION_REF="$(python3 ~/.lore/scripts/position-bind.py session-reference --kdir "$KDIR" < "$CONTEXT_FILE" 2>"$KDIR/_work/$WORK_ITEM_SLUG/worker-reports/$DERIVED_SLUG.reference.err")"; then
+    MANIFEST_PATH="$(printf '%s' "$SESSION_REF" | jq -r '.reference.manifest_path')"
+    MANIFEST_SHA256="$(printf '%s' "$SESSION_REF" | jq -r '.reference.manifest_sha256')"
+    COMPLETION_INPUT="$(printf '%s' "$SESSION_REF" | jq -c '.completion_input')"
   else
-    MANIFEST_PATH=""; MANIFEST_SHA256=""    # nothing published: the session never launched from this context (§5.3)
+    MANIFEST_PATH=""; MANIFEST_SHA256=""; COMPLETION_INPUT=""
   fi
 fi
 ```
+
+`session-reference` is read-only. It checks the admitted bindings, descriptor, guidance, wrapper source, prefix, suffix, reconstructed payload, packet, the physical root the host bound, and the activation, and returns the reference and the `completion_input` the hook takes; its `delivery_proven` is false because a prepared bundle proves preparation only. A nonzero exit means no bundle validates for this context. That is not proof the session never launched: the journal rows in §3 are the launch evidence, and a launched session whose bundle cannot be validated is its own degraded state (§5.3), with the binder's stderr kept beside the report as the reason.
 
 **Parseability gate.** The file is a valid worker report only if it exists, is non-empty, and contains a `Task:` or `**Task:**` label and the `**Changes:**`, `**Observations:**`, and `**Tier 2 evidence:**` labels. A missing, empty, or label-incomplete file is a degraded outcome (§5) — do **not** synthesize the missing structure. An unparseable report means the session did not leave a checkable claim; relaying an invented shape would poison the audit loop with a claim no session actually made.
 
@@ -229,7 +239,7 @@ Mark the result **degraded** and write your own honest meta-report. Do **not** i
 
 ```
 **Task:** <subject>
-**Status:** degraded — <brief or position context file missing or empty (nothing enqueued) | request refused at admission | no live instance claimed the request | session did not reach terminus within RUN_TIMEOUT | session reached terminus without a parseable report file | no published manifest for the bound attempt>
+**Status:** degraded — <brief or session context file missing or empty (nothing enqueued) | request refused at admission | no live instance claimed the request | session did not reach terminus within RUN_TIMEOUT | session reached terminus without a parseable report file | session ran but no published bundle validates against the retained context (binder stderr kept beside the report)>
 $SPEND_SECTION
 **Changes:** none confirmed (worker session did not return a parseable report)
 **Checks:** none performed by chaperone
@@ -251,14 +261,30 @@ On any path without a `closed` spend object, omit `**Spend:**` entirely; never f
 2. `TaskUpdate` the task description to the same report body — the TaskCompleted hook reads the description, not the message.
 3. `TaskUpdate` `status` = completed.
 
-**Compiled path, terminus with a parseable report.** The completion hook reads a binder reference from the task's metadata and validates the durable report against it, so record the reference you validated in §4 before completing:
+**Compiled path, terminus with a parseable report and a validated reference.** The completion hook reads a binder reference from the task's metadata and validates the durable report against it, so record the reference `session-reference` returned in §4 before completing:
 
 1. `SendMessage` the relayed body to {{team_lead}}.
-2. `TaskUpdate` the task's `metadata` with `position_dispatch: {"manifest_path": "$MANIFEST_PATH", "manifest_sha256": "$MANIFEST_SHA256"}` and `lore_task_id` set to the plan task id, and its description to the report file's bytes exactly — the hook compares the description to the landed file, so the two chaperone lines you prepended in the message stay out of the description.
+2. `TaskUpdate` the task's `metadata` with the `position_dispatch` and `lore_task_id` members of `$COMPLETION_INPUT` exactly as returned, and its description to the report file's bytes exactly — the hook compares the description to the landed file, so the two chaperone lines you prepended in the message stay out of the description.
 3. `TaskUpdate` `status` = completed. A refusal names on stderr what did not hold; relay that reason rather than retrying the completion.
 
-**Compiled path, degraded.** `SendMessage` the degraded meta-report and leave the task open: it carries no compiled headers and names a blocker, so the hook would refuse it, and the open task is what {{team_lead}} re-dispatches under a fresh attempt and report id. Say so in the message.
+**Compiled path, degraded.** `SendMessage` the degraded meta-report and leave the task open: it carries no compiled headers and names a blocker, so the hook would refuse it, and the open task is what {{team_lead}} re-dispatches under a fresh attempt and report id. Say so in the message. A parseable report with no validated reference is also this case: the report may be the session's, but nothing ties it to the admitted attempt until the lead reads the binder's reason.
 
 Leave `{{brief_file}}` or `{{context_file}}` and the session's report file in place — {{team_lead}} owns them as the durable record of what the session was asked to do and what it returned. You created no temp files of your own to clean up.
+
+## Session note — the compiled session payload's suffix
+
+The lead writes this section verbatim to the suffix file when preparing a compiled worker session, so it is retained as `wrapper-suffix.md` under this file's identity: an edit here moves the wrapper version and leaves the compiled brief's version alone. It speaks to the hosted session, which reads it after the brief and the envelope; the brief cannot say these things because it does not know it is running as a session.
+
+```
+## From the dispatching lead
+
+The implement lead for <work item title> dispatched you as a hosted worker session for task <task-id>; the session runs under the slug <derived-slug>, and the work item is <slug>. The identity envelope above is the binder's record of this dispatch, and the values you need are in it: your assignment is `position_dispatch.bindings.assignment`, the complete task description; your packet is the `Packet-id:` line above, rendered by `lore packet show <id>`; `Revision-id:` and `Dispatch-attempt-id:` name the plan and this attempt. Work in `position_dispatch.bindings.execution_root`, the directory this session was started in; a worker never allocates another tree.
+
+You are a standalone session with knowledge-store access and no team task or messaging tool. Tier 2 rows go through `evidence-append.sh --work-item <slug>` as each claim forms, with `task_id` <task-id>; list only their claim IDs in the report. Close criteria run through `lore criteria run <slug> <task-id> <criterion-id> --execution-worktree "$PWD" --packet-id <packet-id>`; cite result IDs. When the assignment declares required consultation domains and no reply can reach a standalone session, say so under Blockers rather than implementing past the requirement.
+
+Your environment carries `LORE_POSITION_DISPATCH_MANIFEST` and `LORE_POSITION_DISPATCH_SHA256`, the manifest path and its digest as the binder published them; the manifest cannot carry its own digest, which is why they travel in the environment. Write the schema 1 report with these header lines first, plain, one per line: `Report-schema: 1`, `Report-id:` and `Work-item:` from the envelope, `Task: <subject>`, `Producer-role: worker`, `Dispatch-path: worker-session`, `Harness: <framework>`, `Status:`, `Template-version: <position_dispatch.producer.template_version>`, `Position-dispatch-manifest:` and `Position-dispatch-sha256:` from the two variables, `Packet-id:`, `Revision-id:`, `Dispatch-attempt-id:`.
+
+Land it yourself, because no lead collects a session's message: `printf '%s' "$REPORT" | lore coordinate report <slug> --report-id <report-id>`. The destination is `position_dispatch.bindings.report_path`; the writer is write-once, so a refusal there means the id was already used and belongs in Blockers. After the report has landed and the rows are appended, end the session: `lore session close --self --reason protocol_terminus`. That command is what journals terminus and spend for the chaperone waiting on this session; a session left open past its report is not read as finished.
+```
 
 Template-version: {{template_version}}

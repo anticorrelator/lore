@@ -60,7 +60,11 @@
 # resolve-manifest's --delivery-json sidecar). A legacy append failure warns;
 # a bound append failure stops dispatch.
 # Each TaskCreate manifest entry carries its packet_id so the lead can thread
-# it into the worker Task prompt for dispatch confirmation.
+# it into the worker Task prompt for dispatch confirmation. With
+# --compiled-positions, compiling the active framework's positions also
+# retains each compilation under the store's _templates/positions tree and
+# registers its version in the template registry (idempotent for identical
+# bytes); no dispatch artifact is published here.
 #
 # Exit codes:
 #   0  manifest emitted (possibly empty with explanatory status)
