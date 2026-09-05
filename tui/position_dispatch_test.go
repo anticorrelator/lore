@@ -56,8 +56,8 @@ func TestPositionProductionLaunch(t *testing.T) {
 		t.Fatal(err)
 	}
 	var examples []struct {
-		Position, Framework, Mode, Kdir string
-		QueuePath                       string `json:"queue_path"`
+		Position, Framework, Mode, Kdir, Model string
+		QueuePath                              string `json:"queue_path"`
 	}
 	if err := json.Unmarshal(data, &examples); err != nil {
 		t.Fatal(err)
@@ -152,7 +152,11 @@ func TestPositionProductionLaunch(t *testing.T) {
 				}
 				return ""
 			}
-			if value("--model") != "provider/opaque-model" {
+			expectedModel := example.Model
+			if expectedModel == "" {
+				expectedModel = "provider/opaque-model"
+			}
+			if value("--model") != expectedModel {
 				t.Fatal("model pin changed")
 			}
 			native, err := os.ReadFile(filepath.Join(filepath.Dir(actual.Manifest), "native.md"))

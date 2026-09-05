@@ -182,7 +182,7 @@ def spec_sessions(frameworks):
         assert row['placement_stance'] == 'required_dir' and row['required_project_dir'] == str(repo)
         assert not {'execution_dir', 'worktree_id'} & row.keys()
         examples.append({'position': 'investigator', 'framework': payload['framework'], 'mode': 'spec-' + inv['id'],
-                         'queue_path': str(row_path), 'kdir': str(store), 'payload': payload})
+                         'queue_path': str(row_path), 'kdir': str(store), 'model': payload['model'], 'payload': payload})
     return args, document, opened, examples
 
 if scenario == 'implement-envelope':
