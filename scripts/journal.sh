@@ -15,7 +15,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 # --- write subcommand ---
 journal_write() {
-  local observation="" context="" work_item="" role="interactive" scores="" model=""
+  local observation="" context="" work_item="" role="interactive" scores="" model="" rubric_id="" rubric_version="" rubric_id_set=0 rubric_version_set=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -39,6 +39,16 @@ journal_write() {
         role="$2"
         shift 2
         ;;
+      --rubric-id)
+        rubric_id="${2:?--rubric-id requires a value}"
+        rubric_id_set=1
+        shift 2
+        ;;
+      --rubric-version)
+        rubric_version="${2:?--rubric-version requires a value}"
+        rubric_version_set=1
+        shift 2
+        ;;
       --scores)
         scores="$2"
         shift 2
@@ -53,6 +63,8 @@ Options:
   --work-item     Associated work item slug (optional)
   --role          Role of the observer: interactive, worker, hook, spec, retro (default: interactive)
   --scores        JSON object with numeric scores (optional, e.g. '{"accuracy": 0.8}')
+  --rubric-id     Rubric identity at entry root (requires --rubric-version)
+  --rubric-version 12-hex rubric byte hash (requires --rubric-id)
   --model         Model identity of the observer (falls back to LORE_MODEL env, then "unrecorded");
                   lets /retro and /evolve segment evidence across model generations
   --help, -h      Show this help
@@ -73,6 +85,14 @@ EOF
   fi
   if [[ -z "$context" ]]; then
     die "--context is required"
+  fi
+
+  if [[ "$rubric_id_set" != "$rubric_version_set" ]]; then
+    die "--rubric-id and --rubric-version must be supplied together"
+  fi
+  if [[ "$rubric_id_set" -eq 1 ]]; then
+    [[ "$rubric_id" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "--rubric-id must be a nonempty identifier"
+    [[ "$rubric_version" =~ ^[0-9a-f]{12}$ ]] || die "--rubric-version must be 12 lowercase hex characters"
   fi
 
   # Resolve knowledge directory
@@ -112,8 +132,11 @@ if sys.argv[6]:
     entry['work_item'] = sys.argv[6]
 if sys.argv[7]:
     entry['scores'] = json.loads(sys.argv[7])
+if sys.argv[9]:
+    entry['rubric_id'] = sys.argv[9]
+    entry['rubric_version'] = sys.argv[10]
 print(json.dumps(entry, ensure_ascii=False))
-" "$timestamp" "$observation" "$context" "$role" "$branch" "$work_item" "$scores" "$model")
+" "$timestamp" "$observation" "$context" "$role" "$branch" "$work_item" "$scores" "$model" "$rubric_id" "$rubric_version")
 
   # Append to journal
   local logfile="$meta_dir/effectiveness-journal.jsonl"
@@ -498,6 +521,8 @@ with open(logfile) as f:
 
         if scores:
             entries.append({
+                'rubric_id': entry.get('rubric_id') or 'legacy-unversioned',
+                'rubric_version': entry.get('rubric_version'),
                 'timestamp': ts[:10],  # date only
                 'scores': scores,
             })
@@ -520,7 +545,8 @@ for e in entries:
             all_keys.append(k)
 
 # Print table header
-header = 'Date       '
+identity_width = max(18, *(len(e['rubric_id']) + 1 + len(e['rubric_version'] or 'unknown') for e in entries))
+header = 'Date       ' + ' | ' + 'Rubric identity'.ljust(identity_width)
 for k in all_keys:
     header += f' | {k:>10}'
 print(header)
@@ -529,6 +555,8 @@ print('-' * len(header))
 # Print rows
 for e in entries:
     row = f'{e[\"timestamp\"]:10}'
+    identity = e['rubric_id'] + '@' + (e['rubric_version'] or 'unknown')
+    row += ' | ' + identity.ljust(identity_width)
     for k in all_keys:
         val = e['scores'].get(k)
         if val is not None:
