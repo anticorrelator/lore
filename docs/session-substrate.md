@@ -200,8 +200,10 @@ Registry snapshots carry a revision for both ordinary and managed hosts. An olde
 revision, a conflicting equal revision, or a write from a retired owner is
 refused, so asynchronously completed spawn and close writes cannot erase newer
 membership or recreate a removed owner. Launch checkpoints survive until the
-complete owning registry snapshot is durable. Ordinary queued tmux launches use
-the same provisional checkpoint as dedicated hosts, scoped as `session-spawn`.
+complete owning registry snapshot is durable. Ordinary tmux launches, including requestless UI launches, use the same
+provisional checkpoint as dedicated hosts, scoped as `session-spawn`. A unique
+launch token binds checkpoint cleanup to that attempt, independently of the
+request ID or display slug.
 
 Recovery chooses newer full owners before provisional launch records. It compares
 session generations using request, transcript, process, and worktree identity;
@@ -212,7 +214,9 @@ discovery, with their preserved path reported, even while the current adopter
 remains alive. They can be retried by a subsequent recovery scan after the
 conflict is resolved; there is no periodic replay or automatic slug renaming.
 Successful claims are retired only after the receiving event loop incorporates
-all recovered identities and publishes its complete snapshot. Managed-host
+all recovered identities and publishes its complete snapshot. Incorporation
+rechecks current local and pending generations; a late recovery message cannot
+replace a newer launch, and its conflicting manifest remains retryable. Managed-host
 claims remain scoped to their host and source checkout.
 
 ### Session write containment

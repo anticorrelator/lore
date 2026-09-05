@@ -13,12 +13,16 @@ func (m model) hostSpawnName(requestID string) string {
 	sum := sha256.Sum256([]byte(m.instanceName + "\x00" + requestID))
 	return fmt.Sprintf("spawn-%x", sum[:16])
 }
-func (m model) hostSpawnCheckpoint(requestID string) func(work.SessionDescriptor, string, string, string, int) error {
+func (m model) hostSpawnCheckpoint(requestID string, checkpointIDs ...string) func(work.SessionDescriptor, string, string, string, int) error {
 	// A separate instance row avoids concurrent spawns overwriting one another.
 	// It has the same PID/host/source fences, and is recoverable before the normal
 	// SessionProcessStartedMsg is received or its registry write finishes.
 	row := m.instanceRow()
-	row.Name = m.hostSpawnName(requestID)
+	checkpointID := requestID
+	if len(checkpointIDs) > 0 {
+		checkpointID = checkpointIDs[0]
+	}
+	row.Name = m.hostSpawnName(checkpointID)
 	row.Role = "session-host-spawn"
 	if m.hostKey == "" {
 		row.Role = "session-spawn"

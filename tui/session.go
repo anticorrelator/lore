@@ -442,7 +442,10 @@ func (m model) handleSessionProcessStarted(msg work.SessionProcessStartedMsg) (m
 					return result
 				}
 			}
-			checkpointID := meta.requestID
+			checkpointID := meta.checkpointID
+			if checkpointID == "" {
+				checkpointID = meta.requestID
+			}
 			if checkpointID == "" {
 				checkpointID = slug
 			}

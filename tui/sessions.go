@@ -51,6 +51,7 @@ type liveSession struct {
 	// closeRequests is the ordered, distinct set of close-request ids consumed
 	// during this lifecycle. It survives close_failed outcomes and adoption, then
 	// travels as a compact JSON-array string in closed.links.close_requests.
+	checkpointID  string // exact launch checkpoint token, independent of request identity
 	closeRequests []string
 	// worktree is the durable execution workspace identity. A nil value marks a
 	// legacy session that cannot be safely recovered into a host checkout.
@@ -1066,6 +1067,51 @@ func (m model) finishAdoptionClaimsCmd(paths []string) tea.Cmd {
 // resizeSessionPanels on the first WindowSizeMsg, so a size not yet known at
 // startup self-corrects.
 func (m model) handleAdoptionScan(msg adoptionScanMsg) (model, tea.Cmd) {
+	// The scan ran asynchronously. A new local or pending generation can have
+	// acquired this slug since its snapshot; that generation keeps its identity.
+	current := map[string]session.Session{}
+	for _, row := range m.instanceRow().Sessions {
+		current[row.Slug] = row
+	}
+	conflict := false
+	filter := func(candidates []adoptedSession) []adoptedSession {
+		var accepted []adoptedSession
+		for _, a := range candidates {
+			incoming := a.registrySession()
+			blocked := false
+			if row, exists := current[a.slug]; exists && !session.SameSessionGeneration(row, incoming) {
+				blocked = true
+			}
+			if pending, exists := m.pendingSpawns[a.slug]; exists {
+				row := session.Session{Slug: a.slug, RequestID: pending.requestID, SessionID: pending.sessionID, Tmux: pending.tmuxName, PID: pending.pid, Worktree: pending.worktree, WorktreeID: pending.worktreeID, ExecutionDir: pending.executionDir}
+				if !session.SameSessionGeneration(row, incoming) {
+					blocked = true
+				}
+			}
+			if blocked {
+				conflict = true
+				msg.notices = append(msg.notices, runtimeNotice{Class: operationalFailure, Code: "adoption-generation-conflict", Message: "kept current session " + a.slug + "; recovered generation remains in its manifest"})
+				continue
+			}
+			accepted = append(accepted, a)
+		}
+		return accepted
+	}
+	msg.retained = filter(msg.retained)
+	msg.alive = filter(msg.alive)
+	if conflict {
+		// A claim can contain several sessions. Preserve the entire manifest;
+		// subsequent scans deduplicate any identities transferred successfully.
+		for _, path := range msg.settledClaims {
+			retainedPath, err := session.ReleaseClaim(path)
+			if err != nil {
+				msg.notices = append(msg.notices, runtimeNotice{Class: operationalFailure, Code: "adoption-claim-release", Message: err.Error()})
+			} else {
+				msg.notices = append(msg.notices, runtimeNotice{Class: operationalFailure, Code: "adoption-retained-manifest", Message: "unresolved ownership remains available for recovery at " + retainedPath})
+			}
+		}
+		msg.settledClaims = nil
+	}
 	m = m.routeRuntimeNotices(msg.notices)
 	diagnosticCmd := appendDiagnosticsCmd(m.sessionsDir, msg.diagnostics)
 	if m.localSessions == nil {
@@ -1395,7 +1441,12 @@ func (m model) spawnSessionOnRef(d work.SessionDescriptor, requestID, requiredRe
 	if m.pendingSpawns == nil {
 		m.pendingSpawns = make(map[string]liveSession)
 	}
+	checkpointID := requestID
+	if checkpointID == "" {
+		checkpointID = session.NewRequestID()
+	}
 	m.pendingSpawns[slug] = liveSession{
+		checkpointID: checkpointID,
 		typ:          sessionType(d.Type),
 		initiator:    d.Initiator,
 		requestID:    requestID,
@@ -1409,12 +1460,8 @@ func (m model) spawnSessionOnRef(d work.SessionDescriptor, requestID, requiredRe
 	}
 	env := work.SessionEnv{Instance: m.instanceName, Slug: slug, Type: sessionType(d.Type),
 		WorktreeID: d.WorktreeID, ExecutionDir: d.ExecutionDir, SourceDir: m.normalizedProjectDir, HostKey: m.hostKey, RoutingOverrides: d.RoutingOverrides}
-	if m.hostKey != "" || (m.tmuxEnabled && requestID != "") {
-		checkpointID := requestID
-		if checkpointID == "" {
-			checkpointID = slug
-		}
-		env.Prepared = m.hostSpawnCheckpoint(checkpointID)
+	if m.hostKey != "" || m.tmuxEnabled {
+		env.Prepared = m.hostSpawnCheckpoint(requestID, checkpointID)
 	}
 	if d.Worktree == nil {
 		sourceDir := m.normalizedProjectDir

@@ -660,3 +660,107 @@ func TestAdoptionStaleTransferReleasesClaimForImmediateRetry(t *testing.T) {
 		t.Fatalf("retry lost identity: %+v", retry)
 	}
 }
+
+func TestAdoptionHandlerPreservesNewerLocalAndPendingGenerations(t *testing.T) {
+	for _, started := range []bool{false, true} {
+		t.Run(strconv.FormatBool(started), func(t *testing.T) {
+			m, dir := baseSessionModel(t)
+			m.config.RepoIdentifier = "repo"
+			m.eventScript = repoScriptPath(t, "session-event-append.sh")
+			old := session.Instance{Name: "dead-A", PID: deadPID(t), Repo: "repo", Sessions: []session.Session{{Slug: "same", RequestID: "A", Type: "worker", Initiator: "agent"}}}
+			if err := session.WriteInstance(dir, old); err != nil {
+				t.Fatal(err)
+			}
+			scan := m.adoptionScanCmd()().(adoptionScanMsg)
+			if len(scan.retained) != 1 || len(scan.settledClaims) != 1 {
+				t.Fatalf("scan fixture: %+v", scan)
+			}
+			// B begins after scan(A), using a durable launch checkpoint.
+			m.pendingSpawns = map[string]liveSession{"same": {typ: "worker", initiator: "agent", requestID: "B", checkpointID: "attempt-B", started: time.Now()}}
+			d := work.SessionDescriptor{Slug: "same", Type: work.SessionWorker, Initiator: "agent"}
+			if err := m.hostSpawnCheckpoint("B", "attempt-B")(d, "fake", "session-B", "pane-B", 222); err != nil {
+				t.Fatal(err)
+			}
+			if started {
+				var cmd tea.Cmd
+				m, cmd = m.handleSessionProcessStarted(work.SessionProcessStartedMsg{Slug: "same", SessionID: "session-B", Tmux: "pane-B", PID: 222})
+				batch := cmd().(tea.BatchMsg)
+				// The last command is the production registry promotion/checkpoint
+				// retirement. Do not run the fake terminal's polling command.
+				result := batch[len(batch)-1]().(journalResultMsg)
+				if result.err != nil {
+					t.Fatal(result.err)
+				}
+				if _, err := os.Stat(filepath.Join(session.InstancesDir(dir), m.hostSpawnName("attempt-B")+".json")); !os.IsNotExist(err) {
+					t.Fatalf("B checkpoint was not retired: %v", err)
+				}
+			}
+			m, _ = m.handleAdoptionScan(scan)
+			if started {
+				if m.localSessions["same"].requestID != "B" {
+					t.Fatal("A overwrote current B")
+				}
+				rows := session.ListInstances(dir)
+				found := false
+				for _, row := range rows {
+					if row.Name == m.instanceName && len(row.Sessions) == 1 && row.Sessions[0].RequestID == "B" {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("B lost durable addressability: %+v", rows)
+				}
+			} else if m.pendingSpawns["same"].requestID != "B" {
+				t.Fatal("A overwrote pending B")
+			}
+			if !strings.Contains(m.flashErr, "recovery at") {
+				t.Fatalf("conflict path not surfaced: %q", m.flashErr)
+			}
+			rows := session.ScanAdoptable(dir, "repo", m.instanceName, time.Now())
+			if len(rows) != 1 || rows[0].Sessions[0].RequestID != "A" {
+				t.Fatalf("A cannot be retried while adopter lives: %+v", rows)
+			}
+		})
+	}
+}
+
+func TestRequestlessLaunchCheckpointsBindCleanupToAttempt(t *testing.T) {
+	m, dir := baseSessionModel(t)
+	m.tmuxEnabled = true
+	d := work.SessionDescriptor{Slug: "same-ui-slug", Type: work.SessionWorker, Initiator: "human"}
+	m, _ = m.spawnSession(d, "")
+	first := m.pendingSpawns[d.Slug].checkpointID
+	if first == "" {
+		t.Fatal("requestless launch has no checkpoint token")
+	}
+	if err := m.hostSpawnCheckpoint("", first)(d, "fake", "first-session", "first-pane", 111); err != nil {
+		t.Fatal(err)
+	}
+	m, _ = m.spawnSession(d, "")
+	second := m.pendingSpawns[d.Slug].checkpointID
+	if second == "" || first == second {
+		t.Fatalf("two immediate launches reused token: %q %q", first, second)
+	}
+	if err := m.hostSpawnCheckpoint("", second)(d, "fake", "second-session", "second-pane", 222); err != nil {
+		t.Fatal(err)
+	}
+	// Delayed cleanup for the older launch cannot retire the newer checkpoint.
+	if err := m.clearHostSpawn(first); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := session.OwnershipInstances(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || len(rows[0].Sessions) != 1 || rows[0].Sessions[0].SessionID != "second-session" || rows[0].Sessions[0].RequestID != "" || rows[0].Role != "session-spawn" {
+		t.Fatalf("wrong checkpoint survived: %+v", rows)
+	}
+	if err := m.clearHostSpawn(second); err != nil {
+		t.Fatal(err)
+	}
+	m, _ = m.spawnSession(d, "")
+	third := m.pendingSpawns[d.Slug].checkpointID
+	if err := m.hostSpawnCheckpoint("", third)(d, "fake", "third-session", "third-pane", 333); err != nil {
+		t.Fatalf("retired checkpoint blocked new attempt: %v", err)
+	}
+}
