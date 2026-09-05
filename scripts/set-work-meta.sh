@@ -280,6 +280,12 @@ Restart that instance so it publishes checkout provenance, then re-run."
 Run 'lore work source-checkout $SLUG' from inside a lore-spawned session, which exports all three, or pass '--from-instance <name>' for a live instance shown by 'lore session list'."
     fi
 
+    if [[ -n "${LORE_SESSION_HOST_KEY:-}" ]]; then
+      if ! CURRENT_INSTANCE="$(python3 "$SCRIPT_DIR/session-managed.py" _source-owner "$SESSION_SLUG" --kdir "$KNOWLEDGE_DIR")"; then
+        seed_fail "cannot recover the current owner of managed session '$SESSION_SLUG'"
+      fi
+      SESSION_INSTANCE="$CURRENT_INSTANCE"
+    fi
     REGISTRY="$INSTANCES_DIR/$SESSION_INSTANCE.json"
     if [[ ! -f "$REGISTRY" ]]; then
       seed_fail "no registry row for instance '$SESSION_INSTANCE' at $REGISTRY.

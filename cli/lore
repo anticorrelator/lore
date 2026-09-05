@@ -718,7 +718,18 @@ lore session — multi-session coordination substrate verbs
 
 Usage: lore session <verb> [args...]
 
-Verbs:
+Managed workers:
+  start ITEM --workspace PATH --framework ID --model MODEL --context FILE
+             [--key DISPATCH_ID] [--json]
+            Start a worker with automatic hosting, recovery, and cleanup.
+            Identical keyed retries reuse the handle; no key starts a new worker.
+  inspect HANDLE  Read durable state, operation receipts, and result disposition
+  attach HANDLE   Attach to the worker's existing tmux terminal
+
+Managed handles also use send, answer, peek, wait, and close below. These resolve
+current ownership and await outcomes; close includes cleanup disposition.
+
+Raw substrate and shared verbs:
   request   Enqueue a session spawn request into requests/pending/
   list      Render live instances plus the pending/claimed/close-request queues
   events    Read the events.jsonl journal from an opaque byte-offset cursor
@@ -1087,6 +1098,9 @@ cmd_session() {
       session_usage
       return 0
       ;;
+    start|inspect|attach)
+      exec python3 "$SCRIPTS_DIR/session-managed.py" "$subcmd" "$@"
+      ;;
     request)
       exec "$SCRIPTS_DIR/session-request.sh" "$@"
       ;;
@@ -1097,19 +1111,19 @@ cmd_session() {
       exec "$SCRIPTS_DIR/session-events.sh" "$@"
       ;;
     close)
-      exec "$SCRIPTS_DIR/session-close.sh" "$@"
+      exec python3 "$SCRIPTS_DIR/session-managed.py" "close" "$@"
       ;;
     send)
-      exec "$SCRIPTS_DIR/session-send.sh" "$@"
+      exec python3 "$SCRIPTS_DIR/session-managed.py" "send" "$@"
       ;;
     answer)
-      exec "$SCRIPTS_DIR/session-answer.sh" "$@"
+      exec python3 "$SCRIPTS_DIR/session-managed.py" "answer" "$@"
       ;;
     peek)
-      exec "$SCRIPTS_DIR/session-peek.sh" "$@"
+      exec python3 "$SCRIPTS_DIR/session-managed.py" "peek" "$@"
       ;;
     wait)
-      exec "$SCRIPTS_DIR/session-wait.sh" "$@"
+      exec python3 "$SCRIPTS_DIR/session-managed.py" "wait" "$@"
       ;;
     *)
       echo "Error: unknown session verb '$subcmd'" >&2

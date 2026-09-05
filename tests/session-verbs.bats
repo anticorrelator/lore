@@ -2194,7 +2194,10 @@ PY
 
 @test "session answer routes through the dispatcher" {
   write_instance inst-a feature-x
-  run bash "$LORE" session answer feature-x --option 1 --expect modal --kdir "$TEST_KDIR" --json
+  # Exercise this checkout's routing and scripts together, even before install.
+  mkdir -p "$TEST_KDIR/home/.lore"
+  ln -s "$REPO_DIR/scripts" "$TEST_KDIR/home/.lore/scripts"
+  run env HOME="$TEST_KDIR/home" bash "$LORE" session answer feature-x --option 1 --expect modal --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.enqueued==true and .option==1'
 }

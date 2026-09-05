@@ -142,6 +142,8 @@ REQUESTED_BY=""
 CONTEXT=""
 KDIR_OVERRIDE=""
 JSON_MODE=0
+MANAGED_REQUEST_ID=""
+HOST_KEY=""
 ROUTE_SPECS=()
 MIN_VINTAGE=""
 TRACK=""
@@ -182,6 +184,8 @@ while [[ $# -gt 0 ]]; do
     --anywhere) ANYWHERE_PROVIDED=1; shift ;;
     --yes|--no-confirm) SKIP_CONFIRM="true"; shift ;;
     --confirm) SKIP_CONFIRM="false"; shift ;;
+    --request-id) MANAGED_REQUEST_ID="$2"; shift 2 ;;
+    --host-key) HOST_KEY="$2"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
     -h|--help) sed -n '2,129p' "$0"; exit 0 ;;
@@ -211,6 +215,10 @@ command -v jq &>/dev/null || fail "jq is required but not found on PATH"
 # own project directory. Exit 1 = not inside a session, 2 = no registry row for
 # this instance, 3 = the row names no checkout.
 session_source_checkout() {
+  if [[ -n "${LORE_SESSION_HOST_KEY:-}" && -n "${LORE_SESSION_SOURCE_DIR:-}" ]]; then
+    printf '%s\n' "$LORE_SESSION_SOURCE_DIR"
+    return 0
+  fi
   local instance="${LORE_SESSION_INSTANCE:-}"
   local slug="${LORE_SESSION_SLUG:-}"
   local stype="${LORE_SESSION_TYPE:-}"
@@ -443,7 +451,7 @@ if [[ -n "$CONTEXT" ]]; then
   if printf '%s' "$CONTENT" | jq -e 'type == "object"' >/dev/null 2>&1; then
     EXTRA_JSON="$(printf '%s' "$CONTENT" | jq -c '.')"
   else
-    EXTRA_JSON="$(jq -n --arg g "$CONTENT" '{dispatch_guidance: $g}')"
+    EXTRA_JSON="$(printf '%s' "$CONTENT" | jq -Rs '{dispatch_guidance: .}')"
   fi
 fi
 
@@ -470,8 +478,8 @@ if [[ "$TYPE" == "worker" ]]; then
     GUIDANCE_BLOCK="$(render_dispatch_guidance)" || \
       fail "could not render the canonical dispatch-guidance block; nothing was enqueued"
     EXTRA_JSON="$(printf '%s' "$EXTRA_JSON" \
-      | jq -c --arg block "$GUIDANCE_BLOCK" --arg brief "$WORKER_PROMPT" \
-        '. + {dispatch_guidance: ($block + "\n" + $brief)}')"
+      | jq -c --arg block "$GUIDANCE_BLOCK" \
+        '. + {dispatch_guidance: ($block + "\n" + .dispatch_guidance)}')"
   fi
 fi
 
@@ -640,6 +648,10 @@ mkdir -p "$PENDING_DIR"
 
 RAND="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 REQUEST_ID="$(date -u +%Y%m%dT%H%M%SZ)-${RAND}"
+if [[ -n "$MANAGED_REQUEST_ID" || -n "$HOST_KEY" ]]; then
+  [[ "$MANAGED_REQUEST_ID" =~ ^managed-[a-f0-9]{32}$ && "$HOST_KEY" =~ ^[a-f0-9]{24}$ ]] || fail "managed request identity requires valid --request-id and --host-key"
+  REQUEST_ID="$MANAGED_REQUEST_ID"
+fi
 REQUESTED_AT="$(timestamp_iso)"
 
 # An unscoped chat still needs a durable session identity: every live-session
@@ -655,7 +667,7 @@ SLUG_JSON="null"
 
 # attempts MUST be a JSON number (--argjson), never a quoted string, so the Go
 # decoder accepts it (docs/session-substrate.md, Type discipline).
-ROW="$(jq -n \
+ROW="$(printf '%s' "$EXTRA_JSON" | jq -c \
   --arg request_id "$REQUEST_ID" \
   --arg type "$TYPE" \
   --argjson slug "$SLUG_JSON" \
@@ -664,8 +676,7 @@ ROW="$(jq -n \
   --arg requested_by "$REQUESTED_BY" \
   --arg requested_at "$REQUESTED_AT" \
   --argjson attempts 0 \
-  --argjson extra "$EXTRA_JSON" \
-  '{request_id: $request_id, type: $type, slug: $slug, target_instance: $target, initiator: $initiator, requested_by: $requested_by, requested_at: $requested_at, attempts: $attempts, extra_context: $extra, last_error: null, last_attempt_at: null}')"
+  '{request_id: $request_id, type: $type, slug: $slug, target_instance: $target, initiator: $initiator, requested_by: $requested_by, requested_at: $requested_at, attempts: $attempts, extra_context: ., last_error: null, last_attempt_at: null}')"
 
 # auto_close follows omit-when-empty: added only when the flag forced a value,
 # so an absent override stays absent (the Go decoder reads a nil *bool).
@@ -750,6 +761,10 @@ fi
 # it lands as a real JSON boolean.
 if [[ -n "$SKIP_CONFIRM_JSON" ]]; then
   ROW="$(printf '%s' "$ROW" | jq -c --argjson sc "$SKIP_CONFIRM_JSON" '. + {skip_confirm: $sc}')"
+fi
+
+if [[ -n "$HOST_KEY" ]]; then
+  ROW="$(printf '%s' "$ROW" | jq -c --arg key "$HOST_KEY" '. + {host_key: $key}')"
 fi
 
 # Enqueue = tmp-write + atomic rename-in. The tmp name is hidden and lacks the

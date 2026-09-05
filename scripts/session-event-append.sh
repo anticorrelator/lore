@@ -307,8 +307,8 @@ esac
 
 if [[ "$EVENT" == "answer_refused" ]]; then
   case "$(printf '%s' "$ROW" | jq -r '.reason // ""')" in
-    not-modal|expect-mismatch|option-unavailable|no-contract|error|unconfirmed) ;;
-    *) fail "invalid field: reason (answer_refused requires not-modal, expect-mismatch, option-unavailable, no-contract, error, or unconfirmed)" ;;
+    not-modal|expect-mismatch|option-unavailable|no-contract|error|unconfirmed|delivery-uncertain) ;;
+    *) fail "invalid field: reason (answer_refused requires not-modal, expect-mismatch, option-unavailable, no-contract, error, unconfirmed, or delivery-uncertain)" ;;
   esac
 fi
 
