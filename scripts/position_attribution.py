@@ -71,9 +71,24 @@ def project(record, *, expected=None):
         if record.get('attribution_error'):
             raise ValueError(record['attribution_error'])
         validate_reference(result['position_dispatch'])
-        resolved = resolve_reference(result['position_dispatch'], expected=expected)
+        expected = dict(expected or {})
+        # Claim task labels can precede plan tasks; validate their association after resolution.
+        resolved = resolve_reference(result['position_dispatch'], expected={key: value for key, value in expected.items() if key != 'task_id'})
         manifest = resolved['manifest']
         producer = manifest['producer']
+        bindings = manifest['bindings']
+        preplan_claim = (record.get('tier') == 'task-evidence' and producer['position'] == 'investigator'
+                         and bindings['task_id'] is None and bindings['revision_id'] is None)
+        if preplan_claim:
+            if any(record.get(key) != bindings[key] for key in ('report_id', 'dispatch_attempt_id')):
+                raise ValueError('pre-plan canonical claim report/attempt mismatch')
+            if expected.get('task_id') is not None and expected['task_id'] != record.get('task_id'):
+                raise ValueError('expected task label does not match canonical claim')
+        else:
+            if 'task_id' in expected and expected['task_id'] != bindings['task_id']:
+                raise ValueError('dispatch task_id mismatch')
+            if record.get('tier') == 'task-evidence' and record.get('task_id') != bindings['task_id']:
+                raise ValueError('canonical claim task_id does not match dispatch')
         for key in ('position', 'template_id'):
             if key in record and record[key] != producer[key]:
                 raise ValueError(f'recorded {key} does not match dispatch')

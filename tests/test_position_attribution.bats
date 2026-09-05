@@ -536,3 +536,166 @@ finally:
     log.chmod(0o644)
 PY
 }
+
+@test "large compiled-attribution telemetry reaches the canonical scorecard writer" {
+  python3 - "$REPO" "$CASE_ROOT" <<'PY'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+repo, temporary = map(Path,sys.argv[1:])
+store=temporary/'store';store.mkdir()
+env=dict(os.environ,LORE_KNOWLEDGE_DIR=str(store),LORE_DATA_DIR=str(store))
+row={'schema_version':'1','kind':'telemetry','tier':'telemetry','calibration_state':'pre-calibration',
+     'event_type':'implement-close','metric':'task_attribution','work_item':'fixture','template_version':'123456abcdef',
+     'task_attribution':[{'task_id':f'task-{i}','producer_attempts':[{'status':'unknown','reason':'isolated fixture '+('retained component identity '*110)}]} for i in range(15)]}
+encoded=json.dumps(row).encode();assert len(encoded)>36000
+started=time.monotonic()
+p=subprocess.run(['bash',str(repo/'scripts/scorecard-append.sh'),'--kdir',str(store)],input=encoded,env=env,capture_output=True,timeout=10)
+assert p.returncode==0,(p.stdout,p.stderr)
+rows=[json.loads(line) for line in (store/'_scorecards/rows.jsonl').read_text().splitlines()]
+assert len(rows)==1 and rows[0]['task_attribution']==row['task_attribution'],rows
+blank=subprocess.run(['bash',str(repo/'scripts/scorecard-append.sh'),'--kdir',str(store)],input=b' \t\n ',env=env,capture_output=True,timeout=10)
+assert blank.returncode!=0 and b'row is empty' in blank.stderr
+assert len((store/'_scorecards/rows.jsonl').read_text().splitlines())==1
+print('Large-row canonical append:',len(encoded),'bytes;',round(time.monotonic()-started,3),'seconds')
+PY
+}
+
+@test "pre-plan spec-open assertions retain report and attempt attribution through canonical readers" {
+  python3 - "$REPO" "$CASE_ROOT" <<'PY'
+import copy
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import yaml
+original,temporary=map(lambda p:Path(p).resolve(),sys.argv[1:])
+if os.environ.get('POSITION_PREPLAN_FIXTURES'):
+    temporary=Path(os.environ['POSITION_PREPLAN_FIXTURES']).resolve();temporary.mkdir(parents=True,exist_ok=False)
+repo=temporary/'checkout';repo.mkdir();home=temporary/'home';home.mkdir();store=home/'.lore';store.mkdir()
+for name in ('scripts','adapters','agents','docs','cli','skills'):shutil.copytree(original/name,repo/name)
+(store/'scripts').symlink_to(repo/'scripts');(store/'_manifest.json').write_text('{"version":1}')
+env={k:v for k,v in os.environ.items() if not k.startswith(('LORE_','CLAUDE_'))}
+env.update(HOME=str(home),LORE_DATA_DIR=str(store),LORE_KNOWLEDGE_DIR=str(store),LORE_FRAMEWORK='codex',LORE_MODEL_RESEARCHER='fixture-model')
+for key in list(os.environ):
+    if key.startswith(('LORE_','CLAUDE_')):del os.environ[key]
+os.environ.update(env);os.chdir(repo);sys.path.insert(0,str(repo/'scripts'))
+from position_attribution import project
+from snippet_normalize import hash_normalized
+from packet_builder import build_packet,pointer
+spec=importlib.util.spec_from_file_location('position_bind',repo/'scripts/position-bind.py');binder=importlib.util.module_from_spec(spec);spec.loader.exec_module(binder)
+commands=[]
+def call(argv,input=None,ok=True):
+    r=subprocess.run(argv,input=input,cwd=repo,env=env,capture_output=True)
+    commands.append({'argv':list(map(str,argv)),'exit':r.returncode,'stdout':r.stdout.decode(errors='replace'),'stderr':r.stderr.decode(errors='replace')})
+    assert (r.returncode==0)==ok,commands[-1]
+    return r
+
+def script(name,*args,**kwargs):return call(['bash',str(repo/'scripts'/name),*args],**kwargs)
+script('create-work.sh','--title','Preplan fixture','--slug','preplan-fixture')
+item=store/'_work/preplan-fixture'
+call(['git','init','-q']);call(['git','config','user.name','Fixture']);call(['git','config','user.email','fixture@example.invalid'])
+(repo/'fixture.txt').write_text('Grounded pre-plan assertion.\n');call(['git','add','fixture.txt']);call(['git','commit','-qm','Fixture source'])
+sha=call(['git','rev-parse','HEAD']).stdout.decode().strip()
+document={'schema_version':1,'track':'full','investigations':[
+    {'id':'external','kind':'fixed','question':'External skill and agent applicability','complexity':'simple','prefetch':[]},
+    {'id':'preferences','kind':'fixed','question':'Preferences and conventions applicability','complexity':'simple','prefetch':[]}]}
+source=temporary/'investigations.json';source.write_text(json.dumps(document))
+opened=json.loads(script('spec-open.sh','preplan-fixture','--investigations',str(source),'--json').stdout)
+(temporary/'spec-open.json').write_text(json.dumps(opened,indent=2))
+payload=opened['directives'][0]['payload'];bindings=payload['bindings'];ref={key:payload['position_dispatch'][key] for key in ('manifest_path','manifest_sha256')}
+assert bindings['task_id'] is None and bindings['revision_id'] is None,bindings
+base={'claim_id':'preplan-good','tier':'task-evidence','claim':'The source contains a grounded pre-plan assertion.',
+      'producer_role':'researcher','protocol_slot':'spec','task_id':'external','report_id':bindings['report_id'],
+      'dispatch_attempt_id':bindings['dispatch_attempt_id'],'position_dispatch':ref,'scale':'implementation',
+      'file':str(repo/'fixture.txt'),'line_range':'1-1','exact_snippet':'Grounded pre-plan assertion.',
+      'normalized_snippet_hash':hash_normalized('Grounded pre-plan assertion.'),'falsifier':'The first committed line differs.',
+      'why_this_work_needs_it':'Checks pre-plan attribution.','captured_at_sha':sha,'significance':'low',
+      'change_context':{'summary':'Isolated pre-plan assertion.','changed_files':[str(repo/'fixture.txt')],'diff_ref':sha}}
+
+def emit(row):
+    script('evidence-append.sh','--work-item','preplan-fixture',input=json.dumps(row).encode())
+    return json.loads((item/'task-claims.jsonl').read_text().splitlines()[-1])
+
+good=emit(base)
+assert good['producer_attribution']['status']=='resolved',good
+negative=[]
+for field in ('report_id','dispatch_attempt_id'):
+    for missing in (True,False):
+        row=dict(base,claim_id='preplan-'+field+('-missing' if missing else '-wrong'))
+        if missing:row.pop(field)
+        else:row[field]='wrong-association'
+        written=emit(row);negative.append(written['claim_id'])
+        assert written['producer_attribution']['status']=='unknown',written
+
+# Actual completion uses the same association, with a committed source anchor.
+headers={'Template-version':payload['producer']['template_version'],'Position-dispatch-manifest':ref['manifest_path'],
+         'Position-dispatch-sha256':ref['manifest_sha256'],'Packet-id':bindings['packet_id'],
+         'Report-id':bindings['report_id'],'Dispatch-attempt-id':bindings['dispatch_attempt_id']}
+assertion={key:good[key] for key in ('claim_id','claim','file','line_range','exact_snippet','normalized_snippet_hash','falsifier','significance')}
+report=''.join(f'{k}: {v}\n' for k,v in headers.items())+'**Question:** External skill and agent applicability\n**Findings:** Committed fixture bytes ground the assertion.\n**Key files:** None\n**Implications:** Attribution survives before plan tasks exist.\n**Assertions:**\n'+yaml.safe_dump([assertion])+'**Observations:** None\n**Worker leads:** None\n**Unknowns:** None\n'
+script('coordinate-report.sh','preplan-fixture','--report-id',bindings['report_id'],'--json',input=report.encode())
+script('task-completed-capture-check.sh',input=json.dumps(payload['completion_input']).encode())
+
+resolved=json.loads(script('audit-artifact.sh',str(item/'task-claims.jsonl'),'--kdir',str(store),'--dry-run','--json').stdout)
+claims={r['claim_id']:r for r in resolved['claim_payload']}
+assert claims['preplan-good']['producer_attribution']['status']=='resolved',claims['preplan-good']
+assert all(claims[cid]['producer_attribution']['status']=='unknown' for cid in negative)
+
+def candidate(cid,sid):return {'claim_id':cid,'tier':'reusable','claim':'Pre-plan assertion attribution remains recoverable.',
+    'producer_role':'researcher','protocol_slot':'spec','scale':'implementation','why_future_agent_cares':'The producing attempt predates plan task allocation.',
+    'falsifier':'A different attempt is recovered.','related_files':[str(repo/'fixture.txt')],'source_artifact_ids':[sid],
+    'work_item':'preplan-fixture','captured_at_sha':sha}
+candidates=item/'candidates.json';candidates.write_text(json.dumps([candidate('promoted-good','preplan-good')]+[candidate('promoted-'+str(i),cid) for i,cid in enumerate(negative)]))
+r=script('impl-promote-batch.sh','preplan-fixture','--candidates',str(candidates),'--json')
+result=[json.loads(line) for line in r.stdout.decode().splitlines() if line.startswith('{')][-1]
+assert result['accepted_count']==1 and len(result['rejected'])==4,result
+commons=json.loads((item/'promoted-commons.jsonl').read_text().splitlines()[-1])
+assert commons['position_dispatch']==ref and commons['source_artifact_ids']==['preplan-good']
+assert commons['template_version']==payload['producer']['template_version']
+again=json.loads(script('audit-artifact.sh','--kdir',str(store),'--work-item','preplan-fixture','--kind','commons','--id','promoted-good','--dry-run','--json').stdout)
+assert again['claim_payload'][0]['producer_attribution']['status']=='resolved',again
+
+# A real bound task still demands its exact task identity, even with the correct report/attempt pair.
+(item/'plan.md').write_text('''# Bound fixture
+
+## Intent Anchor
+Preserve exact task identity.
+
+**Scope delta:** none
+
+## Tasks
+
+**Merge rationale:** One fixture task.
+
+### Task 1: Inspect bytes
+**Deliverable:** Grounded identity.
+**Files:** `fixture.txt`
+- [ ] Inspect bytes [class: mechanical]
+''')
+decisions=item/'decisions.json';decisions.write_text(json.dumps({'anchor_coverage':{'disposition':'covered','by':'fixture','note':'Isolated test.'},'review_requirement':{'disposition':'not-required','by':'fixture','note':'Isolated test.'},'dispatch_decision':{'disposition':'proceed','by':'fixture','note':'Isolated test.','task_ids':['task-1'],'prior_review_refs':[]}}))
+script('plan-revise.sh','preplan-fixture','--decisions',str(decisions))
+import runpy
+publication=runpy.run_path(str(repo/'scripts/work-evidence.py'))['publication_for_dispatch'](item,store)
+revision=publication['revision_id']
+bound=copy.deepcopy(bindings);bound.update(task_id='task-1',revision_id=revision,dispatch_attempt_id='bound-attempt',report_id='bound-report',report_path=str(item/'worker-reports/bound-report.md'),packet_id='pkt-bound')
+build_packet(store,{'packet_id':'pkt-bound','packet_scope':'task','work_item':'preplan-fixture','task_id':'task-1','revision_id':revision,'dispatch_attempt_id':'bound-attempt','source_head':publication['source_head'],'session_id':None,'phase':None,'arm':None,'task_scale_set':'implementation'},assembly=('Bound fixture.',{}),role='investigator',scales=['implementation'])
+bound['packet_pointer']=pointer(store,'pkt-bound');bound['absence_reasons']={k:v for k,v in bound['absence_reasons'].items() if bound[k] is None}
+published=binder.publish(payload['descriptor'],bound,store,(Path(ref['manifest_path']).parent/'guidance.md').read_bytes())
+bref={k:published[k] for k in ('manifest_path','manifest_sha256')}
+wrong=dict(base,claim_id='bound-wrong-task',report_id=bound['report_id'],dispatch_attempt_id=bound['dispatch_attempt_id'],position_dispatch=bref)
+assert emit(wrong)['producer_attribution']['status']=='unknown'
+right=dict(wrong,claim_id='bound-right-task',task_id='task-1')
+assert emit(right)['producer_attribution']['status']=='resolved'
+assert project(good,expected={'work_item':'preplan-fixture','task_id':'external'})['status']=='resolved'
+assert project(good,expected={'work_item':'preplan-fixture','task_id':None})['status']=='resolved'
+(temporary/'commands.json').write_text(json.dumps(commands,indent=2))
+print('Pre-plan canonical spec-open, completion, evidence, audit and promotion passed; all missing/wrong association and exact-bound-task controls passed.')
+PY
+}

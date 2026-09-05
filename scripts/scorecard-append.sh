@@ -127,7 +127,7 @@ if [[ -z "$ROW" ]]; then
   ROW=$(cat)
 fi
 
-if [[ -z "${ROW// }" ]]; then
+if [[ "$ROW" != *[![:space:]]* ]]; then
   fail "row is empty"
 fi
 
