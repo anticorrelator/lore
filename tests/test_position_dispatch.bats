@@ -116,6 +116,16 @@ def fixture(position='worker', attempt='attempt-1', revision=None, mode=None):
     b['absence_reasons'] = {key: 'not applicable to this assignment' for key,value in b.items() if value is None}
     return b
 
+def unbound_fixture(position, attempt, mode=None):
+    b=fixture(position,attempt,mode=mode)
+    packet_id='pkt-preplan-'+attempt
+    row={'packet_id':packet_id,'packet_scope':'session','work_item':'fixture','task_id':None,
+         'session_id':None,'phase':None,'arm':None,'task_scale_set':'implementation'}
+    build_packet(store,row,assembly=('Pre-plan investigation.',{}),role=position,scales=['implementation'])
+    b.update(task_id=None,revision_id=None,packet_id=packet_id,packet_pointer=pointer(store,packet_id))
+    b['absence_reasons'].update(task_id='No task has been assigned.',revision_id='No plan revision exists.')
+    return b
+
 def guidance():
     return call(['bash', str(repo / 'scripts/render-dispatch-guidance.sh')]).stdout
 
@@ -128,7 +138,7 @@ def bind(d,b,g=None,**kw):
 def request(b, position='worker', framework='codex', extra=None, flags=(), ok=True, fixed=True):
     (instances / 'fixture.json').touch()
     context = {'bindings': b, **(extra or {})}
-    path = temporary / 'context.json'; path.write_text(json.dumps(context))
+    path = temporary / ('context-' + b['dispatch_attempt_id'] + '.json'); path.write_text(json.dumps(context))
     return call(['bash', str(repo / 'scripts/session-request.sh'), '--type', 'worker', '--slug', 'fixture--w1', '--anywhere',
                  '--position', position, '--framework', framework, '--packet', b['packet_id'] or '',
                  *(['--worktree-id', 'fixture-worktree', '--execution-dir', str(repo)] if fixed else []), '--context', str(path), '--kdir', str(store), '--json', *flags], ok=ok)
@@ -137,42 +147,44 @@ def pending():
     return list((store / '_sessions/requests/pending').glob('*.json'))
 
 if scenario == 'native':
-    examples=[]
-    for position in binder.POSITIONS:
-        for framework in ('claude-code','codex','opencode'):
-            d=compile(position,framework)
-            b=fixture(position, position+'-'+framework, mode='planning' if position=='designer' else None)
-            ref=bind(d,b); m=binder.validate_dispatch(ref['manifest_path'],ref['manifest_sha256'])
-            raw=Path(ref['native_path']).read_bytes(); payload=Path(ref['payload_path']).read_bytes()
-            assert raw==Path(d['artifact_path']).read_bytes()
-            assert native_prompt(raw,d['native_surface'],position)==Path(d['prompt_path']).read_bytes()
-            if framework=='codex':
-                assert not raw.startswith(b'---')
-                assert Path(d['body_path']).read_bytes() in payload
-                assert m['accounting']['native_definition_bytes']==0
+    def exercise_pair(pair):
+        position,framework=pair
+        d=compile(position,framework)
+        b=fixture(position, position+'-'+framework, mode='planning' if position=='designer' else None)
+        ref=bind(d,b); m=binder.validate_dispatch(ref['manifest_path'],ref['manifest_sha256'])
+        raw=Path(ref['native_path']).read_bytes(); payload=Path(ref['payload_path']).read_bytes()
+        assert raw==Path(d['artifact_path']).read_bytes()
+        assert native_prompt(raw,d['native_surface'],position)==Path(d['prompt_path']).read_bytes()
+        if framework=='codex':
+            assert not raw.startswith(b'---')
+            assert Path(d['body_path']).read_bytes() in payload
+            assert m['accounting']['native_definition_bytes']==0
+        else:
+            header=yaml.safe_load(raw.split(b'---\n',2)[1])
+            if framework=='claude-code':
+                assert header['name']=='position-'+position
+                assert ('Edit' in header['tools'])==(position=='worker')
             else:
-                header=yaml.safe_load(raw.split(b'---\n',2)[1])
-                if framework=='claude-code':
-                    assert header['name']=='position-'+position
-                    assert ('Edit' in header['tools'])==(position=='worker')
-                else:
-                    assert header['mode']=='subagent'
-                    assert header['permission']['edit']==('allow' if position=='worker' else 'deny')
-                assert Path(d['body_path']).read_bytes() not in payload
-                assert m['accounting']['native_definition_bytes']==len(raw)
-            assert sum(x['bytes'] for x in m['accounting']['payload_components'])==len(payload)
-            assert m['accounting']['contract_delivery']=='referenced'
-            assert not any(x['name']=='report_contract' for x in m['accounting']['payload_components'])
-            contract=Path(d['contract_references'][0]['path']).read_bytes()
-            assert contract not in payload
-            assert show(store,b['packet_id'])==json.loads((Path(ref['manifest_path']).parent/'packet.json').read_bytes())
-            examples.append({'position':position,'framework':framework,**ref,'template_version':d['template_version']})
+                assert header['mode']=='subagent'
+                assert header['permission']['edit']==('allow' if position=='worker' else 'deny')
+            assert Path(d['body_path']).read_bytes() not in payload
+            assert m['accounting']['native_definition_bytes']==len(raw)
+        assert sum(x['bytes'] for x in m['accounting']['payload_components'])==len(payload)
+        assert m['accounting']['contract_delivery']=='referenced'
+        assert not any(x['name']=='report_contract' for x in m['accounting']['payload_components'])
+        contract=Path(d['contract_references'][0]['path']).read_bytes()
+        assert contract not in payload
+        assert show(store,b['packet_id'])==json.loads((Path(ref['manifest_path']).parent/'packet.json').read_bytes())
+        return {'position':position,'framework':framework,**ref,'template_version':d['template_version']}
+    pairs=[(position,framework) for position in binder.POSITIONS for framework in ('claude-code','codex','opencode')]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        examples=list(pool.map(exercise_pair,pairs))
     (temporary/'examples.json').write_text(json.dumps(examples,indent=2))
     print(json.dumps(examples))
 elif scenario=='native-selection':
     scope=home/'.claude/agents';scope.mkdir(parents=True)
-    examples=[]
-    for position in binder.POSITIONS:
+    def exercise_position(position):
+        cases=[]
         d=compile(position,'claude-code')
         raw=Path(d['artifact_path']).read_bytes()
         original_header=yaml.safe_load(raw.split(b'---\n',2)[1])
@@ -215,10 +227,13 @@ elif scenario=='native-selection':
                 assert json.loads(output.stdout)==selected
                 call(['python3',str(repo/'scripts/position-bind.py'),'native-input',ref['manifest_path'],'--sha256',ref['manifest_sha256'],'--scope',str(scope),'--ready'],ok=False)
                 refused(lambda:binder.register_native(ref['manifest_path'],ref['manifest_sha256'],home/'.claude/missing'),'existing physical')
-            examples.append({'producer':m['producer'],'reference':ref,'selection':selection,'registration':receipt,'prepared_tool_input':selected})
+            cases.append({'producer':m['producer'],'reference':ref,'selection':selection,'registration':receipt,'prepared_tool_input':selected})
         a,b=(binder.validate_dispatch(r['manifest_path']) for r in refs)
         assert a['producer']==b['producer'] and a['selection']['sha256']!=b['selection']['sha256']
         assert (Path(refs[0]['manifest_path']).parent/'selection.md').read_bytes()!=(Path(refs[1]['manifest_path']).parent/'selection.md').read_bytes()
+        return cases
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        examples=[case for group in pool.map(exercise_position,binder.POSITIONS) for case in group]
     d=compile('worker','codex');b=fixture(attempt='codex-native')
     ref=bind(d,b,native_model='gpt-6-astra-high');m=binder.validate_dispatch(ref['manifest_path'],ref['manifest_sha256'])
     selected=binder.native_input(ref['manifest_path'],ref['manifest_sha256'])
@@ -244,16 +259,28 @@ elif scenario=='native-selection':
     (temporary/'examples.json').write_text(json.dumps(examples,indent=2))
     print(json.dumps({'examples_path':str(temporary/'examples.json'),'count':len(examples)}))
 elif scenario=='launch':
-    examples=[]
-    for fw in ('claude-code', 'codex', 'opencode'):
-        for position,mode in [('worker',None),('investigator',None),('designer','planning'),('designer','consultation'),('reviewer',None)]:
-            b=fixture(position, fw+'-'+position+'-'+str(mode), mode=mode)
-            b['execution_root']=None; b['absence_reasons']['execution_root']='ordinary host supplies final directory'
-            r=json.loads(request(b, position, fw, flags=('--model','provider/opaque-model'), fixed=False).stdout)
-            row_path=store/r['path']; row=json.loads(row_path.read_bytes())
-            assert set(row['extra_context'])=={'position_preparation'}
-            assert not (item/'position-dispatch'/b['dispatch_attempt_id']).exists()
-            examples.append({'position':position,'framework':fw,'mode':mode,'queue_path':str(row_path),'kdir':str(store)})
+    def exercise_launch(case):
+        fw,position,mode=case
+        b=fixture(position, fw+'-'+position+'-'+str(mode), mode=mode)
+        b['execution_root']=None; b['absence_reasons']['execution_root']='ordinary host supplies final directory'
+        r=json.loads(request(b, position, fw, flags=('--model','provider/opaque-model'), fixed=False).stdout)
+        row_path=store/r['path']; row=json.loads(row_path.read_bytes())
+        assert set(row['extra_context'])=={'position_preparation'}
+        assert not (item/'position-dispatch'/b['dispatch_attempt_id']).exists()
+        return {'position':position,'framework':fw,'mode':mode,'queue_path':str(row_path),'kdir':str(store)}
+    cases=[(fw,position,mode) for fw in ('claude-code','codex','opencode')
+           for position,mode in [('worker',None),('investigator',None),('designer','planning'),('designer','consultation'),('reviewer',None)]]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        examples=list(pool.map(exercise_launch,cases))
+    b=unbound_fixture('investigator','ordinary-preplan-opencode')
+    b['execution_root']=None;b['absence_reasons']['execution_root']='ordinary host supplies final directory'
+    r=json.loads(request(b,'investigator','opencode',flags=('--model','anthropic/opus'),fixed=False).stdout)
+    row_path=store/r['path'];row=json.loads(row_path.read_bytes())
+    prepared=row['extra_context']['position_preparation']
+    assert prepared['bindings']['task_id'] is None and prepared['bindings']['revision_id'] is None
+    assert not (item/'position-dispatch'/b['dispatch_attempt_id']).exists()
+    # Mode here labels the test case; the actual investigator binding has no mode.
+    examples.append({'position':'investigator','framework':'opencode','mode':'preplan','queue_path':str(row_path),'kdir':str(store)})
     occupied=fixture(attempt='occupied-report');bind(compile(),occupied)
     duplicate=fixture(attempt='duplicate-report')
     duplicate.update(execution_root=None,report_id=occupied['report_id'],report_path=occupied['report_path'])
@@ -298,8 +325,8 @@ elif scenario=='archive':
     refused(lambda:binder.resolve_dispatch(refs[0]['manifest_path'],refs[0]['manifest_sha256']))
     refused(lambda:binder.resolve_dispatch(archived/'position-dispatch/archive-claude-code/manifest.json',refs[0]['manifest_sha256']),'conflict')
 elif scenario=='session':
-    examples=[]
-    for position,mode in [('designer','planning'),('reviewer',None),('designer','consultation'),('investigator',None),('worker',None)]:
+    def exercise_session(case):
+        position,mode=case
         b=fixture(position,position+'-'+str(mode),mode=mode)
         extra={'ceremony':'spec'} if mode=='planning' else {}
         p=request(b,position,extra=extra)
@@ -318,7 +345,10 @@ elif scenario=='session':
         again=json.loads((store/repeat['path']).read_bytes())
         assert again['extra_context']==row['extra_context']
         assert Path(ref['payload_path']).read_bytes()==old
-        examples.append({'position':position,'mode':mode,'queue_path':str(row_path),**ref})
+        return {'position':position,'mode':mode,'queue_path':str(row_path),**ref}
+    cases=[('designer','planning'),('reviewer',None),('designer','consultation'),('investigator',None),('worker',None)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        examples=list(pool.map(exercise_session,cases))
     (temporary/'examples.json').write_text(json.dumps(examples,indent=2))
     b=fixture(attempt='class-pin')
     r=json.loads(request(b,extra={'class':'mechanical'},flags=('--route','worker=pinned-fallback')).stdout)
@@ -420,6 +450,22 @@ elif scenario=='preplan':
     refused(lambda: bind(d,conflict),'task_id mismatch')
     bound=fixture('investigator','bound-attempt');bound['dispatch_attempt_id']='wrong-attempt'
     refused(lambda: bind(d,bound),'dispatch_attempt_id mismatch')
+    for position,mode in [('investigator',None),('designer','planning'),('designer','consultation'),('reviewer',None)]:
+        b=unbound_fixture(position,'session-'+position+'-'+str(mode),mode)
+        b['execution_root']=None;b['absence_reasons']['execution_root']='host supplies final root'
+        r=json.loads(request(b,position,fixed=False).stdout)
+        pending_context=json.loads((store/r['path']).read_bytes())['extra_context']
+        launched=binder.launch_session(pending_context,framework='codex',slug='fixture--w1',execution_root=str(repo),kdir=store)
+        m=binder.validate_dispatch(launched['reference']['manifest_path'],launched['reference']['manifest_sha256'])
+        assert m['bindings']['task_id'] is None and m['bindings']['revision_id'] is None
+        assert set(m['required_bindings'])==set(binder.CORE)|{'packet_id','packet_pointer'}
+        assert m['bindings']['packet_id']==b['packet_id']
+        absent=copy.deepcopy(b);absent.update(packet_id=None,packet_pointer=None)
+        absent['absence_reasons'].update(packet_id='No packet.',packet_pointer='No packet.')
+        request(absent,position,fixed=False,ok=False)
+    b=unbound_fixture('worker','worker-still-requires-task')
+    b['execution_root']=None;b['absence_reasons']['execution_root']='host supplies final root'
+    request(b,'worker',fixed=False,ok=False)
 elif scenario=='renderer-drift':
     d=compile(framework='claude-code')
     old=bind(d,fixture(attempt='before-drift'))

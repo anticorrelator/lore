@@ -437,6 +437,10 @@ def resolve_dispatch(manifest_path, manifest_sha256, *, expected=None):
             'payload_path': str(root / 'payload.md'), 'native_path': str(root / 'native.md')}
 
 
+def session_required_bindings(position):
+    return TASK_BINDINGS if position == 'worker' else ('packet_id', 'packet_pointer')
+
+
 def prepare_session(context, *, position, framework, slug, execution_root, packet_id, kdir):
     """Prepare the exact extra_context consumed by the existing worker prompt path."""
     allowed = {'bindings', 'descriptor', 'guidance_file', 'class', 'ceremony'}
@@ -449,7 +453,7 @@ def prepare_session(context, *, position, framework, slug, execution_root, packe
     for key, value in expected.items():
         if b.get(key) != value:
             raise ValueError(f'session {key} conflicts with bindings')
-    validate_bindings(b, position, kdir, TASK_BINDINGS, pending_root=not execution_root)
+    validate_bindings(b, position, kdir, session_required_bindings(position), pending_root=not execution_root)
     existing = kdir / '_work' / b['work_item'] / 'position-dispatch' / b['dispatch_attempt_id'] / 'manifest.json'
     for prior in existing.parent.parent.glob('*/manifest.json'):
         if prior != existing and json.loads(prior.read_bytes())['bindings']['report_id'] == b['report_id']:
@@ -484,7 +488,7 @@ def prepare_session(context, *, position, framework, slug, execution_root, packe
         if not execution_root:
             return {'position_preparation': {'position': position, 'framework': framework, 'slug': slug,
                     'packet_id': packet_id, 'bindings': b, 'descriptor': d, 'guidance': guidance.decode()}}
-        ref = publish(d, b, kdir, guidance, required=TASK_BINDINGS)
+        ref = publish(d, b, kdir, guidance, required=session_required_bindings(position))
     return {'dispatch_guidance': Path(ref['payload_path']).read_text(), 'position_dispatch': ref}
 
 
@@ -505,7 +509,7 @@ def launch_session(context, *, framework, slug, execution_root, kdir):
         d = pending['descriptor']
         if d['framework'] != framework or d['position'] != pending['position']:
             raise ValueError('pending producer mismatch')
-        ref = publish(d, b, kdir, pending['guidance'].encode(), required=TASK_BINDINGS)
+        ref = publish(d, b, kdir, pending['guidance'].encode(), required=session_required_bindings(d['position']))
     elif set(context) == {'dispatch_guidance', 'position_dispatch'}:
         ref = context['position_dispatch']
     else:
@@ -516,7 +520,7 @@ def launch_session(context, *, framework, slug, execution_root, kdir):
         raise ValueError('native subagent dispatch cannot launch as a session')
     if Path(m['kdir']) != kdir.resolve() or Path(m['work_item_path']) != Path(resolved['resolved_manifest_path']).parents[2]:
         raise ValueError('launch requires the active work item in the selected store')
-    validate_bindings(m['bindings'], m['producer']['position'], kdir, TASK_BINDINGS)
+    validate_bindings(m['bindings'], m['producer']['position'], kdir, session_required_bindings(m['producer']['position']))
     for kind in ('payload', 'native'):
         if ref[kind + '_path'] != m[kind]['path'] or ref[kind + '_sha256'] != m[kind]['sha256']:
             raise ValueError('mixed dispatch reference')
