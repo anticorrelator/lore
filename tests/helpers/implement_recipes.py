@@ -445,6 +445,23 @@ def exercise_recipes(repo, root, source):
     run("plan-decision", DECISION_ID="initial-coverage", DECISIONS_FILE=decisions)
     started = obj(run("impl-start"))
     assert started["slug"] == "recipes" and started["position_descriptors"]["codex"]["worker"]["position"] == "worker"
+    seat_packet = obj(run("seat-packet-build", "standalone seat after slug resolution", SLUG=started["slug"],
+                          TOPIC="Preserve execution and dispatch history.", SCALE_SET="implementation"))
+    packet_ledger = f.store / "_packets/packets.jsonl"
+    seat_row = json.loads(packet_ledger.read_text().splitlines()[-1])
+    assert seat_row["packet_id"] == seat_packet["packet_id"]
+    assert seat_row["recipient_role"] == "coordinator" and seat_row["caller"] == "implement-lead"
+    assert seat_row["work_item"] == started["slug"]
+    assert seat_packet["packet_id"].encode() in run("seat-packet-show", "standalone seat reads assembled context",
+                                                    PACKET_ID=seat_packet["packet_id"]).stdout
+    # A commissioned run receives an existing packet from its caller.
+    commissioned = obj(f.lore("packet", "build", "--work-item", "recipes", "--role", "coordinator", "--caller", "coordinator",
+                              "--topic", "Inspect commissioned execution history.", "--scale-set", "implementation"))
+    before_show = packet_ledger.read_bytes()
+    assert commissioned["packet_id"] != seat_packet["packet_id"]
+    assert commissioned["packet_id"].encode() in run("seat-packet-show", "commissioned seat reads supplied context",
+                                                       PACKET_ID=commissioned["packet_id"]).stdout
+    assert packet_ledger.read_bytes() == before_show, "reading a supplied packet must not publish another packet"
     v["WORKER_TEMPLATE_VERSION"] = started["template_versions"]["worker"]
     v["ADVISOR_TEMPLATE_VERSION"] = started["template_versions"]["advisor"]
     assert obj(run("work-show"))["slug"] == "recipes"
