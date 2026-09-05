@@ -1,7 +1,7 @@
 ---
 name: codex-design-review
 description: "Submit a work item's prepared abstract design (Goal, Design Decisions, Narrative, Architecture Diagram) to Codex CLI for a parsimony and legibility assessment. Use during /spec after abstract synthesis and before tasks are drafted, or when registered as the spec-design ceremony evaluator."
-argument_description: "<work-item-slug> [--attempt <attempt-id> --revision <revision-id>]"
+argument_description: "<work-item-slug> [--prepared <reviews/attempt directory> --attempt <attempt-id> --ceremony spec-design --revision <revision-id>]"
 ---
 
 # Codex Design Review
@@ -30,7 +30,7 @@ SCRIPTS_DIR="$(cd "$(dirname "$(readlink -f "$(command -v lore)")")/../scripts" 
 printf 'KNOWLEDGE_DIR=%s\nSCRIPTS_DIR=%s\n' "$KNOWLEDGE_DIR" "$SCRIPTS_DIR"
 ```
 
-**Commissioned entry.** The caller — the spec protocol at its design gate, or a coordinator commissioning a review — passes `--attempt <attempt-id> --revision <revision-id>` beside the slug. It prepared that attempt under ceremony `spec-design`; nothing is published here. Skip to the read below.
+**Commissioned entry.** The caller — the spec protocol at its design gate, or a coordinator commissioning a review — passes, beside the slug, the prepared attempt directory it published (`--prepared`), the attempt id (`--attempt`), the ceremony it prepared under (`--ceremony spec-design`), and the revision (`--revision`). Nothing is published here; every one of those four identities is checked against the prepared record before anything is read. Skip to the read below.
 
 **Direct entry.** Only a work item reference arrives. Resolve it to a slug, publish the live plan as a revision, and prepare a fresh attempt. An identical plan reuses its current revision (`status: current`); a changed plan publishes the next one. An abstract plan with no Tasks section publishes with zero tasks. Prepare requires the item's intent anchor, so an item without one stops here with the writer's message rather than reviewing against no anchor. Mint the attempt id as `codex-design-<UTC timestamp>-r1`, for example `codex-design-20260905T170000Z-r1`.
 
@@ -51,29 +51,36 @@ lore plan review prepare "$SLUG" --attempt-id "$ATTEMPT_ID" --ceremony spec-desi
   --revision "$REVISION_ID" --purpose criterion-adequacy --json
 ```
 
-**Both entries** read the prepared attempt through the evidence reader, which checks the snapshot hashes against the committed revision. The read refuses an attempt prepared under another ceremony, an attempt holding a different revision than the one named, and an attempt whose evidence is missing or altered; the caller then fixes the identity rather than the skill guessing which input was meant.
+The prepared directory is the parent of `prepared_path` in that output, and the ceremony is `spec-design`; carry both into the read exactly as a caller would.
 
-**Recipe inputs:** SCRIPTS_DIR, KNOWLEDGE_DIR, SLUG, ATTEMPT_ID, REVISION_ID.
+**Both entries** read the prepared attempt through the evidence reader, which checks the snapshot hashes against the committed revision. The read refuses a ceremony other than this skill's, a prepared path that does not name the given attempt of the given item, an attempt prepared under another ceremony, an attempt holding a different revision than the one named, and an attempt whose evidence is missing or altered; the caller then fixes the identity rather than the skill guessing which input was meant.
+
+**Recipe inputs:** SCRIPTS_DIR, KNOWLEDGE_DIR, SLUG, PREPARED_DIR, ATTEMPT_ID, CEREMONY, REVISION_ID.
 <!-- spec-design-review-recipe: read-prepared -->
 ```python
 import json, os, runpy, sys
 from pathlib import Path
 api = runpy.run_path(os.path.join(os.environ["SCRIPTS_DIR"], "work-evidence.py"))
 item = Path(os.environ["KNOWLEDGE_DIR"]) / "_work" / os.environ["SLUG"]
-attempt = os.environ["ATTEMPT_ID"]
+attempt, ceremony = os.environ["ATTEMPT_ID"], os.environ["CEREMONY"]
+expected_dir = item / "reviews" / attempt
+if ceremony != "spec-design":
+    sys.exit("[codex-design-review] this skill reviews the spec-design ceremony; the caller named %s" % ceremony)
+if Path(os.environ["PREPARED_DIR"]).resolve() != expected_dir.resolve():
+    sys.exit("[codex-design-review] prepared path %s does not name attempt %s of %s" % (os.environ["PREPARED_DIR"], attempt, os.environ["SLUG"]))
 try:
     prepared = api["review_prepared"](item, attempt)
 except (ValueError, OSError, KeyError, TypeError) as exc:
     sys.exit("[codex-design-review] prepared review unavailable for attempt %s: %s" % (attempt, exc))
-if prepared["ceremony"] != "spec-design":
-    sys.exit("[codex-design-review] attempt %s was prepared under %s, not spec-design" % (attempt, prepared["ceremony"]))
+if prepared["ceremony"] != ceremony:
+    sys.exit("[codex-design-review] attempt %s was prepared under %s, not %s" % (attempt, prepared["ceremony"], ceremony))
 if prepared["revision_id"] != os.environ["REVISION_ID"]:
     sys.exit("[codex-design-review] attempt %s holds revision %s, not %s" % (attempt, prepared["revision_id"], os.environ["REVISION_ID"]))
 print(json.dumps({"slug": os.environ["SLUG"], "attempt_id": attempt, "revision_id": prepared["revision_id"],
-                  "ceremony": prepared["ceremony"], "purpose": prepared["purpose"],
-                  "prepared_dir": str(item / "reviews" / attempt),
+                  "ceremony": prepared["ceremony"], "purpose": prepared["purpose"], "prepared_dir": str(expected_dir),
                   "plan_file": str(item / prepared["plan_path"]), "tasks_file": str(item / prepared["tasks_path"]),
-                  "anchor_file": str(item / prepared["anchor_path"])}))
+                  "anchor_file": str(item / prepared["anchor_path"])
+                  }))
 ```
 
 State the identity before reading anything else, so the transcript shows which bytes every later judgment is about:
@@ -141,7 +148,8 @@ Build the prompt from the prepared anchor and the design slice. The anchor is th
 cat <<'PROMPT'
 Review the following abstract design for one question: is it lean and legible — easy
 to understand and maintain for humans and agents, without needless machinery or scope
-creep? Tasks have not been drafted yet. Do not evaluate implementation detail.
+creep? Only the abstract design is under review; any tasks the plan may hold are out of
+scope and excluded from this artifact. Do not evaluate implementation detail.
 
 **Calibration:** Prefer preserving necessary complexity over forcing minimalism. Flag
 complexity only when its purpose, owner, boundary, or payoff is unclear. A design that
@@ -302,9 +310,10 @@ Record every decision in the **disposition ledger**, a JSON file the evaluating 
 }
 ```
 
-**Applying edits.** Accepted and modified proposals are applied to the live `plan.md`, never to the prepared copy. The edited plan is then published as a revision and a fresh attempt is prepared for it, because Codex must answer against the bytes that now exist and a sealed verdict must name the revision it judged. Use `publish-revision` with a reason naming the round, then `prepare-review` with the round-2 attempt id — the round-1 attempt id with `-r2` appended — and the new revision, then `read-prepared` and `design-slice` against the new attempt. The round-1 attempt stays prepared and unsealed; its verdict and every disposition travel in the ledger sealed with the final attempt, so nothing pretends the superseded bytes were certified.
+**Applying proposals.** Accepted and modified proposals are applied to the live `plan.md`, never to the prepared copy, and the edited plan is published as a revision with `publish-revision`, naming the round in the reason. What follows depends on whether Codex is owed an answer:
 
-If every proposal was rejected, the plan is unchanged and round 2 rereads the same attempt. If every proposal was accepted, or there were none, no answer is owed: skip to Step 7 with the attempt that now holds the reviewed bytes (the fresh attempt when edits were applied, the original one otherwise).
+- **Some proposal was modified or rejected.** Round 2 answers against the bytes that now exist. When edits were applied, prepare a fresh attempt for the new revision — `prepare-review` with the round-1 attempt id plus `-r2` and the new revision — then `read-prepared` and `design-slice` against it. When every proposal was rejected, the plan is unchanged and round 2 rereads the same attempt. A superseded round-1 attempt stays prepared and unsealed; its verdict and every disposition travel in the ledger sealed with the final attempt, so nothing pretends the superseded bytes were certified.
+- **Every proposal was accepted, or there were none.** No answer is owed and no second round runs. The reviewed attempt is the round-1 attempt: skip to Step 7 and seal it with the round-1 verdict. A revision published from accepted edits is one this review did not read; do not prepare an attempt for it here, and name it in the final report as published after the final round, so the seat can decide whether it needs a fresh invocation.
 
 ## Step 5: Codex response (Round 2)
 
@@ -385,7 +394,7 @@ Compose the review output from the raw responses and the ledger, so the sealed p
 } > "$REVIEW_OUTPUT"
 ```
 
-Normalize the outcome. This is an authored decision, not a parse of Codex's prose: `completed` when the exchange reached a verdict the seat can act on, whatever that verdict is; `needs-decision` with a reason when the two-round cap left a High-severity proposal unresolved between Codex and the evaluating agent; `failed` when Codex could not review the input; `skipped` with a reason when Codex could not run at all. The `criterion-adequacy` judgment is the design-stage judgment this ceremony admits — whether the abstract design adequately serves the anchor — and says so plainly, because an abstract plan has no task criteria to certify. `result_ids` is always empty: this reviewer runs no commands and cites no execution evidence.
+Normalize the outcome. This is an authored decision, not a parse of Codex's prose: `completed` when the exchange reached a verdict the seat can act on, whatever that verdict is; `needs-decision` with a reason when the two-round cap left a High-severity proposal unresolved between Codex and the evaluating agent; `failed` when Codex returned output that is not a review of the input. An attempt with no evaluator output at all takes the unavailable path below instead of this one. The `criterion-adequacy` judgment is the design-stage judgment this ceremony admits — whether the abstract design adequately serves the anchor — and says so plainly, because an abstract plan has no task criteria to certify. `result_ids` is always empty: this reviewer runs no commands and cites no execution evidence.
 
 **Recipe inputs:** LEDGER_FILE, OUTCOME, REASON, JUDGMENT, RATIONALE, DISPOSITIONS_FILE.
 <!-- spec-design-review-recipe: compose-dispositions -->
@@ -440,6 +449,22 @@ args=("$SLUG" --ceremony spec-design --advisor codex-design-review --attempt-id 
       --outcome "$OUTCOME" --verdict "$VERDICT" --evidence-manifest "$EVIDENCE_FILE" --json)
 if [[ -n "$REASON" ]]; then args+=(--reason "$REASON"); fi
 lore spec outcome "${args[@]}"
+```
+
+**Evaluator unavailable.** When `codex-submit` fails before any response — the CLI is missing, refuses to start, or returns nothing — there is no evaluator output to seal and the sealed path does not apply. File the attempt as `skipped` with a reason through the unbound schema-1 manifest, keeping every evidence field present and null where no evidence exists, so the registered evaluator's failure is a record rather than a silence. `MODEL` may be empty when resolution itself failed.
+
+**Recipe inputs:** SCRIPTS_DIR, SLUG, ATTEMPT_ID, MODEL, PLAN_FILE, REASON, EVIDENCE_FILE.
+<!-- spec-design-review-recipe: file-unavailable -->
+```bash
+source "$SCRIPTS_DIR/lib.sh"
+version=$(bash "$SCRIPTS_DIR/template-version.sh" "$LORE_REPO_DIR/skills/codex-design-review/SKILL.md")
+plan_sha=$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$PLAN_FILE")
+jq -n --arg version "$version" --arg model "$MODEL" --arg plan "$plan_sha" \
+  '{schema_version: 1, evaluator_locator: "skills/codex-design-review/SKILL.md", evaluator_template_version: $version,
+    framework: "codex", model: (if $model == "" then null else $model end), final_round: null,
+    disposition_ledger_sha256: null, source_plan_sha256: $plan}' > "$EVIDENCE_FILE"
+lore spec outcome "$SLUG" --ceremony spec-design --advisor codex-design-review --attempt-id "$ATTEMPT_ID" \
+  --outcome skipped --verdict UNAVAILABLE --evidence-manifest "$EVIDENCE_FILE" --reason "$REASON" --json
 ```
 
 ## Step 8: Final report

@@ -1,7 +1,7 @@
 ---
 name: codex-plan-review
 description: "Submit a work item's prepared Tasks plan to Codex CLI for a completeness evaluation with six rated criteria and an Interface Clarity gate. Use after /spec drafts tasks and before /implement, or when registered as the spec-post-plan ceremony evaluator."
-argument_description: "<work-item-slug> [--attempt <attempt-id> --revision <revision-id>]"
+argument_description: "<work-item-slug> [--prepared <reviews/attempt directory> --attempt <attempt-id> --ceremony spec-post-plan --revision <revision-id>]"
 ---
 
 # Codex Plan Review
@@ -30,7 +30,7 @@ SCRIPTS_DIR="$(cd "$(dirname "$(readlink -f "$(command -v lore)")")/../scripts" 
 printf 'KNOWLEDGE_DIR=%s\nSCRIPTS_DIR=%s\n' "$KNOWLEDGE_DIR" "$SCRIPTS_DIR"
 ```
 
-**Commissioned entry.** The caller — the spec protocol at its post-plan gate, or a coordinator commissioning a review — passes `--attempt <attempt-id> --revision <revision-id>` beside the slug. It prepared that attempt under ceremony `spec-post-plan`; nothing is published here. Skip to the read below.
+**Commissioned entry.** The caller — the spec protocol at its post-plan gate, or a coordinator commissioning a review — passes, beside the slug, the prepared attempt directory it published (`--prepared`), the attempt id (`--attempt`), the ceremony it prepared under (`--ceremony spec-post-plan`), and the revision (`--revision`). Nothing is published here; every one of those four identities is checked against the prepared record before anything is read. Skip to the read below.
 
 **Direct entry.** Only a work item reference arrives. Resolve it to a slug, publish the live plan as a revision, and prepare a fresh attempt. Publication validates the plan's task grammar, anchor, dependency DAG, and close criteria and installs `tasks.json`; a plan that fails those checks stops here with the writer's message. An identical plan reuses its current revision (`status: current`); a changed plan publishes the next one. Prepare requires the item's intent anchor. Mint the attempt id as `codex-plan-<UTC timestamp>-r1`, for example `codex-plan-20260905T170000Z-r1`.
 
@@ -51,28 +51,34 @@ lore plan review prepare "$SLUG" --attempt-id "$ATTEMPT_ID" --ceremony spec-post
   --revision "$REVISION_ID" --purpose criterion-adequacy --json
 ```
 
-**Both entries** read the prepared attempt through the evidence reader, which checks the snapshot hashes against the committed revision. The read refuses an attempt prepared under another ceremony, an attempt holding a different revision than the one named, and an attempt whose evidence is missing or altered; the caller then fixes the identity rather than the skill guessing which input was meant.
+The prepared directory is the parent of `prepared_path` in that output, and the ceremony is `spec-post-plan`; carry both into the read exactly as a caller would.
 
-**Recipe inputs:** SCRIPTS_DIR, KNOWLEDGE_DIR, SLUG, ATTEMPT_ID, REVISION_ID.
+**Both entries** read the prepared attempt through the evidence reader, which checks the snapshot hashes against the committed revision. The read refuses a ceremony other than this skill's, a prepared path that does not name the given attempt of the given item, an attempt prepared under another ceremony, an attempt holding a different revision than the one named, and an attempt whose evidence is missing or altered; the caller then fixes the identity rather than the skill guessing which input was meant.
+
+**Recipe inputs:** SCRIPTS_DIR, KNOWLEDGE_DIR, SLUG, PREPARED_DIR, ATTEMPT_ID, CEREMONY, REVISION_ID.
 <!-- spec-plan-review-recipe: read-prepared -->
 ```python
 import json, os, runpy, sys
 from pathlib import Path
 api = runpy.run_path(os.path.join(os.environ["SCRIPTS_DIR"], "work-evidence.py"))
 item = Path(os.environ["KNOWLEDGE_DIR"]) / "_work" / os.environ["SLUG"]
-attempt = os.environ["ATTEMPT_ID"]
+attempt, ceremony = os.environ["ATTEMPT_ID"], os.environ["CEREMONY"]
+expected_dir = item / "reviews" / attempt
+if ceremony != "spec-post-plan":
+    sys.exit("[codex-plan-review] this skill reviews the spec-post-plan ceremony; the caller named %s" % ceremony)
+if Path(os.environ["PREPARED_DIR"]).resolve() != expected_dir.resolve():
+    sys.exit("[codex-plan-review] prepared path %s does not name attempt %s of %s" % (os.environ["PREPARED_DIR"], attempt, os.environ["SLUG"]))
 try:
     prepared = api["review_prepared"](item, attempt)
 except (ValueError, OSError, KeyError, TypeError) as exc:
     sys.exit("[codex-plan-review] prepared review unavailable for attempt %s: %s" % (attempt, exc))
-if prepared["ceremony"] != "spec-post-plan":
-    sys.exit("[codex-plan-review] attempt %s was prepared under %s, not spec-post-plan" % (attempt, prepared["ceremony"]))
+if prepared["ceremony"] != ceremony:
+    sys.exit("[codex-plan-review] attempt %s was prepared under %s, not %s" % (attempt, prepared["ceremony"], ceremony))
 if prepared["revision_id"] != os.environ["REVISION_ID"]:
     sys.exit("[codex-plan-review] attempt %s holds revision %s, not %s" % (attempt, prepared["revision_id"], os.environ["REVISION_ID"]))
 tasks = json.loads((item / prepared["tasks_path"]).read_text())
 print(json.dumps({"slug": os.environ["SLUG"], "attempt_id": attempt, "revision_id": prepared["revision_id"],
-                  "ceremony": prepared["ceremony"], "purpose": prepared["purpose"],
-                  "prepared_dir": str(item / "reviews" / attempt),
+                  "ceremony": prepared["ceremony"], "purpose": prepared["purpose"], "prepared_dir": str(expected_dir),
                   "plan_file": str(item / prepared["plan_path"]), "tasks_file": str(item / prepared["tasks_path"]),
                   "anchor_file": str(item / prepared["anchor_path"]),
                   "task_count": len(tasks.get("tasks", []))}))
@@ -266,9 +272,10 @@ Record the ratings and every decision in the **disposition ledger**, a JSON file
 }
 ```
 
-**Applying edits.** Accepted and modified edits are applied to the live `plan.md`, never to the prepared copy. The edited plan is then published as a revision and a fresh attempt is prepared for it, because Codex must re-rate the bytes that now exist and a sealed rating must name the revision it judged. Use `publish-revision` with a reason naming the round — publication re-validates the task grammar and criteria and regenerates `tasks.json`, so an edit that broke either is refused here rather than discovered at implement — then `prepare-review` with the round-2 attempt id (the round-1 attempt id with `-r2` appended) and the new revision, then `read-prepared` against the new attempt. The round-1 attempt stays prepared and unsealed; its ratings and every disposition travel in the ledger sealed with the final attempt, so nothing pretends the superseded bytes were rated.
+**Applying edits.** Accepted and modified edits are applied to the live `plan.md`, never to the prepared copy, and the edited plan is published as a revision with `publish-revision`, naming the round in the reason; publication re-validates the task grammar and criteria and regenerates `tasks.json`, so an edit that broke either is refused here rather than discovered at implement. What follows depends on whether Codex is owed an answer:
 
-If every edit was rejected, the plan is unchanged and round 2 rereads the same attempt. If every edit was accepted, or there were none, no answer is owed: skip to Step 5.5 with the attempt that now holds the reviewed bytes (the fresh attempt when edits were applied, the original one otherwise), and the round-1 ratings stand as final.
+- **Some edit was modified or rejected.** Round 2 answers against the bytes that now exist. When edits were applied, prepare a fresh attempt for the new revision — `prepare-review` with the round-1 attempt id plus `-r2` and the new revision — then `read-prepared` against it. When every edit was rejected, the plan is unchanged and round 2 rereads the same attempt. A superseded round-1 attempt stays prepared and unsealed; its ratings and every disposition travel in the ledger sealed with the final attempt, so nothing pretends the superseded bytes were rated.
+- **Every edit was accepted, or there were none.** No answer is owed and no second round runs. The reviewed attempt is the round-1 attempt, and its ratings stand as final: skip to Step 5.5 and seal it with the round-1 ratings. A revision published from accepted edits is one this review did not read; do not prepare an attempt for it here, and name it in the final report as published after the final round, so the seat can decide whether it needs a fresh invocation.
 
 ## Step 4: Codex response (Round 2)
 
@@ -381,7 +388,7 @@ Compose the review output from the raw responses and the ledger, so the sealed p
 } > "$REVIEW_OUTPUT"
 ```
 
-Normalize the outcome. This is an authored decision, not a parse of Codex's prose: `completed` when the exchange produced final ratings the seat can act on, whether the gate passed or failed; `needs-decision` with a reason when the two-round cap left the gate failed on a disagreement the evaluating agent could not settle from codebase context; `failed` when Codex could not review the input; `skipped` with a reason when Codex could not run at all. The `criterion-adequacy` judgment states whether the plan's tasks and close criteria adequately cover the anchor, in the evaluating agent's words. `result_ids` is always empty: this reviewer runs no commands and cites no execution evidence.
+Normalize the outcome. This is an authored decision, not a parse of Codex's prose: `completed` when the exchange produced final ratings the seat can act on, whether the gate passed or failed; `needs-decision` with a reason when the two-round cap left the gate failed on a disagreement the evaluating agent could not settle from codebase context; `failed` when Codex returned output that is not a review of the input. An attempt with no evaluator output at all takes the unavailable path below instead of this one. The `criterion-adequacy` judgment states whether the plan's tasks and close criteria adequately cover the anchor, in the evaluating agent's words. `result_ids` is always empty: this reviewer runs no commands and cites no execution evidence.
 
 **Recipe inputs:** LEDGER_FILE, OUTCOME, REASON, JUDGMENT, RATIONALE, DISPOSITIONS_FILE.
 <!-- spec-plan-review-recipe: compose-dispositions -->
@@ -440,6 +447,22 @@ args=("$SLUG" --ceremony spec-post-plan --advisor codex-plan-review --attempt-id
       --outcome "$OUTCOME" --verdict "$VERDICT" --evidence-manifest "$EVIDENCE_FILE" --json)
 if [[ -n "$REASON" ]]; then args+=(--reason "$REASON"); fi
 lore spec outcome "${args[@]}"
+```
+
+**Evaluator unavailable.** When `codex-submit` fails before any response — the CLI is missing, refuses to start, or returns nothing — there is no evaluator output to seal and the sealed path does not apply. File the attempt as `skipped` with a reason through the unbound schema-1 manifest, keeping every evidence field present and null where no evidence exists, so the registered evaluator's failure is a record rather than a silence. `MODEL` may be empty when resolution itself failed.
+
+**Recipe inputs:** SCRIPTS_DIR, SLUG, ATTEMPT_ID, MODEL, PLAN_FILE, REASON, EVIDENCE_FILE.
+<!-- spec-plan-review-recipe: file-unavailable -->
+```bash
+source "$SCRIPTS_DIR/lib.sh"
+version=$(bash "$SCRIPTS_DIR/template-version.sh" "$LORE_REPO_DIR/skills/codex-plan-review/SKILL.md")
+plan_sha=$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$PLAN_FILE")
+jq -n --arg version "$version" --arg model "$MODEL" --arg plan "$plan_sha" \
+  '{schema_version: 1, evaluator_locator: "skills/codex-plan-review/SKILL.md", evaluator_template_version: $version,
+    framework: "codex", model: (if $model == "" then null else $model end), final_round: null,
+    disposition_ledger_sha256: null, source_plan_sha256: $plan}' > "$EVIDENCE_FILE"
+lore spec outcome "$SLUG" --ceremony spec-post-plan --advisor codex-plan-review --attempt-id "$ATTEMPT_ID" \
+  --outcome skipped --verdict UNAVAILABLE --evidence-manifest "$EVIDENCE_FILE" --reason "$REASON" --json
 ```
 
 ## Step 8: Final report
