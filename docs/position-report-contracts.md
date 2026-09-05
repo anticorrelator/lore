@@ -60,15 +60,26 @@ Template-version: <12-hex version of the compiled brief>
 
 Findings are copied verbatim into the plan's Investigations section by the spec collector. Assertions become Tier 2 rows through `evidence-append.sh`; there is no assertion count on the compiled path, and an assertion without a falsifier is an observation. Worker leads route through `write-execution-log.sh` to the off-scale writer. Unknowns are read by whoever plans next.
 
-The typed collector (`scripts/task-completed-capture-check.sh`) reads the landed report at the destination the manifest assigned and applies these constraints before the spec collector accepts anything; each one has refused real reports:
+The typed collector (`scripts/task-completed-capture-check.sh`) reads the landed report at the destination the manifest assigned and applies the checks below before the spec collector accepts anything. Two lists follow, and the distinction matters: the first is what the collector refuses with exit 2, read from the script; the second is what the protocol requires of an author and the collector does not check, so it is caught by the seat's read or not at all.
 
-- Every label above except Narrative is present and non-empty. `None` is a complete value for Assertions, Observations and Worker leads.
-- **Key files** is parsed as YAML and must be a list of existing **absolute** file paths (one path may be given as a plain string). A `path:line` suffix makes the path not exist and is refused; put line references in Findings or Implications. `None` is accepted when the question touched no file.
-- Each grounded assertion is a mapping with non-empty string `claim`, `file`, `line_range`, `exact_snippet`, `normalized_snippet_hash` and `falsifier`, and a `significance` that is exactly `low`, `medium` or `high`. Prose in `significance` is refused; explanatory weight belongs in `implications` or `why_this_work_needs_it`. An entry with no `falsifier` is an observation and is not matched to a row.
-- Each grounded assertion must match exactly one canonical row in `task-claims.jsonl` for this attempt: `producer_role: researcher`; `task_id` equal to the bound task when the manifest binds one, otherwise `report_id` and `dispatch_attempt_id` equal to the manifest's; the same `claim`, `line_range`, `exact_snippet`, `normalized_snippet_hash` and `falsifier`, and a `file` that resolves to the same path under the execution root. The row's `captured_at_sha` must be a commit in that root, and `exact_snippet` must occur within `line_range` of that file at that commit — a snippet from an uncommitted edit, or a `file` outside the root, is refused as a source-anchor mismatch. An assertion carrying a `claim_id` must name that row exactly.
-- Observations must be present; `None` is complete, and structured entries follow the Observations shape of the worker report. The collector does not field-check an investigator's observations; the seven-field YAML check applies to worker reports.
-- An optional `**Tier 2 evidence:**` section is read as a YAML list of claim ids (or `none`), each resolving to one canonical row under the same attempt test; an optional `**Artifacts:**` section is checked as for a worker report.
-- The optional restated headers (`Report-id`, `Work-item`, `Packet-id`, `Revision-id`, `Dispatch-attempt-id`, `Producer-role: investigator`) must equal the assigned values when present; the three required headers are `Template-version`, `Position-dispatch-manifest` and `Position-dispatch-sha256`.
+Refused by the collector:
+
+- A missing or empty section for any of Question, Findings, Key files, Implications, Assertions, Observations, Worker leads, Unknowns. `None` is a complete value for Assertions, Observations and Worker leads; Narrative is optional.
+- The three required headers absent or not equal to the assigned values: `Template-version`, `Position-dispatch-manifest`, `Position-dispatch-sha256`. The optional restated headers (`Report-id`, `Work-item`, `Packet-id`, `Revision-id`, `Dispatch-attempt-id`, `Producer-role: investigator`) refuse only when present and unequal.
+- **Key files** that is not `None` and not a YAML list (or one plain string) of existing **absolute** file paths. A `path:line` suffix makes the path not exist and is refused; a path relative to the checkout is refused. Put line references in Findings or Implications.
+- A grounded assertion (one carrying a `falsifier`) missing a non-empty string `claim`, `file`, `line_range`, `exact_snippet`, `normalized_snippet_hash` or `falsifier`, or whose `significance` is not exactly `low`, `medium` or `high`. Prose in `significance` is refused; explanatory weight belongs in `implications` or `why_this_work_needs_it`.
+- A grounded assertion that does not match exactly one canonical row in `task-claims.jsonl` under this attempt's test — `task_id` equal to the bound task when the manifest binds one, otherwise `report_id` and `dispatch_attempt_id` equal to the manifest's — with the same `claim`, `line_range`, `exact_snippet`, `normalized_snippet_hash` and `falsifier`, a `file` resolving to the same path under the execution root, and, when the assertion carries a `claim_id`, that id.
+- A matched row whose `producer_role` is not `researcher`, that fails `validate-tier2.sh`, whose `captured_at_sha` is not a commit in the execution root, or whose `exact_snippet` is not found within `line_range` of its `file` at that commit. A snippet from an uncommitted edit, or a `file` outside the root, is refused as a source-anchor mismatch.
+- An assertion without a `falsifier` whose `claim_id` names no unique canonical row, or whose `file` does not exist under the execution root. Such an entry is otherwise an observation: no row is required for it, and when its `claim_id` does resolve, that row is validated under the same attempt test and counted with the others.
+- A `**Tier 2 evidence:**` section, when present, that is not `none` or a YAML list of distinct non-empty claim ids each resolving to one canonical row under the attempt test. An `**Artifacts:**` section, when present, is checked as for a worker report.
+- A manifest that binds `task_id` without `revision_id` or the reverse, or that carries no packet id or pointer.
+
+Required by the protocol and not checked by the collector:
+
+- Observations with content. The collector requires the section present and non-empty and does not parse it, so a malformed or syntactically invalid body passes. Write `None`, or entries in the worker report's Observations shape.
+- Agreement between an assertion's `significance` and its row's. Each side is checked as an enum (the row through `validate-tier2.sh`); the two values are not compared.
+- A pre-plan row's `task_id` equal to the investigation id. Pre-plan rows are bound by `report_id` and `dispatch_attempt_id`, and the task label is not compared; Step 3 of the spec skill writes the investigation id there.
+- Key files that are the files the findings rest on. Existence and absoluteness are checked; relevance is not.
 
 A report that passes typed completion, in outline:
 
@@ -95,7 +106,7 @@ Position-dispatch-sha256: <64 lowercase hex>
 **Unknowns:** Whether native transport returns the final message reliably.
 ```
 
-The same report fails typed completion when `Key files` reads `/checkout/scripts/coordinate-report.sh:52`, when `significance` reads `medium — the retry contract depends on it`, when `Key files` uses a path relative to the checkout, or when the canonical row for the assertion was appended under `producer_role: spec-lead` or with a `task_id` other than the investigation id the pre-plan row must carry.
+The same report fails typed completion when `Key files` reads `/checkout/scripts/coordinate-report.sh:52`, when `significance` reads `medium — the retry contract depends on it`, when `Key files` uses a path relative to the checkout, when the canonical row for the assertion was appended under `producer_role: spec-lead`, or when that row's `report_id` or `dispatch_attempt_id` differ from the manifest's. It passes when the row's `significance` is `low` while the assertion says `medium`, and when the pre-plan row's `task_id` is not the investigation id; both are authoring defects for the seat's read, not the collector's.
 
 ## Designer outputs
 

@@ -31,7 +31,15 @@ The verbs prepare evidence and persist decisions; they do not make them. Keep th
 
 Every runnable command in this file is an exact recipe: its inputs are declared on the line before it as environment variables, and each recipe runs on its own in a fresh shell, so carry values between steps as variables you set from earlier output. A test executes these recipes against isolated stores through this checkout's writers, which is why a body cannot carry placeholders. Shapes shown in `text`, `json`, `yaml` or `markdown` fences are data for reading, not commands. Reusable position contracts live in `docs/position-report-contracts.md` (report shapes, writers, the dispatch reference on Tier 2 rows) and are read at the point of use rather than restated here.
 
-A packet returned by `lore packet build` is a candidate set, not a delivery. Before any packet is handed to another position — an investigator, a designer, a commissioned session — the seat reads it, drops entries the receiver should not carry, adds what the receiver needs and retrieval missed, and records kept, dropped and added with one reason each. Where the checkout has a `lore packet synthesize` verb, use it; until it lands, the `packet-synthesis` recipe below writes the same record as `packet-synthesis.md` beside the brief, together with a `packet-delivery.md` carrying only the kept entries and the added context, and the brief tells the receiver to read those two files first. The same judgment applies to the discovered norm manifest: discovery stays complete and is retained as evidence, the Knowledge context a task or position receives carries only what it needs, and every entry set aside is listed with its reason. A packet built and handed on without this step is search pushed down to the receiver.
+A packet returned by `lore packet build` is a candidate set, not a delivery: one retrieval pass at a declared scale, nobody's judgment yet. Before any packet is handed to a position — an investigator, a designer, a commissioned session, and the compiled brief the seat itself reads in short mode — the seat reads it, drops the entries the receiver should not carry, adds what the receiver needs and retrieval missed, and records that judgment through the synthesize verb with one reason per dropped or added entry. The verb appends a superseding row under the same packet id at `delivery_stage: synthesized`: it removes each dropped entry's recorded block from the content by exact bytes, renders the added entries under `### Added by synthesis`, closes the content with a `## Left out by synthesis` list (title, path, reason) when anything was dropped, and recomputes the per-scale counts. `lore packet show` then returns that latest row, so the receiver reads what was handed on and can overrule a set-aside entry by re-pulling it when the reason does not hold against the code; the candidate row stays in the file as history. Only an `assembled` row can be synthesized, so a row already handed on is re-pulled, not repaired. Dispatch preparation (`position-bind`) refuses to prepare against a packet whose latest row is not `synthesized` unless the builder recorded a `synthesis_waiver`; `spec open` records that waiver only on the investigator packets it builds itself in its default-bindings branch, where assembly and dispatch happen in one verb, and a packet this workflow builds and supplies through its own bindings is synthesized first. The seat packet the seat reads for itself is not handed on and needs no synthesis. `SYNTHESIS_FILE` is JSON you write — `{"dropped": [{"path": "<store-relative entry path>", "reason": "..."}], "added": [{"path": "...", "reason": "..."}]}`, dropped paths from the delivered set and added paths naming knowledge entries in the store — and two empty lists are a judgment too, recorded as one:
+
+**Recipe inputs:** PACKET_ID, SYNTHESIS_FILE.
+<!-- spec-recipe: packet-synthesis -->
+```bash
+lore packet synthesize "$PACKET_ID" --by spec-lead --spec "$SYNTHESIS_FILE"
+```
+
+The same judgment applies to the discovered norm manifest: discovery stays complete and is retained as evidence, the Knowledge context a task or position receives carries only what it needs, and every entry set aside is listed with its reason (Step 5b item 2 names the record). A packet built and handed on without this step is search pushed down to the receiver.
 
 ---
 
@@ -63,7 +71,7 @@ A packet returned by `lore packet build` is a candidate set, not a delivery. Bef
    <!-- spec-recipe: lore-defaults -->
    `lore defaults`
 
-3. **Bind the seat.** Commissioned entry arrives with a packet id and pointer from the coordinator, and with the synthesis record the coordinator delivered ahead of it. Read the synthesis first, then render the packet and check it against the move you were given; its entries are candidates to verify against the code, not receipt and not acceptance:
+3. **Bind the seat.** Commissioned entry arrives with a packet id and pointer from the coordinator, who synthesized the packet before handing it on. Render it and check it against the move you were given; its entries are candidates to verify against the code, not receipt and not acceptance, and the `## Left out by synthesis` list at its end, when present, names what the coordinator set aside and why. A dispatch prepared before the verb existed carries that record as `packet-synthesis.md` beside its brief instead; read it the same way:
 
    **Recipe inputs:** PACKET_ID.
    <!-- spec-recipe: seat-packet-show -->
@@ -163,7 +171,7 @@ The seat is the investigator here. It reads the compiled investigator brief boun
 
    Candidate enumeration is hands work; strict/permissive applicability is head work. Do not ask the verb to collapse that boundary. The complete surfaced set is the audit manifest Step 5 carries into the plan; what each later receiver gets is the applicability judgment described under Recipes and packets.
 
-5. **Bind the reading as an investigation.** Name it with an investigation id of your choosing (one id for the whole reading is the ordinary case; several when the reading has separable questions), and give it the question the reading answers. Build its packet, compile the investigator for the active framework, bind the attempt against the checkout you are reading, and read the frozen payload — that read is the brief you work from:
+5. **Bind the reading as an investigation.** Name it with an investigation id of your choosing (one id for the whole reading is the ordinary case; several when the reading has separable questions), and give it the question the reading answers. Build its packet and synthesize it (packet-synthesis recipe) — the brief is handed to a position even when the seat is the one reading it, and the binder refuses to prepare against a candidate set — then compile the investigator for the active framework, bind the attempt against the checkout you are reading, and read the frozen payload — that read is the brief you work from:
 
    **Recipe inputs:** SLUG, INVESTIGATION_ID, QUERY, SCALE_SET.
    <!-- spec-recipe: investigator-packet -->
@@ -230,13 +238,14 @@ digest = ("the two environment variables LORE_POSITION_DISPATCH_MANIFEST and LOR
           else "the sha256 you compute over the manifest file the envelope names")
 who = "The spec seat for " + E["WORK_TITLE"] + (" reads this brief itself" if route == "inline" else " dispatched you on the " + route + " route")
 note = [f"## From the spec seat\n\n{who} for work item {slug}. The identity envelope above is the binder's record of this attempt. "
-        "The Packet-id line names a packet built for this move and already synthesized for it; lore packet show renders it, and its entries are candidates to check against the code. "
+        "The Packet-id line names a packet built for this move and synthesized before this bind; lore packet show renders the synthesized row, its entries are candidates to check against the code, and when entries were set aside the Left out by synthesis list at its end names each with its reason — if a reason does not hold for what you find in the code, re-pull the entry with lore search. "
         f"Work in position_dispatch.bindings.execution_root and allocate no other tree. {E['PLACEMENT_NOTE']}"]
 if b["mode"] == "planning":
     a = json.loads(b["assignment"])
     note.append("You are the designer in planning mode. The assignment (position_dispatch.bindings.assignment, JSON) names the stage (abstract or concrete), the anchor the plan must serve, "
                 "the strawman when one was seeded, the landed investigation reports to read (report_paths), the applicable norm manifest (norms_file), the plan destination, and for the concrete stage "
-                "the accepted revision and the design-gate dispositions. Read the reports at their paths; a packet does not carry them. Write into the destination plan only the sections your stage owns: "
+                "the accepted revision (accepted_revision), the immutable plan it names (accepted_plan_path, with accepted_plan_sha256) and the design-gate dispositions copied in as data (dispositions, with dispositions_sha256). "
+                "Read the reports at their paths and the accepted plan at its path; a packet carries neither, and the destination plan.md is what you write, not the accepted input you read. Write into the destination plan only the sections your stage owns: "
                 "Goal, Narrative, Design Decisions and Architecture Diagram for abstract; Intent Anchor, Tasks with Verification and sizing rationale, Knowledge context and Retrieval directives for concrete. "
                 f"Publish through lore plan revise {slug} --author-role designer --reason naming what changed --json and hold the returned revision_id. "
                 f"Tier 2 rows you append go through evidence-append.sh --work-item {slug} with producer_role spec-lead and the position_dispatch pair copied from your envelope. "
@@ -332,7 +341,7 @@ Path(E["SUFFIX_FILE"]).write_text("\n\n".join(note) + "\n")
 
    A per-investigation `dispatch` object has exactly `framework`, `route`, `model`, and `bindings`. `framework` is `codex`, `claude-code`, or `opencode`; `route` is `native` or `session`; `model` is the already-resolved native binding for that framework, checked through the same route resolver `open` uses, so a model string that belongs to a different framework refuses instead of being reinterpreted. `bindings` is the complete binder envelope: its `assignment` encodes exactly this investigation's `investigation_id`, `question`, and `complexity`; its `work_item` is this slug; its `report_path` is the coordinate-report destination `worker-reports/<report_id>.md`; its `packet_id` and `packet_pointer` name a packet that already exists for this work item with the investigator as recipient (the investigator-packet recipe builds one before a plan exists), because the binder checks supplied bindings against the canonical packet rather than building one for them. `execution_root` has two admitted shapes: a path names a fixed placement that `open` publishes against and the host later requires; on `"route": "session"` it may be `null` with a nonempty `absence_reasons.execution_root`, the ordinary case where the session host allocates the worktree, and `open` then admits the preparation and leaves publication to the host.
 
-   **The default route is an ordinary session with a pending root.** Without a `dispatch` object, `open` supplies its own default — the researcher role's native binding for the active framework, a native route, and freshly minted identities — and that CLI default is unchanged. This workflow declares the session explicitly for every investigation, because a host-allocated worktree is the placement every framework supports and the payload then freezes against the real directory rather than the seat's. Native remains available: declare `"route": "native"` (or omit `dispatch`) for an investigation when the readiness check in item 10 is expected to pass, and let the check decide. Resolve the researcher model for the target framework, build one investigator packet per investigation and synthesize it, write one bindings file per investigation with an empty `EXECUTION_ROOT`, then compose the declared document from your draft (the same JSON as above without `dispatch` objects) and the bindings directory, where each file is named `<investigation_id>.json`:
+   **The default route is an ordinary session with a pending root.** Without a `dispatch` object, `open` supplies its own default — the researcher role's native binding for the active framework, a native route, and freshly minted identities — and that CLI default is unchanged. This workflow declares the session explicitly for every investigation, because a host-allocated worktree is the placement every framework supports and the payload then freezes against the real directory rather than the seat's. Native remains available: declare `"route": "native"` (or omit `dispatch`) for an investigation when the readiness check in item 10 is expected to pass, and let the check decide. Resolve the researcher model for the target framework, build one investigator packet per investigation (investigator-packet recipe) and synthesize it (packet-synthesis recipe — `open` checks supplied bindings against the canonical packet as a preparation and refuses a candidate set; the waiver it records covers only the packets it builds itself), write one bindings file per investigation with an empty `EXECUTION_ROOT`, then compose the declared document from your draft (the same JSON as above without `dispatch` objects) and the bindings directory, where each file is named `<investigation_id>.json`:
 
    **Recipe inputs:** SCRIPTS_DIR, ROLE, CEREMONY.
    <!-- spec-recipe: resolve-role-model -->
@@ -517,7 +526,7 @@ sys.exit("report answers another input; re-dispatch under fresh ids. mismatched:
      <!-- spec-recipe: snippet-hash -->
      `python3 "$SCRIPTS_DIR/snippet_normalize.py" --hash <<<"$SNIPPET"`
 
-   - Producer vocabulary at this writer is legacy: `producer_role` is `researcher` for every compiled investigator's assertion — the dispatched investigator and the seat reading inline in Step 2a alike — because the validator's accepted set was not widened when the position was named and the completion check matches assertions to rows under that role. `template_version` is `$PRODUCER_TEMPLATE_VERSION` for that attempt. Rows the seat authors in its own voice at synthesis (Step 5) carry `spec-lead`; the two never mix on one row. `task_id` follows the attempt's bindings, not the prose around them: before a plan exists the row has no plan task, so `task_id` carries the investigation id, and the row also carries `report_id` and `dispatch_attempt_id` from the bindings, which is what lets the completion check match a grounded assertion to this attempt rather than to an identical assertion from an earlier one. When bindings bind `task_id` (together with `revision_id`; the check requires both bound or both absent), the row carries that task id. The row also carries the attempt's manifest pair, as one optional object copied from the reference you hold and never from the report: `"position_dispatch": {"manifest_path": <retained manifest_path>, "manifest_sha256": <retained manifest_sha256>}`. The writer resolves it against the immutable manifest and checks that the manifest binds this work item and the row's `report_id` and `dispatch_attempt_id`; a pair that does not resolve stores the row with unknown attribution and its reason, and a row without the pair is a legacy row. The shape and the copy rule are in `docs/position-report-contracts.md` § The dispatch reference on Tier 2 rows.
+   - Producer vocabulary at this writer is legacy: `producer_role` is `researcher` for every compiled investigator's assertion — the dispatched investigator and the seat reading inline in Step 2a alike — because the validator's accepted set was not widened when the position was named and the completion check matches assertions to rows under that role. `template_version` is `$PRODUCER_TEMPLATE_VERSION` for that attempt. Rows the seat authors in its own voice at synthesis (Step 5) carry `spec-lead`; the two never mix on one row. `task_id` follows the attempt's bindings, not the prose around them: before a plan exists the row has no plan task, so `task_id` carries the investigation id, and the row also carries `report_id` and `dispatch_attempt_id` from the bindings, which is what lets the completion check match a grounded assertion to this attempt rather than to an identical assertion from an earlier one. The check binds a pre-plan row by those two ids and does not compare its task label; the investigation id there is the protocol's requirement, so a wrong label is an authoring defect the seat's read catches, not the check. When bindings bind `task_id` (together with `revision_id`; the check requires both bound or both absent), the row carries that task id. The row also carries the attempt's manifest pair, as one optional object copied from the reference you hold and never from the report: `"position_dispatch": {"manifest_path": <retained manifest_path>, "manifest_sha256": <retained manifest_sha256>}`. The writer resolves it against the immutable manifest and checks that the manifest binds this work item and the row's `report_id` and `dispatch_attempt_id`; a pair that does not resolve stores the row with unknown attribution and its reason, and a row without the pair is a legacy row. The shape and the copy rule are in `docs/position-report-contracts.md` § The dispatch reference on Tier 2 rows.
    - An investigator may have appended some of its own assertions under the same `researcher` vocabulary and pair; each such assertion lists its `claim_id` in the report. Append only the assertions that carry no `claim_id`, so no canonical row is written twice for one claim.
    - Append the row via the sole writer:
 
@@ -542,7 +551,7 @@ print(json.dumps(completion))
 PY
 ```
 
-   The completion input is the directive's `payload.completion_input`, or the `completion_input` that `session-reference` returned, or the bound reference with the task explicitly absent for an inline attempt. Either way it was computed from the published bundle, and no member of it came from the report. Exit 0 means the landed report carries the assigned identity headers, every label the investigator contract requires, Key files that are existing absolute paths, and grounded assertions that each match one canonical row for this attempt whose snippet is found at the named commit and line range under the execution root. Exit 2 names on stderr what did not hold; the constraints that most often fail are listed in `docs/position-report-contracts.md` § Investigator report. The check reads the report at the destination the manifest assigned, which is why landing comes first. It is invoked explicitly on every spec route because no spec route completes through a native `TaskCompleted` hook: a Claude `Agent` subagent returns rather than completing a team task, Codex and OpenCode have no blocking hook, a session ends on its own lifecycle, and the inline seat is not a hook. A pass establishes checkable references. Whether the findings answer the question well enough to synthesize from stays the seat's judgment, and nothing here accepts the investigation on the seat's behalf.
+   The completion input is the directive's `payload.completion_input`, or the `completion_input` that `session-reference` returned, or the bound reference with the task explicitly absent for an inline attempt. Either way it was computed from the published bundle, and no member of it came from the report. Exit 0 means the landed report carries the assigned identity headers, every label the investigator contract requires, Key files that are existing absolute paths, and grounded assertions that each match one canonical row for this attempt whose snippet is found at the named commit and line range under the execution root. It does not compare an assertion's `significance` with its row's, does not check a pre-plan row's task label, and does not parse Observations beyond requiring the section non-empty; those stay authoring requirements the seat reads for. Exit 2 names on stderr what did not hold; `docs/position-report-contracts.md` § Investigator report keeps the refused list and the authoring list apart. The check reads the report at the destination the manifest assigned, which is why landing comes first. It is invoked explicitly on every spec route because no spec route completes through a native `TaskCompleted` hook: a Claude `Agent` subagent returns rather than completing a team task, Codex and OpenCode have no blocking hook, a session ends on its own lifecycle, and the inline seat is not a hook. A pass establishes checkable references. Whether the findings answer the question well enough to synthesize from stays the seat's judgment, and nothing here accepts the investigation on the seat's behalf.
 
 7. **Route the rest of the report to its readers.**
    - `**Worker leads:**` reaches the off-scale writer through the execution log. Append one entry per report whose body carries the `Worker leads:` line and its bullets verbatim, stamped with the producer's version as `--template-version`, your own as `--filing-template-version`, and the attempt's manifest pair from the reference you hold; `write-execution-log.sh` resolves the pair, writes `Producer-attribution:` beside the two `Position-dispatch-*` lines, and forwards a non-`None` payload to `off-scale-append.sh` under the `researcher` producer role and the producer's resolved version. The two pair flags travel together or not at all (an empty `MANIFEST_PATH` drops both, the legacy no-pair path), and a reference that does not resolve reads `unknown` rather than borrowing any template's version. `None` produces no sidecar row and is the ordinary case:
@@ -580,8 +589,6 @@ PY
     if [[ -n "${LORE_SESSION_INSTANCE:-}" && -n "${LORE_SESSION_SLUG:-}" && -n "${LORE_SESSION_TYPE:-}" ]]; then
       bash "$SCRIPTS_DIR/session-step.sh" --step-id "$STEP_ID" --step-label "$STEP_LABEL" \
         || echo "[spec] Warning: $STEP_ID not journaled; the persisted artifacts remain authoritative." >&2
-    else
-      echo "[spec] Unhosted run; $STEP_ID not journaled."
     fi
     ```
 
@@ -630,12 +637,12 @@ This step is **read-only** — do not modify `surfaced_concerns.jsonl`.
 
 Produce the conceptual frame first before committing to a task breakdown. The abstract design is the planning designer's work: in short mode the seat compiles the designer brief, binds a planning attempt and reads the frozen payload itself; in full mode it dispatches the same position. Either way the designer's output is the abstract plan published as a revision, and the seat reads that revision at the design gate.
 
-1. **Assign the design.** The assignment names everything a designer cannot find in a packet: the stage (`abstract`), the anchor verbatim, the seeded strawman when one exists, the landed investigation reports by path, the applicable norm manifest, and the destination plan. It is refused when a report path does not exist, and the concrete stage (Step 5b) additionally requires the accepted revision and the gate dispositions:
+1. **Assign the design.** The assignment names everything a designer cannot find in a packet: the stage (`abstract`), the anchor verbatim, the seeded strawman when one exists, the landed investigation reports by path, the applicable norm manifest, and the destination plan. It is refused when a report path does not exist. The concrete stage (Step 5b) additionally requires the accepted revision and the file holding the gate's dispositions, and the recipe copies the accepted inputs into the assignment rather than pointing at them: the exact path and sha256 of the immutable plan under `revisions/<accepted>/plan.md`, and the dispositions' parsed contents with the sha256 of the bytes they were read from. The bind hashes the assignment into the payload, so a later edit to the dispositions file changes nothing the designer reads; a pointer alone would not freeze it:
 
 **Recipe inputs:** KNOWLEDGE_DIR, SLUG, STAGE, ANCHOR, STRAWMAN_FILE, REPORT_PATHS, NORMS_FILE, ACCEPTED_REVISION, DISPOSITIONS_FILE, ASSIGNMENT_FILE.
 <!-- spec-recipe: designer-assignment -->
 ```python
-import json, os, re, sys
+import hashlib, json, os, re, sys
 from pathlib import Path
 E = os.environ
 item = Path(E["KNOWLEDGE_DIR"]).resolve() / "_work" / E["SLUG"]
@@ -651,67 +658,38 @@ if norms and not Path(norms).is_file():
     sys.exit("norm manifest missing: " + norms)
 strawman = Path(E["STRAWMAN_FILE"]).read_text() if E["STRAWMAN_FILE"] else None
 accepted = E["ACCEPTED_REVISION"] or None
-dispositions = E["DISPOSITIONS_FILE"] or None
-if stage == "abstract" and (accepted or dispositions):
+dispositions_file = E["DISPOSITIONS_FILE"] or None
+if stage == "abstract" and (accepted or dispositions_file):
     sys.exit("the abstract stage precedes the design gate; it takes no accepted revision or dispositions")
+accepted_plan = plan_sha = dispositions = dispositions_sha = None
 if stage == "concrete":
     if not (accepted and re.fullmatch(r"[0-9a-f]{12}", accepted)):
         sys.exit("the concrete stage requires the accepted 12-hex revision id")
-    if not (dispositions and Path(dispositions).is_file()):
-        sys.exit("the concrete stage requires the design-gate dispositions file")
-    if not (item / "revisions" / accepted / "plan.md").is_file():
+    plan_path = item / "revisions" / accepted / "plan.md"
+    if not plan_path.is_file():
         sys.exit("accepted revision is not committed for this item: " + accepted)
+    if not (dispositions_file and Path(dispositions_file).is_file()):
+        sys.exit("the concrete stage requires the design-gate dispositions file")
+    raw = Path(dispositions_file).read_bytes()
+    dispositions = json.loads(raw)
+    dispositions_sha = hashlib.sha256(raw).hexdigest()
+    accepted_plan = str(plan_path)
+    plan_sha = hashlib.sha256(plan_path.read_bytes()).hexdigest()
 assignment = {"position": "designer", "mode": "planning", "stage": stage, "work_item": E["SLUG"],
               "anchor": E["ANCHOR"] or None, "strawman": strawman, "report_paths": reports, "norms_file": norms,
-              "destination": str(item / "plan.md"), "accepted_revision": accepted, "dispositions_file": dispositions}
+              "destination": str(item / "plan.md"), "accepted_revision": accepted,
+              "accepted_plan_path": accepted_plan, "accepted_plan_sha256": plan_sha,
+              "dispositions": dispositions, "dispositions_sha256": dispositions_sha}
 Path(E["ASSIGNMENT_FILE"]).write_text(json.dumps(assignment, indent=2, ensure_ascii=False) + "\n")
-print(json.dumps({"stage": stage, "reports": len(reports), "accepted_revision": accepted}))
+print(json.dumps({"stage": stage, "reports": len(reports), "accepted_revision": accepted,
+                  "accepted_plan_path": accepted_plan, "dispositions_sha256": dispositions_sha}))
 ```
 
-   `NORMS_FILE` is the retained discovery manifest for this run — the complete permissive set from Step 2 with your applicability judgment beside each entry (`norm-context-dispositions.json` in the item, or the full `**Related preferences/conventions:**` block once it exists). Build the designer's packet at the altitude a design fork sits at (abstract or architecture, usually), synthesize it as described under Recipes and packets, then bind the planning attempt with mode `planning`. The binder's revision field stays absent with its reason — the packet writer binds revisions only to plan tasks, and an abstract plan has none — so the assignment is where the accepted revision travels on the concrete stage:
+   `NORMS_FILE` is the retained discovery manifest for this run — the complete permissive set from Step 2 with your applicability judgment beside each entry (`norm-context-dispositions.json` in the item, or the full `**Related preferences/conventions:**` block once it exists). The dispositions the concrete stage copies in are the gate's record as it was decided: the sealed review's `dispositions.json` when a review was sealed, or the seat's recorded acceptance when it accepted in notes. Build the designer's packet at the altitude a design fork sits at (abstract or architecture, usually), synthesize it with the packet-synthesis recipe before anything binds against it, then bind the planning attempt with mode `planning`. The binder's revision field stays absent with its reason — the packet writer binds revisions only to plan tasks, and an abstract plan has none — so the assignment is where the accepted revision, its immutable plan path and the dispositions travel on the concrete stage, and the envelope's null task and revision keep their stated reasons:
 
    **Recipe inputs:** SLUG, TOPIC, SCALE_SET.
    <!-- spec-recipe: designer-packet -->
    `lore packet build --work-item "$SLUG" --role designer --caller spec-lead --topic "$TOPIC" --scale-set "$SCALE_SET"`
-
-**Recipe inputs:** KNOWLEDGE_DIR, PACKET_ID, DISPOSITIONS_FILE, BRIEF_DIR.
-<!-- spec-recipe: packet-synthesis -->
-```python
-import json, os, subprocess, sys
-from pathlib import Path
-E = os.environ
-packet = json.loads(subprocess.run(["lore", "packet", "show", E["PACKET_ID"], "--json"], capture_output=True, check=True).stdout)
-entries = {e["path"] for e in packet.get("delivered_entries") or []}
-d = json.loads(Path(E["DISPOSITIONS_FILE"]).read_bytes())
-rows = []
-for verdict in ("kept", "dropped", "added"):
-    for row in d.get(verdict, []):
-        if not (isinstance(row, dict) and row.get("entry") and str(row.get("reason", "")).strip()):
-            sys.exit(f"every {verdict} row needs an entry and a reason")
-        rows.append((row["entry"], verdict, row["reason"]))
-decided = {entry for entry, verdict, _ in rows if verdict != "added"}
-undecided = sorted(entries - decided)
-unknown = sorted(decided - entries)
-if undecided or unknown:
-    sys.exit("synthesis must disposition every packet entry exactly once; undecided: " + ", ".join(undecided) + "; not in packet: " + ", ".join(unknown))
-if len(decided) != sum(1 for _, v, _ in rows if v != "added"):
-    sys.exit("an entry appears under both kept and dropped")
-brief = Path(E["BRIEF_DIR"]); brief.mkdir(parents=True, exist_ok=True)
-table = "\n".join(f"| {e} | {v} | {r} |" for e, v, r in rows)
-(brief / "packet-synthesis.md").write_text(f"# Packet synthesis\n\nPacket: {E['PACKET_ID']}; recipient {packet.get('recipient_role')}. Read before packet-delivery.md. The immutable packet is the candidate audit record.\n\n| Entry | Decision | Reason |\n|---|---|---|\n{table}\n")
-kdir = Path(E["KNOWLEDGE_DIR"]).resolve()
-parts = ["# Selected knowledge\n\nOnly kept entries and added context are handed on; set-aside entries are not instructions.\n"]
-for e, v, r in rows:
-    if v == "kept":
-        parts.append(f"## {e}\n\n{(kdir / e).read_text()}\n\nApplicability: {r}\n")
-    elif v == "added":
-        parts.append(f"## Added: {e}\n\n{r}\n")
-(brief / "packet-delivery.md").write_text("\n".join(parts))
-print(json.dumps({"packet_id": E["PACKET_ID"], "kept": sum(v == "kept" for _, v, _ in rows), "dropped": sum(v == "dropped" for _, v, _ in rows),
-                  "added": sum(v == "added" for _, v, _ in rows), "synthesis": str(brief / "packet-synthesis.md"), "delivery": str(brief / "packet-delivery.md")}))
-```
-
-   The dispositions file is your judgment in data form: `{"kept": [{"entry": "<path>", "reason": "..."}], "dropped": [...], "added": [{"entry": "<label or path>", "reason": "<the context itself or where it lives>"}]}`. The receiver's brief says to read `packet-synthesis.md` first, then `packet-delivery.md`, and not to reload set-aside entries on its own initiative.
 
 **Recipe inputs:** SCRIPTS_DIR, KNOWLEDGE_DIR, SLUG, PACKET_ID, ASSIGNMENT_FILE, REPORT_ID, EXECUTION_ROOT, BINDINGS_FILE.
 <!-- spec-recipe: designer-bindings -->
@@ -847,7 +825,7 @@ PY
 
 Apply this contract after every terminal evaluator attempt in Steps 5a and 5.5. The evaluator supplies evidence; the seat decides the normalized protocol outcome. Never parse evaluator prose into a disposition. The two registered ceremonies stay distinct: an attempt names `spec-design` or `spec-post-plan`, and a review prepared under one ceremony never files under the other. Filing an outcome confers no authority the protocol did not already grant: acceptance, checkoff, and close keep their existing owners, and no review outcome gates dispatch on its own.
 
-**Who holds the gate.** The seat-holder reads a gate and records its acceptance. Standalone, that is the spec lead. Commissioned, it is the coordinator: the spec lead prepares the review input, runs every registered evaluator, and then posts one note naming the revision and the prepared attempt and waits — it does not seal that gate's review, and it does not treat its own read as acceptance. The coordinator reads the revision whole and either records acceptance in `notes.md` or authors and seals the review itself. Evaluator evidence and the seat's acceptance are two records; the second is never inferred from the first.
+**Who holds the gate.** The seat-holder reads a gate and records its acceptance. Standalone, that is the spec lead. Commissioned, it is the coordinator: the spec lead prepares the review input, runs every registered evaluator, and then posts one note naming the revision and the prepared attempt and waits — it does not seal that gate's review, and it does not treat its own read as acceptance. The coordinator reads the revision whole and either records acceptance in `notes.md` or authors and seals the review itself. Deciding whether a revision published after an evaluator's final round needs a fresh invocation is part of holding the gate and belongs to the same seat-holder. Evaluator evidence and the seat's acceptance are two records; the second is never inferred from the first.
 
 **Recipe inputs:** SLUG, CEREMONY, REVISION_ID, ATTEMPT_ID.
 <!-- spec-recipe: awaiting-note -->
@@ -984,13 +962,13 @@ This evaluates the abstract plan. The review skill runs its rounds, applies the 
 
 An empty array means the bound seat-holder reads the whole abstract revision as the evaluator: standalone, the spec lead prepares, authors, seals (seat-evaluator-manifest and review-seal recipes) and files (spec-outcome recipe with `EVALUATOR=spec-lead`); commissioned, the spec lead prepares the attempt and posts the awaiting note, and the coordinator reads and records.
 
-After each evaluator reaches a terminal attempt, make the outcome judgment and file it under `--ceremony spec-design` using the ceremony outcome filing contract. A revision round receives a new attempt id; never overwrite the evidence identity of an earlier round. Accepted edits publish a revision (publish-revision recipe) and the affected gate repeats against it with a fresh attempt. An outcome of `needs-decision` is a durable open judgment; the design stage does not advance past it.
+After each evaluator reaches a terminal attempt, make the outcome judgment and file it under `--ceremony spec-design` using the ceremony outcome filing contract. A revision round receives a new attempt id; never overwrite the evidence identity of an earlier round. When the review skill's rounds end with edits applied, the skill seals the attempt it evaluated and publishes the edited plan (publish-revision recipe) as a revision it did not read; it prepares no attempt for that revision and names it in its final report as published after the final round. Whether that post-edit revision needs a fresh evaluator invocation is the seat-holder's decision at the gate, made reading the revision whole: an edit that changed what the review judged gets a fresh invocation under a fresh attempt id, and an edit that only applied what the review already accepted may be accepted by the seat directly, with the acceptance record naming the revision it read. Either way the sealed attempt keeps its identity and the earlier revision is never relabeled as the reviewed one. Commissioned, that decision is the coordinator's like the acceptance itself; the spec lead posts the awaiting note naming both revisions and seals nothing. An outcome of `needs-decision` is a durable open judgment; the design stage does not advance past it.
 
 When every evaluator holds a terminal disposition, the gate decision is recorded, and any accepted revisions are persisted — including the no-evaluator case — a hosted session journals the design milestone with the journal-step recipe, `STEP_ID=spec:design` and `STEP_LABEL="Design accepted"`. One row marks the accepted design state; evaluator attempts and individual revision rounds do not emit. Hold the accepted revision id: the concrete stage binds to it.
 
 ### Step 5b: Synthesize — concrete plan
 
-Draft concrete implementation sections on top of the accepted abstract plan. This is the designer's continuation: the same position, a fresh bound attempt. Author the assignment with `STAGE=concrete`, the accepted revision and the gate's dispositions file (designer-assignment recipe), build and synthesize a fresh designer packet at the concrete altitude (subsystem or implementation), bind fresh (designer-bindings, compile-position, author-wrapper, then bind-attempt or prepare-session and request-session), and read or dispatch as in Step 5. A designer cannot draft approved concrete work before the design gate has happened, which is why the continuation binds to the accepted revision rather than to the head. When the concrete plan is drafted, the designer publishes it through the publish-revision recipe and lands its design record; the seat checks the record's identity and reads the revision.
+Draft concrete implementation sections on top of the accepted abstract plan. This is the designer's continuation: the same position, a fresh bound attempt. Author the assignment with `STAGE=concrete`, the accepted revision and the file holding the gate's dispositions (designer-assignment recipe, which copies the dispositions in as data and names the immutable plan under `revisions/<accepted>/plan.md` with both files' digests, so the bound payload holds the accepted inputs rather than pointers to files that can still change), build a fresh designer packet at the concrete altitude (subsystem or implementation) and synthesize it (designer-packet, packet-synthesis), bind fresh (designer-bindings, compile-position, author-wrapper, then bind-attempt or prepare-session and request-session), and read or dispatch as in Step 5. A designer cannot draft approved concrete work before the design gate has happened, which is why the continuation binds to the accepted revision rather than to the head. When the concrete plan is drafted, the designer publishes it through the publish-revision recipe and lands its design record; the seat checks the record's identity and reads the revision.
 
 0. **Intent anchor** — if the work item has an `intent_anchor` in `_meta.json`, render a `## Intent Anchor` section in `plan.md` immediately after `## Narrative` and before `## Strategy`/`## Context`. Write the anchor body **verbatim** from `_meta.json.intent_anchor` — no quoting, prefix label, or paraphrase. Before decomposing, name the tempting narrower implementation that would appear successful while violating the anchor; ensure the Goal, task constraints, and Verification cover the load-bearing promise or explicitly label the scope delta.
 
@@ -1309,7 +1287,7 @@ Run the ceremony-get recipe with `CEREMONY=spec-post-plan`. Prepare one attempt 
 ```
 /<skill-name> <slug> --prepared <prepared directory> --attempt <attempt-id> --ceremony spec-post-plan --revision <revision-id>
 ```
-Present its output to the user. The post-plan review judges the full Tasks plan: the original anchor, the task DAG, the constraints, and the executable criteria, with its six completeness ratings and the Interface Clarity gate filed by the review skill through its own writers beside the sealed judgment. If the seat accepts changes, revise `plan.md`, publish the revision, repeat the affected review gates, and run a fresh evaluator attempt. After each terminal attempt, make the normalized outcome judgment and file it under `--ceremony spec-post-plan` using the ceremony outcome filing contract; the filing names the review skill and the attempt it sealed. No registered evaluator means the bound seat-holder reads the whole concrete revision, as in Step 5a — standalone, the spec lead seals and files under `spec-lead`; commissioned, the spec lead posts the awaiting note and the coordinator records acceptance or seals.
+Present its output to the user. The post-plan review judges the full Tasks plan: the original anchor, the task DAG, the constraints, and the executable criteria, with its six completeness ratings and the Interface Clarity gate filed by the review skill through its own writers beside the sealed judgment. When the seat accepts changes after the evaluator's final round, revise `plan.md` and publish the revision; as at the design gate, the review skill seals the attempt it evaluated and prepares none for the post-edit revision, and the seat-holder decides whether that revision needs a fresh invocation — a change to what was judged repeats the affected gate under a fresh attempt id, an edit that only applied accepted findings is accepted by the seat naming the revision it read, and a concrete-stage edit that reached the abstract sections repeats the design gate too. After each terminal attempt, make the normalized outcome judgment and file it under `--ceremony spec-post-plan` using the ceremony outcome filing contract; the filing names the review skill and the attempt it sealed. No registered evaluator means the bound seat-holder reads the whole concrete revision, as in Step 5a — standalone, the spec lead seals and files under `spec-lead`; commissioned, the spec lead posts the awaiting note and the coordinator records acceptance or seals.
 
 Do not finalize while a post-plan result still requires a plan edit or human decision. `needs-decision` is durable evidence of that open judgment, not permission to route around it.
 
@@ -1368,7 +1346,7 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 
 ## Commissioned investigation and design on their own
 
-A coordinator may commission an investigation or a design without running this whole skill, and the artifacts are the same ones this skill produces. For an investigation: build and synthesize an investigator packet (investigator-packet, packet-synthesis), compile the investigator (compile-position), write the bindings (investigator-bindings, with an empty `EXECUTION_ROOT` for an ordinary session or the fixed checkout for a placed one), author the wrapper (author-wrapper, `ROUTE=session` or `native`), then prepare-session and request-session, or bind-attempt and native-input; collect exactly as Step 3 does — land-report, session-reference or the held reference, check-identity, append-tier2, typed-completion, log-worker-leads. For a design: designer-assignment with the stage, designer-packet, packet-synthesis, designer-bindings, compile-position, author-wrapper, and the same launch recipes; the designer publishes through publish-revision and lands its design record, and the commissioning seat checks its identity and reads the revision. The gates stay with whoever holds the seat.
+A coordinator may commission an investigation or a design without running this whole skill, and the artifacts are the same ones this skill produces. For an investigation: build and synthesize an investigator packet (investigator-packet, packet-synthesis), compile the investigator (compile-position), write the bindings (investigator-bindings, with an empty `EXECUTION_ROOT` for an ordinary session or the fixed checkout for a placed one), author the wrapper (author-wrapper, `ROUTE=session` or `native`), then prepare-session and request-session, or bind-attempt and native-input; collect exactly as Step 3 does — land-report, session-reference or the held reference, check-identity, append-tier2, typed-completion, log-worker-leads. For a design: designer-assignment with the stage, designer-packet, packet-synthesis, designer-bindings, compile-position, author-wrapper, and the same launch recipes; the designer publishes through publish-revision and lands its design record, and the commissioning seat checks its identity and reads the revision. The gates stay with whoever holds the seat. A commission bound to a plan task — a designer answering for one task's domain, an investigator scoped to one task's premise — carries that task's real `task_id` and `revision_id` in its bindings and in a schema 2 packet built with `--task`, because the binder compares the two; the taskless shape above, with both null and their reasons stated, is for investigation and design that precede or span the plan.
 
 ## Plan.md Template
 
