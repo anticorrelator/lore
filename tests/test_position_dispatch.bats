@@ -1042,6 +1042,11 @@ PY
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
 
+@test "implement compiled envelopes inventory rejects unmarked commands and unexercised or changed recipes" {
+  run python3 "$REPO/tests/helpers/implement_recipes.py" --self-test --root "$CASE_ROOT"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
 @test "ordinary spec sessions bind physical roots and collect independent prepared references" {
   run exercise_binding spec-session
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
