@@ -146,28 +146,65 @@ def build_packet(kdir, row, *, directive=None, assembly=None, role="worker", cal
 
 
 def _canonical(path):
-    return os.path.normpath(str(path)).lstrip("./")
+    """Normalize a store-relative path's permitted aliases (`./`, repeated separators); never rewrite an absolute or parent path."""
+    text = str(path)
+    if text.startswith("./"):
+        text = text[2:]
+    return os.path.normpath(text) if text else text
+
+
+def _valid_store_relative(path):
+    text = str(path)
+    return bool(text) and not Path(text).is_absolute() and ".." not in Path(text).parts
+
+
+def _locate_blocks(content, entries):
+    """Map every delivered entry to the span where assembly rendered it.
+
+    Assembly renders entries in delivery order, so each entry's recorded block is searched for at or
+    after the end of the previous one; that is what tells an entry's own block apart from a literal copy
+    of the same bytes embedded in a neighbour rendered earlier. An entry whose block cannot be placed that
+    way is ambiguous and the caller refuses rather than guessing.
+    """
+    spans, cursor = [], 0
+    for entry in entries:
+        block = entry.get("rendered")
+        if not block:
+            spans.append(None)
+            continue
+        at = content.find(block, cursor)
+        if at < 0:
+            spans.append(None)
+            continue
+        spans.append((at, at + len(block)))
+        cursor = at + len(block)
+    return spans
 
 
 def _drop_blocks(content, entries, dropped_paths):
-    """Remove each dropped entry's recorded rendered block from the candidate content, once, by exact bytes.
+    """Remove each dropped entry's rendered block from the candidate content by its located span; return (content, headings).
 
-    Assembly records the block it rendered for every delivered entry; that block is the entry's identity in
-    the content, so removal cannot cut into a neighbour or stop at a heading inside the entry's own body.
-    An entry whose block was not recorded cannot be dropped honestly and is refused.
+    An entry whose block was not recorded, or cannot be located in delivery order, cannot be dropped honestly and is refused.
     """
-    headings = {}
+    spans = _locate_blocks(content, entries)
+    headings, cuts = {}, []
     for path in dropped_paths:
-        matches = [e for e in entries if _canonical(e.get("path", "")) == _canonical(path)]
-        for entry in matches:
-            block = entry.get("rendered")
-            if not block or block not in content:
-                raise ValueError(f"synthesis: the assembly did not record a rendered block for {path}; "
+        found = False
+        for entry, span in zip(entries, spans):
+            if _canonical(entry.get("path", "")) != path:
+                continue
+            found = True
+            if span is None:
+                raise ValueError(f"synthesis: the assembly did not record a locatable rendered block for {path}; "
                                  "re-pull with `lore packet build` to synthesize with drops")
-            content = content.replace(block, "", 1)
-            first = next((line for line in block.splitlines() if line.strip()), "")
+            cuts.append(span)
+            first = next((line for line in entry["rendered"].splitlines() if line.strip()), "")
             heading = re.match(r"#### (.+?)(?: \[[^\]]*\])? \(from ", first) or re.match(r"- \[\[knowledge:[^#\]]+#(.+?)\]\]", first)
             headings.setdefault(path, heading.group(1) if heading else path)
+        if not found:
+            raise ValueError(f"synthesis: {path} is not in the candidate set")
+    for start, stop in sorted(set(cuts), reverse=True):
+        content = content[:start] + content[stop:]
     return content, headings
 
 
@@ -187,14 +224,17 @@ def _entry_from_file(kdir, path):
 
 
 def _is_knowledge_entry(kdir, path):
-    """A store-relative, .md, category-dir file inside the store — the same membership the indexer uses."""
+    """A store-relative `.md` file under a knowledge category directory, with no `_`-prefixed component
+    (the indexer skips those too) — a deliberately plain rule, checked on the caller's own spelling."""
     try:
         from pk_search import CATEGORY_DIRS
     except Exception:
         CATEGORY_DIRS = {"architecture", "conventions", "design-rationale", "gotchas", "principles", "workflows", "domains", "preferences", "abstractions"}
+    if not _valid_store_relative(path):
+        return False
     rel = _canonical(path)
     parts = Path(rel).parts
-    if Path(path).is_absolute() or ".." in parts or len(parts) < 2 or parts[0] not in CATEGORY_DIRS or not rel.endswith(".md"):
+    if len(parts) < 2 or parts[0] not in CATEGORY_DIRS or not rel.endswith(".md") or any(part.startswith("_") for part in parts):
         return False
     target = (Path(kdir) / rel)
     try:
@@ -228,6 +268,9 @@ def synthesize(kdir, packet_id, *, by, dropped=(), added=()):
         raise ValueError("synthesis: --by must name who synthesized")
     entries = list(candidate.get("delivered_entries", []))
     delivered = list(dict.fromkeys(_canonical(e["path"]) for e in entries))
+    for path, _ in list(dropped) + list(added):
+        if not _valid_store_relative(path):
+            raise ValueError(f"synthesis: {path} is not a store-relative path")
     dropped = [(_canonical(p), r) for p, r in dropped]
     added = [(_canonical(p), r) for p, r in added]
     drop_paths = [p for p, _ in dropped]

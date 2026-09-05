@@ -383,3 +383,55 @@ assert row["entries_per_scale"] == {"subsystem": 3, "implementation": 1}, row["e
   [ "$status" -ne 0 ]; [[ "$output" == *"recipient_role differs from the prior row"* ]]
   [ "$(grep -c "\"$PKT\"" "$TEST_KDIR/_packets/packets.jsonl")" -eq 2 ]
 }
+
+@test "a literal copy of another entry's block inside a kept entry is not what gets removed" {
+  # gizmo documents packet formatting and embeds the exact rendered block of gadget; dropping gadget must remove gadget, not the example.
+  printf '%s\n' '# Gadget boundary' 'The gadget boundary is separate.' '<!-- learned: 2026-09-01 | confidence: high | scale: subsystem | status: current -->' > "$TEST_KDIR/conventions/gadget.md"
+  run bash "$PACKET" build --work-item packet-fixture --role worker --caller implement-lead --topic "widget gadget" --scale-set subsystem
+  [ "$status" -eq 0 ]
+  FIRST=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["packet_id"])')
+  GADGET_BLOCK=$(bash "$PACKET" show "$FIRST" --json | python3 -c 'import json,sys; r=json.load(sys.stdin); print([e["rendered"] for e in r["delivered_entries"] if e["path"]=="conventions/gadget.md"][0], end="")')
+  { printf '%s\n' '# Aaa gizmo formatting example' 'A literal example of a rendered block follows:'; printf '%s\n' "$GADGET_BLOCK"; printf '%s\n' 'Keep this example unchanged.' '<!-- learned: 2026-09-01 | confidence: high | scale: subsystem | status: current -->'; } > "$TEST_KDIR/conventions/aaa-gizmo.md"
+  run bash "$PACKET" build --work-item packet-fixture --role worker --caller implement-lead --topic "gizmo gadget widget formatting" --scale-set subsystem
+  [ "$status" -eq 0 ]
+  PKT=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["packet_id"])')
+  PKT="$PKT" python3 - <<'PY'
+import json, os
+from pathlib import Path
+rows = [json.loads(l) for l in Path(os.environ['LORE_KNOWLEDGE_DIR'], '_packets/packets.jsonl').read_text().splitlines() if l.strip()]
+cand = [r for r in rows if r['packet_id'] == os.environ['PKT']][-1]
+paths = [e['path'] for e in cand['delivered_entries']]
+assert 'conventions/aaa-gizmo.md' in paths and 'conventions/gadget.md' in paths, paths
+gizmo = [e['rendered'] for e in cand['delivered_entries'] if e['path'] == 'conventions/aaa-gizmo.md'][0]
+gadget = [e['rendered'] for e in cand['delivered_entries'] if e['path'] == 'conventions/gadget.md'][0]
+assert gadget in gizmo, "fixture premise: the kept entry embeds the dropped entry's exact block"
+assert cand['content'].count(gadget) >= 2
+PY
+  run bash "$PACKET" synthesize "$PKT" --by implement-lead --drop conventions/gadget.md "outside this worker's files"
+  [ "$status" -eq 0 ]
+  PKT="$PKT" python3 - <<'PY'
+import json, os
+from pathlib import Path
+rows = [json.loads(l) for l in Path(os.environ['LORE_KNOWLEDGE_DIR'], '_packets/packets.jsonl').read_text().splitlines() if l.strip()]
+cand, syn = [r for r in rows if r['packet_id'] == os.environ['PKT']]
+gizmo = [e['rendered'] for e in cand['delivered_entries'] if e['path'] == 'conventions/aaa-gizmo.md'][0]
+gadget = [e['rendered'] for e in cand['delivered_entries'] if e['path'] == 'conventions/gadget.md'][0]
+body = syn['content'].split('## Left out by synthesis')[0]
+assert gizmo in body, "the kept entry, embedded example included, must survive byte for byte"
+assert body.count(gadget) == cand['content'].count(gadget) - 1, "exactly the dropped entry's own occurrence is removed"
+PY
+}
+
+@test "paths are validated as the caller spelled them and an assembled row cannot change an id's identity" {
+  synth_fixture
+  run bash "$PACKET" synthesize "$PKT" --by lead --drop ../conventions/gadget.md "escape"
+  [ "$status" -ne 0 ]; [[ "$output" == *"not a store-relative path"* ]]
+  run bash "$PACKET" synthesize "$PKT" --by lead --add /conventions/sprocket.md "absolute"
+  [ "$status" -ne 0 ]; [[ "$output" == *"not a store-relative path"* ]]
+  run bash "$PACKET" synthesize "$PKT" --by lead --add ./conventions/sprocket.md "dot-slash alias is fine"
+  [ "$status" -eq 0 ]
+  # an assembled row replayed under the same id with another work item is refused by the writer
+  bash "$PACKET" show "$PKT" --json | python3 -c 'import json,sys; r=json.load(sys.stdin); r["delivery_stage"]="assembled"; r.pop("synthesis",None); r["work_item"]="other-item"; r.pop("delivered_at",None); print(json.dumps(r))' > "$TEST_KDIR/bad3.json"
+  run bash "$REPO_DIR/scripts/packet-append.sh" --row "$(cat "$TEST_KDIR/bad3.json")" --kdir "$TEST_KDIR"
+  [ "$status" -ne 0 ]; [[ "$output" == *"work_item differs from the prior row"* ]]
+}

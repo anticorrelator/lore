@@ -25,8 +25,9 @@ cat > "$README" << 'EOF'
 Append-only storage for context-packet records and their post-hoc
 assessments. A packet is the evaluable unit of knowledge delivery. One
 `packet_id` names a chain of rows: an `assembled` candidate set, then the
-`synthesized` row that was actually handed on; each row records exactly what
-it held, at what trust, under what budget. Assessments are verdicts about a delivered packet
+`synthesized` row prepared for handoff; each row records exactly what it
+held, at what trust, under what budget. Neither stage is receipt — that is
+what assessments record. Assessments are verdicts about a delivered packet
 written after the receiving session ends.
 
 ## Contents
@@ -108,7 +109,7 @@ gap dimensions; "miner" is the demand-led capture miner
 |---|---|---|
 | `packet_id` | non-empty string | assessor (joins verdicts to deliveries); experiment (packet identity across arms) |
 | `packet_scope` | `session` \| `task` | assessor (selects assessment mode); experiment (task rows only) |
-| `delivery_stage` | `assembled` \| `delivered` | assessor (dispatch-confirmation: task rows stay `assembled` until an assessment confirms handoff) |
+| `delivery_stage` | `assembled` \| `synthesized` \| `delivered` | assessor (assesses the latest row per id); dispatch preparation (refuses a latest row that is not `synthesized` unless a `synthesis_waiver` was recorded). Stage records preparation, never receipt; assessments live in their own ledger |
 | `session_id` | string or null | assessor (transcript join); experiment (session grouping) |
 | `work_item` | string or null | experiment (matched-task pairing); /retro D2/D3 (cycle scoping) |
 | `phase` | string, integer, or null | experiment (pairing); /retro D2/D3 |
@@ -152,7 +153,7 @@ Extra keys under `budget` (e.g. per-tier counts) are permitted.
 | Field | Type | Consumer |
 |---|---|---|
 | `delivered_at` | ISO 8601 string (writer-stamped when absent) | assessor (ordering); experiment; trust-ledger as-of joins |
-| `schema_version` | the string `"1"` (writer-stamped) | all readers (upgrade policy) |
+| `schema_version` | the string `"1"`, or `"2"` for task packets bound to a revision and dispatch attempt (writer-stamped) | all readers (upgrade policy) |
 | `packet_schema_sha` | 64-char sha256 hex of `packet_schema.py` (writer-stamped, authoritative) | all readers (schema-drift detection across rows) |
 | `trust_compute_sha` | 64-char sha256 hex of `trust-compute.py` — freezes the fold identity so score semantics don't drift across the experiment window | experiment; /retro D3 |
 | `template_version` | 12-char hex or null — template of the receiving agent; register via `template-registry-register.sh` like scorecard rows | experiment; /retro D2 |
@@ -163,7 +164,7 @@ Extra keys under `budget` (e.g. per-tier counts) are permitted.
 
 | Field | Type | Consumer |
 |---|---|---|
-| `packet_id` | non-empty string — references exactly one packet row | experiment; /retro D2/D3 |
+| `packet_id` | non-empty string — references one packet identity, whose chain of rows shares it | experiment; /retro D2/D3 |
 | `assessed_at` | ISO 8601 string (writer-stamped when absent) | /retro (windowing) |
 | `assessor_schema_sha` | 64-char sha256 hex of the assessor artifact | all readers (assessor-drift detection) |
 | `source_transcript` | non-empty string (transcript the verdicts were derived from) | audit of assessments |

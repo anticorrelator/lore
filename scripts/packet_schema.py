@@ -170,10 +170,15 @@ def _check_synthesis(row: dict, errors: list[str]) -> None:
             kept = []
         dropped = _check_reasoned_paths(synthesis.get("dropped"), "dropped", errors)
         added = _check_reasoned_paths(synthesis.get("added"), "added", errors)
+        if len(set(kept)) != len(kept):
+            errors.append("synthesis.kept must not repeat a path")
         if set(kept) & set(dropped):
             errors.append("synthesis.kept and synthesis.dropped must be disjoint")
         if set(added) & (set(kept) | set(dropped)):
             errors.append("synthesis.added must not repeat a kept or dropped path")
+        delivered_paths = {e.get("path") for e in row.get("delivered_entries", []) if isinstance(e, dict)}
+        if delivered_paths != set(kept) | set(added):
+            errors.append("delivered_entries must be exactly the kept and added paths of the synthesis")
         if "synthesis_waiver" in row:
             errors.append("synthesis_waiver must be absent on a synthesized row")
         return
