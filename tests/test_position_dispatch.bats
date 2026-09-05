@@ -149,8 +149,6 @@ def compile(position='worker', framework='codex'):
     return compile_position(position, framework, store, None)
 
 def bind(d,b,g=None,**kw):
-    if b.get('packet_id') and show(store, b['packet_id']).get('delivery_stage') == 'assembled':
-        synthesize(store, b['packet_id'], by='spec-lead')
     return binder.publish(d,b,store,g or guidance(),**kw)
 
 def request(b, position='worker', framework='codex', extra=None, flags=(), ok=True, fixed=True):
