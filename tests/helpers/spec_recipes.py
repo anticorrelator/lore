@@ -829,6 +829,9 @@ def exercise_designer(f):
     assert projected["verdict"] == "ACCEPTED" and projected["outcome"] == "completed"
     assert note_ref in projected["judgments"][0]["rationale"] and abstract_revision in projected["judgments"][0]["rationale"]
     assert f.recipe("acceptance-projection", "identical acceptance projection reuses its authored bytes").stdout.decode().strip() == str(projection)
+    for invalid in ({"CEREMONY": "unregistered-ceremony"}, {"REVISION_ID": "not-a-revision"}, {"REVISION_ID": "0" * 12}):
+        f.recipe("acceptance-projection", "invalid ceremony, id format or absent snapshot refuses", expected=1, **invalid)
+        f.values.update(CEREMONY="spec-design", REVISION_ID=abstract_revision)
     f.recipe("acceptance-projection", "an empty note reference refuses", expected=1, NOTE_REF="")
     f.recipe("acceptance-projection", "conflicting note reference cannot replace the existing acceptance", expected=1, NOTE_REF="## Missing note")
     f.values["NOTE_REF"] = note_ref
@@ -1137,7 +1140,9 @@ def exercise_gate_composition(f, ceremony):
         f.lore("ceremony", "add", ceremony, evaluator)
     registered = f.recipe("ceremony-get", "read both registered identities", CEREMONY=ceremony).stdout.decode()
     assert skill in registered and other in registered
-    attempts = [ceremony + "-" + evaluator + "-r1" for evaluator in (skill, other)]
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    attempts = [ceremony + "-" + evaluator + "-" + stamp + "-r1" for evaluator in (skill, other)]
+    f.data("attempt-inputs.json", {"ceremony": ceremony, "evaluators": [skill, other], "utc": stamp, "attempt_ids": attempts})
     prepared = []
     for evaluator, attempt in zip((skill, other), attempts):
         result = f.recipe("review-prepare", "commissioned lead prepares one initial attempt for " + evaluator,
@@ -1148,6 +1153,8 @@ def exercise_gate_composition(f, ceremony):
                      value=json.loads(result.stdout)["prepared_path"], actor="commissioned-spec-lead", revision=revision, attempt=attempt)
     f.recipe("awaiting-note", "lead hands both prepared attempts to the coordinator once",
              ATTEMPT_IDS=" ".join(attempts), POST_EDIT_REVISION="")
+    f.recipe("awaiting-note", "an empty attempt handoff refuses before writing another note", expected=1, ATTEMPT_IDS="")
+    f.values["ATTEMPT_IDS"] = " ".join(attempts)
     notes = (item / "notes.md").read_text()
     assert all(attempt in notes for attempt in attempts) and revision in notes and notes.count("Awaiting") == 1
     assert not list((item / "reviews").glob("*/sealed"))
@@ -1211,8 +1218,8 @@ def exercise_gate_composition(f, ceremony):
     directory, bound = prepared_connection(f, repeat_design, ceremony="spec-design", evaluator="coordinator")
     assert Path(bound["plan_file"]).read_bytes() == live.read_bytes()
     # Each evaluator's follow-up gets its own attempt at the new revision.
-    for evaluator in (skill, other):
-        attempt = ceremony + "-" + evaluator + "-r2"
+    for evaluator, initial in zip((skill, other), attempts):
+        attempt = initial.removesuffix("-r1") + "-r2"
         fresh = f.recipe("review-prepare", "independent evaluator retry retains its own attempt lineage",
                          ATTEMPT_ID=attempt, CEREMONY=ceremony, REVISION_ID=revised)
         _, bound = prepared_connection(f, fresh, ceremony=ceremony, evaluator="coordinator")
@@ -1452,6 +1459,15 @@ def main():
     args.root = args.root.resolve()
     if args.scenario == "inventory":
         extraction_controls(args.root)
+        test_file = Path(__file__).resolve().parents[2] / "tests/test_spec_recipes.bats"
+        guard = ('selected=$(bats --count "$1" --filter "$2"); '
+                 '[[ "$selected" -gt 0 ]] || { echo "empty Bats selection" >&2; exit 1; }; '
+                 'exec bats "$1" --filter "$2"')
+        argv = ["bash", "-c", guard, "empty-selection-control", str(test_file), "^no-such-spec-fixture$"]
+        refused = subprocess.run(argv, capture_output=True)
+        assert refused.returncode == 1 and b"empty Bats selection" in refused.stderr
+        (args.root / "empty-bats-selection.json").write_text(json.dumps({"argv": argv, "exit_code": refused.returncode,
+             "stdout": refused.stdout.decode(), "stderr": refused.stderr.decode()}, indent=2) + "\n")
         empty = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--scenario", "unknown", "--root", str(args.root / "empty-spec")], capture_output=True)
         assert empty.returncode == 2 and b"invalid choice" in empty.stderr
         assert not (args.root / "empty-spec").exists()
