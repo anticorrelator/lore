@@ -6,8 +6,17 @@ set -euo pipefail
 
 LORE_VERSION="0.1.0"
 
-# Resolve SCRIPTS_DIR via the ~/.lore/scripts symlink
-SCRIPTS_DIR="$(cd "$(readlink ~/.lore/scripts || echo ~/.lore/scripts)" && pwd)"
+# Resolve SCRIPTS_DIR. Prefer the scripts/ beside this CLI file when it is a
+# complete checkout (a session worktree or a test tree must run the scripts it
+# ships with, not the installed copy); otherwise fall back to the ~/.lore/scripts
+# symlink, which is what the installed ~/.local/bin/lore resolves to anyway.
+_lore_cli_path="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+_lore_cli_dir="$(cd "$(dirname "$_lore_cli_path")" && pwd)"
+if [[ -f "$_lore_cli_dir/../scripts/lib.sh" ]]; then
+  SCRIPTS_DIR="$(cd "$_lore_cli_dir/../scripts" && pwd)"
+else
+  SCRIPTS_DIR="$(cd "$(readlink ~/.lore/scripts || echo ~/.lore/scripts)" && pwd)"
+fi
 source "$SCRIPTS_DIR/lib.sh"
 
 # Resolve KDIR once for commands that need it (suppress errors for commands that don't)
