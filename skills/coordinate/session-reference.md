@@ -3,7 +3,17 @@
 Mechanics consulted on demand. The judgment doctrine stays in SKILL.md; this file
 holds the flag semantics, exit codes, and incident-derived calibrations that back it.
 
-## Dispatch targeting and placement
+## Managed sessions
+
+Use `lore session start <item> --workspace <source-checkout> --framework <id> --model <model> --context <brief> --packet <packet-id> --key <dispatch-id> --json` for item-backed workers. It starts or recovers a source-scoped host without a human TUI, seeds missing source provenance, and returns a durable session handle. Identical keyed retries join the same start; changed keyed intent refuses; no key means a new worker. Agent initiation and cooperative terminus auto-close are the defaults.
+
+Use the returned handle with `send`, `answer`, `peek`, `wait`, `inspect`, `attach`, or `close`. Managed operations resolve the current host and persist their outcomes. `send` and `answer` await delivery evidence; `close` awaits its correlated teardown and reports worktree disposition. `inspect` remains available after teardown. `wait` owns its persistent observation cursor. A human can attach to the existing tmux terminal without taking over lifecycle ownership.
+
+A `delivery-uncertain` refusal means an input attempt crossed a crash boundary with no provable outcome. Inspect the worker before deciding what to do; the mechanism never replays that input. Cleanup and integration are separate: a retained quarantine ref requires composition judgment even when the execution directory is gone. See [the session manager contract](../../docs/session-manager.md).
+
+The following placement, raw enqueue, and journal-cursor recipes describe `request` and legacy sessions. Managed callers do not select a TUI, seed provenance separately, or capture a cursor before closing.
+
+## Raw request targeting and placement
 
 Placement lives on the work item, and dispatch derives it. A work item declares
 its `source_checkout` — the checkout its sessions must start from — seeded by
@@ -51,10 +61,9 @@ constrain the claim:
 - `--min-vintage` is a compatibility floor, not a pin — it refuses a claim only on
   positive evidence of an older build; an instance of unknown vintage passes,
   permissively by design.
-- **Targeting pins the instance, not the framework**: a targeted request with a
-  framework-scoped model id still dies at launch when the target runs a different
-  harness (fable → codex 400, 2026-07-13; same class as the haiku incident). Model ids
-  are framework-scoped — every `--model` travels with the `--framework` that owns it.
+- **Targeting pins the instance, not the framework**: the explicit request's
+  `--framework` selects the launched harness independently of the host's default.
+  Model ids are framework-scoped — every `--model` travels with its framework.
 - Instance rows carry the framework an untargeted spawn there will actually resolve,
   alongside the instance's project dir; `session list` renders both as
   `<framework> @ <project_dir>`. An `unknown` in either position is a pre-feature row
@@ -607,7 +616,7 @@ kept for provenance. Live wants stay in SKILL.md.
   input). Gotchas captured: `lore-session-events-emits-next-cursor-on-stderr-wh`,
   `bsd-grep-macos-exits-0-grep-qv`. The stderr-cursor footgun is gone — the cursor
   rides stdout as a final JSON row → [[work:session-wait-verb-plus-events-cursor-to-stdout]].
-- `close --wait` — DISSOLVED into the wait verb (audit 2026-07-07): `close <slug>`
+- Raw `close --wait` — DISSOLVED into the wait verb (audit 2026-07-07): `close <slug>`
   then `wait <slug> --until closed` is the teardown-measurement idiom.
 - wait-verb watcher blind spots — SHIPPED 2026-07-11 (c2c34e2 →
   [[work:session-wait-watcher-blind-spots]]): request-id/`close_failed` identity

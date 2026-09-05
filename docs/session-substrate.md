@@ -2,7 +2,7 @@
 
 Contract for the `_sessions/` coordination substrate: the knowledge-store surface
 that lets TUI instances, protocol verbs, and stop hooks coordinate multi-session
-spec/implement work without a daemon. This doc is the **contract half** — what the
+spec/implement work through durable files. This doc is the **contract half** — what the
 substrate IS (layout, row schemas, lifecycle, cursor, ownership). The
 [Scope note](#scope-note--what-this-does-not-do-yet) at the end is the paired
 **non-goals half** — what it deliberately does NOT do yet, and where that work
@@ -12,6 +12,12 @@ Rows here are written by bash and Go and read by bash, Go, and Python. Scalar
 types are pinned precisely on purpose (see [Type discipline](#type-discipline)):
 a strict Go decoder rejects a numeric field that arrives quoted.
 
+Managed workers use the [session manager facade](session-manager.md), which owns
+host startup, stable-handle routing, receipts, and recovery. References below to
+the owning TUI also apply to the headless session runtime unless explicitly scoped
+to legacy adoption. Raw queue and event contracts remain unchanged; managed host
+ownership and facade indexes add advisory locking and durable checkpoints.
+
 ## Layout
 
 The substrate lives at `$KDIR/_sessions/`, a sibling of `_work/` and `_trust/`,
@@ -20,7 +26,11 @@ has four surfaces, split by **write archetype**:
 
 ```
 $KDIR/_sessions/
-  instances/<name>.json          registry — one file per live TUI instance
+  hosts/<key>/                  managed host readiness, locks, supervisor state
+  managed/<handle>.json         durable worker start intent and identity
+  start-keys.json               serialized keyed-start index
+  receipts/<handle>/<id>.json   durable operation intent and outcome
+  instances/<name>.json          registry — one file per live runtime instance
                                  (mutable; tmp+atomic-rename writes, mtime heartbeat)
   requests/pending/<id>.json     queue — one file per waiting request
   requests/claimed/<id>.json     queue — a request a specific instance has claimed
@@ -43,7 +53,8 @@ $KDIR/_sessions/
 Two archetypes, no third: **mutable per-owner state** (registry files, request
 files, close-request files, send/peek-request files, peek-response files) is
 written tmp+atomic-rename so each file has exactly
-one writer at any moment — no lock in Go or bash. **History** (`events.jsonl`)
+one writer at any moment. Managed host and facade ownership additionally uses
+advisory locks. **History** (`events.jsonl`)
 uses the sole-writer append archetype. There is deliberately no single mutable
 `registry.json` or `queue.json`; per-owner/per-request files dissolve the
 read-modify-write case entirely.
@@ -75,6 +86,8 @@ One file per live TUI instance at `instances/<name>.json`.
 | `build_sha` | string \| absent | Build vintage — the short git SHA embedded at build time (`-ldflags`). Absent for `go run`/dev builds and for any binary predating this field. Omit-when-empty. |
 | `build_time` | string \| absent | Build vintage — the **orderable** quantity: the commit's committer-date (release build) or the binary's mtime (dev build), ISO 8601 UTC. Absent for a binary predating this field. Omit-when-empty. This, not `build_sha`, is what `min_vintage` filtering compares against (a SHA has no read-side ordering). |
 | `project_dir` | string \| absent | The instance's project directory, physically resolved (`filepath.Abs` + `EvalSymlinks`) once at startup. Immutable for the process. Omit-when-empty for a binary predating this field. It is the match key a request's `prefer_project_dir` compares against byte-for-byte (both sides resolve physically, so `/tmp`→`/private/tmp` and worktree symlinks match). Also the match key for hard `required_project_dir` placement when the request declares a `placement_stance`. |
+| `host_key` | string \| absent | Stable source/store host identity for managed runtime generations. Absent for legacy visible TUI owners. |
+| `role` | string \| absent | `session-host` marks on-demand managed ownership, excluded from legacy TUI adoption. |
 | `framework` | string \| absent | The launch framework the TUI resolves for untargeted spawns (`tui_launch_framework` → `ResolveTUILaunchFramework`), refreshed on every full-row write plus an explicit rewrite when the setting is committed. Omit-when-empty for a binary predating this field or when resolution errors. Not a claim filter — framework selection stays the request's `framework` field; this only surfaces the value a coordinator's routing read needs. |
 
 **Routing-visibility fields** (`project_dir`, `framework`) surface a coordinator's
@@ -816,10 +829,10 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `worktree_write_refused` | `guard-session-worktree-writes.sh` | a hosted session's tool call targeted a path outside its session-scoped write allowlist and was blocked before the write; identified by `actor_instance` rather than `slug`, `reason` is `outside-session-allowlist` or `containment-context-missing`, and links carry the attempted target, the declared boundary, and the tool |
 | `send_requested` | `session send` enqueue verb | a send request was enqueued for the instance running a slug |
 | `sent` | TUI | the message was injected AND a later observation confirmed the composer submitted it (verified-outcome; see [Send-request queue](#send-request-queue)) |
-| `send_refused` | TUI | injection was refused, or an injected message never submitted; `reason` names why — gate refusals (`generating`/`modal`/`no-signature`/`no-contract`/`unsafe-payload`/`error`) or the post-inject `unsubmitted` |
+| `send_refused` | TUI | injection was refused, or an injected message never submitted; `reason` names why — gate refusals (`generating`/`modal`/`no-signature`/`no-contract`/`unsafe-payload`/`error`) or the post-inject `unsubmitted` and crash-boundary `delivery-uncertain` |
 | `answer_requested` | `session answer` enqueue verb | an expectation-guarded numbered modal choice was enqueued; carries numeric `option` |
 | `answered` | TUI | one restricted navigation+Enter write was followed by a later screen where the expectation disappeared |
-| `answer_refused` | TUI | the choice failed closed; `reason` is `not-modal`, `expect-mismatch`, `option-unavailable`, `no-contract`, `error`, or `unconfirmed` |
+| `answer_refused` | TUI | the choice failed closed; `reason` is `not-modal`, `expect-mismatch`, `option-unavailable`, `no-contract`, `error`, `unconfirmed`, or crash-boundary `delivery-uncertain` |
 
 **Queue-lifecycle events** — `requested`, `claimed`, `spawned`, `spawn_failed`,
 `request_reclaimed`, `request_abandoned`, `request_cancelled`, `request_expired`, `close_requested`,
