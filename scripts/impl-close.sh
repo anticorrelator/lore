@@ -647,6 +647,8 @@ import json, os, re, sys
 sys.path.insert(0, sys.argv[3])
 from position_attribution import project, report_record
 producer_by_task = {}
+context_by_task = {}
+estimate_dispatch_context = None
 log_path = sys.argv[2]
 if os.path.isfile(log_path):
     with open(log_path, encoding="utf-8") as stream:
@@ -664,6 +666,11 @@ if os.path.isfile(log_path):
                 tid = match[1] if match else None
             if tid:
                 producer_by_task.setdefault(tid, []).append(producer)
+                if estimate_dispatch_context is None:
+                    import runpy
+                    estimate_dispatch_context = runpy.run_path(os.path.join(sys.argv[3], "generate-tasks.py"))["estimate_dispatch_context"]
+                context_by_task.setdefault(tid, []).append(
+                    estimate_dispatch_context(record, expected={"work_item": sys.argv[4]}))
 
 model_by_class = {
     "mechanical": os.environ.get("_LORE_MECH") or None,
@@ -763,7 +770,8 @@ for task in task_rows:
         "context_cost_estimate": total_chars,
         "spend": spend,
         "producer_attempts": producer_by_task.get(tid, []),
-        "context_cost_estimate_detail": estimate if isinstance(estimate, dict) else None,
+        "context_cost_estimate_detail": estimate if isinstance(estimate, (dict, list)) else None,
+        "dispatch_context_estimates": context_by_task.get(tid, []),
     })
 
 for tid in spend_by_task:
