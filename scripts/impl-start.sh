@@ -33,9 +33,14 @@ REF=""
 BRANCH=""
 BRANCH_SET=0
 JSON_MODE=0
+COMPILED_POSITIONS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --compiled-positions)
+      COMPILED_POSITIONS=1
+      shift
+      ;;
     --branch)
       BRANCH="${2:-}"
       BRANCH_SET=1
@@ -232,13 +237,34 @@ LEAD_TV=$(template_version_or_empty lead "$LORE_REPO_DIR/skills/implement/SKILL.
 WORKER_TV=$(template_version_or_empty worker "$(resolve_agent_template worker 2>/dev/null || true)")
 ADVISOR_TV=$(template_version_or_empty advisor "$(resolve_agent_template advisor 2>/dev/null || true)")
 
+POSITION_DESCRIPTORS='null'
+if [[ "$COMPILED_POSITIONS" -eq 1 ]]; then
+  ACTIVE_FRAMEWORK=$(resolve_active_framework)
+  ADVISOR_ROUTE=$(resolve_route_for_role advisor implement)
+  POSITION_DESCRIPTORS=$(python3 - "$SCRIPT_DIR" "$KNOWLEDGE_DIR" "$ACTIVE_FRAMEWORK" \
+    "$WORKER_MECHANICAL_ROUTE" "$WORKER_STANDARD_ROUTE" "$WORKER_JUDGMENT_DENSE_ROUTE" "$ADVISOR_ROUTE" <<'POSITIONS_PY'
+import json
+from pathlib import Path
+import sys
+scripts, kdir, framework, *routes = sys.argv[1:]
+sys.path.insert(0, scripts)
+from position_compile import compile_position
+targets = {framework}
+targets.update(json.loads(route)['target_framework'] for route in routes if route)
+print(json.dumps({target: {position: compile_position(position, target, Path(kdir), None)
+                          for position in ('worker', 'designer')}
+                  for target in sorted(targets)}))
+POSITIONS_PY
+  )
+fi
+
 # --- Assemble and emit the start struct -------------------------------------
 PAYLOAD=$(python3 - "$ITEM_DIR" "$SLUG" "$ARCHIVED" "$PHASES" "$TASK_HEADINGS" "$UNCHECKED" \
   "$CACHE_STATUS" "$CURRENT_BRANCH" \
   "$LEAD_MODEL" "$WORKER_MODEL" "$ADVISOR_MODEL" \
   "$LEAD_TV" "$WORKER_TV" "$ADVISOR_TV" \
   "$WORKER_MECHANICAL_MODEL" "$WORKER_STANDARD_MODEL" "$WORKER_JUDGMENT_DENSE_MODEL" \
-  "$WORKER_MECHANICAL_ROUTE" "$WORKER_STANDARD_ROUTE" "$WORKER_JUDGMENT_DENSE_ROUTE" <<'PYEOF'
+  "$WORKER_MECHANICAL_ROUTE" "$WORKER_STANDARD_ROUTE" "$WORKER_JUDGMENT_DENSE_ROUTE" "$POSITION_DESCRIPTORS" <<'PYEOF'
 import json
 import os
 import sys
@@ -246,7 +272,7 @@ import sys
 (item_dir, slug, archived, phases, task_headings, unchecked, cache_status, branch,
  lead_m, worker_m, advisor_m, lead_tv, worker_tv, advisor_tv,
  worker_mech_m, worker_std_m, worker_jd_m,
- worker_mech_r, worker_std_r, worker_jd_r) = sys.argv[1:21]
+ worker_mech_r, worker_std_r, worker_jd_r, position_descriptors) = sys.argv[1:22]
 
 def route_or_none(raw):
     return json.loads(raw) if raw else None
@@ -303,6 +329,7 @@ print(json.dumps({
         "judgment-dense": route_or_none(worker_jd_r),
     },
     "template_versions": {"lead": lead_tv, "worker": worker_tv, "advisor": advisor_tv},
+    "position_descriptors": json.loads(position_descriptors),
 }))
 PYEOF
 )

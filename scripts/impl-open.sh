@@ -67,6 +67,7 @@ SELECT_TASKS=()
 FALLBACK_SCALE_SET=""
 TEMPLATE_VERSION=""
 JSON_MODE=0
+COMPILED_POSITIONS=0
 
 usage() {
   cat >&2 <<EOF
@@ -95,6 +96,10 @@ fail() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --compiled-positions)
+      COMPILED_POSITIONS=1
+      shift
+      ;;
     --all)
       SELECT_ALL=1
       shift
@@ -273,7 +278,7 @@ SELECT_TASKS_CSV=$(IFS=','; echo "${SELECT_TASKS[*]-}")
 PAYLOAD=$(_LORE_CEREMONY_JSON="$CEREMONY_JSON" python3 - "$ITEM_DIR" "$SLUG" \
   "$SELECT_ALL" "$SELECT_TASKS_CSV" \
   "$FALLBACK_SCALE_SET" "$FRAMEWORK" "$ENFORCEMENT" "$TEAM_MESSAGING" \
-  "$SCRIPT_DIR" "$LORE_REPO_DIR" "$CHECKSUM_LINE" "$TEMPLATE_VERSION" <<'PYEOF'
+  "$SCRIPT_DIR" "$LORE_REPO_DIR" "$CHECKSUM_LINE" "$TEMPLATE_VERSION" "$COMPILED_POSITIONS" <<'PYEOF'
 import json
 import os
 import re
@@ -283,7 +288,7 @@ import uuid
 
 (item_dir, slug, select_all, tasks_csv, fallback_scale_set,
  framework, enforcement, team_messaging, script_dir, repo_dir,
- checksum_line, template_version) = sys.argv[1:13]
+ checksum_line, template_version, compiled_positions) = sys.argv[1:14]
 
 ceremony_skills = json.loads(os.environ.get("_LORE_CEREMONY_JSON", "[]"))
 
@@ -865,6 +870,31 @@ lead_inline_conditions = {
 for entry in prior_knowledge:
     entry.pop("unit_key", None)
 
+position_descriptors = None
+if compiled_positions == '1':
+    from pathlib import Path
+    sys.path.insert(0, script_dir)
+    from position_compile import compile_position
+    from packet_builder import pointer
+    position_descriptors = {framework: {position: compile_position(position, framework, Path(knowledge_dir), None)
+                                       for position in ('worker', 'designer')}}
+    for entry in manifest:
+        if entry['op'] != 'TaskCreate':
+            continue
+        bindings = {'work_item': slug, 'task_id': entry['local_id'],
+                    'revision_id': entry.get('revision_id'), 'packet_id': entry.get('packet_id'),
+                    'dispatch_attempt_id': entry.get('dispatch_attempt_id'),
+                    'assignment': entry['description'],
+                    'packet_pointer': pointer(knowledge_dir, entry['packet_id']) if entry.get('packet_id') else None}
+        entry['position'] = 'worker'
+        entry['position_binding_inputs'] = bindings
+        entry['position_binding_absence_reasons'] = {
+            key: 'legacy-unbound'
+            for key, value in bindings.items() if value is None}
+    for advisor in persistent_advisors:
+        advisor['position'] = 'designer'
+        advisor['position_mode'] = 'consultation'
+
 print(json.dumps({
     "slug": slug,
     "title": title,
@@ -890,6 +920,7 @@ print(json.dumps({
     "skill_invocation_map": skill_invocation_map,
     "ceremony_injected": ceremony_injected,
     "advisors": persistent_advisors,
+    "position_descriptors": position_descriptors,
     "lead_inline_conditions": lead_inline_conditions,
     "warnings": warnings,
 }, ensure_ascii=False))
