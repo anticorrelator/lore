@@ -54,8 +54,13 @@ shift
 PHASE_NUMBER=""
 TASK_ID=""
 DELIVERY_JSON=""
+DIRECTIVE_OVERRIDE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --directive-json)
+      DIRECTIVE_OVERRIDE="$2"
+      shift 2
+      ;;
     --task-id)
       TASK_ID="${2:-}"
       shift 2
@@ -112,12 +117,15 @@ fi
 KNOWLEDGE_DIR=$(resolve_knowledge_dir)
 TASKS_FILE="$KNOWLEDGE_DIR/_work/$SLUG/tasks.json"
 
-if [[ ! -f "$TASKS_FILE" ]]; then
+if [[ -z "$DIRECTIVE_OVERRIDE" && ! -f "$TASKS_FILE" ]]; then
   echo "Error: tasks.json not found for slug '$SLUG' (expected: $TASKS_FILE)" >&2
   exit 1
 fi
 
 # --- Extract the retrieval_directive the addressed unit declares -------------
+if [[ -n "$DIRECTIVE_OVERRIDE" ]]; then
+  DIRECTIVE_JSON="$DIRECTIVE_OVERRIDE"
+else
 DIRECTIVE_JSON=$(python3 - "$TASKS_FILE" "$SLUG" "$PHASE_NUMBER" "$TASK_ID" <<'EXTRACT_PY'
 import json, sys
 
@@ -203,6 +211,7 @@ else:
     print(json.dumps(directive))
 EXTRACT_PY
 ) || exit 1
+fi
 
 if [[ "$DIRECTIVE_JSON" == "null" ]]; then
   echo "Error: $UNIT_LABEL of '$SLUG' has no retrieval_directive; a scale-declared directive is required." >&2
@@ -339,3 +348,24 @@ try:
 except OSError:
     pass
 LOG_PY
+
+if [[ -n "$DELIVERY_JSON" ]]; then
+  printf '%s' "${JSON_RESULT:-[]}" | python3 - "$SCRIPT_DIR" "$KNOWLEDGE_DIR" "$DELIVERY_JSON" "$PROMPT_OUTPUT" 3<&0 <<'PY'
+import json, os, sys
+scripts, kdir, destination, content = sys.argv[1:]
+sys.path.insert(0, scripts)
+from pk_manifest import _trust_snapshot
+try:
+    data = json.load(os.fdopen(3))
+except ValueError:
+    data = []
+entries = data.get("full", []) if isinstance(data, dict) else data
+snapshot = {"entries": [{"path": e.get("path") or e.get("file_path"),
+                         "scale": e.get("scale"), "render_mode": "snippet",
+                         "ranking_path": "search-order", "trust": _trust_snapshot(kdir, e)}
+                        for e in entries],
+            "budget": {"chars_used": len(content), "chars_budget": None}}
+with open(destination, "w") as stream:
+    json.dump(snapshot, stream)
+PY
+fi

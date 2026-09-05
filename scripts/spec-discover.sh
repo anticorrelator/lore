@@ -148,10 +148,9 @@ agent_paths = sorted(glob.glob(os.path.join(agents_root, "*.md"))) if agents_roo
 agent_paths = [p for p in agent_paths if pathlib.Path(p).stem not in canonical_agents]
 add_source("harness-agents", "agent", agents_root, agent_paths)
 
-for source_id, dirname in (("preferences-tree", "preferences"), ("conventions-tree", "conventions"),
-                           ("cross-cutting-conventions-tree", "cross-cutting-conventions")):
-    root = os.path.join(kdir, dirname)
-    paths = sorted(str(p.relative_to(kdir)) for p in pathlib.Path(root).rglob("*.md")) if os.path.isdir(root) else []
+sys.path.insert(0, os.path.dirname(pk_cli))
+from norm_population import sources as norm_sources
+for source_id, root, paths in norm_sources(kdir):
     add_source(source_id, "knowledge", root, paths)
 
 for source_id, scales, limit in (

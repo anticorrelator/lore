@@ -24,6 +24,7 @@
 #                      Omitted (default) defers to --initiator (agent auto-closes,
 #                      human holds open); true forces auto-close, false holds open.
 #   --requested-by <w> Who enqueued it (default: $LORE_SESSION_INSTANCE, else $USER).
+#   --packet <id>     Insert a packet pointer after the worker guidance floor.
 #   --context <t|file> Task content handed to prompt composition — the brief alone,
 #                      with no guidance floor of your own. Value is read from a file
 #                      when it names one, else treated as literal text. A JSON object
@@ -140,6 +141,7 @@ INITIATOR="human"
 AUTO_CLOSE=""
 REQUESTED_BY=""
 CONTEXT=""
+PACKET_ID=""
 KDIR_OVERRIDE=""
 JSON_MODE=0
 ROUTE_SPECS=()
@@ -169,6 +171,7 @@ while [[ $# -gt 0 ]]; do
     --auto-close) AUTO_CLOSE="$2"; shift 2 ;;
     --requested-by) REQUESTED_BY="$2"; shift 2 ;;
     --context) CONTEXT="$2"; shift 2 ;;
+    --packet) PACKET_ID="$2"; shift 2 ;;
     --route) ROUTE_SPECS+=("$2"); shift 2 ;;
     --min-vintage) MIN_VINTAGE="$2"; shift 2 ;;
     --track) TRACK="$2"; shift 2 ;;
@@ -487,6 +490,24 @@ else
   KNOWLEDGE_DIR="$(resolve_knowledge_dir)"
 fi
 [[ -d "$KNOWLEDGE_DIR" ]] || fail "knowledge store not found at: $KNOWLEDGE_DIR"
+if [[ -n "$PACKET_ID" ]]; then
+  [[ "$TYPE" == "worker" ]] || fail "--packet requires --type worker"
+  PACKET_LINE=$(python3 "$SCRIPT_DIR/packet_builder.py" --kdir "$KNOWLEDGE_DIR" pointer "$PACKET_ID") || fail "packet could not be resolved"
+  EXTRA_JSON=$(printf '%s' "$EXTRA_JSON" | python3 -c '
+import json, sys
+value = json.load(sys.stdin)
+line = sys.argv[1]
+brief = value["dispatch_guidance"]
+brief = "\n".join(part for part in brief.split("\n") if part != line)
+marker = "<!-- lore-dispatch-guidance:v1:end -->"
+if marker not in brief:
+    sys.exit("worker guidance floor is incomplete")
+before, after = brief.split(marker, 1)
+value["dispatch_guidance"] = before + marker + "\n" + line + after
+print(json.dumps(value))
+' "$PACKET_LINE") || fail "could not insert packet pointer"
+fi
+
 
 INSTANCES_DIR="$KNOWLEDGE_DIR/_sessions/instances"
 

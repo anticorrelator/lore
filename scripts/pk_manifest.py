@@ -451,6 +451,7 @@ def resolve_v2(
                 for served in sec["render_result"]["served_entries"]:
                     entries.append({
                         "path": served["path"],
+                        "scale": served["entry"].get("scale"),
                         "render_mode": served["render_mode"],
                         "section_role": sec["role"],
                         "topic": sec["topic"],
@@ -461,6 +462,7 @@ def resolve_v2(
                 for served in sec["served_entries"]:
                     entries.append({
                         "path": served["path"],
+                        "scale": served["entry"].get("scale"),
                         "render_mode": served["render_mode"],
                         "section_role": "kind",
                         "topic": sec["title"],

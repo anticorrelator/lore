@@ -323,7 +323,9 @@ for tid in batch_ids:
         } for r in rows],
     })
 
-# The batch carries task and claim context; it does not resolve knowledge entries.
+sys.path.insert(0, script_dir)
+from packet_builder import build_packet, task_owner
+knowledge_dir = os.path.dirname(os.path.dirname(item_dir))
 packets = []
 for task in batch:
     row = {
@@ -332,7 +334,7 @@ for task in batch:
         "session_id": None, "work_item": slug, "phase": task["phase"],
         "task_id": task["local_id"], "arm": os.environ.get("LORE_PACKET_ARM") or None,
         "task_scale_set": None, "delivered_entries": [],
-        "empty_reason": "next-batch returns task descriptions and Tier 2 extracts without knowledge-entry assembly",
+        "empty_reason": "task has no retrieval directive; scale-declared assembly was not requested",
         "budget": {"chars_used": None, "chars_budget": None},
         "template_version": template_version if re.fullmatch(r"[0-9a-f]{12}", template_version or "") else None,
         "tier2_claim_ids": [claim["claim_id"] for claim in task["tier2_extract"] if claim.get("claim_id")],
@@ -342,12 +344,10 @@ for task in batch:
                    source_head=publication["source_head"],
                    dispatch_attempt_id="dispatch-" + uuid.uuid4().hex)
     try:
-        proc = subprocess.run(
-            ["bash", os.path.join(script_dir, "packet-append.sh"),
-             "--kdir", os.path.dirname(os.path.dirname(item_dir)), "--row", json.dumps(row)],
-            capture_output=True, text=True, timeout=60)
-        if proc.returncode:
-            raise ValueError(proc.stderr.strip())
+        owner, _ = task_owner(knowledge_dir, slug, task["local_id"])
+        directive = owner.get("retrieval_directive")
+        build_packet(knowledge_dir, row, directive=directive,
+                     assembly=None if directive else ("", {}), caller="implement-lead")
         identity = {key: row.get(key) for key in ("packet_id", "dispatch_attempt_id", "revision_id")}
         task.update(identity)
         packets.append({"task_id": task["local_id"], "phase": task["phase"], **identity})

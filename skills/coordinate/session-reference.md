@@ -3,6 +3,56 @@
 Mechanics consulted on demand. The judgment doctrine stays in SKILL.md; this file
 holds the flag semantics, exit codes, and incident-derived calibrations that back it.
 
+## Knowledge packets
+
+Build context for a recipient at dispatch, or pull it again during a task:
+
+```bash
+lore packet build --work-item <slug> --role coordinator --caller coordinator \
+  --topic "<assignment topic>" --scale-set architecture,subsystem
+```
+
+`--role` names the recipient: `investigator`, `designer`, `worker`, `reviewer`,
+or `coordinator`. `--caller` records who requested the assembly. `--task <id>`
+addresses a task in the item. Supply `--topic`, `--seeds <paths...>` (space- or
+comma-separated), or both; when neither is supplied, the named task must have
+a retrieval directive. That directive retains its focal/adjacent topics and
+consultation requirements. `--scale-set` is required and declares the buckets
+for this pull; there is no default. Existing task directives are read with the
+caller’s declared scales.
+
+The JSON status contains `packet_id`, `recipient_role`, `entries_per_scale`,
+`scales_requested`, `scales_returned`, `norm_population_count`,
+`consultation_requirements`, `trust_snapshot_hash`, `delivery_stage`, `location`,
+and `flags`. Counts are distinct entry paths tagged with each requested scale;
+a preference or abstract entry returned through the retrieval stack’s bypass
+rule does not count as a hit at a different scale. The norm population retains
+the full discovery tree enumeration with the labels used by conformance.
+Status describes assembly. It does not establish receipt or decide whether the
+context answers the assignment.
+
+`--thin-floor <n>` adds `below_floor`, the requested scales whose counts are
+below the caller’s threshold. Repeat `--flag <trigger> "<reason>"` to record
+`unverified-assumption`, `unfamiliar-boundary`, or `conflicting-explanations`.
+The caller declares these reasons; retrieval does not infer them.
+
+A task packet uses schema 2 when a committed revision and a recorded dispatch
+attempt exist. A re-pull uses the latest recorded attempt for that task and
+current revision. Otherwise `unbound_reason` names the missing task, revision,
+or attempt. Assembly writes through `packet-append.sh` and retains the
+renderer’s `manifest_load` provenance. It does not publish a revision or create
+a dispatch attempt.
+
+Pass `--packet <id>` to `lore session request --type worker` to put one pointer
+line after the guidance floor and before the brief. For a harness-native spawn,
+`lore dispatch guidance --short --packet <id>` emits the same pointer after the
+short floor. Without `--packet`, both surfaces retain their existing output.
+The pointer names the store location and `lore packet show <id>`; it carries no
+entry bodies. `show` renders entries with their available bylines, norm labels,
+flags, and binding. `show --json` returns the stored row. Coordinators receive
+the build status by default and can inspect a packet when the decision needs it.
+Packets are pulled at dispatch; prefetch and session-start output do not change.
+
 ## Dispatch targeting and placement
 
 Placement lives on the work item, and dispatch derives it. A work item declares

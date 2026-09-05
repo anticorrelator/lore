@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: lore dispatch guidance [--short]
+Usage: lore dispatch guidance [--short] [--packet <id>]
 
 Render the invocation-fresh schema-v1 dispatch-guidance block on stdout.
 Prepend the output verbatim before task-specific context.
@@ -18,8 +18,13 @@ EOF
 }
 
 SHORT=false
+PACKET_ID=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --packet)
+      PACKET_ID="${2:?--packet requires an id}"
+      shift 2
+      ;;
     --short)
       SHORT=true
       shift
@@ -38,8 +43,15 @@ done
 
 EXTERNAL_VOCABULARY='External-Vocabulary: In pull requests, issues, comments, and every other colleague-visible deliverable, describe only what shipped and its effect. Do not expose internal process: no harness session links, session trailers, generated-attribution lines, agent/worker/skill language, or Lore tooling references.'
 
+PACKET_LINE=""
+if [[ -n "$PACKET_ID" ]]; then
+  source "$SCRIPT_DIR/lib.sh"
+  PACKET_LINE=$(python3 "$SCRIPT_DIR/packet_builder.py" --kdir "$(resolve_knowledge_dir)" pointer "$PACKET_ID")
+fi
+
 if [[ "$SHORT" == true ]]; then
   printf '%s\n' "$EXTERNAL_VOCABULARY" 'For the standing defaults in force, run `lore dispatch guidance`.'
+  [[ -z "$PACKET_LINE" ]] || printf '%s\n' "$PACKET_LINE"
   exit 0
 fi
 
@@ -66,3 +78,5 @@ Standing-Defaults:
 $DEFAULTS
 <!-- lore-dispatch-guidance:v1:end -->
 EOF
+
+[[ -z "$PACKET_LINE" ]] || printf '%s\n' "$PACKET_LINE"

@@ -58,13 +58,12 @@ supersede a row, write a new one; never rewrite history. Readers that need
 
 ## Prompt-context invariant
 
-Packet and assessment rows are **never** loaded into any agent prompt — no
-skill, hook, or prefetch surface may inject them. The packet measures
-delivery quality for agents whose behavior the graduation experiment
-compares; letting a measured agent see its own delivery record or verdicts
-contaminates the measurement. Consumers are offline readers only: the
-graduation experiment, the packet assessor, `/retro`, and the demand-led
-capture miner.
+Packet bodies are inspected on demand with `lore packet show <id>`. Dispatch
+briefs carry a pointer; prefetch and session-start surfaces do not inject packet
+rows. The builder reports `assembled`, which records preparation without
+claiming receipt. Assessment rows remain separate from the recipient’s packet;
+`show` does not include verdicts. Historical experiment rows retain their
+original collection context.
 
 ## Packet row schema (v1)
 
