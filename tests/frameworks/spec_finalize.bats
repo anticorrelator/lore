@@ -12,6 +12,8 @@
 #   - emission-contract assert: empty seeds refuse naming the unit, on both the
 #     flat tasks[] path and the legacy phases[] fallback, no row
 #   - re-finalize appends a fresh point-event row (no dedup)
+#   - finalization adopts fresh plans, reuses unchanged revisions, and publishes
+#     semantic edits without changing prepared/sealed review identities
 #   - resolver tri-state passthrough (no match 1, ambiguous 2)
 #   - SKILL.md Step 5.5 routes through the verb (no hand-run verifier sequence)
 #
@@ -169,6 +171,32 @@ json_payload() {
   echo "$output" | grep '"slug"'
 }
 
+assert_current_revision() {
+  local item="$1"
+  python3 - "$REPO_DIR" "$TEST_KDIR" "$item" <<'PYEOF'
+import json, runpy, sys
+from pathlib import Path
+api = runpy.run_path(sys.argv[1] + '/scripts/work-evidence.py')
+item = Path(sys.argv[3])
+evidence = api['project'](item, Path(sys.argv[2]))
+revision = evidence['revision']
+tasks = json.loads((item / 'tasks.json').read_text())
+assert revision['publication_state'] == 'current', revision
+assert revision['head']['revision_id'] == tasks['revision_id'], revision
+assert tasks['tasks'], tasks
+assert (item / revision['head']['plan_path']).read_bytes() == (item / 'plan.md').read_bytes()
+assert (item / revision['head']['tasks_path']).read_bytes() == (item / 'tasks.json').read_bytes()
+PYEOF
+}
+
+assert_no_finalize_success() {
+  local slug="$1"
+  [ "$(row_count)" -eq 0 ]
+  ! grep -q '| source: spec-verb' "$WORK_DIR/$slug/execution-log.md" 2>/dev/null
+  [ "$(close_request_count)" -eq 0 ]
+  [ ! -f "$TEST_KDIR/_sessions/events.jsonl" ]
+}
+
 # --- Router surface -----------------------------------------------------
 
 @test "lore spec with no args prints usage and exits non-zero" {
@@ -211,11 +239,14 @@ json_payload() {
 # --- Happy path -------------------------------------------------------------
 
 @test "finalize on a valid anchored item exits 0 and appends one telemetry row" {
+  [ ! -e "$WORK_DIR/finalize-item/revisions.jsonl" ]
   run bash "$FINALIZE_SH" finalize-item
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Finalize complete"
   [ -f "$WORK_DIR/finalize-item/tasks.json" ]
   [ "$(row_count)" -eq 1 ]
+  [ "$(wc -l < "$WORK_DIR/finalize-item/revisions.jsonl" | tr -d ' ')" = 1 ]
+  assert_current_revision "$WORK_DIR/finalize-item"
 }
 
 @test "telemetry row counts match execution-log source atoms including the finalize atom" {
@@ -258,6 +289,8 @@ assert d["slug"] == "finalize-item"
 assert d["backlinks"]["status"] == "passed", d["backlinks"]
 assert d["anchor"]["status"] == "passed", d["anchor"]
 assert d["contract_asserts"]["status"] == "passed", d["contract_asserts"]
+assert d["regen_tasks"]["status"] == "passed", d["regen_tasks"]
+assert d["regen_tasks"]["summary"], d["regen_tasks"]
 assert d["telemetry"]["status"] == "appended", d["telemetry"]
 assert d["telemetry"]["metric"] == "spec_finalize_bookkeeping"
 assert d["verb_mediated_count"] == 1
@@ -325,6 +358,9 @@ assert "no intent_anchor" in d["anchor"]["reason"], d["anchor"]
 @test "empty seeds in a retrieval directive refuse with a diagnostic naming the task" {
   make_item "empty-seeds-item" "Deliver the capability." \
     "Deliver the capability." legacy-empty-seeds
+  export LORE_SESSION_INSTANCE="tui-a1b2c3"
+  export LORE_SESSION_SLUG="empty-seeds-item"
+  export LORE_SESSION_TYPE="spec"
   run bash "$FINALIZE_SH" empty-seeds-item
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "emission-contract assert failed"
@@ -332,6 +368,8 @@ assert "no intent_anchor" in d["anchor"]["reason"], d["anchor"]
   echo "$output" | grep -q "empty seeds"
   [ "$(row_count)" -eq 0 ]
   ! grep -q "| source: spec-verb" "$WORK_DIR/empty-seeds-item/execution-log.md" 2>/dev/null
+  assert_current_revision "$WORK_DIR/empty-seeds-item"
+  assert_no_finalize_success empty-seeds-item
 }
 
 @test "a phase-shaped plan still asserts through the phases[] fallback" {
@@ -376,6 +414,9 @@ write_class_gate_plan() {
     '**Deliverable:** The built module' \
     '**Files:** `src/a.py`' \
     '- [ ] build the module with no class marker in `src/a.py`')"
+  export LORE_SESSION_INSTANCE="tui-a1b2c3"
+  export LORE_SESSION_SLUG="unannotated-item"
+  export LORE_SESSION_TYPE="spec"
   run bash "$FINALIZE_SH" unannotated-item
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "judgment-class gate"
@@ -383,6 +424,8 @@ write_class_gate_plan() {
   echo "$output" | grep -q "build the module with no class marker"
   [ "$(row_count)" -eq 0 ]
   ! grep -q "| source: spec-verb" "$WORK_DIR/unannotated-item/execution-log.md" 2>/dev/null
+  assert_current_revision "$WORK_DIR/unannotated-item"
+  assert_no_finalize_success unannotated-item
 }
 
 @test "multi-task plan without split rationale refuses naming the plan, no row" {
@@ -479,9 +522,14 @@ PYEOF
 @test "re-running finalize appends a fresh row rather than deduplicating" {
   run bash "$FINALIZE_SH" finalize-item
   [ "$status" -eq 0 ]
+  cp "$WORK_DIR/finalize-item/tasks.json" "$TEST_KDIR/first-tasks.json"
+  cp "$WORK_DIR/finalize-item/revisions.jsonl" "$TEST_KDIR/first-revisions.jsonl"
   run bash "$FINALIZE_SH" finalize-item
   [ "$status" -eq 0 ]
   [ "$(row_count)" -eq 2 ]
+  cmp "$WORK_DIR/finalize-item/tasks.json" "$TEST_KDIR/first-tasks.json"
+  cmp "$WORK_DIR/finalize-item/revisions.jsonl" "$TEST_KDIR/first-revisions.jsonl"
+  assert_current_revision "$WORK_DIR/finalize-item"
   # Second run counts the first run's atom as verb-mediated too.
   python3 - "$(rows_file)" <<'PYEOF'
 import json, sys
@@ -618,6 +666,83 @@ write_hosted_registry() {
   [ "$status" -eq 3 ]
   [ "$(row_count)" -eq 0 ]
   [ "$(close_request_count)" -eq 0 ]
+  [ ! -e "$WORK_DIR/divergent-item/revisions.jsonl" ]
+  assert_no_finalize_success divergent-item
+}
+
+@test "publication failure emits no finalize success inside a session" {
+  export LORE_SESSION_INSTANCE="tui-a1b2c3"
+  export LORE_SESSION_SLUG="finalize-item"
+  export LORE_SESSION_TYPE="spec"
+  run env LORE_PLAN_REVISE_FAIL_AT=after-ledger bash "$FINALIZE_SH" finalize-item --json
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'plan revision publication failed'* ]]
+  json_payload | python3 -c '
+import json, sys
+result = json.load(sys.stdin)
+assert result["regen_tasks"]["status"] == "failed", result
+assert result["contract_asserts"]["status"] == "not-run", result
+assert result["telemetry"]["status"] == "not-run", result
+'
+  [ -f "$WORK_DIR/finalize-item/revisions.jsonl" ]
+  assert_no_finalize_success finalize-item
+}
+
+@test "finalize adopts an unchanged legacy generation" {
+  local item="$WORK_DIR/finalize-item"
+  run bash "$REPO_DIR/scripts/regen-tasks.sh" finalize-item --quiet
+  [ "$status" -eq 0 ]
+  [ -f "$item/tasks.json" ]
+  [ ! -e "$item/revisions.jsonl" ]
+  run bash "$FINALIZE_SH" finalize-item
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$item/revisions.jsonl" | tr -d ' ')" = 1 ]
+  assert_current_revision "$item"
+}
+
+@test "semantic edit at finalize publishes a new revision and preserves the sealed review" {
+  local item="$WORK_DIR/finalize-item"
+  run bash "$FINALIZE_SH" finalize-item
+  [ "$status" -eq 0 ]
+  local rid
+  rid=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["revision_id"])' "$item/tasks.json")
+  run bash "$REPO_DIR/scripts/plan-review.sh" prepare finalize-item \
+    --attempt-id before-edit --revision "$rid" --ceremony spec-post-plan --purpose criterion-adequacy
+  [ "$status" -eq 0 ]
+  printf '%s\n' 'The task covers the module.' > "$TEST_KDIR/review.md"
+  printf '%s\n' '{"schema_version":1,"outcome":"completed","verdict":"PASS","reason":null,"judgments":[{"purpose":"criterion-adequacy","judgment":"adequate","rationale":"The task covers the module.","result_ids":[]}],"dispositions":[]}' > "$TEST_KDIR/dispositions.json"
+  printf '%s\n' '{"evaluator_locator":"skill://review","evaluator_template_version":"123456789abc","framework":"codex","model":"review-model","final_round":1}' > "$TEST_KDIR/evaluator.json"
+  run bash "$REPO_DIR/scripts/plan-review.sh" seal finalize-item --attempt-id before-edit \
+    --output "$TEST_KDIR/review.md" --dispositions "$TEST_KDIR/dispositions.json" \
+    --evaluator-manifest "$TEST_KDIR/evaluator.json"
+  [ "$status" -eq 0 ]
+  cp -R "$item/reviews/before-edit" "$TEST_KDIR/original-review"
+  python3 - "$item/plan.md" <<'PYEOF'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace('The built module', 'The built module with retry support'))
+PYEOF
+  run bash "$FINALIZE_SH" finalize-item
+  [ "$status" -eq 0 ]
+  assert_current_revision "$item"
+  diff -r "$TEST_KDIR/original-review" "$item/reviews/before-edit"
+  python3 - "$REPO_DIR" "$TEST_KDIR" "$item" "$rid" <<'PYEOF'
+import json, runpy, sys
+from pathlib import Path
+item = Path(sys.argv[3])
+rows = [json.loads(line) for line in (item / 'revisions.jsonl').read_text().splitlines()]
+assert len(rows) == 2, rows
+assert rows[0]['revision_id'] == sys.argv[4], rows
+assert rows[1]['predecessor'] == sys.argv[4], rows
+assert rows[1]['revision_id'] != sys.argv[4] and rows[1]['kind'] == 'semantic', rows
+assert rows[1]['changed_task_ids'] == ['task-1'], rows
+api = runpy.run_path(sys.argv[1] + '/scripts/work-evidence.py')
+review = api['project'](item, Path(sys.argv[2]))['review_summary'][0]
+assert review['revision_id'] == sys.argv[4], review
+assert review['state'] == 'sealed' and review['binding']['state'] == 'stale', review
+PYEOF
+  [ "$(row_count)" -eq 2 ]
 }
 
 @test "finalize preserves adopted revision identity when generation is unchanged" {

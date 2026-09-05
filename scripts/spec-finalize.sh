@@ -10,7 +10,8 @@
 #   3. intent-anchor gate        verify-plan-intent-anchor.sh; refuses on any
 #                                non-zero; an absent anchor reports as skipped,
 #                                never as passed
-#   4. regen tasks               regen-tasks.sh --quiet; failure refuses
+#   4. publish revision          plan-revise.sh; adopts a fresh plan or reuses
+#                                the unchanged revision; failure refuses
 #   5. heal                      heal-work.sh; warn-and-continue
 #   6. emission-contract assert  every retrieval_directive in tasks.json carries
 #                                non-empty seeds AND non-empty scale_set (v2:
@@ -48,7 +49,7 @@
 # A refused finalize emits no telemetry row, no spec-verb execution-log atom,
 # and no session close-request. Earlier sanctioned mutations may have occurred
 # before the refusal
-# (backlink --fix corrections; a regenerated tasks.json when the failure is
+# (backlink --fix corrections; a published revision when the failure is
 # at the contract assert) — the report names them.
 #
 # The counts are family-relative bookkeeping attribution — which fraction of
@@ -61,13 +62,14 @@
 # assume one row per item.
 #
 # Every write composes the target file's sanctioned writer:
-# verify-plan-backlinks.sh --fix (plan.md), regen-tasks.sh (tasks.json),
+# verify-plan-backlinks.sh --fix (plan.md), plan-revise.sh (revisions, with
+# tasks.json installed through regen-tasks.sh),
 # write-execution-log.sh (execution-log.md), scorecard-append.sh (rows.jsonl).
 #
 # Exit codes:
 #   0  finalize passed — report emitted, telemetry appended (append failure warns)
 #   1  validation/precondition error (no match, archived item, backlink script
-#      failure, regen failure, contract-assert failure, atom write failure)
+#      failure, publication failure, contract-assert failure, atom write failure)
 #   2  ambiguous work-item reference
 #   3  intent-anchor gate failure (verifier code 2/3/4 surfaced in diagnostics,
 #      not in the process exit code)
@@ -86,7 +88,7 @@ usage() {
 Usage: lore spec finalize <ref> [--template-version <hash>] [--json]
 
 Runs the /spec terminal gate sequence (backlink verify, intent-anchor gate,
-regen-tasks, heal, emission-contract asserts), stamps one spec-verb
+revision publication, heal, emission-contract asserts), stamps one spec-verb
 execution-log atom, and appends one adoption-telemetry scorecard row.
 
 Exit codes: 0 finalized, 1 error/refused, 2 ambiguous reference,
@@ -338,16 +340,19 @@ else
   emit_json_and_exit 3 "intent-anchor gate failed (verifier code $CODE_MEANING)"
 fi
 
-# --- 4. Regenerate tasks.json (failure refuses) ------------------------------
+# --- 4. Publish the plan and tasks revision (failure refuses) -----------------
+# Ordinary publication adopts even an unchanged legacy generation. Keep the
+# regen_tasks report fields for existing readers of the finalization result.
 set +e
-REGEN_OUTPUT=$(bash "$SCRIPT_DIR/regen-tasks.sh" "$SLUG" --quiet 2>&1)
+REGEN_OUTPUT=$(bash "$SCRIPT_DIR/plan-revise.sh" "$SLUG" \
+  --author-role spec-lead --reason "publish plan for finalization" 2>&1)
 REGEN_RC=$?
 set -e
 if [[ $REGEN_RC -ne 0 ]]; then
   REGEN_STATUS="failed"
   REGEN_SUMMARY="$REGEN_OUTPUT"
   echo "$REGEN_OUTPUT" >&2
-  fail "regen-tasks failed (exit $REGEN_RC) for '$SLUG'"
+  fail "plan revision publication failed (exit $REGEN_RC) for '$SLUG'"
 fi
 REGEN_STATUS="passed"
 REGEN_SUMMARY=$(printf '%s\n' "$REGEN_OUTPUT" | grep '^\[work\] Regenerated' | head -1 || true)
