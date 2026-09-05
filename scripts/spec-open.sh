@@ -189,6 +189,9 @@ for index, inv in enumerate(investigations):
             reject(f"{where}.dispatch assignment conflicts with investigation")
         if dispatch["bindings"]["work_item"] != slug:
             reject(f"{where}.dispatch work_item mismatch")
+        report_destination = kdir / "_work" / slug / "worker-reports" / (dispatch["bindings"]["report_id"] + ".md")
+        if dispatch["bindings"]["report_path"] != str(report_destination):
+            reject(f"{where}.dispatch report_path must match the coordinate report destination")
     lowered = question.lower()
     if inv.get("kind") == "fixed" and "external skill" in lowered and "agent" in lowered:
         fixed_external += 1
@@ -299,16 +302,21 @@ for ordinal, inv in enumerate(normalized, 1):
                          assembly=("\n".join(r["content"] for r in knowledge_by_id[inv["id"]]), {}))
             bindings = dict.fromkeys(binder.FIELDS)
             bindings.update(work_item=slug, dispatch_attempt_id=attempt, report_id=attempt,
-                            report_path=str(kdir / "_work" / slug / "investigator-reports" / (attempt + ".md")),
+                            report_path=str(kdir / "_work" / slug / "worker-reports" / (attempt + ".md")),
                             execution_root=str(Path.cwd().resolve()), packet_id=packet_id,
                             packet_pointer=pointer(kdir, packet_id), assignment=json.dumps({
                                 "investigation_id": inv["id"], "question": inv["question"], "complexity": inv["complexity"]}, ensure_ascii=False))
-            bindings["absence_reasons"] = {field: "pre-plan-investigation" if field in {"task_id", "revision_id"}
+            bindings["absence_reasons"] = {field: "no-plan-task-assigned" if field in {"task_id", "revision_id"}
                                           else "not-applicable-to-investigator" for field in binder.FIELDS if bindings[field] is None}
         if route == "session" and (bindings["task_id"] is None or bindings["revision_id"] is None):
             reject("session investigator requires an assigned plan task and revision in the current session runtime")
+        header_fields = {"Packet-id": bindings["packet_id"], "Report-id": bindings["report_id"],
+                         "Dispatch-attempt-id": bindings["dispatch_attempt_id"]}
+        if bindings["revision_id"] is not None:
+            header_fields["Revision-id"] = bindings["revision_id"]
+        identity_headers = "".join(f"{key}: {value}\n" for key, value in header_fields.items()).encode()
         reference = binder.publish(descriptor, bindings, kdir, dispatch_guidance.encode(),
-                                   required=("packet_id", "packet_pointer"),
+                                   prefix=identity_headers, required=("packet_id", "packet_pointer"),
                                    wrapper={"template_id": "spec", "template_version": lead_template_version,
                                             "path": str(Path(script_dir).parent / "skills/spec/SKILL.md"),
                                             "sha256": hashlib.sha256((Path(script_dir).parent / "skills/spec/SKILL.md").read_bytes()).hexdigest()})
