@@ -49,7 +49,7 @@ store = home / '.lore'
 settings = {'version': 1, 'harnesses': {'codex': {'roles': {'lead': 'planning-model', 'reviewer': 'review-model', 'worker': 'worker-model', 'researcher': 'research-model', 'advisor': 'advisor-model'}, 'ceremony_roles': {'spec': {'lead': 'spec-model'}}}}}
 (store / 'config/settings.json').write_text(json.dumps(settings))
 item = store / '_work/fixture'
-if scenario != 'implement-envelope':
+if scenario not in ('implement-envelope', 'spec-report-fields'):
     item.mkdir(parents=True)
     (item / '_meta.json').write_text(json.dumps({'title': 'Fixture', 'source_checkout': str(repo)}))
 instances = store / '_sessions/instances'; instances.mkdir(parents=True)
@@ -82,7 +82,7 @@ def refused(fn, message=None):
     else:
         raise AssertionError('expected refusal')
 
-if scenario == 'implement-envelope':
+if scenario in ('implement-envelope', 'spec-report-fields'):
     call([str(repo/'cli/lore'), 'work', 'create', '--title', 'Fixture', '--slug', 'fixture',
           '--intent-anchor', 'Preserve isolated packet history.'])
     call([str(repo/'cli/lore'), 'work', 'source-checkout', 'fixture', '--from-instance', 'fixture'])
@@ -502,6 +502,78 @@ elif scenario == 'spec-claims':
         if not correct:
             assert b'assertion has no unique matching canonical claim' in result.stderr
     print('grounded self-emission rejects investigation labels for bound tasks and accepts the actual bound task')
+
+elif scenario == 'spec-report-fields':
+    # These are authored report inputs. Every packet, claim and report lands
+    # through the same writers used by the collector.
+    call(['git', 'init', '-q'])
+    call(['git', 'config', 'user.name', 'Fixture'])
+    call(['git', 'config', 'user.email', 'fixture@example.invalid'])
+    (repo / 'fixture.txt').write_text('grounded fixture bytes\n')
+    call(['git', 'add', 'fixture.txt']); call(['git', 'commit', '-qm', 'Fixture source'])
+    sha = call(['git', 'rev-parse', 'HEAD']).stdout.decode().strip()
+    from snippet_normalize import hash_normalized
+    hook = ['bash', str(repo / 'scripts/task-completed-capture-check.sh')]
+    cases = [
+        ('valid', None), ('empty', None),
+        ('key-line', 'existing absolute files'),
+        ('key-relative', 'existing absolute files'),
+        ('significance', 'malformed grounded investigator assertion'),
+        ('wrong-role', 'canonical claim producer mismatch'),
+        ('outside-root', 'is not in the subpath'),
+        ('missing-revision-file', 'exists on disk, but not in'),
+        ('wrong-header', 'Report-id mismatched'),
+        ('plain-claim-ids', 'invalid Tier 2 evidence references'),
+    ]
+    for name, reason in cases:
+        b = fixture('investigator', 'fields-' + name)
+        b['report_path'] = str(item / 'worker-reports' / (b['report_id'] + '.md'))
+        ref = bind(compile('investigator'), b)
+        m = binder.validate_dispatch(ref['manifest_path'], ref['manifest_sha256'])
+        source = repo / 'fixture.txt'
+        if name == 'outside-root':
+            source = temporary / 'outside.txt'; source.write_text('grounded fixture bytes\n')
+        elif name == 'missing-revision-file':
+            source = repo / 'uncommitted.txt'; source.write_text('grounded fixture bytes\n')
+        row = {'claim_id': 'claim-fields-' + name, 'tier': 'task-evidence',
+               'claim': 'The source contains grounded fixture bytes.',
+               'producer_role': 'spec-lead' if name == 'wrong-role' else 'researcher',
+               'protocol_slot': 'spec', 'task_id': b['task_id'], 'scale': 'implementation',
+               'file': str(source), 'line_range': '1-1', 'exact_snippet': 'grounded fixture bytes',
+               'normalized_snippet_hash': hash_normalized('grounded fixture bytes'),
+               'falsifier': 'The committed first line differs.',
+               'why_this_work_needs_it': 'Check source-bound report collection.',
+               'captured_at_sha': sha, 'change_context': {'summary': 'Fixture source',
+                    'changed_files': [str(source)], 'diff_ref': None},
+               'significance': 'low', 'report_id': b['report_id'],
+               'dispatch_attempt_id': b['dispatch_attempt_id'],
+               'position_dispatch': {key: ref[key] for key in ('manifest_path', 'manifest_sha256')}}
+        if name != 'empty':
+            call(['bash', str(repo / 'scripts/evidence-append.sh'), '--work-item', 'fixture', '--kdir', str(store)], input=json.dumps(row).encode())
+        assertion = {key: row[key] for key in ('claim_id', 'claim', 'file', 'line_range', 'exact_snippet', 'normalized_snippet_hash', 'falsifier', 'significance')}
+        if name == 'significance': assertion['significance'] = 'This affects collection.'
+        key = str(repo / 'fixture.txt')
+        if name == 'key-line': key += ':1'
+        if name == 'key-relative': key = 'fixture.txt'
+        headers = {'Template-version': m['producer']['template_version'],
+                   'Position-dispatch-manifest': ref['manifest_path'], 'Position-dispatch-sha256': ref['manifest_sha256'],
+                   'Report-id': 'different-report' if name == 'wrong-header' else b['report_id']}
+        report = ''.join(f'{key}: {value}\n' for key, value in headers.items())
+        report += '**Question:** Which committed bytes ground the report?\n**Findings:** The named bytes are inspectable.\n**Key files:**\n' + yaml.safe_dump([key])
+        report += '**Implications:** Retain the source identity.\n**Assertions:**\n' + yaml.safe_dump([] if name == 'empty' else [assertion])
+        report += '**Observations:** None\n**Worker leads:** None\n**Unknowns:** None\n'
+        if name == 'plain-claim-ids': report += '**Tier 2 evidence:**\n' + row['claim_id'] + '\n'
+        completion = {'position_dispatch': ref, 'lore_task_id': b['task_id']}
+        # Missing durable output fails even when a complete response exists in memory.
+        missing = call(hook, ok=False, input=json.dumps(completion).encode())
+        assert b'durable report missing' in missing.stderr
+        call(['bash', str(repo / 'scripts/coordinate-report.sh'), 'fixture', '--report-id', b['report_id'], '--kdir', str(store)], input=report.encode())
+        before = Path(b['report_path']).read_bytes()
+        result = call(hook, ok=reason is None, input=json.dumps(completion).encode())
+        if reason: assert reason.encode() in result.stderr, (name, result.stderr)
+        repeat = call(['bash', str(repo / 'scripts/coordinate-report.sh'), 'fixture', '--report-id', b['report_id'], '--kdir', str(store)], ok=False, input=report.encode())
+        assert repeat.returncode == 4 and Path(b['report_path']).read_bytes() == before
+    print('real investigator report fields, source-root restrictions, write-once history and empty assertions checked')
 
 elif scenario == 'spec-session':
     args, document, opened, examples = spec_sessions(('claude-code', 'codex', 'opencode'))
@@ -1073,5 +1145,10 @@ PY
 
 @test "bound spec investigator claims preserve task identity through canonical completion" {
   run exercise_binding spec-claims
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "spec investigator report fields reject malformed paths, roles and source identities" {
+  run exercise_binding spec-report-fields
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
