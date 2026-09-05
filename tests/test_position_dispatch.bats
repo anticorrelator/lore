@@ -982,6 +982,15 @@ elif scenario=='synthesis':
     b=fixture('investigator','waived-attempt');b.update(task_id=None,revision_id=None,packet_id='pkt-waived',packet_pointer=pointer(store,'pkt-waived'))
     b['absence_reasons'].update(task_id='Investigation precedes tasks.',revision_id='No plan revision exists.')
     bind(compile('investigator'),b)
+    # A dispatch published before the rule, or whose packet later gained an assembled row, still re-validates: the rule is a preparation check.
+    row=dict(row,delivery_stage='assembled'); row.pop('synthesis',None)
+    build_packet(store,dict(packet_id='pkt-unsynthesized',packet_scope='task',work_item='fixture',task_id='task-1',revision_id=revision,
+                            dispatch_attempt_id='synth-attempt',source_head=committed['source_head'],session_id=None,phase=None,arm=None,task_scale_set='implementation'),
+                 assembly=('Candidate content',{}),role='worker',scales=['implementation'])
+    assert show(store,'pkt-unsynthesized')['delivery_stage']=='assembled'
+    binder.validate_dispatch(ref['manifest_path'],ref['manifest_sha256'])
+    binder.native_input(ref['manifest_path'],ref['manifest_sha256'])
+    refused(lambda: bind(d,b),'canonical packet changed after preparation')
 elif scenario=='renderer-drift':
     d=compile(framework='claude-code')
     old=bind(d,fixture(attempt='before-drift'))

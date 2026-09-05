@@ -398,7 +398,7 @@ def native_selection(manifest_path, manifest_sha256):
     root = Path(resolved['resolved_manifest_path']).parent
     if root.parents[1] != Path(m['work_item_path']):
         raise ValueError('native selection requires an active work item')
-    validate_bindings(m['bindings'], m['producer']['position'], Path(m['kdir']), m['required_bindings'])
+    validate_bindings(m['bindings'], m['producer']['position'], Path(m['kdir']), m['required_bindings'], preparation=False)
     stored = json.loads(read(root / 'selection.json'))
     selection, registration = render_selection(json.loads(read(root / 'descriptor.json')),
                                                m['bindings']['dispatch_attempt_id'], stored['model_binding'])
@@ -594,7 +594,7 @@ def session_reference(context, *, kdir):
         m = validate_dispatch(path, digest(raw))
         b['execution_root'] = m['bindings']['execution_root']
         del b['absence_reasons']['execution_root']
-        validate_bindings(b, pending['position'], kdir, session_required_bindings(pending['position']))
+        validate_bindings(b, pending['position'], kdir, session_required_bindings(pending['position']), preparation=False)
         if m['bindings'] != b or m['wrapper'] != options.get('wrapper') or m.get('dispatch_route') == 'native-subagent':
             raise ValueError('published session differs from admitted bindings or wrapper')
         members = {'descriptor.json': encoded(pending['descriptor']), 'guidance.md': pending['guidance'].encode()}
@@ -624,7 +624,7 @@ def session_reference(context, *, kdir):
         raise ValueError('invalid position session context')
     if Path(m['kdir']) != kdir.resolve() or Path(m['work_item_path']) != kdir.resolve() / '_work' / m['bindings']['work_item']:
         raise ValueError('session reference store mismatch')
-    validate_bindings(m['bindings'], m['producer']['position'], kdir, session_required_bindings(m['producer']['position']))
+    validate_bindings(m['bindings'], m['producer']['position'], kdir, session_required_bindings(m['producer']['position']), preparation=False)
     for kind in ('payload', 'native'):
         if ref[kind + '_path'] != m[kind]['path'] or ref[kind + '_sha256'] != m[kind]['sha256']:
             raise ValueError('mixed dispatch reference')
@@ -653,7 +653,7 @@ def launch_session(context, *, framework, slug, execution_root, kdir):
         raise ValueError('native subagent dispatch cannot launch as a session')
     if Path(m['kdir']) != kdir.resolve() or Path(m['work_item_path']) != Path(resolved['resolved_manifest_path']).parents[2]:
         raise ValueError('launch requires the active work item in the selected store')
-    validate_bindings(m['bindings'], m['producer']['position'], kdir, session_required_bindings(m['producer']['position']))
+    validate_bindings(m['bindings'], m['producer']['position'], kdir, session_required_bindings(m['producer']['position']), preparation=False)
     for kind in ('payload', 'native'):
         if ref[kind + '_path'] != m[kind]['path'] or ref[kind + '_sha256'] != m[kind]['sha256']:
             raise ValueError('mixed dispatch reference')
