@@ -147,6 +147,31 @@ def validate_declarative_examples(document, source):
             raise AssertionError("unvalidated declarative text example at line " + str(row["line_start"]))
 
 
+def isolated_go_environment(repo, case_root, env):
+    env = dict(env)
+    go = os.environ.get("LORE_TEST_GO") or shutil.which("go", path=env["PATH"])
+    if not go:
+        raise RuntimeError("Recipe fixtures require an installed Go toolchain; set LORE_TEST_GO")
+    go = Path(go).resolve()
+    probe_env = dict(env, GOTOOLCHAIN="local")
+    version = subprocess.run([str(go), "env", "GOVERSION"], env=probe_env,
+                             capture_output=True, text=True, check=True).stdout.strip()
+    required = re.search(r"^go (\d+\.\d+(?:\.\d+)?)$", (repo / "tui/go.mod").read_text(), re.MULTILINE).group(1)
+    def parts(value):
+        match = re.fullmatch(r"(?:go)?(\d+)\.(\d+)(?:\.(\d+))?", value)
+        return tuple(int(v or 0) for v in match.groups()) if match else ()
+    if not parts(version) or parts(version) < parts(required):
+        raise RuntimeError(f"Recipe fixtures need installed Go >= {required}, found {version}; set LORE_TEST_GO")
+    go_cache = Path(tempfile.gettempdir()).resolve() / f"lore-implement-go-cache-{os.getuid()}"
+    if go_cache.is_relative_to(case_root.resolve()):
+        raise ValueError("Go caches must be outside the case root")
+    for name in ("modules", "build"):
+        (go_cache / name).mkdir(parents=True, exist_ok=True)
+    env.update(PATH=str(go.parent) + os.pathsep + env["PATH"], GOTOOLCHAIN="local",
+               GOMODCACHE=str(go_cache / "modules"), GOCACHE=str(go_cache / "build"))
+    return env
+
+
 class Fixture:
     def __init__(self, repo, root, source):
         self.repo, self.root = repo.resolve(), root.resolve()
@@ -165,11 +190,7 @@ class Fixture:
                         XDG_CONFIG_HOME=str(self.root / "config"), XDG_DATA_HOME=str(self.root / "data"),
                         XDG_CACHE_HOME=str(self.root / "cache"),
                         PATH=str(self.repo / "cli") + os.pathsep + self.env["PATH"])
-        go_cache = Path(tempfile.gettempdir()).resolve() / f"lore-implement-go-cache-{os.getuid()}"
-        assert not go_cache.is_relative_to(self.root), "Go caches must be outside the case root"
-        for name in ("modules", "build"):
-            (go_cache / name).mkdir(parents=True, exist_ok=True)
-        self.env.update(GOTOOLCHAIN="local", GOMODCACHE=str(go_cache / "modules"), GOCACHE=str(go_cache / "build"))
+        self.env = isolated_go_environment(self.repo, self.root, self.env)
         (self.root / "data/config").mkdir(parents=True)
         (self.root / "data/config/settings.json").write_text(json.dumps({"version": 1,
             "coordination": {"max_concurrency": 2}, "harnesses": {"codex": {"roles": {

@@ -1,0 +1,287 @@
+{
+  "test_implement.py": {
+    "retired": {
+      "test_cache_branch_write_in_step1": "Old inline orchestration/step contract replaced by compiled implement verbs; retained behavior covered by tests/frameworks/impl_start.bats, impl_open.bats, impl_gate_anchor.bats, impl_check_report.bats, impl_promote_batch.bats, impl_close.bats and tests/helpers/implement_recipes.py.",
+      "test_worker_template_path_referenced": "Old inline orchestration/step contract replaced by compiled implement verbs; retained behavior covered by tests/frameworks/impl_start.bats, impl_open.bats, impl_gate_anchor.bats, impl_check_report.bats, impl_promote_batch.bats, impl_close.bats and tests/helpers/implement_recipes.py.",
+      "test_teamcreate_before_taskcreate_documented": "Old inline orchestration/step contract replaced by compiled implement verbs; retained behavior covered by tests/frameworks/impl_start.bats, impl_open.bats, impl_gate_anchor.bats, impl_check_report.bats, impl_promote_batch.bats, impl_close.bats and tests/helpers/implement_recipes.py.",
+      "test_lore_promote_in_step5": "Old inline orchestration/step contract replaced by compiled implement verbs; retained behavior covered by tests/frameworks/impl_start.bats, impl_open.bats, impl_gate_anchor.bats, impl_check_report.bats, impl_promote_batch.bats, impl_close.bats and tests/helpers/implement_recipes.py.",
+      "test_evidence_append_in_step3": "Old inline orchestration/step contract replaced by compiled implement verbs; retained behavior covered by tests/frameworks/impl_start.bats, impl_open.bats, impl_gate_anchor.bats, impl_check_report.bats, impl_promote_batch.bats, impl_close.bats and tests/helpers/implement_recipes.py.",
+      "test_advisor_rollup_in_step4": "Old inline orchestration/step contract replaced by compiled implement verbs; retained behavior covered by tests/frameworks/impl_start.bats, impl_open.bats, impl_gate_anchor.bats, impl_check_report.bats, impl_promote_batch.bats, impl_close.bats and tests/helpers/implement_recipes.py.",
+      "test_tier2_prior_evidence_injection_documented": "Old inline orchestration/step contract replaced by compiled implement verbs; retained behavior covered by tests/frameworks/impl_start.bats, impl_open.bats, impl_gate_anchor.bats, impl_check_report.bats, impl_promote_batch.bats, impl_close.bats and tests/helpers/implement_recipes.py.",
+      "test_lore_promote_source_artifact_verification_documented": "Old inline orchestration/step contract replaced by compiled implement verbs; retained behavior covered by tests/frameworks/impl_start.bats, impl_open.bats, impl_gate_anchor.bats, impl_check_report.bats, impl_promote_batch.bats, impl_close.bats and tests/helpers/implement_recipes.py.",
+      "test_step_1_5b_anchor_coverage_lists_five_verdicts": "Old inline orchestration/step contract replaced by compiled implement verbs; retained behavior covered by tests/frameworks/impl_start.bats, impl_open.bats, impl_gate_anchor.bats, impl_check_report.bats, impl_promote_batch.bats, impl_close.bats and tests/helpers/implement_recipes.py.",
+      "test_step_3_0_lead_inline_four_conditions": "Old inline orchestration/step contract replaced by compiled implement verbs; retained behavior covered by tests/frameworks/impl_start.bats, impl_open.bats, impl_gate_anchor.bats, impl_check_report.bats, impl_promote_batch.bats, impl_close.bats and tests/helpers/implement_recipes.py.",
+      "test_yes_never_skips_gate_evaluation": "Old inline orchestration/step contract replaced by compiled implement verbs; retained behavior covered by tests/frameworks/impl_start.bats, impl_open.bats, impl_gate_anchor.bats, impl_check_report.bats, impl_promote_batch.bats, impl_close.bats and tests/helpers/implement_recipes.py."
+    },
+    "retained": [
+      "test_step_present",
+      "test_tier2_tier3_emission_documented",
+      "test_step_6_capability_anchor_reconciliation"
+    ]
+  },
+  "test_legacy_conventions.py": {
+    "retired": {
+      "test_embedded_templates_delimited": "Old inline prompt/review rubric layout is no longer the contract; prompts and rubrics are external resources.",
+      "test_review_skills_reference_sound_weak_unsound": "Old inline prompt/review rubric layout is no longer the contract; prompts and rubrics are external resources.",
+      "test_review_skills_carry_grounding_mechanism_consequence_chain": "Old inline prompt/review rubric layout is no longer the contract; prompts and rubrics are external resources."
+    },
+    "retained": [
+      "test_step_header_canonical_form",
+      "test_lore_invocations_backticked",
+      "test_intent_anchor_referenced_with_verbatim_preservation",
+      "test_spawn_skills_document_parallel_execution_model"
+    ]
+  },
+  "test_self_test.py": {
+    "retired": {
+      "test_dimension_present": "Retired self-test skill and journal output; current maintenance is memory heal and retro.",
+      "test_protocol_evolution_suggestions_produced": "Retired self-test skill and journal output; current maintenance is memory heal and retro.",
+      "test_results_written_to_file": "Retired self-test skill and journal output; current maintenance is memory heal and retro.",
+      "test_step3_mechanical_fixes_mandatory": "Retired self-test skill and journal output; current maintenance is memory heal and retro.",
+      "test_references_4_condition_gate_by_name": "Retired self-test skill and journal output; current maintenance is memory heal and retro."
+    },
+    "retained": []
+  },
+  "test_claude_md_handlers.py": {
+    "retired": {},
+    "retained": [
+      "test_pending_captures_handler_surface",
+      "test_pending_digest_handler_surface"
+    ]
+  },
+  "test_retro.py": {
+    "retired": {
+      "test_dimension_present": "Pins the retired five-dimension audit/journal pipeline. Current evidence-pack and prepare/file contracts are covered by tests/test_retro_evidence_pack_protocol.sh and tests/frameworks/retro_prepare.bats and retro_file.bats.",
+      "test_retro_evolution_output_hook": "Pins the retired five-dimension audit/journal pipeline. Current evidence-pack and prepare/file contracts are covered by tests/test_retro_evidence_pack_protocol.sh and tests/frameworks/retro_prepare.bats and retro_file.bats.",
+      "test_lore_audit_invoked": "Pins the retired five-dimension audit/journal pipeline. Current evidence-pack and prepare/file contracts are covered by tests/test_retro_evidence_pack_protocol.sh and tests/frameworks/retro_prepare.bats and retro_file.bats.",
+      "test_step_order_load_bearing_documented": "Pins the retired five-dimension audit/journal pipeline. Current evidence-pack and prepare/file contracts are covered by tests/test_retro_evidence_pack_protocol.sh and tests/frameworks/retro_prepare.bats and retro_file.bats.",
+      "test_lore_journal_write_referenced": "Pins the retired five-dimension audit/journal pipeline. Current evidence-pack and prepare/file contracts are covered by tests/test_retro_evidence_pack_protocol.sh and tests/frameworks/retro_prepare.bats and retro_file.bats.",
+      "test_memory_telemetry_must_not_feed_evolve": "Pins the retired five-dimension audit/journal pipeline. Current evidence-pack and prepare/file contracts are covered by tests/test_retro_evidence_pack_protocol.sh and tests/frameworks/retro_prepare.bats and retro_file.bats.",
+      "test_four_journal_roles_preserved": "Pins the retired five-dimension audit/journal pipeline. Current evidence-pack and prepare/file contracts are covered by tests/test_retro_evidence_pack_protocol.sh and tests/frameworks/retro_prepare.bats and retro_file.bats.",
+      "test_tier_partition_step_3_0": "Pins the retired five-dimension audit/journal pipeline. Current evidence-pack and prepare/file contracts are covered by tests/test_retro_evidence_pack_protocol.sh and tests/frameworks/retro_prepare.bats and retro_file.bats.",
+      "test_step_3_9_tier_template_filter": "Pins the retired five-dimension audit/journal pipeline. Current evidence-pack and prepare/file contracts are covered by tests/test_retro_evidence_pack_protocol.sh and tests/frameworks/retro_prepare.bats and retro_file.bats.",
+      "test_silence_invariant_step_3_8": "Pins the retired five-dimension audit/journal pipeline. Current evidence-pack and prepare/file contracts are covered by tests/test_retro_evidence_pack_protocol.sh and tests/frameworks/retro_prepare.bats and retro_file.bats.",
+      "test_behavioral_health_late_binding": "Pins the retired five-dimension audit/journal pipeline. Current evidence-pack and prepare/file contracts are covered by tests/test_retro_evidence_pack_protocol.sh and tests/frameworks/retro_prepare.bats and retro_file.bats.",
+      "test_cc04_sole_writer_invariant": "Pins the retired five-dimension audit/journal pipeline. Current evidence-pack and prepare/file contracts are covered by tests/test_retro_evidence_pack_protocol.sh and tests/frameworks/retro_prepare.bats and retro_file.bats.",
+      "test_per_kind_correctness_gate_fork": "Pins the retired five-dimension audit/journal pipeline. Current evidence-pack and prepare/file contracts are covered by tests/test_retro_evidence_pack_protocol.sh and tests/frameworks/retro_prepare.bats and retro_file.bats.",
+      "test_grounding_preflight_failure_reasons_single_line": "Pins the retired five-dimension audit/journal pipeline. Current evidence-pack and prepare/file contracts are covered by tests/test_retro_evidence_pack_protocol.sh and tests/frameworks/retro_prepare.bats and retro_file.bats."
+    },
+    "retained": []
+  },
+  "test_spec.py": {
+    "retired": {
+      "test_consumer_contradiction_emission_present": "Old consumer-contradiction emission token retired; current spec outcome records retain evaluator findings."
+    },
+    "retained": [
+      "test_short_flow_section_present",
+      "test_full_flow_section_present",
+      "test_synthesis_step_present",
+      "test_design_decisions_produced",
+      "test_step_4b_verifier_verdict_forbidden",
+      "test_key_assertions_section_forbidden",
+      "test_without_verification_flag_absent",
+      "test_plan_template_investigations_no_assertions",
+      "test_lore_resolve_invoked",
+      "test_investigation_plan_section_present",
+      "test_intent_anchor_preserved_verbatim_for_downstream"
+    ]
+  },
+  "test_renormalize.py": {
+    "retired": {},
+    "retained": [
+      "test_step_present",
+      "test_prune_operation_documented",
+      "test_dedupe_merge_documented",
+      "test_backlink_maintenance_documented",
+      "test_staleness_analysis_step"
+    ]
+  },
+  "test_tier_invariants.py": {
+    "retired": {
+      "test_normalized_snippet_hash_algorithm_identity": "Inline normalization recipe removed from worker template; shared scripts own hash normalization.",
+      "test_tier_migration_smoke": "Old scorecard payload cannot satisfy current metric schema; tests/test_scorecard.sh covers writer tiers and missing fields.",
+      "test_tier3_emit_requires_lore_promote_same_stage": "Obsolete expected failure: universal same-stage promotion conflicts with evidence-then-acceptance flow."
+    },
+    "retained": [
+      "test_no_skill_writes_rows_jsonl_directly"
+    ]
+  },
+  "test_lib.py": {
+    "retired": {},
+    "retained": [
+      "test_read_skill_returns_string",
+      "test_read_agent_returns_string",
+      "test_extract_section_basic",
+      "test_extract_section_includes_subsections",
+      "test_extract_section_missing_returns_empty",
+      "test_extract_section_case_insensitive",
+      "test_extract_section_real_skill",
+      "test_in_code_context_inside_fence",
+      "test_in_code_context_outside_fence",
+      "test_in_code_context_fence_delimiter_line",
+      "test_extract_embedded_template_by_name",
+      "test_extract_embedded_template_no_match",
+      "test_extract_embedded_template_multiple",
+      "test_find_invocation_basic",
+      "test_find_invocation_returns_correct_line_numbers",
+      "test_find_invocation_none",
+      "test_find_invocation_real_skill"
+    ]
+  },
+  "test_cc01_backcompat.py": {
+    "retired": {
+      "test_cc01_warn_pass_documented": "Legacy unstamped-report behavior is exercised by tests/test_task_completed_compat.sh; current spec/implement no longer duplicate hook internals."
+    },
+    "retained": []
+  },
+  "test_pr_revise.py": {
+    "retired": {
+      "test_grounding_rubric_applied_to_reviewer_findings": "Retired skill; review handling is in skills/pr-review and its lens resources.",
+      "test_trivial_reduction_check_in_epistemic_stance": "Retired skill; review handling is in skills/pr-review and its lens resources.",
+      "test_symmetric_scrutiny_in_epistemic_stance": "Retired skill; review handling is in skills/pr-review and its lens resources.",
+      "test_pr_revise_has_step": "Retired skill; review handling is in skills/pr-review and its lens resources."
+    },
+    "retained": []
+  },
+  "test_evolve.py": {
+    "retired": {
+      "test_reads_self_test_evolution_suggestions": "Retired self-test producer.",
+      "test_no_auto_mutation": "Current Step 6 authors decisions under its authorization; old mandatory Step 6 presentation gate is retired.",
+      "test_scorecard_citation_gate_present": "Old Step 5 heading replaced by eligibility preparation; tests/frameworks/evolve_prepare.bats exercises evidence gates.",
+      "test_step_7_5_sequenced_after_edits": "Old template registration stage replaced by atomic evolve file; tests/frameworks/evolve_file.bats covers commit and recovery.",
+      "test_evidence_class_matrix_step_5": "Old claim-retraction gate intentionally removed; current primary/correction/recurring gates covered by evolve_prepare.bats.",
+      "test_pipeline_degraded_exclusion": "Exact old hyphenated prose replaced by pipeline_degraded_window_only reason; evolve_prepare.bats tests degradation exclusion."
+    },
+    "retained": [
+      "test_step_present",
+      "test_reads_retro_evolution_suggestions",
+      "test_template_registry_registration"
+    ]
+  },
+  "test_generate_tasks_design_decisions.py": {
+    "retired": {},
+    "retained": [
+      "test_absent_section_emits_warning",
+      "test_absent_section_sets_flag_false",
+      "test_present_section_no_warning",
+      "test_present_section_sets_flag_true",
+      "test_present_section_injection_unchanged"
+    ]
+  },
+  "test_worker_template.py": {
+    "retired": {},
+    "retained": [
+      "test_worker_observations_block_present",
+      "test_worker_observations_required_fields_documented",
+      "test_worker_template_version_echo",
+      "test_worker_sendmessage_to_team_lead",
+      "test_worker_advisor_consultations_section_documented",
+      "test_worker_advisor_consultations_requires_template_version",
+      "test_worker_surfaced_concerns_required",
+      "test_worker_tier2_evidence_section_documented",
+      "test_worker_tier2_emission_cli_referenced",
+      "test_worker_tier2_required_fields_named",
+      "test_worker_tier2_one_call_per_claim_rule_present",
+      "test_worker_tier3_candidates_section_documented",
+      "test_worker_tier3_candidates_naming_standard_callout",
+      "test_worker_tier3_candidates_fields_named",
+      "test_worker_tier3_source_artifact_ids_links_tier2",
+      "test_worker_mustache_variables_preserved"
+    ]
+  },
+  "test_remember.py": {
+    "retired": {},
+    "retained": [
+      "test_step_present",
+      "test_lore_capture_invoked",
+      "test_pending_captures_handler_referenced",
+      "test_tier3_emission_uses_lore_promote",
+      "test_lore_capture_in_step5",
+      "test_4_condition_gate_canonical_body_in_step2",
+      "test_orientation_gate_five_conditions_in_step2"
+    ]
+  },
+  "test_advisor_template.py": {
+    "retired": {
+      "test_advisor_documents_consultation_modes": "Old unresolved on-demand/must-consult template expectation; current required consultations belong to task metadata and worker contract."
+    },
+    "retained": [
+      "test_advisor_has_consultation_response_section",
+      "test_advisor_response_uses_sendmessage",
+      "test_advisor_response_format_includes_guidance_field",
+      "test_advisor_documents_domain_context",
+      "test_advisor_documents_persistent_membership",
+      "test_advisor_template_documents_version_field"
+    ]
+  },
+  "test_bootstrap.py": {
+    "retired": {
+      "test_explorer_agents_forbidden_from_lore_capture": "Obsolete universal prohibition: scoped domain bootstrap explicitly permits researcher capture."
+    },
+    "retained": [
+      "test_step_present",
+      "test_lead_invokes_lore_capture",
+      "test_synthesis_step_present",
+      "test_confidence_medium_source_bootstrap"
+    ]
+  },
+  "test_task_completed_capture_check.py": {
+    "retired": {},
+    "retained": [
+      "test_hook_script_present",
+      "test_worker_with_tier2_and_tier3_passes",
+      "test_worker_without_template_version_warn_pass",
+      "test_researcher_assertions_unchanged",
+      "test_worker_tier3_missing_source_artifact_ids_fails",
+      "test_worker_tier3_empty_source_artifact_ids_fails",
+      "test_worker_empty_tier2_evidence_passes",
+      "test_worker_tier2_with_non_list_prose_fails",
+      "test_task_completed_hook_extended_worker_shape_cases"
+    ]
+  },
+  "test_memory.py": {
+    "retired": {},
+    "retained": [
+      "test_command_documented",
+      "test_lore_search_invoked",
+      "test_lore_curate_invoked",
+      "test_lore_heal_invoked",
+      "test_renormalize_redirects"
+    ]
+  },
+  "test_pr_review.py": {
+    "retired": {
+      "test_sound_weak_unsound_terms_in_step_4b": "Old inline Sound/Weak/Unsound rubric and numbered review stages were replaced by the current shared severity/grounding resources. Layout assertions are retired; this recovery does not claim equivalent semantic review-quality coverage.",
+      "test_grounding_template_in_step_3": "Old inline Sound/Weak/Unsound rubric and numbered review stages were replaced by the current shared severity/grounding resources. Layout assertions are retired; this recovery does not claim equivalent semantic review-quality coverage.",
+      "test_pr_review_has_step": "Old inline Sound/Weak/Unsound rubric and numbered review stages were replaced by the current shared severity/grounding resources. Layout assertions are retired; this recovery does not claim equivalent semantic review-quality coverage."
+    },
+    "retained": []
+  },
+  "test_researcher_template.py": {
+    "retired": {
+      "test_researcher_documents_tier3_emission_via_lore_promote": "Obsolete expected failure: researchers emit evidence; lead-owned promotion is a separate stage."
+    },
+    "retained": [
+      "test_researcher_emits_assertions_block",
+      "test_researcher_emits_observations_block",
+      "test_researcher_normalization_recipe_present",
+      "test_researcher_worker_leads_required"
+    ]
+  },
+  "test_pr_self_review.py": {
+    "retired": {
+      "test_sound_weak_unsound_rubric_referenced_in_step_3": "Retired standalone skill; pr-review --self is the supported entry point.",
+      "test_grounding_template_in_step_2": "Retired standalone skill; pr-review --self is the supported entry point.",
+      "test_pr_self_review_has_step": "Retired standalone skill; pr-review --self is the supported entry point."
+    },
+    "retained": []
+  },
+  "test_tier_schemas.py": {
+    "retired": {
+      "test_tier3_schema_matches_validator": "Tier 3 schema and validator were intentionally removed; capture/promote and current report contracts own reusable claims."
+    },
+    "retained": [
+      "test_tier2_schema_matches_validator"
+    ]
+  }
+}

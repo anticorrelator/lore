@@ -7,17 +7,18 @@
 #   lore test protocols -k convention
 #
 # Subcommands:
-#   protocols    Run pytest against ~/.lore/tests/protocols/
+#   protocols    Run pytest against the owning source tree’s tests/protocols/
 
 set -euo pipefail
 
-PROTOCOLS_DIR="$HOME/.lore/tests/protocols"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+PROTOCOLS_DIR="$LORE_REPO_DIR/tests/protocols"
 
 if [[ $# -eq 0 ]]; then
   echo "Usage: lore test <subcommand> [args...]" >&2
   echo "" >&2
   echo "Subcommands:" >&2
-  echo "  protocols    Run protocol tests (pytest ~/.lore/tests/protocols/)" >&2
+  echo "  protocols    Run protocol tests (pytest the owning source tree’s tests/protocols/)" >&2
   echo "  seams        Run retro seam-drift checker + reader contract tests (repo cwd)" >&2
   exit 1
 fi
@@ -30,7 +31,7 @@ case "$SUBCMD" in
     echo "Usage: lore test <subcommand> [args...]" >&2
     echo "" >&2
     echo "Subcommands:" >&2
-    echo "  protocols    Run protocol tests (pytest ~/.lore/tests/protocols/)" >&2
+    echo "  protocols    Run protocol tests (pytest the owning source tree’s tests/protocols/)" >&2
     exit 0
     ;;
   protocols)
