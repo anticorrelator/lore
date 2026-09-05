@@ -539,7 +539,7 @@ def prepare_session_input(descriptor, bindings, kdir, guidance, *, slug=None, wr
     return context
 
 
-def validate_session_preparation(pending, *, kdir, framework=None, slug=None, validate_inputs=True, validate_activation=True):
+def validate_session_preparation(pending, *, kdir, framework=None, slug=None, validate_inputs=True, validate_activation=True, preparation=True):
     required = {'position', 'framework', 'slug', 'packet_id', 'bindings', 'descriptor', 'guidance'}
     if not isinstance(pending, dict) or not required <= set(pending) or set(pending) - required - {'composition', 'activation'}:
         raise ValueError('invalid pending position preparation')
@@ -557,7 +557,7 @@ def validate_session_preparation(pending, *, kdir, framework=None, slug=None, va
     if not re.fullmatch('[0-9a-f]{64}', d.get('descriptor_sha256', '')):
         raise ValueError('descriptor_sha256 is required')
     if validate_inputs:
-        validate_bindings(b, pending['position'], kdir, session_required_bindings(pending['position']), pending_root=True)
+        validate_bindings(b, pending['position'], kdir, session_required_bindings(pending['position']), pending_root=True, preparation=preparation)
         validate_descriptor(d)
         from position_compile import normalize_guidance
         guidance = pending['guidance'].encode()
@@ -585,7 +585,8 @@ def session_reference(context, *, kdir):
     """Read the final prepared reference independently of the agent's report."""
     if set(context) == {'position_preparation'}:
         pending = context['position_preparation']
-        options = validate_session_preparation(pending, kdir=kdir, validate_activation=False)
+        # session-reference reads back a publication the host already made; the synthesis rule was applied when it was prepared.
+        options = validate_session_preparation(pending, kdir=kdir, validate_activation=False, preparation=False)
         if not isinstance(pending.get('activation'), dict):
             raise ValueError('reference collection requires admitted activation')
         b = copy.deepcopy(pending['bindings'])
