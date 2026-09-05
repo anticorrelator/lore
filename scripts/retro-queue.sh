@@ -101,6 +101,9 @@ if os.path.isfile(queue):
             except (ValueError, TypeError):
                 malformed += 1
                 continue
+            if not isinstance(row, dict):
+                malformed += 1
+                continue
             if cycle_filter and row.get("cycle_id") != cycle_filter:
                 continue
             if start is not None:
@@ -108,7 +111,12 @@ if os.path.isfile(queue):
                 if not isinstance(stamp, str):
                     continue
                 try:
-                    if not (start <= parse(stamp) < end):
+                    instant = parse(stamp)
+                    # Outcomes select the cohort in [start,end). Correlated
+                    # transitions fold in append order as of end, without a
+                    # lower bound: their timestamps need not follow outcome time.
+                    is_transition = row.get("record_type") == "disposition"
+                    if instant >= end or (not is_transition and instant < start):
                         continue
                 except ValueError:
                     malformed += 1
@@ -126,13 +134,12 @@ unhandled = []
 handled = []
 for oid, outcome in outcomes.items():
     transitions = dispositions.get(oid, [])
+    current = dict(outcome)
     if transitions:
-        current = dict(outcome)
-        current["disposition"] = "handled"
         current["handling"] = transitions[-1]
-        handled.append(current)
-    else:
-        unhandled.append(outcome)
+    eligible = not transitions or transitions[-1].get("action") == "deferred"
+    current["disposition"] = "unhandled" if eligible else "handled"
+    (unhandled if eligible else handled).append(current)
 
 key = lambda row: (row.get("ts") or "", row.get("outcome_id") or "")
 unhandled.sort(key=key)
@@ -142,7 +149,12 @@ print(json.dumps({
     "reader_contract_version": "1",
     "projection_mode": "half-open-window" if start is not None else "fold",
     "window": {"start": start_raw, "end": end_raw} if start is not None else None,
-    "fold_version": "1",
+    "fold_version": "2",
+    "window_semantics": {
+        "cohort": "outcome time in [start,end)",
+        "transitions": "transition time < end; no lower bound",
+        "ordering": "append order by outcome_id",
+    } if start is not None else None,
     "vocabulary_version": "1",
     "counts": {
         "unhandled_due": len(unhandled),
