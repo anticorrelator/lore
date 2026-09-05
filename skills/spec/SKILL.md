@@ -846,13 +846,13 @@ else
 fi
 ```
 
-When the seat accepts a gate in `notes.md` rather than by sealing a review, the concrete designer-assignment still needs the gate's dispositions as JSON, and a Markdown note is not that input. The seat projects its acceptance once, into `reviews/<ceremony>-acceptance-<revision>.json` in the item, in the dispositions-ledger shape the seal writer validates — `outcome: completed`, `verdict: ACCEPTED`, one `criterion-adequacy` judgment whose rationale names the `notes.md` entry (`NOTE_REF`, the entry's `## <timestamp>` heading) and the revision read, and an empty `dispositions` list. The file is authored input, written by no ledger writer and read by no review reader as an attempt (it is a file directly under `reviews/`, not an attempt directory); the recipe refuses an uncommitted or malformed revision and a second projection for the same gate and revision with different content, and prints the path to pass as `DISPOSITIONS_FILE`:
+When the seat accepts a gate in `notes.md` rather than by sealing a review, the concrete designer-assignment still needs the gate's dispositions as JSON, and a Markdown note is not that input. The seat projects its acceptance once, into `reviews/<ceremony>-acceptance-<revision>.json` in the item, in the dispositions-ledger shape the seal writer validates — `outcome: completed`, `verdict: ACCEPTED`, one `criterion-adequacy` judgment whose rationale names the `notes.md` entry (`NOTE_REF`, the entry's `## <timestamp>` heading) and the revision read, and an empty `dispositions` list. The file is authored input, written by no ledger writer and read by no review reader as an attempt (it is a file directly under `reviews/`, not an attempt directory); the recipe checks that the revision id is 12-hex and that its snapshot exists under `revisions/<id>/plan.md`; it does not read `revisions.jsonl`, so, as with designer-assignment, the id is the seat's to supply from the revision it read whole at the gate. It refuses a second projection for the same gate and revision with different content, and prints the path to pass as `DISPOSITIONS_FILE`:
 
 **Recipe inputs:** KNOWLEDGE_DIR, SLUG, CEREMONY, REVISION_ID, NOTE_REF.
 <!-- spec-recipe: acceptance-projection -->
 ```bash
 [[ "$CEREMONY" == spec-design || "$CEREMONY" == spec-post-plan ]] || { echo "ceremony must be spec-design or spec-post-plan" >&2; exit 1; }
-[[ "$REVISION_ID" =~ ^[0-9a-f]{12}$ && -f "$KNOWLEDGE_DIR/_work/$SLUG/revisions/$REVISION_ID/plan.md" ]] || { echo "acceptance names a committed 12-hex revision of $SLUG" >&2; exit 1; }
+[[ "$REVISION_ID" =~ ^[0-9a-f]{12}$ && -f "$KNOWLEDGE_DIR/_work/$SLUG/revisions/$REVISION_ID/plan.md" ]] || { echo "acceptance names a 12-hex revision of $SLUG whose snapshot exists under revisions/" >&2; exit 1; }
 [[ -n "$NOTE_REF" ]] || { echo "acceptance names the notes.md entry that recorded it" >&2; exit 1; }
 OUT="$KNOWLEDGE_DIR/_work/$SLUG/reviews/$CEREMONY-acceptance-$REVISION_ID.json"
 mkdir -p "$(dirname "$OUT")"
