@@ -252,7 +252,7 @@ digest = ("the two environment variables LORE_POSITION_DISPATCH_MANIFEST and LOR
 note = [f"## From the dispatching lead\n\nThe implement lead for {E['WORK_TITLE']} dispatched you on the {route} route for task {task} of work item {slug}"
         + (f", on team {E['TEAM_NAME']} led by {E['LEAD_NAME']}" if E["TEAM_NAME"] else "") + ". The identity envelope above is the binder's record of this attempt. "
         "Your assignment is position_dispatch.bindings.assignment, the complete task description. The Packet-id line names a packet built for this move; "
-        "lore packet show renders it, and its entries are candidates to check against the code. The lead synthesized it before binding: the Left out by synthesis list at its end names each entry set aside and why, "
+        "lore packet show renders it, and its entries are candidates to check against the code. The lead synthesized it before binding; when the lead set entries aside, the Left out by synthesis list at the end names each and why, "
         "and if a reason does not hold for what you find in the code, re-pull the entry with lore search. Revision-id and Dispatch-attempt-id name the plan revision and this attempt. "
         f"Work in position_dispatch.bindings.execution_root and allocate no other tree. {E['PLACEMENT_NOTE']}"]
 if route == "designer":
@@ -289,7 +289,7 @@ if extract.strip():
 Path(E["SUFFIX_FILE"]).write_text("\n\n".join(note) + "\n")
 ```
 
-Synthesize the packet before you bind. The packet `impl open` or `impl next-batch` built for this task is a candidate set: one retrieval pass at a declared scale, nobody's judgment yet, and handing it on unread is search pushed down to the worker. Read it with `lore packet show`, drop the entries the worker should not carry, add the entries it needs that retrieval missed, and give one reason each. The verb appends a superseding row under the same packet id at `delivery_stage: synthesized`, re-renders the content without the dropped blocks, appends the added entries and a `## Left out by synthesis` list the worker can read and overrule by re-pulling, and recomputes the per-scale counts. `SYNTHESIS_FILE` is a JSON file you write, `{"dropped": [{"path": "...", "reason": "..."}], "added": [{"path": "...", "reason": "..."}]}`; an empty pair of lists is a judgment too and is recorded as one. `position-bind` refuses to prepare a dispatch against an assembled packet and names this repair. The seat packet you read for yourself is not handed on and needs no synthesis:
+Synthesize the packet before you bind. The packet `impl open` or `impl next-batch` built for this task is a candidate set: one retrieval pass at a declared scale, nobody's judgment yet, and handing it on unread is search pushed down to the worker. Read it with `lore packet show`, drop the entries the worker should not carry, add the entries it needs that retrieval missed, and give one reason each. The verb appends a superseding row under the same packet id at `delivery_stage: synthesized`, removes each dropped entry's recorded block from the content by exact bytes (and refuses to drop from a packet whose assembly recorded no blocks), appends the added entries, closes the content with a `## Left out by synthesis` list only when something was dropped, and recomputes the per-scale counts. The worker can read that list and overrule an entry by re-pulling it. `SYNTHESIS_FILE` is a JSON file you write, `{"dropped": [{"path": "...", "reason": "..."}], "added": [{"path": "...", "reason": "..."}]}`; an empty pair of lists is a judgment too and is recorded as one. `position-bind` refuses to prepare a dispatch against any packet whose latest row is not `synthesized` unless the builder recorded a `synthesis_waiver`, and names this repair; only an `assembled` row can be synthesized, so a row already handed on is re-pulled, not repaired. The seat packet you read for yourself is not handed on and needs no synthesis:
 
 **Recipe inputs:** PACKET_ID, SYNTHESIS_FILE.
 <!-- implement-recipe: synthesize-packet -->
@@ -415,7 +415,7 @@ The durable consultation record is `$ITEM_DIR/consultation-transcript.jsonl`, on
 <!-- implement-recipe: designer-packet -->
 `lore packet build --work-item "$SLUG" --role designer --caller implement-lead --topic "$DOMAIN: $QUESTION" --scale-set "$SCALE_SET"`
 
-This packet is handed on too, so the `synthesize-packet` recipe above runs against it before the consultation is bound, with the same JSON file and the same rule about empty lists.
+This packet is handed on too, so the `synthesize-packet` recipe above runs against it before the consultation is bound, with a JSON file of the same form written for this consultation packet (a disposition recorded for the worker's packet does not apply to a different packet) and the same rule about empty lists.
 
 Then assemble the consultation bindings from the request. The recipe refuses a request that is not a `## Consultation` body with a consultation id, domain and question, because an attempt bound to a malformed request would carry an identity no reply could join:
 
