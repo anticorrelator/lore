@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """generate-tasks: Parse plan.md and produce a tasks.json-compatible dict.
 
-Standalone CLI and importable module. Zero external dependencies (stdlib only).
+Standalone CLI and importable module. Plan parsing uses only the standard library;
+compiled dispatch accounting uses the position compiler dependencies.
 
 CLI usage:
     python3 generate-tasks.py <plan-md-path> [--knowledge-dir <path>]
@@ -22,9 +23,10 @@ emitted follows the plan's own grammar, and only one is ever present:
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import os
 import re
 import subprocess
@@ -60,9 +62,8 @@ VERB_MAP = {
 # Regex for CVC short verbs that double final consonant (Run->Running)
 SHORT_CVC_RE = re.compile(r"^[A-Z][a-z]*[^aeiou]$")
 
-# Context cost estimation constants.
-# FIXED_OVERHEAD_CHARS: base per-task overhead (CLAUDE.md + MEMORY.md + worker.md +
-# advisory mixin — approximately 22 KB for a typical worker session).
+# Historical character allowance for tasks without compiled dispatch data.
+# This is not a measurement of a current prompt or its runtime token usage.
 FIXED_OVERHEAD_CHARS = 22000
 
 # Verb complexity multiplier: fraction of file read size to reserve for edit space.
@@ -527,52 +528,153 @@ def _format_backlink_line(item: "str | tuple[str, str]") -> str:
     return f"- [[{target}]]"
 
 
+def estimate_dispatch_context(record: dict, *, expected: dict | None = None) -> dict:
+    """Read prepared byte accounting; retained input does not prove delivery."""
+    scripts = str(Path(__file__).resolve().parent)
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    spec = importlib.util.spec_from_file_location(
+        "position_attribution", Path(scripts) / "position_attribution.py"
+    )
+    attribution = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(attribution)
+    producer = attribution.project(record, expected=expected)
+    result = {
+        "status": producer["status"], "reason": producer["reason"],
+        "position_dispatch": producer["position_dispatch"],
+        "producer_attribution": producer,
+        "basis": "compiled-prepared-input" if producer["status"] == "resolved" else producer["status"],
+        "unit": "bytes", "advisory_only": True, "delivery_proven": False,
+        "payload_components": None, "payload_bytes": None,
+        "native_definition_bytes": None, "prepared_input_bytes": None,
+        "contract_delivery": None, "referenced_contract_bytes": None,
+        "referenced_packet_bytes": None, "assignment_bytes": None,
+    }
+    if producer["status"] != "resolved":
+        return result
+    try:
+        resolved = attribution.resolve_reference(producer["position_dispatch"], expected=expected)
+        manifest = resolved["manifest"]
+        accounting = manifest["accounting"]
+        result.update({key: accounting[key] for key in (
+            "payload_components", "payload_bytes", "native_definition_bytes", "prepared_input_bytes",
+        )})
+        # The contract's bytes are already in the payload when included.
+        delivery = accounting["contract_delivery"]
+        if delivery not in ("included", "referenced"):
+            raise ValueError("invalid contract delivery accounting")
+        contract_bytes = sum(
+            Path(reference["path"]).stat().st_size
+            for reference in manifest["contract_references"]
+        )
+        result.update(
+            contract_delivery=delivery,
+            referenced_contract_bytes=contract_bytes if delivery == "referenced" else 0,
+            referenced_packet_bytes=manifest["files"].get("packet.json", {}).get("bytes", 0),
+            assignment_bytes=len(manifest["bindings"]["assignment"].encode("utf-8")),
+        )
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        # References can disappear between projection and accounting reads.
+        result.update({key: None for key in (
+            "payload_components", "payload_bytes", "native_definition_bytes", "prepared_input_bytes",
+            "contract_delivery", "referenced_contract_bytes", "referenced_packet_bytes", "assignment_bytes",
+        )})
+        result.update(status="unknown", basis="unknown", reason=str(exc))
+        result["producer_attribution"] = {
+            key: (value if key == "position_dispatch" else None)
+            for key, value in producer.items()
+        }
+        result["producer_attribution"].update(status="unknown", reason=str(exc))
+    return result
+
+
 def estimate_context_cost(
     description: str,
     file_targets: list[str],
     subject: str,
     has_advisory: bool = False,
+    *,
+    position_record: dict | None = None,
+    expected: dict | None = None,
 ) -> dict:
-    """Estimate the context window cost (in chars) for a single task.
+    """Estimate source working space separately from prepared dispatch bytes.
 
-    Returns a dict with:
-        fixed_overhead_chars  — base per-task overhead (system framing, etc.)
-        description_chars     — len(description)
-        file_read_chars       — sum of os.path.getsize() for each file_target;
-                                missing files contribute 0
-        edit_space_chars      — file_read_chars * verb_multiplier, where the
-                                multiplier is derived from the first word of
-                                subject via VERB_COMPLEXITY
-        advisory_chars        — extra overhead when has_advisory=True
-        total_chars           — sum of all components above
+    Legacy *_chars fields retain their historical arithmetic: description and
+    fixed allowance are characters, but file reads use a byte-size proxy.
+    Compiled estimates use bytes and leave those legacy fields null.
     """
-    fixed = FIXED_OVERHEAD_CHARS
-    description_chars = len(description)
-
-    file_read_chars = 0
-    for path in file_targets:
+    dispatch = estimate_dispatch_context(position_record, expected=expected) if position_record is not None else None
+    compiled = dispatch is not None and dispatch["status"] != "legacy"
+    file_bytes = 0
+    for path in (dict.fromkeys(file_targets) if compiled else file_targets):
         try:
-            file_read_chars += os.path.getsize(path)
+            file_bytes += os.path.getsize(path)
         except OSError:
-            pass  # missing or inaccessible file → 0
-
-    # Derive verb multiplier from subject's first word
+            pass
     first_word = subject.split()[0] if subject.split() else ""
     multiplier = VERB_COMPLEXITY.get(first_word, _DEFAULT_VERB_MULTIPLIER)
-    edit_space_chars = int(file_read_chars * multiplier)
-
+    edit_space = int(file_bytes * multiplier)
+    if compiled:
+        result = dict.fromkeys((
+            "fixed_overhead_chars", "description_chars", "file_read_chars",
+            "edit_space_chars", "advisory_chars", "total_chars",
+        ))
+        result.update(
+            basis=dispatch["basis"], unit="bytes", advisory_only=True,
+            dispatch_context=dispatch,
+            working_set_estimate={"file_read_bytes": file_bytes, "edit_reserve_bytes": edit_space},
+            total_bytes_estimate=(dispatch["prepared_input_bytes"] + file_bytes + edit_space
+                                  if dispatch["status"] == "resolved" else None),
+        )
+        return result
     advisory_chars = _ADVISORY_OVERHEAD_CHARS if has_advisory else 0
-
-    total_chars = fixed + description_chars + file_read_chars + edit_space_chars + advisory_chars
-
     return {
-        "fixed_overhead_chars": fixed,
-        "description_chars": description_chars,
-        "file_read_chars": file_read_chars,
-        "edit_space_chars": edit_space_chars,
+        "basis": "legacy-fixed-character-estimate", "unit": "legacy-character-proxy", "advisory_only": True,
+        "fixed_overhead_chars": FIXED_OVERHEAD_CHARS,
+        "description_chars": len(description),
+        "file_read_chars": file_bytes,
+        "edit_space_chars": edit_space,
         "advisory_chars": advisory_chars,
-        "total_chars": total_chars,
+        "total_chars": FIXED_OVERHEAD_CHARS + len(description) + file_bytes + edit_space + advisory_chars,
     }
+
+
+def _task_estimates(task: dict) -> list[dict]:
+    estimate = task.get("context_cost_estimate", {})
+    return estimate if isinstance(estimate, list) else [estimate]
+
+
+def _apply_dispatch_estimates(result: dict, records: dict, slug: str) -> None:
+    """Attach caller-supplied attempt records without selecting a producer."""
+    tasks = result.get("tasks", [task for phase in result.get("phases", []) for task in phase["tasks"]])
+    if not isinstance(records, dict) or set(records) - {task["id"] for task in tasks}:
+        raise ValueError("dispatch_records must map generated task IDs to records")
+    for task in tasks:
+        if task["id"] not in records:
+            continue
+        supplied = records[task["id"]]
+        attempts = supplied if isinstance(supplied, list) else [supplied]
+        if not attempts or any(not isinstance(record, dict) for record in attempts):
+            raise ValueError("dispatch_records values must be records or nonempty ordered record lists")
+        expected = {"task_id": task["id"]}
+        if slug:
+            expected["work_item"] = slug
+        estimates = [estimate_context_cost(
+            task["description"], task["file_targets"], task["subject"],
+            has_advisory=bool(task["context_cost_estimate"].get("advisory_chars")),
+            position_record=record, expected=expected,
+        ) for record in attempts]
+        task["context_cost_estimate"] = estimates if isinstance(supplied, list) else estimates[0]
+    for phase in result.get("phases", []):
+        estimates = [estimate for task in phase["tasks"] for estimate in _task_estimates(task)]
+        totals = [estimate["total_chars"] for estimate in estimates]
+        summary = phase["phase_cost_summary"]
+        if len(estimates) == len(phase["tasks"]) and all(total is not None for total in totals):
+            summary.update(total_chars=sum(totals), avg_per_task=int(sum(totals) / len(totals)) if totals else 0,
+                           max_task=max(totals, default=0), min_task=min(totals, default=0))
+        else:
+            summary.update(total_chars=None, avg_per_task=None, max_task=None, min_task=None)
+        summary["attempt_estimates"] = estimates
 
 
 def build_context_section(
@@ -1557,6 +1659,7 @@ def generate_tasks_from_plan(
     script_dir: str = "",
     previous_tasks: dict | None = None,
     include_completed: bool = False,
+    dispatch_records: dict | None = None,
 ) -> dict:
     """Parse plan.md content and return a tasks.json-compatible dict.
 
@@ -1567,6 +1670,7 @@ def generate_tasks_from_plan(
         script_dir: Path to the scripts directory (for pk_search.py).
         previous_tasks: Prior generation used to retain task identities.
         include_completed: Retain checked definitions and validate revision DAGs.
+        dispatch_records: Optional task-ID map of original records or ordered retry lists.
 
     Returns:
         Dict matching the tasks.json schema with plan_checksum, generated_at,
@@ -1653,6 +1757,8 @@ def generate_tasks_from_plan(
         result["task_id_high_watermark"] = identity.high_watermark
     _validate_dependency_graph(all_tasks, check_cycles=previous_tasks is not None or include_completed)
     result["recommended_workers"] = compute_recommended_workers(all_tasks)
+    if dispatch_records is not None:
+        _apply_dispatch_estimates(result, dispatch_records, slug)
     return result
 
 
@@ -2372,6 +2478,16 @@ def print_sizing_diagnostics(result: dict) -> None:
     Args:
         result: The dict returned by generate_tasks_from_plan().
     """
+    all_tasks = result.get("tasks", [task for phase in result.get("phases", []) for task in phase["tasks"]])
+    if any(isinstance(task.get("context_cost_estimate"), list) or
+           task.get("context_cost_estimate", {}).get("total_chars") is None for task in all_tasks):
+        print("\nContext cost summary (advisory estimates; attempts kept separate):", file=sys.stderr)
+        for task in all_tasks:
+            for index, estimate in enumerate(_task_estimates(task), 1):
+                total = estimate.get("total_bytes_estimate") if estimate.get("unit") == "bytes" else estimate.get("total_chars")
+                value = "unknown" if total is None else f"{total:,} {estimate.get('unit', 'legacy-character-proxy')}"
+                print(f"  {task['id']} attempt {index}: {value} ({estimate.get('basis', 'legacy')})", file=sys.stderr)
+        return
     tasks = result.get("tasks")
     if tasks:
         _print_flat_sizing_diagnostics(tasks)
@@ -2450,6 +2566,7 @@ def main():
         "--quiet", action="store_true",
         help="Suppress diagnostics output (overrides --diagnostics)"
     )
+    parser.add_argument("--dispatch-records", help="JSON task-ID map of original dispatch records or ordered retry lists")
     parser.add_argument("--previous-tasks", help="Previous generation for stable task identities")
     parser.add_argument("--include-completed", action="store_true", help="Retain completed task definitions")
     args = parser.parse_args()
@@ -2471,6 +2588,11 @@ def main():
         with open(args.previous_tasks, encoding="utf-8") as previous_file:
             previous_tasks = json.load(previous_file)
 
+    dispatch_records = None
+    if args.dispatch_records:
+        with open(args.dispatch_records, encoding="utf-8") as records_file:
+            dispatch_records = json.load(records_file)
+
     result = generate_tasks_from_plan(
         plan_content=plan_content,
         knowledge_dir=args.knowledge_dir,
@@ -2478,6 +2600,7 @@ def main():
         script_dir=os.path.dirname(os.path.abspath(__file__)),
         previous_tasks=previous_tasks,
         include_completed=args.include_completed,
+        dispatch_records=dispatch_records,
     )
 
     if args.diagnostics and not args.quiet:

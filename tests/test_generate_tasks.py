@@ -3287,3 +3287,219 @@ class TestRevisionGeneration:
         plan = "### Phase 1: Work\n**Files:** `src/a.py`\n- [x] Complete\n- [ ] Pending\n" + self.block([self.criteria()])
         with pytest.raises(ValueError, match="exactly one task"):
             generate_tasks_from_plan(plan)
+
+
+@pytest.fixture
+def prepared_position(tmp_path, monkeypatch):
+    """Create real retained compiler/binder outputs, with no agent launch."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    scripts = _script_path.parent
+    monkeypatch.syspath_prepend(str(scripts))
+    from position_compile import compile_position
+
+    binder_spec = importlib.util.spec_from_file_location("accounting_position_bind", scripts / "position-bind.py")
+    binder = importlib.util.module_from_spec(binder_spec)
+    binder_spec.loader.exec_module(binder)
+    for key in list(os.environ):
+        if key.startswith(("LORE_", "CLAUDE_")):
+            monkeypatch.delenv(key)
+    test_home = tmp_path / "home"
+    store = test_home / ".lore"
+    (store / "config").mkdir(parents=True)
+    (store / "scripts").symlink_to(scripts)
+    (store / "config/settings.json").write_text('{"version":1}')
+    item = store / "_work/fixture"
+    item.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(test_home))
+    monkeypatch.setenv("LORE_DATA_DIR", str(store))
+    monkeypatch.setenv("LORE_KNOWLEDGE_DIR", str(store))
+    monkeypatch.setenv("LORE_FRAMEWORK", "codex")
+    guidance = subprocess.run(
+        ["bash", str(scripts / "render-dispatch-guidance.sh")],
+        check=True, capture_output=True,
+    ).stdout
+    guidance_path = tmp_path / "guidance.md"
+    guidance_path.write_bytes(guidance)
+    counter = 0
+
+    def prepare(framework="codex", *, contract_delivery="referenced", wrapped=False,
+                native=False, packet=False, changed=False):
+        nonlocal counter
+        counter += 1
+        attempt = f"attempt-{counter}"
+        if changed:
+            (store / "config/settings.json").write_text('{"version":1,"coordination":{"max_concurrency":3}}')
+            guidance_path.write_bytes(subprocess.run(
+                ["bash", str(scripts / "render-dispatch-guidance.sh")], check=True, capture_output=True,
+            ).stdout)
+        descriptor = compile_position("worker", framework, store, guidance_path)
+        bindings = dict.fromkeys(binder.FIELDS)
+        bindings.update(work_item="fixture", task_id="task-1", dispatch_attempt_id=attempt,
+                        assignment="Read λ and café.\nKeep this assignment once.\n", report_id=attempt,
+                        report_path=str(item / "worker-reports" / f"{attempt}.md"),
+                        execution_root=str(tmp_path))
+        if packet:
+            from packet_builder import build_packet, pointer
+            packet_id = "pkt-" + attempt
+            row = {"packet_id": packet_id, "packet_scope": "session", "work_item": "fixture", "task_id": None,
+                   "session_id": None, "phase": None, "arm": None, "task_scale_set": "implementation"}
+            build_packet(store, row, assembly=("Referenced knowledge λ", {}), role="worker", scales=["implementation"])
+            bindings.update(task_id=None, packet_id=packet_id, packet_pointer=pointer(store, packet_id))
+        bindings["absence_reasons"] = {key: "Isolated optional binding" for key, value in bindings.items() if value is None}
+        options = {"contract_delivery": contract_delivery}
+        if wrapped:
+            import hashlib
+            source = tmp_path / "wrapper.md"
+            source.write_bytes(b"Original wrapper source")
+            sha = hashlib.sha256(source.read_bytes()).hexdigest()
+            options.update(wrapper={"path": str(source), "sha256": sha, "template_id": "wrapper/test", "template_version": sha[:12]},
+                           prefix="prefix λ\n".encode(), suffix="\nsuffix café".encode())
+        if native:
+            options["native_model"] = "fixture-model"
+        reference = binder.publish(descriptor, bindings, store, guidance_path.read_bytes(), **options)
+        pair = {key: reference[key] for key in ("manifest_path", "manifest_sha256")}
+        manifest = json.loads(Path(pair["manifest_path"]).read_text())
+        return {"position_dispatch": pair}, manifest, descriptor
+
+    return prepare
+
+
+class TestCompiledContextAccounting:
+    @pytest.mark.parametrize("framework", ["codex", "claude-code", "opencode"])
+    @pytest.mark.parametrize("native", [False, True])
+    def test_actual_prepared_components_are_counted_once(self, prepared_position, framework, native):
+        if framework == "opencode" and native:
+            with pytest.raises(ValueError, match="native subagent selection unavailable"):
+                prepared_position(framework, native=True, wrapped=True)
+            return
+        record, manifest, descriptor = prepared_position(framework, native=native, wrapped=True)
+        result = _mod.estimate_dispatch_context(record, expected={"task_id": "task-1"})
+        assert result["status"] == "resolved", result
+        payload = Path(manifest["payload"]["path"]).read_bytes()
+        assert result["payload_bytes"] == len(payload)
+        assert sum(component["bytes"] for component in result["payload_components"]) == len(payload)
+        assert result["prepared_input_bytes"] == len(payload) + result["native_definition_bytes"]
+        if descriptor["native_surface"]["consumption"] == "prompt-text":
+            assert result["native_definition_bytes"] == 0
+            assert [c["name"] for c in result["payload_components"]].count("compiled_body") == 1
+        else:
+            member = "selection.md" if native else "native.md"
+            assert result["native_definition_bytes"] == Path(manifest["files"][member]["path"]).stat().st_size
+            assert "compiled_body" not in [c["name"] for c in result["payload_components"]]
+        assert result["assignment_bytes"] == len(manifest["bindings"]["assignment"].encode())
+        assert result["assignment_bytes"] > len(manifest["bindings"]["assignment"])
+        assert result["producer_attribution"]["wrapper"] == manifest["wrapper"]
+        assert result["delivery_proven"] is False
+        assert result["advisory_only"] is True
+        assert "spend" not in result
+
+    @pytest.mark.parametrize("delivery", ["included", "referenced"])
+    def test_references_are_separate_from_prepared_input(self, prepared_position, delivery):
+        record, manifest, descriptor = prepared_position(contract_delivery=delivery, packet=True)
+        result = _mod.estimate_dispatch_context(record)
+        assert result["status"] == "resolved", result
+        contract_size = Path(descriptor["contract_references"][0]["path"]).stat().st_size
+        assert result["referenced_contract_bytes"] == (contract_size if delivery == "referenced" else 0)
+        assert result["referenced_packet_bytes"] == manifest["files"]["packet.json"]["bytes"]
+        assert result["referenced_packet_bytes"] > 0
+        assert result["prepared_input_bytes"] == manifest["accounting"]["prepared_input_bytes"]
+        assert ("report_contract" in [c["name"] for c in result["payload_components"]]) == (delivery == "included")
+
+    def test_source_working_set_and_unicode_description_are_not_readded(self, prepared_position, tmp_path):
+        record, manifest, _ = prepared_position()
+        source = tmp_path / "source.txt"
+        source.write_text("λ" * 100)
+        estimate = estimate_context_cost("different description λ", [str(source), str(source)], "Add x",
+                                         has_advisory=True, position_record=record)
+        assert estimate["total_chars"] is None
+        assert estimate["fixed_overhead_chars"] is None
+        assert estimate["advisory_chars"] is None
+        assert estimate["working_set_estimate"] == {"file_read_bytes": 200, "edit_reserve_bytes": 60}
+        assert estimate["total_bytes_estimate"] == manifest["accounting"]["prepared_input_bytes"] + 260
+
+    @pytest.mark.parametrize("record", [{"position_dispatch": None}, {"position": "worker"},
+                                       {"template_id": "position/worker/codex"},
+                                       {"producer_attribution": {"status": "resolved", "template_version": "a" * 12}}])
+    def test_unknown_is_not_legacy_fallback(self, record):
+        result = estimate_context_cost("λ", [], "Add x", position_record=record)
+        assert result["dispatch_context"]["status"] == "unknown"
+        assert result["total_bytes_estimate"] is None
+        assert result["total_chars"] is None
+        assert result["dispatch_context"]["producer_attribution"]["template_version"] is None
+
+    @pytest.mark.parametrize("failure", ["hash", "payload", "descriptor", "task"])
+    def test_unresolvable_or_mismatched_reference_is_unknown(self, prepared_position, failure):
+        record, manifest, descriptor = prepared_position()
+        expected = None
+        if failure == "hash":
+            record["position_dispatch"]["manifest_sha256"] = "0" * 64
+        elif failure == "payload":
+            Path(manifest["payload"]["path"]).write_bytes(b"tampered")
+        elif failure == "descriptor":
+            Path(descriptor["descriptor_path"]).unlink()
+        else:
+            expected = {"task_id": "task-2"}
+        result = _mod.estimate_dispatch_context(record, expected=expected)
+        assert result["status"] == "unknown"
+        assert result["prepared_input_bytes"] is None
+        assert result["reason"]
+
+    def test_historical_absence_retains_labelled_character_estimate(self):
+        result = estimate_context_cost("λ", [], "Add x", position_record={"template_version": "a" * 12})
+        assert result["basis"] == "legacy-fixed-character-estimate"
+        assert result["description_chars"] == 1
+        assert result["total_chars"] == 22001
+
+    def test_archive_move_preserves_accounting(self, prepared_position):
+        record, manifest, _ = prepared_position()
+        before = _mod.estimate_dispatch_context(record)
+        item = Path(manifest["work_item_path"])
+        archived = item.parent.parent / "_archive" / item.name
+        archived.parent.mkdir()
+        item.rename(archived)
+        assert _mod.estimate_dispatch_context(record) == before
+
+    @pytest.mark.parametrize("phase", [False, True])
+    def test_generation_diagnostics_preserve_mixed_attempts_and_units(self, prepared_position, capsys, phase):
+        first, _, _ = prepared_position()
+        second, _, _ = prepared_position(changed=True)
+        block = "Phase" if phase else "Task"
+        plan = f"# Fixture\n## Tasks\n### {block} 1: Read files\n**Files:** `new-file.py`\n- [ ] Add x\n"
+        attempts = [first, second, {"position": "worker"}, {"template_version": "b" * 12}]
+        result = generate_tasks_from_plan(plan, slug="fixture", dispatch_records={"task-1": attempts})
+        tasks = result["phases"][0]["tasks"] if phase else result["tasks"]
+        estimates = tasks[0]["context_cost_estimate"]
+        assert len(estimates) == 4
+        versions = [e["dispatch_context"]["producer_attribution"]["template_version"] for e in estimates[:2]]
+        assert versions[0] != versions[1]
+        assert estimates[2]["total_bytes_estimate"] is None
+        assert estimates[3]["fixed_overhead_chars"] == FIXED_OVERHEAD_CHARS
+        assert result["recommended_workers"] == 1
+        if phase:
+            assert result["phases"][0]["phase_cost_summary"]["total_chars"] is None
+        print_sizing_diagnostics(result)
+        output = capsys.readouterr().err
+        assert "attempt 4" in output and "unknown" in output and "bytes" in output
+
+    def test_single_record_generation_and_cli(self, prepared_position, tmp_path):
+        import json
+        import subprocess
+        import sys
+
+        record, _, _ = prepared_position()
+        plan = "# Fixture\n## Tasks\n### Task 1: Read files\n**Files:** `new-file.py`\n- [ ] Add x\n"
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text(plan)
+        records = tmp_path / "records.json"
+        records.write_text(json.dumps({"task-1": record}))
+        process = subprocess.run([sys.executable, str(_script_path), str(plan_path), "--slug", "fixture",
+                                  "--dispatch-records", str(records), "--diagnostics"], capture_output=True, text=True)
+        assert process.returncode == 0, process.stderr
+        output = json.loads(process.stdout)
+        estimate = output["tasks"][0]["context_cost_estimate"]
+        assert estimate["dispatch_context"]["status"] == "resolved"
+        assert "bytes" in process.stderr
