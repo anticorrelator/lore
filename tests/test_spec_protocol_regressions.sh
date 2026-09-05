@@ -73,7 +73,7 @@ fi
 
 echo ""
 echo "Test 5: A contradicted verification resolves in the same call"
-assert_contains "contradicted example names the resolution flag" '--resolution <corrected|disputed> \'
+assert_contains "contradicted example names the resolution flag" '--resolution "$RESOLUTION"'
 assert_contains "altitude refusal vocabulary is visible" '`disputed-required`'
 assert_contains "corrected branch names the confidence input" '`--confidence <high|medium|low>`'
 assert_contains "corrected branch names the evidence-scope enum" '`--evidence-scope <single-callsite|multi-callsite|systemic>`'
