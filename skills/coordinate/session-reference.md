@@ -627,6 +627,46 @@ the lifecycle stated in § The role of the skill.
     convergent reasoning, not a verdict binding this read. n=1 dry run; effects on
     sustained coordination have not been measured.
 
+
+### Commons-reshape arc, 2026-09-04/05 (n=1 arc, thirteen steps)
+
+1. **Tiers are what the work needs; rungs are the ceremony.** The arc that dissolved
+   spec and implement into tiered dispatch needed a vocabulary for *what kind of work
+   this is* separate from *how much ceremony it gets*: fix / decision / change / arc,
+   set by decisions and working sets, never by diff size, and cheap to move between
+   because a fix can reveal a fork mid-stream. A peer read from a differently-trained
+   model named the failure this prevents — agents defend an initial classification to
+   avoid procedural expansion when moving costs something. *In skill.*
+2. **A packet at every dispatch; investigation and design are commissioned, not
+   scheduled.** The retrospective record (2026-08-15) showed the store holding the
+   answer to the one decision that went wrong while no surface put it in front of the
+   agent making it — the lead path had no packet; only implement workers did, once, at
+   finalize. `lore packet build` (arc step 4) builds one for any role at dispatch and
+   returns facts, not a verdict; the seat declares a floor if it wants one. The three
+   non-thin triggers (unverified assumption, unfamiliar boundary, conflicting
+   explanations) came from the same peer read: a packet can be rich, current, and
+   pointed at the wrong framing, and no retrieval count distinguishes that from
+   readiness. *In skill.*
+3. **Seat captures carry role and work item.** Bylines shipped (arc step 2) and the
+   seat's own captures showed no byline because `lore capture` at the seat had been
+   given no role; every seat capture now passes `--producer-role coordinator
+   --work-item <slug>`. *In skill.*
+4. **Compare a wake's event time to the session's spawn time before acting on it.** A
+   `needs_input` wake for a just-finalized spec session arrived; by the time the seat
+   peeked, a fresh implement session had spawned on the same slug and sat in its
+   pre-submit startup state (launch command typed, unsent — `no-signature`). The seat
+   read the startup as a park and closed it, losing 46 s and one re-request. Ledgered
+   with a false first explanation, corrected against the journal. *Not yet in skill* —
+   the durable fix is the watcher carrying spawn time, or readiness recognizing the
+   startup state; see the arc's friction log.
+5. **Session-owned teardown never lands a commit.** Across eleven streams: when the
+   seat had moved main, the guard quarantined (correct, empty of anything new); when it
+   had not, the guard *published* the result as uncommitted working-tree changes on the
+   control checkout, and the next fast-forward refused to overwrite them. The landing
+   path is always the worker's branch commit — verify the published copies identical,
+   discard, fast-forward or cherry-pick. *Not yet in skill*; belongs in § Verifying and
+   closing once the guard's behavior is settled rather than described.
+
 ## Shipped verb history
 
 Moved from the SKILL's "Verbs this role wants" evidence log as each want shipped;
