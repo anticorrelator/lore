@@ -197,8 +197,6 @@ def supervise(args):
         with lock(directory / 'supervisor.lock', False):
             atomic(directory / 'supervisor.json', {'pid': os.getpid(), 'host_key': args.host_key, 'started_at': now()})
             for attempt in range(6):
-                # A host surviving its supervisor is still the sole owner. Wait for
-                # it to drain or fail rather than interpreting duplicate-owner as idle.
                 while held(directory / 'runtime.lock'):
                     time.sleep(.2)
                 process = subprocess.Popen([args.binary, '--session-host', '--host-key', args.host_key,
@@ -218,7 +216,7 @@ def supervise(args):
                                     if manifest['state'] in {'intent', 'enqueueing'}:
                                         enqueue_start(kdir, manifest)
                             except BlockingIOError:
-                                pass  # the caller is still publishing this intent
+                                pass
                             except (RuntimeError, OSError) as error:
                                 print(f'intent reconciliation: {error}', flush=True)
                     reconcile_operations(kdir, args.host_key)
@@ -261,7 +259,6 @@ def disposition(kdir, handle):
     cleaned = closed and cleanup.get('cleaned') is True
     worktree_path = links.get('worktree_path')
     if closed and not cleaned and worktree_path and not Path(worktree_path).exists():
-        # Recover the crash gap after physical cleanup but before proof publication.
         source = manifest.get('source_dir')
         if source:
             try:
@@ -323,8 +320,6 @@ def enqueue_start(kdir, manifest):
     key, source = manifest['host_key'], manifest['source_dir']
     path = manifest_path(kdir, manifest['handle'])
     rid = manifest['request_id']
-    # Start replay is safe only before any durable queue/claim/event evidence.
-    # A fixed writer id closes the caller-crash window between enqueue and receipt.
     existing = any(p.exists() for p in [kdir / '_sessions/requests/pending' / (rid + '.json')])
     existing = existing or any(row.get('request_id') == rid for row in events(kdir))
     existing = existing or any(p.name.startswith(rid) for p in (kdir / '_sessions/requests').rglob('*') if p.is_file())
@@ -382,7 +377,6 @@ def start(args, kdir):
         index = read(index_path, {})
         token = hashlib.sha256(args.key.encode()).hexdigest() if args.key else None
         if token and token not in index:
-            # Recover a caller death after manifest fsync but before key-index fsync.
             for path in (kdir / '_sessions/managed').glob('*.json'):
                 saved = read(path, {})
                 if saved.get('key_token') == token:
@@ -530,7 +524,6 @@ def operate_attempt(args, kdir, manifest):
             raise RuntimeError('session has no surviving tmux terminal to attach')
         os.execvp('tmux', ['tmux', '-L', 'lore-tui', 'attach-session', '-t', live['tmux']])
     if args.verb == 'wait':
-        # The persistent per-handle cursor hides journal byte offsets from callers.
         path = kdir / '_sessions/managed' / (manifest['handle'] + '.wait.json')
         with lock(path.with_suffix('.lock')):
             seen = set(read(path, {}).get('seen', []))
@@ -583,8 +576,6 @@ def operate_attempt(args, kdir, manifest):
     if (args.verb == 'send' and result['outcome'] == 'send_refused'
             and result.get('event', {}).get('reason') in {'no-signature', 'generating'}
             and time.monotonic() + .3 < deadline):
-        # Only an explicit pre-injection refusal authorizes this retry. Unknown
-        # acceptance and delivery-uncertain never enter the retry path.
         time.sleep(.25)
         result['_retry_send'] = True
         return result
@@ -617,7 +608,6 @@ def main(argv=None):
     parser.add_argument('--until')
     parser.add_argument('--host-key')
     parser.add_argument('--binary')
-    # Legacy verbs retain their argument grammar and behavior for unmanaged targets.
     verb = argv[0] if argv else ''
     if verb in {'send', 'answer', 'peek', 'close', 'wait'}:
         if '--help' in argv or '-h' in argv:
