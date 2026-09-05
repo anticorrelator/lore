@@ -545,6 +545,7 @@ check('report header binding checked', fixture('wrong-packet', edit=lambda s: s.
 check('convention presence retained', fixture('no-convention', edit=lambda s: s.replace('**Convention handling:** none in scope', '**Convention handling:**')), 2, 'Convention handling')
 check('malformed observation cannot use empty exception', fixture('bad-observation', observations='- claim: invented'), 2, 'malformed compiled observation')
 check('empty observation heading is not explicit emptiness', fixture('missing-observation', observations=''), 2, 'Observations')
+check('source artifact relative to execution root', fixture('relative-source', edit=lambda s: s.replace('path: ' + str(repo / 'scripts/task-completed-capture-check.sh'), 'path: scripts/task-completed-capture-check.sh')))
 check('missing source artifact', fixture('missing-source', edit=lambda s: s.replace('path: ' + str(repo / 'scripts/task-completed-capture-check.sh'), 'path: ' + str(repo / 'missing-source'))), 2, 'artifact missing')
 check('unlanded task description cannot replace report', {**valid, 'task_description': valid['task_description'] + 'changed'}, 2, 'differs from durable')
 

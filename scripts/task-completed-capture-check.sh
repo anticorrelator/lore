@@ -198,7 +198,8 @@ try:
                     for key in ('path', 'kind', 'writer', 'identity')), 'invalid artifact entry')
         target = Path(artifact['path'])
         if not target.is_absolute():
-            target = item / target
+            base = Path(binding['execution_root']) if artifact['kind'] == 'source' else item
+            target = base / target
         require(target.is_file(), f'artifact missing: {target}')
         identity = artifact['identity']
         if artifact['kind'] == 'source':
