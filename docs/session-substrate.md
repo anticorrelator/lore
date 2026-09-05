@@ -1234,3 +1234,12 @@ Deploying the position request writer is itself a compatibility transition: an
 already-running binary without `runtime_capabilities` will no longer receive new
 position requests. Coordinate that writer activation with host replacement; no
 historical SHA allowlist or unknown-runtime fallback is implied.
+
+
+The exact faint `Press up to edit queued messages` composer hint is a queue
+placeholder, not an option-select candidate. It permits another send through the
+existing queued-input contract; a typed copy remains a held draft, and genuine
+permission or option menus retain their refusal behavior. Completion markers
+recognize the rotating Unicode verb in `✻ <verb> for <duration>`, including an
+optional `· done <time>` clock. They establish idle only beside an unobstructed
+empty composer and do not override current activity or modal evidence.

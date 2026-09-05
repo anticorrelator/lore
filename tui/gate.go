@@ -76,6 +76,7 @@ type screenClass struct {
 	availableOptions  []int
 	pending           bool
 	placeholder       bool
+	queued            bool // exact styled queue hint on an otherwise empty composer
 	heldInput         bool
 	numberedModal     *config.NumberedModalSignature
 }
@@ -132,6 +133,9 @@ func classifyScreen(framework string, snap work.ScreenSnapshot) (screenClass, bo
 		pending:     mm.pending != nil && mm.pending(rows),
 		placeholder: mm.placeholder != nil && mm.placeholder(rows, ansiRows),
 		heldInput:   mm.heldInput != nil && mm.heldInput(rows, ansiRows),
+	}
+	if framework == "claude-code" && state.composer && !state.interactive && !state.pending && !state.heldInput {
+		state.queued = ccComposerQueued(rows, ansiRows)
 	}
 	if state.interactive {
 		state.interactiveReason = framework + "-interactive"
@@ -363,14 +367,15 @@ func lastRows(rows []string, n int) []string {
 
 // --- claude-code: a '❯' prompt row flanked by two full-width '─' rules. ---
 var (
-	ccRule      = regexp.MustCompile(`^\s*─{12,}\s*$`)
-	ccPrompt    = regexp.MustCompile(`^\s*[❯>](\s|$)`)
-	ccProceed   = regexp.MustCompile(`(?i)do you want to (proceed|run|allow)`)
-	ccFooter    = regexp.MustCompile(`(?i)esc to cancel|tab to amend|ctrl\+e to explain`)
-	ccSelect    = regexp.MustCompile(`(?i)enter\s+to\s+select|select.*enter|↑|↓|up/down|arrow keys`)
-	ccOption    = regexp.MustCompile(`[❯>]?\s*\d[.)]\s`)
-	ccSelected  = regexp.MustCompile(`^\s*[❯>]\s+\S`)
-	ccPasteChip = regexp.MustCompile(`\[Pasted text #\d+`)
+	ccRule         = regexp.MustCompile(`^\s*─{12,}\s*$`)
+	ccPrompt       = regexp.MustCompile(`^\s*[❯>](\s|$)`)
+	ccProceed      = regexp.MustCompile(`(?i)do you want to (proceed|run|allow)`)
+	ccFooter       = regexp.MustCompile(`(?i)esc to cancel|tab to amend|ctrl\+e to explain`)
+	ccSelect       = regexp.MustCompile(`(?i)enter\s+to\s+select|select.*enter|↑|↓|up/down|arrow keys`)
+	ccOption       = regexp.MustCompile(`[❯>]?\s*\d[.)]\s`)
+	ccSelected     = regexp.MustCompile(`^\s*[❯>]\s+\S`)
+	ccQueuedPrompt = regexp.MustCompile(`^\s*[❯>]\s+Press up to edit queued messages\s*$`)
+	ccPasteChip    = regexp.MustCompile(`\[Pasted text #\d+`)
 )
 
 func ccComposerReady(rows []string) bool {
@@ -450,7 +455,7 @@ func ccOptionSelectModal(rows []string) bool {
 	selected := false
 	for _, r := range tail {
 		trimmed := strings.TrimSpace(r)
-		if trimmed == "" || ccRule.MatchString(r) || ccSelect.MatchString(r) {
+		if trimmed == "" || ccRule.MatchString(r) || ccSelect.MatchString(r) || ccQueuedPrompt.MatchString(r) {
 			continue
 		}
 		candidates++
@@ -483,6 +488,13 @@ func ccComposerPending(rows []string) bool {
 func ccComposerPlaceholder(rows []string, ansiRows []string) bool {
 	_, hasText, allFaint, ok := ccPromptSuffixStyle(rows, ansiRows)
 	return ok && hasText && allFaint
+}
+
+// The queued-message hint is placeholder chrome, not a selected menu option
+// or held draft. Exact text plus faint styling distinguishes a typed copy.
+func ccComposerQueued(rows []string, ansiRows []string) bool {
+	idx := ccPromptLineIndex(rows)
+	return idx >= 0 && ccQueuedPrompt.MatchString(rows[idx]) && ccComposerPlaceholder(rows, ansiRows)
 }
 
 func ccComposerHeldInput(rows []string, ansiRows []string) bool {

@@ -35,14 +35,19 @@ func activeScreenMatcher(framework string, rows []string) string {
 				return framework + "-interrupt-chrome-v1"
 			}
 		}
-		if framework == "claude-code" && ccActivity.MatchString(strings.TrimSpace(row)) {
+		if framework == "claude-code" && (ccActivity.MatchString(strings.TrimSpace(row)) || ccElapsedActivity.MatchString(strings.TrimSpace(row))) {
 			return "claude-code-thinking-chrome-v1"
 		}
 	}
 	return ""
 }
 
-var ccSettled = regexp.MustCompile(`^✻\s*Worked for\s*\d+(?:m\s*\d+s|s|m)?$`)
+const ccDuration = `(?:\d+h(?:\s+\d+m)?(?:\s+\d+s)?|\d+m(?:\s+\d+s)?|\d+(?:\.\d+)?s)`
+
+// Claude rotates the Unicode verb; the star, completed duration phrase and
+// optional completion clock distinguish this marker from active ellipsis chrome.
+var ccSettled = regexp.MustCompile(`^✻\s+[\p{L}][\p{L}\p{M}]*\s+for\s+` + ccDuration + `(?:\s+·\s+done\s+(?:[1-9]|1[0-2]):[0-5]\d\s+(?:AM|PM))?$`)
+var ccElapsedActivity = regexp.MustCompile(`^[✶✻✽✢✳·*]\s+[\p{L}][\p{L}\p{M}]*(?:…|\.\.\.)\s+` + ccDuration + `$`)
 
 var ocSettled = regexp.MustCompile(`^▣\s+.+ · .+ · \d+(?:\.\d+)?(?:ms|s|m|h|d)(?: \d+(?:s|m|h))?$`)
 var cxSettled = regexp.MustCompile(`^─ Worked for \d+(?:h|m|s)(?: \d+(?:m|s)){0,2} (?:• .+ )?─+$`)
@@ -328,7 +333,7 @@ func (m model) observeProgress(slug string, obs *session.Observation, snap work.
 	var meaningful []string
 	for _, row := range rows {
 		row = strings.TrimSpace(row)
-		if row == "" || providerFailure.MatchString(row) || activityInterrupt.MatchString(row) || ccActivity.MatchString(row) || strings.HasPrefix(row, "Background task") {
+		if row == "" || providerFailure.MatchString(row) || activityInterrupt.MatchString(row) || ccActivity.MatchString(row) || ccElapsedActivity.MatchString(row) || strings.HasPrefix(row, "Background task") {
 			continue
 		}
 		meaningful = append(meaningful, row)
