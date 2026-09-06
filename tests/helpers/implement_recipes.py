@@ -568,7 +568,7 @@ def exercise_recipes(repo, root, source):
     fixed = prepare("fixed-session", route="session")
     fixed_ref = bind("fixed root binding", NATIVE_MODEL="")
     context_path = f.data("fixed-context.json", {"dispatch_guidance": Path(fixed_ref["payload_path"]).read_text(), "position_dispatch": fixed_ref})
-    run("request-session", "fixed session admission", CONTEXT_FILE=context_path, SESSION_SLUG="recipes--w2",
+    run("request-session", "seat-owned fixed session route is refused before enqueue", expected=1, CONTEXT_FILE=context_path, SESSION_SLUG="recipes--w2",
         TARGET_INSTANCE="fixture", WORKTREE_ID="fixed-fixture", EXECUTION_DIR=f.code)
     fixed_collected = obj(run("session-reference", "fixed independent reference"))
     assert fixed_collected["reference"] == fixed_ref

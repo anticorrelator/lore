@@ -22,6 +22,8 @@ import (
 // (every row written before the field existed) decodes to "", which the
 // consumer reads as the slug-key close-matching it always used.
 type CloseRequest struct {
+	Generation     string `json:"generation,omitempty"`
+	SessionType    string `json:"session_type,omitempty"`
 	RequestID      string `json:"request_id"`
 	Slug           string `json:"slug"`
 	TargetInstance string `json:"target_instance"`

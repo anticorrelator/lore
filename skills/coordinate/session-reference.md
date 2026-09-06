@@ -158,10 +158,11 @@ capturing cwd there could only stall the claim and then land anywhere. When it
 runs inside a session and no source checkout can be resolved, the flag refuses
 rather than writing an unmatchable preference.
 An ordinary hosted session captures that checkout into a session-owned
-worktree before spawn. A coordinated writer instead carries the all-or-nothing
-`--worktree-id`, `--execution-dir`, and `--worktree-identity` tuple allocated by the
-coordination manager. Both direct PTY and tmux hosting validate the tuple and run at
-the canonical execution directory; neither falls back to the TUI project directory.
+worktree before spawn. Manager-allocated trees are seat-owned and used for subagents dispatched by the
+seat. They cannot host worker sessions: do not pass their `--worktree-id`,
+`--execution-dir`, and `--worktree-identity` tuple to `session request`.
+Hosted workers use ordinary placement and receive a checkout from the claiming
+host. Legacy session-owned tuples remain readable for recovery only.
 
 ## Worktree lifecycle and refusal
 

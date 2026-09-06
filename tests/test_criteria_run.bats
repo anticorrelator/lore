@@ -372,3 +372,10 @@ assert row['source_start']['state']=='read' and row['source_end']['state']=='rea
 assert (pathlib.Path(code)/'started-count').read_text()=='1'
 PY
 }
+
+@test "criteria record host load and isolate unrelated pytest plugins" {
+  plan '{"argv":["python3","-c","import os; assert os.environ[\"PYTEST_DISABLE_PLUGIN_AUTOLOAD\"] == \"1\""]}'
+  run execute
+  [ "$status" -eq 0 ]
+  jq -e '.host_load_start.timestamp != null and .host_load_end.timestamp != null and .host_load_start.cpu_count > 0 and (.host_load_start.load_average_1_5_15 | length == 3) and .environment.PYTEST_DISABLE_PLUGIN_AUTOLOAD == "1"' "$ITEM/results.jsonl"
+}

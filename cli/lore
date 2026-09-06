@@ -731,6 +731,11 @@ lore session — multi-session coordination substrate verbs
 
 Usage: lore session <verb> [args...]
 
+  interrupt SLUG [--generation ID] [--json]
+            Interrupt a turn; interrupt_sent confirms key delivery, not turn completion.
+  sweep-quarantine [--target REF] [--apply]
+            Dry-run ref cleanup against accepted history; --apply deletes proven refs.
+
 Managed workers:
   start ITEM --workspace PATH --framework ID --model MODEL --context FILE
              [--key DISPATCH_ID] [--packet ID] [--json]
@@ -1113,6 +1118,12 @@ cmd_session() {
     --help|-h)
       session_usage
       return 0
+      ;;
+    sweep-quarantine)
+      exec python3 "$SCRIPTS_DIR/quarantine-sweep.py" "$@"
+      ;;
+    interrupt)
+      exec bash "$SCRIPTS_DIR/session-interrupt.sh" "$@"
       ;;
     start|inspect|attach)
       exec python3 "$SCRIPTS_DIR/session-managed.py" "$subcmd" "$@"
@@ -2463,6 +2474,7 @@ case "$1" in
     cmd_trust "$@"
     ;;
   impl)
+    ensure_yaml_python
     shift
     cmd_impl "$@"
     ;;

@@ -289,3 +289,31 @@ func TestOrdinaryCloseRetainsCommittedAndDirtyResultsWithoutIntegration(t *testi
 		}
 	}
 }
+
+func TestRetainEmptyBaseAfterDestinationAdvances(t *testing.T) {
+	_, repo, _ := closedSessionWorktree(t, "seed")
+	ctx := context.Background()
+	identity, err := worktree.Create(ctx, repo, filepath.Join(t.TempDir(), "empty"), "empty")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err = worktree.Transition(identity, worktree.StateActive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "commit", "--allow-empty", "-m", "advance").CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	before := refOID(t, repo, "HEAD")
+	outcome, err := retainWorktree(ctx, identity)
+	if err != nil || outcome.Kind != worktree.OutcomeNoChanges {
+		t.Fatalf("%+v %v", outcome, err)
+	}
+	if refOID(t, repo, "refs/lore/quarantine/empty") != "" || refOID(t, repo, "HEAD") != before {
+		t.Fatal("empty result quarantined or destination changed")
+	}
+	proof, err := worktree.CleanupSessionCheckout(ctx, outcome.Identity)
+	if err != nil || !proof.Verified {
+		t.Fatalf("cleanup: %+v %v", proof, err)
+	}
+}

@@ -34,6 +34,7 @@ type OutcomeKind string
 const (
 	OutcomePublished           OutcomeKind = "published"
 	OutcomeRestoreRefused      OutcomeKind = "restore_refused"
+	OutcomeNoChanges           OutcomeKind = "no_changes"
 	OutcomeWorktreeQuarantined OutcomeKind = "worktree_quarantined"
 )
 
@@ -307,6 +308,20 @@ func MakePublishable(ctx context.Context, identity Identity) (Identity, ResultAr
 		return Identity{}, ResultArtifact{}, fmt.Errorf("materialize session result: %w", err)
 	}
 	return next, artifact, nil
+}
+
+// EmptyAtBase checks both committed and uncommitted output, independently of
+// the destination's current HEAD. It never writes the destination.
+func EmptyAtBase(ctx context.Context, identity Identity) (bool, error) {
+	if err := ValidateIdentity(ctx, identity); err != nil {
+		return false, err
+	}
+	head, err := gitString(ctx, identity.CanonicalPath, "rev-parse", "HEAD")
+	if err != nil {
+		return false, err
+	}
+	dirty, err := isDirty(ctx, identity.CanonicalPath)
+	return err == nil && !dirty && head == identity.Captured.HeadOID, err
 }
 
 // Quarantine preserves the current session result as both a Git ref and a

@@ -89,7 +89,7 @@ def make_attempt(position='worker', framework='codex', attempt='attempt-1', mode
     descriptor = compile_position(position, framework, store, None)
     packet_id = 'pkt-' + attempt
     row = {'packet_id':packet_id,'packet_scope':'task','work_item':'fixture','task_id':'task-1','revision_id':revision,
-           'dispatch_attempt_id':attempt,'source_head':None,'session_id':None,'phase':None,'arm':None,'task_scale_set':'implementation'}
+           'dispatch_attempt_id':attempt,'source_head':None,'session_id':None,'phase':None,'arm':None,'task_scale_set':'implementation','synthesis_waiver':{'by':'fixture','reason':'Isolated attribution fixture, no retrieval judgment under test.'}}
     build_packet(store, row, assembly=('Isolated packet content', {}), role=position, scales=['implementation'])
     bindings = dict.fromkeys(binder.FIELDS)
     bindings.update(work_item='fixture', task_id='task-1', revision_id=revision, packet_id=packet_id,
@@ -685,7 +685,7 @@ import runpy
 publication=runpy.run_path(str(repo/'scripts/work-evidence.py'))['publication_for_dispatch'](item,store)
 revision=publication['revision_id']
 bound=copy.deepcopy(bindings);bound.update(task_id='task-1',revision_id=revision,dispatch_attempt_id='bound-attempt',report_id='bound-report',report_path=str(item/'worker-reports/bound-report.md'),packet_id='pkt-bound')
-build_packet(store,{'packet_id':'pkt-bound','packet_scope':'task','work_item':'preplan-fixture','task_id':'task-1','revision_id':revision,'dispatch_attempt_id':'bound-attempt','source_head':publication['source_head'],'session_id':None,'phase':None,'arm':None,'task_scale_set':'implementation'},assembly=('Bound fixture.',{}),role='investigator',scales=['implementation'])
+build_packet(store,{'packet_id':'pkt-bound','packet_scope':'task','work_item':'preplan-fixture','task_id':'task-1','revision_id':revision,'dispatch_attempt_id':'bound-attempt','source_head':publication['source_head'],'session_id':None,'phase':None,'arm':None,'task_scale_set':'implementation','synthesis_waiver':{'by':'fixture','reason':'Isolated attribution fixture, no retrieval judgment under test.'}},assembly=('Bound fixture.',{}),role='investigator',scales=['implementation'])
 bound['packet_pointer']=pointer(store,'pkt-bound');bound['absence_reasons']={k:v for k,v in bound['absence_reasons'].items() if bound[k] is None}
 published=binder.publish(payload['descriptor'],bound,store,(Path(ref['manifest_path']).parent/'guidance.md').read_bytes())
 bref={k:published[k] for k in ('manifest_path','manifest_sha256')}
@@ -697,5 +697,24 @@ assert project(good,expected={'work_item':'preplan-fixture','task_id':'external'
 assert project(good,expected={'work_item':'preplan-fixture','task_id':None})['status']=='resolved'
 (temporary/'commands.json').write_text(json.dumps(commands,indent=2))
 print('Pre-plan canonical spec-open, completion, evidence, audit and promotion passed; all missing/wrong association and exact-bound-task controls passed.')
+PY
+}
+
+@test "attribution bounds claim size while retaining verifiable bindings identity" {
+  python3 - "$REPO" <<'PY'
+import hashlib,json,sys
+from unittest.mock import patch
+sys.path.insert(0,sys.argv[1]+'/scripts')
+from position_attribution import project
+bindings=dict(work_item='fixture',task_id='task-1',revision_id='rev',packet_id='pkt',dispatch_attempt_id='attempt',report_id='report',mode=None,consultation_id=None,domain=None,assignment='x'*34000,absence_reasons={'huge':'y'*34000})
+manifest=dict(producer=dict(position='worker',framework='codex',template_id='position/worker/codex',template_version='v1'),bindings=bindings,native={'source_path':'/brief'},wrapper=None)
+ref={'manifest_path':'/fixture/manifest.json','manifest_sha256':'a'*64}
+with patch('position_attribution.resolve_reference',return_value={'manifest':manifest}):
+    value=project({'position_dispatch':ref})
+assert value['status']=='resolved',value
+assert len(json.dumps(value))<2000
+assert value['bindings']['task_id']=='task-1'
+assert value['bindings_sha256']==hashlib.sha256(json.dumps(bindings,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+assert 'assignment' not in value['bindings'] and value['position_dispatch']==ref
 PY
 }

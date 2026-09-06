@@ -1575,14 +1575,13 @@ PYEOF
   [ "$status" -eq 0 ]
 }
 
-@test "close --session stamps the leading prefix the coordinator passed, not the full id" {
-  # The producer stamps the passed value verbatim; the consumer matches it
-  # against the full hosted id by leading prefix, so the short form still resolves.
+@test "close --session binds the full resolved identity instead of a mutable prefix" {
+  # Prefix resolution is convenient; the durable request binds the complete id.
   write_instance_session inst-a feature-x 11111111-1111-1111-1111-111111111111
   run bash "$CLOSE" --session 1111 --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
   local cr; cr="$(ls "$TEST_KDIR"/_sessions/close-requests/*.json)"
-  run jq -e '.session_id=="1111"' "$cr"
+  run jq -e '.session_id=="11111111-1111-1111-1111-111111111111"' "$cr"
   [ "$status" -eq 0 ]
 }
 
@@ -3466,4 +3465,27 @@ answer_peek_observation() {
   run bash "$WATCH" --timeout 0 --kdir "$TEST_KDIR"    # pending advisory path
   [ "$status" -eq 0 ]
   [ "$(shasum -a 256 "$TEST_KDIR/_sessions/events.jsonl" | awk '{print $1}')" = "$before" ]
+}
+
+@test "close binds type and generation and refuses a successor guard" {
+  write_instance_session inst-a feature-x first-id
+  run bash "$CLOSE" feature-x --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  generation=$(jq -r .generation <<< "$output")
+  [ -n "$generation" ]
+  jq -e '.session_type != "" and .generation != "" and .session_id == "first-id"' "$TEST_KDIR"/_sessions/close-requests/*.json
+  rm "$TEST_KDIR"/_sessions/close-requests/*.json
+  write_instance_session inst-a feature-x successor-id
+  run bash "$CLOSE" feature-x --generation "$generation" --kdir "$TEST_KDIR" --json
+  [ "$status" -ne 0 ]
+  [[ "$output" == *generation*mismatch* ]]
+  [ -z "$(ls "$TEST_KDIR"/_sessions/close-requests/*.json 2>/dev/null)" ]
+}
+
+@test "interrupt enqueues a generation-bound action without closing" {
+  write_instance_session inst-a feature-x first-id
+  run bash "$REPO_DIR/scripts/session-interrupt.sh" feature-x --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  jq -e '.action=="interrupt" and .generation!="" and .body==""' "$TEST_KDIR"/_sessions/send-requests/*.json
+  [ ! -d "$TEST_KDIR/_sessions/close-requests" ]
 }

@@ -51,6 +51,7 @@ KDIR_OVERRIDE=""
 JSON_MODE=0
 CURSOR_SCHEMA_VERSION=1
 WAKE_SCHEMA_VERSION=1
+WAKE_JOURNAL_BATCH='[]'
 OWNER_GONE_GRACE_SECONDS=2
 
 SCOPE_SLUGS=()
@@ -324,6 +325,7 @@ emit_wake() {
     --argjson modal_gate "$WAKE_MODAL_GATE" \
     --argjson clock_skew "$WAKE_CLOCK_SKEW" \
     --argjson matched "$WAKE_MATCHED" \
+    --argjson journal_batch "$WAKE_JOURNAL_BATCH" \
     --argjson pending "$WAKE_PENDING" \
     --arg mode "$SCOPE_MODE" \
     --argjson slugs "$SCOPE_SLUGS_JSON" \
@@ -340,7 +342,8 @@ emit_wake() {
       clock_skew: $clock_skew,
       matched: $matched, pending: $pending,
       scope: {mode: $mode, slugs: $slugs, arcs: $arcs, cursor_file: $cursor_file},
-      next_cursor: $nc, until: $until, current_observations:$current, current_delta:$delta}')"
+      next_cursor: $nc, until: $until, current_observations:$current, current_delta:$delta}
+      + (if ($journal_batch | length) > 1 then {journal_batch:$journal_batch} else {} end)')"
 
   if [[ $DURABLE -eq 1 ]]; then
     payload="$(printf '%s' "$payload" | python3 "$WATCH_HELPER" publish --path "$DELIVERY_FILE" --identity "$IDENTITY_JSON" --interval "$TIMEOUT")" || fail "could not persist wake; cursor remains uncommitted"
@@ -401,11 +404,12 @@ emit_internal_error() {
 first_match_record() {
   printf '%s' "$1" | jq -c \
     --argjson until "$UNTIL_JSON" \
+    --argjson durable "$DURABLE" \
     --argjson slugs "$SCOPE_SLUGS_JSON" \
     --argjson scoped "$SCOPED" \
     "$SESSION_SCOPE_JQ_PREDICATE"'
     .records as $records |
-    first(
+    [
       $records[] as $candidate
       | $candidate
       | select((.event.event != "needs_input" and .event.event != "modal_blocked") or
@@ -415,7 +419,9 @@ first_match_record() {
       | (.event | scope_state($scoped; $slugs)) as $scope
       | select($scope.matched)
       | . + {scope: $scope}
-    )' 2>/dev/null || true
+    ] | if length == 0 then empty
+        elif $durable == 1 then . as $batch | .[-1] + {matched_batch: [$batch[].event]}
+        else .[0] end' 2>/dev/null || true
 }
 
 # Pending spawn requests older than the staleness bound, newest-first age order.
@@ -617,6 +623,7 @@ emit_matched_from_record() {
   cursor="$(printf '%s' "$record" | jq -r '.next_cursor')"
   WAKE_OUTCOME="matched"
   WAKE_MATCHED="$row"
+  WAKE_JOURNAL_BATCH="$(printf '%s' "$record" | jq -c '.matched_batch // []')"
   reconcile_current
   classify_match "$row" "$(printf '%s' "$record" | jq -r '.scope.unattributed')"
   emit_wake "$cursor" 0 \

@@ -3,6 +3,7 @@ package work
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1689,7 +1690,8 @@ func materializePosition(d SessionDescriptor, framework, root, kdir string) (*po
 	if err := json.Unmarshal(data, &launch); err != nil {
 		return nil, err
 	}
-	if launch.Payload == "" || launch.Reference["manifest_sha256"] == "" || launch.Producer["framework"] != framework {
+	digest, digestErr := hex.DecodeString(launch.Reference["manifest_sha256"])
+	if launch.Payload == "" || launch.Reference["manifest_path"] == "" || digestErr != nil || len(digest) != 32 || launch.Producer["framework"] != framework {
 		return nil, fmt.Errorf("incomplete position launch")
 	}
 	return &launch, nil
@@ -1748,6 +1750,7 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 		// The child's write fence reads its containment boundary and its
 		// operational store root from the environment; both launch paths below
 		// export whatever sessionEnv carries.
+		sessionEnv.Model = d.Model
 		sessionEnv.WorktreeRoot = worktreeDir
 		sessionEnv.StoreRoot = knowledgeDir
 		// Build the initial prompt to auto-submit. Passing it as a positional
@@ -1839,6 +1842,7 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 			})
 		} else if model, err := config.ResolveModelForRoleInCeremonyOnFramework(leadRole, leadCeremony, activeFramework); err == nil {
 			args = append(args, "--model", model)
+			sessionEnv.Model = model
 			notices = append(notices, OperatorNotice{
 				Code:    "lead-model-role-resolved",
 				Message: fmt.Sprintf("lead model %s on %s (role %s)", model, activeFramework, leadSeat),

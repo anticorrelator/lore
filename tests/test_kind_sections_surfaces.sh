@@ -474,7 +474,7 @@ printf '# Quillon Work Item\n\n## Session note\n\nThe quillon router work item t
   > "$WRAPPER_DIR/_work/quillon-work-item/notes.md"
 
 TEST_LORE="$TEST_DIR/lore-under-test"
-sed -e "s|^SCRIPTS_DIR=.*|SCRIPTS_DIR=\"$SCRIPT_DIR\"|" \
+sed -e "s|^[[:space:]]*SCRIPTS_DIR=.*|SCRIPTS_DIR=\"$SCRIPT_DIR\"|" \
     -e "s|^  \"\$SCRIPTS_DIR/resolve-repo.sh\"$|  echo \"\$LORE_TEST_KDIR\"|" \
     "$REPO_DIR/cli/lore" > "$TEST_LORE"
 chmod +x "$TEST_LORE"

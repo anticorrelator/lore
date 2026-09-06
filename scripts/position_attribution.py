@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -60,7 +61,7 @@ def legacy_role(attribution):
 
 def project(record, *, expected=None):
     result = dict.fromkeys(('position_dispatch', 'template_id', 'template_version', 'template_path',
-                            'position', 'framework', 'bindings', 'wrapper'))
+                            'position', 'framework', 'bindings', 'bindings_sha256', 'wrapper'))
     present = ('position_dispatch' in record or 'producer_attribution' in record or
                'attribution_error' in record or record.get('position') is not None or
                str(record.get('template_id', '')).startswith('position/'))
@@ -102,7 +103,11 @@ def project(record, *, expected=None):
         if 'producer_role' in record and record['producer_role'] != legacy_role(dict(producer, bindings=manifest['bindings'])):
             raise ValueError('evidence producer role does not match position')
         result.update({key: producer[key] for key in ('position', 'framework', 'template_id', 'template_version')})
-        result.update(template_path=manifest['native']['source_path'], bindings=manifest['bindings'], wrapper=manifest['wrapper'])
+        # Hash the complete bindings as compact sorted UTF-8 JSON (no trailing newline).
+        # Large assignments and absence reasons remain behind the validated reference.
+        result.update(template_path=manifest['native']['source_path'], bindings={key: bindings[key] for key in ('work_item', 'task_id', 'revision_id', 'packet_id', 'dispatch_attempt_id', 'report_id', 'mode', 'consultation_id', 'domain')},
+                      bindings_sha256=hashlib.sha256(json.dumps(bindings, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest(),
+                      wrapper=manifest['wrapper'])
         return dict(result, status='resolved', reason=None)
     except (ValueError, OSError, KeyError, TypeError, ImportError, AttributeError) as exc:
         return dict(result, status='unknown', reason=str(exc))

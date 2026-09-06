@@ -41,7 +41,9 @@ func activeScreenMatcher(framework string, rows []string) string {
 	return ""
 }
 
-var ccSettled = regexp.MustCompile(`^✻\s*Worked for\s*\d+(?:m\s*\d+s|s|m)?$`)
+var reconnectFailure = regexp.MustCompile(`(?i)(reconnecting.*(?:timeout|failed)|idle timeout waiting for websocket|stream disconnected.*(?:timeout|failed))`)
+
+var ccSettled = regexp.MustCompile(`^[✻✶✽✢]\s*[\p{L}]+ for\s*\d+(?:h|m|s)(?:\s+\d+(?:m|s)){0,2}(?:\s*·\s*done .+)?$`)
 
 var ocSettled = regexp.MustCompile(`^▣\s+.+ · .+ · \d+(?:\.\d+)?(?:ms|s|m|h|d)(?: \d+(?:s|m|h))?$`)
 var cxSettled = regexp.MustCompile(`^─ Worked for \d+(?:h|m|s)(?: \d+(?:m|s)){0,2} (?:• .+ )?─+$`)
@@ -85,7 +87,7 @@ func settledScreenMatcher(framework string, rows []string) string {
 	}
 	for i := start - 1; i >= 0; i-- {
 		row := strings.TrimSpace(rows[i])
-		if row == "" {
+		if row == "" || (framework == "claude-code" && row == "/diff to hide diff") {
 			continue
 		}
 		if framework == "claude-code" && ccSettled.MatchString(row) {
@@ -109,6 +111,11 @@ func classifyActivity(framework string, snap work.ScreenSnapshot) (string, sessi
 		return "blocked", session.ObservationEvidence{Matcher: state.interactiveReason, Reason: "Interactive prompt owns terminal input."}
 	}
 	if matcher := activeScreenMatcher(framework, snap.Rows); matcher != "" {
+		for _, row := range lastRows(gateRows(snap.Rows), 18) {
+			if reconnectFailure.MatchString(row) {
+				return "stalled", session.ObservationEvidence{Matcher: "connection-failure-v1", Reason: strings.TrimSpace(row)}
+			}
+		}
 		return "working", session.ObservationEvidence{Matcher: matcher, Reason: "Current activity chrome advertises an interruptible turn."}
 	}
 	if matcher := settledScreenMatcher(framework, snap.Rows); matcher != "" && state.composer && !state.pending && !state.heldInput {
@@ -165,6 +172,10 @@ func (m model) snapshotObservation(slug string, now time.Time) (session.Observat
 	obs.CanAcceptInput, obs.InputBlockedReason = sendReadiness(framework, panel.NeedsInput(), contract, queues, snap)
 	obs.Fresh = true
 	obs.Activity, obs.Evidence = classifyActivity(framework, snap)
+	if last := panel.LastOutputTime(); obs.Activity == "working" && !last.IsZero() && now.Sub(last) >= 5*time.Minute {
+		obs.Activity = "stalled"
+		obs.Evidence = session.ObservationEvidence{Matcher: "working-output-silent-v1", Reason: "Working chrome with no terminal output for at least five minutes; inspect before interrupting, a silent tool may still be running."}
+	}
 	if obs.Activity != "unknown" {
 		obs.Authority = "screen-signature"
 	}
@@ -206,6 +217,9 @@ func (m model) applySessionObservation(slug string, obs session.Observation, now
 	wasParked := seen && (previous.Activity == "idle" || previous.Activity == "blocked")
 	event := ""
 	if parked && (!wasParked || previous.Activity != obs.Activity) {
+		event = session.EventNeedsInput
+	}
+	if obs.Activity == "stalled" && (!seen || previous.Activity != "stalled") {
 		event = session.EventNeedsInput
 	}
 	if obs.Activity == "working" && (!seen || previous.Activity != "working") {

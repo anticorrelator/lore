@@ -10,8 +10,13 @@
     "scale": "subsystem",
     "entry_status": "current",
     "template_version": "fix1",
+    "trust_score": 0.0,
+    "kind": "fact",
+    "kind_status": null,
+    "subsystem": null,
     "score": "<NUM>",
     "snippet": "# Widget Naming\n\nWidget identifiers use kebab-case slugs. Every widget pipeline stage prefixes\nits logs with the widget slug so cross-stage traces line up.\n<!-- learned: 2025-02-20 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->",
+    "correction_recency": null,
     "path": "conventions/widget-naming.md"
   },
   {
@@ -25,8 +30,13 @@
     "scale": "subsystem",
     "entry_status": "current",
     "template_version": "fix1",
+    "trust_score": 0.0,
+    "kind": "fact",
+    "kind_status": null,
+    "subsystem": null,
     "score": "<NUM>",
     "snippet": "# Review Widget Diffs Stage By Stage\n\nWhen reviewing widget pipeline changes, review one stage at a time and name\nthe stage in the review summary.\n<!-- learned: 2025-05-01 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->",
+    "correction_recency": null,
     "path": "preferences/widget-review-preference.md"
   },
   {
@@ -40,8 +50,13 @@
     "scale": "subsystem",
     "entry_status": "current",
     "template_version": "fix1",
+    "trust_score": 0.0,
+    "kind": "fact",
+    "kind_status": null,
+    "subsystem": null,
     "score": "<NUM>",
     "snippet": "# Widget Domain\n\nDeep widget domain notes, lazy-loaded on demand. Widget telemetry schema and\nwidget retention windows live here.\n<!-- learned: 2025-02-01 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->",
+    "correction_recency": null,
     "path": "domains/widget-domain.md"
   },
   {
@@ -55,8 +70,13 @@
     "scale": "implementation",
     "entry_status": "current",
     "template_version": "fix1",
+    "trust_score": 0.0,
+    "kind": "fact",
+    "kind_status": null,
+    "subsystem": null,
     "score": "<NUM>",
     "snippet": "# Widget Release Steps\n\nRun widget-release.sh --dry-run first, inspect the widget manifest diff, then\nrun it again without the flag to ship widgets.\n<!-- learned: 2025-04-05 | confidence: medium | source: manual | related_files: scripts/widget-release.sh | template_version: fix1 | scale: implementation | scale_registry_version: 1 -->",
+    "correction_recency": null,
     "path": "workflows/widget-release.md"
   },
   {
@@ -70,8 +90,13 @@
     "scale": "subsystem,implementation",
     "entry_status": "current",
     "template_version": "fix1",
+    "trust_score": 0.0,
+    "kind": "fact",
+    "kind_status": null,
+    "subsystem": null,
     "score": "<NUM>",
     "snippet": "# Widget Cache Stale Reads\n\nThe widget assembly cache serves stale widget parts when the intake stage\nrewrites a spec in place. Bust the cache key on every widget spec rewrite.\n<!-- learned: 2025-03-10 | confidence: high | source: manual | related_files: scripts/widget-cache.sh | template_version: fix1 | scale: subsystem,implementation | scale_registry_version: 1 -->",
+    "correction_recency": null,
     "path": "gotchas/widget-cache-stale.md"
   },
   {
@@ -85,8 +110,13 @@
     "scale": "abstract",
     "entry_status": "current",
     "template_version": "fix1",
+    "trust_score": 0.0,
+    "kind": "fact",
+    "kind_status": null,
+    "subsystem": null,
     "score": "<NUM>",
     "snippet": "# Widget Abstraction Law\n\nWhen multiple consumers compose the same widget primitive, policy lives in\nthe primitive, never per consumer. Duplicated widget policy drifts.\n<!-- learned: 2025-01-30 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: abstract | scale_registry_version: 1 -->",
+    "correction_recency": null,
     "path": "principles/widget-abstraction-law.md"
   }
 ]

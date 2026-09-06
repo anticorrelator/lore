@@ -433,7 +433,19 @@ func ccPermissionModal(rows []string) bool {
 	return (proceed || footer) && options >= 2
 }
 
+func ccQueuedComposer(rows []string) bool {
+	for _, row := range ccComposerRegion(rows) {
+		if strings.TrimSpace(row) == "❯ Press up to edit queued messages" || strings.TrimSpace(row) == "> Press up to edit queued messages" {
+			return true
+		}
+	}
+	return false
+}
+
 func ccOptionSelectModal(rows []string) bool {
+	if ccQueuedComposer(rows) {
+		return false
+	}
 	tail := lastRows(ccComposerRegion(rows), 16)
 	txt := strings.Join(tail, "\n")
 	if !ccSelect.MatchString(txt) {
@@ -466,6 +478,9 @@ func ccOptionSelectModal(rows []string) bool {
 // region (the bottom "rule / prompt / rule / hint" band) to tell a still-pending
 // composer from a sent chip scrolled into history.
 func ccComposerPending(rows []string) bool {
+	if ccQueuedComposer(rows) {
+		return false
+	}
 	for _, r := range ccComposerRegion(rows) {
 		if ccPasteChip.MatchString(r) {
 			return true
@@ -480,6 +495,9 @@ func ccComposerPlaceholder(rows []string, ansiRows []string) bool {
 }
 
 func ccComposerHeldInput(rows []string, ansiRows []string) bool {
+	if ccQueuedComposer(rows) {
+		return false
+	}
 	_, hasText, allFaint, ok := ccPromptSuffixStyle(rows, ansiRows)
 	return ok && hasText && !allFaint
 }

@@ -1272,3 +1272,15 @@ func TestCloseDispositionRetainsResultAndJournalsPendingIntegration(t *testing.T
 		t.Fatalf("journal = %v", got)
 	}
 }
+
+func TestCloseGenerationGuardRejectsSuccessor(t *testing.T) {
+	m := sessionModelWithRealScript(t)
+	m.localSessions["demo"] = liveSession{sessionID: "new", typ: "implement"}
+	next, cmd := m.handleCloseRequestScan(closeRequestScanMsg{matched: []session.CloseRequest{{RequestID: "old-close", Slug: "demo", Generation: "old", SessionType: "spec"}}})
+	if cmd == nil {
+		t.Fatal("stale close needs a disposition")
+	}
+	if len(next.pendingClose) != 0 || len(next.localSessions["demo"].closeRequests) != 0 {
+		t.Fatal("successor accepted stale close")
+	}
+}

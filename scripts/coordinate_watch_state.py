@@ -363,6 +363,8 @@ def compact_wake(payload, budget=COMPACT_LIMIT):
     current = payload.get('current_observations') or {}
     result = fields(payload, ('schema_version', 'wake_id', 'outcome', 'tier', 'authority', 'created_at',
                               'acknowledgment_required', 'next_cursor'))
+    if payload.get('journal_batch'):
+        result['journal_batch_count'] = len(payload['journal_batch'])
     result.update(presentation='compact', presentation_version=1, max_bytes=COMPACT_LIMIT, omitted=omitted)
     wake_id = payload.get('wake_id')
     store = payload.get('evidence_store')

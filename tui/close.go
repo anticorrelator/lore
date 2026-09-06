@@ -413,6 +413,11 @@ func (m model) handleCloseRequestScan(msg closeRequestScanMsg) (model, tea.Cmd) 
 			cmds = append(cmds, deleteCloseRequestCmd(m.sessionsDir, cr.RequestID))
 			continue
 		}
+		if ls, tracked := m.localSessions[slug]; tracked && ((cr.Generation != "" && cr.Generation != observationGeneration(ls)) || (cr.SessionType != "" && cr.SessionType != string(ls.typ))) {
+			ev := session.Event{Event: "close_failed", RequestID: cr.RequestID, Slug: slug, Reason: "generation-mismatch"}
+			cmds = append(cmds, tea.Sequence(journalCmd(m.eventScript, m.config.KnowledgeDir, ev), deleteCloseRequestCmd(m.sessionsDir, cr.RequestID)))
+			continue
+		}
 		if _, pending := m.pendingClose[slug]; pending {
 			continue // already consumed this session's close-request; awaiting quiescence
 		}

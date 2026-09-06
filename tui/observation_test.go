@@ -167,3 +167,39 @@ func TestObservationIdentityWithoutNativeSessionID(t *testing.T) {
 		t.Fatalf("missing universal identity: %+v", obs)
 	}
 }
+
+func TestClaudeRotatingSettledAndDiffFooter(t *testing.T) {
+	for _, marker := range []string{"✻ Sautéed for 35m 56s · done 1:23 PM", "✻ Cogitated for 4s", "✻ Baked for 1h 2m 3s"} {
+		rows := append([]string{marker, "/diff to hide diff"}, ccComposerRows...)
+		got, _ := classifyActivity("claude-code", work.ScreenSnapshot{Rows: rows})
+		if got != "idle" {
+			t.Fatalf("%q: %s", marker, got)
+		}
+	}
+}
+
+func TestClaudeQueuedComposerIsNotModal(t *testing.T) {
+	rows := append([]string{"✶ Crunching… (5m 0s · esc to interrupt)"}, ccComposerRows...)
+	for i, row := range rows {
+		if strings.TrimSpace(row) == "❯" {
+			rows[i] = "❯ Press up to edit queued messages"
+		}
+	}
+	rows = append(rows, "queued first message", "queued second message", "↑ edit queue")
+	snap := work.ScreenSnapshot{Rows: rows, ANSI: strings.Join(rows, "\n")}
+	if ccInteractivePrompt(rows) {
+		t.Fatal("queue classified as modal")
+	}
+	ready, reason := sendReadiness("claude-code", false, true, true, snap)
+	if !ready {
+		t.Fatalf("queued turn unreachable: %s", reason)
+	}
+}
+
+func TestReconnectFailureIsStalledWithoutInferringIdle(t *testing.T) {
+	rows := append([]string{"Reconnecting… idle timeout waiting for websocket", "Working (10s · esc to interrupt)"}, cxComposerRows...)
+	got, evidence := classifyActivity("codex", work.ScreenSnapshot{Rows: rows})
+	if got != "stalled" || !strings.Contains(evidence.Reason, "websocket") {
+		t.Fatalf("%s %+v", got, evidence)
+	}
+}

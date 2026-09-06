@@ -218,9 +218,17 @@ func (m model) handleManagedWorktreeQuiesced(msg managedWorktreeQuiescedMsg) (mo
 // retainWorktree is automatic disposition, never authorization to integrate.
 func retainWorktree(ctx context.Context, identity worktree.Identity) (worktree.PublishOutcome, error) {
 	const reason = "integration_pending: result retained for explicit integration"
-	publishable, _, err := worktree.MakePublishable(ctx, identity)
+	empty, err := worktree.EmptyAtBase(ctx, identity)
+	if err != nil {
+		return worktree.PublishOutcome{Kind: worktree.OutcomeRestoreRefused, Identity: identity}, err
+	}
+	publishable, retained, err := worktree.MakePublishable(ctx, identity)
 	if err != nil {
 		return worktree.PublishOutcome{Kind: worktree.OutcomeRestoreRefused, Identity: identity, Reason: err.Error()}, err
+	}
+	if empty && retained.OID == identity.Captured.HeadOID {
+		next, err := worktree.Transition(publishable, worktree.StatePublished)
+		return worktree.PublishOutcome{Kind: worktree.OutcomeNoChanges, Identity: next, Artifact: retained, Expected: identity.Captured, Reason: "no_changes"}, err
 	}
 	next, artifact, err := worktree.Quarantine(ctx, publishable, reason)
 	if err != nil {
@@ -234,6 +242,8 @@ func retainWorktree(ctx context.Context, identity worktree.Identity) (worktree.P
 func worktreeOutcomeEvent(instanceName, slug string, ls liveSession, outcome worktree.PublishOutcome) session.Event {
 	event := session.EventRestoreRefused
 	switch outcome.Kind {
+	case worktree.OutcomeNoChanges:
+		event = session.EventWorktreeNoChanges
 	case worktree.OutcomePublished:
 		event = session.EventWorktreePublished
 	case worktree.OutcomeWorktreeQuarantined:
@@ -311,7 +321,7 @@ func (m model) handleWorktreeDisposition(msg worktreeDispositionMsg) (model, tea
 	}
 
 	var outcomeCmd tea.Cmd
-	if msg.outcome.Kind == worktree.OutcomeWorktreeQuarantined || msg.outcome.Kind == worktree.OutcomePublished {
+	if msg.outcome.Kind == worktree.OutcomeNoChanges || msg.outcome.Kind == worktree.OutcomeWorktreeQuarantined || msg.outcome.Kind == worktree.OutcomePublished {
 		outcomeCmd = journalCmd(m.eventScript, m.config.KnowledgeDir, worktreeOutcomeEvent(m.instanceName, msg.slug, ls, msg.outcome))
 		if m.hostKey != "" {
 			var err error

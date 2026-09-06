@@ -151,7 +151,7 @@ case "$EVENT" in
   requested|claimed|spawned|needs_input|resumed|recovered|closed|orphaned|\
 step_completed|terminus_reached|spawn_failed|request_reclaimed|\
 request_abandoned|request_cancelled|request_expired|close_requested|close_failed|send_requested|sent|send_refused|answer_requested|answered|answer_refused|modal_blocked|\
-restore_refused|worktree_quarantined|worktree_published|worktree_write_refused) ;;
+interrupt_requested|interrupt_sent|interrupt_refused|restore_refused|worktree_quarantined|worktree_no_changes|worktree_published|worktree_write_refused) ;;
   "")
     fail "missing required field: event"
     ;;
@@ -175,7 +175,7 @@ fi
 # A successful publish carries no refusal reason, so only the refusal-shaped
 # outcomes require one.
 case "$EVENT" in
-  worktree_published|restore_refused|worktree_quarantined)
+  worktree_no_changes|worktree_published|restore_refused|worktree_quarantined)
     if ! printf '%s' "$ROW" | jq -e '(.slug // "") != ""' >/dev/null 2>&1; then
       fail "missing required field: slug (required for worktree outcome '$EVENT')"
     fi
@@ -274,7 +274,7 @@ fi
 
 # --- Queue-lifecycle events require a non-empty request_id ---
 case "$EVENT" in
-  requested|claimed|spawned|spawn_failed|request_reclaimed|request_abandoned|request_cancelled|request_expired|close_requested|close_failed|send_requested|sent|send_refused|answer_requested|answered|answer_refused)
+  requested|claimed|spawned|spawn_failed|request_reclaimed|request_abandoned|request_cancelled|request_expired|close_requested|close_failed|interrupt_requested|interrupt_sent|interrupt_refused|send_requested|sent|send_refused|answer_requested|answered|answer_refused)
     if ! printf '%s' "$ROW" | jq -e '(.request_id // "") != ""' >/dev/null 2>&1; then
       fail "missing required field: request_id (required for queue-lifecycle event '$EVENT')"
     fi

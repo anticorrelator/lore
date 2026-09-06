@@ -16,6 +16,7 @@
 #                                        instance is confirmed dead
 #
 # Options:
+#   --generation <id> Require the exact generation shown by close or peek observation.
 #   --reason <r>       Close reason: protocol_terminus | coordinator | human
 #                      (default: human). Ignored by the cancel/retire forms.
 #   --requested-by <w> Who requested it (default: $LORE_SESSION_INSTANCE, else $USER).
@@ -41,6 +42,9 @@ source "$SCRIPT_DIR/lib.sh"
 
 SLUG_ARG=""
 SESSION_ID_ARG=""
+GENERATION_ARG=""
+TARGET_GENERATION=""
+TARGET_TYPE=""
 SELF=0
 CANCEL_ID=""
 RETIRE_CLOSE_ID=""
@@ -54,6 +58,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --self) SELF=1; shift ;;
     --session) SESSION_ID_ARG="$2"; shift 2 ;;
+    --generation) GENERATION_ARG="${2:?missing generation}"; shift 2 ;;
     --request) CANCEL_ID="$2"; shift 2 ;;
     --retire-close-request) RETIRE_CLOSE_ID="$2"; shift 2 ;;
     --reason) REASON="$2"; shift 2 ;;
@@ -102,6 +107,10 @@ if [[ $FORMS -eq 0 ]]; then
   fail "no target: pass a <slug>, --session <id>, --self, --request <id>, or --retire-close-request <id>"
 elif [[ $FORMS -gt 1 ]]; then
   fail "ambiguous: pass exactly one of <slug>, --session <id>, --self, --request <id>, or --retire-close-request <id>"
+fi
+
+if [[ -n "$GENERATION_ARG" && ( -n "$CANCEL_ID" || -n "$RETIRE_CLOSE_ID" ) ]]; then
+  fail "--generation applies only to a live close target"
 fi
 
 if [[ -z "$REQUESTED_BY" ]]; then
@@ -304,6 +313,16 @@ else
   [[ -n "$TARGET_INSTANCE" ]] || fail "no live instance is running session '$SLUG'"
 fi
 
+# Bind the observed generation even for a slug-addressed close. The consumer
+# rechecks it, preventing a delayed row from ending a successor under that slug.
+if [[ $SELF -ne 1 || -n "$GENERATION_ARG" ]]; then
+  TARGET_ROW="$(python3 "$SCRIPT_DIR/session_target.py" "$SESSIONS_DIR/instances" "$TARGET_INSTANCE" "$SLUG" "$SESSION_ID_ARG" "$TTL")" || fail "close target changed during resolution"
+  TARGET_GENERATION="$(jq -r '.generation' <<< "$TARGET_ROW")"
+  TARGET_TYPE="$(jq -r '.type // "unknown"' <<< "$TARGET_ROW")"
+  SESSION_ID_ARG="$(jq -r '.session_id // ""' <<< "$TARGET_ROW")"
+  [[ -z "$GENERATION_ARG" || "$GENERATION_ARG" == "$TARGET_GENERATION" ]] || fail "generation mismatch: live type=$TARGET_TYPE generation=$TARGET_GENERATION"
+fi
+
 # --- One physical enqueue path: tmp-write + rename into close-requests/ ---
 CLOSE_DIR="$SESSIONS_DIR/close-requests"
 mkdir -p "$CLOSE_DIR"
@@ -315,18 +334,19 @@ REQUESTED_AT="$(timestamp_iso)"
 SLUG_JSON="null"
 [[ -n "$SLUG" ]] && SLUG_JSON="$(jq -n --arg s "$SLUG" '$s')"
 
-# session_id is stamped only by the --session form (SESSION_ID_ARG is empty for
-# every other form), so the consumer can disambiguate a slugless session by its
-# harness id. Omit-when-empty keeps every non-session-form row byte-identical.
+# A resolved session_id strengthens the generation binding, including slug
+# closes. Legacy registry rows without an id retain the slug fallback.
 ROW="$(jq -n \
   --arg request_id "$REQUEST_ID" \
   --argjson slug "$SLUG_JSON" \
   --arg target "$TARGET_INSTANCE" \
+  --arg generation "$TARGET_GENERATION" \
+  --arg session_type "$TARGET_TYPE" \
   --arg reason "$REASON" \
   --arg requested_by "$REQUESTED_BY" \
   --arg requested_at "$REQUESTED_AT" \
   --arg session_id "$SESSION_ID_ARG" \
-  '{request_id: $request_id, slug: $slug, target_instance: $target, reason: $reason, requested_by: $requested_by, requested_at: $requested_at}
+  '{request_id: $request_id, slug: $slug, target_instance: $target, reason: $reason, generation: $generation, session_type: $session_type, requested_by: $requested_by, requested_at: $requested_at}
    + (if $session_id != "" then {session_id: $session_id} else {} end)')"
 
 TMP="$(mktemp "$CLOSE_DIR/.tmp.${REQUEST_ID}.XXXXXX")"
@@ -339,9 +359,11 @@ EVENT_ROW="$(jq -n \
   --arg request_id "$REQUEST_ID" \
   --argjson slug "$SLUG_JSON" \
   --arg target "$TARGET_INSTANCE" \
+  --arg generation "$TARGET_GENERATION" \
+  --arg session_type "$TARGET_TYPE" \
   --arg reason "$REASON" \
   --arg actor "$ACTOR_INSTANCE" \
-  '{event: "close_requested", request_id: $request_id, target_instance: $target, reason: $reason}
+  '{event: "close_requested", request_id: $request_id, target_instance: $target, reason: $reason, generation: $generation, session_type: $session_type}
    + (if $slug != null then {slug: $slug} else {} end)
    + (if $actor != "" then {actor_instance: $actor} else {} end)')"
 emit_event "$EVENT_ROW"
@@ -353,9 +375,11 @@ if [[ $JSON_MODE -eq 1 ]]; then
     --arg request_id "$REQUEST_ID" \
     --argjson slug "$SLUG_JSON" \
     --arg target "$TARGET_INSTANCE" \
+    --arg generation "$TARGET_GENERATION" \
+    --arg session_type "$TARGET_TYPE" \
     --arg reason "$REASON" \
     --arg path "$RELPATH" \
-    '{request_id: $request_id, slug: $slug, target_instance: $target, reason: $reason, path: $path, enqueued: true}')"
+    '{request_id: $request_id, slug: $slug, target_instance: $target, reason: $reason, generation: $generation, session_type: $session_type, path: $path, enqueued: true}')"
 fi
 
 # A slugless session has no slug to name; describe it by its target instance so
@@ -365,4 +389,4 @@ if [[ -n "$SLUG" ]]; then
 else
   TARGET_DESC="slugless session"
 fi
-echo "[session] Requested close of $TARGET_DESC on instance $TARGET_INSTANCE (reason=$REASON) → $RELPATH"
+echo "[session] Requested close of $TARGET_DESC on instance $TARGET_INSTANCE (type=${TARGET_TYPE:-self}, generation=${TARGET_GENERATION:-self}, reason=$REASON) → $RELPATH"

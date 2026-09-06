@@ -99,6 +99,7 @@ type SessionDescriptor struct {
 // inferring it from the slug. The zero value exports nothing (a launch with no
 // session identity to advertise).
 type SessionEnv struct {
+	Model string // Resolved launch binding, never a role default.
 	// Prepared persists ownership before launch and after the process PID is known.
 	Prepared func(SessionDescriptor, string, string, string, int) error
 
@@ -133,6 +134,9 @@ type SessionEnv struct {
 // `[ -n "$LORE_SESSION_INSTANCE" ]` gate stays meaningful).
 func (s SessionEnv) vars() []string {
 	var out []string
+	if s.Model != "" {
+		out = append(out, "LORE_SESSION_MODEL="+s.Model)
+	}
 	if s.SourceDir != "" {
 		out = append(out, "LORE_SESSION_SOURCE_DIR="+s.SourceDir)
 	}

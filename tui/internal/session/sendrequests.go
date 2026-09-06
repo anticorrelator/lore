@@ -16,6 +16,8 @@ import (
 // gate. Unknown fields are tolerated so a forward-extended writer never breaks
 // this reader.
 type SendRequest struct {
+	Action         string `json:"action,omitempty"`
+	Generation     string `json:"generation,omitempty"`
 	RequestID      string `json:"request_id"`
 	Slug           string `json:"slug"`
 	TargetInstance string `json:"target_instance"`

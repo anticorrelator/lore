@@ -142,10 +142,10 @@ PY
 
 load helpers/packet_legacy
 
-@test "impl-open legacy fixture stdout is byte-identical to the pre-refactor output" {
+@test "impl-open legacy fixture preserves its contract with optional compiled descriptors" {
   packet_legacy_fixture
   bash "$REPO_DIR/scripts/impl-open.sh" legacy-packet --all --json > "$TEST_KDIR/actual.json"
-  cmp "$REPO_DIR/tests/fixtures/packet-legacy-open.json" "$TEST_KDIR/actual.json"
+  diff -u <(jq . "$REPO_DIR/tests/fixtures/packet-legacy-open.json") <(jq . "$TEST_KDIR/actual.json")
 }
 
 @test "next-batch assembles directive entries and preserves required consultations" {

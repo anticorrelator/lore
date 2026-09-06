@@ -123,11 +123,19 @@ def select(args, item):
 def identity(inputs, item):
     return api['code_identity'](inputs['execution_worktree'], result_exclusion=(item, inputs['result_id']))
 
+def host_load():
+    try:
+        averages = list(os.getloadavg())
+    except (OSError, AttributeError):
+        averages = None
+    return {'timestamp': timestamp(), 'load_average_1_5_15': averages, 'cpu_count': os.cpu_count()}
+
 def observe(command, inputs, directory, name):
     started = time.monotonic()
     result = {'argv': command['argv'], 'cwd': command['cwd'], 'resolved_cwd': None,
               'exit': None, 'signal': None, 'timed_out': False, 'duration_ms': 0,
-              'output_path': None, 'output_sha256': None, 'reason': None}
+              'output_path': None, 'output_sha256': None, 'reason': None,
+              'host_load_start': host_load(), 'environment': {'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1'}}
     child, output, selector = None, None, selectors.DefaultSelector()
     output_error = False
     try:
@@ -145,7 +153,8 @@ def observe(command, inputs, directory, name):
         if result['reason'] is None and interrupted is None:
             try:
                 child = subprocess.Popen(command['argv'], cwd=result['resolved_cwd'], stdin=subprocess.DEVNULL,
-                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
+                                         env=dict(os.environ, PYTEST_DISABLE_PLUGIN_AUTOLOAD="1"))
             except (OSError, ValueError) as exc:
                 result['reason'] = 'executable-unavailable' if isinstance(exc, FileNotFoundError) else 'launch-failed'
             if child is not None:
@@ -216,6 +225,7 @@ def observe(command, inputs, directory, name):
                 output.close()
             except OSError:
                 pass
+    result['host_load_end'] = host_load()
     result['duration_ms'] = round((time.monotonic() - started) * 1000)
     return result
 

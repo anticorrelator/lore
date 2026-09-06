@@ -310,3 +310,32 @@ func TestHandleSendRequestScan_RefusalConsumesImmediately(t *testing.T) {
 		t.Errorf("refusal row request_id = %q, want s1", rows[0].RequestID)
 	}
 }
+
+func TestInterruptDeliveryRequiresExactGenerationAndDoesNotClose(t *testing.T) {
+	for _, generation := range []string{"old", "current"} {
+		t.Run(generation, func(t *testing.T) {
+			m := runtimeModel(t)
+			p, reader := runtimePanel(t, "demo", []string{"unknown screen during a hung turn"})
+			m.sessionPanels["demo"] = p
+			m.localSessions["demo"] = liveSession{sessionID: "current", harness: "codex"}
+			sr := session.SendRequest{RequestID: "interrupt-test", Slug: "demo", Action: "interrupt", Generation: generation}
+			next, cmd := m.handleSendRequestScan(sendRequestScanMsg{matched: []session.SendRequest{sr}})
+			runJournalCmds(t, cmd)
+			rows := readEventRows(t, m.config.KnowledgeDir)
+			if len(rows) != 1 {
+				t.Fatalf("events: %+v", rows)
+			}
+			expected := "interrupt_refused"
+			if generation == "current" {
+				expected = "interrupt_sent"
+				var b [1]byte
+				if n, err := reader.Read(b[:]); n != 1 || err != nil || b[0] != 27 {
+					t.Fatalf("interrupt bytes: %v %d %v", b, n, err)
+				}
+			}
+			if rows[0].Event != expected || len(next.pendingClose) != 0 {
+				t.Fatalf("outcome %+v", rows)
+			}
+		})
+	}
+}

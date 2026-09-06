@@ -8,6 +8,7 @@ Managed JSON puts the snapshot under `response`; raw session peek returns it dir
 |---|---|
 | starting | A new or recovered screen has not yet settled enough to classify. |
 | working | Current activity chrome identifies a running turn. |
+| stalled | Connection-failure chrome or working chrome with no terminal output for five minutes; inspect before acting. |
 | idle | A supported settled-turn signature identifies an idle composer. |
 | blocked | A recognized interactive prompt is holding input. |
 | unknown | The available evidence does not establish a lifecycle state. |
@@ -49,3 +50,13 @@ Harness wake capabilities remain explicit. An asynchronous hook can wake an idle
 Installed durable watcher notifications use a compact presentation with an aggregate 8KiB bound. They show meaningful changes, current evidence, and explicit omitted counts, with a command for inspecting the exact saved evidence. Quiet notifications omit unchanged screen content. Full captured evidence remains in the durable record; a smaller notification is not permission to discard the evidence behind its classification.
 
 For caller-driven compact monitoring, use `lore coordinate watch --compact --owner-pid <owner> --json`; compact mode enables durable delivery and requires an owner. `lore coordinate status --wake-id <id>` returns the compact receipt with the board. Add `--full-evidence --receipt-only` when only the saved detail is needed, without the unrelated board. The notification’s retrieval command includes the correct knowledge-store location. Both receipt reads retain the explicit acknowledgment semantics above. Legacy raw watch and non-durable wake-shaped output remain compatible.
+
+## Recovery and cleanup
+
+`lore session interrupt <slug> --generation <observation.generation>` delivers Escape to the identified turn without closing the session. `interrupt_sent` means the key was delivered; inspect again to establish whether the harness stopped. The CLI initially reports a pending request. Both embedded and tmux sessions use the host's terminal transport. Stalled is advisory: a silent tool may still be running.
+
+`lore session close <slug>` echoes the resolved type and generation and binds both to the request. Pass `--generation` from a recent observation to refuse a changed target. The host rechecks the generation at consumption, including when another session has reused the slug.
+
+Durable watches coalesce all matching rows in a read batch into one receipt. Its `journal_batch` retains every delivered event; compact output names the count and points to that receipt. Acknowledging it advances through the complete batch, avoiding one historical close per watch window. Non-durable cursor reads keep their single-event contract.
+
+An unchanged session at its captured base closes as `worktree_no_changes`, even if the source branch advanced. Its retained base ref proves cleanup; no quarantine patch or destination write is needed. `lore session sweep-quarantine --target main` previews refs whose commit was accepted or whose complete result tree occurs in accepted history after its allocation base; `--apply` removes just those refs with old-OID checks. Registered checkouts and unproven results remain protected; patch files and other result refs remain available.

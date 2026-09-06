@@ -70,7 +70,7 @@ func TestPositionProductionLaunch(t *testing.T) {
 			t.Setenv("LORE_HARNESS_ARGS", "[]")
 			t.Setenv("LORE_FRAMEWORK", "")
 			bin := t.TempDir()
-			stub := "#!/usr/bin/env python3\nimport json,os,sys\nwith open(os.environ['POSITION_CAPTURE'],'w') as f: json.dump({'args':sys.argv[1:],'cwd':os.getcwd(),'config':os.environ.get('OPENCODE_CONFIG_CONTENT'),'manifest':os.environ.get('LORE_POSITION_DISPATCH_MANIFEST'),'sha256':os.environ.get('LORE_POSITION_DISPATCH_SHA256')},f)\n"
+			stub := "#!/usr/bin/env python3\nimport json,os,sys\nwith open(os.environ['POSITION_CAPTURE'],'w') as f: json.dump({'args':sys.argv[1:],'cwd':os.getcwd(),'config':os.environ.get('OPENCODE_CONFIG_CONTENT'),'manifest':os.environ.get('LORE_POSITION_DISPATCH_MANIFEST'),'sha256':os.environ.get('LORE_POSITION_DISPATCH_SHA256'),'model':os.environ.get('LORE_SESSION_MODEL')},f)\n"
 			for _, name := range []string{"claude", "codex", "opencode"} {
 				if err := os.WriteFile(filepath.Join(bin, name), []byte(stub), 0755); err != nil {
 					t.Fatal(err)
@@ -113,8 +113,8 @@ func TestPositionProductionLaunch(t *testing.T) {
 				t.Fatal(err)
 			}
 			var actual struct {
-				Args                          []string
-				Cwd, Config, Manifest, Sha256 string
+				Args                                 []string
+				Cwd, Config, Manifest, Sha256, Model string
 			}
 			if err := json.Unmarshal(captured, &actual); err != nil {
 				t.Fatal(err)
@@ -125,6 +125,12 @@ func TestPositionProductionLaunch(t *testing.T) {
 			manifestBytes, err := os.ReadFile(actual.Manifest)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if actual.Sha256 != fmt.Sprintf("%x", sha256.Sum256(manifestBytes)) {
+				t.Fatal("launch lost or changed manifest digest")
+			}
+			if actual.Model != d.Model {
+				t.Fatalf("resolved model missing: %q", actual.Model)
 			}
 			var manifest struct {
 				Bindings map[string]any

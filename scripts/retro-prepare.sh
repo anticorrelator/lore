@@ -2,7 +2,8 @@
 # retro-prepare.sh — Publish the deterministic evidence envelope for one /retro.
 #
 # This verb resolves sources, records their coverage, and computes only fixed
-# arithmetic. It never chooses a window, interprets a cause, scores D1-D5,
+# arithmetic. It never chooses a window, interprets a cause, scores D1-D6
+# (including the reader's D6 integration-review disposition),
 # answers behavioral checks, selects a suggestion, or decides graduation.
 
 set -euo pipefail

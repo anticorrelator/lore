@@ -249,7 +249,7 @@ def owner(kdir, manifest):
 
 def disposition(kdir, handle):
     history = events(kdir, handle)
-    outcomes = [r for r in history if r.get('event') in {'worktree_published', 'worktree_quarantined', 'restore_refused'}]
+    outcomes = [r for r in history if r.get('event') in {'worktree_no_changes', 'worktree_published', 'worktree_quarantined', 'restore_refused'}]
     latest = outcomes[-1] if outcomes else {}
     outcome = latest.get('event', 'pending')
     links = latest.get('links', {})
@@ -555,6 +555,11 @@ def operate_attempt(args, kdir, manifest):
         if args.registration_id:
             row['registration_id'] = args.registration_id
     elif args.verb == 'close':
+        from session_target import generation
+        target_generation = generation(live)
+        if args.generation and args.generation != target_generation:
+            raise RuntimeError('generation mismatch: live type=' + str(live.get('type')) + ' generation=' + target_generation)
+        row.update(generation=target_generation, session_type=live.get('type', ''), session_id=live.get('session_id', ''))
         row['reason'] = args.reason or 'coordinator'
     elif args.verb == 'peek':
         row.update(raw=args.raw, summary=args.summary, lines=args.lines, before=args.before, max_bytes=args.max_bytes)
@@ -612,6 +617,7 @@ def main(argv=None):
     parser.add_argument('--expect')
     parser.add_argument('--registration-id')
     parser.add_argument('--reason')
+    parser.add_argument('--generation')
     parser.add_argument('--raw', action='store_true')
     parser.add_argument('--summary', action='store_true')
     parser.add_argument('--lines', type=int, default=0)

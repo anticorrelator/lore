@@ -1301,7 +1301,7 @@ framework_interaction_field() {
 # validation case-arm). tests/session-verbs.bats cross-checks this list against
 # the writer and names any drift; if that test fails, reconcile this line with
 # the writer rather than silencing the test.
-SESSION_EVENT_VOCAB="requested claimed spawned needs_input resumed recovered closed orphaned step_completed terminus_reached spawn_failed request_reclaimed request_abandoned request_cancelled request_expired close_requested close_failed restore_refused worktree_quarantined worktree_published worktree_write_refused send_requested sent send_refused answer_requested answered answer_refused modal_blocked"
+SESSION_EVENT_VOCAB="requested claimed spawned needs_input resumed recovered closed orphaned step_completed terminus_reached spawn_failed request_reclaimed request_abandoned request_cancelled request_expired close_requested close_failed restore_refused worktree_quarantined worktree_no_changes worktree_published worktree_write_refused interrupt_requested interrupt_sent interrupt_refused send_requested sent send_refused answer_requested answered answer_refused modal_blocked"
 
 # The events a coordinator can actually do something about, and therefore the
 # default stop set for anything that waits on the journal. It covers both ends of
@@ -3783,4 +3783,28 @@ tui_ghostty_preflight() {
     return 1
   fi
   return 0
+}
+
+# Select a Python with the compiler dependency and propagate it to child scripts.
+# Search PATH candidates before conventional user installations; never install.
+ensure_yaml_python() {
+  local candidate directory
+  local -a candidates=()
+  [[ -z "${LORE_PYTHON:-}" ]] || candidates+=("$LORE_PYTHON")
+  local old_ifs="$IFS"
+  IFS=:
+  for directory in $PATH; do candidates+=("${directory:-.}/python3"); done
+  IFS="$old_ifs"
+  candidates+=("$HOME/.lore/venv/bin/python3" "$HOME/miniconda3/bin/python3" "$HOME/miniforge3/bin/python3" /opt/homebrew/Caskroom/miniconda/base/bin/python3)
+  for candidate in "${candidates[@]}"; do
+    [[ -x "$candidate" && "$(basename "$candidate")" == python3 ]] || continue
+    if "$candidate" -c 'import sys, yaml; assert sys.version_info >= (3, 10)' >/dev/null 2>&1; then
+      directory="$(cd "$(dirname "$candidate")" && pwd)"
+      export LORE_PYTHON="$directory/$(basename "$candidate")"
+      export PATH="$directory:$PATH"
+      return 0
+    fi
+  done
+  echo "[lore] Python >=3.10 with PyYAML is required; no tested python3 satisfies both. Tried: ${candidates[*]}. Set LORE_PYTHON to a Python with PyYAML." >&2
+  return 1
 }

@@ -63,6 +63,7 @@ const (
 	EventCloseRequested       = "close_requested"
 	EventCloseFailed          = "close_failed"
 	EventRestoreRefused       = "restore_refused"
+	EventWorktreeNoChanges    = "worktree_no_changes"
 	EventWorktreeQuarantined  = "worktree_quarantined"
 	EventWorktreePublished    = "worktree_published"
 	EventWorktreeWriteRefused = "worktree_write_refused"

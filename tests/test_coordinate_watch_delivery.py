@@ -333,6 +333,16 @@ class WatchCommands(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('--wake-id', result.stderr)
 
+    def test_durable_close_batch_is_delivered_and_acknowledged_once(self):
+        rows = [{'event': 'closed', 'slug': 'task--w' + str(i), 'request_id': 'r' + str(i)} for i in range(4)]
+        self.journal(rows)
+        _, first = self.watch('--durable', '--since', '0')
+        self.assertEqual(len(first['journal_batch']), 4)
+        self.assertEqual([r['request_id'] for r in first['journal_batch']], ['r0', 'r1', 'r2', 'r3'])
+        m.wake_receipt(self.kdir, first['wake_id'], acknowledge=True)
+        _, second = self.watch('--durable')
+        self.assertEqual(second['outcome'], 'timeout')
+
     def test_shell_lost_output_and_explicit_status_receipt(self):
         self.journal([{'event': 'closed', 'slug': 'task--w1', 'request_id': 'r1'}])
         _, first = self.watch('--durable', '--since', '0')

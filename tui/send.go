@@ -133,6 +133,31 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 		}
 		m.pendingSend[sr.RequestID] = true
 
+		if sr.Action != "" {
+			ev := m.sendOutcomeEvent(sr, false, "unsupported-action")
+			ev.Event = "interrupt_refused"
+			ev.Links = map[string]string{"generation": sr.Generation}
+			ls := m.localSessions[sr.Slug]
+			if sr.Action == "interrupt" {
+				ev.Reason = "generation-mismatch"
+				if sr.Generation != "" && sr.Generation == observationGeneration(ls) {
+					ev.Reason = "delivery-uncertain"
+					if err := m.hostDeliveryAttempt("send", ev); err != nil {
+						ev.Reason = "error"
+					} else if err := panel.Interrupt(); err != nil {
+						ev.Reason = "error"
+					} else {
+						ev.Event, ev.Reason = "interrupt_sent", "key-delivered"
+					}
+				}
+			}
+			if m.hostKey != "" {
+				cmds = append(cmds, m.hostDeliveryTerminalCmd("send", ev))
+			} else {
+				cmds = append(cmds, consumeSendCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, sr.RequestID, ev))
+			}
+			continue
+		}
 		framework := m.sessionHarness(sr.Slug)
 		hasContract := false
 		queuesMidGen := false

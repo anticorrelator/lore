@@ -20,6 +20,8 @@ Status: <completed | blocked | degraded>
 Template-version: <12-hex version of the brief the worker was compiled from>
 ```
 
+Any author/model byline must cite the resolved dispatch binding. Hosted workers read `LORE_SESSION_MODEL`; native workers use the prepared tool input or verified transcript evidence. A standing role default does not establish which model ran. If no binding is available, record unknown.
+
 The path is the report's identity; the header restates context for a reader who has only the file. `Status` values stay distinct: `blocked` when Blockers is non-empty, `degraded` when the task shipped with a named capability gap, `completed` otherwise.
 
 | Section | Content | Reader |
