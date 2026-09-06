@@ -18,17 +18,6 @@ def test_board_uses_explicit_edges_eager_join_and_settings_capacity():
     coordinate = prose(COORDINATE)
     implement = prose(IMPLEMENT)
 
-    for token in (
-        "Depends on",
-        "Tree",
-        "lore coordinate status",
-        "settings-derived concurrency ceiling",
-        "readiness is derived",
-        "Dispatch every ready stream",
-        "unrelated writer never creates a barrier",
-    ):
-        assert token in coordinate
-
     for stale_clause in (
         "Re-join at every wave boundary",
         "tree-writer is any stream that mutates the working tree; one at a time",

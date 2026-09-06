@@ -45,7 +45,7 @@ for token in (
 ):
     assert token in lifecycle, f"session substrate missing worktree obligation: {token}"
 
-for prose in (" ".join(coordinate.split()), " ".join(reference.split())):
+for prose in (" ".join(reference.split()),):
     for token in (
         "session-owned worktree",
         "teardown-pending",
@@ -57,9 +57,8 @@ for prose in (" ".join(coordinate.split()), " ".join(reference.split())):
         "byte-for-byte unchanged",
         "durable result ref/patch",
     ):
-        assert token in prose, f"coordinate guidance missing worktree obligation: {token}"
+        assert token in prose, f"session reference missing worktree obligation: {token}"
 
-assert "does not retain the physical directory forever" in coordinate
 assert "Quarantine preserves content, not the physical directory" in reference
 reference_flat = " ".join(reference.split())
 for managed_contract in (

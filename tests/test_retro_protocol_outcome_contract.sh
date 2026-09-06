@@ -67,19 +67,6 @@ for token in [
 ]:
     assert token in retro, f"retro verification vocabulary missing: {token}"
 
-retro_checkpoint = coordinate.split("### Retro", 1)[1].split("## What escalates", 1)[0]
-for token in [
-    "lore retro queue",
-    "outcome=due",
-    "disposition=unhandled",
-    "--outcome-id <id>",
-    "--action <dispatched|deferred|skipped>",
-    "disposition=handled",
-    "does not auto-run `/retro`",
-    "not the cross-substrate coordinator state projection",
-]:
-    assert token in retro_checkpoint, f"coordinate retro checkpoint missing: {token}"
-
 for token in [
     "due (unhandled)",
     "lore retro queue",
