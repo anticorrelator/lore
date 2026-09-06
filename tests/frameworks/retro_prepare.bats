@@ -847,3 +847,31 @@ file_json() { echo "$output" | grep '^{' | tail -1; }
   cmp "$journal" "$TEST_KDIR/journal-final"
   cmp "$rows" "$TEST_KDIR/rows-final"
 }
+
+@test "result rows carrying host load and environment fields pass the reader intact" {
+  item="$TEST_KDIR/_work/cycle-a"
+  mkdir -p "$item/results/result-load"
+  printf 'load probe output\n' > "$item/results/result-load/output.out"
+  sha="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$item/results/result-load/output.out")"
+  jq -cn --arg sha "$sha" '{
+    schema_version: 1, result_id: "result-load", execution_attempt_id: "execution-load", dispatch_attempt_id: "dispatch-load",
+    packet_id: "pkt-load", task_id: "task-1", criterion_id: "load-criterion", revision_id: "aaaaaaaaaaaa",
+    criterion_version: ("c" * 64), state: "pass", exit: 0, signal: null, timed_out: false, execution_sequence: 1,
+    output_path: "results/result-load/output.out", output_sha256: $sha, reason: "expected-exit",
+    source_start: {head: "h", digest: "d", digest_version: "2", worktree: "/w"},
+    source_end: {head: "h", digest: "d", digest_version: "2", worktree: "/w"},
+    host_load_start: {timestamp: "2026-09-06T00:00:00Z", load_average_1_5_15: [1.5, 1.2, 1.0], cpu_count: 8},
+    host_load_end: {timestamp: "2026-09-06T00:01:00Z", load_average_1_5_15: null, cpu_count: 8},
+    environment: {PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"}
+  }' > "$item/results.jsonl"
+  run_prepare
+  python3 - "$item/retro-evidence-pack.json" <<'PY'
+import json, sys
+pack = json.load(open(sys.argv[1]))
+work = pack['source_data']['cycle_work']
+text = json.dumps(work)
+assert 'invalid-results-record' not in text, 'reader rejected a row that only added executor fields'
+for marker in ('"host_load_start"', '"host_load_end"', '"load_average_1_5_15"', '"cpu_count": 8', '"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"'):
+    assert marker in text, marker
+PY
+}
