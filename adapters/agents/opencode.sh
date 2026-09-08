@@ -67,6 +67,22 @@ cap() {
   framework_capability "$1" 2>/dev/null || echo "none"
 }
 
+cmd_route_flags() {
+  [[ $# -eq 1 ]] || { echo 'Error: route_flags requires <canonical-route-json>' >&2; return 1; }
+  python3 - "$LORE_REPO_DIR" "$1" <<'PYTHON'
+import json, sys
+sys.path.insert(0, sys.argv[1] + '/scripts')
+from route_config import parse_route, RouteConfigError
+try:
+    route = parse_route(json.loads(sys.argv[2]), sys.argv[1])
+    if route['framework'] != 'opencode': raise RouteConfigError('route_framework_mismatch', "opencode adapter requires framework 'opencode'")
+    if route['options']: raise RouteConfigError('unsupported_route_option', 'opencode CLI cannot carry route options')
+    print(json.dumps(['--model', route['model']], separators=(',', ':')))
+except (ValueError, json.JSONDecodeError, RouteConfigError) as exc:
+    print('Error: invalid opencode route: ' + str(exc), file=sys.stderr); raise SystemExit(2)
+PYTHON
+}
+
 # --- split_provider_model ---
 # Multi-provider role bindings use the documented `provider/model`
 # syntax (lib.sh::validate_role_model_binding splits on `/`; bats roles
@@ -113,16 +129,14 @@ cmd_spawn() {
   fi
   emit_degraded_notice spawn "$subagents" "opencode plugin-runtime spawn"
 
-  local binding
+  local route binding
   if [[ -n "$override_model" ]]; then
-    binding="$override_model"
+    route=$(printf '{"repo_root":%s,"route":%s,"routing_source":{"layer":"override","role":%s}}\n' "$(jq -Rn --arg v "$LORE_REPO_DIR" '$v')" "$(jq -Rn --arg v "opencode/$override_model" '$v')" "$(jq -Rn --arg v "$role" '$v')" | python3 "$LORE_REPO_DIR/scripts/route_config.py" parse | jq -cer '.result') || return 1
   else
-    binding=$(resolve_model_for_role "$role") || return 1
+    route=$(resolve_native_route_for_role "$role" "" opencode) || return 1
   fi
-
-  if ! validate_role_model_binding "$role" "$binding"; then
-    return 1
-  fi
+  [[ "$(jq -e '.options | length == 0' <<<"$route")" == true ]] || { echo 'unsupported native-option' >&2; return 1; }
+  binding=$(jq -r '.model' <<<"$route")
 
   local routing_keys
   routing_keys=$(split_provider_model "$binding")
@@ -349,6 +363,7 @@ case "$cmd" in
   shutdown)                 shift; cmd_shutdown                 "$@" ;;
   completion_enforcement)   shift; cmd_completion_enforcement   "$@" ;;
   resolve_model_for_role)   shift; cmd_resolve_model_for_role   "$@" ;;
+  route_flags)              shift; cmd_route_flags              "$@" ;;
   system_prompt_flag)       shift; cmd_system_prompt_flag       "$@" ;;
   settings_override_flag)   shift; cmd_settings_override_flag   "$@" ;;
   smoke|--smoke)            shift; cmd_smoke                    "$@" ;;

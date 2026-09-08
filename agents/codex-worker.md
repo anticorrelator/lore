@@ -25,7 +25,7 @@ The task description IS the brief — it arrives composed, and there is nothing 
 
 ### 3. Select the Codex model binding
 
-The route enters with either a standing qualified Codex binding already resolved by the source lead or a legacy explicit Codex selection. `{{native_binding}}` is the qualified route's native Codex payload; use it verbatim when present. Only the legacy path re-resolves through the shared resolver with the framework overridden to `codex`. Do not hand-read `settings.json`.
+The route enters as a canonical route already resolved by the source lead. `{{native_route}}` carries the complete Codex route, including its declared options; use it verbatim when present. Only the legacy path resolves the native route locally. Do not hand-read `settings.json`.
 
 `{{worker_role}}` is the class-qualified role the lead resolved for this task (`worker`, `worker-mechanical`, or `worker-judgment-dense`; a merged same-file chain carries its max class). It defaults to `worker` when the lead leaves it unset.
 
@@ -34,36 +34,29 @@ source ~/.lore/scripts/lib.sh
 CODEX_ADAPTER="$LORE_REPO_DIR/adapters/agents/codex.sh"
 WORKER_ROLE="{{worker_role}}"
 [[ -z "$WORKER_ROLE" ]] && WORKER_ROLE="worker"
-RESOLVED_NATIVE_BINDING="{{native_binding}}"
+RESOLVED_NATIVE_ROUTE='{{native_route}}'
 
-if [[ -n "$RESOLVED_NATIVE_BINDING" ]]; then
-  BINDING="$RESOLVED_NATIVE_BINDING"
+if [[ -n "$RESOLVED_NATIVE_ROUTE" ]]; then
+  ROUTE="$RESOLVED_NATIVE_ROUTE"
 else
-  BINDING=$(LORE_FRAMEWORK=codex bash "$CODEX_ADAPTER" resolve_model_for_role "$WORKER_ROLE" implement) || {
-    echo "[codex-worker] resolve_model_for_role failed — cannot route to codex" >&2
+  ROUTE=$(LORE_FRAMEWORK=codex resolve_native_route_for_role "$WORKER_ROLE" implement codex) || {
+    echo "[codex-worker] native route resolution failed — cannot route to codex" >&2
     # Report degraded (see §6) and stop; the lead falls back to a same-harness worker.
     exit 0
   }
 fi
 ```
 
-On the legacy path, `resolve_model_for_role "$WORKER_ROLE" implement` lets a `ceremony_roles.implement.<role>` binding win over the plain role and preserves class fallback. The standing path is already fully resolved and must not be replaced by target-side settings.
+On the legacy path, `resolve_native_route_for_role "$WORKER_ROLE" implement codex` applies global route precedence and then the Codex native map when the global route targets another harness. The standing path is already fully resolved and must not be replaced by target-side settings.
 
-Split the binding into a model id and an optional reasoning-effort suffix through the Codex adapter — never re-implement the suffix split here; the adapter owns it.
+Project the canonical route to Codex CLI argv through the adapter. Decode its JSON array element by element; never evaluate shell text.
 
 ```bash
-# split_model_variant prints `model=<m>` optionally followed by ` reasoning_effort=<e>`.
-# Parse with parameter expansion, not `for kv in $ROUTING` — some shells (zsh) don't
-# word-split unquoted expansions, which would swallow the whole string into one token.
-ROUTING=$(bash "$CODEX_ADAPTER" split_model_variant "$BINDING")
-CODEX_MODEL="${ROUTING#model=}"
-CODEX_EFFORT=""
-case "$CODEX_MODEL" in
-  *" reasoning_effort="*)
-    CODEX_EFFORT="${CODEX_MODEL##* reasoning_effort=}"
-    CODEX_MODEL="${CODEX_MODEL%% reasoning_effort=*}"
-    ;;
-esac
+ROUTE_FLAGS=()
+while IFS= read -r -d '' flag; do ROUTE_FLAGS+=("$flag"); done < <(
+  bash "$CODEX_ADAPTER" route_flags "$ROUTE" | jq -j '.[] + "\u0000"'
+)
+[[ ${#ROUTE_FLAGS[@]} -gt 0 ]] || { echo "[codex-worker] route projection failed" >&2; exit 0; }
 ```
 
 ### 4. Assemble the Codex prompt
@@ -136,8 +129,7 @@ Substitute `<slug>` with the literal value you derived. `$TASK_ID`, `$TASK_SUBJE
 
 ```bash
 CODEX_OUT=$(mktemp); CODEX_ERR=$(mktemp); REPORT_FILE=$(mktemp)
-CMD=(codex exec --json -o "$REPORT_FILE" --sandbox workspace-write --skip-git-repo-check -m "$CODEX_MODEL")
-[[ -n "$CODEX_EFFORT" ]] && CMD+=(-c "model_reasoning_effort=\"$CODEX_EFFORT\"")
+CMD=(codex exec --json -o "$REPORT_FILE" --sandbox workspace-write --skip-git-repo-check "${ROUTE_FLAGS[@]}")
 
 # Wall-clock the run. This duration is the spend basis on a degraded run and
 # rides alongside the token counts on a good one. Initialized here so every

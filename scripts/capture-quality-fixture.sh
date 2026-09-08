@@ -448,12 +448,7 @@ CAPTURED_AT_ISO=$(timestamp_iso)
 # mirrors resolve_judge_model in audit-artifact.sh, which is the runner.
 MODEL_VARIANT=$(
   active=$(resolve_active_framework 2>/dev/null) || exit 1
-  if route=$(resolve_route_for_role reviewer 2>/dev/null) && [[ -n "$route" ]] \
-     && [[ "$(printf '%s' "$route" | jq -r '.target_framework // empty')" == "$active" ]]; then
-    printf '%s' "$route" | jq -r '.native_binding'
-  else
-    resolve_model_for_role default
-  fi
+  resolve_native_route_for_role reviewer "" "$active" | jq -r '.model'
 )
 SCHEMA_FILE="$SCRIPT_DIR/judge-schemas/reverse-auditor-output.schema.json"
 SCHEMA_VERSION=$(shasum -a 256 "$SCHEMA_FILE" | cut -c1-12)

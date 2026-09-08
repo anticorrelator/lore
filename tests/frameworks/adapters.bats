@@ -124,16 +124,16 @@ set_framework() {
   local fw="$1"
   export LORE_FRAMEWORK="$fw"
   cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
-{"version":2,"tui_launch_framework":"$fw","capability_overrides":{},"harnesses":{"$fw":{"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}}}}
+{"version":2,"tui_launch_framework":"$fw","capability_overrides":{},"routes":{"default":"claude-code/sonnet"},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"sonnet"}},"opencode":{"args":[],"native_models":{"default":"anthropic/sonnet"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5"}}}}
 EOF
 }
 
 set_framework_with_roles() {
-  # $1 = framework, $2 = inline JSON for the .roles object body.
+  # $1 = framework, $2 = inline JSON role-to-model object.
   local fw="$1" roles="$2"
   export LORE_FRAMEWORK="$fw"
   cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
-{"version":2,"tui_launch_framework":"$fw","capability_overrides":{},"harnesses":{"$fw":{"roles":$roles}}}
+{"version":2,"tui_launch_framework":"$fw","capability_overrides":{},"routes":$(jq -cn --arg fw "$fw" --argjson roles "$roles" '$roles | with_entries(.value = ($fw + "/" + .value))'),"harnesses":{"claude-code":{"args":[],"native_models":{"default":"sonnet"}},"opencode":{"args":[],"native_models":{"default":"anthropic/sonnet"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5"}}}}
 EOF
 }
 
@@ -393,12 +393,14 @@ cap_support() {
     fw="${fw_adapter%%:*}"
     adapter="${fw_adapter#*:}"
     set_framework "$fw"
+    override="pinned-model"
+    [[ "$fw" != opencode ]] || override="anthropic/pinned-model"
 
-    run bash "$adapter" spawn worker "floorless prompt" "pinned-model"
+    run bash "$adapter" spawn worker "floorless prompt" "$override"
     [ "$status" -ne 0 ]
     [[ "$output" == *"Run 'lore dispatch guidance'"* ]]
 
-    run bash "$adapter" spawn worker "$(guidance_prompt)" "pinned-model"
+    run bash "$adapter" spawn worker "$(guidance_prompt)" "$override"
     [ "$status" -eq 0 ]
     [[ "$output" == *"model=pinned-model"* ]]
   done
@@ -438,7 +440,7 @@ cap_support() {
   # but the resulting bare id 'anthropic:sonnet' is not a real model;
   # the contract is the separator, not the validator's reach).
   # Assert the validator's positive path for the canonical separator.
-  LORE_FRAMEWORK=opencode run bash -c "source '$LIB'; validate_role_model_binding lead anthropic/sonnet"
+  run bash "$OC_AGENT" route_flags '{"framework":"opencode","model":"anthropic/sonnet","options":{}}'
   [ "$status" -eq 0 ]
 }
 
@@ -447,13 +449,13 @@ cap_support() {
   # single-shape harness MUST fail. Closed-set rejection is the contract,
   # not silent fallback to the harness default. This catches the
   # opposite of the multi-provider separator test.
-  LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; validate_role_model_binding worker anthropic/haiku"
+  run bash "$CC_AGENT" route_flags '{"framework":"claude-code","model":"anthropic/haiku","options":{}}'
   [ "$status" -ne 0 ]
-  [[ "$output" =~ single-provider ]]
+  [[ "$output" =~ invalid ]]
 
-  LORE_FRAMEWORK=codex run bash -c "source '$LIB'; validate_role_model_binding worker openai/gpt-4"
+  run bash "$CODEX_AGENT" route_flags '{"framework":"codex","model":"openai/gpt-4","options":{}}'
   [ "$status" -ne 0 ]
-  [[ "$output" =~ single-provider ]]
+  [[ "$output" =~ invalid ]]
 }
 
 # ============================================================
@@ -837,7 +839,7 @@ model_for_lead=repo-lead
 EOF
 
   # Env var top tier
-  LORE_MODEL_LEAD="env-lead" run bash -c "cd '$tmp_repo' && source '$LIB' && resolve_model_for_role lead"
+  LORE_MODEL_LEAD="claude-code/env-lead" run bash -c "cd '$tmp_repo' && source '$LIB' && resolve_model_for_role lead"
   [ "$status" -eq 0 ]
   [ "$output" = "env-lead" ]
 
@@ -849,7 +851,7 @@ EOF
   local tmp_repo
   tmp_repo="$(mktemp -d)"
   cat > "$tmp_repo/.lore.config" <<EOF
-model_for_lead=repo-lead
+model_for_lead=claude-code/repo-lead
 EOF
 
   # No env var; per-repo wins over user settings.json's harness roles.lead
@@ -888,7 +890,7 @@ EOF
   # with non-zero exit and an `unknown role` message on stderr.
   # Mirrors the validate_role_model_binding rejection in roles.bats.
   set_framework claude-code
-  run bash -c "source '$LIB'; resolve_model_for_role bogus-role"
+  run python3 "$REPO_DIR/scripts/route_config.py" resolve <<<"{\"repo_root\":\"$REPO_DIR\",\"settings_path\":\"$TEST_LORE_DATA_DIR/config/settings.json\",\"role\":\"bogus-role\"}"
   [ "$status" -ne 0 ]
   [[ "$output" =~ "unknown role" ]]
 }
@@ -897,6 +899,7 @@ EOF
   # Cross-check that every role in adapters/roles.json is accepted by
   # the validator. roles.bats has the same assertion at the json level;
   # this test asserts the bash helper agrees with the registry.
+  set_framework claude-code
   REPO="$REPO_DIR" LIB="$LIB" run python3 - <<'PYEOF'
 import json, os, subprocess, sys
 roles_file = os.path.join(os.environ["REPO"], "adapters", "roles.json")
@@ -908,7 +911,7 @@ for role in ids:
     # Class-qualified role ids carry hyphens; the resolver maps them to
     # underscores in the env-var name, so derive the key the same way.
     env_key = "LORE_MODEL_" + role.upper().replace("-", "_")
-    env[env_key] = "stub-model"
+    env[env_key] = "claude-code/stub-model"
     res = subprocess.run(
         ["bash", "-c", f'source "{os.environ["LIB"]}" && resolve_model_for_role {role}'],
         capture_output=True, text=True, env=env,

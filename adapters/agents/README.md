@@ -85,44 +85,27 @@ value (not an error) — even on unsupported harnesses, it returns
 `unavailable` so callers can branch to a soft warning instead of
 treating it as a fatal error.
 
-## Model Routing Integration (D10)
+## Canonical Route Projection
 
-`resolve_model_for_role` is **the** entry point for model selection.
-Every adapter operation that spawns a process MUST go through it:
+Route selection returns JSON shaped as `{"framework": string, "model":
+string, "options": object, "routing_source": object}`. The `options` object
+contains only present options. Native spawns call
+`resolve_native_route_for_role`; a route targeting the parent harness is kept
+whole, while a foreign route selects that harness's `native_models` binding.
+Configuration errors propagate without a fallback.
 
-1. The skill or script calls `resolve_model_for_role <role> [<ceremony>]`
-   (bash → `scripts/lib.sh`, Go → `tui/internal/config/framework.go`).
-   The optional ceremony id comes from the closed set in
-   `adapters/ceremonies.json` (`spec`, `implement`) and is passed as a
-   call-site constant (e.g. the `/spec` researcher fanout passes `spec`).
-2. The resolver returns a model id that respects the precedence
-   (env override → per-repo `.lore.config` → user `settings.json`
-   `harnesses.<active>.ceremony_roles.<ceremony>.<role>` (only when a
-   ceremony is passed) → `harnesses.<active>.roles.<role>` →
-   `harnesses.<active>.roles.default`).
-3. The adapter translates the resolved id into the harness-native
-   spawn flag:
-   - Claude Code: `--model <id>` argument.
-   - OpenCode: provider/model selector in the plugin spawn API
-     (multi-provider; honors `provider/model` syntax like
-     `anthropic/sonnet` or `openai/gpt-4o`).
-   - Codex: model selector at session start (single-provider; bare
-     model id only). Codex bindings may append a reasoning-effort suffix
-     such as `gpt-5.5-high`; the adapter splits this into
-     `model=gpt-5.5 reasoning_effort=high` in the spawn directive. The
-     codex adapter also exposes this split as a standalone
-     `split_model_variant <binding>` subcommand (a pure transform with no
-     active-framework guard) so the codex-worker chaperone reuses one
-     split implementation instead of copying the suffix table.
-4. If `validate_role_model_binding` rejects the resolved binding
-   (e.g. multi-provider syntax on a single-shape harness), the adapter
-   surfaces the error to the caller — no silent fallback to the
-   harness default.
+Each adapter exposes `route_flags <canonical-route-json>`. It validates target
+affinity and writes a JSON argv array. Callers decode array elements without
+shell evaluation. Claude Code maps the model to `["--model", model]`;
+OpenCode uses the same CLI spelling; Codex maps to `["-m", model]` followed by
+`["-c", "model_reasoning_effort=..."]` and `["-c", "service_tier=..."]`
+when those options are present. Claude Code and OpenCode reject configured
+options because their CLI surfaces do not declare a carrier.
 
-The legacy per-invocation `--model` flag remains as a per-call
-override at the skill/script level, but the adapter does not see it
-directly — the override sets `LORE_MODEL_<ROLE>` for the duration of
-the call, and the adapter still resolves through `resolve_model_for_role`.
+Native tool directives use the same canonical route. A tool API that cannot
+carry a present option reports `unsupported native-option` rather than
+discarding it. The compatibility `split_model_variant` command remains for old
+callers, but delegates shorthand parsing to the canonical route parser.
 
 ## Completion Enforcement Degradation Modes
 
