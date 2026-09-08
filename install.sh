@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install.sh — Set up lore for Claude Code
-# Usage: bash install.sh [--uninstall] [--dry-run] [--framework <name>]
+# Usage: bash install.sh [--uninstall] [--dry-run] [--migrate-settings-only] [--framework <name>]
 #
 # --framework selects the harness whose install paths and capability profile
 # Lore should target. Supported values: claude-code (default), opencode, codex.
@@ -22,11 +22,12 @@ CLAUDE_DIR="$HOME/.claude"
 # the deterministic fallback audit (lore doctor's aggregator) is empty. Bump
 # this in lockstep with adapters/settings.schema.json's `version` field when a
 # breaking shape change ships — see plan D4 phase 3.
-LORE_SETTINGS_CLEANUP_VERSION=1
+LORE_SETTINGS_CLEANUP_VERSION=2
 
 # --- Parse flags ---
 UNINSTALL=false
 DRY_RUN=false
+MIGRATE_SETTINGS_ONLY=false
 FRAMEWORK="claude-code"
 
 # Supported framework allowlist is sourced from adapters/capabilities.json
@@ -59,6 +60,7 @@ while [ $i -lt ${#args[@]} ]; do
   case "$arg" in
     --uninstall) UNINSTALL=true ;;
     --dry-run)   DRY_RUN=true ;;
+    --migrate-settings-only) MIGRATE_SETTINGS_ONLY=true ;;
     --framework)
       i=$((i + 1))
       if [ $i -ge ${#args[@]} ]; then
@@ -239,6 +241,11 @@ echo "  Claude:    $CLAUDE_DIR"
 echo "  Framework: $FRAMEWORK"
 echo ""
 
+if $MIGRATE_SETTINGS_ONLY && [ ! -f "$LORE_DATA_DIR/config/settings.json" ]; then
+  echo "Error: --migrate-settings-only requires an existing $LORE_DATA_DIR/config/settings.json" >&2
+  exit 1
+fi
+
 # --- 1. Create data directory ---
 info "Creating data directory"
 dry mkdir -p "$LORE_DATA_DIR/repos"
@@ -270,8 +277,10 @@ else
     SETTINGS_TEMPLATE="$SETTINGS_TEMPLATE" \
     SETTINGS_FILE="$SETTINGS_FILE" \
     MIGRATION_PROVENANCE="$MIGRATION_PROVENANCE" \
+    LORE_REPO_DIR="$LORE_REPO_DIR" \
     python3 - <<'PYEOF'
 import datetime
+import importlib.util
 import json
 import os
 import sys
@@ -390,8 +399,17 @@ if isinstance(framework_doc, dict):
     if isinstance(framework_doc.get("framework"), str):
         doc["tui_launch_framework"] = framework_doc["framework"]
     if isinstance(framework_doc.get("roles"), dict):
-        fan_to_harnesses(doc, "roles", framework_doc["roles"])
-        doc.pop("roles", None)
+        # Build a coherent legacy candidate in memory, then run the same route
+        # migration used for existing unified settings before writing bytes.
+        # The fragmented framework map is the global (Claude) source; other
+        # harnesses retain only their template-native defaults.
+        for fw, block in doc.get("harnesses", {}).items():
+            native_default = block.get("native_models", {}).get("default")
+            block.pop("native_models", None)
+            block["roles"] = dict(framework_doc["roles"]) if fw == "claude-code" else {"default": native_default}
+            block["ceremony_roles"] = {}
+        doc.pop("routes", None)
+        doc["version"] = 1
     if isinstance(framework_doc.get("capability_overrides"), dict):
         doc["capability_overrides"] = framework_doc["capability_overrides"]
     mark("config/framework.json")
@@ -451,6 +469,15 @@ if isinstance(tui_doc, dict):
     mark("config/tui.json")
 
 # Atomic write: tmp file in same dir, then rename.
+if doc.get("version") == 1:
+    migration_path = os.path.join(os.environ["LORE_REPO_DIR"], "scripts", "migrations", "routes-table-v2.py")
+    spec = importlib.util.spec_from_file_location("routes_table_v2", migration_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {migration_path}")
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    doc = migration.migrate(doc, __import__("pathlib").Path(os.environ["LORE_REPO_DIR"]))
+
 fd, tmp_path = tempfile.mkstemp(prefix=".settings.", suffix=".tmp", dir=config_dir)
 try:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -493,6 +520,25 @@ except OSError:
 print(f"  [lore] migration sources: {sources}", file=sys.stderr)
 PYEOF
   fi
+fi
+
+# Route migration precedes every prune, backfill, and version-2 consumer. The
+# migrator owns the settings lock, backup, candidate validation, and atomic
+# replace; install treats refusal as fatal so legacy policy is never discarded.
+if [ -f "$SETTINGS_FILE" ]; then
+  info "Validating/migrating route settings -> version 2"
+  _route_migration_args=(--settings "$SETTINGS_FILE" --repo-root "$LORE_REPO_DIR")
+  $DRY_RUN && _route_migration_args+=(--dry-run)
+  python3 "$LORE_REPO_DIR/scripts/migrations/routes-table-v2.py" "${_route_migration_args[@]}"
+  unset _route_migration_args
+elif $MIGRATE_SETTINGS_ONLY; then
+  echo "Error: --migrate-settings-only requires an existing $SETTINGS_FILE" >&2
+  exit 1
+fi
+
+if $MIGRATE_SETTINGS_ONLY; then
+  info "Settings migration complete; skipping install writes"
+  exit 0
 fi
 
 # Coordination seat ceiling: copy a live ceiling out of the retired settlement
@@ -668,64 +714,22 @@ dry mkdir -p "$LORE_DATA_DIR/config"
 #   readers layer on top of the static profile.
 info "Persisting unified settings config (tui_launch_framework=$FRAMEWORK)"
 if ! $DRY_RUN; then
-  FRAMEWORK="$FRAMEWORK" LORE_REPO_DIR="$LORE_REPO_DIR" \
-    python3 - "$LORE_DATA_DIR/config/settings.json" <<'PYEOF'
-import json, os, sys
-
+  FRAMEWORK="$FRAMEWORK" python3 - "$SETTINGS_FILE" <<'PYEOF'
+import json, os, sys, tempfile
 path = sys.argv[1]
-framework = os.environ["FRAMEWORK"]
-repo_dir = os.environ["LORE_REPO_DIR"]
-
-# Derive the role-id keyset from adapters/roles.json (T3 closed registry).
-# This is the parity hardening from T72 — adding a role to roles.json
-# automatically seeds it here, and resolve_model_for_role's closed-set
-# rejection (T6) cannot diverge from install.sh's seed dict.
-roles_path = os.path.join(repo_dir, "adapters", "roles.json")
-with open(roles_path) as f:
-    roles_data = json.load(f)
-if framework == "claude-code":
-    default_roles = {r["id"]: "opus" for r in roles_data["roles"]}
-elif framework == "codex":
-    default_roles = {r["id"]: "gpt-5.5-high" for r in roles_data["roles"]}
-else:
-    reasoning_roles = {"lead", "researcher", "advisor", "default"}
-    default_roles = {
-        r["id"]: ("anthropic/opus" if r["id"] in reasoning_roles else "openai/gpt-5.5")
-        for r in roles_data["roles"]
-    }
-
-if os.path.exists(path):
-    with open(path, "r") as f:
-        cfg = json.load(f)
-else:
-    cfg = {}
-
-cfg["version"] = 1
-cfg["tui_launch_framework"] = framework
-
-# Preserve user-edited overrides; only seed when key is absent.
-if "capability_overrides" not in cfg or not isinstance(cfg.get("capability_overrides"), dict):
-    cfg["capability_overrides"] = {}
-
-harnesses = cfg.get("harnesses") if isinstance(cfg.get("harnesses"), dict) else {}
-harness_block = harnesses.get(framework) if isinstance(harnesses.get(framework), dict) else {}
-existing_roles = harness_block.get("roles") if isinstance(harness_block.get("roles"), dict) else {}
-merged_roles = dict(default_roles)
-merged_roles.update(existing_roles)  # user values win for keys that exist
-harness_block["roles"] = merged_roles
-if "args" not in harness_block:
-    harness_block["args"] = ["--dangerously-skip-permissions"] if framework == "claude-code" else []
-harnesses[framework] = harness_block
-cfg["harnesses"] = harnesses
-if isinstance(cfg.get("tui"), dict):
-    cfg["tui"].pop("launch_framework", None)
-cfg.pop("active_framework", None)
-cfg.pop("framework", None)
-cfg.pop("roles", None)
-
-with open(path, "w") as f:
-    json.dump(cfg, f, indent=2)
-    f.write("\n")
+with open(path, encoding="utf-8") as handle:
+    settings = json.load(handle)
+settings["tui_launch_framework"] = os.environ["FRAMEWORK"]
+fd, temporary = tempfile.mkstemp(prefix=".settings.install.", suffix=".tmp", dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(settings, handle, indent=2)
+        handle.write("\n")
+    os.replace(temporary, path)
+except BaseException:
+    try: os.unlink(temporary)
+    except FileNotFoundError: pass
+    raise
 PYEOF
 fi
 

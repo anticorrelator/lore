@@ -53,9 +53,11 @@ setup() {
 
 teardown() {
   if [ -n "${TEST_LORE_DATA_DIR:-}" ] && [ -d "$TEST_LORE_DATA_DIR" ]; then
+    chmod -R u+w "$TEST_LORE_DATA_DIR" 2>/dev/null || true
     rm -rf "$TEST_LORE_DATA_DIR"
   fi
   if [ -n "${TEST_HOME:-}" ] && [ -d "$TEST_HOME" ]; then
+    chmod -R u+w "$TEST_HOME" 2>/dev/null || true
     rm -rf "$TEST_HOME"
   fi
 }
@@ -383,30 +385,32 @@ PYEOF
 # Default role seeding: claude-code=opus, codex=gpt-5.5-high, opencode by role class
 # ============================================================
 
-@test "install.sh source seeds claude-code roles as opus" {
-  run grep -n 'framework == "claude-code"\|"opus"' "$INSTALL_SH"
+@test "fresh template routes every global role to generic Claude opus" {
+  run python3 - "$REPO_DIR/adapters/settings.template.json" "$ROLES_JSON" <<'PY'
+import json, sys
+settings, roles = (json.load(open(path)) for path in sys.argv[1:])
+assert settings["version"] == 2
+assert set(settings["routes"]) == {row["id"] for row in roles["roles"]}
+assert set(settings["routes"].values()) == {"claude-code/opus"}
+PY
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "opus" ]]
 }
 
-@test "install.sh source seeds codex roles as gpt-5.5-high" {
-  run grep -n 'framework == "codex"\|gpt-5.5-high' "$INSTALL_SH"
+@test "fresh template declares generic native defaults" {
+  run jq -e '.harnesses."claude-code".native_models == {default:"opus"} and .harnesses.codex.native_models == {default:"gpt-5.5-high"} and .harnesses.opencode.native_models == {default:"anthropic/opus"}' "$REPO_DIR/adapters/settings.template.json"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "gpt-5.5-high" ]]
 }
 
-@test "install.sh source seeds opencode reasoning and technical role defaults" {
-  run grep -n 'reasoning_roles\|anthropic/opus\|openai/gpt-5.5' "$INSTALL_SH"
+@test "install cleanup gate requires settings version 2" {
+  run grep -n '^LORE_SETTINGS_CLEANUP_VERSION=2$' "$INSTALL_SH"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "reasoning_roles" ]]
-  [[ "$output" =~ "anthropic/opus" ]]
-  [[ "$output" =~ "openai/gpt-5.5" ]]
 }
 
-@test "install.sh derives role keyset from adapters/roles.json (closed registry)" {
-  # The role-seeding block sources roles.json not a hardcoded list.
-  run grep -n 'roles\.json\|roles_path\|roles_data' "$INSTALL_SH"
+@test "route migration runs before retired-key pruning" {
+  run python3 - "$INSTALL_SH" <<'PY'
+import sys
+text = open(sys.argv[1]).read()
+assert text.index('scripts/migrations/routes-table-v2.py') < text.index('scripts/prune-retired-settings.py')
+PY
   [ "$status" -eq 0 ]
-  # At least the roles.json reference must exist
-  [[ "$output" =~ "roles.json" ]]
 }

@@ -1,20 +1,20 @@
 {
-  "version": 1,
+  "version": 2,
   "tui_launch_framework": "claude-code",
+  "routes": {
+    "lead": "claude-code/opus",
+    "worker": "claude-code/opus",
+    "worker-mechanical": "claude-code/opus",
+    "worker-judgment-dense": "claude-code/opus",
+    "researcher": "claude-code/opus",
+    "reviewer": "claude-code/opus",
+    "advisor": "claude-code/opus",
+    "default": "claude-code/opus"
+  },
   "harnesses": {
     "claude-code": {
       "args": ["--dangerously-skip-permissions"],
-      "roles": {
-        "lead": "opus",
-        "worker": "opus",
-        "worker-mechanical": "opus",
-        "worker-judgment-dense": "opus",
-        "researcher": "opus",
-        "reviewer": "opus",
-        "advisor": "opus",
-        "default": "opus"
-      },
-      "ceremony_roles": {},
+      "native_models": {"default": "opus"},
       "ceremonies": {
         "spec-design": ["codex-design-review"],
         "spec-post-plan": ["codex-plan-review"],
@@ -23,17 +23,7 @@
     },
     "opencode": {
       "args": [],
-      "roles": {
-        "lead": "anthropic/opus",
-        "worker": "openai/gpt-5.5",
-        "worker-mechanical": "openai/gpt-5.5",
-        "worker-judgment-dense": "openai/gpt-5.5",
-        "researcher": "anthropic/opus",
-        "reviewer": "openai/gpt-5.5",
-        "advisor": "anthropic/opus",
-        "default": "anthropic/opus"
-      },
-      "ceremony_roles": {},
+      "native_models": {"default": "anthropic/opus"},
       "ceremonies": {
         "spec-design": ["codex-design-review"],
         "spec-post-plan": ["codex-plan-review"],
@@ -42,17 +32,7 @@
     },
     "codex": {
       "args": [],
-      "roles": {
-        "lead": "gpt-5.5-high",
-        "worker": "gpt-5.5-high",
-        "worker-mechanical": "gpt-5.5-high",
-        "worker-judgment-dense": "gpt-5.5-high",
-        "researcher": "gpt-5.5-high",
-        "reviewer": "gpt-5.5-high",
-        "advisor": "gpt-5.5-high",
-        "default": "gpt-5.5-high"
-      },
-      "ceremony_roles": {},
+      "native_models": {"default": "gpt-5.5-high"},
       "ceremonies": {
         "spec-design": ["codex-design-review"],
         "spec-post-plan": ["codex-plan-review"],
