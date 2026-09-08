@@ -50,7 +50,6 @@ TASKS_TOTAL=""
 TIER2_COUNT=""
 TIER3_ACCEPTED=""
 TIER3_REJECTED=""
-FOLLOWUP_TITLE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -82,17 +81,13 @@ while [[ $# -gt 0 ]]; do
       TIER3_REJECTED="$2"
       shift 2
       ;;
-    --followup)
-      FOLLOWUP_TITLE="$2"
-      shift 2
-      ;;
     -h|--help)
       sed -n '2,30p' "$0"
       exit 0
       ;;
     *)
       echo "[implement] Unknown argument: $1" >&2
-      echo "Usage: implement-closure-report.sh --slug <slug> [--kdir <path>] [--tasks-completed N] [--tasks-total M] [--tier2-count C] [--tier3-accepted A] [--tier3-rejected R] [--followup <title>]" >&2
+      echo "Usage: implement-closure-report.sh --slug <slug> [--kdir <path>] [--tasks-completed N] [--tasks-total M] [--tier2-count C] [--tier3-accepted A] [--tier3-rejected R]" >&2
       exit 1
       ;;
   esac
@@ -211,9 +206,6 @@ case "$STATE" in
       echo "Tier 3 promoted: $TIER3_ACCEPTED (rejected: $TIER3_REJECTED)"
     fi
     echo "Remaining: none — work item archived"
-    if [[ -n "$FOLLOWUP_TITLE" ]]; then
-      echo "Followup: $FOLLOWUP_TITLE"
-    fi
     echo "Consider \`/retro $SLUG\` to evaluate knowledge system effectiveness for this work."
     exit 0
     ;;

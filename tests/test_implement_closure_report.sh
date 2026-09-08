@@ -114,7 +114,7 @@ write_meta "_work/_archive" "wi-full" \
   '{"intent_anchor":"deliver the widget loop","closure":{"verdict":"full","capability_incomplete":false,"capability_loop_summary":"widget loop operable end to end","divergence_summary":null,"residue_followup":null,"verdict_at":"2026-06-09T00:00:00Z","intent_anchor_at_close":"deliver the widget loop"}}'
 run_report "wi-full" \
   --tasks-completed 4 --tasks-total 4 --tier2-count 7 \
-  --tier3-accepted 2 --tier3-rejected 1 --followup "Deferred: widget polish"
+  --tier3-accepted 2 --tier3-rejected 1
 assert_rc "full close exits 0" 0
 assert_has_done "full close prints Done summary"
 assert_contains "full close reports Closure: full" "Closure: full"
@@ -123,7 +123,6 @@ assert_contains "full close renders Completed N/M" "Completed: 4/4 tasks"
 assert_contains "full close renders Tier 2 count" "Tier 2 claims written: 7"
 assert_contains "full close renders Tier 3 promoted/rejected" "Tier 3 promoted: 2 (rejected: 1)"
 assert_contains "full close renders Remaining archived line" "Remaining: none — work item archived"
-assert_contains "full close renders Followup when passed" "Followup: Deferred: widget polish"
 assert_contains "full close keeps retro pointer last" "Consider \`/retro wi-full\`"
 
 # --- legacy / no-anchor (archived), no count flags -> Done, lines gracefully omitted ---
@@ -136,7 +135,6 @@ assert_contains "legacy close still archives" "Remaining: none — work item arc
 # Graceful omission: a count flag not passed -> that line is absent, not blank.
 assert_absent "legacy close omits Completed when no flag" "Completed:"
 assert_absent "legacy close omits Tier 2 line when no flag" "Tier 2 claims written:"
-assert_absent "legacy close omits Followup when no flag" "Followup:"
 
 # --- partial (active), counts passed -> banner only, no count lines, exit 3 ---
 # Pass the success-only flags to prove they are structurally inert on the
@@ -145,7 +143,7 @@ write_meta "_work" "wi-partial" \
   '{"intent_anchor":"deliver the widget loop","closure":{"verdict":"partial","capability_incomplete":true,"capability_loop_summary":"shipped the read path","divergence_summary":"write path deferred to residue child","residue_followup":"widget-write-path","verdict_at":"2026-06-09T00:00:00Z","intent_anchor_at_close":"deliver the widget loop"}}'
 run_report "wi-partial" \
   --tasks-completed 4 --tasks-total 4 --tier2-count 7 \
-  --tier3-accepted 2 --tier3-rejected 1 --followup "Deferred: widget polish"
+  --tier3-accepted 2 --tier3-rejected 1
 assert_rc "partial close exits 3" 3
 assert_no_success_text "partial close emits no success text"
 assert_contains "partial banner names divergence" "DIVERGED FROM ANCHOR"
@@ -156,7 +154,6 @@ assert_contains "partial banner states NOT archived" "NOT archived"
 assert_absent "partial banner omits Completed line" "Completed:"
 assert_absent "partial banner omits Tier 2 line" "Tier 2 claims written:"
 assert_absent "partial banner omits Tier 3 line" "Tier 3 promoted:"
-assert_absent "partial banner omits Followup line" "Followup:"
 
 # --- none (active), counts passed -> banner only, no count lines, exit 3 ---
 write_meta "_work" "wi-none" \
