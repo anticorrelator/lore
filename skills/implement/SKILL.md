@@ -574,7 +574,7 @@ A task with no executable criteria is an explicit absence of execution evidence:
 
 **Accept.** Read the artifacts the report's manifest points at — changed files, canonical claims, result outputs — and weigh substance: scope, blockers, what the checks showed. Then record your acceptance in one sentence with the result and review ids it rests on, before checkoff. Checkoff publishes a progress revision, and result freshness compares exact revision ids, so those rows become historical the moment the box is checked; retain their ids and your applicability reasoning rather than calling them current or rerunning to erase history. Changed criterion definitions or relevant source need new affected runs; a semantic plan change needs renewed coverage and an explicit decision about affected results and reviews.
 
-Assess divergence rationales yourself. A worker may legitimately diverge from a woven norm, and silencing principled divergence is worse than the violation; "woven but inapplicable to this change" is valid and a signal the weave was loose. You judge the rationale, not compliance from the diff, and this never blocks acceptance or edits the worker's output. An unconvincing divergence or a completeness finding opens a non-blocking followup, the review loop's input:
+Assess divergence rationales yourself. A worker may legitimately diverge from a woven norm, and silencing principled divergence is worse than the violation; "woven but inapplicable to this change" is valid and a signal the weave was loose. You judge the rationale, not compliance from the diff, and this never blocks acceptance or edits the worker's output. Your assessment goes in the task's execution-log reduction below and nowhere else: `clean`, or `unconvincing` with the reason. An unconvincing rationale is a review finding — raise it when the change is reviewed and tighten the weave in the next brief you write. A completeness finding (a label missing, duplicated, or dispositioned beyond the woven set) is a note in the same line; it is not work for anyone.
 
 **Write the task's execution-log reduction** immediately after acceptance, one entry per task, never a placeholder before the report arrives, never several tasks in one entry. The body carries these labels in this order, `None` where a field is empty; the `Spend:` line appears only when the report carried `**Spend:**` (chaperone and session routes), copied verbatim with `task=<task-id>` prepended and nothing rewritten or backfilled, and close reads its absence as `spend: null`:
 
@@ -584,7 +584,7 @@ Changes: <worker Changes>
 Skills: <worker Skills used>
 Tier2-claims: <comma-separated claim ids>
 Observations: <worker Observations or Tier 3 summary>
-Convention: <worker Convention handling + your assessment: clean | followup-opened: <reason>>
+Convention: <worker Convention handling + your assessment: clean | unconvincing: <reason>>
 Investigation: <worker Investigation>
 Blockers: <worker Blockers>
 Consultations: <worker Consultations, verbatim YAML list, or none>
