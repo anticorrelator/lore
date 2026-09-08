@@ -5,12 +5,16 @@
   "description": "User-config schema for ~/.lore/config/settings.json. Authoritative shape for valid keys, types, and value constraints across the bash/Python/Go loaders. Closed-set rejection at the boundary: unknown frameworks, role ids, capability ids, and tui layouts must be rejected — never silently routed to a default. Migration provenance lives in ~/.lore/.install-state/migration.json (D4) and MUST NOT appear inside settings.json — additionalProperties:false on every object enforces this implicitly. Cross-field invariants (e.g. tui_launch_framework value must be present in harnesses) live in the loaders and `lore doctor`, not here. The tui_launch_framework enum and harnesses keyset MUST stay in lockstep with adapters/capabilities.json frameworks (covered by tests/frameworks/settings_schema_keyset_parity.bats); $defs/role_id MUST stay in lockstep with adapters/roles.json (same test).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "tui_launch_framework", "harnesses"],
+  "required": [
+    "version",
+    "tui_launch_framework",
+    "harnesses",
+    "routes"
+  ],
   "properties": {
     "version": {
-      "type": "integer",
-      "minimum": 1,
-      "description": "Schema/file version. Increment when a breaking shape change ships. install.sh consults this against its cleanup-version constant before deleting the legacy fragmented files (D4 phase 3)."
+      "const": 2,
+      "description": "Settings schema version."
     },
     "tui_launch_framework": {
       "$ref": "#/$defs/framework_id",
@@ -21,9 +25,15 @@
       "additionalProperties": false,
       "description": "Per-harness configuration. Keyset is closed against adapters/capabilities.json frameworks — adding a new harness requires schema bump + capabilities.json entry + install.sh allowlist update (no defaults, no fall-through).",
       "properties": {
-        "claude-code": {"$ref": "#/$defs/harness_block"},
-        "opencode":    {"$ref": "#/$defs/harness_block"},
-        "codex":       {"$ref": "#/$defs/harness_block"}
+        "claude-code": {
+          "$ref": "#/$defs/harness_block"
+        },
+        "opencode": {
+          "$ref": "#/$defs/harness_block"
+        },
+        "codex": {
+          "$ref": "#/$defs/harness_block"
+        }
       }
     },
     "capability_overrides": {
@@ -37,7 +47,10 @@
       "properties": {
         "layout": {
           "type": "string",
-          "enum": ["left-right", "top-bottom"],
+          "enum": [
+            "left-right",
+            "top-bottom"
+          ],
           "description": "Pane layout. Closed-set against tui/internal/config/config.go LayoutMode (LayoutLeftRight/LayoutTopBottom)."
         }
       }
@@ -56,10 +69,19 @@
           "additionalProperties": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["vault_path"],
+            "required": [
+              "vault_path"
+            ],
             "properties": {
-              "enabled":    {"type": "boolean", "description": "Per-KB sync toggle. Absence is treated as `true` for forward-compat — adding `enabled` to an entry is opt-in disable, not opt-in enable."},
-              "vault_path": {"type": "string",  "description": "Absolute filesystem path to the Obsidian vault directory. Empty string is REJECTED — its semantics are ambiguous (suppress vs. inherit) and doctor flags it as malformed.", "minLength": 1}
+              "enabled": {
+                "type": "boolean",
+                "description": "Per-KB sync toggle. Absence is treated as `true` for forward-compat — adding `enabled` to an entry is opt-in disable, not opt-in enable."
+              },
+              "vault_path": {
+                "type": "string",
+                "description": "Absolute filesystem path to the Obsidian vault directory. Empty string is REJECTED — its semantics are ambiguous (suppress vs. inherit) and doctor flags it as malformed.",
+                "minLength": 1
+              }
             }
           },
           "description": "Map of knowledge-base key → vault binding. Keyset is open at the schema layer (key shape matches the KB-relative-path produced by `resolve-repo.sh`); doctor cross-references against the install-base."
@@ -77,113 +99,104 @@
     "conformance_sampling": {
       "$ref": "#/$defs/conformance_sampling_config",
       "description": "Closure-conformance render sampling, consulted by impl-close.sh before archive. Absent render_rate uses impl-close.sh's built-in 0.25 fallback; install.sh declares the shipped value explicitly for both fresh and upgraded settings files."
+    },
+    "routes": {
+      "$ref": "#/$defs/routes_config"
     }
   },
-
   "$defs": {
     "framework_id": {
       "type": "string",
-      "enum": ["claude-code", "opencode", "codex"],
+      "enum": [
+        "claude-code",
+        "opencode",
+        "codex"
+      ],
       "description": "Closed framework registry. MUST stay in lockstep with adapters/capabilities.json `frameworks` keyset — drift is caught by tests/frameworks/settings_schema_keyset_parity.bats."
     },
-
     "role_id": {
       "type": "string",
-      "enum": ["lead", "worker", "worker-mechanical", "worker-judgment-dense", "researcher", "reviewer", "advisor", "default"],
+      "enum": [
+        "lead",
+        "worker",
+        "worker-mechanical",
+        "worker-judgment-dense",
+        "researcher",
+        "reviewer",
+        "advisor",
+        "default"
+      ],
       "description": "Closed role registry. MUST stay in lockstep with adapters/roles.json `roles[].id` — drift is caught by tests/frameworks/settings_schema_keyset_parity.bats. Adding a role requires updating roles.json AND this enum AND $defs/roles_map_overlay properties AND scripts/lib.sh resolve_model_for_role AND tui/internal/config/framework.go ResolveModelForRoleInCeremony AND tests/frameworks/roles.bats."
     },
-
-    "role_value": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Model id bound to a role (e.g. \"opus\", \"sonnet\", \"haiku\", or a provider/model value like \"anthropic/sonnet\"). A first slash segment that exactly matches a framework id in adapters/capabilities.json qualifies the route (for example \"codex/gpt-5.5-medium\"); other slash values retain their target-native provider/model meaning. Codex reasoning-effort suffixes remain adapter-owned: after route qualification is removed, the Codex adapter splits \"gpt-5.5-high\" into model \"gpt-5.5\" plus reasoning_effort \"high\". Empty string is REJECTED — its semantics are ambiguous (suppress vs. use-default) and it would route through resolve_model_for_role as a non-empty truthy value in jq. The schema forbids it; doctor surfaces violations."
-    },
-
     "skill_id": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]*$",
       "minLength": 1,
       "description": "Kebab-case skill id (e.g. \"spec-design\", \"pr-review\", \"codex-plan-review\"). Open at the schema layer — closed-set rejection against adapters/capabilities.json `skills` map happens in the loaders and doctor, not here. Pattern blocks obvious typos and uppercase/whitespace mistakes."
     },
-
     "advisor_id": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]*$",
       "minLength": 1,
       "description": "Kebab-case advisor id (e.g. \"codex-design-review\", \"codex-plan-review\", \"codex-pr-review\"). Open at the schema layer — closed-set rejection against the skills registry happens in the loaders and doctor."
     },
-
-    "roles_map_overlay": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "Per-harness role -> model bindings. Closed-keyset against $defs/role_id. All keys optional except where callers need a concrete default. worker-mechanical and worker-judgment-dense are the class-qualified worker roles; leaving them unset routes those classes through plain worker via the resolver's fallback_role step.",
-      "properties": {
-        "lead":                  {"$ref": "#/$defs/role_value"},
-        "worker":                {"$ref": "#/$defs/role_value"},
-        "worker-mechanical":     {"$ref": "#/$defs/role_value"},
-        "worker-judgment-dense": {"$ref": "#/$defs/role_value"},
-        "researcher": {"$ref": "#/$defs/role_value"},
-        "reviewer":   {"$ref": "#/$defs/role_value"},
-        "advisor":    {"$ref": "#/$defs/role_value"},
-        "default":    {"$ref": "#/$defs/role_value"}
-      }
-    },
-
     "ceremony_id": {
       "type": "string",
-      "enum": ["spec", "implement", "pr-review"],
+      "enum": [
+        "spec",
+        "implement",
+        "pr-review"
+      ],
       "description": "Closed ceremony registry. MUST stay in lockstep with adapters/ceremonies.json `ceremonies[].id` — drift is caught by tests/frameworks/settings_schema_keyset_parity.bats. Adding a ceremony requires updating ceremonies.json AND this enum AND $defs/ceremony_roles properties AND scripts/lib.sh resolve_model_for_role AND tui/internal/config/framework.go."
     },
-
-    "ceremony_roles": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "Per-harness ceremony-scoped role -> model bindings. Outer keyset is closed against $defs/ceremony_id (lockstep with adapters/ceremonies.json). Each value is a roles_map_overlay resolved ahead of the harness role overlay when resolve_model_for_role is called with a ceremony argument; without a ceremony argument this key is not consulted. Absent ceremony key or absent role inside it falls through to the role overlay; empty-string values are rejected by role_value the same way the role overlay rejects them.",
-      "properties": {
-        "spec":      {"$ref": "#/$defs/roles_map_overlay"},
-        "implement": {"$ref": "#/$defs/roles_map_overlay"},
-        "pr-review": {"$ref": "#/$defs/roles_map_overlay"}
-      }
-    },
-
     "ceremonies_map": {
       "type": "object",
       "description": "Skill -> advisor list. Property keys are kebab-case skill ids; values are arrays of kebab-case advisor ids. Empty array is valid and means \"run with no advisors\". Absent key means no ceremony configured for this harness. Keyset is open at the schema layer; closed-set rejection against the skills registry lives in the loaders and doctor.",
       "additionalProperties": {
         "type": "array",
-        "items": {"$ref": "#/$defs/advisor_id"},
+        "items": {
+          "$ref": "#/$defs/advisor_id"
+        },
         "minItems": 0,
         "uniqueItems": true,
         "description": "Empty array = explicit no-advisors binding. Non-empty = explicit advisor list. Absent key = no ceremony configured for this harness."
       }
     },
-
     "harness_block": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["args"],
+      "required": [
+        "args",
+        "native_models"
+      ],
       "description": "Per-harness configuration block. `args` is required (every harness has a CLI arg list, possibly empty). New settings should include `roles` and `ceremonies` here because agent defaults and ceremony skills vary by harness. `ceremony_roles` is the optional ceremony-scoped role overlay consulted ahead of `roles` when resolve_model_for_role is passed a ceremony. Absent `enabled` is default-on; explicit `false` disables this harness's integration.",
       "properties": {
         "args": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": {
+            "type": "string"
+          },
           "description": "CLI args prepended to every harness invocation. Empty array is valid (no flags). For claude-code the legacy default was [\"--dangerously-skip-permissions\"]; other harnesses default to []."
         },
         "autonomous_args": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": {
+            "type": "string"
+          },
           "description": "Optional CLI args prepended to agent-initiated (autonomous) spawns in place of `args`. Same shape as `args`. When present, an agent-initiated session (initiator=agent on the request) uses this array; human-initiated sessions and an absent key both use `args` unchanged — unset is byte-identical to prior behavior. Used to drop interactive approval postures that re-ask consent the user's standing riders already settled (e.g. codex --ask-for-approval on-request → never) while leaving the human-opened guardian intact."
         },
         "enabled": {
           "type": "boolean",
           "description": "Per-harness integration toggle. When false, scripts/harness-toggle/disable.sh has removed this harness's skill/agent symlinks and cleared its instruction-file lore region. Absent = enabled. Mutated only via `lore harness {enable,disable}`; direct settings.json patches that bypass the toggle scripts are rejected by the unified loaders to keep symlink/instruction-file state in sync with the flag."
         },
-        "roles":          {"$ref": "#/$defs/roles_map_overlay"},
-        "ceremony_roles": {"$ref": "#/$defs/ceremony_roles"},
-        "ceremonies":     {"$ref": "#/$defs/ceremonies_map"}
+        "ceremonies": {
+          "$ref": "#/$defs/ceremonies_map"
+        },
+        "native_models": {
+          "$ref": "#/$defs/native_models"
+        }
       }
     },
-
     "capability_id": {
       "type": "string",
       "enum": [
@@ -209,98 +222,192 @@
       ],
       "description": "Closed capability registry. MUST stay in lockstep with adapters/capabilities.json `capabilities` map — drift is caught by tests/frameworks/settings_schema_keyset_parity.bats."
     },
-
     "support_level": {
       "type": "string",
-      "enum": ["full", "partial", "fallback", "none"],
+      "enum": [
+        "full",
+        "partial",
+        "fallback",
+        "none"
+      ],
       "description": "Closed support-level vocabulary. Mirrors adapters/capabilities.json `support_levels`."
     },
-
     "standing_decisions_config": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "modal_answers": {
           "type": "object",
-          "additionalProperties": {"$ref": "#/$defs/modal_answer_registration"},
+          "additionalProperties": {
+            "$ref": "#/$defs/modal_answer_registration"
+          },
           "description": "Stable registration id to exact numbered-modal answer. Missing entries and entries with enabled=false are inactive."
         }
       }
     },
-
     "modal_answer_registration": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "framework", "signature", "answer", "registered_by", "registered_at", "rationale"],
+      "required": [
+        "enabled",
+        "framework",
+        "signature",
+        "answer",
+        "registered_by",
+        "registered_at",
+        "rationale"
+      ],
       "properties": {
-        "enabled": {"type": "boolean"},
-        "framework": {"$ref": "#/$defs/framework_id"},
-        "signature": {"$ref": "#/$defs/numbered_modal_signature"},
+        "enabled": {
+          "type": "boolean"
+        },
+        "framework": {
+          "$ref": "#/$defs/framework_id"
+        },
+        "signature": {
+          "$ref": "#/$defs/numbered_modal_signature"
+        },
         "answer": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["option", "expect"],
+          "required": [
+            "option",
+            "expect"
+          ],
           "properties": {
-            "option": {"type": "integer", "minimum": 1},
-            "expect": {"type": "string", "minLength": 1}
+            "option": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "expect": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         },
-        "registered_by": {"type": "string", "enum": ["user"]},
-        "registered_at": {"type": "string", "format": "date-time"},
-        "rationale": {"type": "string", "minLength": 1}
+        "registered_by": {
+          "type": "string",
+          "enum": [
+            "user"
+          ]
+        },
+        "registered_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
-
     "numbered_modal_signature": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "title", "options"],
+      "required": [
+        "kind",
+        "title",
+        "options"
+      ],
       "properties": {
-        "kind": {"type": "string", "enum": ["numbered-modal-v1"]},
-        "title": {"type": "string", "minLength": 1},
+        "kind": {
+          "type": "string",
+          "enum": [
+            "numbered-modal-v1"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
         "options": {
           "type": "array",
           "minItems": 2,
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["number", "label"],
+            "required": [
+              "number",
+              "label"
+            ],
             "properties": {
-              "number": {"type": "integer", "minimum": 1},
-              "label": {"type": "string", "minLength": 1}
+              "number": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           }
         }
       }
     },
-
     "capability_overrides_map": {
       "type": "object",
       "additionalProperties": false,
       "description": "Capability -> support-level overrides. Closed-keyset against $defs/capability_id. Empty object is the default (no overrides).",
       "properties": {
-        "instructions":         {"$ref": "#/$defs/support_level"},
-        "skills":               {"$ref": "#/$defs/support_level"},
-        "mcp":                  {"$ref": "#/$defs/support_level"},
-        "session_start_hook":   {"$ref": "#/$defs/support_level"},
-        "stop_hook":            {"$ref": "#/$defs/support_level"},
-        "turn_boundary_rewake": {"$ref": "#/$defs/support_level"},
-        "pre_compact_hook":     {"$ref": "#/$defs/support_level"},
-        "tool_hooks":           {"$ref": "#/$defs/support_level"},
-        "permission_hooks":     {"$ref": "#/$defs/support_level"},
-        "task_completed_hook":  {"$ref": "#/$defs/support_level"},
-        "native_dispatch_guidance_hook": {"$ref": "#/$defs/support_level"},
-        "subagents":            {"$ref": "#/$defs/support_level"},
-        "team_messaging":       {"$ref": "#/$defs/support_level"},
-        "transcript_provider":  {"$ref": "#/$defs/support_level"},
-        "headless_runner":      {"$ref": "#/$defs/support_level"},
-        "plugin_runtime":       {"$ref": "#/$defs/support_level"},
-        "model_routing":        {"$ref": "#/$defs/support_level"},
-        "interaction":          {"$ref": "#/$defs/support_level"},
-        "spend_telemetry":      {"$ref": "#/$defs/support_level"}
+        "instructions": {
+          "$ref": "#/$defs/support_level"
+        },
+        "skills": {
+          "$ref": "#/$defs/support_level"
+        },
+        "mcp": {
+          "$ref": "#/$defs/support_level"
+        },
+        "session_start_hook": {
+          "$ref": "#/$defs/support_level"
+        },
+        "stop_hook": {
+          "$ref": "#/$defs/support_level"
+        },
+        "turn_boundary_rewake": {
+          "$ref": "#/$defs/support_level"
+        },
+        "pre_compact_hook": {
+          "$ref": "#/$defs/support_level"
+        },
+        "tool_hooks": {
+          "$ref": "#/$defs/support_level"
+        },
+        "permission_hooks": {
+          "$ref": "#/$defs/support_level"
+        },
+        "task_completed_hook": {
+          "$ref": "#/$defs/support_level"
+        },
+        "native_dispatch_guidance_hook": {
+          "$ref": "#/$defs/support_level"
+        },
+        "subagents": {
+          "$ref": "#/$defs/support_level"
+        },
+        "team_messaging": {
+          "$ref": "#/$defs/support_level"
+        },
+        "transcript_provider": {
+          "$ref": "#/$defs/support_level"
+        },
+        "headless_runner": {
+          "$ref": "#/$defs/support_level"
+        },
+        "plugin_runtime": {
+          "$ref": "#/$defs/support_level"
+        },
+        "model_routing": {
+          "$ref": "#/$defs/support_level"
+        },
+        "interaction": {
+          "$ref": "#/$defs/support_level"
+        },
+        "spend_telemetry": {
+          "$ref": "#/$defs/support_level"
+        }
       }
     },
-
     "coordination_config": {
       "type": "object",
       "additionalProperties": false,
@@ -320,8 +427,6 @@
         }
       }
     },
-
-
     "retro_sampling_config": {
       "type": "object",
       "additionalProperties": false,
@@ -335,7 +440,6 @@
         }
       }
     },
-
     "conformance_sampling_config": {
       "type": "object",
       "additionalProperties": false,
@@ -346,6 +450,205 @@
           "maximum": 1,
           "default": 0.25,
           "description": "Probability [0,1] that a routine full closure eagerly renders its reproducible conformance aggregate. Degraded closures always render. Readers use a built-in 0.25 fallback when the key is absent, and clamp malformed values defensively; the schema rejects out-of-range values at the configuration boundary."
+        }
+      }
+    },
+    "route_value": {
+      "description": "A qualified route shorthand or closed framework-specific route object.",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 3,
+          "pattern": "^(claude-code|opencode|codex)/.+"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "framework",
+            "model"
+          ],
+          "properties": {
+            "framework": {
+              "const": "claude-code"
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "framework",
+            "model"
+          ],
+          "properties": {
+            "framework": {
+              "const": "opencode"
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "framework",
+            "model"
+          ],
+          "properties": {
+            "framework": {
+              "const": "codex"
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1
+            },
+            "effort": {
+              "type": "string",
+              "enum": [
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ]
+            },
+            "service_tier": {
+              "type": "string",
+              "enum": [
+                "fast"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "route_roles_overlay": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "lead": {
+          "$ref": "#/$defs/route_value"
+        },
+        "worker": {
+          "$ref": "#/$defs/route_value"
+        },
+        "worker-mechanical": {
+          "$ref": "#/$defs/route_value"
+        },
+        "worker-judgment-dense": {
+          "$ref": "#/$defs/route_value"
+        },
+        "researcher": {
+          "$ref": "#/$defs/route_value"
+        },
+        "reviewer": {
+          "$ref": "#/$defs/route_value"
+        },
+        "advisor": {
+          "$ref": "#/$defs/route_value"
+        },
+        "default": {
+          "$ref": "#/$defs/route_value"
+        }
+      }
+    },
+    "ceremony_route_overlays": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "spec": {
+          "$ref": "#/$defs/route_roles_overlay"
+        },
+        "implement": {
+          "$ref": "#/$defs/route_roles_overlay"
+        },
+        "pr-review": {
+          "$ref": "#/$defs/route_roles_overlay"
+        }
+      }
+    },
+    "routes_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "default"
+      ],
+      "properties": {
+        "lead": {
+          "$ref": "#/$defs/route_value"
+        },
+        "worker": {
+          "$ref": "#/$defs/route_value"
+        },
+        "worker-mechanical": {
+          "$ref": "#/$defs/route_value"
+        },
+        "worker-judgment-dense": {
+          "$ref": "#/$defs/route_value"
+        },
+        "researcher": {
+          "$ref": "#/$defs/route_value"
+        },
+        "reviewer": {
+          "$ref": "#/$defs/route_value"
+        },
+        "advisor": {
+          "$ref": "#/$defs/route_value"
+        },
+        "default": {
+          "$ref": "#/$defs/route_value"
+        },
+        "ceremony_overlays": {
+          "$ref": "#/$defs/ceremony_route_overlays"
+        }
+      }
+    },
+    "native_models": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "default"
+      ],
+      "properties": {
+        "lead": {
+          "type": "string",
+          "minLength": 1
+        },
+        "worker": {
+          "type": "string",
+          "minLength": 1
+        },
+        "worker-mechanical": {
+          "type": "string",
+          "minLength": 1
+        },
+        "worker-judgment-dense": {
+          "type": "string",
+          "minLength": 1
+        },
+        "researcher": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reviewer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "advisor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "default": {
+          "type": "string",
+          "minLength": 1
         }
       }
     }

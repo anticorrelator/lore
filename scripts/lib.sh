@@ -1964,305 +1964,57 @@ framework_spend_telemetry_field() {
     '.frameworks[$fw].spend_telemetry[$f]' "$capabilities_file" 2>/dev/null
 }
 
-# --- resolve_model_for_role ---
-# Print the resolved model id for a role on stdout.
-# Role MUST be one of the closed set in adapters/roles.json (see T3); unknown
-# roles are rejected with a non-zero exit at the top level AND the harness
-# overlay layer (D3b closed-set rejection: an unknown id in
-# `harnesses.<active>.roles` is the same error class as in `roles.<id>`).
-# The "default" role is the resolution fallback consumed internally by this
-# helper and is also a valid explicit role id.
-# The optional second argument is a ceremony id from the closed set in
-# adapters/ceremonies.json (`spec`, `implement`). When present it inserts a
-# ceremony-scoped overlay between the per-repo config and the role overlay;
-# when absent the ceremony layer is skipped entirely (role-only resolution is
-# byte-identical to the pre-ceremony behavior). Same closed-set rejection
-# applies at the ceremony layer to an unknown ceremony id (in the query or
-# stored under `ceremony_roles`) and an unknown role id stored inside a
-# ceremony map.
-# Resolution order (first match wins):
-#   1. Env var LORE_MODEL_<ROLE_UPPER> (e.g., LORE_MODEL_LEAD=opus).
-#   2. Per-repo .lore.config `model_for_<role>=<model>` (walk-up search from
-#      cwd; same lookup mechanism as resolve_knowledge_dir).
-#   3. Unified settings.json `.harnesses.<active>.ceremony_roles.<ceremony>.<role>`
-#      (only consulted when a ceremony argument is passed; absent binding
-#      falls through).
-#   4. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay
-#      — applies to the active harness only; absent overlay falls through).
-#   4b. Class-qualified role fallback: if the role declares a `fallback_role` in
-#      roles.json and layers 1-4 all missed, re-resolve once with that role (so
-#      an unbound worker-mechanical resolves exactly as plain worker). Runs
-#      before layer 5 so the fallback role consults its own overlay binding
-#      ahead of the shared default.
-#   5. Unified `.harnesses.<active>.roles.default` (overlay's own default).
-# Mirrors config.ResolveModelForRoleInCeremony() in tui/internal/config/framework.go.
+# Route-facing callers share one parser and precedence implementation.  The
+# Python command emits a typed JSON envelope; this bridge unwraps successful
+# results and preserves the diagnostic on stderr for shell callers.
+_route_config_call() {
+  local operation="$1"
+  local role="${2:-}"
+  local ceremony="${3:-}"
+  local harness="${4:-}"
+  local repo_root="$LORE_LIB_DIR/.."
+  local settings_path="${LORE_DATA_DIR:-$HOME/.lore}/config/settings.json"
+  local response
+  response=$(python3 -c '
+import json, sys
+operation, root, settings, cwd, role, ceremony, harness = sys.argv[1:]
+request = {"operation": operation, "repo_root": root, "settings_path": settings, "cwd": cwd}
+if role: request["role"] = role
+if ceremony: request["ceremony"] = ceremony
+if harness: request["harness"] = harness
+json.dump(request, sys.stdout)
+' "$operation" "$repo_root" "$settings_path" "$PWD" "$role" "$ceremony" "$harness" \
+    | python3 "$LORE_LIB_DIR/route_config.py") || {
+      printf '%s\n' "$response" | jq -r '.error | "Error [\(.code)]: \(.message)"' >&2 2>/dev/null
+      return 1
+    }
+  printf '%s\n' "$response" | jq -c '.result'
+}
+
+# Compatibility projection for native tool consumers. Session launch paths
+# consume resolve_route_for_role's complete JSON object instead.
 resolve_model_for_role() {
   local role="$1"
   local ceremony="${2:-}"
-  [[ -z "$role" ]] && { echo "Error: resolve_model_for_role requires a role name" >&2; return 1; }
-
-  local roles_file="$LORE_LIB_DIR/../adapters/roles.json"
-  local ceremonies_file="$LORE_LIB_DIR/../adapters/ceremonies.json"
-  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
-  local settings_sh="$LORE_LIB_DIR/settings.sh"
-
-  # Validate role against the closed registry, and read its optional
-  # fallback_role in the same pass. A class-qualified role (worker-mechanical,
-  # worker-judgment-dense) declares fallback_role: "worker"; when the role's own
-  # layers all miss short of the overlay default, the resolver re-resolves once
-  # with that role (see the fallback step below). Empty when the role has no
-  # fallback or roles.json/jq is unavailable, matching the pre-class behavior.
-  local fallback_role=""
-  if [[ -f "$roles_file" ]] && command -v jq &>/dev/null; then
-    if ! jq -e --arg r "$role" '.roles[] | select(.id == $r)' "$roles_file" &>/dev/null; then
-      echo "Error: unknown role '$role' (not in $roles_file)" >&2
-      return 1
-    fi
-    fallback_role=$(jq -r --arg r "$role" '.roles[] | select(.id == $r) | .fallback_role // empty' "$roles_file" 2>/dev/null)
-  fi
-
-  # Validate the ceremony query against the closed registry. Mirrors the role
-  # query guard above — a malformed ceremony id is rejected upfront, before the
-  # env/per-repo layers, so an unknown ceremony never resolves regardless of
-  # env override.
-  if [[ -n "$ceremony" && -f "$ceremonies_file" ]] && command -v jq &>/dev/null; then
-    if ! jq -e --arg c "$ceremony" '.ceremonies[] | select(.id == $c)' "$ceremonies_file" &>/dev/null; then
-      echo "Error: unknown ceremony '$ceremony' (not in $ceremonies_file)" >&2
-      return 1
-    fi
-  fi
-
-  # 1. Env var override: LORE_MODEL_<ROLE_UPPER>.
-  # Indirect expansion via eval rather than ${!var} — the latter is bash-only
-  # and trips zsh with "bad substitution" when this library is sourced from
-  # the harness shell (see lib.sh top-of-file comment on shell support).
-  # Hyphens in the role id (class-qualified roles like worker-mechanical) are
-  # mapped to underscores in the env-var name so the name is a valid shell
-  # identifier — without this, `${LORE_MODEL_WORKER-MECHANICAL:-}` triggers the
-  # ${param-word} default operator on LORE_MODEL_WORKER instead of a lookup.
-  local env_var="LORE_MODEL_$(echo "$role" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
-  local env_value=""
-  eval "env_value=\${$env_var:-}"
-  if [[ -n "$env_value" ]]; then
-    echo "$env_value"
-    return 0
-  fi
-
-  # 2. Per-repo .lore.config (walk-up from cwd)
-  local lore_config
-  if lore_config=$(find_lore_config 2>/dev/null) && [[ -n "$lore_config" ]]; then
-    local repo_value
-    if repo_value=$(parse_lore_config "model_for_$role" "$lore_config") && [[ -n "$repo_value" ]]; then
-      echo "$repo_value"
-      return 0
-    fi
-  fi
-
-  command -v jq &>/dev/null || {
-    echo "Error: resolve_model_for_role requires jq" >&2
-    return 1
-  }
-
-  # Resolve active harness once for the overlay layer.
-  local active=""
-  active=$(resolve_active_framework 2>/dev/null) || active=""
-
-  # 3. Ceremony overlay `.harnesses.<active>.ceremony_roles.<ceremony>.<role>`.
-  # Consulted only when a ceremony argument is passed, so role-only resolution
-  # is byte-identical to the pre-ceremony behavior. Closed-set rejection here
-  # mirrors the role overlay guard below: any unknown ceremony key or unknown
-  # role key stored under ceremony_roles is a misconfiguration the user should
-  # see, not a silently-ignored block.
-  if [[ -n "$ceremony" && -n "$active" && -f "$ceremonies_file" && -f "$roles_file" ]]; then
-    local ceremony_block
-    ceremony_block=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.ceremony_roles" 2>/dev/null || true)
-    if [[ -n "$ceremony_block" ]]; then
-      local valid_ceremony_ids
-      valid_ceremony_ids=$(jq -c '[.ceremonies[].id]' "$ceremonies_file" 2>/dev/null)
-      [[ -z "$valid_ceremony_ids" || "$valid_ceremony_ids" == "null" ]] && valid_ceremony_ids="[]"
-      local bad_ceremony
-      bad_ceremony=$(printf '%s' "$ceremony_block" | jq -r --argjson valid "$valid_ceremony_ids" \
-        '(keys) - $valid | .[]' 2>/dev/null | head -1)
-      if [[ -n "$bad_ceremony" ]]; then
-        echo "Error: unknown ceremony '$bad_ceremony' in harnesses.$active.ceremony_roles (not in $ceremonies_file)" >&2
-        return 1
-      fi
-
-      local valid_role_ids_c
-      valid_role_ids_c=$(jq -c '[.roles[].id]' "$roles_file" 2>/dev/null)
-      [[ -z "$valid_role_ids_c" || "$valid_role_ids_c" == "null" ]] && valid_role_ids_c="[]"
-      local bad_ceremony_role
-      bad_ceremony_role=$(printf '%s' "$ceremony_block" | jq -r --argjson valid "$valid_role_ids_c" \
-        '[.[] | keys[]] - $valid | .[]' 2>/dev/null | head -1)
-      if [[ -n "$bad_ceremony_role" ]]; then
-        echo "Error: unknown role '$bad_ceremony_role' in harnesses.$active.ceremony_roles (not in $roles_file)" >&2
-        return 1
-      fi
-    fi
-
-    local ceremony_raw
-    ceremony_raw=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.ceremony_roles.$ceremony.$role" 2>/dev/null || true)
-    if [[ -n "$ceremony_raw" ]]; then
-      local ceremony_value
-      ceremony_value=$(printf '%s' "$ceremony_raw" | jq -r '. // empty' 2>/dev/null)
-      if [[ -n "$ceremony_value" ]]; then
-        echo "$ceremony_value"
-        return 0
-      fi
-    fi
-  fi
-
-  # D3b closed-set rejection at the overlay layer: any unknown role id
-  # (anything not in adapters/roles.json) found under
-  # `harnesses.<active>.roles` is rejected immediately. The role validation
-  # above already rejects an unknown role in the *query*; this guard rejects
-  # an unknown id stored in the overlay block itself, which would otherwise
-  # silently never be consulted (a misconfiguration the user should see).
-  if [[ -n "$active" && -f "$roles_file" ]]; then
-    local overlay_keys
-    overlay_keys=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.roles" 2>/dev/null || true)
-    if [[ -n "$overlay_keys" ]]; then
-      local valid_role_ids
-      valid_role_ids=$(jq -c '[.roles[].id]' "$roles_file" 2>/dev/null)
-      [[ -z "$valid_role_ids" || "$valid_role_ids" == "null" ]] && valid_role_ids="[]"
-      local bad
-      bad=$(printf '%s' "$overlay_keys" | jq -r --argjson valid "$valid_role_ids" \
-        '(keys) - $valid | .[]' 2>/dev/null | head -1)
-      if [[ -n "$bad" ]]; then
-        echo "Error: unknown role '$bad' in harnesses.$active.roles (not in $roles_file)" >&2
-        return 1
-      fi
-    fi
-  fi
-
-  # 4. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay)
-  local overlay_value=""
-  if [[ -n "$active" ]]; then
-    local raw
-    raw=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.roles.$role" 2>/dev/null || true)
-    if [[ -n "$raw" ]]; then
-      overlay_value=$(printf '%s' "$raw" | jq -r '. // empty' 2>/dev/null)
-      if [[ -n "$overlay_value" ]]; then
-        echo "$overlay_value"
-        return 0
-      fi
-    fi
-  fi
-
-  # Class-qualified role fallback: a role that declares fallback_role re-resolves
-  # once with that role after all of its own layers (env, per-repo, ceremony
-  # overlay, role overlay) miss short of the shared overlay default. This makes
-  # an unbound class-qualified role resolve byte-identically to its fallback
-  # (worker-mechanical == worker); a class role bound at any layer above still
-  # wins. Placed before roles.default so the fallback role gets its own overlay
-  # binding before the shared default is consulted. The fallback target declares
-  # no fallback_role of its own, so this re-resolution runs at most once.
-  if [[ -n "$fallback_role" ]]; then
-    resolve_model_for_role "$fallback_role" "$ceremony"
-    return $?
-  fi
-
-  # 5. Unified `.harnesses.<active>.roles.default` (overlay's own default)
-  if [[ -n "$active" ]]; then
-    local raw_default
-    raw_default=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.roles.default" 2>/dev/null || true)
-    if [[ -n "$raw_default" ]]; then
-      local default_value
-      default_value=$(printf '%s' "$raw_default" | jq -r '. // empty' 2>/dev/null)
-      if [[ -n "$default_value" ]]; then
-        echo "$default_value"
-        return 0
-      fi
-    fi
-  fi
-
-  echo "Error: no model binding for role '$role' (no env var, no per-repo .lore.config entry, no harnesses.<active>.roles.$role or harnesses.<active>.roles.default in settings.json)" >&2
-  return 1
-}
-
-# --- resolve_route_for_role ---
-# Resolve the existing scalar role binding, then interpret an optional leading
-# framework id from adapters/capabilities.json. The scalar resolver above is
-# deliberately unchanged; this sibling returns the non-lossy route as compact
-# JSON for orchestration callers.
-#
-# Output keys: binding, source_framework, target_framework, native_binding,
-# qualified. Go counterpart: config.ResolveRouteForRoleInCeremony.
-_model_route_json() {
-  local role="$1"
-  local binding="$2"
-  [[ -z "$role" ]] && { echo "Error: resolve_route_for_role requires a role name" >&2; return 1; }
-  [[ -z "$binding" ]] && { echo "Error: role '$role' has empty model binding" >&2; return 1; }
-
-  if ! command -v jq &>/dev/null; then
-    echo "Error: resolve_route_for_role requires jq" >&2
-    return 1
-  fi
-
-  local roles_file="$LORE_LIB_DIR/../adapters/roles.json"
-  local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
-  if [[ ! -f "$capabilities_file" ]]; then
-    echo "Error: resolve_route_for_role cannot read $capabilities_file" >&2
-    return 1
-  fi
-  if [[ -f "$roles_file" ]] && ! jq -e --arg r "$role" '.roles[] | select(.id == $r)' "$roles_file" &>/dev/null; then
-    echo "Error: unknown role '$role' (not in $roles_file)" >&2
-    return 1
-  fi
-
-  local source target native prefix qualified shape
-  source=$(resolve_active_framework) || return 1
-  target="$source"
-  native="$binding"
-  qualified="false"
-
-  if [[ "$binding" == */* ]]; then
-    prefix="${binding%%/*}"
-    if jq -e --arg fw "$prefix" '.frameworks[$fw] != null' "$capabilities_file" &>/dev/null; then
-      target="$prefix"
-      native="${binding#*/}"
-      qualified="true"
-      if [[ -z "$native" ]]; then
-        echo "Error: role '$role' binding '$binding' has an empty native binding after framework qualifier '$target/'" >&2
-        return 1
-      fi
-    fi
-  fi
-
-  shape=$(jq -r --arg fw "$target" '.frameworks[$fw].model_routing.shape // "single"' "$capabilities_file" 2>/dev/null)
-  if [[ "$native" == */* && "$shape" != "multi" ]]; then
-    if [[ "$qualified" == "true" ]]; then
-      echo "Error: role '$role' binding '$binding' has native binding '$native' but target framework '$target' has model_routing.shape=$shape (single-provider harnesses require a bare model binding)" >&2
-    else
-      echo "Error: role '$role' binding '$binding' names a provider but the active harness '$source' has model_routing.shape=$shape (single-provider harnesses cannot serve cross-provider bindings)." >&2
-    fi
-    return 1
-  fi
-
-  # The only implemented foreign bridge is the Codex worker chaperone. Same-
-  # framework qualification is always native; every other foreign pair fails
-  # before a source adapter can mistake the framework id for a provider id.
-  if [[ "$source" != "$target" && "$target" != "codex" ]]; then
-    echo "Error: unsupported framework bridge '$source->$target' for role '$role' binding '$binding'" >&2
-    return 1
-  fi
-
-  jq -cn \
-    --arg binding "$binding" \
-    --arg source_framework "$source" \
-    --arg target_framework "$target" \
-    --arg native_binding "$native" \
-    --argjson qualified "$qualified" \
-    '{binding: $binding, source_framework: $source_framework, target_framework: $target_framework, native_binding: $native_binding, qualified: $qualified}'
+  local active
+  active=$(resolve_active_framework) || return 1
+  resolve_native_route_for_role "$role" "$ceremony" "$active" | jq -r '.model'
 }
 
 resolve_route_for_role() {
+  _route_config_call resolve "$1" "${2:-}"
+}
+
+resolve_native_route_for_role() {
   local role="$1"
   local ceremony="${2:-}"
-  local binding
-  [[ -z "$role" ]] && { echo "Error: resolve_route_for_role requires a role name" >&2; return 1; }
-  binding=$(resolve_model_for_role "$role" ${ceremony:+"$ceremony"}) || return 1
-  _model_route_json "$role" "$binding"
+  local harness="${3:-}"
+  [[ -n "$harness" ]] || harness=$(resolve_active_framework) || return 1
+  _route_config_call native "$role" "$ceremony" "$harness"
+}
+
+validate_route_settings() {
+  _route_config_call validate-settings
 }
 
 # --- resolve_harness_install_path ---

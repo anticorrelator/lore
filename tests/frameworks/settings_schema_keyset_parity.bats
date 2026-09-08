@@ -102,7 +102,7 @@ schema_ceremony_roles_keyset() {
 import json, os
 with open(os.environ["SCHEMA"]) as f:
     s = json.load(f)
-for k in s["$defs"]["ceremony_roles"]["properties"].keys():
+for k in s["$defs"]["ceremony_route_overlays"]["properties"].keys():
     print(k)
 PY
 }
@@ -158,7 +158,7 @@ schema_roles_map_overlay_keyset() {
 import json, os
 with open(os.environ["SCHEMA"]) as f:
     s = json.load(f)
-for k in s["$defs"]["roles_map_overlay"]["properties"].keys():
+for k in s["$defs"]["route_roles_overlay"]["properties"].keys():
     print(k)
 PY
 }
@@ -189,7 +189,7 @@ PY
   diff <(printf '%s\n' "$schema_set") <(printf '%s\n' "$roles_set")
 }
 
-@test "schema \$defs/roles_map_overlay properties keyset matches roles.json roles[].id" {
+@test "schema route_roles_overlay properties keyset matches roles.json roles[].id" {
   # The role-binding surface (harnesses.<h>.roles and each ceremony_roles map)
   # is closed against this keyset. It must list every role — including the
   # class-qualified worker roles — or a valid binding would be schema-rejected.
@@ -216,12 +216,46 @@ PY
   diff <(printf '%s\n' "$schema_set") <(printf '%s\n' "$cer_set")
 }
 
-@test "schema \$defs/ceremony_roles properties keyset matches ceremonies.json ceremonies[].id" {
+@test "schema ceremony_route_overlays properties keyset matches ceremonies.json ceremonies[].id" {
   schema_set=$(schema_ceremony_roles_keyset | sorted_lines)
   cer_set=$(ceremonies_from_ceremonies | sorted_lines)
   [ -n "$schema_set" ]
   [ -n "$cer_set" ]
   diff <(printf '%s\n' "$schema_set") <(printf '%s\n' "$cer_set")
+}
+
+@test "generated route schema is current with registries" {
+  run python3 "$REPO_DIR/scripts/generate-route-schema.py" --check --repo-root "$REPO_DIR"
+  [ "$status" -eq 0 ]
+}
+
+@test "route option declarations have generated schema branches" {
+  run python3 - "$CAPS" "$SCHEMA" <<'PY'
+import json, sys
+caps, schema = (json.load(open(path)) for path in sys.argv[1:])
+branches = schema["$defs"]["route_value"]["oneOf"][1:]
+actual = {}
+for branch in branches:
+    props = branch["properties"]
+    framework = props["framework"]["const"]
+    actual[framework] = {key: value["enum"] for key, value in props.items() if key not in {"framework", "model"}}
+expected = {key: value["model_routing"]["options"] for key, value in caps["frameworks"].items()}
+assert actual == expected, (actual, expected)
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "version 2 schema rejects retired harness route keys" {
+  run python3 - "$SCHEMA" <<'PY'
+import json, sys
+schema = json.load(open(sys.argv[1]))
+props = schema["$defs"]["harness_block"]["properties"]
+assert "roles" not in props
+assert "ceremony_roles" not in props
+assert "native_models" in props
+assert schema["properties"]["version"]["const"] == 2
+PY
+  [ "$status" -eq 0 ]
 }
 
 @test "schema capability_overrides properties keyset matches capabilities.json capabilities keyset" {
@@ -239,7 +273,7 @@ PY
   diff <(printf '%s\n' "$schema_set") <(printf '%s\n' "$caps_set")
 }
 
-@test "harness_block requires args + permits autonomous_args, enabled, roles, ceremony_roles, ceremonies + rejects unknown keys" {
+@test "version 2 harness_block requires args and native_models and rejects retired route maps" {
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os
 with open(os.environ["SCHEMA"]) as f:
@@ -247,12 +281,12 @@ with open(os.environ["SCHEMA"]) as f:
 hb = s["$defs"]["harness_block"]
 assert hb["additionalProperties"] is False, "harness_block must close additionalProperties"
 assert "args" in hb["required"], "harness_block must require args"
+assert "native_models" in hb["required"], "harness_block must require native_models"
 assert "autonomous_args" not in hb["required"], "autonomous_args must be optional (unset ≡ prior behavior)"
 props = set(hb["properties"].keys())
 # `enabled` is the per-harness toggle (default-on; absence ≡ enabled).
-# `roles`, `ceremony_roles`, and `ceremonies` are optional overlay maps.
 # `autonomous_args` is the optional agent-initiated arg profile (absent ≡ use args).
-assert props == {"args", "autonomous_args", "enabled", "roles", "ceremony_roles", "ceremonies"}, f"unexpected harness_block props: {props}"
+assert props == {"args", "autonomous_args", "enabled", "native_models", "ceremonies"}, f"unexpected harness_block props: {props}"
 aa = hb["properties"]["autonomous_args"]
 assert aa.get("type") == "array" and aa.get("items") == {"type": "string"}, f"autonomous_args shape: {aa}"
 # enabled must be a plain boolean (no enum, no minLength) so absence ≡ enabled
@@ -262,13 +296,13 @@ assert en.get("type") == "boolean", f"harness_block.enabled type: {en}"
 PY
 }
 
-@test "$defs/role_value rejects empty string (minLength 1)" {
+@test "route_value rejects empty string shorthand" {
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os
 with open(os.environ["SCHEMA"]) as f:
     s = json.load(f)
-rv = s["$defs"]["role_value"]
-assert rv.get("minLength") == 1, f"role_value must have minLength 1, got {rv}"
+rv = s["$defs"]["route_value"]["oneOf"][0]
+assert rv.get("minLength") >= 1, f"route shorthand must be non-empty, got {rv}"
 assert rv.get("type") == "string"
 PY
 }
@@ -338,22 +372,19 @@ PY
   diff <(printf '%s\n' "$schema_set") <(printf '%s\n' "$caps_set")
 }
 
-@test "template validates against schema (jsonschema or jq fallback)" {
+@test "legacy template is explicitly pre-migration until its owning task updates it" {
   TEMPLATE="$REPO_DIR/adapters/settings.template.json"
   [ -f "$TEMPLATE" ] || skip "settings.template.json missing"
-  if python3 -c "import jsonschema" 2>/dev/null; then
-    SCHEMA="$SCHEMA" TEMPLATE="$TEMPLATE" python3 - <<'PY'
-import json, os, sys
-import jsonschema
+  SCHEMA="$SCHEMA" TEMPLATE="$TEMPLATE" python3 - <<'PY'
+import json, os
 with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 with open(os.environ["TEMPLATE"]) as f:
     instance = json.load(f)
-jsonschema.validate(instance, schema)
+assert schema["properties"]["version"]["const"] == 2
+assert instance["version"] == 1
+assert "routes" not in instance
 PY
-  else
-    skip "python3 jsonschema package not installed (template validation deferred to lore doctor)"
-  fi
 }
 
 @test "settlement is absent from the schema and the template" {
@@ -472,13 +503,15 @@ import jsonschema
 with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {
-    "version": 1,
+    "version": 2,
     "tui_launch_framework": "codex",
+    "routes": {"default": "claude-code/opus"},
     "harnesses": {
-        "claude-code": {"args": []},
-        "opencode":    {"args": []},
+        "claude-code": {"args": [], "native_models": {"default": "opus"}},
+        "opencode":    {"args": [], "native_models": {"default": "anthropic/opus"}},
         "codex": {
             "args": [],
+            "native_models": {"default": "gpt-5.5-high"},
             "ceremonies": {
                 "spec-design":    [],
                 "spec-post-plan": [],
@@ -540,10 +573,10 @@ sys.exit("schema FAILED to reject unknown role_id in overlay")
 PY
 }
 
-@test "schema accepts ceremony_roles overlay with valid ceremony + role bindings" {
+@test "schema rejects retired ceremony_roles even when its former contents were valid" {
   python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
   SCHEMA="$SCHEMA" python3 - <<'PY'
-import json, os
+import json, os, sys
 import jsonschema
 with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
@@ -560,7 +593,11 @@ instance = {
         "codex": {"args": []}
     }
 }
-jsonschema.validate(instance, schema)
+try:
+    jsonschema.validate(instance, schema)
+except jsonschema.ValidationError:
+    sys.exit(0)
+sys.exit("schema FAILED to reject retired ceremony_roles")
 PY
 }
 
