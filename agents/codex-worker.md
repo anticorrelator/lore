@@ -52,6 +52,8 @@ On the legacy path, `resolve_native_route_for_role "$WORKER_ROLE" implement code
 Project the canonical route to Codex CLI argv through the adapter. Decode its JSON array element by element; never evaluate shell text.
 
 ```bash
+HARNESS_ARGS=()
+while IFS= read -r arg; do HARNESS_ARGS+=("$arg"); done < <(load_harness_args codex)
 ROUTE_FLAGS=()
 while IFS= read -r -d '' flag; do ROUTE_FLAGS+=("$flag"); done < <(
   bash "$CODEX_ADAPTER" route_flags "$ROUTE" | jq -j '.[] + "\u0000"'
@@ -129,7 +131,7 @@ Substitute `<slug>` with the literal value you derived. `$TASK_ID`, `$TASK_SUBJE
 
 ```bash
 CODEX_OUT=$(mktemp); CODEX_ERR=$(mktemp); REPORT_FILE=$(mktemp)
-CMD=(codex exec --json -o "$REPORT_FILE" --sandbox workspace-write --skip-git-repo-check "${ROUTE_FLAGS[@]}")
+CMD=(codex exec "${HARNESS_ARGS[@]}" "${ROUTE_FLAGS[@]}" --json -o "$REPORT_FILE" --sandbox workspace-write --skip-git-repo-check)
 
 # Wall-clock the run. This duration is the spend basis on a degraded run and
 # rides alongside the token counts on a good one. Initialized here so every
