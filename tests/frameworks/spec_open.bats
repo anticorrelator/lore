@@ -95,6 +95,22 @@ PY
   json_line | jq -e '.directives | all(.payload.framework == "claude-code" and .payload.model == "sonnet" and .payload.session_route.framework == "claude-code")'
 }
 
+@test "native Codex investigations preserve canonical effort in tool selection" {
+  export LORE_MODEL_RESEARCHER=codex/gpt-6-astra-high
+  run bash "$LORE" spec open open-item --investigations "$MANIFEST" --json
+  [ "$status" -eq 0 ]
+  json_line | jq -e '.directives | all(.payload.session_route.options.effort == "high" and .payload.native_selection.tool_input.reasoning_effort == "high" and (.payload.native_selection.model_binding | fromjson | .options.effort == "high"))'
+}
+
+@test "native Codex investigations reject unsupported canonical service tier" {
+  unset LORE_MODEL_RESEARCHER
+  printf '%s\n' '{"version":2,"tui_launch_framework":"codex","routes":{"default":"codex/default","researcher":{"framework":"codex","model":"gpt-6-astra","service_tier":"fast"}},"harnesses":{"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}}}}' > "$LORE_DATA_DIR/config/settings.json"
+  run bash "$LORE" spec open open-item --investigations "$MANIFEST" --json
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unsupported native-option: service_tier"* ]]
+  [ ! -e "$TEST_KDIR/_work/open-item/spec-dispatch.json" ]
+}
+
 @test "exact replay is reused and appends no second atom" {
   run bash "$LORE" spec open open-item --investigations "$MANIFEST" --json
   [ "$status" -eq 0 ]

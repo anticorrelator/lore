@@ -429,8 +429,9 @@ for ordinal, inv in enumerate(normalized, 1):
             context = binder.prepare_session_input(descriptor, bindings, kdir, dispatch_guidance.encode(), **composition)
             state = "pending-execution-root"
         else:
+            native_binding = canonical(resolved_session_route(inv)).decode() if route == "native" else None
             reference = binder.publish(descriptor, bindings, kdir, dispatch_guidance.encode(),
-                                       native_model=model if route == "native" else None,
+                                       native_model=native_binding,
                                        required=("packet_id", "packet_pointer"), **composition)
             prompt = Path(reference["payload_path"]).read_text()
             selection_path = Path(reference["manifest_path"]).parent / "selection.json"
