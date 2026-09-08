@@ -2308,7 +2308,9 @@ case "$1" in
     ;;
   defaults)
     shift
-    exec "$SCRIPTS_DIR/render-standing-defaults.sh" "$@"
+    # The seat-facing verb shows routing; the digest-bearing callers
+    # (render-/validate-dispatch-guidance.sh) invoke the script without it.
+    exec "$SCRIPTS_DIR/render-standing-defaults.sh" --with-routing "$@"
     ;;
   dispatch)
     shift

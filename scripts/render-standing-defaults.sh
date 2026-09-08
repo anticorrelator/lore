@@ -15,6 +15,12 @@
 #   - the effective settings document flattened to `key.path: value` lines
 #   - the preference directives currently in force, cited by entry title only
 #     (full text is retrieved via `lore search` when a directive binds a step)
+#   - with --with-routing, the effective route per role as resolved from THIS
+#     process's harness. Off by default because the dispatch-guidance digest
+#     hashes this script's output and a worker is validated by whichever host
+#     claims it: a section that differs by requesting harness would make a
+#     codex lead's guidance stale on a claude-code host. `lore defaults` passes
+#     the flag; render-/validate-dispatch-guidance.sh never do.
 #
 # Read-only. Exit 0 even when the settings file or preferences directory is
 # absent — absence is rendered explicitly, never silently.
@@ -26,6 +32,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 SETTINGS_FILE="${LORE_DATA_DIR:-$HOME/.lore}/config/settings.json"
+
+WITH_ROUTING=false
+for arg in "$@"; do
+  case "$arg" in
+    --with-routing) WITH_ROUTING=true ;;
+    -h|--help) awk 'NR > 1 { if ($0 !~ /^#/) exit; print }' "$0"; exit 0 ;;
+    *) echo "Error: unknown argument '$arg' (accepted: --with-routing)" >&2; exit 1 ;;
+  esac
+done
 
 echo "=== Standing defaults in force (rendered $(timestamp_iso)) ==="
 echo ""
@@ -45,7 +60,9 @@ fi
 # (env → repo → ceremony overlay → roles → fallback role → default), with a
 # `codex/<model>` value shown as the target framework it selects. This is the
 # surface a seat reads before dispatching; the flattened settings above are the
-# inputs, this is the answer.
+# inputs, this is the answer. Harness-relative, so excluded from the digest
+# payload unless asked for (see header).
+if [[ "$WITH_ROUTING" == true ]]; then
 echo ""
 ACTIVE_FW="$(resolve_active_framework 2>/dev/null || true)"
 echo "-- Effective routing on ${ACTIVE_FW:-<unknown framework>} (role -> framework/model; sessions resolve this when no --framework/--model is passed) --"
@@ -68,6 +85,7 @@ if [[ -n "$ACTIVE_FW" && -f "$ROLES_FILE" ]] && command -v jq &>/dev/null; then
   done
 else
   echo "(routing not renderable: active framework or adapters/roles.json unavailable)"
+fi
 fi
 
 echo ""
