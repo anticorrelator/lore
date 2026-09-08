@@ -1500,7 +1500,7 @@ else
     # (today: `claude` on PATH) can spawn the correctness-gate judge.
     echo "[audit] Error: no model binding for role 'reviewer' (or 'default') and no --gate-output-file supplied." >&2
     echo "[audit]   Either pass --gate-output-file <path> (orchestrator-injected judge output)," >&2
-    echo "[audit]   or set harnesses.<active>.roles.reviewer (or .default) in ~/.lore/config/settings.json (or pass --model <model>)" >&2
+    echo "[audit]   or set routes.reviewer (or routes.default) and the active harness's native_models fallback in ~/.lore/config/settings.json (or pass --model <model>)" >&2
     echo "[audit]   to use the \`claude\` headless runner direct-invocation fallback." >&2
     exit 1
   fi
