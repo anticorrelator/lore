@@ -47,6 +47,12 @@ assert d["track"]=="full" and len(d["lead_template_version"])==12
   json_line | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["track"]=="short"; assert d["effective_lead_model"]=="invocation-model"'
 }
 
+@test "start preserves a qualified model override across framework boundaries" {
+  run bash "$LORE" spec start start-item --model claude-code/sonnet --json
+  [ "$status" -eq 0 ]
+  json_line | jq -e '.effective_lead_route.framework == "claude-code" and .effective_lead_model == "sonnet"'
+}
+
 @test "unseen input is a read-only unresolved struct, not an error or implicit work item" {
   run bash "$LORE" spec start a-brand-new-capability --json
   [ "$status" -eq 0 ]

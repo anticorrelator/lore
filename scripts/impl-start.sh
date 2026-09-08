@@ -207,24 +207,9 @@ else
   CACHE_STATUS="failed"
 fi
 
-# --- Role->model bindings and template versions (warn + "" on failure) -----
-resolve_model_or_empty() {
-  local role="$1" ceremony="${2:-}" model
-  if model=$(resolve_route_for_role "$role" ${ceremony:+"$ceremony"} 2>/dev/null | jq -r '.model') && [[ -n "$model" ]]; then
-    printf '%s' "$model"
-  else
-    echo "[impl] Warning: no model binding resolved for role '$role'" >&2
-    printf ''
-  fi
-}
-
+# --- Role routes and template versions -------------------------------------
 resolve_route_or_empty() {
-  local role="$1" ceremony="${2:-}" raw_model="${3:-}" route
-  if [[ -z "$raw_model" ]]; then
-    echo "[impl] Warning: no model binding resolved for role '$role'; route unavailable" >&2
-    printf ''
-    return 0
-  fi
+  local role="$1" ceremony="${2:-}" route
   if route=$(resolve_route_for_role "$role" ${ceremony:+"$ceremony"}) && [[ -n "$route" ]]; then
     printf '%s' "$route"
   else
@@ -243,21 +228,23 @@ template_version_or_empty() {
   fi
 }
 
-LEAD_MODEL=$(resolve_model_or_empty lead)
-WORKER_MODEL=$(resolve_model_or_empty worker)
-ADVISOR_MODEL=$(resolve_model_or_empty advisor)
+LEAD_ROUTE=$(resolve_route_or_empty lead)
+WORKER_ROUTE=$(resolve_route_or_empty worker)
+ADVISOR_ROUTE=$(resolve_route_or_empty advisor implement)
+LEAD_MODEL=$(printf '%s' "$LEAD_ROUTE" | jq -r '.model')
+WORKER_MODEL=$(printf '%s' "$WORKER_ROUTE" | jq -r '.model')
+ADVISOR_MODEL=$(printf '%s' "$ADVISOR_ROUTE" | jq -r '.model')
 
 # The three worker-class bindings, resolved with the implement ceremony so the
 # display matches what per-task routing resolves at spawn. standard == plain
 # worker; an unbound class role falls back to the worker binding (registry
 # fallback_role). Confirm these against stated intent before spawning.
-WORKER_MECHANICAL_MODEL=$(resolve_model_or_empty worker-mechanical implement)
-WORKER_STANDARD_MODEL=$(resolve_model_or_empty worker implement)
-WORKER_JUDGMENT_DENSE_MODEL=$(resolve_model_or_empty worker-judgment-dense implement)
-WORKER_MECHANICAL_ROUTE=$(resolve_route_or_empty worker-mechanical implement "$WORKER_MECHANICAL_MODEL")
-WORKER_STANDARD_ROUTE=$(resolve_route_or_empty worker implement "$WORKER_STANDARD_MODEL")
-WORKER_JUDGMENT_DENSE_ROUTE=$(resolve_route_or_empty worker-judgment-dense implement "$WORKER_JUDGMENT_DENSE_MODEL")
-ADVISOR_ROUTE=$(resolve_route_for_role advisor implement)
+WORKER_MECHANICAL_ROUTE=$(resolve_route_or_empty worker-mechanical implement)
+WORKER_STANDARD_ROUTE=$(resolve_route_or_empty worker implement)
+WORKER_JUDGMENT_DENSE_ROUTE=$(resolve_route_or_empty worker-judgment-dense implement)
+WORKER_MECHANICAL_MODEL=$(printf '%s' "$WORKER_MECHANICAL_ROUTE" | jq -r '.model')
+WORKER_STANDARD_MODEL=$(printf '%s' "$WORKER_STANDARD_ROUTE" | jq -r '.model')
+WORKER_JUDGMENT_DENSE_MODEL=$(printf '%s' "$WORKER_JUDGMENT_DENSE_ROUTE" | jq -r '.model')
 
 LEAD_TV=$(template_version_or_empty lead "$LORE_REPO_DIR/skills/implement/SKILL.md")
 WORKER_TV=$(template_version_or_empty worker "$(resolve_agent_template worker 2>/dev/null || true)")

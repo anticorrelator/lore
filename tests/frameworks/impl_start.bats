@@ -95,6 +95,13 @@ teardown() {
   unset LORE_KNOWLEDGE_DIR LORE_MODEL_LEAD LORE_MODEL_WORKER LORE_MODEL_ADVISOR LORE_FRAMEWORK
 }
 
+@test "invalid supplied worker route is refused instead of projected as empty" {
+  export LORE_MODEL_WORKER="claude-code/invalid/model/shape"
+  run bash "$START_SH" widget-pipeline --json
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"configured route for role 'worker' is invalid"* ]]
+}
+
 # --- Happy path: text mode ---------------------------------------------
 
 @test "start returns the text struct with title, counts, models, and anchor" {

@@ -53,7 +53,13 @@ done
 [[ -n "$REF" ]] || { usage; fail "missing required argument: <input>"; }
 if [[ -n "$MODEL_OVERRIDE" ]]; then
   OVERRIDE_FRAMEWORK=$(resolve_active_framework) || fail "active framework could not be resolved for --model"
-  export LORE_MODEL_LEAD="$OVERRIDE_FRAMEWORK/$MODEL_OVERRIDE"
+  MODEL_PREFIX="${MODEL_OVERRIDE%%/*}"
+  if [[ "$MODEL_OVERRIDE" == */* ]] && jq -e --arg framework "$MODEL_PREFIX" '.frameworks | has($framework)' "$LORE_REPO_DIR/adapters/capabilities.json" >/dev/null; then
+    export LORE_MODEL_LEAD="$MODEL_OVERRIDE"
+  else
+    # Compatibility: a bare value is a model native to the active framework.
+    export LORE_MODEL_LEAD="$OVERRIDE_FRAMEWORK/$MODEL_OVERRIDE"
+  fi
 fi
 
 KDIR=$(resolve_knowledge_dir)

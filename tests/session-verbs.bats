@@ -3585,6 +3585,19 @@ SH
   [ "$status" -eq 0 ]
 }
 
+@test "explicit session route and compatibility pair cannot hide malformed settings" {
+  echo brief > "$TEST_KDIR/brief.md"
+  jq '.retired_model = "stale"' "$LORE_DATA_DIR/config/settings.json" > "$TEST_KDIR/settings.invalid"
+  mv "$TEST_KDIR/settings.invalid" "$LORE_DATA_DIR/config/settings.json"
+  run bash "$REQUEST" --type worker --slug x--w1 --anywhere --initiator agent --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes --session-route codex/gpt-6-astra
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"explicit overrides cannot bypass settings validation"* ]]
+  run bash "$REQUEST" --type worker --slug x--w2 --anywhere --initiator agent --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes --framework codex --model gpt-6-astra
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"explicit overrides cannot bypass settings validation"* ]]
+  [ ! -d "$TEST_KDIR/_sessions/requests/pending" ] || [ -z "$(ls -A "$TEST_KDIR/_sessions/requests/pending")" ]
+}
+
 @test "request replays a canonical session route without changing provenance" {
   local route='{"framework":"codex","model":"gpt-5.6-sol","options":{"effort":"high","service_tier":"fast"},"routing_source":{"layer":"routes","role":"worker"}}'
   echo brief > "$TEST_KDIR/brief.md"

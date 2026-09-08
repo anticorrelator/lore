@@ -174,11 +174,16 @@ for index, inv in enumerate(investigations):
             reject(f"{where}.dispatch has an unsupported framework or route")
         if not isinstance(dispatch["model"], str) or not dispatch["model"].strip():
             reject(f"{where}.dispatch.model must be resolved before publication")
-        model_check = subprocess.run(["bash", "-c", 'source "$1/lib.sh"; _model_route_json researcher "$2"',
-                                      "spec-model", script_dir, dispatch["model"]],
-                                     env={**os.environ, "LORE_FRAMEWORK": dispatch["framework"]},
-                                     capture_output=True, text=True)
-        if model_check.returncode or json.loads(model_check.stdout)["target_framework"] != dispatch["framework"]:
+        qualified = dispatch["model"]
+        prefix = qualified.partition("/")[0]
+        if prefix not in {"codex", "claude-code", "opencode"}:
+            qualified = dispatch["framework"] + "/" + qualified
+        try:
+            dispatch_route = parse_route(qualified, Path(script_dir).parent,
+                                         {"layer": "override", "role": "researcher", "ceremony": "spec"})
+        except ValueError:
+            reject(f"{where}.dispatch.model is not a native binding for the selected framework")
+        if dispatch_route["framework"] != dispatch["framework"]:
             reject(f"{where}.dispatch.model is not a native binding for the selected framework")
         if dispatch["route"] == "native" and dispatch["framework"] not in {framework, "codex"}:
             reject(f"{where}.dispatch cannot launch {dispatch['framework']} through the {framework} native surface; use route=session")
@@ -249,21 +254,25 @@ def resolved_launch(inv):
     target = request.get("framework", base["framework"])
     if route == "native" and target == "codex" and target != framework:
         route = "codex-chaperone"
-    return target, route, request.get("model", base["model"])
+    return target, route, resolved_session_route(inv)["model"]
 
 def resolved_session_route(inv):
     request = inv.get("dispatch", {})
     launch = request.get("route", "native")
     base = researcher_native_route if launch == "native" else researcher_route
-    target, _, model = resolved_launch(inv)
-    if "framework" in request or "model" in request:
-        return parse_route({"framework": target, "model": model}, Path(script_dir).parent,
+    target = request.get("framework", base["framework"])
+    if "model" in request:
+        raw = request["model"]
+        prefix = raw.partition("/")[0]
+        qualified = raw if prefix in {"codex", "claude-code", "opencode"} else target + "/" + raw
+        return parse_route(qualified, Path(script_dir).parent,
                            {"layer": "override", "role": "researcher", "ceremony": "spec"})
     return base
 
 capabilities = {"subagents": subagents, "team_messaging": team_messaging}
 source_shape = {"active_framework": framework, "adapter_capabilities": capabilities,
                 "researcher_model": researcher_model, "researcher_route": researcher_route,
+                "researcher_native_route": researcher_native_route,
                 "researcher_template_version": researcher_template_version,
                 "dispatch_guidance_identity": guidance_identity,
                 "ordered_prefetch": prefetch_manifest}
@@ -350,7 +359,8 @@ if previous and previous.get("input_fingerprint") == input_fp and previous.get("
             frozen = resolved["manifest"]
             payload = directive["payload"]
             target, route, model = resolved_launch(inv)
-            expected_fields = {"framework": target, "route": route, "model": model, "publication_state": "prepared",
+            expected_fields = {"framework": target, "route": route, "model": model,
+                               "session_route": resolved_session_route(inv), "publication_state": "prepared",
                                "investigation_id": inv["id"], "question": inv["question"],
                                "complexity": inv["complexity"]}
             if any(payload.get(key) != value for key, value in expected_fields.items()):

@@ -372,6 +372,11 @@ json.dump(payload, sys.stdout)
 PY
 }
 
+if [[ $SESSION_ROUTE_PROVIDED -eq 1 || $MODEL_PROVIDED -eq 1 ]]; then
+  route_request validate-settings | python3 "$SCRIPT_DIR/route_config.py" | jq -e '.ok and .result.valid' >/dev/null \
+    || fail "invalid routing settings; explicit overrides cannot bypass settings validation"
+fi
+
 if [[ $SESSION_ROUTE_PROVIDED -eq 1 ]]; then
   SESSION_ROUTE_SOURCE=override
   if printf '%s' "$SESSION_ROUTE" | jq -e 'type == "object" and has("routing_source")' >/dev/null 2>&1; then
