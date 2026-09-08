@@ -97,7 +97,7 @@ import json, os, re, sys
 kdir = sys.argv[1]
 repo_root = os.getcwd()
 
-CATEGORY_DIRS = {'abstractions', 'architecture', 'conventions', 'gotchas', 'principles', 'workflows', 'domains'}
+CATEGORY_DIRS = {'abstractions', 'architecture', 'conventions', 'gotchas', 'principles', 'workflows', 'domains', 'preferences'}
 SKIP_FILES = {'_inbox.md', '_index.md', '_meta.md', '_meta.json', '_index.json', '_manifest.json'}
 OVERSIZED_THRESHOLD = 20
 
