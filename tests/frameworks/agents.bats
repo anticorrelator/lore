@@ -399,6 +399,47 @@ PYEOF
   [ "$output" = '["-m","gpt-5.6-sol","-c","model_reasoning_effort=\"high\"","-c","service_tier=\"fast\""]' ]
 }
 
+@test "codex native_selection accepts canonical route and preserves effort" {
+  set_framework codex
+  run bash "$CODEX_AGENT_ADAPTER" native_selection ignored.md attempt-1 '{"framework":"codex","model":"gpt-5.6-sol","options":{"effort":"high"}}'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.tool_input.model' <<<"$output")" = "gpt-5.6-sol" ]
+  [ "$(jq -r '.tool_input.reasoning_effort' <<<"$output")" = "high" ]
+}
+
+@test "codex native_selection parses legacy effort shorthand canonically" {
+  set_framework codex
+  run bash "$CODEX_AGENT_ADAPTER" native_selection ignored.md attempt-1 gpt-5.5-high
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.tool_input.model' <<<"$output")" = "gpt-5.5" ]
+  [ "$(jq -r '.tool_input.reasoning_effort' <<<"$output")" = "high" ]
+}
+
+@test "codex native_selection rejects foreign routes and unsupported service tier" {
+  set_framework codex
+  run bash "$CODEX_AGENT_ADAPTER" native_selection ignored.md attempt-1 '{"framework":"claude-code","model":"opus","options":{}}'
+  [ "$status" -ne 0 ]
+  run bash "$CODEX_AGENT_ADAPTER" native_selection ignored.md attempt-1 '{"framework":"codex","model":"gpt-5.6-sol","options":{"service_tier":"fast"}}'
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "unsupported native-option: service_tier" ]]
+}
+
+@test "claude native_selection accepts canonical and legacy routes while OpenCode remains unavailable" {
+  local artifact="$TEST_LORE_DATA_DIR/native.md"
+  printf '%s\n' '---' 'name: fixture' 'description: fixture' 'tools: Read' '---' 'prompt' > "$artifact"
+  set_framework claude-code
+  run bash "$CC_AGENT_ADAPTER" native_selection "$artifact" attempt-1 '{"framework":"claude-code","model":"opus","options":{}}'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.tool_input.model' <<<"$output")" = opus ]
+  run bash "$CC_AGENT_ADAPTER" native_selection "$artifact" attempt-2 sonnet
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.tool_input.model' <<<"$output")" = sonnet ]
+  set_framework opencode
+  run bash "$OC_AGENT_ADAPTER" native_selection "$artifact" attempt-3 '{"framework":"opencode","model":"anthropic/opus","options":{}}'
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ unavailable ]]
+}
+
 @test "codex agent spawn fails fast when active framework is not codex" {
   [ -f "$CODEX_AGENT_ADAPTER" ] || skip "adapters/agents/codex.sh missing (T40 not landed yet)"
   set_framework opencode

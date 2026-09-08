@@ -297,23 +297,29 @@ cmd_smoke() {
 cmd_native_selection() {
   require_claude_code
   [[ "$(cap subagents)" != none ]] || { echo 'Error: native subagents unavailable' >&2; return 1; }
-  [[ $# -eq 3 ]] || { echo 'Error: native_selection requires artifact, attempt, and model' >&2; return 1; }
-  validate_role_model_binding default "$3" || return 1
-  python3 - "$@" <<'PYTHON'
+  [[ $# -eq 3 ]] || { echo 'Error: native_selection requires artifact, attempt, and route' >&2; return 1; }
+  local route_input="$3" route_value route
+  if [[ "$route_input" == \{* ]]; then route_value=$(jq -ce . <<<"$route_input") || return 1
+  else route_value=$(jq -Rn --arg v "claude-code/$route_input" '$v'); fi
+  route=$(printf '{"repo_root":%s,"route":%s}\n' "$(jq -Rn --arg v "$LORE_REPO_DIR" '$v')" "$route_value" | python3 "$LORE_REPO_DIR/scripts/route_config.py" parse | jq -cer '.result') || return 1
+  [[ "$(jq -r '.framework' <<<"$route")" == claude-code ]] || { echo 'Error: native Claude selection requires a claude-code route' >&2; return 1; }
+  [[ "$(jq -e '.options | length == 0' <<<"$route")" == true ]] || { echo 'unsupported native-option' >&2; return 1; }
+  python3 - "$1" "$2" "$route" <<'PYTHON'
 import hashlib
 import json
 from pathlib import Path
 import re
 import sys
 raw = Path(sys.argv[1]).read_bytes()
-activation = json.dumps({'attempt': sys.argv[2], 'model': sys.argv[3]}, sort_keys=True).encode()
+route = json.loads(sys.argv[3])
+activation = json.dumps({'attempt': sys.argv[2], 'route': route}, sort_keys=True).encode()
 name = 'lore-position-' + hashlib.sha256(raw + b'\0' + activation).hexdigest()
 _, header, body = raw.decode().split('---\n', 2)
 header, count = re.subn(r'^name: [^\n]+$', 'name: ' + name, header, flags=re.MULTILINE)
 if count != 1:
     raise ValueError('native definition requires one name')
 content = '---\n' + header + '---\n' + body
-print(json.dumps({'tool': 'Agent', 'tool_input': {'subagent_type': name, 'model': sys.argv[3]},
+print(json.dumps({'tool': 'Agent', 'tool_input': {'subagent_type': name, 'model': route['model']},
                   'prompt_field': 'prompt', 'registration': {'filename': name + '.md', 'content': content},
                   'readiness': {'kind': 'native-agent-inventory', 'selection_name': name}}))
 PYTHON

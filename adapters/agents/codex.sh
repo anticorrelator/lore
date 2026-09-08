@@ -323,14 +323,20 @@ cmd_smoke() {
 cmd_native_selection() {
   require_codex
   [[ "$(cap subagents)" != none ]] || { echo 'Error: native subagents unavailable' >&2; return 1; }
-  [[ $# -eq 3 ]] || { echo 'Error: native_selection requires artifact, attempt, and model' >&2; return 1; }
-  validate_role_model_binding default "$3" || return 1
-  local routing_keys
-  routing_keys=$(split_codex_model_variant "$3")
-  python3 - "$routing_keys" <<'PYTHON'
+  [[ $# -eq 3 ]] || { echo 'Error: native_selection requires artifact, attempt, and route' >&2; return 1; }
+  local route_input="$3" route_value route
+  if [[ "$route_input" == \{* ]]; then route_value=$(jq -ce . <<<"$route_input") || return 1
+  else route_value=$(jq -Rn --arg v "codex/$route_input" '$v'); fi
+  route=$(printf '{"repo_root":%s,"route":%s}\n' "$(jq -Rn --arg v "$LORE_REPO_DIR" '$v')" "$route_value" | python3 "$LORE_REPO_DIR/scripts/route_config.py" parse | jq -cer '.result') || return 1
+  [[ "$(jq -r '.framework' <<<"$route")" == codex ]] || { echo 'Error: native codex selection requires a codex route' >&2; return 1; }
+  [[ "$(jq -r '.options.service_tier // empty' <<<"$route")" == "" ]] || { echo 'unsupported native-option: service_tier' >&2; return 1; }
+  python3 - "$route" <<'PYTHON'
 import json
 import sys
-binding = dict(part.split('=', 1) for part in sys.argv[1].split())
+route = json.loads(sys.argv[1])
+binding = {'model': route['model']}
+if 'effort' in route['options']:
+    binding['reasoning_effort'] = route['options']['effort']
 print(json.dumps({'tool': 'spawn_agent', 'tool_input': binding, 'prompt_field': 'message',
                   'registration': None, 'readiness': {'kind': 'native-tool-schema', 'tool': 'spawn_agent'}}))
 PYTHON
