@@ -85,6 +85,7 @@ WORK_ITEM_FLAG=""
 # spawned via the headless runner. The --model flag (added in T38) lets
 # the operator override the role binding for one invocation.
 JUDGE_MODEL=""
+JUDGE_ROUTE=""
 
 # headless_runner_invoke <system_prompt_file> <user_prompt_string> <output_file>
 #
@@ -107,20 +108,6 @@ JUDGE_MODEL=""
 # tests can pin attempts=1.
 : "${LORE_JUDGE_MAX_ATTEMPTS:=3}"
 : "${LORE_JUDGE_RETRY_BACKOFF_SECS:=2}"
-
-split_codex_model_variant() {
-  local binding="$1"
-  local model="$binding"
-  local effort=""
-  case "$binding" in
-    *-minimal) model="${binding%-minimal}"; effort="minimal" ;;
-    *-low)     model="${binding%-low}";     effort="low" ;;
-    *-medium)  model="${binding%-medium}";  effort="medium" ;;
-    *-high)    model="${binding%-high}";    effort="high" ;;
-    *-xhigh)   model="${binding%-xhigh}";   effort="xhigh" ;;
-  esac
-  printf '%s\t%s\n' "$model" "$effort"
-}
 
 # headless_runner_invoke — public entry point with retry on transient flakes.
 # Wraps _headless_runner_invoke_once with up to LORE_JUDGE_MAX_ATTEMPTS attempts.
@@ -239,6 +226,9 @@ _headless_runner_invoke_once() {
         rm -f "$err_file"
         return 64
       fi
+      local -a route_flags=()
+      while IFS= read -r -d '' flag; do route_flags+=("$flag"); done < <(bash "$LORE_REPO_DIR/adapters/agents/$active.sh" route_flags "$JUDGE_ROUTE" | jq -j '.[] + "\u0000"')
+      [[ ${#route_flags[@]} -gt 0 ]] || return 64
       # --max-turns 10 (not 1): the kind-specialized correctness-gate
       # templates instruct the judge to Read the cited file to verify the
       # claim. With --max-turns 1, the first tool use consumes the budget
@@ -264,7 +254,7 @@ _headless_runner_invoke_once() {
         printf '%s' "$user_prompt" | claude -p \
           ${harness_args[@]+"${harness_args[@]}"} \
           --append-system-prompt "$(cat "$system_prompt_file")" \
-          --model "$JUDGE_MODEL" \
+          "${route_flags[@]}" \
           --output-format stream-json \
           --verbose \
           --max-turns "$max_turns" \
@@ -340,7 +330,7 @@ PYEOF
         printf '%s' "$user_prompt" | claude -p \
           ${harness_args[@]+"${harness_args[@]}"} \
           --append-system-prompt "$(cat "$system_prompt_file")" \
-          --model "$JUDGE_MODEL" \
+          "${route_flags[@]}" \
           --output-format text \
           --max-turns "$max_turns" \
           > "$output_file" 2>"$err_file"
@@ -353,8 +343,9 @@ PYEOF
         rm -f "$err_file"
         return 64
       fi
-      local codex_model codex_effort
-      IFS=$'\t' read -r codex_model codex_effort < <(split_codex_model_variant "$JUDGE_MODEL")
+      local -a route_flags=()
+      while IFS= read -r -d '' flag; do route_flags+=("$flag"); done < <(bash "$LORE_REPO_DIR/adapters/agents/codex.sh" route_flags "$JUDGE_ROUTE" | jq -j '.[] + "\u0000"')
+      [[ ${#route_flags[@]} -gt 0 ]] || return 64
       local prompt
       prompt="System instructions:
 $(cat "$system_prompt_file")
@@ -369,12 +360,9 @@ $user_prompt"
             ;;
         esac
       done
-      local cmd=(codex exec ${harness_args[@]+"${harness_args[@]}"} --ephemeral --skip-git-repo-check -m "$codex_model" -o "$output_file")
+      local cmd=(codex exec ${harness_args[@]+"${harness_args[@]}"} --ephemeral --skip-git-repo-check "${route_flags[@]}" -o "$output_file")
       if [[ "$has_sandbox_arg" -eq 0 ]]; then
         cmd+=(--sandbox read-only)
-      fi
-      if [[ -n "$codex_effort" ]]; then
-        cmd+=(-c "model_reasoning_effort=\"$codex_effort\"")
       fi
       if [[ -n "$schema_path" ]]; then
         if [[ ! -f "$schema_path" ]]; then
@@ -706,29 +694,27 @@ fi
 # the model — the same rule the settings encode for other harness-native spawns.
 # Retired when routes carry a per-harness native_models map
 # ([[work:routes-table-launch-path-route-options]]).
-resolve_judge_model() {
-  local active route target native
+resolve_judge_route() {
+  local active
   active=$(resolve_active_framework 2>/dev/null) || return 1
-  if route=$(resolve_route_for_role reviewer 2>/dev/null) && [[ -n "$route" ]]; then
-    target=$(printf '%s' "$route" | jq -r '.target_framework // empty' 2>/dev/null)
-    native=$(printf '%s' "$route" | jq -r '.native_binding // empty' 2>/dev/null)
-    if [[ -n "$native" && "$target" == "$active" ]]; then
-      printf '%s\n' "$native"
-      return 0
-    fi
-    echo "[audit] reviewer routes to ${target:-?}; the headless runner is native to $active — judges run on role 'default'" >&2
-  fi
-  resolve_model_for_role default
+  resolve_native_route_for_role reviewer "" "$active"
 }
 
 if [[ -z "$JUDGE_MODEL" ]] && [[ -z "$GATE_OUTPUT_FILE" || -z "$CURATOR_OUTPUT_FILE" || -z "$REVERSE_AUDITOR_OUTPUT_FILE" ]]; then
-  if ! JUDGE_MODEL=$(resolve_judge_model 2>/dev/null) || [[ -z "$JUDGE_MODEL" ]]; then
+  if ! JUDGE_ROUTE=$(resolve_judge_route 2>/dev/null) || [[ -z "$JUDGE_ROUTE" ]]; then
     # Soft-fail: only error if the judge actually needs to run. The
     # gate/curator/reverse-auditor blocks below check JUDGE_MODEL
     # before invoking the runner; when all three are injected via
     # --*-output-file, the role binding is unnecessary.
     JUDGE_MODEL=""
+    JUDGE_ROUTE=""
+  else
+    JUDGE_MODEL=$(jq -r '.model' <<<"$JUDGE_ROUTE")
   fi
+fi
+if [[ -n "$JUDGE_MODEL" && -z "$JUDGE_ROUTE" ]]; then
+  active=$(resolve_active_framework 2>/dev/null) || active=""
+  JUDGE_ROUTE=$(printf '{"repo_root":%s,"route":%s,"routing_source":{"layer":"override","role":"reviewer"}}\n' "$(jq -Rn --arg v "$LORE_REPO_DIR" '$v')" "$(jq -Rn --arg v "$active/$JUDGE_MODEL" '$v')" | python3 "$LORE_REPO_DIR/scripts/route_config.py" parse | jq -cer '.result') || JUDGE_ROUTE=""
 fi
 
 # Model provenance: scorecard-append.sh stamps rows with LORE_MODEL when the
@@ -1514,7 +1500,7 @@ else
     # (today: `claude` on PATH) can spawn the correctness-gate judge.
     echo "[audit] Error: no model binding for role 'reviewer' (or 'default') and no --gate-output-file supplied." >&2
     echo "[audit]   Either pass --gate-output-file <path> (orchestrator-injected judge output)," >&2
-    echo "[audit]   or set harnesses.<active>.roles.reviewer (or .default) in ~/.lore/config/settings.json (or pass --model <model>)" >&2
+    echo "[audit]   or set routes.reviewer (or routes.default) and the active harness's native_models fallback in ~/.lore/config/settings.json (or pass --model <model>)" >&2
     echo "[audit]   to use the \`claude\` headless runner direct-invocation fallback." >&2
     exit 1
   fi

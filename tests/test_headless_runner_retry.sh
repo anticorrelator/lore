@@ -121,6 +121,7 @@ eval "\$(awk '
 # headless_runner=full).
 export LORE_FRAMEWORK="claude-code"
 JUDGE_MODEL="opus"
+JUDGE_ROUTE='{"framework":"claude-code","model":"opus","options":{}}'
 
 # Args: <sys_file> <user_prompt> <output_file> [schema_path] [max_turns].
 # Forward only the args actually supplied so the function's own defaults apply.

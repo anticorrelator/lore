@@ -68,6 +68,22 @@ cap() {
   framework_capability "$1" 2>/dev/null || echo "none"
 }
 
+cmd_route_flags() {
+  [[ $# -eq 1 ]] || { echo 'Error: route_flags requires <canonical-route-json>' >&2; return 1; }
+  python3 - "$LORE_REPO_DIR" "$1" <<'PYTHON'
+import json, sys
+sys.path.insert(0, sys.argv[1] + '/scripts')
+from route_config import parse_route, RouteConfigError
+try:
+    route = parse_route(json.loads(sys.argv[2]), sys.argv[1])
+    if route['framework'] != 'claude-code': raise RouteConfigError('route_framework_mismatch', "claude-code adapter requires framework 'claude-code'")
+    if route['options']: raise RouteConfigError('unsupported_route_option', 'claude-code CLI cannot carry route options')
+    print(json.dumps(['--model', route['model']], separators=(',', ':')))
+except (ValueError, json.JSONDecodeError, RouteConfigError) as exc:
+    print('Error: invalid claude-code route: ' + str(exc), file=sys.stderr); raise SystemExit(2)
+PYTHON
+}
+
 # --- cmd_spawn ---
 # Spawn a worker agent. On Claude Code this means TaskCreate (and
 # TeamCreate for the first call of a team). The bash adapter cannot
@@ -99,13 +115,14 @@ cmd_spawn() {
   # Resolve the role -> model binding. Per-call override (positional $3 or
   # LORE_MODEL_<ROLE>) is honored by resolve_model_for_role itself; the
   # adapter does not re-implement override precedence.
-  local model
+  local route model
   if [[ -n "$override_model" ]]; then
-    model="$override_model"
+    route=$(printf '{"repo_root":%s,"route":%s,"routing_source":{"layer":"override","role":%s}}\n' "$(jq -Rn --arg v "$LORE_REPO_DIR" '$v')" "$(jq -Rn --arg v "claude-code/$override_model" '$v')" "$(jq -Rn --arg v "$role" '$v')" | python3 "$LORE_REPO_DIR/scripts/route_config.py" parse | jq -cer '.result') || return 1
   else
-    model=$(resolve_model_for_role "$role") || return 1
+    route=$(resolve_native_route_for_role "$role" "" claude-code) || return 1
   fi
-
+  [[ "$(jq -e '.options | length == 0' <<<"$route")" == true ]] || { echo 'unsupported native-option' >&2; return 1; }
+  model=$(jq -r '.model' <<<"$route")
   echo "delegate:TaskCreate role=$role model=$model"
 }
 
@@ -280,23 +297,29 @@ cmd_smoke() {
 cmd_native_selection() {
   require_claude_code
   [[ "$(cap subagents)" != none ]] || { echo 'Error: native subagents unavailable' >&2; return 1; }
-  [[ $# -eq 3 ]] || { echo 'Error: native_selection requires artifact, attempt, and model' >&2; return 1; }
-  validate_role_model_binding default "$3" || return 1
-  python3 - "$@" <<'PYTHON'
+  [[ $# -eq 3 ]] || { echo 'Error: native_selection requires artifact, attempt, and route' >&2; return 1; }
+  local route_input="$3" route_value route
+  if [[ "$route_input" == \{* ]]; then route_value=$(jq -ce . <<<"$route_input") || return 1
+  else route_value=$(jq -Rn --arg v "claude-code/$route_input" '$v'); fi
+  route=$(printf '{"repo_root":%s,"route":%s}\n' "$(jq -Rn --arg v "$LORE_REPO_DIR" '$v')" "$route_value" | python3 "$LORE_REPO_DIR/scripts/route_config.py" parse | jq -cer '.result') || return 1
+  [[ "$(jq -r '.framework' <<<"$route")" == claude-code ]] || { echo 'Error: native Claude selection requires a claude-code route' >&2; return 1; }
+  [[ "$(jq -e '.options | length == 0' <<<"$route")" == true ]] || { echo 'unsupported native-option' >&2; return 1; }
+  python3 - "$1" "$2" "$route" <<'PYTHON'
 import hashlib
 import json
 from pathlib import Path
 import re
 import sys
 raw = Path(sys.argv[1]).read_bytes()
-activation = json.dumps({'attempt': sys.argv[2], 'model': sys.argv[3]}, sort_keys=True).encode()
+route = json.loads(sys.argv[3])
+activation = json.dumps({'attempt': sys.argv[2], 'route': route}, sort_keys=True).encode()
 name = 'lore-position-' + hashlib.sha256(raw + b'\0' + activation).hexdigest()
 _, header, body = raw.decode().split('---\n', 2)
 header, count = re.subn(r'^name: [^\n]+$', 'name: ' + name, header, flags=re.MULTILINE)
 if count != 1:
     raise ValueError('native definition requires one name')
 content = '---\n' + header + '---\n' + body
-print(json.dumps({'tool': 'Agent', 'tool_input': {'subagent_type': name, 'model': sys.argv[3]},
+print(json.dumps({'tool': 'Agent', 'tool_input': {'subagent_type': name, 'model': route['model']},
                   'prompt_field': 'prompt', 'registration': {'filename': name + '.md', 'content': content},
                   'readiness': {'kind': 'native-agent-inventory', 'selection_name': name}}))
 PYTHON
@@ -347,6 +370,7 @@ case "$cmd" in
   shutdown)                 shift; cmd_shutdown                 "$@" ;;
   completion_enforcement)   shift; cmd_completion_enforcement   "$@" ;;
   resolve_model_for_role)   shift; cmd_resolve_model_for_role   "$@" ;;
+  route_flags)              shift; cmd_route_flags              "$@" ;;
   system_prompt_flag)       shift; cmd_system_prompt_flag       "$@" ;;
   settings_override_flag)   shift; cmd_settings_override_flag   "$@" ;;
   smoke|--smoke)            shift; cmd_smoke                    "$@" ;;

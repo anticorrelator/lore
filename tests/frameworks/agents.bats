@@ -58,7 +58,7 @@ teardown() {
 set_framework() {
   export LORE_FRAMEWORK="$1"
   cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
-{"version":1,"tui_launch_framework":"$1","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}},"opencode":{"args":[],"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}},"codex":{"args":[],"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}}}}
+{"version":2,"tui_launch_framework":"$1","capability_overrides":{},"routes":{"default":"claude-code/sonnet"},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"sonnet","lead":"opus","worker":"sonnet"}},"opencode":{"args":[],"native_models":{"default":"anthropic/sonnet","lead":"anthropic/opus","worker":"openai/gpt-4o"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5","lead":"gpt-5.5","worker":"gpt-5.5"}}}}
 EOF
 }
 
@@ -68,7 +68,7 @@ EOF
 set_framework_multi() {
   export LORE_FRAMEWORK="$1"
   cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
-{"version":1,"tui_launch_framework":"$1","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"default":"anthropic/sonnet","lead":"anthropic/opus","worker":"openai/gpt-4o"}},"opencode":{"args":[],"roles":{"default":"anthropic/sonnet","lead":"anthropic/opus","worker":"openai/gpt-4o"}},"codex":{"args":[],"roles":{"default":"anthropic/sonnet","lead":"anthropic/opus","worker":"openai/gpt-4o"}}}}
+{"version":2,"tui_launch_framework":"$1","capability_overrides":{},"routes":{"default":"opencode/anthropic/sonnet","lead":"opencode/anthropic/opus","worker":"opencode/openai/gpt-4o"},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"sonnet"}},"opencode":{"args":[],"native_models":{"default":"anthropic/sonnet"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5"}}}}
 EOF
 }
 
@@ -263,19 +263,11 @@ PYEOF
   [[ "$output" =~ model=opus ]]
 }
 
-@test "opencode agent spawn keeps bare model bindings unsplit" {
+@test "opencode route_flags preserves provider/model as one argv value" {
   [ -f "$OC_AGENT_ADAPTER" ] || skip "adapters/agents/opencode.sh missing (T39 not landed yet)"
-  set_framework opencode
-  run bash "$OC_AGENT_ADAPTER" spawn worker "$(guidance_prompt)"
+  run bash "$OC_AGENT_ADAPTER" route_flags '{"framework":"opencode","model":"anthropic/sonnet","options":{}}'
   [ "$status" -eq 0 ]
-  [[ "$output" =~ delegate:TaskCreate ]]
-  [[ "$output" =~ role=worker ]]
-  [[ "$output" =~ "model=sonnet" ]]
-  # Bare bindings MUST NOT emit a provider= key.
-  if [[ "$output" =~ provider= ]]; then
-    echo "bare binding leaked provider= key: $output"
-    return 1
-  fi
+  [ "$output" = '["--model","anthropic/sonnet"]' ]
 }
 
 @test "opencode agent spawn fails fast when active framework is not opencode" {
@@ -399,9 +391,53 @@ PYEOF
   set_framework codex
   run bash "$CODEX_AGENT_ADAPTER" spawn lead "$(guidance_prompt)" "anthropic/opus"
   [ "$status" -ne 0 ]
-  # validate_role_model_binding emits the explanatory error on stderr;
-  # bats `run` merges streams, so the message appears in $output.
-  [[ "$output" =~ provider ]] || [[ "$output" =~ single ]]
+}
+
+@test "codex route_flags emits model effort and fast tier as exact argv" {
+  run bash "$CODEX_AGENT_ADAPTER" route_flags '{"framework":"codex","model":"gpt-5.6-sol","options":{"effort":"high","service_tier":"fast"}}'
+  [ "$status" -eq 0 ]
+  [ "$output" = '["-m","gpt-5.6-sol","-c","model_reasoning_effort=\"high\"","-c","service_tier=\"fast\""]' ]
+}
+
+@test "codex native_selection accepts canonical route and preserves effort" {
+  set_framework codex
+  run bash "$CODEX_AGENT_ADAPTER" native_selection ignored.md attempt-1 '{"framework":"codex","model":"gpt-5.6-sol","options":{"effort":"high"}}'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.tool_input.model' <<<"$output")" = "gpt-5.6-sol" ]
+  [ "$(jq -r '.tool_input.reasoning_effort' <<<"$output")" = "high" ]
+}
+
+@test "codex native_selection parses legacy effort shorthand canonically" {
+  set_framework codex
+  run bash "$CODEX_AGENT_ADAPTER" native_selection ignored.md attempt-1 gpt-5.5-high
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.tool_input.model' <<<"$output")" = "gpt-5.5" ]
+  [ "$(jq -r '.tool_input.reasoning_effort' <<<"$output")" = "high" ]
+}
+
+@test "codex native_selection rejects foreign routes and unsupported service tier" {
+  set_framework codex
+  run bash "$CODEX_AGENT_ADAPTER" native_selection ignored.md attempt-1 '{"framework":"claude-code","model":"opus","options":{}}'
+  [ "$status" -ne 0 ]
+  run bash "$CODEX_AGENT_ADAPTER" native_selection ignored.md attempt-1 '{"framework":"codex","model":"gpt-5.6-sol","options":{"service_tier":"fast"}}'
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "unsupported native-option: service_tier" ]]
+}
+
+@test "claude native_selection accepts canonical and legacy routes while OpenCode remains unavailable" {
+  local artifact="$TEST_LORE_DATA_DIR/native.md"
+  printf '%s\n' '---' 'name: fixture' 'description: fixture' 'tools: Read' '---' 'prompt' > "$artifact"
+  set_framework claude-code
+  run bash "$CC_AGENT_ADAPTER" native_selection "$artifact" attempt-1 '{"framework":"claude-code","model":"opus","options":{}}'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.tool_input.model' <<<"$output")" = opus ]
+  run bash "$CC_AGENT_ADAPTER" native_selection "$artifact" attempt-2 sonnet
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.tool_input.model' <<<"$output")" = sonnet ]
+  set_framework opencode
+  run bash "$OC_AGENT_ADAPTER" native_selection "$artifact" attempt-3 '{"framework":"opencode","model":"anthropic/opus","options":{}}'
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ unavailable ]]
 }
 
 @test "codex agent spawn fails fast when active framework is not codex" {

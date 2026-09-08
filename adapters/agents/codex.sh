@@ -86,22 +86,27 @@ cap() {
 # on stdout.
 split_codex_model_variant() {
   local binding="$1"
-  local model="$binding"
-  local effort=""
+  local route
+  route=$(printf '{"repo_root":%s,"route":%s}\n' "$(jq -Rn --arg v "$LORE_REPO_DIR" '$v')" "$(jq -Rn --arg v "codex/$binding" '$v')" | python3 "$LORE_REPO_DIR/scripts/route_config.py" parse | jq -cer '.result') || return 1
+  jq -r '"model=" + .model + (if .options.effort then " reasoning_effort=" + .options.effort else "" end)' <<<"$route"
+}
 
-  case "$binding" in
-    *-minimal) model="${binding%-minimal}"; effort="minimal" ;;
-    *-low)     model="${binding%-low}";     effort="low" ;;
-    *-medium)  model="${binding%-medium}";  effort="medium" ;;
-    *-high)    model="${binding%-high}";    effort="high" ;;
-    *-xhigh)   model="${binding%-xhigh}";   effort="xhigh" ;;
-  esac
-
-  if [[ -n "$effort" && -n "$model" ]]; then
-    printf 'model=%s reasoning_effort=%s' "$model" "$effort"
-  else
-    printf 'model=%s' "$binding"
-  fi
+cmd_route_flags() {
+  [[ $# -eq 1 ]] || { echo 'Error: route_flags requires <canonical-route-json>' >&2; return 1; }
+  python3 - "$LORE_REPO_DIR" "$1" <<'PYTHON'
+import json, sys
+sys.path.insert(0, sys.argv[1] + '/scripts')
+from route_config import parse_route, RouteConfigError
+try:
+    route = parse_route(json.loads(sys.argv[2]), sys.argv[1])
+    if route['framework'] != 'codex': raise RouteConfigError('route_framework_mismatch', "codex adapter requires framework 'codex'")
+    args = ['-m', route['model']]
+    if 'effort' in route['options']: args += ['-c', 'model_reasoning_effort=' + json.dumps(route['options']['effort'])]
+    if 'service_tier' in route['options']: args += ['-c', 'service_tier=' + json.dumps(route['options']['service_tier'])]
+    print(json.dumps(args, separators=(',', ':')))
+except (ValueError, json.JSONDecodeError, RouteConfigError) as exc:
+    print('Error: invalid codex route: ' + str(exc), file=sys.stderr); raise SystemExit(2)
+PYTHON
 }
 
 cmd_spawn() {
@@ -123,22 +128,17 @@ cmd_spawn() {
   fi
   emit_degraded_notice spawn "$subagents" "codex subagent spawn"
 
-  local model
+  local route model effort
   if [[ -n "$override_model" ]]; then
-    model="$override_model"
+    route=$(printf '{"repo_root":%s,"route":%s,"routing_source":{"layer":"override","role":%s}}\n' "$(jq -Rn --arg v "$LORE_REPO_DIR" '$v')" "$(jq -Rn --arg v "codex/$override_model" '$v')" "$(jq -Rn --arg v "$role" '$v')" | python3 "$LORE_REPO_DIR/scripts/route_config.py" parse | jq -cer '.result') || return 1
   else
-    model=$(resolve_model_for_role "$role") || return 1
+    route=$(resolve_native_route_for_role "$role" "" codex) || return 1
   fi
-
-  # Reject provider/model syntax on this single-shape harness;
-  # validate_role_model_binding emits the explanatory stderr line.
-  if ! validate_role_model_binding "$role" "$model"; then
-    return 1
-  fi
-
-  local routing_keys
-  routing_keys=$(split_codex_model_variant "$model")
-  echo "delegate:TaskCreate role=$role $routing_keys"
+  [[ "$(jq -r '.options.service_tier // empty' <<<"$route")" == "" ]] || { echo 'unsupported native-option: service_tier' >&2; return 1; }
+  model=$(jq -r '.model' <<<"$route"); effort=$(jq -r '.options.effort // empty' <<<"$route")
+  printf 'delegate:TaskCreate role=%s model=%s' "$role" "$model"
+  [[ -z "$effort" ]] || printf ' reasoning_effort=%s' "$effort"
+  printf '\n'
 }
 
 # --- cmd_wait ---
@@ -323,14 +323,20 @@ cmd_smoke() {
 cmd_native_selection() {
   require_codex
   [[ "$(cap subagents)" != none ]] || { echo 'Error: native subagents unavailable' >&2; return 1; }
-  [[ $# -eq 3 ]] || { echo 'Error: native_selection requires artifact, attempt, and model' >&2; return 1; }
-  validate_role_model_binding default "$3" || return 1
-  local routing_keys
-  routing_keys=$(split_codex_model_variant "$3")
-  python3 - "$routing_keys" <<'PYTHON'
+  [[ $# -eq 3 ]] || { echo 'Error: native_selection requires artifact, attempt, and route' >&2; return 1; }
+  local route_input="$3" route_value route
+  if [[ "$route_input" == \{* ]]; then route_value=$(jq -ce . <<<"$route_input") || return 1
+  else route_value=$(jq -Rn --arg v "codex/$route_input" '$v'); fi
+  route=$(printf '{"repo_root":%s,"route":%s}\n' "$(jq -Rn --arg v "$LORE_REPO_DIR" '$v')" "$route_value" | python3 "$LORE_REPO_DIR/scripts/route_config.py" parse | jq -cer '.result') || return 1
+  [[ "$(jq -r '.framework' <<<"$route")" == codex ]] || { echo 'Error: native codex selection requires a codex route' >&2; return 1; }
+  [[ "$(jq -r '.options.service_tier // empty' <<<"$route")" == "" ]] || { echo 'unsupported native-option: service_tier' >&2; return 1; }
+  python3 - "$route" <<'PYTHON'
 import json
 import sys
-binding = dict(part.split('=', 1) for part in sys.argv[1].split())
+route = json.loads(sys.argv[1])
+binding = {'model': route['model']}
+if 'effort' in route['options']:
+    binding['reasoning_effort'] = route['options']['effort']
 print(json.dumps({'tool': 'spawn_agent', 'tool_input': binding, 'prompt_field': 'message',
                   'registration': None, 'readiness': {'kind': 'native-tool-schema', 'tool': 'spawn_agent'}}))
 PYTHON
@@ -364,6 +370,7 @@ case "$cmd" in
   shutdown)                 shift; cmd_shutdown                 "$@" ;;
   completion_enforcement)   shift; cmd_completion_enforcement   "$@" ;;
   resolve_model_for_role)   shift; cmd_resolve_model_for_role   "$@" ;;
+  route_flags)              shift; cmd_route_flags              "$@" ;;
   split_model_variant)      shift; cmd_split_model_variant      "$@" ;;
   system_prompt_flag)       shift; cmd_system_prompt_flag       "$@" ;;
   settings_override_flag)   shift; cmd_settings_override_flag   "$@" ;;
