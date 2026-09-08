@@ -5,6 +5,7 @@ import contextlib
 import datetime
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,44 @@ SCRIPTS = Path(__file__).resolve().parent
 WARNED_CORRUPTION = set()
 EVENT_CACHE = {}
 TERMINAL = {'closed', 'request_cancelled', 'request_expired', 'request_abandoned', 'orphaned'}
+
+
+def route_module():
+    spec = importlib.util.spec_from_file_location('route_config', SCRIPTS / 'route_config.py')
+    if spec is None or spec.loader is None:
+        raise RuntimeError('canonical route helper is unavailable')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def canonical_start_route(args, source):
+    """Validate all settings, then resolve or canonicalize one frozen worker route."""
+    routes = route_module()
+    settings_path = Path(os.environ.get('LORE_DATA_DIR', Path.home() / '.lore')) / 'config/settings.json'
+    try:
+        settings = json.loads(settings_path.read_text())
+        routes.validate_settings(settings, SCRIPTS.parent)
+        session_route = getattr(args, 'session_route', None)
+        if session_route is not None:
+            if args.framework is not None or args.model is not None:
+                raise RuntimeError('--session-route conflicts with --framework/--model; pass one complete override')
+            value = json.loads(session_route) if session_route.lstrip().startswith(('{', '[')) else session_route
+            parsed = routes.parse_route(value, SCRIPTS.parent)
+            if 'routing_source' not in parsed:
+                parsed['routing_source'] = {'layer': 'override', 'role': 'worker'}
+            return parsed
+        if (args.framework is None) != (args.model is None):
+            raise RuntimeError('--framework and --model are a pair: pass both to override the worker route, or neither to resolve it')
+        if args.framework is not None:
+            return routes.resolve_route_for_role('worker', repo_root=SCRIPTS.parent, settings=settings,
+                                                 cwd=source, override=f'{args.framework}/{args.model}')
+        return routes.resolve_route_for_role('worker', repo_root=SCRIPTS.parent, settings=settings, cwd=source)
+    except routes.RouteConfigError as exc:
+        location = f' at {exc.path}' if exc.path else ''
+        raise RuntimeError(f'invalid route configuration ({exc.code}){location}: {exc.message}') from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f'invalid route configuration: cannot read {settings_path}: {exc}') from exc
 
 
 def read(path, default=None):
@@ -346,8 +385,7 @@ def enqueue_start(kdir, manifest):
             manifest['state'] = 'enqueueing'
             atomic(path, manifest)
             run(['bash', SCRIPTS / 'session-request.sh', '--type', 'worker', '--slug', manifest['handle'],
-                 '--target', status['instance_name'], '--framework', manifest['framework'], '--model', manifest['model'],
-                 '--routing-source', manifest.get('routing_source') or 'override',
+                 '--target', status['instance_name'], '--session-route', json.dumps(manifest['route'], separators=(',', ':')),
                  '--context', context_path, '--initiator', 'agent', '--auto-close', 'true', '--yes', '--kdir', kdir,
                  '--request-id', rid, '--host-key', key, '--json',
                  *(['--packet', manifest['packet']] if manifest.get('packet') else [])], cwd=source)
@@ -371,23 +409,9 @@ def start(args, kdir):
     context = Path(args.context).read_bytes().decode('utf-8')
     if '\x00' in context:
         raise RuntimeError('context must not contain NUL bytes')
-    # Every start carries a framework and a model. Absent both, the worker
-    # route resolves them from the requesting harness's role map (a value such
-    # as `codex/gpt-5.6-sol` names the target framework and its native model);
-    # passing exactly one is a half-override and is refused, because a session
-    # must never inherit the other half from whoever happens to launch it.
-    framework, model, routing_source = args.framework, args.model, 'override'
-    if not framework and not model:
-        route = subprocess.run(['bash', '-c', 'source "$1/lib.sh" && resolve_route_for_role worker', 'route', str(SCRIPTS)],
-                               capture_output=True, text=True, cwd=source)
-        if route.returncode or not route.stdout.strip():
-            raise RuntimeError('no route resolves for role worker; bind harnesses.<framework>.roles.worker or pass --framework and --model together'
-                               + (': ' + route.stderr.strip() if route.stderr.strip() else ''))
-        resolved = json.loads(route.stdout)
-        framework, model, routing_source = resolved['target_framework'], resolved['native_binding'], 'role-route'
-    elif not framework or not model:
-        raise RuntimeError('--framework and --model are a pair: pass both to override the worker route, or neither to resolve it')
-    intent = dict(work_item=args.handle, source_dir=source, framework=framework, model=model, routing_source=routing_source,
+    route = canonical_start_route(args, source)
+    intent = dict(work_item=args.handle, source_dir=source, route=route,
+                  framework=route['framework'], model=route['model'], routing_source=route['routing_source']['layer'],
                   context=context, packet=getattr(args, 'packet', None))
     key = hashlib.sha256((str(kdir) + '\0' + source).encode()).hexdigest()[:24]
     with lock(kdir / '_sessions/managed.lock'):
@@ -403,6 +427,12 @@ def start(args, kdir):
                     break
         if token and token in index:
             manifest = read(manifest_path(kdir, index[token]))
+            if getattr(args, 'session_route', None) is None and args.framework is None and args.model is None:
+                # An absent-override retry means "the same managed start", not
+                # "reselect from today's settings". Current settings were
+                # validated above; preserve the route frozen in the intent.
+                for field in ('route', 'framework', 'model', 'routing_source'):
+                    intent[field] = manifest[field]
             if any(manifest.get(k) != v for k, v in intent.items()):
                 raise RuntimeError('idempotency key already names a different start intent')
         else:
@@ -624,6 +654,7 @@ def main(argv=None):
     parser.add_argument('--workspace')
     parser.add_argument('--framework', choices=['codex', 'claude-code', 'opencode'])
     parser.add_argument('--model')
+    parser.add_argument('--session-route')
     parser.add_argument('--context')
     parser.add_argument('--key')
     parser.add_argument('--packet')

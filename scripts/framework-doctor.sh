@@ -9,7 +9,7 @@
 #   2. Role-binding x model_routing capability conflicts  (with set-model fix)
 #   3. Per-repo .lore.config cwd-vs-user-config diff
 #   4. Capability override inspection (overrides + evidence-ceiling check)
-#   5. Ceremony overlay: which ceremony_roles bindings override the [roles]
+#   5. Ceremony overlay: which routes.ceremony_overlays bindings override routes
 #      table, and which are written but shadowed by a higher layer
 #
 # Doctor is the operator-facing surface that maps each problem to the
@@ -52,7 +52,7 @@ Sections (doctor):
                chain); rejects bindings that conflict with the active
                harness's model_routing capability
   Ceremony     Per-ceremony overlay bindings that override the Roles table
-               (harnesses.<active>.ceremony_roles), and bindings written there
+               (routes.ceremony_overlays), and bindings written there
                that a higher-precedence layer shadows
   Per-repo     Diff between cwd resolution (.lore.config + env) and the
                user-config defaults (so operators see what cwd changes)
@@ -143,6 +143,28 @@ if [[ -n "$ACTIVE_FRAMEWORK" ]]; then
   MODEL_ROUTING_NOTES=$(jq -r --arg fw "$ACTIVE_FRAMEWORK" '.frameworks[$fw].model_routing.notes // ""' "$CAPABILITIES_FILE")
 fi
 
+# Validate the complete routing tree before inspecting any winning route. This
+# catches retired keys and malformed unused routes even when env wins.
+ROUTE_VALIDATION_JSON='{}'
+if [[ "$CONFIG_STATUS" == "present" ]]; then
+  ROUTE_VALIDATION_JSON=$(python3 "$SCRIPT_DIR/route_config.py" validate-settings <<EOF
+{"repo_root":$(printf '%s' "$SCRIPT_DIR/.." | jq -Rs .),"settings_path":$(printf '%s' "$CONFIG_PATH" | jq -Rs .)}
+EOF
+  ) || true
+  if [[ $(printf '%s' "$ROUTE_VALIDATION_JSON" | jq -r '.ok // false') != true ]]; then
+    code=$(printf '%s' "$ROUTE_VALIDATION_JSON" | jq -r '.error.code // "invalid_route_configuration"')
+    message=$(printf '%s' "$ROUTE_VALIDATION_JSON" | jq -r '.error.message // "invalid route configuration"')
+    path=$(printf '%s' "$ROUTE_VALIDATION_JSON" | jq -r '.error.path // ""')
+    if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+      jq -n --arg status invalid --arg config "$CONFIG_PATH" --arg code "$code" --arg message "$message" --arg path "$path" '{config_status:$status,config_path:$config,error:{code:$code,message:$message,path:$path},diagnostics_fired:1}'
+    else
+      echo "[diagnostic] invalid route configuration: $code${path:+ at $path}: $message"
+      echo "  Repair: ${path:-settings.json}; use 'lore framework set-model <role> <qualified-route>' for global routes."
+    fi
+    exit 3
+  fi
+fi
+
 # --- Per-repo .lore.config discovery ------------------------------------------
 LORE_CONFIG_PATH=""
 if discovered=$(find_lore_config 2>/dev/null) && [[ -n "$discovered" ]]; then
@@ -153,14 +175,35 @@ CWD_PATH="$(pwd)"
 # --- Capability + override + role analysis ------------------------------------
 # A single python helper does the cross-file join: capabilities.json profile +
 # settings.json overrides + roles.json registry + .lore.config (if any) +
-# resolved env vars. The shell side calls resolve_model_for_role for the
-# user-config layer (so resolution drift between python and lib.sh is
-# impossible) and feeds those answers in via env.
+# resolved env vars. Route selection stays inside route_config.py.
 
-# Enumerate role ids to call resolve_model_for_role per-role from bash.
+# Enumerate role ids for canonical resolution.
 ROLE_IDS=""
 if [[ -f "$ROLES_FILE" ]]; then
   ROLE_IDS=$(jq -r '.roles[].id' "$ROLES_FILE" 2>/dev/null | tr '\n' ' ')
+fi
+
+# Validate winning env and per-repo values before the reporting joins below.
+# Settings validation alone cannot see these higher-precedence inputs.
+if [[ "$CONFIG_STATUS" == "present" ]]; then
+for rid in $ROLE_IDS; do
+  request=$(jq -nc --arg root "$SCRIPT_DIR/.." --arg settings "$CONFIG_PATH" --arg cwd "$CWD_PATH" --arg role "$rid" \
+    '{operation:"resolve",repo_root:$root,settings_path:$settings,cwd:$cwd,role:$role}')
+  resolution=$(printf '%s' "$request" | python3 "$SCRIPT_DIR/route_config.py" resolve) || true
+  if [[ $(printf '%s' "$resolution" | jq -r '.ok // false') != true ]]; then
+    code=$(printf '%s' "$resolution" | jq -r '.error.code // "invalid_route"')
+    message=$(printf '%s' "$resolution" | jq -r '.error.message // "invalid route"')
+    path=$(printf '%s' "$resolution" | jq -r '.error.path // ""')
+    if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+      jq -n --arg status invalid --arg config "$CONFIG_PATH" --arg role "$rid" --arg code "$code" --arg message "$message" --arg path "$path" \
+        '{config_status:$status,config_path:$config,role:$role,error:{code:$code,message:$message,path:$path},diagnostics_fired:1}'
+    else
+      echo "[diagnostic] invalid resolved route for $rid: $code${path:+ at $path}: $message"
+      echo "  Repair the LORE_MODEL_* or .lore.config value, or run: lore framework set-model $rid <qualified-route>"
+    fi
+    exit 3
+  fi
+done
 fi
 
 # Resolve each role via the canonical lib.sh helper. We capture both the
@@ -168,292 +211,80 @@ fi
 # the per-repo diff section can show "cwd would resolve X but user-config
 # defaults to Y".
 ROLE_RESOLUTIONS_JSON='{}'
-if [[ -n "$ROLE_IDS" ]]; then
-  ROLE_RESOLUTIONS_JSON=$(
-    LORE_LIB_DIR_FOR_PY="$SCRIPT_DIR" \
-    LORE_CONFIG_PATH_FOR_PY="$LORE_CONFIG_PATH" \
-    CONFIG_PATH_FOR_PY="$CONFIG_PATH" \
-    ACTIVE_FRAMEWORK_FOR_PY="$ACTIVE_FRAMEWORK" \
-    ROLE_IDS_FOR_PY="$ROLE_IDS" \
-    python3 - <<'PYEOF'
-import json, os, subprocess
-
-role_ids = os.environ["ROLE_IDS_FOR_PY"].split()
-lore_config = os.environ["LORE_CONFIG_PATH_FOR_PY"]
-cfg_path = os.environ["CONFIG_PATH_FOR_PY"]
-fw = os.environ["ACTIVE_FRAMEWORK_FOR_PY"]
-lib_dir = os.environ["LORE_LIB_DIR_FOR_PY"]
-out = {}
-
-for rid in role_ids:
-    entry = {"role": rid, "resolved": "", "resolved_source": "unset", "resolved_error": ""}
-    # Resolved value via lib.sh (full chain).
-    try:
-        r = subprocess.run(
-            ["bash", "-c", "source " + lib_dir + "/lib.sh && resolve_model_for_role " + rid],
-            capture_output=True, text=True, env=os.environ,
-        )
-        if r.returncode == 0:
-            entry["resolved"] = r.stdout.strip()
-        else:
-            entry["resolved_error"] = r.stderr.strip()
-    except Exception as e:
-        entry["resolved_error"] = str(e)
-
-    # Per-repo .lore.config layer: read directly so we can distinguish "cwd
-    # took it" from "user config took it" without re-running the resolver
-    # in a stripped env.
-    repo_value = ""
-    if lore_config and os.path.exists(lore_config):
-        with open(lore_config) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                key = "model_for_" + rid + "="
-                if line.startswith(key):
-                    repo_value = line[len(key):].strip()
-                    break
-    entry["per_repo"] = repo_value
-
-    # Env layer. Hyphens in class-qualified role ids map to underscores in the
-    # env-var name, matching resolve_model_for_role's derivation (scripts/lib.sh).
-    entry["env"] = os.environ.get("LORE_MODEL_" + rid.upper().replace("-", "_"), "")
-
-    # User-config layer (raw read; resolve_model_for_role handles fallback to
-    # default but we want to see explicit-vs-default for the diff section).
-    user_value = ""
-    user_default = ""
-    if os.path.exists(cfg_path):
-        try:
-            with open(cfg_path) as f:
-                cfg = json.load(f)
-            roles = ((cfg.get("harnesses") or {}).get(fw) or {}).get("roles") or {}
-            user_value = roles.get(rid, "") or ""
-            user_default = roles.get("default", "") or ""
-        except Exception:
-            pass
-    entry["user_config"] = user_value
-    entry["user_config_default"] = user_default
-
-    # Source attribution: which layer did the resolver actually use?
-    if entry["env"]:
-        entry["resolved_source"] = "env"
-    elif entry["per_repo"]:
-        entry["resolved_source"] = "per-repo"
-    elif user_value:
-        entry["resolved_source"] = "user-config"
-    elif user_default and rid != "default":
-        entry["resolved_source"] = "user-default"
-    elif user_default and rid == "default":
-        entry["resolved_source"] = "user-config"
-    elif entry["resolved"]:
-        entry["resolved_source"] = "unknown"
-    else:
-        entry["resolved_source"] = "unset"
-
-    out[rid] = entry
-
+if [[ -n "$ROLE_IDS" && "$CONFIG_STATUS" == "present" ]]; then
+  ROLE_RESOLUTIONS_JSON=$(ROLE_IDS_FOR_PY="$ROLE_IDS" CONFIG_PATH_FOR_PY="$CONFIG_PATH" SCRIPT_DIR_FOR_PY="$SCRIPT_DIR" python3 - <<'PYEOF'
+import importlib.util, json, os, pathlib
+scripts=pathlib.Path(os.environ["SCRIPT_DIR_FOR_PY"])
+spec=importlib.util.spec_from_file_location("route_config", scripts/"route_config.py")
+rc=importlib.util.module_from_spec(spec); spec.loader.exec_module(rc)
+settings=json.load(open(os.environ["CONFIG_PATH_FOR_PY"]))
+out={}
+for role in os.environ["ROLE_IDS_FOR_PY"].split():
+    route=rc.resolve_route_for_role(role,repo_root=scripts.parent,settings=settings,cwd=os.getcwd())
+    configured=rc.resolve_route_for_role(role,repo_root=scripts.parent,settings=settings,cwd=None,env={})
+    source=route["routing_source"]
+    def text(value):
+        rendered=value["framework"]+"/"+value["model"]
+        if value["options"]: rendered += " "+json.dumps(value["options"],sort_keys=True,separators=(",",":"))
+        return rendered
+    rendered=text(route)
+    configured_text=text(configured)
+    out[role]={"role":role,"resolved":rendered,"resolved_source":source["layer"],"route":route,
+               "per_repo":rendered if source["layer"]=="per-repo" else "",
+               "user_config":configured_text if configured["routing_source"]["layer"]=="routes" else "",
+               "user_config_default":configured_text if configured["routing_source"]["layer"]=="default" else "",
+               "configured_route":configured,"resolved_error":""}
 print(json.dumps(out))
 PYEOF
   )
 fi
 
 # --- Ceremony overlay resolution ----------------------------------------------
-# The [roles] block above calls resolve_model_for_role with NO ceremony
-# argument, so it renders layer 4 and below and skips layer 3
-# (harnesses.<active>.ceremony_roles.<ceremony>.<role>) entirely. That made the
-# operative binding invisible: a store with ceremony_roles.spec.lead=fable
-# rendered a clean all-opus [roles] table while every /spec lead ran on fable.
-# This block resolves the overlay through the same lib.sh helper so the binding
-# that actually applies is on screen.
-#
-# Ceremony ids come from the closed registry lib.sh validates against
-# (adapters/ceremonies.json) — never a list spelled out here, or doctor would
-# drift from the resolver the moment a ceremony is added.
-CEREMONY_IDS=""
-if [[ -f "$CEREMONIES_FILE" ]]; then
-  CEREMONY_IDS=$(jq -r '.ceremonies[].id' "$CEREMONIES_FILE" 2>/dev/null | tr '\n' ' ')
-fi
-
-# Which ceremonies carry any binding on the active harness. A ceremony with an
-# empty (or absent) map is not resolved at all: layer 3 falls through for every
-# role, so every pair is identical to its [roles] row by construction.
+# Resolve every potentially affected pair through the canonical global route
+# resolver. This preserves options and provenance and naturally covers role
+# fallback, env/per-repo shadowing, and source-independent target frameworks.
+CEREMONY_IDS="$(jq -r '.ceremonies[].id' "$CEREMONIES_FILE" 2>/dev/null | tr '\n' ' ')"
 CEREMONY_BOUND_IDS=""
+if [[ "$CONFIG_STATUS" == "present" ]]; then
+  CEREMONY_BOUND_IDS="$(jq -r '.routes.ceremony_overlays // {} | keys[]' "$CONFIG_PATH" 2>/dev/null | tr '\n' ' ')"
+fi
 CEREMONY_UNKNOWN_IDS=""
 CEREMONY_RESOLUTIONS_JSON='[]'
-if [[ -n "$CEREMONY_IDS" && -n "$ROLE_IDS" && -n "$ACTIVE_FRAMEWORK" && "$CONFIG_STATUS" == "present" && -f "$ROLES_FILE" ]]; then
-  CEREMONY_BOUND_IDS=$(jq -r --arg fw "$ACTIVE_FRAMEWORK" \
-    '(.harnesses[$fw].ceremony_roles // {}) | to_entries[] | select((.value | length) > 0) | .key' \
-    "$CONFIG_PATH" 2>/dev/null | tr '\n' ' ')
-
-  # Keys under ceremony_roles that are not in the registry. The render loop
-  # below walks the registry, so an unknown key would otherwise never appear —
-  # yet the resolver rejects it on every ceremony-scoped call, so it breaks all
-  # of them. Collected separately because no (ceremony, role) pair exists to
-  # hang it on.
-  CEREMONY_UNKNOWN_IDS=$(jq -r --arg fw "$ACTIVE_FRAMEWORK" --slurpfile C "$CEREMONIES_FILE" \
-    '($C[0].ceremonies | map(.id)) as $valid
-     | ((.harnesses[$fw].ceremony_roles // {}) | keys) - $valid | .[]' \
-    "$CONFIG_PATH" 2>/dev/null | tr '\n' ' ')
-
-  # Candidate pairs to resolve, as "<ceremony>\t<role>\t<written-or-empty>".
-  # A pair can diverge from its [roles] row only if layer 3 yields a value for
-  # it: either the role is keyed directly under the ceremony map, or the
-  # resolver's fallback_role re-resolution (layer 4b, which forwards the
-  # ceremony argument) lands on a role that is. Walking the fallback chain with
-  # `recurse` keeps that closed even if a future role declares a multi-hop
-  # chain. Pairs outside this set are provably equal to [roles], so skipping
-  # them costs no fidelity — only the resolver forks.
-  CEREMONY_PAIRS=$(jq -r \
-    --arg fw "$ACTIVE_FRAMEWORK" \
-    --slurpfile R "$ROLES_FILE" \
-    --slurpfile C "$CEREMONIES_FILE" \
-    '
-    ($R[0].roles | map({key: .id, value: (.fallback_role // null)}) | from_entries) as $fb
-    | ($R[0].roles | map(.id)) as $allroles
-    | ($C[0].ceremonies | map(.id)) as $cers
-    | (.harnesses[$fw].ceremony_roles // {}) as $cr
-    | $cers[] as $c
-    | (($cr[$c] // {}) | keys) as $bound
-    | if ($bound | length) == 0 then empty
-      else
-        $allroles[] as $r
-        | ([$r | recurse($fb[.] // empty)] | unique) as $chain
-        | if ($chain | any(. as $x | $bound | index($x))) then
-            "\($c)\t\($r)\t\((($cr[$c] // {})[$r]) // "")"
-          else empty end
-      end
-    ' "$CONFIG_PATH" 2>/dev/null || true)
-
-  if [[ -n "$CEREMONY_PAIRS" ]]; then
-    CEREMONY_ROWS=""
-    while IFS=$'\t' read -r cer rol written; do
-      [[ -n "$cer" && -n "$rol" ]] || continue
-      # Same canonical helper the [roles] block uses — with the ceremony
-      # argument, so layer 3 is actually consulted.
-      #
-      # A non-zero return is a real signal, not noise to swallow: the resolver
-      # rejects an unknown ceremony key or an unknown role key stored under
-      # ceremony_roles, and that rejection applies to EVERY ceremony-scoped
-      # resolution. The [roles] block cannot see it (layer 3 is only validated
-      # when a ceremony is passed), so without this the malformed map surfaces
-      # nowhere — or worse, an empty resolution reads as a shadowed binding.
-      cer_err=""
-      if ! cer_resolved=$(resolve_model_for_role "$rol" "$cer" 2>&1); then
-        cer_err=$(printf '%s' "$cer_resolved" | head -1)
-        cer_resolved=""
-      fi
-      CEREMONY_ROWS+="${cer}"$'\t'"${rol}"$'\t'"${written}"$'\t'"${cer_resolved}"$'\t'"${cer_err}"$'\n'
-    done <<< "$CEREMONY_PAIRS"
-
-    CEREMONY_RESOLUTIONS_JSON=$(
-      CEREMONY_ROWS_FOR_PY="$CEREMONY_ROWS" \
-      ROLE_RESOLUTIONS_JSON_FOR_PY="$ROLE_RESOLUTIONS_JSON" \
-      python3 - <<'PYEOF'
-import json, os
-
-general = json.loads(os.environ["ROLE_RESOLUTIONS_JSON_FOR_PY"])
-out = []
-for line in os.environ["CEREMONY_ROWS_FOR_PY"].split("\n"):
-    if not line.strip():
-        continue
-    parts = line.split("\t")
-    if len(parts) < 5:
-        continue
-    cer, rol, written, resolved, err = parts[0], parts[1], parts[2], parts[3], parts[4]
-    gen_entry = general.get(rol) or {}
-    gen = gen_entry.get("resolved", "")
-    out.append({
-        "ceremony": cer,
-        "role": rol,
-        "written": written,
-        "resolved": resolved,
-        "general": gen,
-        # The resolver refused this pair — a malformed ceremony_roles map.
-        # Reported on its own, never folded into differs/shadowed, because an
-        # empty resolution is not evidence about precedence.
-        "error": err,
-        # The overlay changes the operative model for this seat.
-        "differs": not err and bool(resolved) and resolved != gen,
-        # A binding is written under ceremony_roles but a higher-precedence
-        # layer (env / per-repo .lore.config) wins — the operator wrote it and
-        # it does not apply.
-        "shadowed": not err and bool(written) and resolved != written,
-    })
+if [[ -n "$CEREMONY_IDS" && -n "$ROLE_IDS" && "$CONFIG_STATUS" == "present" ]]; then
+  CEREMONY_RESOLUTIONS_JSON=$(ROLE_IDS_FOR_PY="$ROLE_IDS" CONFIG_PATH_FOR_PY="$CONFIG_PATH" SCRIPT_DIR_FOR_PY="$SCRIPT_DIR" python3 - <<'PYEOF'
+import importlib.util, json, os, pathlib
+scripts=pathlib.Path(os.environ["SCRIPT_DIR_FOR_PY"])
+spec=importlib.util.spec_from_file_location("route_config", scripts/"route_config.py")
+rc=importlib.util.module_from_spec(spec); spec.loader.exec_module(rc)
+settings=json.load(open(os.environ["CONFIG_PATH_FOR_PY"]))
+_, roles_registry, ceremonies_registry=rc.load_registries(scripts.parent)
+role_rows={row["id"]:row for row in roles_registry["roles"]}
+overlays=settings["routes"].get("ceremony_overlays", {})
+def text(route):
+    value=route["framework"]+"/"+route["model"]
+    return value + (" "+json.dumps(route["options"],sort_keys=True,separators=(",",":")) if route["options"] else "")
+out=[]
+for ceremony in [row["id"] for row in ceremonies_registry["ceremonies"] if row["id"] in overlays]:
+    direct=overlays[ceremony]
+    for role in os.environ["ROLE_IDS_FOR_PY"].split():
+        general=rc.resolve_route_for_role(role,repo_root=scripts.parent,settings=settings,cwd=os.getcwd())
+        resolved=rc.resolve_route_for_role(role,ceremony,repo_root=scripts.parent,settings=settings,cwd=os.getcwd())
+        written_route=rc.parse_route(direct[role],scripts.parent) if role in direct else None
+        differs={k:general[k] for k in ("framework","model","options")} != {k:resolved[k] for k in ("framework","model","options")}
+        if not differs and written_route is None: continue
+        shadowed=written_route is not None and resolved["routing_source"]["layer"] != "ceremony-overlay"
+        out.append({"ceremony":ceremony,"role":role,"written":text(written_route) if written_route else "",
+                    "resolved":text(resolved),"general":text(general),"route":resolved,"general_route":general,
+                    "error":"","differs":differs,"shadowed":shadowed})
 print(json.dumps(out))
 PYEOF
-    ) || CEREMONY_RESOLUTIONS_JSON='[]'
-  fi
+  )
 fi
 
 # Validate each role binding against the active harness's model_routing
 # shape. Emits one line per conflict; resolved bindings that pass validation
 # produce no row.
 ROLE_CONFLICTS_JSON='[]'
-if [[ -n "$ROLE_IDS" && -n "$ACTIVE_FRAMEWORK" ]]; then
-  ROLE_CONFLICTS_JSON=$(
-    ROLE_RESOLUTIONS_JSON_FOR_PY="$ROLE_RESOLUTIONS_JSON" \
-    CEREMONY_RESOLUTIONS_JSON_FOR_PY="$CEREMONY_RESOLUTIONS_JSON" \
-    MODEL_ROUTING_SHAPE_FOR_PY="$MODEL_ROUTING_SHAPE" \
-    ACTIVE_FRAMEWORK_FOR_PY="$ACTIVE_FRAMEWORK" \
-    python3 - <<'PYEOF'
-import json, os
-
-resolutions = json.loads(os.environ["ROLE_RESOLUTIONS_JSON_FOR_PY"])
-ceremonies = json.loads(os.environ["CEREMONY_RESOLUTIONS_JSON_FOR_PY"])
-shape = os.environ["MODEL_ROUTING_SHAPE_FOR_PY"]
-fw = os.environ["ACTIVE_FRAMEWORK_FOR_PY"]
-conflicts = []
-
-# Provider/model syntax requires multi-shape; mirrors validate_role_model_binding.
-def bad_shape(model):
-    return "/" in model and shape != "multi"
-
-for rid, entry in resolutions.items():
-    model = entry.get("resolved", "")
-    if not model:
-        # Genuinely unset roles are not a binding-conflict; the resolver's
-        # error already told the caller "no binding for role X". Doctor flags
-        # this separately under the unbound-roles diagnostic, not here.
-        continue
-    if bad_shape(model):
-        conflicts.append({
-            "role": rid,
-            "ceremony": "",
-            "model": model,
-            "source": entry.get("resolved_source"),
-            "framework": fw,
-            "shape": shape,
-            "remediation": "lore framework set-model " + rid + " <bare-model-without-provider>",
-            "reason": "provider/model syntax requires model_routing.shape=multi (active harness is " + shape + ")",
-        })
-
-# Ceremony-scoped bindings get the same shape check. Once the overlay is
-# visible it must also be validated — otherwise the conflict diagnostic keeps
-# exactly the blind spot the [roles] block just lost, and a malformed
-# ceremony binding stays invisible until a protocol session fails on it.
-for row in ceremonies:
-    model = row.get("written", "")
-    if not model or not bad_shape(model):
-        continue
-    conflicts.append({
-        "role": row.get("role", ""),
-        "ceremony": row.get("ceremony", ""),
-        "model": model,
-        "source": "ceremony",
-        "framework": fw,
-        "shape": shape,
-        # No CLI reaches the ceremony overlay — set-model writes roles.<role>
-        # only — so the remediation is the config path, not a command.
-        "remediation": "edit harnesses." + fw + ".ceremony_roles." + row.get("ceremony", "") + "." + row.get("role", "") + " to a bare model (no `lore framework set-model` equivalent exists)",
-        "reason": "provider/model syntax requires model_routing.shape=multi (active harness is " + shape + ")",
-    })
-
-print(json.dumps(conflicts))
-PYEOF
-  )
-fi
 
 # Capabilities + overrides + evidence ceiling.
 # For each capability override:
@@ -586,9 +417,8 @@ fi
 DIAG_COUNT=0
 HAS_CONFLICT=$(echo "$ROLE_CONFLICTS_JSON" | jq 'length' 2>/dev/null || echo 0)
 HAS_CEILING=$(echo "$CAPABILITY_REPORT_JSON" | jq '[.[] | select(.ceiling_violation == true)] | length' 2>/dev/null || echo 0)
-# A ceremony pair the resolver refuses means the ceremony_roles map names an
-# unknown ceremony or role. That breaks every ceremony-scoped resolution, so it
-# is a diagnostic, unlike a merely diverging binding.
+# Canonical settings validation rejects unknown ceremony and role keys before
+# this rendering pass. Resolution errors here count only defensively.
 HAS_CEREMONY_ERROR=$(echo "$CEREMONY_RESOLUTIONS_JSON" | jq '[.[] | select(.error != "")] | length' 2>/dev/null || echo 0)
 HAS_CEREMONY_UNKNOWN=$(printf '%s' "$CEREMONY_UNKNOWN_IDS" | wc -w | tr -d '[:space:]')
 DIAG_COUNT=$((HAS_CONFLICT + HAS_CEILING + HAS_CEREMONY_ERROR + HAS_CEREMONY_UNKNOWN))
@@ -843,8 +673,8 @@ if [[ -z "$CEREMONY_IDS" ]]; then
 elif [[ -z "$ACTIVE_FRAMEWORK" || "$CONFIG_STATUS" != "present" ]]; then
   echo "  (no config to inspect — see [config] above)"
 else
-  echo "  Overlay:    harnesses.$ACTIVE_FRAMEWORK.ceremony_roles.<ceremony>.<role>"
-  echo "  Precedence: env > per-repo .lore.config > CEREMONY > roles > roles.default"
+  echo "  Overlay:    routes.ceremony_overlays.<ceremony>.<role>"
+  echo "  Precedence: env > per-repo .lore.config > ceremony-overlay > routes > default"
   for bad_cer in $CEREMONY_UNKNOWN_IDS; do
     echo "  $bad_cer: UNKNOWN ceremony — not in $CEREMONIES_FILE; the resolver rejects every ceremony-scoped call while this key is present"
   done
