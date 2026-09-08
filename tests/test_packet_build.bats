@@ -7,7 +7,10 @@ setup() {
   TEST_KDIR=$(mktemp -d)
   export LORE_KNOWLEDGE_DIR="$TEST_KDIR" LORE_DATA_DIR="$TEST_KDIR/data" LORE_FRAMEWORK=codex
   unset LORE_SESSION_INSTANCE LORE_SESSION_SLUG LORE_SESSION_TYPE
-  mkdir -p "$TEST_KDIR/_work/packet-fixture" "$TEST_KDIR/conventions"
+  mkdir -p "$TEST_KDIR/_work/packet-fixture" "$TEST_KDIR/conventions" "$LORE_DATA_DIR/config"
+  # A worker request resolves its framework and model from the requesting
+  # harness's role map, so the isolated store needs a bound worker role.
+  printf '%s\n' '{"version":1,"tui_launch_framework":"codex","capability_overrides":{},"harnesses":{"codex":{"roles":{"worker":"worker-model","default":"default-model"}}}}' > "$LORE_DATA_DIR/config/settings.json"
   printf '%s\n' '{"title":"Packet fixture","status":"active"}' > "$TEST_KDIR/_work/packet-fixture/_meta.json"
   printf '%s\n' '# Widget boundary' 'The widget boundary preserves identity.' '<!-- learned: 2026-09-01 | confidence: high | scale: subsystem | status: current -->' > "$TEST_KDIR/conventions/widget.md"
   PACKET="$REPO_DIR/scripts/packet.sh"

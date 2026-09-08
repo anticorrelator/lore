@@ -89,7 +89,7 @@
 
     "role_id": {
       "type": "string",
-      "enum": ["lead", "worker", "worker-mechanical", "worker-judgment-dense", "researcher", "reviewer", "judge", "summarizer", "advisor", "default"],
+      "enum": ["lead", "worker", "worker-mechanical", "worker-judgment-dense", "researcher", "reviewer", "advisor", "default"],
       "description": "Closed role registry. MUST stay in lockstep with adapters/roles.json `roles[].id` — drift is caught by tests/frameworks/settings_schema_keyset_parity.bats. Adding a role requires updating roles.json AND this enum AND $defs/roles_map_overlay properties AND scripts/lib.sh resolve_model_for_role AND tui/internal/config/framework.go ResolveModelForRoleInCeremony AND tests/frameworks/roles.bats."
     },
 
@@ -124,8 +124,6 @@
         "worker-judgment-dense": {"$ref": "#/$defs/role_value"},
         "researcher": {"$ref": "#/$defs/role_value"},
         "reviewer":   {"$ref": "#/$defs/role_value"},
-        "judge":      {"$ref": "#/$defs/role_value"},
-        "summarizer": {"$ref": "#/$defs/role_value"},
         "advisor":    {"$ref": "#/$defs/role_value"},
         "default":    {"$ref": "#/$defs/role_value"}
       }

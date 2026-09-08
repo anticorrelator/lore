@@ -103,7 +103,7 @@ scan_prompt_scripts() {
   local root="$1"
   # Blank out `lore work search` occurrences first so a line carrying BOTH the
   # excluded work-search command and a separate unscoped `lore search` (as
-  # work-ai.sh's permitted-actions block does) is still judged on the latter.
+  # a permitted-actions block would) is still judged on the latter.
   grep -rEn 'lore (search|prefetch|query) "[^"]' "$root" 2>/dev/null \
     | sed 's/lore work search/lore_WORK_search/g' \
     | grep -E 'lore (search|prefetch|query) "[^"]' \

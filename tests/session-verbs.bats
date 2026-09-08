@@ -41,6 +41,14 @@ setup() {
   TEST_KDIR="$(mktemp -d)"
   TEST_KDIR="$(cd "$TEST_KDIR" && pwd -P)"
   mkdir -p "$TEST_KDIR/_sessions"
+  # Every request row now carries a framework and a model resolved from the
+  # requesting harness's role map, so the tests run against their own settings
+  # rather than the developer's. Roles are bound to opaque ids; the route tests
+  # below rewrite this file to exercise cross-provider values.
+  export LORE_DATA_DIR="$TEST_KDIR/data" LORE_FRAMEWORK=claude-code
+  mkdir -p "$LORE_DATA_DIR/config"
+  ln -s "$REPO_DIR/scripts" "$LORE_DATA_DIR/scripts"
+  write_settings_roles '{"lead":"lead-model","worker":"worker-model","researcher":"research-model","reviewer":"review-model","advisor":"advisor-model","default":"default-model"}'
   WATCH_CURSOR="_coordination/watch-cursor-$(bash -c 'source "$1"; watcher_identity_hash "$2" none "" lore-tui' _ "$LIB" "$TEST_KDIR")-board.json"
   # These tests run inside a live session as often as not, and --prefer-cwd now
   # reads the session identity. Clear it so each test declares its own.
@@ -62,6 +70,13 @@ teardown() {
 }
 
 # --- Fixtures --------------------------------------------------------------
+
+# Write the isolated settings.json with the given claude-code roles object body.
+write_settings_roles() {
+  cat > "$LORE_DATA_DIR/config/settings.json" <<EOF
+{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"roles":$1}}}
+EOF
+}
 
 # Wait (up to ~10s) for the first request file under _sessions/<subdir> and echo
 # its request_id. Used by the send/peek --wait tests to seed an outcome/response
@@ -362,15 +377,17 @@ journal_boundaries() {
   [ "$status" -eq 0 ]
 }
 
-@test "request omits framework when the flag is not passed" {
+@test "request resolves framework and model from the role route when the flags are not passed" {
   bash "$REQUEST" --type spec --slug wi --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
-  run jq -e 'has("framework") | not' "$pending"
+  run jq -e '.framework == "claude-code" and .model == "lead-model" and .routing_source == "role-route"' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request --framework writes the framework field" {
-  bash "$REQUEST" --type implement --slug wi --framework codex --min-vintage 2026-07-05T12:00:00Z --anywhere --kdir "$TEST_KDIR"
+  # --framework alone would be a half-override against the claude-code route;
+  # paired with --model it is a recorded override.
+  bash "$REQUEST" --type implement --slug wi --framework codex --model codex-model --min-vintage 2026-07-05T12:00:00Z --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.framework == "codex"' "$pending"
   [ "$status" -eq 0 ]
@@ -421,7 +438,7 @@ journal_boundaries() {
 @test "request --framework without --min-vintage enqueues silently" {
   local err="$TEST_KDIR/framework.err"
   local out
-  out="$(bash "$REQUEST" --type implement --slug wi --framework codex --anywhere --kdir "$TEST_KDIR" 2>"$err")"
+  out="$(bash "$REQUEST" --type implement --slug wi --framework codex --model codex-model --anywhere --kdir "$TEST_KDIR" 2>"$err")"
   [[ "$out" == *"Enqueued implement request"* ]] || return 1
   [ ! -s "$err" ] || return 1
 
@@ -3488,4 +3505,79 @@ answer_peek_observation() {
   [ "$status" -eq 0 ]
   jq -e '.action=="interrupt" and .generation!="" and .body==""' "$TEST_KDIR"/_sessions/send-requests/*.json
   [ ! -d "$TEST_KDIR/_sessions/close-requests" ]
+}
+
+# --- request: route resolution -------------------------------------------------
+# Every row carries framework + model. Absent flags resolve the request's role
+# route from the requesting harness's map; a route value like codex/<model>
+# selects the target framework; half-overrides are refused.
+
+@test "request resolves the worker route when neither --framework nor --model is given" {
+  write_settings_roles '{"worker":"codex/gpt-5.6-sol","default":"opus"}'
+  echo brief > "$TEST_KDIR/brief.md"
+  run bash "$REQUEST" --type worker --slug x--w1 --anywhere --initiator agent --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes
+  [ "$status" -eq 0 ]
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e '.framework=="codex" and .model=="gpt-5.6-sol" and .routing_source=="role-route"' "$pending"
+  [ "$status" -eq 0 ]
+  run jq -e 'select(.event=="requested") | .framework=="codex" and .model=="gpt-5.6-sol" and .routing_source=="role-route"' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "request resolves lead@ceremony for spec and implement and default for chat" {
+  write_settings_roles '{"lead":"codex/gpt-6-astra","default":"opus"}'
+  write_instance inst-a existing
+  run bash "$REQUEST" --type implement --slug wi --target inst-a --initiator agent --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run jq -e '.framework=="codex" and .model=="gpt-6-astra" and .routing_source=="role-route"' "$TEST_KDIR"/_sessions/requests/pending/*.json
+  [ "$status" -eq 0 ]
+  run bash "$REQUEST" --type chat --target inst-a --initiator agent --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run bash -c "jq -c 'select(.type==\"chat\") | [.framework,.model,.routing_source]' '$TEST_KDIR'/_sessions/requests/pending/*.json"
+  [ "$output" = '["claude-code","opus","role-route"]' ]
+}
+
+@test "request refuses --framework alone when it disagrees with the route" {
+  write_settings_roles '{"worker":"codex/gpt-5.6-sol","default":"opus"}'
+  echo brief > "$TEST_KDIR/brief.md"
+  run bash "$REQUEST" --type worker --slug x--w1 --anywhere --initiator agent --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes --framework claude-code
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"disagrees with the route"* ]]
+  [ ! -d "$TEST_KDIR/_sessions/requests/pending" ] || [ -z "$(ls -A "$TEST_KDIR/_sessions/requests/pending")" ]
+}
+
+@test "request refuses --model alone when the route targets another framework" {
+  write_settings_roles '{"worker":"codex/gpt-5.6-sol","default":"opus"}'
+  echo brief > "$TEST_KDIR/brief.md"
+  run bash "$REQUEST" --type worker --slug x--w1 --anywhere --initiator agent --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes --model opus
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--model without --framework is ambiguous"* ]]
+}
+
+@test "request accepts --framework with --model as a recorded override" {
+  write_settings_roles '{"worker":"codex/gpt-5.6-sol","default":"opus"}'
+  echo brief > "$TEST_KDIR/brief.md"
+  run bash "$REQUEST" --type worker --slug x--w1 --anywhere --initiator agent --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes --framework claude-code --model opus
+  [ "$status" -eq 0 ]
+  run jq -e '.framework=="claude-code" and .model=="opus" and .routing_source=="override"' "$TEST_KDIR"/_sessions/requests/pending/*.json
+  [ "$status" -eq 0 ]
+}
+
+@test "request honors --routing-source role-route when a caller resolved the pair itself" {
+  write_settings_roles '{"worker":"codex/gpt-5.6-sol","default":"opus"}'
+  echo brief > "$TEST_KDIR/brief.md"
+  run bash "$REQUEST" --type worker --slug x--w1 --anywhere --initiator agent --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes --framework codex --model gpt-5.6-sol --routing-source role-route
+  [ "$status" -eq 0 ]
+  run jq -e '.routing_source=="role-route"' "$TEST_KDIR"/_sessions/requests/pending/*.json
+  [ "$status" -eq 0 ]
+  run bash "$REQUEST" --type worker --slug x--w2 --anywhere --initiator agent --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes --framework codex --model gpt-5.6-sol --routing-source bogus
+  [ "$status" -ne 0 ]
+}
+
+@test "request refuses when no route resolves and no override pair is given" {
+  write_settings_roles '{"worker":"worker-model"}'
+  write_instance inst-a existing
+  run bash "$REQUEST" --type chat --target inst-a --initiator agent --kdir "$TEST_KDIR"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no route resolves for role 'default'"* ]]
 }

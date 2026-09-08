@@ -186,7 +186,10 @@ func runStartTerminal(t *testing.T, slug, projectDir string, followupMode bool) 
 	// width=80, height=24 are typical PTY defaults; the values aren't
 	// load-bearing for the args we assert.
 	identity := mustSessionWorktree(t)
-	d := SessionDescriptor{Type: SessionSpec, Slug: slug, Title: "smoke title", SkipConfirm: true, FollowupMode: followupMode, FindingIndex: -1, Worktree: &identity}
+	// Model is an explicit per-dispatch override: a launch with neither a model
+	// nor a role binding is refused (see the lead-model tests), and these smoke
+	// tests are about the rest of the composed command.
+	d := SessionDescriptor{Type: SessionSpec, Slug: slug, Title: "smoke title", Model: "smoke-model", SkipConfirm: true, FollowupMode: followupMode, FindingIndex: -1, Worktree: &identity}
 	cmd := StartTerminalCmd(d, 80, 24, projectDir, SessionEnv{}, false)
 	msg := cmd()
 	if started, ok := msg.(SessionProcessStartedMsg); ok {
@@ -233,7 +236,7 @@ func TestStartTerminalCmdPinsDirectPTYToValidatedWorktree(t *testing.T) {
 	stageFakeBinaries(t)
 	knowledgeDir := stageFakeLoreData(t, "claude-code", nil)
 	identity := mustSessionWorktree(t)
-	d := SessionDescriptor{Type: SessionSpec, Slug: "cwd-smoke", Title: "cwd smoke", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+	d := SessionDescriptor{Type: SessionSpec, Slug: "cwd-smoke", Title: "cwd smoke", Model: "smoke-model", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
 
 	msg := StartTerminalCmd(d, 80, 24, knowledgeDir, SessionEnv{}, false)()
 	started, ok := msg.(SessionProcessStartedMsg)
@@ -268,7 +271,7 @@ func TestStartTerminalCmdPinsManagedDirectPTYToExecutionDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(registry, "tree-1.json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	d := SessionDescriptor{Type: SessionWorker, Slug: "worker-1", SkipConfirm: true, FindingIndex: -1,
+	d := SessionDescriptor{Type: SessionWorker, Slug: "worker-1", Model: "smoke-model", SkipConfirm: true, FindingIndex: -1,
 		Worktree: &identity, WorktreeID: "tree-1", ExecutionDir: identity.CanonicalPath}
 	env := SessionEnv{Instance: "owner", Slug: d.Slug, Type: d.Type, WorktreeID: d.WorktreeID, ExecutionDir: d.ExecutionDir}
 	msg := StartTerminalCmd(d, 80, 24, knowledgeDir, env, false)()
@@ -334,7 +337,7 @@ func TestStartTerminalCmd_ExportsSessionIdentity(t *testing.T) {
 	dir := stageFakeLoreData(t, "claude-code", nil)
 
 	identity := mustSessionWorktree(t)
-	d := SessionDescriptor{Type: SessionSpec, Slug: "smoke-slug", Title: "smoke title", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+	d := SessionDescriptor{Type: SessionSpec, Slug: "smoke-slug", Title: "smoke title", Model: "smoke-model", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
 	cmd := StartTerminalCmd(d, 80, 24, dir,
 		SessionEnv{Instance: "amber-otter", Slug: "smoke-slug", Type: "spec"}, false)
 	msg := cmd()
@@ -573,6 +576,7 @@ func TestStartTerminalCmd_FrameworkOverrideSelectsSpawnIdentity(t *testing.T) {
 		Type:         SessionSpec,
 		Slug:         "smoke-slug",
 		Title:        "smoke title",
+		Model:        "smoke-model",
 		Framework:    "codex",
 		SkipConfirm:  true,
 		FindingIndex: -1,
@@ -661,8 +665,9 @@ func TestStartTerminalCmd_NoSessionIDWithoutBinding(t *testing.T) {
 // TestStartTerminalCmd_ComposesModelFlag asserts the lead-model override rides
 // the harness's universal `--model` flag: a descriptor carrying Model spawns with
 // `--model <id>` before the positional prompt. The second half spawns with no
-// Model against settings that bind no role, which is the unbound case —
-// nothing is composed. (The role-resolved path has its own test below.)
+// Model against settings that bind no role, which is the unbound case — the
+// launch is refused rather than composed without a model. (The role-resolved
+// path has its own test below.)
 func TestStartTerminalCmd_ComposesModelFlag(t *testing.T) {
 	stageFakeBinaries(t)
 	dir := stageFakeLoreData(t, "claude-code", nil)
@@ -682,11 +687,17 @@ func TestStartTerminalCmd_ComposesModelFlag(t *testing.T) {
 		t.Errorf("Cmd.Args missing `--model opus`: %v", started.Cmd.Args)
 	}
 
-	// Empty Model injects no flag.
-	msg2 := runStartTerminal(t, "smoke-slug", dir, false)
-	started2 := msg2.(SessionProcessStartedMsg)
-	if argsContains(started2.Cmd.Args, "--model") {
-		t.Errorf("Cmd.Args should not contain --model when Model is empty: %v", started2.Cmd.Args)
+	// Empty Model with nothing bound is refused, never launched flag-less.
+	withoutModel := SessionDescriptor{Type: SessionSpec, Slug: "smoke-slug", Title: "smoke", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+	msg2 := StartTerminalCmd(withoutModel, 80, 24, dir, SessionEnv{}, false)()
+	if started2, ok := msg2.(SessionProcessStartedMsg); ok {
+		if started2.Ptmx != nil {
+			_ = started2.Ptmx.Close()
+		}
+		t.Fatalf("empty Model with no binding launched anyway: %v", started2.Cmd.Args)
+	}
+	if _, ok := msg2.(StreamErrorMsg); !ok {
+		t.Fatalf("expected StreamErrorMsg for empty Model with no binding, got %T", msg2)
 	}
 }
 
@@ -813,47 +824,73 @@ func TestStartTerminalCmd_LeadModelResolvesPerSessionType(t *testing.T) {
 	}
 }
 
-// TestStartTerminalCmd_LeadModelUnboundComposesNoFlag asserts an unbound seat
-// composes no flag rather than an invented tier: with no roles block at all the
-// spawn falls through to the harness's own default and says so.
-func TestStartTerminalCmd_LeadModelUnboundComposesNoFlag(t *testing.T) {
+// refuseForLeadModel drives StartTerminalCmd like spawnForLeadModel but expects
+// the launch to be refused, returning the StreamErrorMsg.
+func refuseForLeadModel(t *testing.T, sessionType, model, knowledgeDir string) StreamErrorMsg {
+	t.Helper()
+	identity := mustSessionWorktree(t)
+	d := SessionDescriptor{Type: sessionType, Slug: "lead-model-slug", Title: "lead model",
+		Model: model, SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+	msg := StartTerminalCmd(d, 80, 24, knowledgeDir, SessionEnv{}, false)()
+	if started, ok := msg.(SessionProcessStartedMsg); ok {
+		if started.Ptmx != nil {
+			_ = started.Ptmx.Close()
+		}
+		t.Fatalf("expected a refusal, got a launch with args %v", started.Cmd.Args)
+	}
+	refused, ok := msg.(StreamErrorMsg)
+	if !ok {
+		t.Fatalf("expected StreamErrorMsg, got %T (%+v)", msg, msg)
+	}
+	return refused
+}
+
+// TestStartTerminalCmd_LeadModelUnboundRefuses asserts an unbound seat with no
+// per-dispatch model is refused rather than launched on the harness's personal
+// default: with no roles block at all there is no third source of a model.
+func TestStartTerminalCmd_LeadModelUnboundRefuses(t *testing.T) {
 	stageFakeBinaries(t)
 	dir := stageLeadModelSettings(t, nil, nil)
 
-	started := spawnForLeadModel(t, SessionSpec, "", dir)
-	if argsContains(started.Cmd.Args, "--model") {
-		t.Errorf("unbound lead seat composed a --model flag: %v", started.Cmd.Args)
-	}
-	if _, ok := noticeByCode(started.Notices, "lead-model-unbound"); !ok {
-		t.Errorf("Notices = %#v, want a lead-model-unbound notice", started.Notices)
+	refused := refuseForLeadModel(t, SessionSpec, "", dir)
+	if !strings.Contains(refused.Err.Error(), "no spec.lead binding") || !strings.Contains(refused.Err.Error(), "--model") {
+		t.Errorf("refusal %q should name the unbound seat and the override flags", refused.Err)
 	}
 }
 
-// TestStartTerminalCmd_LeadModelResolverErrorComposesNoFlag asserts a
-// misconfigured overlay degrades to flag-less with a distinct notice rather than
-// refusing the spawn. The trigger is an unknown role key stored under
+// TestStartTerminalCmd_LeadModelResolverErrorRefuses asserts a misconfigured
+// overlay refuses the spawn with the resolver's reason rather than launching
+// flag-less. The trigger is an unknown role key stored under
 // `harnesses.claude-code.roles`, which the resolver rejects by closed set — a
 // different failure class than "nothing bound", and one the operator must fix.
-func TestStartTerminalCmd_LeadModelResolverErrorComposesNoFlag(t *testing.T) {
+func TestStartTerminalCmd_LeadModelResolverErrorRefuses(t *testing.T) {
 	stageFakeBinaries(t)
 	dir := stageLeadModelSettings(t,
 		map[string]string{"lead": "overlay-model", "not-a-real-role": "whatever"},
 		nil,
 	)
 
-	started := spawnForLeadModel(t, SessionSpec, "", dir)
-	if argsContains(started.Cmd.Args, "--model") {
-		t.Errorf("resolver error composed a --model flag: %v", started.Cmd.Args)
+	refused := refuseForLeadModel(t, SessionSpec, "", dir)
+	if !strings.Contains(refused.Err.Error(), "not-a-real-role") {
+		t.Errorf("refusal %q does not name the offending key", refused.Err)
 	}
-	notice, ok := noticeByCode(started.Notices, "lead-model-resolve-failed")
-	if !ok {
-		t.Fatalf("Notices = %#v, want a lead-model-resolve-failed notice", started.Notices)
+	if strings.Contains(refused.Err.Error(), "no spec.lead binding") {
+		t.Errorf("a misconfiguration was reported as an unbound seat: %q", refused.Err)
 	}
-	if !strings.Contains(notice.Message, "not-a-real-role") {
-		t.Errorf("notice %q does not name the offending key", notice.Message)
-	}
-	if _, ok := noticeByCode(started.Notices, "lead-model-unbound"); ok {
-		t.Errorf("a misconfiguration was reported as an unbound seat: %#v", started.Notices)
+}
+
+// TestStartTerminalCmd_LeadModelCrossFrameworkRouteRefuses asserts a role whose
+// binding routes to another framework (`codex/<model>` on the claude-code map)
+// is refused on a claude-code claim, naming the target, instead of passing the
+// qualified string to a harness that cannot run it.
+func TestStartTerminalCmd_LeadModelCrossFrameworkRouteRefuses(t *testing.T) {
+	stageFakeBinaries(t)
+	dir := stageLeadModelSettings(t, map[string]string{"lead": "codex/gpt-6-astra"}, nil)
+
+	refused := refuseForLeadModel(t, SessionSpec, "", dir)
+	msg := refused.Err.Error()
+	if !strings.Contains(msg, "routes to codex/gpt-6-astra") || !strings.Contains(msg, "--framework codex") {
+		t.Errorf("refusal %q should name the route target and the remedy", refused.Err)
 	}
 }
 
@@ -1014,7 +1051,7 @@ func TestStartTerminalCmd_DeclaresContainmentBoundary(t *testing.T) {
 	dir := stageFakeLoreData(t, "claude-code", nil)
 
 	identity := mustSessionWorktree(t)
-	d := SessionDescriptor{Type: SessionSpec, Slug: "fence-slug", Title: "fence title", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+	d := SessionDescriptor{Type: SessionSpec, Slug: "fence-slug", Title: "fence title", Model: "smoke-model", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
 	cmd := StartTerminalCmd(d, 80, 24, dir,
 		SessionEnv{Instance: "amber-otter", Slug: "fence-slug", Type: "spec"}, false)
 	msg := cmd()

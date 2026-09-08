@@ -5,8 +5,8 @@ from pathlib import Path
 
 
 _ROLES = {
-    "worker", "researcher", "lead", "reviewer", "advisor", "judge",
-    "summarizer", "interactive", "coordinator", "classifier", "curator",
+    "worker", "researcher", "lead", "reviewer", "advisor",
+    "interactive", "coordinator", "classifier", "curator",
     "implement-lead", "spec-lead", "worker-mechanical", "worker-judgment-dense",
     "spec-researcher", "spec-worker", "implement-worker",
 }

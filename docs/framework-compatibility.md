@@ -188,9 +188,7 @@ Defined in [`adapters/roles.json`](../adapters/roles.json):
 | `lead`       | Coordinator agent that plans a work item's tasks, spawns workers, and accepts each report before dependent tasks dispatch. | `skills/spec/SKILL.md`, `skills/implement/SKILL.md`     |
 | `worker`     | Task-iterating implementation agent emitting Tier 2 evidence anchored to file:line ranges.               | `agents/worker.md`, `skills/implement`, `batch-implement` |
 | `researcher` | Task-iterating investigation agent that explores design space without modifying source files.            | `agents/researcher.md`, `skills/spec`, `batch-spec`     |
-| `reviewer`   | Single-batch evaluator that consumes a finished artifact and returns a verdict against a rubric.         | `skills/pr-review`, `generate-review-summary.sh`        |
-| `judge`      | Single-batch verdict agent that scores candidates against a closed rubric (correctness gate, batch suit.) | `judge-batch-candidates.sh`, `audit-artifact.sh`        |
-| `summarizer` | Lightweight synthesis agent that compresses transcripts, capture queues, or review threads.              | `work-ai.sh`, `extract-session-digest.py`               |
+| `reviewer`   | Single-batch evaluator that consumes a finished artifact and returns a verdict against a rubric.         | `skills/pr-review`, `audit-artifact.sh`                  |
 | `default`    | Resolution fallback consulted when a role binding is unset; never named directly by a call site.         | (fallback only)                                         |
 
 Adding a role requires updating `roles.json`, `scripts/lib.sh::resolve_model_for_role`, `tui/internal/config/config.go::ResolveModelForRole`, and `tests/frameworks/roles.bats` — the closed set keeps the schema verifiable and `lore framework status` output finite.
@@ -217,7 +215,6 @@ Multi-provider harnesses (today: OpenCode) honor per-role bindings using the `<p
     "lead":       "anthropic/opus",       // Opus for the coordinator
     "worker":     "anthropic/haiku",      // Haiku for fanout workers (cost-optimized)
     "researcher": "openai/gpt-4o",        // Cross-provider for design exploration
-    "judge":      "anthropic/sonnet",     // Sonnet for verdict rubrics
     "default":    "anthropic/sonnet"
   }
 }

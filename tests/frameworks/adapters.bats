@@ -106,7 +106,7 @@ setup() {
   unset LORE_FRAMEWORK
   # Prevent any LORE_MODEL_<ROLE> env vars from a developer shell from
   # leaking into precedence tests.
-  for r in default lead worker researcher reviewer judge summarizer; do
+  for r in default lead worker researcher reviewer advisor; do
     upper=$(echo "$r" | tr '[:lower:]' '[:upper:]')
     unset "LORE_MODEL_$upper" || true
   done
@@ -873,11 +873,11 @@ EOF
 }
 
 @test "resolve_model_for_role: roles.default is the fallback when role binding is unset" {
-  # settings.json carries harness roles.default but no entry for `judge`.
+  # settings.json carries harness roles.default but no entry for `advisor`.
   set_framework_with_roles claude-code '{"default":"user-default"}'
   local tmp_dir
   tmp_dir="$(mktemp -d)"
-  run bash -c "cd '$tmp_dir' && source '$LIB' && resolve_model_for_role judge"
+  run bash -c "cd '$tmp_dir' && source '$LIB' && resolve_model_for_role advisor"
   [ "$status" -eq 0 ]
   [ "$output" = "user-default" ]
   rm -rf "$tmp_dir"

@@ -11,8 +11,6 @@
         "worker-judgment-dense": "opus",
         "researcher": "opus",
         "reviewer": "opus",
-        "judge": "opus",
-        "summarizer": "opus",
         "advisor": "opus",
         "default": "opus"
       },
@@ -32,8 +30,6 @@
         "worker-judgment-dense": "openai/gpt-5.5",
         "researcher": "anthropic/opus",
         "reviewer": "openai/gpt-5.5",
-        "judge": "anthropic/opus",
-        "summarizer": "anthropic/opus",
         "advisor": "anthropic/opus",
         "default": "anthropic/opus"
       },
@@ -53,8 +49,6 @@
         "worker-judgment-dense": "gpt-5.5-high",
         "researcher": "gpt-5.5-high",
         "reviewer": "gpt-5.5-high",
-        "judge": "gpt-5.5-high",
-        "summarizer": "gpt-5.5-high",
         "advisor": "gpt-5.5-high",
         "default": "gpt-5.5-high"
       },

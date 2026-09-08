@@ -53,23 +53,8 @@
       "description": "Single-batch evaluator that consumes a finished artifact (PR, plan, capture) and returns a verdict against a rubric.",
       "call_sites": [
         "skills/pr-review/SKILL.md",
-        "scripts/generate-review-summary.sh"
-      ]
-    },
-    {
-      "id": "judge",
-      "description": "Single-batch verdict agent that scores candidates against a closed rubric and emits a structured pass/fail decision (correctness gate, batch suitability).",
-      "call_sites": [
-        "scripts/judge-batch-candidates.sh",
-        "scripts/audit-artifact.sh"
-      ]
-    },
-    {
-      "id": "summarizer",
-      "description": "Lightweight synthesis agent that compresses transcripts, capture queues, or review threads into thematic prose.",
-      "call_sites": [
-        "scripts/work-ai.sh",
-        "scripts/extract-session-digest.py"
+        "scripts/audit-artifact.sh",
+        "scripts/capture-quality-fixture.sh"
       ]
     },
     {

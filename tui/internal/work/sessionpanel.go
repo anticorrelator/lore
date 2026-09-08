@@ -1834,29 +1834,32 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 		if leadCeremony != "" {
 			leadSeat = leadCeremony + "." + leadRole
 		}
+		//
+		// There is no third source. A session that resolves neither is refused:
+		// launching without --model would hand the seat to whatever the harness's
+		// personal settings name, which is the inheritance this path exists to
+		// prevent. Requests written by the current session-request.sh always carry
+		// the pair, so this resolution is the safety net for older rows.
 		if d.Model != "" {
 			args = append(args, "--model", d.Model)
 			notices = append(notices, OperatorNotice{
 				Code:    "lead-model-override",
 				Message: fmt.Sprintf("lead model %s on %s (per-dispatch override)", d.Model, activeFramework),
 			})
-		} else if model, err := config.ResolveModelForRoleInCeremonyOnFramework(leadRole, leadCeremony, activeFramework); err == nil {
-			args = append(args, "--model", model)
-			sessionEnv.Model = model
+		} else if route, err := config.ResolveRouteForRoleInCeremonyOnFramework(leadRole, leadCeremony, activeFramework); err == nil {
+			if route.TargetFramework != activeFramework {
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: role %s routes to %s/%s but this session is claimed on %s; request it with --framework %s, or pass --framework and --model together to override", leadSeat, route.TargetFramework, route.NativeBinding, activeFramework, route.TargetFramework)}
+			}
+			args = append(args, "--model", route.NativeBinding)
+			sessionEnv.Model = route.NativeBinding
 			notices = append(notices, OperatorNotice{
 				Code:    "lead-model-role-resolved",
-				Message: fmt.Sprintf("lead model %s on %s (role %s)", model, activeFramework, leadSeat),
+				Message: fmt.Sprintf("lead model %s on %s (role %s)", route.NativeBinding, activeFramework, leadSeat),
 			})
 		} else if errors.Is(err, config.ErrNoModelBinding) {
-			notices = append(notices, OperatorNotice{
-				Code:    "lead-model-unbound",
-				Message: fmt.Sprintf("no %s binding on %s; lead runs on the harness default", leadSeat, activeFramework),
-			})
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: no %s binding on %s and no --model on the request; bind harnesses.%s.roles or request with --framework and --model", leadSeat, activeFramework, activeFramework)}
 		} else {
-			notices = append(notices, OperatorNotice{
-				Code:    "lead-model-resolve-failed",
-				Message: fmt.Sprintf("lead model resolution failed for %s on %s (%v); lead runs on the harness default", leadSeat, activeFramework, err),
-			})
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: lead model resolution failed for %s on %s: %w", leadSeat, activeFramework, err)}
 		}
 
 		if d.FollowupMode && slug != "" {

@@ -50,15 +50,29 @@
 #                      spec (rejected otherwise). `short` maps to the session's
 #                      short-track (/spec short); `full` is the default and stores
 #                      nothing (omit-when-empty).
-#   --model <id>       Lead-model override for the session (the top-level agent is
-#                      the session lead). Composed into the spawn as the harness's
-#                      --model flag. The id is opaque — validated only for
-#                      non-emptiness here, never against a model list (the candidate
-#                      set is coordinator policy, not schema).
+#   --model <id>       Model override for the session's top-level agent. Composed
+#                      into the spawn as the harness's --model flag. The id is
+#                      opaque — validated only for non-emptiness, never against a
+#                      model list (the candidate set is coordinator policy, not
+#                      schema). Absent, the model comes from the role route.
 #   --framework <id>   Framework override for the spawned session: claude-code |
-#                      codex | opencode. Validated against adapters/capabilities.json
-#                      and stored only when present. Pair with --min-vintage when an
-#                      old claiming TUI must not ignore this additive field.
+#                      codex | opencode. Validated against adapters/capabilities.json.
+#                      Absent, the framework comes from the role route.
+#
+#   Every enqueued row carries BOTH framework and model. When either is absent the
+#   verb resolves the request's role route through resolve_route_for_role from the
+#   requesting (source) harness's role map: spec -> lead@spec, implement ->
+#   lead@implement, worker -> the position's role (or plain worker), chat ->
+#   default. A route value such as `codex/gpt-5.6-sol` selects the target
+#   framework and its native binding. A request that can neither resolve a route
+#   nor carries both flags is refused — a session never launches on an inherited
+#   or harness-default model. Passing exactly one of the pair that disagrees with
+#   the route is refused as a half-override; pass both to override.
+#   --routing-source <override|role-route>
+#                      Provenance of the framework/model pair when a caller
+#                      resolved the route itself (lore session start). Derived
+#                      when absent: override if either flag was passed, else
+#                      role-route.
 #   --worktree-identity <json|file>
 #                      Versioned session-worktree identity to carry unchanged to
 #                      the claiming TUI. A file is read when the value names one;
@@ -159,6 +173,7 @@ MODEL=""
 MODEL_PROVIDED=0
 FRAMEWORK=""
 FRAMEWORK_PROVIDED=0
+ROUTING_SOURCE=""
 WORKTREE_IDENTITY=""
 WORKTREE_IDENTITY_PROVIDED=0
 WORKTREE_ID=""
@@ -186,6 +201,7 @@ while [[ $# -gt 0 ]]; do
     --track) TRACK="$2"; shift 2 ;;
     --model) MODEL="$2"; MODEL_PROVIDED=1; shift 2 ;;
     --framework) FRAMEWORK="$2"; FRAMEWORK_PROVIDED=1; shift 2 ;;
+    --routing-source) ROUTING_SOURCE="$2"; shift 2 ;;
     --worktree-identity) WORKTREE_IDENTITY="$2"; WORKTREE_IDENTITY_PROVIDED=1; shift 2 ;;
     --worktree-id) WORKTREE_ID="$2"; WORKTREE_ID_PROVIDED=1; shift 2 ;;
     --execution-dir) EXECUTION_DIR="$2"; shift 2 ;;
@@ -201,7 +217,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) awk 'NR > 1 { if ($0 !~ /^#/) exit; print }' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--target <name> | --prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--framework <claude-code|codex|opencode>] [--worktree-identity <json|file>] [--worktree-id <id> --execution-dir <path>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--target <name> | --prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--framework <claude-code|codex|opencode>] [--routing-source <override|role-route>] [--worktree-identity <json|file>] [--worktree-id <id> --execution-dir <path>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -703,20 +719,6 @@ if [[ $POSITION_PROVIDED -eq 1 ]]; then
       esac ;;
   esac
   [[ "$POSITION" == "worker" || -z "$POSITION_CLASS" ]] || fail "class is valid only for worker position"
-  if [[ $MODEL_PROVIDED -eq 0 ]]; then
-    # Request overrides use the same environment layer as the claiming side,
-    # including the fallback role for a class-qualified worker.
-    MODEL="$(
-      for spec in "${ROUTE_SPECS[@]+${ROUTE_SPECS[@]}}"; do
-        [[ -n "$spec" ]] || continue
-        route_env="LORE_MODEL_$(printf '%s' "${spec%%=*}" | tr '[:lower:]-' '[:upper:]_')"
-        export "$route_env=${spec#*=}"
-      done
-      export LORE_FRAMEWORK="$FRAMEWORK"
-      resolve_model_for_role "$POSITION_ROLE" "$POSITION_CEREMONY"
-    )" || fail "could not resolve position model; pass --model or configure '$POSITION_ROLE'"
-    [[ -n "$MODEL" ]] || fail "position model is unbound; pass --model"
-  fi
   EXTRA_JSON="$(printf '%s' "$EXTRA_JSON" | LORE_FRAMEWORK="$FRAMEWORK" python3 "$SCRIPT_DIR/position-bind.py" session \
     --position "$POSITION" --framework "$FRAMEWORK" --slug "$SLUG" --packet-id "$PACKET_ID" \
     --execution-root "$EXECUTION_DIR" --kdir "$KNOWLEDGE_DIR")" || fail "position preparation failed; nothing was enqueued"
@@ -728,6 +730,51 @@ if [[ $POSITION_PROVIDED -eq 0 ]] && printf '%s' "$EXTRA_JSON" | jq -e 'has("pos
   EXTRA_JSON="$(printf '%s' "$EXTRA_JSON" | python3 "$SCRIPT_DIR/position-bind.py" admit-session \
     --framework "$FRAMEWORK" --slug "$SLUG" --kdir "$KNOWLEDGE_DIR")" || fail "position preparation failed; nothing was enqueued"
 fi
+
+# --- Route resolution: every row carries framework + model -------------------
+# Resolved here, in the sole writer, so every claiming host — claude-code, codex,
+# opencode — launches the same pair and the choice sits in the row and the
+# journal. The role per request type mirrors the TUI's leadSeatForSessionType.
+# Resolution runs from the REQUESTING harness's role map (LORE_FRAMEWORK or the
+# runtime marker), because that map is where a cross-provider route such as
+# `codex/gpt-5.6-sol` is written; the route names the target.
+ROUTE_ROLE=""; ROUTE_CEREMONY=""
+case "$TYPE" in
+  spec)      ROUTE_ROLE=lead; ROUTE_CEREMONY=spec ;;
+  implement) ROUTE_ROLE=lead; ROUTE_CEREMONY=implement ;;
+  worker)    ROUTE_ROLE="${POSITION_ROLE:-worker}"; ROUTE_CEREMONY="${POSITION_CEREMONY:-}" ;;
+  chat)      ROUTE_ROLE=default ;;
+esac
+if [[ $MODEL_PROVIDED -eq 0 || $FRAMEWORK_PROVIDED -eq 0 ]]; then
+  SOURCE_FRAMEWORK="$(resolve_active_framework 2>/dev/null || true)"
+  ROUTE_JSON="$(
+    for spec in "${ROUTE_SPECS[@]+${ROUTE_SPECS[@]}}"; do
+      [[ -n "$spec" ]] || continue
+      route_env="LORE_MODEL_$(printf '%s' "${spec%%=*}" | tr '[:lower:]-' '[:upper:]_')"
+      export "$route_env=${spec#*=}"
+    done
+    resolve_route_for_role "$ROUTE_ROLE" ${ROUTE_CEREMONY:+"$ROUTE_CEREMONY"}
+  )" || fail "no route resolves for role '$ROUTE_ROLE'${ROUTE_CEREMONY:+ in ceremony '$ROUTE_CEREMONY'} on $SOURCE_FRAMEWORK; bind it under harnesses.$SOURCE_FRAMEWORK.roles or pass --framework and --model together"
+  ROUTE_TARGET="$(printf '%s' "$ROUTE_JSON" | jq -r '.target_framework // empty')"
+  ROUTE_NATIVE="$(printf '%s' "$ROUTE_JSON" | jq -r '.native_binding // empty')"
+  [[ -n "$ROUTE_TARGET" && -n "$ROUTE_NATIVE" ]] || fail "route for role '$ROUTE_ROLE' resolved without a target framework or native model ($ROUTE_JSON)"
+  if [[ $FRAMEWORK_PROVIDED -eq 1 && $MODEL_PROVIDED -eq 0 && "$FRAMEWORK" != "$ROUTE_TARGET" ]]; then
+    fail "--framework $FRAMEWORK disagrees with the route for role '$ROUTE_ROLE' ($ROUTE_TARGET/$ROUTE_NATIVE); pass --model with it to override the route, or drop --framework"
+  fi
+  if [[ $MODEL_PROVIDED -eq 1 && $FRAMEWORK_PROVIDED -eq 0 && "$ROUTE_TARGET" != "$SOURCE_FRAMEWORK" ]]; then
+    fail "--model without --framework is ambiguous: the route for role '$ROUTE_ROLE' targets $ROUTE_TARGET, not $SOURCE_FRAMEWORK; pass --framework with the model"
+  fi
+  [[ $MODEL_PROVIDED -eq 1 ]] || MODEL="$ROUTE_NATIVE"
+  if [[ $FRAMEWORK_PROVIDED -eq 0 ]]; then
+    FRAMEWORK="$ROUTE_TARGET"
+    FRAMEWORK_JSON="$(jq -n --arg fw "$FRAMEWORK" '$fw')"
+  fi
+fi
+case "$ROUTING_SOURCE" in
+  "") if [[ $MODEL_PROVIDED -eq 1 || $FRAMEWORK_PROVIDED -eq 1 ]]; then ROUTING_SOURCE=override; else ROUTING_SOURCE=role-route; fi ;;
+  override|role-route) ;;
+  *) fail "invalid --routing-source: '$ROUTING_SOURCE' (must be override or role-route)" ;;
+esac
 
 PENDING_DIR="$KNOWLEDGE_DIR/_sessions/requests/pending"
 mkdir -p "$PENDING_DIR"
@@ -800,6 +847,9 @@ fi
 if [[ -n "$FRAMEWORK_JSON" ]]; then
   ROW="$(printf '%s' "$ROW" | jq -c --argjson fw "$FRAMEWORK_JSON" '. + {framework: $fw}')"
 fi
+# routing_source records whether the pair above came from the role route or from
+# explicit flags, so a reader can tell a resolved default from a typed override.
+ROW="$(printf '%s' "$ROW" | jq -c --arg rs "$ROUTING_SOURCE" '. + {routing_source: $rs}')"
 
 # worktree_identity follows omit-when-empty for rolling schema compatibility.
 # When present, preserve the whole versioned identity object byte-for-byte in
@@ -885,9 +935,13 @@ EVENT_ROW="$(jq -n \
   --arg required_ref "$REQUIRED_TARGET_REF" \
   --arg prefer_dir "$PREFER_RESOLVED" \
   --arg min_vintage "${MIN_VINTAGE_RESOLVED:-}" \
+  --arg framework "$FRAMEWORK" \
+  --arg model "$MODEL" \
+  --arg routing_source "$ROUTING_SOURCE" \
   '{event: "requested", request_id: $request_id, session_type: $session_type, initiator: $initiator,
     requested_by: $requested_by, placement_stance: $placement_stance,
-    worktree_identity_declared: $identity_declared}
+    worktree_identity_declared: $identity_declared,
+    framework: $framework, model: $model, routing_source: $routing_source}
    + (if $slug != null then {slug: $slug} else {} end)
    + (if $target != null then {target_instance: $target} else {} end)
    + (if $required_dir != "" then {required_project_dir: $required_dir} else {} end)

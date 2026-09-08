@@ -52,8 +52,8 @@
 #      Without a working headless surface and without
 #      `--gate-output-file`, the script fails with exit 1 (or a clear
 #      error from `headless_runner_invoke`) and refuses to proceed.
-#      The model is resolved from role `judge` via
-#      `resolve_model_for_role` — `--model <name>` overrides for one
+#      The model is resolved from role `reviewer` (see
+#      resolve_judge_model) — `--model <name>` overrides for one
 #      invocation. The agent template is resolved via
 #      `resolve_agent_template <name>` rather than hardcoding
 #      `~/.claude/agents/<name>.md`.
@@ -81,7 +81,7 @@ KIND_FLAG=""
 ID_FLAG=""
 WORK_ITEM_FLAG=""
 # JUDGE_MODEL stays empty until after arg parsing; resolution from the
-# `judge` role runs after we know whether all three judges might be
+# `reviewer` role runs after we know whether all three judges might be
 # spawned via the headless runner. The --model flag (added in T38) lets
 # the operator override the role binding for one invocation.
 JUDGE_MODEL=""
@@ -547,7 +547,7 @@ Options:
                              judge 1. When absent, behavior is unchanged.
                              Superseded for the per-kind dispatch path by
                              --kind/--id; retained for legacy callers.
-  --model <model>            Override resolve_model_for_role judge for this
+  --model <model>            Override the reviewer-role model for this
                              invocation. All three judges share the same model
                              unless they are injected via the --*-output-file
                              flags above. When absent and no role binding is
@@ -697,8 +697,32 @@ fi
 # inject pre-computed outputs, the resolved JUDGE_MODEL is unused — the
 # script does not error, since the test-injection path bypasses the
 # runner entirely.
+# resolve_judge_model — the three judges run as role `reviewer` (a single-batch
+# evaluator returning a verdict against a rubric, which is that role's
+# definition). headless_runner_invoke is harness-native: it runs `claude -p` or
+# `codex exec` on the ACTIVE framework, so a reviewer route that targets another
+# framework (e.g. `codex/gpt-6-astra` while active on claude-code) cannot be
+# followed from here. In that case the native catch, role `default`, supplies
+# the model — the same rule the settings encode for other harness-native spawns.
+# Retired when routes carry a per-harness native_models map
+# ([[work:routes-table-launch-path-route-options]]).
+resolve_judge_model() {
+  local active route target native
+  active=$(resolve_active_framework 2>/dev/null) || return 1
+  if route=$(resolve_route_for_role reviewer 2>/dev/null) && [[ -n "$route" ]]; then
+    target=$(printf '%s' "$route" | jq -r '.target_framework // empty' 2>/dev/null)
+    native=$(printf '%s' "$route" | jq -r '.native_binding // empty' 2>/dev/null)
+    if [[ -n "$native" && "$target" == "$active" ]]; then
+      printf '%s\n' "$native"
+      return 0
+    fi
+    echo "[audit] reviewer routes to ${target:-?}; the headless runner is native to $active — judges run on role 'default'" >&2
+  fi
+  resolve_model_for_role default
+}
+
 if [[ -z "$JUDGE_MODEL" ]] && [[ -z "$GATE_OUTPUT_FILE" || -z "$CURATOR_OUTPUT_FILE" || -z "$REVERSE_AUDITOR_OUTPUT_FILE" ]]; then
-  if ! JUDGE_MODEL=$(resolve_model_for_role judge 2>/dev/null) || [[ -z "$JUDGE_MODEL" ]]; then
+  if ! JUDGE_MODEL=$(resolve_judge_model 2>/dev/null) || [[ -z "$JUDGE_MODEL" ]]; then
     # Soft-fail: only error if the judge actually needs to run. The
     # gate/curator/reverse-auditor blocks below check JUDGE_MODEL
     # before invoking the runner; when all three are injected via
@@ -1480,17 +1504,17 @@ else
   # Mode 2: headless_runner direct invocation (T38 — formerly hardcoded
   # `claude -p`). Routed through the active harness's headless_runner
   # capability so codex/opencode-targeted runs honor capability
-  # degradation. JUDGE_MODEL is supplied via resolve_model_for_role
-  # judge unless the operator overrode with --model.
+  # degradation. JUDGE_MODEL is supplied via resolve_judge_model
+  # (role reviewer, native fallback default) unless --model overrode it.
   if [[ -z "$JUDGE_MODEL" ]]; then
     # No role binding AND no --gate-output-file means the operator
     # has not chosen either integration mode. Name both so the error
     # is actionable: pass --gate-output-file (orchestrator/test
     # injection), or set a model binding so the headless runner
     # (today: `claude` on PATH) can spawn the correctness-gate judge.
-    echo "[audit] Error: no model binding for role 'judge' and no --gate-output-file supplied." >&2
+    echo "[audit] Error: no model binding for role 'reviewer' (or 'default') and no --gate-output-file supplied." >&2
     echo "[audit]   Either pass --gate-output-file <path> (orchestrator-injected judge output)," >&2
-    echo "[audit]   or set harnesses.<active>.roles.judge in ~/.lore/config/settings.json (or pass --model <model>)" >&2
+    echo "[audit]   or set harnesses.<active>.roles.reviewer (or .default) in ~/.lore/config/settings.json (or pass --model <model>)" >&2
     echo "[audit]   to use the \`claude\` headless runner direct-invocation fallback." >&2
     exit 1
   fi
@@ -1874,7 +1898,7 @@ if [[ "$N_VERIFIED_COUNT" -gt 0 ]]; then
       echo "[audit] curator: reading pre-computed output from $CURATOR_OUTPUT_FILE" >&2
     else
       if [[ -z "$JUDGE_MODEL" ]]; then
-        echo "[audit] warning: neither --curator-output-file nor 'judge' role binding available — skipping curator stage" >&2
+        echo "[audit] warning: neither --curator-output-file nor 'reviewer' role binding available — skipping curator stage" >&2
       else
         CURATOR_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-curator-output.XXXXXX")
         CURATOR_RAW_FILE="$CURATOR_RAW_TMP"
@@ -2156,7 +2180,7 @@ if [[ "$CURATOR_STAGE_RAN" -eq 1 && "$N_SELECTED" -gt 0 ]]; then
       echo "[audit] reverse-auditor: reading pre-computed output from $REVERSE_AUDITOR_OUTPUT_FILE" >&2
     else
       if [[ -z "$JUDGE_MODEL" ]]; then
-        echo "[audit] warning: neither --reverse-auditor-output-file nor 'judge' role binding available — skipping reverse-auditor stage" >&2
+        echo "[audit] warning: neither --reverse-auditor-output-file nor 'reviewer' role binding available — skipping reverse-auditor stage" >&2
       else
         REVERSE_AUDITOR_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-output.XXXXXX")
         REVERSE_AUDITOR_RAW_FILE="$REVERSE_AUDITOR_RAW_TMP"

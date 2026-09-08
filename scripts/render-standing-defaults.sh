@@ -40,6 +40,36 @@ else
   echo "-- Settings: no settings file at $SETTINGS_FILE (or jq unavailable) --"
 fi
 
+# Effective routing: one line per registry role, resolved from this process's
+# active framework the way a session request or a dispatch would resolve it
+# (env → repo → ceremony overlay → roles → fallback role → default), with a
+# `codex/<model>` value shown as the target framework it selects. This is the
+# surface a seat reads before dispatching; the flattened settings above are the
+# inputs, this is the answer.
+echo ""
+ACTIVE_FW="$(resolve_active_framework 2>/dev/null || true)"
+echo "-- Effective routing on ${ACTIVE_FW:-<unknown framework>} (role -> framework/model; sessions resolve this when no --framework/--model is passed) --"
+ROLES_FILE="$SCRIPT_DIR/../adapters/roles.json"
+if [[ -n "$ACTIVE_FW" && -f "$ROLES_FILE" ]] && command -v jq &>/dev/null; then
+  while IFS= read -r role; do
+    if route="$(resolve_route_for_role "$role" 2>/dev/null)" && [[ -n "$route" ]]; then
+      printf -- '- %s -> %s\n' "$role" "$(printf '%s' "$route" | jq -r '.target_framework + "/" + .native_binding')"
+    else
+      printf -- '- %s -> (unbound: a session for this role is refused until harnesses.%s.roles.%s is set)\n' "$role" "$ACTIVE_FW" "$role"
+    fi
+  done < <(jq -r '.roles[].id' "$ROLES_FILE")
+  for ceremony in $(jq -r '.ceremonies[].id' "$SCRIPT_DIR/../adapters/ceremonies.json" 2>/dev/null); do
+    while IFS= read -r role; do
+      [[ -n "$role" ]] || continue
+      if route="$(resolve_route_for_role "$role" "$ceremony" 2>/dev/null)" && [[ -n "$route" ]]; then
+        printf -- '- %s@%s -> %s (ceremony overlay)\n' "$role" "$ceremony" "$(printf '%s' "$route" | jq -r '.target_framework + "/" + .native_binding')"
+      fi
+    done < <(jq -r --arg fw "$ACTIVE_FW" --arg c "$ceremony" '.harnesses[$fw].ceremony_roles[$c] // {} | keys[]' "$SETTINGS_FILE" 2>/dev/null)
+  done
+else
+  echo "(routing not renderable: active framework or adapters/roles.json unavailable)"
+fi
+
 echo ""
 echo "-- Preference directives in force (titles; retrieve full text via lore search) --"
 

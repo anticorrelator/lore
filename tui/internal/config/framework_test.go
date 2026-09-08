@@ -733,15 +733,12 @@ func TestResolveModelForRole_FromUserConfig(t *testing.T) {
 		"worker":     "sonnet",
 		"researcher": "sonnet",
 		"reviewer":   "sonnet",
-		"judge":      "haiku",
-		"summarizer": "sonnet",
 	})
 	cases := []struct {
 		role string
 		want string
 	}{
 		{"lead", "opus"},
-		{"judge", "haiku"},
 		{"worker", "sonnet"},
 		{"default", "sonnet"},
 	}

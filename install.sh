@@ -688,7 +688,7 @@ if framework == "claude-code":
 elif framework == "codex":
     default_roles = {r["id"]: "gpt-5.5-high" for r in roles_data["roles"]}
 else:
-    reasoning_roles = {"lead", "researcher", "judge", "summarizer", "advisor", "default"}
+    reasoning_roles = {"lead", "researcher", "advisor", "default"}
     default_roles = {
         r["id"]: ("anthropic/opus" if r["id"] in reasoning_roles else "openai/gpt-5.5")
         for r in roles_data["roles"]

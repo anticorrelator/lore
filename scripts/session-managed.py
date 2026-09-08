@@ -347,6 +347,7 @@ def enqueue_start(kdir, manifest):
             atomic(path, manifest)
             run(['bash', SCRIPTS / 'session-request.sh', '--type', 'worker', '--slug', manifest['handle'],
                  '--target', status['instance_name'], '--framework', manifest['framework'], '--model', manifest['model'],
+                 '--routing-source', manifest.get('routing_source') or 'override',
                  '--context', context_path, '--initiator', 'agent', '--auto-close', 'true', '--yes', '--kdir', kdir,
                  '--request-id', rid, '--host-key', key, '--json',
                  *(['--packet', manifest['packet']] if manifest.get('packet') else [])], cwd=source)
@@ -370,7 +371,24 @@ def start(args, kdir):
     context = Path(args.context).read_bytes().decode('utf-8')
     if '\x00' in context:
         raise RuntimeError('context must not contain NUL bytes')
-    intent = dict(work_item=args.handle, source_dir=source, framework=args.framework, model=args.model, context=context, packet=getattr(args, 'packet', None))
+    # Every start carries a framework and a model. Absent both, the worker
+    # route resolves them from the requesting harness's role map (a value such
+    # as `codex/gpt-5.6-sol` names the target framework and its native model);
+    # passing exactly one is a half-override and is refused, because a session
+    # must never inherit the other half from whoever happens to launch it.
+    framework, model, routing_source = args.framework, args.model, 'override'
+    if not framework and not model:
+        route = subprocess.run(['bash', '-c', 'source "$1/lib.sh" && resolve_route_for_role worker', 'route', str(SCRIPTS)],
+                               capture_output=True, text=True, cwd=source)
+        if route.returncode or not route.stdout.strip():
+            raise RuntimeError('no route resolves for role worker; bind harnesses.<framework>.roles.worker or pass --framework and --model together'
+                               + (': ' + route.stderr.strip() if route.stderr.strip() else ''))
+        resolved = json.loads(route.stdout)
+        framework, model, routing_source = resolved['target_framework'], resolved['native_binding'], 'role-route'
+    elif not framework or not model:
+        raise RuntimeError('--framework and --model are a pair: pass both to override the worker route, or neither to resolve it')
+    intent = dict(work_item=args.handle, source_dir=source, framework=framework, model=model, routing_source=routing_source,
+                  context=context, packet=getattr(args, 'packet', None))
     key = hashlib.sha256((str(kdir) + '\0' + source).encode()).hexdigest()[:24]
     with lock(kdir / '_sessions/managed.lock'):
         index_path = kdir / '_sessions/start-keys.json'
@@ -655,8 +673,8 @@ def main(argv=None):
     if args.self:
         args.handle = os.environ.get('LORE_SESSION_SLUG')
     if args.verb == 'start':
-        if not all([args.handle, args.framework, args.model, args.context]):
-            parser.error('start requires work item, --framework, --model, and --context FILE')
+        if not all([args.handle, args.context]):
+            parser.error('start requires work item and --context FILE (--framework/--model resolve from the worker route when omitted)')
         result = start(args, kdir)
     else:
         if not args.handle:

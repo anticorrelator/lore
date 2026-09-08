@@ -71,8 +71,7 @@ setup() {
   # Clear any LORE_MODEL_<ROLE> overrides leaking in from the parent shell —
   # tests assert the settings.json harness roles map is the resolution source.
   unset LORE_MODEL_LEAD LORE_MODEL_WORKER LORE_MODEL_RESEARCHER \
-        LORE_MODEL_REVIEWER LORE_MODEL_JUDGE LORE_MODEL_SUMMARIZER \
-        LORE_MODEL_DEFAULT
+        LORE_MODEL_REVIEWER LORE_MODEL_ADVISOR LORE_MODEL_DEFAULT
 }
 
 teardown() {

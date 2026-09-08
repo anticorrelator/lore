@@ -1353,17 +1353,39 @@ func ResolveRouteForRoleInCeremony(role, ceremony string) (ModelRoute, error) {
 	return resolveModelRoute(role, binding)
 }
 
+// ResolveRouteForRoleInCeremonyOnFramework resolves the role's binding against
+// the named framework's role map — the framework claiming a session, not the
+// process's own — and interprets a registered framework qualifier the same way
+// ResolveRouteForRoleInCeremony does. A launch path uses it to learn whether the
+// binding it resolved is native to the harness it is about to start
+// (TargetFramework == framework) or routes the seat somewhere else.
+func ResolveRouteForRoleInCeremonyOnFramework(role, ceremony, framework string) (ModelRoute, error) {
+	binding, err := ResolveModelForRoleInCeremonyOnFramework(role, ceremony, framework)
+	if err != nil {
+		return ModelRoute{}, err
+	}
+	return resolveModelRouteFrom(role, binding, framework)
+}
+
 func resolveModelRoute(role, binding string) (ModelRoute, error) {
+	source, err := ResolveActiveFramework()
+	if err != nil {
+		return ModelRoute{}, err
+	}
+	return resolveModelRouteFrom(role, binding, source)
+}
+
+// resolveModelRouteFrom interprets binding as a route whose source is the given
+// framework. The qualifier and shape rules are unchanged from resolveModelRoute.
+func resolveModelRouteFrom(role, binding, source string) (ModelRoute, error) {
 	if role == "" {
 		return ModelRoute{}, fmt.Errorf("resolve_route_for_role requires a role name")
 	}
 	if binding == "" {
 		return ModelRoute{}, fmt.Errorf("role %q has empty model binding", role)
 	}
-
-	source, err := ResolveActiveFramework()
-	if err != nil {
-		return ModelRoute{}, err
+	if source == "" {
+		return ModelRoute{}, fmt.Errorf("resolve_route_for_role requires a source framework")
 	}
 	caps, err := loadCapabilitiesFile()
 	if err != nil {

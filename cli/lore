@@ -176,7 +176,6 @@ Subcommands:
   check        Check off a plan task
   relate       Add or remove related work item links
   heal         Detect and fix work structure issues
-  ai           Create work items from a natural-language prompt (headless Claude)
   cache-branch Cache or retrieve the active branch for a work item
   project      Project verbs: show, describe, archive (see: lore work project --help)
 
@@ -281,7 +280,6 @@ Subcommands:
   unarchive    Restore an archived follow-up to the active set
   delete       Permanently delete a follow-up
   post-review  Post a proposed review comment to GitHub
-  summarize    Generate a thematic summary of selected review comments
 
 Options:
   --help, -h    Show this help
@@ -2013,9 +2011,6 @@ cmd_work() {
     relate)
       exec "$SCRIPTS_DIR/relate-work.sh" "$@"
       ;;
-    ai)
-      exec "$SCRIPTS_DIR/work-ai.sh" "$@"
-      ;;
     cache-branch)
       exec "$SCRIPTS_DIR/cache-branch.sh" "$@"
       ;;
@@ -2106,9 +2101,6 @@ cmd_followup() {
       ;;
     post-review)
       exec "$SCRIPTS_DIR/post-proposed-review.sh" "$@"
-      ;;
-    summarize)
-      exec "$SCRIPTS_DIR/generate-review-summary.sh" "$@"
       ;;
     *)
       echo "Error: unknown followup subcommand '$subcmd'" >&2
