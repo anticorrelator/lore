@@ -740,8 +740,6 @@ def exercise_recipes(repo, root, source):
     entry = root / "lead-entry.md"
     entry.write_text("Lead-invoked skill: fixture validation\nDomain: recipe behavior\nSkill template-version: " + v["LEAD_TEMPLATE_VERSION"] + "\n")
     run("lead-log", ENTRY_FILE=entry, TEMPLATE_VERSION=v["LEAD_TEMPLATE_VERSION"])
-    run("followup-divergence", "unconvincing divergence creates nonblocking followup", TASK_SUBJECT="Observe history 2",
-        CONTENT="The report needs a clearer explanation of the retained naming convention.")
     note.write_text("Accept task-2 after reading its durable inline report and actual command result.\n")
     run("work-note", "inline acceptance before progress", NOTE_FILE=note)
     subject2 = json.loads((item / "tasks.json").read_text())["tasks"][1]["subject"]

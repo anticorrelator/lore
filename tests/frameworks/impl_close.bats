@@ -5,7 +5,7 @@
 #   - --verdict and --summary are required; verdict enum-validated
 #   - per-verdict field contract (--divergence, --residue-title/--residue-anchor)
 #   - REMAINING_COUNT precondition: unchecked plan.md tasks refuse the close
-#     (no closure block, not archived, followup filed)
+#     (no closure block, not archived)
 #   - --check-task reconciles plan.md before the precondition is evaluated
 #   - full close: closure block written (sole-writer schema), archive verified,
 #     retro-bundle.json written, execution-log entry with source impl-verb,
@@ -14,7 +14,7 @@
 #     notes.md appended, divergence banner, exit 3
 #   - none close: no child, parent held open, exit 3
 #   - legacy items: full archives without a closure block; partial/none refused
-#   - blocker entries in execution-log.md create a followup on a clean close
+#   - blocker entries survive in retro-bundle.json without creating followups
 #   - tri-state reference resolution passthrough; --json output shape
 #
 # All tests use an isolated knowledge directory via LORE_KNOWLEDGE_DIR.
@@ -156,13 +156,6 @@ json_payload() {
   [ "$(closure_of "$WORK_DIR/anchored-open/_meta.json")" = "null" ]
   [ -d "$WORK_DIR/anchored-open" ]
   [ ! -d "$WORK_DIR/_archive/anchored-open" ]
-}
-
-@test "refused close files a Deferred work followup" {
-  run bash "$LORE_CLI" impl close anchored-open --verdict full --summary "done"
-  [ "$status" -eq 1 ]
-  [ -d "$TEST_KDIR/_followups/deferred-work-anchored-open" ]
-  grep -q "Build Y" "$TEST_KDIR/_followups/deferred-work-anchored-open/finding.md"
 }
 
 @test "--check-task reconciles plan.md before the precondition" {
@@ -454,24 +447,19 @@ PYEOF
   echo "$output" | grep -q "no intent_anchor"
 }
 
-# --- Blocker followup on a clean close ----------------------------------------------
+# --- Blocker preservation on a clean close -----------------------------------------
 
-@test "blockers in execution-log.md create a followup and render in the Done report" {
+@test "non-none blockers are preserved without creating followups" {
   printf 'Report body\n**Blockers:** flaky CI runner blocked task 4\n' \
     | bash "$REPO_DIR/scripts/write-execution-log.sh" --slug anchored-done --source implement-lead >/dev/null
   run bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done"
   [ "$status" -eq 0 ]
-  [ -d "$TEST_KDIR/_followups/deferred-work-anchored-done" ]
-  grep -q "flaky CI runner" "$TEST_KDIR/_followups/deferred-work-anchored-done/finding.md"
-  echo "$output" | grep -q "Followup: Deferred work: Anchored Done"
-}
-
-@test "Blockers: none does not create a followup" {
-  printf 'Report body\n**Blockers:** none\n' \
-    | bash "$REPO_DIR/scripts/write-execution-log.sh" --slug anchored-done --source implement-lead >/dev/null
-  run bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done"
-  [ "$status" -eq 0 ]
-  [ ! -d "$TEST_KDIR/_followups/deferred-work-anchored-done" ]
+  [ ! -d "$TEST_KDIR/_followups" ]
+  python3 - "$WORK_DIR/_archive/anchored-done/retro-bundle.json" <<'PYEOF'
+import json, sys
+bundle = json.load(open(sys.argv[1]))
+assert bundle["blockers"] == ["flaky CI runner blocked task 4"]
+PYEOF
 }
 
 # --- Reference resolution and archived refusal ---------------------------------------

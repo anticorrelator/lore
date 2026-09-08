@@ -18,8 +18,8 @@
 #   none         R            R                    -
 #
 # Sequence: reconcile plan.md checkboxes from --check-task subjects, heal the
-# work structure, hard-block while unchecked tasks remain (mechanical-followup
-# gate fires, then refuse), create the partial-residue child, write the
+# work structure, hard-block while unchecked tasks remain, create the
+# partial-residue child, write the
 # `closure` block on _meta.json (this script is its sole sanctioned writer),
 # write retro-bundle.json, append one execution-log entry (source: impl-verb),
 # run the closure-validity gate (legacy/full -> archive and verify the move;
@@ -39,8 +39,8 @@
 # whose write sequence ran to a terminal verdict, so it emits the close-request.
 #
 # Every write composes the file's sanctioned writer: update-plan-checkbox.sh,
-# create-work.sh, create-followup.sh, write-execution-log.sh, archive-work.sh,
-# scorecard-append.sh. The one write owned here is the `closure` block.
+# create-work.sh, write-execution-log.sh, archive-work.sh, scorecard-append.sh.
+# The one write owned here is the `closure` block.
 #
 # Legacy items (no intent_anchor) accept only --verdict full: no closure block
 # is written and the item archives; partial/none are anchor-relative verdicts
@@ -365,7 +365,7 @@ fi
 bash "$SCRIPT_DIR/heal-work.sh" >/dev/null 2>&1 \
   || echo "[impl] Warning: heal-work.sh reported issues; close continues." >&2
 
-# --- Blocker scan (mechanical-followup gate, signal 2) -----------------------
+# --- Blocker scan (preserved in retro-bundle.json) ---------------------------
 BLOCKERS=""
 if [[ -f "$LOG_FILE" ]]; then
   BLOCKERS=$(python3 - "$LOG_FILE" <<'PYEOF'
@@ -395,50 +395,19 @@ if [[ -f "$PLAN_FILE" ]]; then
 fi
 TASKS_TOTAL=$((TASKS_COMPLETED + REMAINING_COUNT))
 
-create_followup() {
-  # $1: one-line summary; $2: checklist body (may be empty)
-  local content="$1"
-  if [[ -n "$2" ]]; then
-    content=$(printf '%s\n\n%s' "$1" "$2")
-  fi
-  bash "$SCRIPT_DIR/create-followup.sh" \
-    --title "Deferred work: $TITLE" \
-    --source "implement" \
-    --attachments "[{\"type\":\"work_item\",\"slug\":\"$SLUG\"}]" \
-    --suggested-actions '[{"type":"create_work_item"}]' \
-    --template-version "$TEMPLATE_VERSION" \
-    --content "$content" >/dev/null
-}
-
-FOLLOWUP_TITLE=""
 if [[ "$REMAINING_COUNT" -gt 0 ]]; then
-  # Run order is load-bearing: with tasks remaining, the mechanical gate fires
-  # and the close stops — no verdict is recorded, no closure block is written.
-  BODY="Close refused with $REMAINING_COUNT task(s) unchecked in plan.md."
-  CHECKLIST="$UNCHECKED_LIST"
-  if [[ -n "$BLOCKERS" ]]; then
-    CHECKLIST=$(printf '%s\n\nBlockers reported in execution-log.md:\n%s' "$UNCHECKED_LIST" "$BLOCKERS")
-  fi
-  create_followup "$BODY" "$CHECKLIST" \
-    || echo "[impl] Warning: mechanical-followup creation failed." >&2
+  # Run order is load-bearing: with tasks remaining, the close stops — no
+  # verdict is recorded and no closure block is written.
   {
     echo "[impl] Error: cannot close '$SLUG' — $REMAINING_COUNT task(s) still unchecked in plan.md:"
     printf '%s\n' "$UNCHECKED_LIST" | sed 's/^/[impl]   /'
-    echo "[impl] No closure verdict recorded; work item NOT archived. A 'Deferred work' followup was filed."
+    echo "[impl] No closure verdict recorded; work item NOT archived."
     echo "[impl] Complete or re-plan the remaining tasks (pass --check-task for tasks finished this run), then re-run close."
   } >&2
   if [[ $JSON_MODE -eq 1 ]]; then
     printf '{"error": "close refused: %s task(s) unchecked in plan.md", "slug": "%s"}\n' "$REMAINING_COUNT" "$SLUG"
   fi
   exit 1
-fi
-
-if [[ -n "$BLOCKERS" ]]; then
-  if create_followup "Tasks complete but execution-log.md carries unresolved Blockers entries." "$BLOCKERS"; then
-    FOLLOWUP_TITLE="Deferred work: $TITLE"
-  else
-    echo "[impl] Warning: mechanical-followup creation failed." >&2
-  fi
 fi
 
 # --- Partial residue: create the child BEFORE writing the parent's closure ---
@@ -577,13 +546,11 @@ json_string() {
 
 DIVERGENCE_JSON="None"
 RESIDUE_LINE="None"
-FOLLOWUP_LINE="None"
 [[ -n "$DIVERGENCE" ]] && DIVERGENCE_JSON=$(json_string "$DIVERGENCE")
 [[ -n "$CHILD_SLUG" ]] && RESIDUE_LINE="$CHILD_SLUG"
-[[ -n "$FOLLOWUP_TITLE" ]] && FOLLOWUP_LINE=$(json_string "$FOLLOWUP_TITLE")
 
-BODY=$(printf 'Closure verdict: %s\nCapability loop summary: %s\nDivergence summary: %s\nResidue followup: %s\nMechanical followup: %s' \
-  "$VERDICT" "$(json_string "$SUMMARY")" "$DIVERGENCE_JSON" "$RESIDUE_LINE" "$FOLLOWUP_LINE")
+BODY=$(printf 'Closure verdict: %s\nCapability loop summary: %s\nDivergence summary: %s\nResidue followup: %s' \
+  "$VERDICT" "$(json_string "$SUMMARY")" "$DIVERGENCE_JSON" "$RESIDUE_LINE")
 
 if ! printf '%s\n' "$BODY" | bash "$SCRIPT_DIR/write-execution-log.sh" \
     --slug "$SLUG" --source impl-verb --template-version "$TEMPLATE_VERSION" >/dev/null; then
@@ -1046,9 +1013,6 @@ fi
 CLOSURE_FLAGS=(--tasks-completed "$TASKS_COMPLETED" --tasks-total "$TASKS_TOTAL"
                --tier2-count "$TIER2_COUNT"
                --tier3-accepted "$TIER3_ACCEPTED" --tier3-rejected "$TIER3_REJECTED")
-if [[ -n "$FOLLOWUP_TITLE" ]]; then
-  CLOSURE_FLAGS+=(--followup "$FOLLOWUP_TITLE")
-fi
 
 set +e
 REPORT_OUTPUT=$(bash "$SCRIPT_DIR/implement-closure-report.sh" --slug "$SLUG" "${CLOSURE_FLAGS[@]}")
@@ -1058,17 +1022,16 @@ set -e
 if [[ $JSON_MODE -eq 1 ]]; then
   _LORE_REPORT="$REPORT_OUTPUT" python3 -c '
 import json, os, sys
-slug, verdict, archived, child, followup, rc = sys.argv[1:7]
+slug, verdict, archived, child, rc = sys.argv[1:6]
 print(json.dumps({
     "slug": slug,
     "verdict": verdict,
     "archived": archived == "true",
     "residue_followup": child or None,
-    "mechanical_followup": followup or None,
     "report_exit": int(rc),
     "report": os.environ.get("_LORE_REPORT", ""),
 }, ensure_ascii=False))
-' "$SLUG" "$VERDICT" "$WAS_ARCHIVED" "$CHILD_SLUG" "$FOLLOWUP_TITLE" "$REPORT_RC"
+' "$SLUG" "$VERDICT" "$WAS_ARCHIVED" "$CHILD_SLUG" "$REPORT_RC"
   exit "$REPORT_RC"
 fi
 
