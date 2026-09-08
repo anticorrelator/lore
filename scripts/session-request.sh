@@ -36,9 +36,12 @@
 #                      as {"dispatch_guidance": <text>}. For --type worker this verb
 #                      renders the canonical guidance block itself and prepends it to
 #                      the brief, so nothing upstream has to remember to.
-#   --route role=model Per-dispatch routing override (repeatable). The claiming TUI
-#                      exports it as LORE_MODEL_<ROLE> into the spawned session, riding
-#                      the resolver's top-precedence env layer. role MUST be in the
+#   --route role=framework/model Per-dispatch child routing override (repeatable).
+#   --session-route <route> Freeze the top-level session route as qualified shorthand,
+#                      a flat route object, or a canonical route envelope. A canonical
+#                      envelope retains its routing_source for managed retries.
+#                      Child overrides are exported as LORE_MODEL_<ROLE> by the host,
+#                      riding the resolver's top-precedence env layer. role MUST be in the
 #                      adapters/roles.json closed set (unknown roles are refused).
 #   --min-vintage <v>  Minimum build vintage the claiming instance must meet: a
 #                      request never targets an instance whose build is older. Value
@@ -59,15 +62,15 @@
 #                      codex | opencode. Validated against adapters/capabilities.json.
 #                      Absent, the framework comes from the role route.
 #
-#   Every enqueued row carries BOTH framework and model. When either is absent the
+#   Every enqueued row carries a canonical route plus framework/model projections.
 #   verb resolves the request's role route through resolve_route_for_role from the
-#   requesting (source) harness's role map: spec -> lead@spec, implement ->
+#   global route table: spec -> lead@spec, implement ->
 #   lead@implement, worker -> the position's role (or plain worker), chat ->
 #   default. A route value such as `codex/gpt-5.6-sol` selects the target
 #   framework and its native binding. A request that can neither resolve a route
 #   nor carries both flags is refused — a session never launches on an inherited
-#   or harness-default model. Passing exactly one of the pair that disagrees with
-#   the route is refused as a half-override; pass both to override.
+#   or harness-default model. The compatibility framework/model flags form one
+#   complete override and conflict with --session-route.
 #   --routing-source <override|role-route>
 #                      Provenance of the framework/model pair when a caller
 #                      resolved the route itself (lore session start). Derived
@@ -167,6 +170,8 @@ JSON_MODE=0
 MANAGED_REQUEST_ID=""
 HOST_KEY=""
 ROUTE_SPECS=()
+SESSION_ROUTE=""
+SESSION_ROUTE_PROVIDED=0
 MIN_VINTAGE=""
 TRACK=""
 MODEL=""
@@ -197,6 +202,7 @@ while [[ $# -gt 0 ]]; do
     --packet) PACKET_ID="$2"; shift 2 ;;
     --position) POSITION="$2"; POSITION_PROVIDED=1; shift 2 ;;
     --route) ROUTE_SPECS+=("$2"); shift 2 ;;
+    --session-route) SESSION_ROUTE="$2"; SESSION_ROUTE_PROVIDED=1; shift 2 ;;
     --min-vintage) MIN_VINTAGE="$2"; shift 2 ;;
     --track) TRACK="$2"; shift 2 ;;
     --model) MODEL="$2"; MODEL_PROVIDED=1; shift 2 ;;
@@ -217,7 +223,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) awk 'NR > 1 { if ($0 !~ /^#/) exit; print }' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--target <name> | --prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--framework <claude-code|codex|opencode>] [--routing-source <override|role-route>] [--worktree-identity <json|file>] [--worktree-id <id> --execution-dir <path>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--target <name> | --prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=framework/model>]... [--session-route <qualified-route|object>] [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id> --framework <claude-code|codex|opencode>] [--routing-source <override|role-route>] [--worktree-identity <json|file>] [--worktree-id <id> --execution-dir <path>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -286,13 +292,123 @@ case "$TYPE" in
   *) fail "invalid --type: '$TYPE' (must be one of spec, implement, chat, worker)" ;;
 esac
 
+# --- Freeze the session route before any position admission -----------------
+ROUTE_ROLE=""; ROUTE_CEREMONY=""
+if [[ $POSITION_PROVIDED -eq 1 ]]; then
+  POSITION_INPUT="$CONTEXT"
+  [[ -f "$CONTEXT" ]] && POSITION_INPUT="$(cat "$CONTEXT")"
+  printf '%s' "$POSITION_INPUT" | jq -e 'type == "object" and (.bindings | type == "object")' >/dev/null 2>&1 \
+    || fail "--position requires JSON context.bindings"
+  POSITION_MODE="$(printf '%s' "$POSITION_INPUT" | jq -r '.bindings.mode // empty')"
+  POSITION_CLASS="$(printf '%s' "$POSITION_INPUT" | jq -r '.class // empty')"
+  POSITION_CEREMONY="$(printf '%s' "$POSITION_INPUT" | jq -r '.ceremony // empty')"
+  case "$POSITION" in
+    investigator) POSITION_ROLE=researcher ;;
+    designer)
+      case "$POSITION_MODE" in
+        planning) POSITION_ROLE=lead ;;
+        consultation) POSITION_ROLE=advisor ;;
+        *) fail "designer requires explicit planning or consultation mode" ;;
+      esac ;;
+    reviewer) POSITION_ROLE=reviewer ;;
+    worker)
+      case "$POSITION_CLASS" in
+        "") POSITION_ROLE=worker ;;
+        mechanical|judgment-dense) POSITION_ROLE="worker-$POSITION_CLASS" ;;
+        *) fail "invalid worker class: '$POSITION_CLASS'" ;;
+      esac ;;
+  esac
+  [[ "$POSITION" == "worker" || -z "$POSITION_CLASS" ]] || fail "class is valid only for worker position"
+elif [[ "$TYPE" == "worker" && -n "$CONTEXT" ]]; then
+  POSITION_INPUT="$CONTEXT"
+  [[ -f "$CONTEXT" ]] && POSITION_INPUT="$(cat "$CONTEXT")"
+  if printf '%s' "$POSITION_INPUT" | jq -e 'type == "object" and (.position_preparation | type == "object")' >/dev/null 2>&1; then
+    PREPARED_POSITION="$(printf '%s' "$POSITION_INPUT" | jq -r '.position_preparation.position // empty')"
+    POSITION_MODE="$(printf '%s' "$POSITION_INPUT" | jq -r '.position_preparation.bindings.mode // empty')"
+    case "$PREPARED_POSITION" in
+      investigator) POSITION_ROLE=researcher ;;
+      designer)
+        case "$POSITION_MODE" in
+          planning) POSITION_ROLE=lead ;;
+          consultation) POSITION_ROLE=advisor ;;
+          *) fail "prepared designer requires explicit planning or consultation mode" ;;
+        esac ;;
+      reviewer) POSITION_ROLE=reviewer ;;
+      worker) POSITION_ROLE=worker ;;
+      *) fail "position preparation has an invalid position" ;;
+    esac
+  fi
+fi
+case "$TYPE" in
+  spec)      ROUTE_ROLE=lead; ROUTE_CEREMONY=spec ;;
+  implement) ROUTE_ROLE=lead; ROUTE_CEREMONY=implement ;;
+  worker)    ROUTE_ROLE="${POSITION_ROLE:-worker}"; ROUTE_CEREMONY="${POSITION_CEREMONY:-}" ;;
+  chat)      ROUTE_ROLE=default ;;
+esac
+
+if [[ $MODEL_PROVIDED -ne $FRAMEWORK_PROVIDED ]]; then
+  fail "--framework and --model must be supplied together"
+fi
+if [[ $SESSION_ROUTE_PROVIDED -eq 1 && $MODEL_PROVIDED -eq 1 ]]; then
+  fail "--session-route conflicts with --framework/--model; pass one complete override"
+fi
+
+route_request() {
+  local operation="$1" value="${2:-}" source="${3:-}"
+  python3 - "$operation" "$SCRIPT_DIR/.." "${LORE_DATA_DIR:-$HOME/.lore}/config/settings.json" "$PWD" \
+    "$ROUTE_ROLE" "$ROUTE_CEREMONY" "$value" "$source" <<'PY'
+import json, sys
+op, root, settings, cwd, role, ceremony, value, source = sys.argv[1:]
+payload = {"operation": op, "repo_root": root, "settings_path": settings,
+           "cwd": cwd, "role": role}
+if ceremony:
+    payload["ceremony"] = ceremony
+if value:
+    try: payload["route" if op == "parse" else "override"] = json.loads(value)
+    except json.JSONDecodeError: payload["route" if op == "parse" else "override"] = value
+if source:
+    payload["routing_source"] = {"layer": source, "role": role, **({"ceremony": ceremony} if ceremony else {})}
+json.dump(payload, sys.stdout)
+PY
+}
+
+if [[ $SESSION_ROUTE_PROVIDED -eq 1 ]]; then
+  SESSION_ROUTE_SOURCE=override
+  if printf '%s' "$SESSION_ROUTE" | jq -e 'type == "object" and has("routing_source")' >/dev/null 2>&1; then
+    SESSION_ROUTE_SOURCE=""
+  fi
+  ROUTE_JSON="$(route_request parse "$SESSION_ROUTE" "$SESSION_ROUTE_SOURCE" | python3 "$SCRIPT_DIR/route_config.py" | jq -ce 'if .ok then .result else error(.error.message) end')" \
+    || fail "invalid --session-route"
+elif [[ $MODEL_PROVIDED -eq 1 ]]; then
+  ROUTE_JSON="$(route_request parse "$FRAMEWORK/$MODEL" override | python3 "$SCRIPT_DIR/route_config.py" | jq -ce 'if .ok then .result else error(.error.message) end')" \
+    || fail "invalid --framework/--model route override"
+else
+  ROUTE_JSON="$(
+    for spec in "${ROUTE_SPECS[@]+${ROUTE_SPECS[@]}}"; do
+      [[ -n "$spec" ]] || continue
+      route_env="LORE_MODEL_$(printf '%s' "${spec%%=*}" | tr '[:lower:]-' '[:upper:]_')"
+      export "$route_env=${spec#*=}"
+    done
+    resolve_route_for_role "$ROUTE_ROLE" ${ROUTE_CEREMONY:+"$ROUTE_CEREMONY"}
+  )" || fail "no route resolves for role '$ROUTE_ROLE'${ROUTE_CEREMONY:+ in ceremony '$ROUTE_CEREMONY'}"
+fi
+FRAMEWORK="$(printf '%s' "$ROUTE_JSON" | jq -r '.framework')"
+MODEL="$(printf '%s' "$ROUTE_JSON" | jq -r '.model')"
+FRAMEWORK_JSON="$(jq -n --arg fw "$FRAMEWORK" '$fw')"
+ROUTE_SOURCE_LAYER="$(printf '%s' "$ROUTE_JSON" | jq -r '.routing_source.layer')"
+case "$ROUTE_SOURCE_LAYER" in override) ROUTING_SOURCE_EXPECTED=override ;; *) ROUTING_SOURCE_EXPECTED=role-route ;; esac
+case "$ROUTING_SOURCE" in
+  "") ROUTING_SOURCE="$ROUTING_SOURCE_EXPECTED" ;;
+  override|role-route) [[ "$ROUTING_SOURCE" == "$ROUTING_SOURCE_EXPECTED" ]] || fail "--routing-source contradicts the frozen route provenance" ;;
+  *) fail "invalid --routing-source: '$ROUTING_SOURCE' (must be override or role-route)" ;;
+esac
+
 if [[ $POSITION_PROVIDED -eq 1 ]]; then
   [[ "$TYPE" == "worker" ]] || fail "--position requires --type worker"
   case "$POSITION" in
     investigator|designer|worker|reviewer) ;;
     *) fail "invalid --position: '$POSITION'" ;;
   esac
-  [[ $FRAMEWORK_PROVIDED -eq 1 ]] || fail "--position requires explicit --framework"
   [[ -n "$PACKET_ID" ]] || fail "--position requires --packet"
 fi
 
@@ -366,7 +482,7 @@ fi
 # framework is an optional closed-set override for the claiming TUI's launch
 # framework. Validate from the existing adapter capability registry at write time
 # so stale/invalid request rows never enter the queue.
-FRAMEWORK_JSON=""
+FRAMEWORK_JSON="${FRAMEWORK_JSON:-}"
 if [[ $FRAMEWORK_PROVIDED -eq 1 ]]; then
   [[ -n "$FRAMEWORK" ]] || fail "empty --framework (a framework id is required when --framework is given)"
   CAPABILITIES_FILE="$LORE_LIB_DIR/../adapters/capabilities.json"
@@ -431,7 +547,7 @@ fi
 # with --argjson so the Go decoder reads a real JSON boolean.
 SKIP_CONFIRM_JSON="$SKIP_CONFIRM"
 
-# routing_overrides is a role→model object built from repeatable --route flags.
+# routing_overrides is a role→qualified-route object built from repeatable --route flags.
 # Each role MUST be in the adapters/roles.json closed set — the same rejection
 # the resolver applies (resolve_model_for_role), enforced here at write time so a
 # reader never re-validates. The registry must exist to enforce the closed set:
@@ -443,14 +559,17 @@ if [[ ${#ROUTE_SPECS[@]} -gt 0 ]]; then
   [[ -f "$ROLES_FILE" ]] || fail "role registry not found at: $ROLES_FILE (cannot validate --route roles)"
   ROUTING_JSON="{}"
   for spec in "${ROUTE_SPECS[@]}"; do
-    [[ "$spec" == *=* ]] || fail "invalid --route: '$spec' (expected role=model)"
+    [[ "$spec" == *=* ]] || fail "invalid --route: '$spec' (expected role=framework/model)"
     route_role="${spec%%=*}"
     route_model="${spec#*=}"
     [[ -n "$route_role" ]] || fail "invalid --route: '$spec' (empty role)"
-    [[ -n "$route_model" ]] || fail "invalid --route: '$spec' (empty model)"
+    [[ -n "$route_model" ]] || fail "invalid --route: '$spec' (empty route)"
     if ! jq -e --arg r "$route_role" '.roles[] | select(.id == $r)' "$ROLES_FILE" >/dev/null 2>&1; then
       fail "unknown role '$route_role' in --route (not in $ROLES_FILE)"
     fi
+    parse_result="$(jq -cn --arg root "$SCRIPT_DIR/.." --arg route "$route_model" \
+      '{operation:"parse",repo_root:$root,route:$route}' | python3 "$SCRIPT_DIR/route_config.py")" || \
+      fail "invalid --route for role '$route_role': $route_model"
     ROUTING_JSON="$(printf '%s' "$ROUTING_JSON" | jq -c --arg r "$route_role" --arg m "$route_model" '. + {($r): $m}')"
   done
 fi
@@ -735,46 +854,7 @@ fi
 # Resolved here, in the sole writer, so every claiming host — claude-code, codex,
 # opencode — launches the same pair and the choice sits in the row and the
 # journal. The role per request type mirrors the TUI's leadSeatForSessionType.
-# Resolution runs from the REQUESTING harness's role map (LORE_FRAMEWORK or the
-# runtime marker), because that map is where a cross-provider route such as
-# `codex/gpt-5.6-sol` is written; the route names the target.
-ROUTE_ROLE=""; ROUTE_CEREMONY=""
-case "$TYPE" in
-  spec)      ROUTE_ROLE=lead; ROUTE_CEREMONY=spec ;;
-  implement) ROUTE_ROLE=lead; ROUTE_CEREMONY=implement ;;
-  worker)    ROUTE_ROLE="${POSITION_ROLE:-worker}"; ROUTE_CEREMONY="${POSITION_CEREMONY:-}" ;;
-  chat)      ROUTE_ROLE=default ;;
-esac
-if [[ $MODEL_PROVIDED -eq 0 || $FRAMEWORK_PROVIDED -eq 0 ]]; then
-  SOURCE_FRAMEWORK="$(resolve_active_framework 2>/dev/null || true)"
-  ROUTE_JSON="$(
-    for spec in "${ROUTE_SPECS[@]+${ROUTE_SPECS[@]}}"; do
-      [[ -n "$spec" ]] || continue
-      route_env="LORE_MODEL_$(printf '%s' "${spec%%=*}" | tr '[:lower:]-' '[:upper:]_')"
-      export "$route_env=${spec#*=}"
-    done
-    resolve_route_for_role "$ROUTE_ROLE" ${ROUTE_CEREMONY:+"$ROUTE_CEREMONY"}
-  )" || fail "no route resolves for role '$ROUTE_ROLE'${ROUTE_CEREMONY:+ in ceremony '$ROUTE_CEREMONY'} on $SOURCE_FRAMEWORK; bind it under harnesses.$SOURCE_FRAMEWORK.roles or pass --framework and --model together"
-  ROUTE_TARGET="$(printf '%s' "$ROUTE_JSON" | jq -r '.target_framework // empty')"
-  ROUTE_NATIVE="$(printf '%s' "$ROUTE_JSON" | jq -r '.native_binding // empty')"
-  [[ -n "$ROUTE_TARGET" && -n "$ROUTE_NATIVE" ]] || fail "route for role '$ROUTE_ROLE' resolved without a target framework or native model ($ROUTE_JSON)"
-  if [[ $FRAMEWORK_PROVIDED -eq 1 && $MODEL_PROVIDED -eq 0 && "$FRAMEWORK" != "$ROUTE_TARGET" ]]; then
-    fail "--framework $FRAMEWORK disagrees with the route for role '$ROUTE_ROLE' ($ROUTE_TARGET/$ROUTE_NATIVE); pass --model with it to override the route, or drop --framework"
-  fi
-  if [[ $MODEL_PROVIDED -eq 1 && $FRAMEWORK_PROVIDED -eq 0 && "$ROUTE_TARGET" != "$SOURCE_FRAMEWORK" ]]; then
-    fail "--model without --framework is ambiguous: the route for role '$ROUTE_ROLE' targets $ROUTE_TARGET, not $SOURCE_FRAMEWORK; pass --framework with the model"
-  fi
-  [[ $MODEL_PROVIDED -eq 1 ]] || MODEL="$ROUTE_NATIVE"
-  if [[ $FRAMEWORK_PROVIDED -eq 0 ]]; then
-    FRAMEWORK="$ROUTE_TARGET"
-    FRAMEWORK_JSON="$(jq -n --arg fw "$FRAMEWORK" '$fw')"
-  fi
-fi
-case "$ROUTING_SOURCE" in
-  "") if [[ $MODEL_PROVIDED -eq 1 || $FRAMEWORK_PROVIDED -eq 1 ]]; then ROUTING_SOURCE=override; else ROUTING_SOURCE=role-route; fi ;;
-  override|role-route) ;;
-  *) fail "invalid --routing-source: '$ROUTING_SOURCE' (must be override or role-route)" ;;
-esac
+# The route was resolved above before position preparation and is frozen here.
 
 PENDING_DIR="$KNOWLEDGE_DIR/_sessions/requests/pending"
 mkdir -p "$PENDING_DIR"
@@ -850,6 +930,9 @@ fi
 # routing_source records whether the pair above came from the role route or from
 # explicit flags, so a reader can tell a resolved default from a typed override.
 ROW="$(printf '%s' "$ROW" | jq -c --arg rs "$ROUTING_SOURCE" '. + {routing_source: $rs}')"
+# The canonical route is the authority; framework/model/routing_source above are
+# compatibility projections and must describe these same bytes.
+ROW="$(printf '%s' "$ROW" | jq -c --argjson route "$ROUTE_JSON" '. + {route: $route}')"
 
 # worktree_identity follows omit-when-empty for rolling schema compatibility.
 # When present, preserve the whole versioned identity object byte-for-byte in
@@ -938,10 +1021,11 @@ EVENT_ROW="$(jq -n \
   --arg framework "$FRAMEWORK" \
   --arg model "$MODEL" \
   --arg routing_source "$ROUTING_SOURCE" \
+  --argjson route "$ROUTE_JSON" \
   '{event: "requested", request_id: $request_id, session_type: $session_type, initiator: $initiator,
     requested_by: $requested_by, placement_stance: $placement_stance,
     worktree_identity_declared: $identity_declared,
-    framework: $framework, model: $model, routing_source: $routing_source}
+    framework: $framework, model: $model, routing_source: $routing_source, route: $route}
    + (if $slug != null then {slug: $slug} else {} end)
    + (if $target != null then {target_instance: $target} else {} end)
    + (if $required_dir != "" then {required_project_dir: $required_dir} else {} end)

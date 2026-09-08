@@ -37,28 +37,28 @@ source "$SCRIPT_DIR/lib.sh"
 
 usage() {
   cat >&2 <<EOF
-framework-set-model.sh — mutate the persisted role->model map
+framework-set-model.sh — mutate the persisted global route map
 
 Usage:
-  lore framework set-model   <role> <model> [--json] [--dry-run]
+  lore framework set-model   <role> <qualified-route|object> [--effort <v>] [--service-tier <v>] [--json] [--dry-run]
   lore framework unset-model <role>         [--json] [--dry-run]
 
 Subcommands:
-  set-model     Bind <role> to <model> in settings.json harnesses.<active>.roles.<role>
+  set-model     Bind <role> in settings.json routes.<role>
   unset-model   Remove that role key (resolution falls through to
-                harnesses.<active>.roles.default per resolve_model_for_role precedence)
+                the registry fallback role and then routes.default)
 
 Options:
   --json        Emit a machine-readable JSON confirmation to stdout
   --dry-run     Print the planned mutation without writing settings.json
+  --effort      Add an effort option when the supplied route does not contain one
+  --service-tier Add a service tier when the supplied route does not contain one
   --help, -h    Show this help
 
 Validation:
   Role MUST appear in adapters/roles.json's closed set. set-model also
-  validates the model against the active harness's model_routing.shape:
-  provider/model syntax (slash separator) requires shape=multi; single-shape
-  harnesses (claude-code, codex) reject cross-provider bindings with the
-  same remediation language as 'lore framework doctor'.
+  validates the complete candidate settings document through the canonical
+  route parser before taking the existing settings mutation lock.
 
 Exit codes:
   0  success (mutation written, dry-run printed, or unset no-op)
@@ -78,6 +78,8 @@ ROLE=""
 MODEL=""
 JSON_OUTPUT=0
 DRY_RUN=0
+EFFORT=""
+SERVICE_TIER=""
 
 case "$1" in
   --help|-h)
@@ -114,6 +116,12 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=1
       shift
       ;;
+    --effort)
+      [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { echo "Error: --effort requires a non-empty value" >&2; exit 1; }
+      EFFORT="$2"; shift 2 ;;
+    --service-tier)
+      [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { echo "Error: --service-tier requires a non-empty value" >&2; exit 1; }
+      SERVICE_TIER="$2"; shift 2 ;;
     --*)
       echo "Error: unknown flag '$1'" >&2
       echo "" >&2
@@ -205,19 +213,7 @@ if ! jq -e . "$CONFIG_PATH" &>/dev/null; then
   exit 2
 fi
 
-ACTIVE_FRAMEWORK=$(resolve_active_framework 2>/dev/null || true)
-if [[ -z "$ACTIVE_FRAMEWORK" ]]; then
-  msg="process framework could not be resolved; set LORE_FRAMEWORK to a registered harness"
-  if [[ "$JSON_OUTPUT" -eq 1 ]]; then
-    emit_json "$SUBCOMMAND" "$ROLE" "$MODEL" "config-malformed" "$msg"
-  else
-    echo "Error: $msg" >&2
-    echo "" >&2
-    echo "[remediation] Run: bash install.sh --framework <name>" >&2
-  fi
-  exit 2
-fi
-ROLE_PATH="harnesses.$ACTIVE_FRAMEWORK.roles.$ROLE"
+ROLE_PATH="routes.$ROLE"
 
 # --- Validate role against the closed registry ------------------------------
 # Done here (rather than relying solely on validate_role_model_binding) so the
@@ -243,15 +239,51 @@ if [[ "$SUBCOMMAND" == "set-model" ]]; then
   # it so the JSON branch can fold it into the message. The shape mismatch
   # error there mirrors the doctor remediation hint: provider/model syntax
   # requires shape=multi.
+  route_err=""
+  ROUTE_RESULT=$(python3 - "$SCRIPT_DIR" "$MODEL" "$EFFORT" "$SERVICE_TIER" <<'PY'
+import importlib.util, json, sys
+from pathlib import Path
+scripts, raw, effort, tier = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("route_config", Path(scripts) / "route_config.py")
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+try:
+    try: supplied = json.loads(raw)
+    except json.JSONDecodeError: supplied = raw
+    parsed = mod.parse_route(supplied, str(Path(scripts).parent))
+    options = dict(parsed["options"])
+    if effort and "effort" in options:
+        raise mod.RouteConfigError("duplicate_option", "--effort duplicates the supplied route option", "effort")
+    if tier and "service_tier" in options:
+        raise mod.RouteConfigError("duplicate_option", "--service-tier duplicates the supplied route option", "service_tier")
+    if effort: options["effort"] = effort
+    if tier: options["service_tier"] = tier
+    candidate = {"framework": parsed["framework"], "model": parsed["model"], **options}
+    # Re-parse after overlay so capability-declared values remain authoritative.
+    mod.parse_route(candidate, str(Path(scripts).parent))
+    print(json.dumps({"ok": True, "route": candidate}, separators=(",", ":"), sort_keys=True))
+except mod.RouteConfigError as exc:
+    print(json.dumps({"ok": False, "error": exc.message}, separators=(",", ":"), sort_keys=True))
+PY
+  )
+  if [[ "$(printf '%s' "$ROUTE_RESULT" | jq -r '.ok')" != true ]]; then
+    route_err=$(printf '%s' "$ROUTE_RESULT" | jq -r '.error')
+    if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+      emit_json "set-model" "$ROLE" "$MODEL" "binding-conflict" "$route_err"
+    else
+      echo "Error: $route_err" >&2
+    fi
+    exit 3
+  fi
+  ROUTE_CANON=$(printf '%s' "$ROUTE_RESULT" | jq -c '.route')
+  MODEL="$ROUTE_CANON"
+  CANDIDATE=$(jq -c --argjson route "$MODEL" --arg role "$ROLE" '.routes[$role]=$route' "$CONFIG_PATH")
   bind_err=""
-  if ! bind_err=$(validate_role_model_binding "$ROLE" "$MODEL" 2>&1 >/dev/null); then
-    # Build the same remediation language used by framework-doctor.sh's
-    # role-conflict diagnostic so a user copying the hint from doctor sees
-    # consistent language here. The doctor remediation is:
-    #   "lore framework set-model <role> <bare-model-without-provider>"
-    active=$(resolve_active_framework 2>/dev/null || echo "<unknown>")
-    shape=$(framework_model_routing_shape 2>/dev/null || echo "single")
-    remediation="lore framework set-model $ROLE <bare-model-without-provider>"
+  VALIDATION=$(printf '%s' "$CANDIDATE" | python3 -c 'import json,sys; print(json.dumps({"operation":"validate-settings","repo_root":sys.argv[1],"settings":json.load(sys.stdin)}))' "$SCRIPT_DIR/.." | python3 "$SCRIPT_DIR/route_config.py" || true)
+  if [[ "$(printf '%s' "$VALIDATION" | jq -r '.ok')" != true ]]; then
+    bind_err=$(printf '%s' "$VALIDATION" | jq -r '.error.message')
+    active="global"
+    shape="qualified"
+    remediation="lore framework set-model $ROLE <framework/model>"
     if [[ "$JSON_OUTPUT" -eq 1 ]]; then
       python3 - "$ROLE" "$MODEL" "$active" "$shape" "$bind_err" "$remediation" "$CONFIG_PATH" <<'PYEOF'
 import json, sys
@@ -287,7 +319,21 @@ fi
 existing_raw=$(LORE_DATA_DIR="$DATA_DIR" bash "$SETTINGS_SH" get "$ROLE_PATH" 2>/dev/null || true)
 existing=""
 if [[ -n "$existing_raw" ]]; then
-  existing=$(printf '%s' "$existing_raw" | jq -r '. // empty' 2>/dev/null || true)
+  existing=$(printf '%s' "$existing_raw" | jq -c '. // empty' 2>/dev/null || true)
+fi
+
+if [[ "$SUBCOMMAND" == "unset-model" && -n "$existing" ]]; then
+  CANDIDATE=$(jq -c --arg role "$ROLE" 'del(.routes[$role])' "$CONFIG_PATH")
+  VALIDATION=$(printf '%s' "$CANDIDATE" | python3 -c 'import json,sys; print(json.dumps({"operation":"validate-settings","repo_root":sys.argv[1],"settings":json.load(sys.stdin)}))' "$SCRIPT_DIR/.." | python3 "$SCRIPT_DIR/route_config.py" || true)
+  if [[ "$(printf '%s' "$VALIDATION" | jq -r '.ok')" != true ]]; then
+    msg="unsetting $ROLE would make the routing configuration invalid: $(printf '%s' "$VALIDATION" | jq -r '.error.message')"
+    if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+      emit_json "unset-model" "$ROLE" "" "binding-conflict" "$msg"
+    else
+      echo "Error: $msg" >&2
+    fi
+    exit 3
+  fi
 fi
 
 case "$SUBCOMMAND" in
@@ -336,7 +382,7 @@ fi
 # --- Atomic write -----------------------------------------------------------
 case "$SUBCOMMAND" in
   set-model)
-    LORE_DATA_DIR="$DATA_DIR" bash "$SETTINGS_SH" patch "$ROLE_PATH" "$(jq -cn --arg v "$MODEL" '$v')"
+    LORE_DATA_DIR="$DATA_DIR" bash "$SETTINGS_SH" patch "$ROLE_PATH" "$MODEL"
     ;;
   unset-model)
     LORE_DATA_DIR="$DATA_DIR" bash "$SETTINGS_SH" delete "$ROLE_PATH"
@@ -354,7 +400,7 @@ case "$SUBCOMMAND" in
     fi
     ;;
   unset-model)
-    msg="removed $ROLE_PATH (was: $existing); resolution will fall through to harnesses.$ACTIVE_FRAMEWORK.roles.default"
+    msg="removed $ROLE_PATH (was: $existing); resolution will fall through to the registry fallback or routes.default"
     if [[ "$JSON_OUTPUT" -eq 1 ]]; then
       emit_json "unset-model" "$ROLE" "" "ok" "$msg"
     else

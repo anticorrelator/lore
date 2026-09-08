@@ -7,7 +7,10 @@ setup() {
   TEST_KDIR="$(mktemp -d)"
   export LORE_KNOWLEDGE_DIR="$TEST_KDIR"
   export LORE_FRAMEWORK=codex
-  export LORE_MODEL_LEAD=test-lead-model
+  export LORE_MODEL_LEAD=codex/test-lead-model
+  export LORE_DATA_DIR="$TEST_KDIR/data"
+  mkdir -p "$LORE_DATA_DIR/config"
+  printf '%s\n' '{"version":2,"tui_launch_framework":"codex","routes":{"default":"codex/default"},"harnesses":{"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}}}}' > "$LORE_DATA_DIR/config/settings.json"
   mkdir -p "$TEST_KDIR/_work/start-item"
   printf '%s\n' '{"title":"Start Item","status":"active","intent_anchor":"Deliver startup."}' > "$TEST_KDIR/_work/start-item/_meta.json"
   printf '%s\n' '# Start Item' '' '## Strategy' 'Use verbs.' '' '## Investigations' 'Findings.' '' '## Phases' '### Phase 1: Build' '- [ ] Build it [class: standard]' '' '## Open Questions' '- None.' > "$TEST_KDIR/_work/start-item/plan.md"
@@ -26,12 +29,13 @@ json_line() { echo "$output" | grep '"schema_version"'; }
   json_line | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
-assert set(d)=={"schema_version","resolved","slug","archived","plan_state","intent_anchor","strategy_present","active_framework","effective_lead_model","track","lead_template_version","provenance"}
+assert set(d)=={"schema_version","resolved","slug","archived","plan_state","intent_anchor","strategy_present","active_framework","effective_lead_model","effective_lead_route","track","lead_template_version","provenance"}
 assert d["schema_version"]==1 and d["resolved"] is True
 assert d["plan_state"]=="synthesis-complete"
 assert d["intent_anchor"]=="Deliver startup."
 assert d["strategy_present"] is True
 assert d["active_framework"]=="codex" and d["effective_lead_model"]=="test-lead-model"
+assert d["effective_lead_route"]["framework"]=="codex"
 assert d["track"]=="full" and len(d["lead_template_version"])==12
 '
   [ ! -e "$TEST_KDIR/_work/start-item/execution-log.md" ]

@@ -73,8 +73,10 @@ teardown() {
 
 # Write the isolated settings.json with the given claude-code roles object body.
 write_settings_roles() {
+  local routes
+  routes="$(printf '%s' "$1" | jq -c 'with_entries(.value = (if (.value | test("^(claude-code|codex|opencode)/")) then .value else "claude-code/" + .value end))')"
   cat > "$LORE_DATA_DIR/config/settings.json" <<EOF
-{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"roles":$1}}}
+{"version":2,"tui_launch_framework":"claude-code","capability_overrides":{},"routes":$routes,"harnesses":{"claude-code":{"args":[],"native_models":{"default":"opus"}}}}
 EOF
 }
 
@@ -874,23 +876,23 @@ journal_boundaries() {
 }
 
 @test "request --route writes a routing_overrides map" {
-  bash "$REQUEST" --type implement --slug wi --route worker=opus --anywhere --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type implement --slug wi --route worker=claude-code/opus --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
-  run jq -e '.routing_overrides.worker == "opus" and (.routing_overrides | type == "object")' "$pending"
+  run jq -e '.routing_overrides.worker == "claude-code/opus" and (.routing_overrides | type == "object")' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request --route is repeatable across roles" {
-  bash "$REQUEST" --type implement --slug wi --route worker=opus --route reviewer=haiku --anywhere --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type implement --slug wi --route worker=claude-code/opus --route reviewer=claude-code/haiku --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
-  run jq -e '.routing_overrides.worker == "opus" and .routing_overrides.reviewer == "haiku"' "$pending"
+  run jq -e '.routing_overrides.worker == "claude-code/opus" and .routing_overrides.reviewer == "claude-code/haiku"' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request --route accepts a hyphenated class-qualified role" {
-  bash "$REQUEST" --type implement --slug wi --route worker-mechanical=haiku --anywhere --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type implement --slug wi --route worker-mechanical=claude-code/haiku --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
-  run jq -e '.routing_overrides."worker-mechanical" == "haiku"' "$pending"
+  run jq -e '.routing_overrides."worker-mechanical" == "claude-code/haiku"' "$pending"
   [ "$status" -eq 0 ]
 }
 
@@ -3524,6 +3526,26 @@ answer_peek_observation() {
   [ "$status" -eq 0 ]
 }
 
+@test "request resolves a compiled preparation's position route without explicit model flags" {
+  write_settings_roles '{"worker":"claude-code/worker-model","researcher":"codex/gpt-6-astra","default":"claude-code/opus"}'
+  local context="$TEST_KDIR/prepared.json"
+  printf '%s\n' '{"position_preparation":{"position":"investigator","framework":"codex","slug":"x--w1","packet_id":"pkt-test","bindings":{"mode":null}}}' > "$context"
+  # Stub admission after route selection: this test isolates the sole writer's
+  # selection from the binder's full immutable-fixture validation.
+  mkdir -p "$TEST_KDIR/bin"
+  cat > "$TEST_KDIR/bin/python3" <<'SH'
+#!/bin/sh
+case "$1" in
+  */position-bind.py) cat; exit 0 ;;
+esac
+exec /usr/bin/python3 "$@"
+SH
+  chmod +x "$TEST_KDIR/bin/python3"
+  run env PATH="$TEST_KDIR/bin:$PATH" bash "$REQUEST" --type worker --slug x--w1 --anywhere --initiator agent --context "$context" --kdir "$TEST_KDIR" --yes
+  [ "$status" -eq 0 ]
+  jq -e '.framework=="codex" and .model=="gpt-6-astra" and .route.routing_source.role=="researcher"' "$TEST_KDIR"/_sessions/requests/pending/*.json
+}
+
 @test "request resolves lead@ceremony for spec and implement and default for chat" {
   write_settings_roles '{"lead":"codex/gpt-6-astra","default":"opus"}'
   write_instance inst-a existing
@@ -3551,7 +3573,7 @@ answer_peek_observation() {
   echo brief > "$TEST_KDIR/brief.md"
   run bash "$REQUEST" --type worker --slug x--w1 --anywhere --initiator agent --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes --model opus
   [ "$status" -ne 0 ]
-  [[ "$output" == *"--model without --framework is ambiguous"* ]]
+  [[ "$output" == *"--framework and --model must be supplied together"* ]]
 }
 
 @test "request accepts --framework with --model as a recorded override" {
@@ -3563,13 +3585,22 @@ answer_peek_observation() {
   [ "$status" -eq 0 ]
 }
 
-@test "request honors --routing-source role-route when a caller resolved the pair itself" {
+@test "request replays a canonical session route without changing provenance" {
+  local route='{"framework":"codex","model":"gpt-5.6-sol","options":{"effort":"high","service_tier":"fast"},"routing_source":{"layer":"routes","role":"worker"}}'
+  echo brief > "$TEST_KDIR/brief.md"
+  bash "$REQUEST" --type worker --slug x--w1 --anywhere --initiator agent \
+    --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes --session-route "$route"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  jq -e --argjson route "$route" '.route == $route and .framework == $route.framework and .model == $route.model' "$pending"
+  jq -e --argjson route "$route" 'select(.event == "requested") | .route == $route' "$TEST_KDIR/_sessions/events.jsonl"
+}
+
+@test "request refuses legacy provenance that contradicts an explicit pair" {
   write_settings_roles '{"worker":"codex/gpt-5.6-sol","default":"opus"}'
   echo brief > "$TEST_KDIR/brief.md"
   run bash "$REQUEST" --type worker --slug x--w1 --anywhere --initiator agent --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes --framework codex --model gpt-5.6-sol --routing-source role-route
-  [ "$status" -eq 0 ]
-  run jq -e '.routing_source=="role-route"' "$TEST_KDIR"/_sessions/requests/pending/*.json
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"contradicts the frozen route provenance"* ]]
   run bash "$REQUEST" --type worker --slug x--w2 --anywhere --initiator agent --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes --framework codex --model gpt-5.6-sol --routing-source bogus
   [ "$status" -ne 0 ]
 }

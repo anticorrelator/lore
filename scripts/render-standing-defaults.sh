@@ -65,26 +65,28 @@ fi
 if [[ "$WITH_ROUTING" == true ]]; then
 echo ""
 ACTIVE_FW="$(resolve_active_framework 2>/dev/null || true)"
-echo "-- Effective routing on ${ACTIVE_FW:-<unknown framework>} (role -> framework/model; sessions resolve this when no --framework/--model is passed) --"
+echo "-- Effective routing (role -> route/options/source) --"
 ROLES_FILE="$SCRIPT_DIR/../adapters/roles.json"
-if [[ -n "$ACTIVE_FW" && -f "$ROLES_FILE" ]] && command -v jq &>/dev/null; then
+if [[ -f "$ROLES_FILE" ]] && command -v jq &>/dev/null; then
   while IFS= read -r role; do
     if route="$(resolve_route_for_role "$role" 2>/dev/null)" && [[ -n "$route" ]]; then
-      printf -- '- %s -> %s\n' "$role" "$(printf '%s' "$route" | jq -r '.target_framework + "/" + .native_binding')"
+      printf -- '- %s -> %s\n' "$role" "$(printf '%s' "$route" | jq -c '{framework,model,options,routing_source}')"
     else
-      printf -- '- %s -> (unbound: a session for this role is refused until harnesses.%s.roles.%s is set)\n' "$role" "$ACTIVE_FW" "$role"
+      printf -- '- %s -> (unbound)\n' "$role"
     fi
   done < <(jq -r '.roles[].id' "$ROLES_FILE")
   for ceremony in $(jq -r '.ceremonies[].id' "$SCRIPT_DIR/../adapters/ceremonies.json" 2>/dev/null); do
     while IFS= read -r role; do
       [[ -n "$role" ]] || continue
       if route="$(resolve_route_for_role "$role" "$ceremony" 2>/dev/null)" && [[ -n "$route" ]]; then
-        printf -- '- %s@%s -> %s (ceremony overlay)\n' "$role" "$ceremony" "$(printf '%s' "$route" | jq -r '.target_framework + "/" + .native_binding')"
+        printf -- '- %s@%s -> %s\n' "$role" "$ceremony" "$(printf '%s' "$route" | jq -c '{framework,model,options,routing_source}')"
       fi
-    done < <(jq -r --arg fw "$ACTIVE_FW" --arg c "$ceremony" '.harnesses[$fw].ceremony_roles[$c] // {} | keys[]' "$SETTINGS_FILE" 2>/dev/null)
+    done < <(jq -r --arg c "$ceremony" '.routes.ceremony_overlays[$c] // {} | keys[]' "$SETTINGS_FILE" 2>/dev/null)
   done
+  echo "-- Native model maps --"
+  jq -c '.harnesses | with_entries(.value = .value.native_models)' "$SETTINGS_FILE"
 else
-  echo "(routing not renderable: active framework or adapters/roles.json unavailable)"
+  echo "(routing not renderable: adapters/roles.json unavailable)"
 fi
 fi
 

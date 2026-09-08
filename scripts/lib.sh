@@ -1996,9 +1996,10 @@ json.dump(request, sys.stdout)
 resolve_model_for_role() {
   local role="$1"
   local ceremony="${2:-}"
-  local active
+  local active route
   active=$(resolve_active_framework) || return 1
-  resolve_native_route_for_role "$role" "$ceremony" "$active" | jq -r '.model'
+  route=$(resolve_native_route_for_role "$role" "$ceremony" "$active") || return 1
+  printf '%s\n' "$route" | jq -r '.model'
 }
 
 resolve_route_for_role() {

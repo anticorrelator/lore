@@ -63,8 +63,9 @@ ITEM_DIR="$KDIR/_work/$SLUG"
 ARTIFACT="$ITEM_DIR/spec-dispatch.json"
 LOG_FILE="$ITEM_DIR/execution-log.md"
 FRAMEWORK=$(resolve_active_framework) || emit_error "active framework could not be resolved"
-RESEARCHER_MODEL=$(resolve_model_for_role researcher spec 2>/dev/null) || emit_error "researcher model could not be resolved for the spec ceremony"
-RESEARCHER_ROUTE=$(_model_route_json researcher "$RESEARCHER_MODEL") || emit_error "researcher route could not be resolved"
+RESEARCHER_ROUTE=$(resolve_route_for_role researcher spec 2>/dev/null) || emit_error "researcher route could not be resolved for the spec ceremony"
+RESEARCHER_MODEL=$(printf '%s' "$RESEARCHER_ROUTE" | jq -r '.model')
+RESEARCHER_NATIVE_ROUTE=$(resolve_native_route_for_role researcher spec "$FRAMEWORK" 2>/dev/null) || emit_error "native researcher route could not be resolved"
 RESEARCHER_TEMPLATE=$(resolve_agent_template researcher 2>/dev/null) || emit_error "researcher template could not be resolved"
 RESEARCHER_TEMPLATE_VERSION=$(bash "$SCRIPT_DIR/template-version.sh" "$RESEARCHER_TEMPLATE" 2>/dev/null) || emit_error "researcher template version could not be resolved"
 LEAD_TEMPLATE_VERSION=$(bash "$SCRIPT_DIR/template-version.sh" "$LORE_REPO_DIR/skills/spec/SKILL.md" 2>/dev/null) || emit_error "spec lead template version could not be resolved"
@@ -89,17 +90,19 @@ validate_dispatch_guidance --prompt-file "$GUIDANCE_FILE" || \
 set +e
 python3 - "$INVESTIGATIONS_FILE" "$PREPARED" "$SLUG" "$FRAMEWORK" "$SUBAGENTS" "$TEAM_MESSAGING" \
   "$RESEARCHER_MODEL" "$RESEARCHER_TEMPLATE_VERSION" "$SCRIPT_DIR/prefetch-knowledge.sh" "$ADAPTER" "$GUIDANCE_FILE" \
-  "$SCRIPT_DIR" "$KDIR" "$LEAD_TEMPLATE_VERSION" "$ARTIFACT" "$RESEARCHER_TEMPLATE" "$RESEARCHER_ROUTE" <<'PY'
+  "$SCRIPT_DIR" "$KDIR" "$LEAD_TEMPLATE_VERSION" "$ARTIFACT" "$RESEARCHER_TEMPLATE" "$RESEARCHER_ROUTE" "$RESEARCHER_NATIVE_ROUTE" <<'PY'
 import hashlib, importlib.util, json, os, subprocess, sys, uuid
 from pathlib import Path
 
 (input_path, output_path, slug, framework, subagents, team_messaging,
  researcher_model, researcher_template_version, prefetch_script, adapter,
- guidance_path, script_dir, kdir, lead_template_version, artifact_path, legacy_template, researcher_route) = sys.argv[1:]
+ guidance_path, script_dir, kdir, lead_template_version, artifact_path, legacy_template, researcher_route, researcher_native_route) = sys.argv[1:]
 researcher_route = json.loads(researcher_route)
+researcher_native_route = json.loads(researcher_native_route)
 sys.path.insert(0, script_dir)
 from position_compile import compile_position, validate_descriptor
 from packet_builder import build_packet, pointer
+from route_config import parse_route
 module = importlib.util.spec_from_file_location("position_bind", Path(script_dir) / "position-bind.py")
 binder = importlib.util.module_from_spec(module)
 module.loader.exec_module(binder)
@@ -177,8 +180,8 @@ for index, inv in enumerate(investigations):
                                      capture_output=True, text=True)
         if model_check.returncode or json.loads(model_check.stdout)["target_framework"] != dispatch["framework"]:
             reject(f"{where}.dispatch.model is not a native binding for the selected framework")
-        if dispatch["route"] == "native" and dispatch["framework"] != framework and dispatch["framework"] != "codex":
-            reject(f"{where}.dispatch requests an unsupported foreign native route")
+        if dispatch["route"] == "native" and dispatch["framework"] not in {framework, "codex"}:
+            reject(f"{where}.dispatch cannot launch {dispatch['framework']} through the {framework} native surface; use route=session")
         binder.validate_bindings(dispatch["bindings"], "investigator", kdir, ("packet_id", "packet_pointer"),
                                  pending_root=dispatch["route"] == "session")
         expected_assignment = {"investigation_id": ident, "question": question, "complexity": inv["complexity"]}
@@ -239,6 +242,25 @@ for inv in normalized:
         delivered.append({**manifest_row, "content": proc.stdout})
     knowledge_by_id[inv["id"]] = delivered
 
+def resolved_launch(inv):
+    request = inv.get("dispatch", {})
+    route = request.get("route", "native")
+    base = researcher_native_route if route == "native" else researcher_route
+    target = request.get("framework", base["framework"])
+    if route == "native" and target == "codex" and target != framework:
+        route = "codex-chaperone"
+    return target, route, request.get("model", base["model"])
+
+def resolved_session_route(inv):
+    request = inv.get("dispatch", {})
+    launch = request.get("route", "native")
+    base = researcher_native_route if launch == "native" else researcher_route
+    target, _, model = resolved_launch(inv)
+    if "framework" in request or "model" in request:
+        return parse_route({"framework": target, "model": model}, Path(script_dir).parent,
+                           {"layer": "override", "role": "researcher", "ceremony": "spec"})
+    return base
+
 capabilities = {"subagents": subagents, "team_messaging": team_messaging}
 source_shape = {"active_framework": framework, "adapter_capabilities": capabilities,
                 "researcher_model": researcher_model, "researcher_route": researcher_route,
@@ -247,7 +269,7 @@ source_shape = {"active_framework": framework, "adapter_capabilities": capabilit
                 "ordered_prefetch": prefetch_manifest}
 descriptors = {}
 if not legacy:
-    for target in sorted({inv.get("dispatch", {}).get("framework", researcher_route["target_framework"]) for inv in normalized}):
+    for target in sorted({resolved_launch(inv)[0] for inv in normalized}):
         descriptors[target] = compile_position("investigator", target, kdir, Path(guidance_path))
 source_shape.update(lead_template_version=lead_template_version,
                     wrapper={"path": str(Path(script_dir) / "spec-open.sh"),
@@ -256,14 +278,6 @@ source_shape.update(lead_template_version=lead_template_version,
                                for key, value in descriptors.items()},
                     legacy_template_path=legacy_template if legacy else None)
 source_fp = hashlib.sha256(canonical(source_shape)).hexdigest()
-
-def resolved_launch(inv):
-    request = inv.get("dispatch", {})
-    target = request.get("framework", researcher_route["target_framework"])
-    route = request.get("route", "native")
-    if route == "native" and target != framework:
-        route = "codex-chaperone"
-    return target, route, request.get("model", researcher_route["native_binding"])
 
 # The collector's note closes every compiled investigator payload. It is
 # emitted prose, retained as wrapper-suffix.md and covered by the wrapper
@@ -415,6 +429,7 @@ for ordinal, inv in enumerate(normalized, 1):
             context = {"dispatch_guidance": prompt, "position_dispatch": reference}
             state = "prepared"
         payload.update(position="investigator", framework=target, route=route, model=model,
+                       session_route=resolved_session_route(inv),
                        prompt=prompt, position_dispatch=reference, descriptor=descriptor,
                        producer={key: descriptor[key] for key in ("template_id", "template_version")},
                        native_selection=selection, completion_input=completion, publication_state=state,

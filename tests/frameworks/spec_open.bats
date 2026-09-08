@@ -25,7 +25,10 @@ setup() {
   export HOME="$TEST_HOME"
   export LORE_KNOWLEDGE_DIR="$TEST_KDIR"
   export LORE_FRAMEWORK=codex
-  export LORE_MODEL_RESEARCHER=test-researcher-model
+  export LORE_MODEL_RESEARCHER=codex/test-researcher-model
+  export LORE_DATA_DIR="$TEST_KDIR/data"
+  mkdir -p "$LORE_DATA_DIR/config"
+  printf '%s\n' '{"version":2,"tui_launch_framework":"codex","routes":{"default":"codex/default"},"harnesses":{"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}}}}' > "$LORE_DATA_DIR/config/settings.json"
   mkdir -p "$TEST_KDIR/_work/open-item"
   printf '%s\n' '{"title":"Open Item","status":"active"}' > "$TEST_KDIR/_work/open-item/_meta.json"
   printf '%s\n' '# Open Item' '## Phases' '- [ ] Build [class: standard]' > "$TEST_KDIR/_work/open-item/plan.md"
@@ -79,6 +82,17 @@ PY
   json_line | jq -r '.directives[0].payload.dispatch_guidance + "\nInvestigate the declared question."' > "$prompt"
   run bash "$REPO_DIR/scripts/validate-dispatch-guidance.sh" --prompt-file "$prompt"
   [ "$status" -eq 0 ]
+}
+
+@test "native investigations compile the parent-native descriptor when the global route is foreign" {
+  export LORE_FRAMEWORK=claude-code
+  unset LORE_MODEL_RESEARCHER
+  printf '%s\n' '{"version":2,"tui_launch_framework":"claude-code","routes":{"default":"claude-code/opus","researcher":"codex/gpt-6-astra-high"},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"opus","researcher":"sonnet"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}}}}' > "$LORE_DATA_DIR/config/settings.json"
+  local native_manifest="$TEST_KDIR/native-investigations.json"
+  jq 'del(.investigations[].dispatch)' "$MANIFEST" > "$native_manifest"
+  run bash "$LORE" spec open open-item --investigations "$native_manifest" --json
+  [ "$status" -eq 0 ]
+  json_line | jq -e '.directives | all(.payload.framework == "claude-code" and .payload.model == "sonnet" and .payload.session_route.framework == "claude-code")'
 }
 
 @test "exact replay is reused and appends no second atom" {

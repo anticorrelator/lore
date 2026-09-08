@@ -28,6 +28,7 @@ ROLES="$REPO_DIR/adapters/roles.json"
 CEREMONIES="$REPO_DIR/adapters/ceremonies.json"
 CAPS="$REPO_DIR/adapters/capabilities.json"
 LIB="$REPO_DIR/scripts/lib.sh"
+SET_MODEL="$REPO_DIR/scripts/framework-set-model.sh"
 
 setup() {
   [ -f "$ROLES" ] || skip "adapters/roles.json missing"
@@ -36,17 +37,100 @@ setup() {
   command -v jq >/dev/null 2>&1 || skip "jq not installed"
   FIXTURE_DIR="$(mktemp -d)"
   mkdir -p "$FIXTURE_DIR/config"
+  export LORE_DATA_DIR="$FIXTURE_DIR"
+  write_route_settings
 }
 
 teardown() {
   [ -n "${FIXTURE_DIR:-}" ] && rm -rf "$FIXTURE_DIR"
+  unset LORE_DATA_DIR
 }
 
 # Write a settings.json fixture (JSON on stdin) into the per-test data dir.
 # Callers point resolve_model_for_role at it with
 # LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=<harness>.
 write_settings() {
-  cat > "$FIXTURE_DIR/config/settings.json"
+  python3 -c '
+import json,sys
+d=json.load(sys.stdin); hs=d.get("harnesses",{}); launch=d.get("tui_launch_framework","claude-code")
+source=hs.get(launch,{}); roles=source.get("roles",{})
+def qualify(v, fw=launch):
+    return v if isinstance(v,dict) or any(v.startswith(x+"/") for x in ("claude-code","codex","opencode")) else fw+"/"+v
+routes={k:qualify(v) for k,v in roles.items()}
+routes.setdefault("default", "claude-code/opus")
+overlays={}
+for ceremony,bindings in source.get("ceremony_roles",{}).items():
+    overlays[ceremony]={k:qualify(v) for k,v in bindings.items()}
+if overlays: routes["ceremony_overlays"]=overlays
+out={"version":2,"tui_launch_framework":d.get("tui_launch_framework","claude-code"),"routes":routes,"harnesses":{}}
+for fw in ("claude-code","codex","opencode"):
+    block=hs.get(fw,{})
+    native={k:(v.split("/",1)[1] if isinstance(v,str) and v.startswith(fw+"/") else v) for k,v in block.get("roles",{}).items() if not (isinstance(v,str) and "/" in v and not v.startswith(fw+"/"))}
+    native.setdefault("default", {"claude-code":"opus","codex":"gpt-5.5-high","opencode":"anthropic/opus"}[fw])
+    out["harnesses"][fw]={"args":block.get("args",[]),"native_models":native}
+json.dump(out,sys.stdout)
+' > "$FIXTURE_DIR/config/settings.json"
+}
+
+parse_route_test() {
+  jq -cn --arg root "$REPO_DIR" --arg route "$1" '{operation:"parse",repo_root:$root,route:$route}' \
+    | python3 "$REPO_DIR/scripts/route_config.py"
+}
+
+write_route_settings() {
+  cat > "$FIXTURE_DIR/config/settings.json" <<'JSON'
+{"version":2,"tui_launch_framework":"claude-code","routes":{"default":"claude-code/opus","worker":{"framework":"codex","model":"gpt-5.6-sol","effort":"high","service_tier":"fast"},"ceremony_overlays":{"implement":{"advisor":"codex/gpt-6-astra-high"}}},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"opus","advisor":"opus"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}},"opencode":{"args":[],"native_models":{"default":"anthropic/opus"}}}}
+JSON
+}
+
+@test "global route resolution preserves target options and provenance" {
+  write_route_settings
+  run env LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code bash -c "source '$LIB'; resolve_route_for_role worker implement"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.framework=="codex" and .model=="gpt-5.6-sol" and .options=={"effort":"high","service_tier":"fast"} and .routing_source.layer=="routes"'
+}
+
+@test "native route resolution uses the parent native map for a foreign global route" {
+  write_route_settings
+  run env LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code bash -c "source '$LIB'; resolve_native_route_for_role advisor implement claude-code"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.framework=="claude-code" and .model=="opus" and .routing_source.layer=="native-models"'
+}
+
+@test "route validation rejects malformed unused entries before selection" {
+  write_route_settings
+  jq '.routes.reviewer={framework:"codex",model:"gpt-5.5",bogus:true}' "$FIXTURE_DIR/config/settings.json" > "$FIXTURE_DIR/bad"
+  mv "$FIXTURE_DIR/bad" "$FIXTURE_DIR/config/settings.json"
+  run env LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code bash -c "source '$LIB'; resolve_route_for_role worker"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unknown route field"* ]]
+}
+
+@test "set-model persists a flat route object and overlays options after shorthand parsing" {
+  write_route_settings
+  run env LORE_DATA_DIR="$FIXTURE_DIR" bash "$SET_MODEL" set-model worker codex/gpt-5.5-high --service-tier fast --json
+  [ "$status" -eq 0 ]
+  jq -e '.routes.worker == {framework:"codex",model:"gpt-5.5",effort:"high",service_tier:"fast"}' "$FIXTURE_DIR/config/settings.json"
+}
+
+@test "set-model keeps an object model suffix literal and reports duplicate options as JSON" {
+  write_route_settings
+  run env LORE_DATA_DIR="$FIXTURE_DIR" bash "$SET_MODEL" set-model worker '{"framework":"codex","model":"custom-high"}' --json
+  [ "$status" -eq 0 ]
+  jq -e '.routes.worker == {framework:"codex",model:"custom-high"}' "$FIXTURE_DIR/config/settings.json"
+  run env LORE_DATA_DIR="$FIXTURE_DIR" bash "$SET_MODEL" set-model worker '{"framework":"codex","model":"gpt-5.5","effort":"high"}' --effort medium --json
+  [ "$status" -eq 3 ]
+  echo "$output" | jq -e '.status == "binding-conflict" and (.message | contains("duplicates"))'
+}
+
+@test "set-model rejects empty option flags and unset-default validation stays structured" {
+  write_route_settings
+  run env LORE_DATA_DIR="$FIXTURE_DIR" bash "$SET_MODEL" set-model worker codex/gpt-5.5 --effort ""
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--effort requires a non-empty value"* ]]
+  run env LORE_DATA_DIR="$FIXTURE_DIR" bash "$SET_MODEL" unset-model default --json
+  [ "$status" -eq 3 ]
+  echo "$output" | jq -e '.status == "binding-conflict" and (.message | contains("invalid"))'
 }
 
 # ============================================================
@@ -149,12 +233,13 @@ ids = [r["id"] for r in d["roles"]]
 # default may legitimately not have a call site; resolve via env override.
 for role in ids:
     env = os.environ.copy()
+    env["LORE_FRAMEWORK"] = "claude-code"
     # Hyphens in the role id map to underscores in the env-var name (class roles
     # like worker-mechanical) — the resolver derives the name the same way.
     # Built on its own line with double quotes to avoid clashing with the outer
     # single-quoted bash block and Python f-string quote nesting.
     env_key = "LORE_MODEL_" + role.upper().replace("-", "_")
-    env[env_key] = "stub-model"
+    env[env_key] = "claude-code/stub-model"
     out = subprocess.check_output(["bash", "-c", f"source $LIB && resolve_model_for_role {role}"], env=env, text=True).strip()
     assert out == "stub-model", f"role {role}: got {out!r}"
 PYEOF
@@ -166,43 +251,43 @@ PYEOF
 # validate_role_model_binding tests
 # ============================================================
 
-@test "validate_role_model_binding accepts bare model on claude-code (single shape)" {
-  LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; validate_role_model_binding lead sonnet"
-  [ "$status" -eq 0 ]
+@test "route parser requires a qualified model" {
+  run parse_route_test sonnet
+  [ "$status" -ne 0 ]
 }
 
 @test "validate_role_model_binding accepts bare model on opencode (multi shape)" {
-  LORE_FRAMEWORK=opencode run bash -c "source '$LIB'; validate_role_model_binding lead sonnet"
+  run parse_route_test opencode/anthropic/sonnet
   [ "$status" -eq 0 ]
 }
 
 @test "validate_role_model_binding rejects provider/model on claude-code (single shape)" {
-  LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; validate_role_model_binding lead anthropic/sonnet"
+  run parse_route_test claude-code/anthropic/sonnet
   [ "$status" -ne 0 ]
-  [[ "$output" == *"single-provider"* ]]
+  [[ "$output" == *"invalid_model"* ]]
 }
 
 @test "validate_role_model_binding rejects provider/model on codex (single shape)" {
-  LORE_FRAMEWORK=codex run bash -c "source '$LIB'; validate_role_model_binding worker openai/gpt-4"
+  run parse_route_test codex/openai/gpt-4
   [ "$status" -ne 0 ]
-  [[ "$output" == *"single-provider"* ]]
+  [[ "$output" == *"invalid_model"* ]]
 }
 
 @test "validate_role_model_binding accepts provider/model on opencode (multi shape)" {
-  LORE_FRAMEWORK=opencode run bash -c "source '$LIB'; validate_role_model_binding lead anthropic/sonnet"
+  run parse_route_test opencode/anthropic/sonnet
   [ "$status" -eq 0 ]
 }
 
-@test "validate_role_model_binding rejects unknown role" {
-  run bash -c "source '$LIB'; validate_role_model_binding bogus_role sonnet"
+@test "route resolver rejects unknown role" {
+  run bash -c "source '$LIB'; resolve_route_for_role bogus_role"
   [ "$status" -ne 0 ]
   [[ "$output" == *"unknown role"* ]]
 }
 
-@test "validate_role_model_binding rejects empty model" {
-  run bash -c "source '$LIB'; validate_role_model_binding lead ''"
+@test "route parser rejects empty model" {
+  run parse_route_test claude-code/
   [ "$status" -ne 0 ]
-  [[ "$output" == *"empty model binding"* ]]
+  [[ "$output" == *"invalid_model"* ]]
 }
 
 # ============================================================
@@ -334,7 +419,7 @@ JSON
       "ceremony_roles": { "spec": {"researcher": "haiku"} } },
     "opencode": {"args": []}, "codex": {"args": []} } }
 JSON
-  LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code LORE_MODEL_RESEARCHER=sonnet run bash -c "source '$LIB'; resolve_model_for_role researcher spec"
+  LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code LORE_MODEL_RESEARCHER=claude-code/sonnet run bash -c "source '$LIB'; resolve_model_for_role researcher spec"
   [ "$status" -eq 0 ]
   [ "$output" = "sonnet" ]
 }
@@ -368,7 +453,7 @@ JSON
   run bash -c "source '$LIB'; resolve_model_for_role researcher bogus_ceremony"
   [ "$status" -ne 0 ]
   [[ "$output" == *"unknown ceremony"* ]]
-  [[ "$output" == *"ceremonies.json"* ]]
+  [[ "$output" == *"unknown ceremony"* ]]
 }
 
 @test "resolve_model_for_role rejects unknown ceremony key stored under ceremony_roles" {
@@ -382,7 +467,7 @@ JSON
   LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; resolve_model_for_role researcher spec"
   [ "$status" -ne 0 ]
   [[ "$output" == *"unknown ceremony 'deploy'"* ]]
-  [[ "$output" == *"ceremonies.json"* ]]
+  [[ "$output" == *"unknown ceremony"* ]]
 }
 
 @test "resolve_model_for_role rejects unknown role key inside a ceremony map" {
@@ -396,7 +481,7 @@ JSON
   LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; resolve_model_for_role researcher spec"
   [ "$status" -ne 0 ]
   [[ "$output" == *"unknown role 'spectator'"* ]]
-  [[ "$output" == *"roles.json"* ]]
+  [[ "$output" == *"unknown role"* ]]
 }
 
 # ============================================================
@@ -489,19 +574,19 @@ JSON
     "claude-code": { "args": [], "roles": {"worker": "sonnet"} },
     "opencode": {"args": []}, "codex": {"args": []} } }
 JSON
-  wm=$(LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code LORE_MODEL_WORKER_MECHANICAL=mech-model \
+  wm=$(LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code LORE_MODEL_WORKER_MECHANICAL=claude-code/mech-model \
     bash -c "source '$LIB'; resolve_model_for_role worker-mechanical implement")
   [ "$wm" = "mech-model" ]
 }
 
-@test "unbound class role errors naming the fallback role when nothing binds" {
+@test "unbound class role reaches the required global default when nothing else binds" {
   write_settings <<'JSON'
 { "version": 1, "tui_launch_framework": "claude-code",
   "harnesses": { "claude-code": { "args": [] }, "opencode": {"args": []}, "codex": {"args": []} } }
 JSON
   LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; resolve_model_for_role worker-mechanical implement"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"role 'worker'"* ]]
+  [ "$status" -eq 0 ]
+  [ "$output" = "opus" ]
 }
 
 # ============================================================
@@ -518,11 +603,8 @@ JSON
 JSON
   LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=opencode run bash -c "source '$LIB'; resolve_route_for_role worker implement"
   [ "$status" -eq 0 ]
-  [ "$(printf '%s' "$output" | jq -r '.binding')" = "openai/gpt-5.5" ]
-  [ "$(printf '%s' "$output" | jq -r '.source_framework')" = "opencode" ]
-  [ "$(printf '%s' "$output" | jq -r '.target_framework')" = "opencode" ]
-  [ "$(printf '%s' "$output" | jq -r '.native_binding')" = "openai/gpt-5.5" ]
-  [ "$(printf '%s' "$output" | jq -r '.qualified')" = "false" ]
+  [ "$(printf '%s' "$output" | jq -r '.framework')" = "opencode" ]
+  [ "$(printf '%s' "$output" | jq -r '.model')" = "openai/gpt-5.5" ]
 }
 
 @test "resolve_route_for_role selects a registered Codex target and strips only its qualifier" {
@@ -534,11 +616,9 @@ JSON
 JSON
   LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; resolve_route_for_role worker-mechanical implement"
   [ "$status" -eq 0 ]
-  [ "$(printf '%s' "$output" | jq -r '.binding')" = "codex/gpt-5.5-medium" ]
-  [ "$(printf '%s' "$output" | jq -r '.source_framework')" = "claude-code" ]
-  [ "$(printf '%s' "$output" | jq -r '.target_framework')" = "codex" ]
-  [ "$(printf '%s' "$output" | jq -r '.native_binding')" = "gpt-5.5-medium" ]
-  [ "$(printf '%s' "$output" | jq -r '.qualified')" = "true" ]
+  [ "$(printf '%s' "$output" | jq -r '.framework')" = "codex" ]
+  [ "$(printf '%s' "$output" | jq -r '.model')" = "gpt-5.5" ]
+  [ "$(printf '%s' "$output" | jq -r '.options.effort')" = "medium" ]
 }
 
 @test "resolve_route_for_role strips same-framework qualifiers for every registered framework" {
@@ -550,10 +630,12 @@ JSON
   for case_value in "${cases[@]}"; do
     IFS='|' read -r framework binding native <<<"$case_value"
     route=$(LORE_FRAMEWORK="$framework" LORE_MODEL_WORKER="$binding" bash -c "source '$LIB'; resolve_route_for_role worker")
-    [ "$(printf '%s' "$route" | jq -r '.source_framework')" = "$framework" ]
-    [ "$(printf '%s' "$route" | jq -r '.target_framework')" = "$framework" ]
-    [ "$(printf '%s' "$route" | jq -r '.native_binding')" = "$native" ]
-    [ "$(printf '%s' "$route" | jq -r '.qualified')" = "true" ]
+    [ "$(printf '%s' "$route" | jq -r '.framework')" = "$framework" ]
+    if [ "$framework" = codex ]; then
+      [ "$(printf '%s' "$route" | jq -r '.model')-$(printf '%s' "$route" | jq -r '.options.effort')" = "gpt-5.5-high" ]
+    else
+      [ "$(printf '%s' "$route" | jq -r '.model')" = "$native" ]
+    fi
   done
 }
 
@@ -578,7 +660,7 @@ JSON
 JSON
   LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; resolve_route_for_role worker"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"empty native binding"* ]]
+  [[ "$output" == *"must not be empty"* ]]
 }
 
 @test "resolve_route_for_role validates the native payload against the selected target shape" {
@@ -590,11 +672,10 @@ JSON
 JSON
   LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; resolve_route_for_role worker"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"target framework 'codex'"* ]]
-  [[ "$output" == *"single-provider"* ]]
+  [[ "$output" == *"requires a native model without a provider prefix"* ]]
 }
 
-@test "resolve_route_for_role names an unsupported registered foreign bridge" {
+@test "resolve_route_for_role permits a registered foreign global route" {
   write_settings <<'JSON'
 { "version": 1, "tui_launch_framework": "claude-code",
   "harnesses": {
@@ -602,12 +683,12 @@ JSON
     "opencode": {"args": []}, "codex": {"args": []} } }
 JSON
   LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; resolve_route_for_role worker"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"unsupported framework bridge 'claude-code->opencode'"* ]]
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.framework == "opencode" and .model == "openai/gpt-5.5"'
 }
 
 @test "validate_role_model_binding accepts a supported qualified Codex route" {
-  LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; validate_role_model_binding worker codex/gpt-5.5-medium"
+  run parse_route_test codex/gpt-5.5-medium
   [ "$status" -eq 0 ]
 }
 

@@ -36,9 +36,11 @@ setup() {
 
   # Role->model env overrides are resolution order #1, so tests never read
   # the operator's settings.json.
-  export LORE_MODEL_LEAD="test-lead-model"
-  export LORE_MODEL_WORKER="test-worker-model"
-  export LORE_MODEL_ADVISOR="test-advisor-model"
+  export LORE_MODEL_LEAD="claude-code/test-lead-model"
+  export LORE_MODEL_WORKER="claude-code/test-worker-model"
+  export LORE_MODEL_ADVISOR="claude-code/test-advisor-model"
+  mkdir -p "$HOME/.lore/config"
+  printf '%s\n' '{"version":2,"tui_launch_framework":"claude-code","routes":{"default":"claude-code/default"},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"opus"}}}}' > "$HOME/.lore/config/settings.json"
   export LORE_FRAMEWORK="claude-code"
 
   # Throwaway git repo: cache-branch.sh derives the branch from cwd.
@@ -165,10 +167,10 @@ d = json.loads(sys.stdin.read())
 routes = d["worker_class_routes"]
 assert set(routes) == {"mechanical", "standard", "judgment-dense"}
 for route in routes.values():
-    assert route["source_framework"] == "claude-code"
-    assert route["target_framework"] == "claude-code"
-    assert route["native_binding"] == route["binding"]
-    assert route["qualified"] is False
+    assert route["framework"] == "claude-code"
+    assert route["model"] == "test-worker-model"
+    assert route["options"] == {}
+    assert route["routing_source"]["layer"] in {"env", "routes", "default"}
 assert d["worker_class_models"]["standard"] == "test-worker-model"
 '
 }
@@ -179,12 +181,11 @@ assert d["worker_class_models"]["standard"] == "test-worker-model"
   echo "$output" | grep -q "Worker class bindings (implement ceremony): mechanical=.* standard=test-worker-model  judgment-dense="
 }
 
-@test "start refuses an unsupported registered foreign worker route" {
+@test "start preserves a registered foreign worker route" {
   export LORE_MODEL_WORKER_MECHANICAL="opencode/openai/gpt-5.5"
   run bash "$LORE_CLI" impl start widget-pipeline --json
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"unsupported framework bridge 'claude-code->opencode'"* ]]
-  [[ "$output" == *"refusing to prepare dispatch"* ]]
+  [ "$status" -eq 0 ]
+  echo "$output" | grep '"slug"' | jq -e '.worker_class_routes.mechanical.framework == "opencode" and .worker_class_routes.mechanical.model == "openai/gpt-5.5"'
 }
 
 @test "--json prior-claims maps are keyed by task and by file; malformed lines skipped" {

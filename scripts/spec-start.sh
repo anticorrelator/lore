@@ -51,7 +51,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$REF" ]] || { usage; fail "missing required argument: <input>"; }
-[[ -z "$MODEL_OVERRIDE" ]] || export LORE_MODEL_LEAD="$MODEL_OVERRIDE"
+if [[ -n "$MODEL_OVERRIDE" ]]; then
+  OVERRIDE_FRAMEWORK=$(resolve_active_framework) || fail "active framework could not be resolved for --model"
+  export LORE_MODEL_LEAD="$OVERRIDE_FRAMEWORK/$MODEL_OVERRIDE"
+fi
 
 KDIR=$(resolve_knowledge_dir)
 RESOLVER_KDIR="$KDIR"
@@ -116,14 +119,15 @@ if [[ $RESOLVE_RC -ne 0 && $RESOLVE_RC -ne 1 ]]; then
 fi
 
 FRAMEWORK=$(resolve_active_framework) || fail "active framework could not be resolved"
-LEAD_MODEL=$(resolve_model_for_role lead spec 2>/dev/null) || fail "lead model could not be resolved for the spec ceremony"
+LEAD_ROUTE=$(resolve_route_for_role lead spec 2>/dev/null) || fail "lead route could not be resolved for the spec ceremony"
+LEAD_MODEL=$(printf '%s' "$LEAD_ROUTE" | jq -r '.model')
 LEAD_TEMPLATE_VERSION=$(bash "$SCRIPT_DIR/template-version.sh" "$LORE_REPO_DIR/skills/spec/SKILL.md" 2>/dev/null) \
   || fail "spec lead template version could not be resolved"
 
 if [[ $RESOLVE_RC -eq 1 ]]; then
-  PAYLOAD=$(python3 - "$REF" "$FRAMEWORK" "$LEAD_MODEL" "$TRACK" "$LEAD_TEMPLATE_VERSION" <<'PY'
+  PAYLOAD=$(python3 - "$REF" "$FRAMEWORK" "$LEAD_MODEL" "$TRACK" "$LEAD_TEMPLATE_VERSION" "$LEAD_ROUTE" <<'PY'
 import json, sys
-raw, framework, model, track, template = sys.argv[1:]
+raw, framework, model, track, template, route = sys.argv[1:]
 print(json.dumps({
     "schema_version": 1,
     "resolved": False,
@@ -134,6 +138,7 @@ print(json.dumps({
     "strategy_present": False,
     "active_framework": framework,
     "effective_lead_model": model,
+    "effective_lead_route": json.loads(route),
     "track": track,
     "lead_template_version": template,
     "provenance": {"input": raw, "sources": []},
@@ -148,9 +153,9 @@ else
   else
     ITEM_DIR="$KDIR/_work/$SLUG"
   fi
-  PAYLOAD=$(python3 - "$ITEM_DIR" "$SLUG" "$ARCHIVED" "$FRAMEWORK" "$LEAD_MODEL" "$TRACK" "$LEAD_TEMPLATE_VERSION" "$REF" <<'PY'
+  PAYLOAD=$(python3 - "$ITEM_DIR" "$SLUG" "$ARCHIVED" "$FRAMEWORK" "$LEAD_MODEL" "$TRACK" "$LEAD_TEMPLATE_VERSION" "$REF" "$LEAD_ROUTE" <<'PY'
 import hashlib, json, os, re, sys
-item, slug, archived, framework, model, track, template, raw = sys.argv[1:]
+item, slug, archived, framework, model, track, template, raw, route = sys.argv[1:]
 meta_path = os.path.join(item, "_meta.json")
 plan_path = os.path.join(item, "plan.md")
 with open(meta_path, encoding="utf-8") as f:
@@ -199,6 +204,7 @@ print(json.dumps({
     "strategy_present": bool(re.search(r"(?m)^## Strategy\s*$", plan)),
     "active_framework": framework,
     "effective_lead_model": model,
+    "effective_lead_route": json.loads(route),
     "track": track,
     "lead_template_version": template,
     "provenance": {"input": raw, "sources": sources},

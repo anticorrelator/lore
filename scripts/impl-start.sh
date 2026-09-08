@@ -210,7 +210,7 @@ fi
 # --- Role->model bindings and template versions (warn + "" on failure) -----
 resolve_model_or_empty() {
   local role="$1" ceremony="${2:-}" model
-  if model=$(resolve_model_for_role "$role" ${ceremony:+"$ceremony"} 2>/dev/null) && [[ -n "$model" ]]; then
+  if model=$(resolve_route_for_role "$role" ${ceremony:+"$ceremony"} 2>/dev/null | jq -r '.model') && [[ -n "$model" ]]; then
     printf '%s' "$model"
   else
     echo "[impl] Warning: no model binding resolved for role '$role'" >&2
@@ -257,6 +257,7 @@ WORKER_JUDGMENT_DENSE_MODEL=$(resolve_model_or_empty worker-judgment-dense imple
 WORKER_MECHANICAL_ROUTE=$(resolve_route_or_empty worker-mechanical implement "$WORKER_MECHANICAL_MODEL")
 WORKER_STANDARD_ROUTE=$(resolve_route_or_empty worker implement "$WORKER_STANDARD_MODEL")
 WORKER_JUDGMENT_DENSE_ROUTE=$(resolve_route_or_empty worker-judgment-dense implement "$WORKER_JUDGMENT_DENSE_MODEL")
+ADVISOR_ROUTE=$(resolve_route_for_role advisor implement)
 
 LEAD_TV=$(template_version_or_empty lead "$LORE_REPO_DIR/skills/implement/SKILL.md")
 WORKER_TV=$(template_version_or_empty worker "$(resolve_agent_template worker 2>/dev/null || true)")
@@ -265,7 +266,6 @@ ADVISOR_TV=$(template_version_or_empty advisor "$(resolve_agent_template advisor
 POSITION_DESCRIPTORS='null'
 if [[ "$COMPILED_POSITIONS" -eq 1 ]]; then
   ACTIVE_FRAMEWORK=$(resolve_active_framework)
-  ADVISOR_ROUTE=$(resolve_route_for_role advisor implement)
   POSITION_DESCRIPTORS=$(python3 - "$SCRIPT_DIR" "$KNOWLEDGE_DIR" "$ACTIVE_FRAMEWORK" \
     "$WORKER_MECHANICAL_ROUTE" "$WORKER_STANDARD_ROUTE" "$WORKER_JUDGMENT_DENSE_ROUTE" "$ADVISOR_ROUTE" <<'POSITIONS_PY'
 import json
@@ -275,7 +275,7 @@ scripts, kdir, framework, *routes = sys.argv[1:]
 sys.path.insert(0, scripts)
 from position_compile import compile_position
 targets = {framework}
-targets.update(json.loads(route)['target_framework'] for route in routes if route)
+targets.update(json.loads(route)['framework'] for route in routes if route)
 print(json.dumps({target: {position: compile_position(position, target, Path(kdir), None)
                           for position in ('worker', 'designer')}
                   for target in sorted(targets)}))
@@ -289,7 +289,7 @@ PAYLOAD=$(python3 - "$ITEM_DIR" "$SLUG" "$ARCHIVED" "$PHASES" "$TASK_HEADINGS" "
   "$LEAD_MODEL" "$WORKER_MODEL" "$ADVISOR_MODEL" \
   "$LEAD_TV" "$WORKER_TV" "$ADVISOR_TV" \
   "$WORKER_MECHANICAL_MODEL" "$WORKER_STANDARD_MODEL" "$WORKER_JUDGMENT_DENSE_MODEL" \
-  "$WORKER_MECHANICAL_ROUTE" "$WORKER_STANDARD_ROUTE" "$WORKER_JUDGMENT_DENSE_ROUTE" "$POSITION_DESCRIPTORS" <<'PYEOF'
+  "$WORKER_MECHANICAL_ROUTE" "$WORKER_STANDARD_ROUTE" "$WORKER_JUDGMENT_DENSE_ROUTE" "$ADVISOR_ROUTE" "$POSITION_DESCRIPTORS" <<'PYEOF'
 import json
 import os
 import sys
@@ -297,7 +297,7 @@ import sys
 (item_dir, slug, archived, phases, task_headings, unchecked, cache_status, branch,
  lead_m, worker_m, advisor_m, lead_tv, worker_tv, advisor_tv,
  worker_mech_m, worker_std_m, worker_jd_m,
- worker_mech_r, worker_std_r, worker_jd_r, position_descriptors) = sys.argv[1:22]
+ worker_mech_r, worker_std_r, worker_jd_r, advisor_route, position_descriptors) = sys.argv[1:23]
 
 def route_or_none(raw):
     return json.loads(raw) if raw else None
@@ -353,6 +353,7 @@ print(json.dumps({
         "standard": route_or_none(worker_std_r),
         "judgment-dense": route_or_none(worker_jd_r),
     },
+    "advisor_route": route_or_none(advisor_route),
     "template_versions": {"lead": lead_tv, "worker": worker_tv, "advisor": advisor_tv},
     "position_descriptors": json.loads(position_descriptors),
 }))
@@ -379,8 +380,8 @@ print(f"Models: lead={m['lead']}  worker={m['worker']}  advisor={m['advisor']}")
 print(f"Worker class bindings (implement ceremony): "
       f"mechanical={wc['mechanical']}  standard={wc['standard']}  "
       f"judgment-dense={wc['judgment-dense']}")
-print("Worker class routes (source -> target / native): " + "  ".join(
-      f"{name}={route['source_framework']}->{route['target_framework']} / {route['native_binding']}"
+print("Worker class routes: " + "  ".join(
+      f"{name}={route['framework']}/{route['model']} options={route['options']} source={route['routing_source']['layer']}"
       if route else f"{name}=unresolved"
       for name, route in wr.items()))
 print(f"Template versions: lead={tv['lead']}  worker={tv['worker']}  advisor={tv['advisor']}")
