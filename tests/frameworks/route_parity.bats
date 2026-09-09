@@ -106,21 +106,30 @@ PY
   jq '.routes.worker={framework:"codex",model:"gpt-5.6-sol",effort:"high"}' "$REPO_DIR/adapters/settings.template.json" > "$ROUTE_PARITY_DIR/config/settings.json"
   for source in claude-code codex opencode; do
     export LORE_FRAMEWORK="$source" LORE_MODEL_WORKER=opencode/openai/gpt-5
-    out="$(bash -c "source '$REPO_DIR/scripts/lib.sh'; resolve_route_for_role worker")"
-    [ "$(jq -r '.framework+":"+.model+":"+.routing_source.layer' <<<"$out")" = opencode:openai/gpt-5:env ]
+    expected='{"framework":"opencode","model":"openai/gpt-5","options":{},"routing_source":{"layer":"env","role":"worker"}}'
+    request="$(jq -cn --arg root "$REPO_DIR" --arg settings "$ROUTE_PARITY_DIR/config/settings.json" --arg route "$LORE_MODEL_WORKER" '{operation:"resolve",repo_root:$root,settings_path:$settings,role:"worker",env:{LORE_MODEL_WORKER:$route}}')"
+    [ "$(python_request "$request" | jq -cS '.result')" = "$(jq -cS . <<<"$expected")" ]
+    [ "$(bash -c "source '$REPO_DIR/scripts/lib.sh'; resolve_route_for_role worker" | jq -cS .)" = "$(jq -cS . <<<"$expected")" ]
+    [ "$($ROUTE_PARITY_DIR/parity-harness resolve_canonical_route worker | jq -cS .)" = "$(jq -cS . <<<"$expected")" ]
   done
   unset LORE_MODEL_WORKER
   mkdir -p "$ROUTE_PARITY_DIR/project/child"
   printf 'model_for_worker="claude-code/sonnet" # retained comment\n' > "$ROUTE_PARITY_DIR/project/.lore.config"
-  out="$(cd "$ROUTE_PARITY_DIR/project/child" && bash -c "source '$REPO_DIR/scripts/lib.sh'; resolve_route_for_role worker")"
-  [ "$(jq -r '.framework+":"+.model+":"+.routing_source.layer' <<<"$out")" = claude-code:sonnet:per-repo ]
+  expected='{"framework":"claude-code","model":"sonnet","options":{},"routing_source":{"layer":"per-repo","role":"worker"}}'
+  request="$(jq -cn --arg root "$REPO_DIR" --arg settings "$ROUTE_PARITY_DIR/config/settings.json" --arg cwd "$ROUTE_PARITY_DIR/project/child" '{operation:"resolve",repo_root:$root,settings_path:$settings,cwd:$cwd,role:"worker",env:{}}')"
+  [ "$(python_request "$request" | jq -cS '.result')" = "$(jq -cS . <<<"$expected")" ]
+  [ "$(cd "$ROUTE_PARITY_DIR/project/child" && bash -c "source '$REPO_DIR/scripts/lib.sh'; resolve_route_for_role worker" | jq -cS .)" = "$(jq -cS . <<<"$expected")" ]
+  [ "$(cd "$ROUTE_PARITY_DIR/project/child" && "$ROUTE_PARITY_DIR/parity-harness" resolve_canonical_route worker | jq -cS .)" = "$(jq -cS . <<<"$expected")" ]
 }
 
 @test "missing helper and registry fail closed and registry mutation invalidates stale schema" {
   export LORE_DATA_DIR="$ROUTE_PARITY_DIR"
   broken="$(mktemp -d)"; mkdir -p "$broken/adapters" "$broken/scripts"
   cp "$REPO_DIR/scripts/route_config.py" "$broken/scripts/"
+  cp "$REPO_DIR/scripts/lib.sh" "$broken/scripts/"
   cp "$REPO_DIR/adapters/"{capabilities,roles,ceremonies,settings.schema}.json "$broken/adapters/"
+  mkdir -p "$broken/adapters/agents"
+  cp "$REPO_DIR/adapters/agents/codex.sh" "$broken/adapters/agents/"
   jq '.frameworks.codex.model_routing.options.verbosity=["brief"]' "$broken/adapters/capabilities.json" > "$broken/adapters/c" && mv "$broken/adapters/c" "$broken/adapters/capabilities.json"
   run python3 "$REPO_DIR/scripts/generate-route-schema.py" --check --repo-root "$broken"
   [ "$status" -ne 0 ]
@@ -128,6 +137,23 @@ PY
   run python_request "$request"
   [ "$status" -eq 2 ]
   [ "$(jq -r '.error.code' <<<"$output")" = unknown_route_field ]
+  route='{"framework":"codex","model":"gpt-5.5","options":{"verbosity":"brief"}}'
+  run bash "$broken/adapters/agents/codex.sh" route_flags "$route"
+  [ "$status" -ne 0 ]
+  mkdir -p "$broken/config"
+  cp "$REPO_DIR/adapters/settings.template.json" "$broken/config/settings.json"
+  run env LORE_DATA_DIR="$broken" "$ROUTE_PARITY_DIR/parity-harness" route_flags "$route"
+  [ "$status" -ne 0 ]
+
+  printf '{malformed\n' > "$broken/adapters/capabilities.json"
+  run python_request "$(jq -cn --arg root "$broken" '{operation:"parse",repo_root:$root,route:"codex/gpt-5.5"}')"
+  [ "$status" -eq 2 ]
+  [ "$(jq -r '.error.code' <<<"$output")" = registry_unavailable ]
+  cp "$REPO_DIR/adapters/capabilities.json" "$broken/adapters/capabilities.json"
+  rm "$broken/adapters/roles.json"
+  run python_request "$(jq -cn --arg root "$broken" '{operation:"parse",repo_root:$root,route:"codex/gpt-5.5"}')"
+  [ "$status" -eq 2 ]
+  [ "$(jq -r '.error.code' <<<"$output")" = registry_unavailable ]
   rm "$broken/scripts/route_config.py"
   run env LORE_DATA_DIR="$broken" "$ROUTE_PARITY_DIR/parity-harness" parse_route '"codex/gpt-5.5-high"'
   [ "$status" -ne 0 ]

@@ -46,6 +46,10 @@ pending_row() { jq -c '.' "$(ls -t "$TEST_ROOT/kdir/_sessions/requests/pending"/
   [ "$status" -eq 0 ]
   [ "$(pending_row | jq -r '.min_vintage')" = 2026-09-09T01:27:42Z ]
 
+  run bash "$REQUEST" --type worker --slug demo--w1 --context "compiled test brief" --session-route codex/gpt-5.5-high --min-vintage 2027-01-01T00:00:00Z --anywhere --kdir "$TEST_ROOT/kdir" --yes --json
+  [ "$status" -eq 0 ]
+  [ "$(pending_row | jq -r '.min_vintage')" = 2027-01-01T00:00:00Z ]
+
   run bash "$REQUEST" --type spec --slug demo --session-route claude-code/opus --anywhere --kdir "$TEST_ROOT/kdir" --yes --json
   [ "$status" -eq 0 ]
   row="$(pending_row)"
