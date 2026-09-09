@@ -1757,20 +1757,48 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 		// argument to the harness binary starts an interactive session and
 		// submits it immediately — no PTY-write timing hack needed.
 		initialPrompt := buildInitialPrompt(d)
+		leadRole, leadCeremony := leadSeatForSessionType(d.Type)
+		leadSeat := leadRole
+		if leadCeremony != "" {
+			leadSeat = leadCeremony + "." + leadRole
+		}
+		var route config.Route
+		if d.Route != nil {
+			if err := config.ValidateRoutingSettings(); err != nil {
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: invalid routing settings: %w", err)}
+			}
+			if (d.Framework == "") != (d.Model == "") {
+				return StreamErrorMsg{Slug: slug, Err: errors.New("refuse harness spawn: legacy framework/model projection must be a complete pair")}
+			}
+			resolved, err := config.ParseCanonicalRoute(*d.Route)
+			if err != nil {
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: invalid canonical route: %w", err)}
+			}
+			if d.Framework != "" && (d.Framework != resolved.Framework || d.Model != resolved.Model) {
+				return StreamErrorMsg{Slug: slug, Err: errors.New("refuse harness spawn: legacy framework/model projection disagrees with canonical route")}
+			}
+			route = resolved
+		} else {
+			var override any
+			if d.Framework != "" || d.Model != "" {
+				if d.Framework == "" || d.Model == "" {
+					return StreamErrorMsg{Slug: slug, Err: errors.New("refuse harness spawn: legacy route requires framework and model together")}
+				}
+				override = map[string]any{"framework": d.Framework, "model": d.Model}
+			}
+			resolved, err := config.ResolveCanonicalRoute(leadRole, leadCeremony, override)
+			if err != nil {
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: resolve canonical route for %s: %w", leadSeat, err)}
+			}
+			route = resolved
+		}
 
 		// Choose the framework once and use it for the binary, harness-specific
 		// prepended args, and child-process environment. Per-session descriptors
 		// may override the TUI preference; shell helpers inside the spawned
 		// session see the selected value via LORE_FRAMEWORK rather than by
 		// reading settings.json as global process truth.
-		activeFramework := d.Framework
-		if activeFramework == "" {
-			resolved, err := config.ResolveTUILaunchFramework()
-			if err != nil {
-				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve TUI launch framework: %w", err)}
-			}
-			activeFramework = resolved
-		}
+		activeFramework := route.Framework
 		position, err := materializePosition(d, activeFramework, worktreeDir, knowledgeDir)
 		if err != nil {
 			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse position spawn: %w", err)}
@@ -1800,67 +1828,16 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 		// unknown flag). See adapters/agents/README.md §"TUI Launch Concerns".
 		args := append([]string(nil), config.LoadHarnessArgsForInitiator(activeFramework, d.Initiator)...)
 
-		// Session-lead model. The top-level agent of a TUI-spawned session *is* the
-		// session lead, so the model it runs on is lead selection. Two sources feed
-		// it, in this order:
-		//
-		//  1. The descriptor's per-dispatch Model — a coordinator naming a model for
-		//     this one dispatch always wins, unchanged.
-		//  2. Otherwise the role binding for the seat this session type occupies,
-		//     resolved against `activeFramework` — the framework claiming *this*
-		//     session, not the TUI process's own. Resolving against the claiming
-		//     framework is what makes `harnesses.<fw>.roles.lead` and its ceremony
-		//     overlays live at the session seam instead of dead config, which is why
-		//     the framework-explicit resolver exists.
-		//
-		// Both ride the harness's universal `--model` flag — the same flag
-		// model_routing.tiers aliases feed — so the value lands on every framework
-		// without a per-harness spelling. The value stays opaque here (validated for
-		// non-emptiness at enqueue, never against a model list): a bad id surfaces as
-		// an honest harness launch error, not a silent drop.
-		//
-		// Neither an unbound role nor a resolver error composes a flag. The spawn
-		// falls through to the harness's own default rather than inventing a tier,
-		// and says so: a misconfiguration gives the operator something to fix, and an
-		// honest absence is announced too, because a lead silently inheriting the
-		// harness's personal `model` setting is exactly the tier drift this
-		// resolution exists to make visible.
-		//
-		// Composed here, ahead of the degradation notices below, because notice
-		// routing is last-wins on the status line: this always-emitted informational
-		// notice must never outrank a real launch degradation.
-		leadRole, leadCeremony := leadSeatForSessionType(d.Type)
-		leadSeat := leadRole
-		if leadCeremony != "" {
-			leadSeat = leadCeremony + "." + leadRole
+		// Project the already canonical, frozen route after harness args. The
+		// canonicalizer owns route grammar and validation; RouteFlags alone owns
+		// the Go-side native argv spelling.
+		routeArgs, err := config.RouteFlags(route)
+		if err != nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: %w", err)}
 		}
-		//
-		// There is no third source. A session that resolves neither is refused:
-		// launching without --model would hand the seat to whatever the harness's
-		// personal settings name, which is the inheritance this path exists to
-		// prevent. Requests written by the current session-request.sh always carry
-		// the pair, so this resolution is the safety net for older rows.
-		if d.Model != "" {
-			args = append(args, "--model", d.Model)
-			notices = append(notices, OperatorNotice{
-				Code:    "lead-model-override",
-				Message: fmt.Sprintf("lead model %s on %s (per-dispatch override)", d.Model, activeFramework),
-			})
-		} else if route, err := config.ResolveRouteForRoleInCeremonyOnFramework(leadRole, leadCeremony, activeFramework); err == nil {
-			if route.TargetFramework != activeFramework {
-				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: role %s routes to %s/%s but this session is claimed on %s; request it with --framework %s, or pass --framework and --model together to override", leadSeat, route.TargetFramework, route.NativeBinding, activeFramework, route.TargetFramework)}
-			}
-			args = append(args, "--model", route.NativeBinding)
-			sessionEnv.Model = route.NativeBinding
-			notices = append(notices, OperatorNotice{
-				Code:    "lead-model-role-resolved",
-				Message: fmt.Sprintf("lead model %s on %s (role %s)", route.NativeBinding, activeFramework, leadSeat),
-			})
-		} else if errors.Is(err, config.ErrNoModelBinding) {
-			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: no %s binding on %s and no --model on the request; bind harnesses.%s.roles or request with --framework and --model", leadSeat, activeFramework, activeFramework)}
-		} else {
-			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: lead model resolution failed for %s on %s: %w", leadSeat, activeFramework, err)}
-		}
+		args = append(args, routeArgs...)
+		sessionEnv.Model = route.Model
+		notices = append(notices, OperatorNotice{Code: "lead-model-role-resolved", Message: fmt.Sprintf("lead model %s on %s (role %s)", route.Model, activeFramework, leadSeat)})
 
 		if d.FollowupMode && slug != "" {
 			if sysPrompt := loadFollowupContext(slug, knowledgeDir, d.FindingIndex); sysPrompt != "" {

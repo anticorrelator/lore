@@ -342,7 +342,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				d := m.sessionConfirmDescriptor
 				d.ExtraContext = strings.TrimSpace(m.sessionConfirmInput.Value())
 				m.sessionConfirmActive = false
-				return m.spawnSession(d, "")
+				return m.enqueueSession(d)
 			case "esc", "ctrl+c":
 				m.sessionConfirmActive = false
 				return m, nil
@@ -680,6 +680,18 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		if msg.err != nil {
 			m.flashErr = compactErr("session registry", msg.err)
 		}
+		return m, nil
+
+	case directEnqueueResultMsg:
+		if msg.err != nil {
+			m.flashErr = compactErr("enqueue session", msg.err)
+			return m, nil
+		}
+		d := msg.descriptor
+		m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: d.Slug, Type: sessionType(d.Type)})
+		panel := work.NewSessionPanelModel(d.Slug)
+		panel, _ = panel.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth() - 2, Height: m.detailPanelHeight()})
+		m.setSessionPanel(d.Slug, panel)
 		return m, nil
 
 	case journalResultMsg:

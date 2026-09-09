@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"github.com/anticorrelator/lore/tui/internal/config"
 	"sort"
 	"strings"
 
@@ -42,6 +43,7 @@ const SpecTrackShort = "short"
 // durable contract. The mode flags below them (ShortMode, SkipConfirm,
 // FollowupMode, FindingIndex) select which branch of buildInitialPrompt runs.
 type SessionDescriptor struct {
+	Route           *config.Route
 	Type            string // spec|implement|chat
 	Slug            string
 	Title           string

@@ -52,9 +52,10 @@ func TestHostRecoveryScopesFreshDeadAndAbandonedClaims(t *testing.T) {
 }
 
 func TestHostQueueRetargetsAndLegacyDeclines(t *testing.T) {
+	stageRouteScripts(t)
 	dir := t.TempDir()
 	now := time.Now()
-	req := Request{RequestID: "r-host", Type: "worker", Slug: StrPtr("item--w123"), Initiator: "agent", HostKey: "host", TargetInstance: StrPtr("dead"), RequestedAt: now.UTC().Format(time.RFC3339)}
+	req := Request{Framework: StrPtr("claude-code"), Model: StrPtr("fixture-model"), RequestID: "r-host", Type: "worker", Slug: StrPtr("item--w123"), Initiator: "agent", HostKey: "host", TargetInstance: StrPtr("dead"), RequestedAt: now.UTC().Format(time.RFC3339)}
 	if err := WritePending(dir, req); err != nil {
 		t.Fatal(err)
 	}

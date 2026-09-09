@@ -13,6 +13,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
 
@@ -146,18 +147,29 @@ func stageFakeLoreData(t *testing.T, framework string, extraArgs []string) strin
 		t.Fatal(err)
 	}
 	harnesses := map[string]any{
-		"claude-code": map[string]any{"args": []string{}},
-		"opencode":    map[string]any{"args": []string{}},
-		"codex":       map[string]any{"args": []string{}},
+		"claude-code": map[string]any{"args": []string{}, "native_models": map[string]any{"default": "opus"}},
+		"opencode":    map[string]any{"args": []string{}, "native_models": map[string]any{"default": "anthropic/opus"}},
+		"codex":       map[string]any{"args": []string{}, "native_models": map[string]any{"default": "gpt-5.5-high"}},
 	}
 	if extraArgs != nil {
 		harnesses[framework].(map[string]any)["args"] = extraArgs
 	}
 	cfg := map[string]any{
-		"version":              1,
+		"version":              2,
 		"tui_launch_framework": framework,
 		"capability_overrides": map[string]string{},
 		"harnesses":            harnesses,
+		"routes": map[string]any{"default": func() string {
+			if framework == "opencode" {
+				return "opencode/anthropic/opus"
+			}
+			return framework + "/smoke-model"
+		}(), "lead": func() string {
+			if framework == "opencode" {
+				return "opencode/anthropic/opus"
+			}
+			return framework + "/smoke-model"
+		}()},
 	}
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), data, 0644); err != nil {
@@ -186,10 +198,22 @@ func runStartTerminal(t *testing.T, slug, projectDir string, followupMode bool) 
 	// width=80, height=24 are typical PTY defaults; the values aren't
 	// load-bearing for the args we assert.
 	identity := mustSessionWorktree(t)
-	// Model is an explicit per-dispatch override: a launch with neither a model
-	// nor a role binding is refused (see the lead-model tests), and these smoke
-	// tests are about the rest of the composed command.
-	d := SessionDescriptor{Type: SessionSpec, Slug: slug, Title: "smoke title", Model: "smoke-model", SkipConfirm: true, FollowupMode: followupMode, FindingIndex: -1, Worktree: &identity}
+	settings, err := os.ReadFile(filepath.Join(projectDir, "config", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var launch struct {
+		Framework string `json:"tui_launch_framework"`
+	}
+	if err := json.Unmarshal(settings, &launch); err != nil {
+		t.Fatal(err)
+	}
+	model := "smoke-model"
+	if launch.Framework == "opencode" {
+		model = "anthropic/opus"
+	}
+	route := config.Route{Framework: launch.Framework, Model: model, Options: map[string]string{}}
+	d := SessionDescriptor{Type: SessionSpec, Slug: slug, Title: "smoke title", Route: &route, SkipConfirm: true, FollowupMode: followupMode, FindingIndex: -1, Worktree: &identity}
 	cmd := StartTerminalCmd(d, 80, 24, projectDir, SessionEnv{}, false)
 	msg := cmd()
 	if started, ok := msg.(SessionProcessStartedMsg); ok {
@@ -236,7 +260,7 @@ func TestStartTerminalCmdPinsDirectPTYToValidatedWorktree(t *testing.T) {
 	stageFakeBinaries(t)
 	knowledgeDir := stageFakeLoreData(t, "claude-code", nil)
 	identity := mustSessionWorktree(t)
-	d := SessionDescriptor{Type: SessionSpec, Slug: "cwd-smoke", Title: "cwd smoke", Model: "smoke-model", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+	d := SessionDescriptor{Type: SessionSpec, Slug: "cwd-smoke", Title: "cwd smoke", Framework: "claude-code", Model: "smoke-model", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
 
 	msg := StartTerminalCmd(d, 80, 24, knowledgeDir, SessionEnv{}, false)()
 	started, ok := msg.(SessionProcessStartedMsg)
@@ -271,7 +295,7 @@ func TestStartTerminalCmdPinsManagedDirectPTYToExecutionDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(registry, "tree-1.json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	d := SessionDescriptor{Type: SessionWorker, Slug: "worker-1", Model: "smoke-model", SkipConfirm: true, FindingIndex: -1,
+	d := SessionDescriptor{Type: SessionWorker, Slug: "worker-1", Framework: "claude-code", Model: "smoke-model", SkipConfirm: true, FindingIndex: -1,
 		Worktree: &identity, WorktreeID: "tree-1", ExecutionDir: identity.CanonicalPath}
 	env := SessionEnv{Instance: "owner", Slug: d.Slug, Type: d.Type, WorktreeID: d.WorktreeID, ExecutionDir: d.ExecutionDir}
 	msg := StartTerminalCmd(d, 80, 24, knowledgeDir, env, false)()
@@ -337,7 +361,7 @@ func TestStartTerminalCmd_ExportsSessionIdentity(t *testing.T) {
 	dir := stageFakeLoreData(t, "claude-code", nil)
 
 	identity := mustSessionWorktree(t)
-	d := SessionDescriptor{Type: SessionSpec, Slug: "smoke-slug", Title: "smoke title", Model: "smoke-model", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+	d := SessionDescriptor{Type: SessionSpec, Slug: "smoke-slug", Title: "smoke title", Framework: "claude-code", Model: "smoke-model", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
 	cmd := StartTerminalCmd(d, 80, 24, dir,
 		SessionEnv{Instance: "amber-otter", Slug: "smoke-slug", Type: "spec"}, false)
 	msg := cmd()
@@ -673,7 +697,7 @@ func TestStartTerminalCmd_ComposesModelFlag(t *testing.T) {
 	dir := stageFakeLoreData(t, "claude-code", nil)
 
 	identity := mustSessionWorktree(t)
-	withModel := SessionDescriptor{Type: SessionSpec, Slug: "smoke-slug", Title: "smoke", Model: "opus", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+	withModel := SessionDescriptor{Type: SessionSpec, Slug: "smoke-slug", Title: "smoke", Framework: "claude-code", Model: "opus", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
 	cmd := StartTerminalCmd(withModel, 80, 24, dir, SessionEnv{}, false)
 	msg := cmd()
 	started, ok := msg.(SessionProcessStartedMsg)
@@ -687,17 +711,17 @@ func TestStartTerminalCmd_ComposesModelFlag(t *testing.T) {
 		t.Errorf("Cmd.Args missing `--model opus`: %v", started.Cmd.Args)
 	}
 
-	// Empty Model with nothing bound is refused, never launched flag-less.
 	withoutModel := SessionDescriptor{Type: SessionSpec, Slug: "smoke-slug", Title: "smoke", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
 	msg2 := StartTerminalCmd(withoutModel, 80, 24, dir, SessionEnv{}, false)()
-	if started2, ok := msg2.(SessionProcessStartedMsg); ok {
-		if started2.Ptmx != nil {
-			_ = started2.Ptmx.Close()
-		}
-		t.Fatalf("empty Model with no binding launched anyway: %v", started2.Cmd.Args)
+	started2, ok := msg2.(SessionProcessStartedMsg)
+	if !ok {
+		t.Fatalf("expected route-default launch, got %T (%+v)", msg2, msg2)
 	}
-	if _, ok := msg2.(StreamErrorMsg); !ok {
-		t.Fatalf("expected StreamErrorMsg for empty Model with no binding, got %T", msg2)
+	if started2.Ptmx != nil {
+		_ = started2.Ptmx.Close()
+	}
+	if !argsContainPair(started2.Cmd.Args, "--model", "smoke-model") {
+		t.Fatalf("default route argv = %v", started2.Cmd.Args)
 	}
 }
 
@@ -710,7 +734,7 @@ func TestStartTerminalCmd_ComposesModelFlag(t *testing.T) {
 func stageLeadModelSettings(t *testing.T, roles map[string]string, ceremonyRoles map[string]map[string]string) string {
 	t.Helper()
 	for _, role := range []string{"LEAD", "WORKER", "DEFAULT", "RESEARCHER"} {
-		t.Setenv("LORE_MODEL_"+role, "")
+		os.Unsetenv("LORE_MODEL_" + role)
 	}
 	dataDir := stageFakeLoreData(t, "claude-code", nil)
 	path := filepath.Join(dataDir, "config", "settings.json")
@@ -722,12 +746,24 @@ func stageLeadModelSettings(t *testing.T, roles map[string]string, ceremonyRoles
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatal(err)
 	}
-	harness := cfg["harnesses"].(map[string]any)["claude-code"].(map[string]any)
-	if roles != nil {
-		harness["roles"] = roles
+	routes := cfg["routes"].(map[string]any)
+	for role, model := range roles {
+		if strings.HasPrefix(model, "codex/") || strings.HasPrefix(model, "opencode/") || strings.HasPrefix(model, "claude-code/") {
+			routes[role] = model
+		} else {
+			routes[role] = "claude-code/" + model
+		}
 	}
 	if ceremonyRoles != nil {
-		harness["ceremony_roles"] = ceremonyRoles
+		overlays := map[string]any{}
+		for ceremony, bindings := range ceremonyRoles {
+			values := map[string]any{}
+			for role, model := range bindings {
+				values[role] = "claude-code/" + model
+			}
+			overlays[ceremony] = values
+		}
+		routes["ceremony_overlays"] = overlays
 	}
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 	if err := os.WriteFile(path, data, 0644); err != nil {
@@ -742,7 +778,12 @@ func spawnForLeadModel(t *testing.T, sessionType, model, knowledgeDir string) Se
 	t.Helper()
 	identity := mustSessionWorktree(t)
 	d := SessionDescriptor{Type: sessionType, Slug: "lead-model-slug", Title: "lead model",
-		Model: model, SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+		Framework: func() string {
+			if model != "" {
+				return "claude-code"
+			}
+			return ""
+		}(), Model: model, SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
 	msg := StartTerminalCmd(d, 80, 24, knowledgeDir, SessionEnv{}, false)()
 	started, ok := msg.(SessionProcessStartedMsg)
 	if !ok {
@@ -771,9 +812,9 @@ func TestStartTerminalCmd_LeadModelOverrideBeatsRoleBinding(t *testing.T) {
 	if argsContains(started.Cmd.Args, "ceremony-model") || argsContains(started.Cmd.Args, "overlay-model") {
 		t.Errorf("role binding leaked past the per-dispatch override: %v", started.Cmd.Args)
 	}
-	notice, ok := noticeByCode(started.Notices, "lead-model-override")
+	notice, ok := noticeByCode(started.Notices, "lead-model-role-resolved")
 	if !ok || !strings.Contains(notice.Message, "dispatch-model") {
-		t.Errorf("Notices = %#v, want a lead-model-override notice naming dispatch-model", started.Notices)
+		t.Errorf("Notices = %#v, want a canonical route notice naming dispatch-model", started.Notices)
 	}
 }
 
@@ -830,7 +871,12 @@ func refuseForLeadModel(t *testing.T, sessionType, model, knowledgeDir string) S
 	t.Helper()
 	identity := mustSessionWorktree(t)
 	d := SessionDescriptor{Type: sessionType, Slug: "lead-model-slug", Title: "lead model",
-		Model: model, SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+		Framework: func() string {
+			if model != "" {
+				return "claude-code"
+			}
+			return ""
+		}(), Model: model, SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
 	msg := StartTerminalCmd(d, 80, 24, knowledgeDir, SessionEnv{}, false)()
 	if started, ok := msg.(SessionProcessStartedMsg); ok {
 		if started.Ptmx != nil {
@@ -848,13 +894,12 @@ func refuseForLeadModel(t *testing.T, sessionType, model, knowledgeDir string) S
 // TestStartTerminalCmd_LeadModelUnboundRefuses asserts an unbound seat with no
 // per-dispatch model is refused rather than launched on the harness's personal
 // default: with no roles block at all there is no third source of a model.
-func TestStartTerminalCmd_LeadModelUnboundRefuses(t *testing.T) {
+func TestStartTerminalCmd_LeadModelUsesRequiredDefault(t *testing.T) {
 	stageFakeBinaries(t)
 	dir := stageLeadModelSettings(t, nil, nil)
-
-	refused := refuseForLeadModel(t, SessionSpec, "", dir)
-	if !strings.Contains(refused.Err.Error(), "no spec.lead binding") || !strings.Contains(refused.Err.Error(), "--model") {
-		t.Errorf("refusal %q should name the unbound seat and the override flags", refused.Err)
+	started := spawnForLeadModel(t, SessionSpec, "", dir)
+	if !argsContainPair(started.Cmd.Args, "--model", "smoke-model") {
+		t.Fatalf("argv=%v", started.Cmd.Args)
 	}
 }
 
@@ -883,14 +928,12 @@ func TestStartTerminalCmd_LeadModelResolverErrorRefuses(t *testing.T) {
 // binding routes to another framework (`codex/<model>` on the claude-code map)
 // is refused on a claude-code claim, naming the target, instead of passing the
 // qualified string to a harness that cannot run it.
-func TestStartTerminalCmd_LeadModelCrossFrameworkRouteRefuses(t *testing.T) {
+func TestStartTerminalCmd_LeadModelAllowsCrossFrameworkRoute(t *testing.T) {
 	stageFakeBinaries(t)
 	dir := stageLeadModelSettings(t, map[string]string{"lead": "codex/gpt-6-astra"}, nil)
-
-	refused := refuseForLeadModel(t, SessionSpec, "", dir)
-	msg := refused.Err.Error()
-	if !strings.Contains(msg, "routes to codex/gpt-6-astra") || !strings.Contains(msg, "--framework codex") {
-		t.Errorf("refusal %q should name the route target and the remedy", refused.Err)
+	started := spawnForLeadModel(t, SessionSpec, "", dir)
+	if started.Harness != "codex" || !argsContainPair(started.Cmd.Args, "-m", "gpt-6-astra") {
+		t.Fatalf("argv=%v harness=%s", started.Cmd.Args, started.Harness)
 	}
 }
 
@@ -898,44 +941,13 @@ func TestStartTerminalCmd_LeadModelCrossFrameworkRouteRefuses(t *testing.T) {
 // resolution reads the overlay of the framework claiming *this* session, not the
 // TUI process's own active framework. Binding differs between the two so a
 // resolver that consulted the process framework would compose the wrong value.
-func TestStartTerminalCmd_LeadModelResolvesAgainstRequestFramework(t *testing.T) {
-	stageFakeBinaries(t)
+func TestStartTerminalCmd_RefusesIncompleteLegacyPair(t *testing.T) {
 	dir := stageLeadModelSettings(t, map[string]string{"lead": "claude-lead-model"}, nil)
-
-	// Add an opencode overlay binding a different model, then claim the session
-	// for opencode via the descriptor while the process framework stays
-	// claude-code.
-	path := filepath.Join(dir, "config", "settings.json")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		t.Fatal(err)
-	}
-	cfg["harnesses"].(map[string]any)["opencode"].(map[string]any)["roles"] = map[string]string{"lead": "opencode-lead-model"}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		t.Fatal(err)
-	}
-
 	identity := mustSessionWorktree(t)
-	d := SessionDescriptor{Type: SessionSpec, Slug: "cross-framework", Title: "cross framework",
-		Framework: "opencode", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
-	msg := StartTerminalCmd(d, 80, 24, dir, SessionEnv{}, false)()
-	started, ok := msg.(SessionProcessStartedMsg)
-	if !ok {
-		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
-	}
-	if started.Ptmx != nil {
-		_ = started.Ptmx.Close()
-	}
-	if !argsContainPair(started.Cmd.Args, "--model", "opencode-lead-model") {
-		t.Errorf("Cmd.Args missing `--model opencode-lead-model`: %v", started.Cmd.Args)
-	}
-	if argsContains(started.Cmd.Args, "claude-lead-model") {
-		t.Errorf("resolved against the process framework, not the session's: %v", started.Cmd.Args)
+	msg := StartTerminalCmd(SessionDescriptor{Type: SessionSpec, Slug: "partial", Framework: "opencode", Worktree: &identity}, 80, 24, dir, SessionEnv{}, false)()
+	failed, ok := msg.(StreamErrorMsg)
+	if !ok || !strings.Contains(failed.Err.Error(), "requires framework and model together") {
+		t.Fatalf("partial=%T %+v", msg, msg)
 	}
 }
 
@@ -964,19 +976,13 @@ func TestTmuxSessionNameSlugless(t *testing.T) {
 }
 
 func TestStartTerminalCmd_UnknownFrameworkReturnsStreamError(t *testing.T) {
-	stageFakeBinaries(t)
-	t.Setenv("LORE_DATA_DIR", stageFakeLoreDataWithLaunchFramework(t, "definitely-not-a-real-harness"))
-
-	msg := runStartTerminal(t, "smoke-slug", t.TempDir(), false)
-	streamErr, ok := msg.(StreamErrorMsg)
-	if !ok {
-		t.Fatalf("expected StreamErrorMsg for unknown framework, got %T (%+v)", msg, msg)
-	}
-	if streamErr.Err == nil || !strings.Contains(streamErr.Err.Error(), "unknown TUI launch framework") {
-		t.Errorf("StreamErrorMsg.Err = %v, want substring %q", streamErr.Err, "unknown TUI launch framework")
-	}
-	if streamErr.Slug != "smoke-slug" {
-		t.Errorf("StreamErrorMsg.Slug = %q, want %q", streamErr.Slug, "smoke-slug")
+	dir := stageFakeLoreData(t, "claude-code", nil)
+	identity := mustSessionWorktree(t)
+	route := config.Route{Framework: "unknown", Model: "x", Options: map[string]string{}}
+	msg := StartTerminalCmd(SessionDescriptor{Type: SessionSpec, Slug: "bad", Route: &route, Worktree: &identity}, 80, 24, dir, SessionEnv{}, false)()
+	failed, ok := msg.(StreamErrorMsg)
+	if !ok || !strings.Contains(failed.Err.Error(), "unknown") {
+		t.Fatalf("unknown=%T %+v", msg, msg)
 	}
 }
 
@@ -1051,7 +1057,7 @@ func TestStartTerminalCmd_DeclaresContainmentBoundary(t *testing.T) {
 	dir := stageFakeLoreData(t, "claude-code", nil)
 
 	identity := mustSessionWorktree(t)
-	d := SessionDescriptor{Type: SessionSpec, Slug: "fence-slug", Title: "fence title", Model: "smoke-model", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
+	d := SessionDescriptor{Type: SessionSpec, Slug: "fence-slug", Title: "fence title", Framework: "claude-code", Model: "smoke-model", SkipConfirm: true, FindingIndex: -1, Worktree: &identity}
 	cmd := StartTerminalCmd(d, 80, 24, dir,
 		SessionEnv{Instance: "amber-otter", Slug: "fence-slug", Type: "spec"}, false)
 	msg := cmd()
@@ -1093,5 +1099,23 @@ func TestSessionEnvVarsCarriesContainmentBoundary(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("vars()[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestStartTerminalCmdCodexRouteOptionsReachActualArgv(t *testing.T) {
+	stageFakeBinaries(t)
+	dir := stageFakeLoreData(t, "codex", []string{"--human-arg"})
+	identity := mustSessionWorktree(t)
+	route := config.Route{Framework: "codex", Model: "gpt-5.6-sol", Options: map[string]string{"effort": "high", "service_tier": "fast"}, RoutingSource: map[string]string{"layer": "routes", "role": "worker"}}
+	msg := StartTerminalCmd(SessionDescriptor{Type: SessionWorker, Slug: "route-argv", Route: &route, Worktree: &identity}, 80, 24, dir, SessionEnv{}, false)()
+	started, ok := msg.(SessionProcessStartedMsg)
+	if !ok {
+		t.Fatalf("start = %T %+v", msg, msg)
+	}
+	defer started.Ptmx.Close()
+	want := []string{"--human-arg", "-m", "gpt-5.6-sol", "-c", `model_reasoning_effort="high"`, "-c", `service_tier="fast"`}
+	joined := strings.Join(started.Cmd.Args, "\x00")
+	if !strings.Contains(joined, strings.Join(want, "\x00")) {
+		t.Fatalf("actual argv = %#v, want ordered %#v", started.Cmd.Args, want)
 	}
 }

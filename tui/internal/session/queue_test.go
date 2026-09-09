@@ -3,17 +3,38 @@ package session
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/anticorrelator/lore/tui/internal/config"
 )
+
+func stageRouteScripts(t *testing.T) {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Clean(filepath.Join(wd, "..", "..", ".."))
+	dir := t.TempDir()
+	if err := os.Symlink(filepath.Join(root, "scripts"), filepath.Join(dir, "scripts")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LORE_DATA_DIR", dir)
+}
 
 func strp(s string) *string { return &s }
 
 func plantPending(t *testing.T, dir string, req Request) {
 	t.Helper()
+	stageRouteScripts(t)
+	if req.Route == nil && req.Framework == nil && req.Model == nil {
+		req.Framework, req.Model = strp("claude-code"), strp("fixture-model")
+	}
 	if err := WritePending(dir, req); err != nil {
 		t.Fatalf("WritePending %q: %v", req.RequestID, err)
 	}
@@ -311,6 +332,7 @@ func TestQueueTickReclaimsStaleClaimer(t *testing.T) {
 	req, _ := ReadClaimed(dir, id)
 	old := time.Now().Add(-2 * ReclaimAfter).UTC().Format("2006-01-02T15:04:05Z")
 	req.ClaimedAt = &old
+	req.Framework, req.Model = strp("claude-code"), strp("fixture-model")
 	if err := writeRow(claimedPath(dir, id), req); err != nil {
 		t.Fatal(err)
 	}
@@ -337,6 +359,7 @@ func TestQueueTickLeavesLiveClaimerAlone(t *testing.T) {
 	req, _ := ReadClaimed(dir, id)
 	old := time.Now().Add(-2 * ReclaimAfter).UTC().Format("2006-01-02T15:04:05Z")
 	req.ClaimedAt = &old
+	req.Framework, req.Model = strp("claude-code"), strp("fixture-model")
 	_ = writeRow(claimedPath(dir, id), req)
 	res, _ := QueueTick(dir, "me", "", "", map[string]bool{"me": true, "busy-instance": true}, noPlan, nil, time.Now(), ReclaimAfter)
 	if len(res.Reclaimed) != 0 {
@@ -601,6 +624,8 @@ func noPlan(string) bool { return false }
 // reclaim/metadata tests build on.
 func ClaimRequestFixture(t *testing.T, dir string, req Request) error {
 	t.Helper()
+	stageRouteScripts(t)
+	req.Framework, req.Model = strp("claude-code"), strp("fixture-model")
 	if err := WritePending(dir, req); err != nil {
 		return err
 	}
@@ -732,6 +757,38 @@ func TestPlacementFieldsRoundTrip(t *testing.T) {
 	for _, key := range []string{"required_project_dir", "placement_stance", "required_target_ref"} {
 		if strings.Contains(string(data), key) {
 			t.Fatalf("absent %s should be omitted on marshal, got %s", key, data)
+		}
+	}
+}
+
+func TestClaimableByOptionRouteRequiresKnownVintage(t *testing.T) {
+	req := Request{Route: &config.Route{Framework: "codex", Model: "gpt-5.6-sol", Options: map[string]string{"effort": "high"}}}
+	if claimableBy(req, "host", "", "", time.Now()) {
+		t.Fatal("unknown-vintage host claimed option-bearing route")
+	}
+	if !claimableBy(req, "host", "2026-09-08T12:00:00Z", "", time.Now()) {
+		t.Fatal("known-vintage host should claim option-bearing route")
+	}
+	legacy := Request{Framework: strp("codex"), Model: strp("gpt-5.6-sol")}
+	if !claimableBy(legacy, "host", "", "", time.Now()) {
+		t.Fatal("legacy empty-option pair lost unknown-vintage compatibility")
+	}
+}
+
+func TestReadRowRejectsUnknownCanonicalRouteFieldAndBadProjection(t *testing.T) {
+	stageRouteScripts(t)
+	dir := t.TempDir()
+	for name, raw := range map[string]string{
+		"unknown":    `{"request_id":"x","type":"spec","route":{"framework":"codex","model":"gpt-5.6-sol","options":{},"mystery":true},"framework":"codex","model":"gpt-5.6-sol"}`,
+		"projection": `{"request_id":"x","type":"spec","route":{"framework":"codex","model":"gpt-5.6-sol","options":{}},"framework":"claude-code","model":"gpt-5.6-sol"}`,
+		"missing":    `{"request_id":"x","type":"spec"}`,
+	} {
+		path := filepath.Join(dir, name+".json")
+		if err := os.WriteFile(path, []byte(raw), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, diagnostic, ok := readRow(path, "test"); ok || diagnostic == nil {
+			t.Fatalf("%s malformed row accepted", name)
 		}
 	}
 }

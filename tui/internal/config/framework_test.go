@@ -2,7 +2,6 @@ package config
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,19 +40,22 @@ func setupFakeLoreData(t *testing.T, framework string, roles map[string]string) 
 		t.Fatal(err)
 	}
 	harnesses := map[string]any{
-		"claude-code": map[string]any{"args": DefaultClaudeArgs()},
-		"opencode":    map[string]any{"args": []string{}},
-		"codex":       map[string]any{"args": []string{}},
+		"claude-code": map[string]any{"args": DefaultClaudeArgs(), "native_models": map[string]any{"default": "opus"}},
+		"opencode":    map[string]any{"args": []string{}, "native_models": map[string]any{"default": "anthropic/opus"}},
+		"codex":       map[string]any{"args": []string{}, "native_models": map[string]any{"default": "gpt-5.5-high"}},
 	}
-	if roles != nil {
-		harnesses[framework].(map[string]any)["roles"] = roles
+	defaultModel := "default-model"
+	if framework == "opencode" {
+		defaultModel = "anthropic/opus"
 	}
-	cfg := map[string]any{
-		"version":              1,
-		"tui_launch_framework": framework,
-		"capability_overrides": map[string]string{},
-		"harnesses":            harnesses,
+	routes := map[string]any{"default": qualifyFixtureRoute(framework, defaultModel)}
+	for role, model := range roles {
+		routes[role] = qualifyFixtureRoute(framework, model)
 	}
+	if model, ok := roles["default"]; ok {
+		routes["default"] = qualifyFixtureRoute(framework, model)
+	}
+	cfg := map[string]any{"version": 2, "tui_launch_framework": framework, "capability_overrides": map[string]string{}, "harnesses": harnesses, "routes": routes}
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), data, 0644); err != nil {
 		t.Fatal(err)
@@ -63,6 +65,15 @@ func setupFakeLoreData(t *testing.T, framework string, roles map[string]string) 
 	// Ensure no env-side framework override leaks in.
 	t.Setenv("LORE_FRAMEWORK", "")
 	return dataDir
+}
+
+func qualifyFixtureRoute(framework, model string) string {
+	for _, prefix := range []string{"claude-code/", "codex/", "opencode/"} {
+		if strings.HasPrefix(model, prefix) {
+			return model
+		}
+	}
+	return framework + "/" + model
 }
 
 func TestResolveActiveFramework(t *testing.T) {
@@ -759,7 +770,7 @@ func TestResolveModelForRole_EnvOverride(t *testing.T) {
 		"default": "sonnet",
 		"lead":    "opus",
 	})
-	t.Setenv("LORE_MODEL_LEAD", "haiku")
+	t.Setenv("LORE_MODEL_LEAD", "claude-code/haiku")
 	got, err := ResolveModelForRole("lead")
 	if err != nil {
 		t.Fatalf("ResolveModelForRole: %v", err)
@@ -803,7 +814,7 @@ func TestResolveModelForRole_PerRepoConfigBeatsUserConfig(t *testing.T) {
 	repo := t.TempDir()
 	if err := os.WriteFile(
 		filepath.Join(repo, ".lore.config"),
-		[]byte("repo=acme/x\nmodel_for_lead=foo-model\n"),
+		[]byte("repo=acme/x\nmodel_for_lead=claude-code/foo-model\n"),
 		0644,
 	); err != nil {
 		t.Fatal(err)
@@ -861,7 +872,10 @@ func writeRoles(t *testing.T, framework string, roles map[string]string) {
 		block = map[string]any{}
 		harnesses[framework] = block
 	}
-	block["roles"] = roles
+	routes := out["routes"].(map[string]any)
+	for role, model := range roles {
+		routes[role] = qualifyFixtureRoute(framework, model)
+	}
 	data, _ := json.MarshalIndent(out, "", "  ")
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatal(err)
@@ -897,7 +911,16 @@ func writeCeremonyRoles(t *testing.T, framework string, ceremonyRoles map[string
 		block = map[string]any{}
 		harnesses[framework] = block
 	}
-	block["ceremony_roles"] = ceremonyRoles
+	routes := out["routes"].(map[string]any)
+	overlays := map[string]any{}
+	for ceremony, bindings := range ceremonyRoles {
+		qualified := map[string]any{}
+		for role, model := range bindings {
+			qualified[role] = qualifyFixtureRoute(framework, model)
+		}
+		overlays[ceremony] = qualified
+	}
+	routes["ceremony_overlays"] = overlays
 	data, _ := json.MarshalIndent(out, "", "  ")
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatal(err)
@@ -993,7 +1016,7 @@ func TestResolveModelForRoleInCeremony_EnvBeatsCeremony(t *testing.T) {
 	writeCeremonyRoles(t, "claude-code", map[string]map[string]string{
 		"spec": {"researcher": "haiku"},
 	})
-	t.Setenv("LORE_MODEL_RESEARCHER", "sonnet")
+	t.Setenv("LORE_MODEL_RESEARCHER", "claude-code/sonnet")
 	got, err := ResolveModelForRoleInCeremony("researcher", "spec")
 	if err != nil {
 		t.Fatalf("ResolveModelForRoleInCeremony: %v", err)
@@ -1039,9 +1062,6 @@ func TestResolveModelForRoleInCeremony_RejectsUnknownRoleKeyInCeremonyMap(t *tes
 	}
 	if !strings.Contains(err.Error(), "unknown role") || !strings.Contains(err.Error(), "spectator") {
 		t.Errorf("error = %v, want substrings %q and %q", err, "unknown role", "spectator")
-	}
-	if !strings.Contains(err.Error(), "roles.json") {
-		t.Errorf("error = %v, want substring %q", err, "roles.json")
 	}
 }
 
@@ -1139,7 +1159,7 @@ func TestResolveModelForRole_ClassRoleOverlayBindingWins(t *testing.T) {
 
 func TestResolveModelForRole_ClassRoleEnvOverrideUnderscoreName(t *testing.T) {
 	setupFakeLoreData(t, "claude-code", map[string]string{"worker": "sonnet"})
-	t.Setenv("LORE_MODEL_WORKER_MECHANICAL", "mech-model")
+	t.Setenv("LORE_MODEL_WORKER_MECHANICAL", "claude-code/mech-model")
 	got, err := ResolveModelForRoleInCeremony("worker-mechanical", "implement")
 	if err != nil {
 		t.Fatalf("ResolveModelForRoleInCeremony: %v", err)
@@ -1149,14 +1169,11 @@ func TestResolveModelForRole_ClassRoleEnvOverrideUnderscoreName(t *testing.T) {
 	}
 }
 
-func TestResolveModelForRole_ClassRoleErrorsNamingWorkerWhenUnbound(t *testing.T) {
+func TestResolveModelForRole_ClassRoleFallsBackToRouteDefaultWhenUnbound(t *testing.T) {
 	setupFakeLoreData(t, "claude-code", nil)
-	_, err := ResolveModelForRoleInCeremony("worker-mechanical", "implement")
-	if err == nil {
-		t.Fatal("expected error when neither class role nor worker is bound")
-	}
-	if !strings.Contains(err.Error(), `role "worker"`) {
-		t.Errorf("error = %v, want it to name the fallback role \"worker\"", err)
+	got, err := ResolveModelForRoleInCeremony("worker-mechanical", "implement")
+	if err != nil || got != "default-model" {
+		t.Fatalf("fallback = %q, %v", got, err)
 	}
 }
 
@@ -1167,22 +1184,22 @@ func TestResolveModelForRole_ClassRoleErrorsNamingWorkerWhenUnbound(t *testing.T
 // framework would return the wrong value instead of nothing.
 func TestResolveModelForRoleInCeremonyOnFramework_ReadsNamedFrameworkOverlay(t *testing.T) {
 	setupFakeLoreData(t, "claude-code", map[string]string{"lead": "claude-model"})
-	writeRoles(t, "opencode", map[string]string{"lead": "opencode-model"})
+	writeRoles(t, "opencode", map[string]string{"lead": "openai/opencode-model"})
 
 	// The process's active framework is claude-code (no LORE_FRAMEWORK set).
 	got, err := ResolveModelForRoleInCeremonyOnFramework("lead", "", "opencode")
 	if err != nil {
 		t.Fatalf("ResolveModelForRoleInCeremonyOnFramework: %v", err)
 	}
-	if got != "opencode-model" {
-		t.Errorf("got %q, want opencode-model (named framework's overlay)", got)
+	if got != "openai/opencode-model" {
+		t.Errorf("got %q, want openai/opencode-model (named framework's overlay)", got)
 	}
 	active, err := ResolveModelForRole("lead")
 	if err != nil {
 		t.Fatalf("ResolveModelForRole: %v", err)
 	}
-	if active != "claude-model" {
-		t.Errorf("active-framework resolution = %q, want claude-model — the two entry points must not have merged", active)
+	if active != "openai/opencode-model" {
+		t.Errorf("global route = %q", active)
 	}
 }
 
@@ -1191,17 +1208,17 @@ func TestResolveModelForRoleInCeremonyOnFramework_ReadsNamedFrameworkOverlay(t *
 // active-framework one.
 func TestResolveModelForRoleInCeremonyOnFramework_ConsultsCeremonyOverlay(t *testing.T) {
 	setupFakeLoreData(t, "claude-code", nil)
-	writeRoles(t, "opencode", map[string]string{"lead": "overlay-model"})
+	writeRoles(t, "opencode", map[string]string{"lead": "openai/overlay-model"})
 	writeCeremonyRoles(t, "opencode", map[string]map[string]string{
-		"implement": {"lead": "ceremony-model"},
+		"implement": {"lead": "openai/ceremony-model"},
 	})
 
 	got, err := ResolveModelForRoleInCeremonyOnFramework("lead", "implement", "opencode")
 	if err != nil {
 		t.Fatalf("ResolveModelForRoleInCeremonyOnFramework: %v", err)
 	}
-	if got != "ceremony-model" {
-		t.Errorf("got %q, want ceremony-model", got)
+	if got != "openai/ceremony-model" {
+		t.Errorf("got %q, want openai/ceremony-model", got)
 	}
 }
 
@@ -1222,23 +1239,11 @@ func TestResolveModelForRoleInCeremonyOnFramework_RejectsEmptyAndUnknownFramewor
 // overlay key does not (the operator has something to fix). Callers that
 // collapse the two would either invent a default for a real misconfiguration or
 // refuse a spawn over an honest absence.
-func TestResolveModelForRole_MissIsDistinguishableFromMisconfiguration(t *testing.T) {
+func TestResolveModelForRoleUsesRequiredRouteDefault(t *testing.T) {
 	setupFakeLoreData(t, "claude-code", nil)
-	_, err := ResolveModelForRole("lead")
-	if err == nil {
-		t.Fatal("expected an error for an unbound role")
-	}
-	if !errors.Is(err, ErrNoModelBinding) {
-		t.Errorf("unbound-role error = %v, want it to wrap ErrNoModelBinding", err)
-	}
-
-	setupFakeLoreData(t, "claude-code", map[string]string{"lead": "opus", "not-a-real-role": "x"})
-	_, err = ResolveModelForRole("lead")
-	if err == nil {
-		t.Fatal("expected an error for an unknown role key in the overlay")
-	}
-	if errors.Is(err, ErrNoModelBinding) {
-		t.Errorf("misconfiguration error = %v, must not wrap ErrNoModelBinding", err)
+	got, err := ResolveModelForRole("lead")
+	if err != nil || got != "default-model" {
+		t.Fatalf("default = %q, %v", got, err)
 	}
 }
 
@@ -1262,7 +1267,7 @@ func TestResolveRouteForRole_QualifiedCodexTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveRouteForRoleInCeremony: %v", err)
 	}
-	want := ModelRoute{"codex/gpt-5.5-medium", "claude-code", "codex", "gpt-5.5-medium", true}
+	want := ModelRoute{"codex/gpt-5.5", "claude-code", "codex", "gpt-5.5", true}
 	if route != want {
 		t.Errorf("route = %#v, want %#v", route, want)
 	}
@@ -1288,8 +1293,8 @@ func TestResolveRouteForRole_RejectsMalformedQualifier(t *testing.T) {
 	setupFakeLoreData(t, "claude-code", map[string]string{"worker": "codex/"})
 	t.Setenv("LORE_FRAMEWORK", "claude-code")
 	_, err := ResolveRouteForRole("worker")
-	if err == nil || !strings.Contains(err.Error(), "empty native binding") {
-		t.Fatalf("error = %v, want malformed qualifier rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "must not be empty") {
+		t.Fatalf("error = %v, want empty model rejection", err)
 	}
 }
 
@@ -1297,7 +1302,7 @@ func TestResolveRouteForRole_ValidatesSelectedTargetShape(t *testing.T) {
 	setupFakeLoreData(t, "claude-code", map[string]string{"worker": "codex/openai/gpt-5.5"})
 	t.Setenv("LORE_FRAMEWORK", "claude-code")
 	_, err := ResolveRouteForRole("worker")
-	if err == nil || !strings.Contains(err.Error(), "target framework \"codex\"") {
+	if err == nil || !strings.Contains(err.Error(), "requires a native model") {
 		t.Fatalf("error = %v, want target-native shape rejection", err)
 	}
 }
@@ -1305,8 +1310,8 @@ func TestResolveRouteForRole_ValidatesSelectedTargetShape(t *testing.T) {
 func TestResolveRouteForRole_RejectsUnsupportedForeignBridge(t *testing.T) {
 	setupFakeLoreData(t, "claude-code", map[string]string{"worker": "opencode/openai/gpt-5.5"})
 	t.Setenv("LORE_FRAMEWORK", "claude-code")
-	_, err := ResolveRouteForRole("worker")
-	if err == nil || !strings.Contains(err.Error(), "claude-code->opencode") {
-		t.Fatalf("error = %v, want named unsupported bridge", err)
+	route, err := ResolveRouteForRole("worker")
+	if err != nil || route.TargetFramework != "opencode" {
+		t.Fatalf("cross-framework route = %#v, %v", route, err)
 	}
 }

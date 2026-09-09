@@ -25,6 +25,8 @@ package config
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,7 +35,176 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
+
+type Route struct {
+	Framework     string            `json:"framework"`
+	Model         string            `json:"model"`
+	Options       map[string]string `json:"options"`
+	RoutingSource map[string]string `json:"routing_source,omitempty"`
+}
+
+type routeResponse struct {
+	OK     bool                                  `json:"ok"`
+	Result json.RawMessage                       `json:"result"`
+	Error  *struct{ Code, Message, Path string } `json:"error,omitempty"`
+}
+
+// ResolveCanonicalRoute delegates all parsing, validation, and precedence to route_config.py.
+func ResolveCanonicalRoute(role, ceremony string, override any) (Route, error) {
+	repo, err := loreRepoDir()
+	if err != nil {
+		return Route{}, err
+	}
+	settings := filepath.Join(os.Getenv("LORE_DATA_DIR"), "config", "settings.json")
+	if os.Getenv("LORE_DATA_DIR") == "" {
+		home, _ := os.UserHomeDir()
+		settings = filepath.Join(home, ".lore", "config", "settings.json")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return Route{}, fmt.Errorf("resolve route cwd: %w", err)
+	}
+	payload := map[string]any{"operation": "resolve", "repo_root": repo, "settings_path": settings, "cwd": cwd, "role": role}
+	if ceremony != "" {
+		payload["ceremony"] = ceremony
+	}
+	if override != nil {
+		payload["override"] = override
+	}
+	return callRouteConfig(repo, payload)
+}
+
+// ParseCanonicalRoute validates and normalizes an already transported route.
+func ParseCanonicalRoute(value any) (Route, error) {
+	repo, err := loreRepoDir()
+	if err != nil {
+		return Route{}, err
+	}
+	return callRouteConfig(repo, map[string]any{"operation": "parse", "repo_root": repo, "route": value})
+}
+
+func callRouteConfigEnvelope(repo string, payload map[string]any) (json.RawMessage, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, "python3", filepath.Join(repo, "scripts", "route_config.py"))
+	cmd.Stdin = bytes.NewReader(raw)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	runErr := cmd.Run()
+	var response routeResponse
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		return nil, fmt.Errorf("route_config.py malformed response: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	if !response.OK {
+		if response.Error != nil {
+			return nil, fmt.Errorf("route_config.py %s at %s: %s", response.Error.Code, response.Error.Path, response.Error.Message)
+		}
+		return nil, errors.New("route_config.py refused request")
+	}
+	if runErr != nil {
+		return nil, fmt.Errorf("route_config.py: %w: %s", runErr, strings.TrimSpace(stderr.String()))
+	}
+	if len(response.Result) == 0 || bytes.Equal(response.Result, []byte("null")) {
+		return nil, errors.New("route_config.py returned malformed success envelope")
+	}
+	return response.Result, nil
+}
+
+func callRouteConfig(repo string, payload map[string]any) (Route, error) {
+	raw, err := callRouteConfigEnvelope(repo, payload)
+	if err != nil {
+		return Route{}, err
+	}
+	var route Route
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&route); err != nil || route.Framework == "" || route.Model == "" || route.Options == nil {
+		return Route{}, errors.New("route_config.py returned malformed route result")
+	}
+	return route, nil
+}
+
+// ValidateRoutingSettings validates the complete current routing tree without selecting a route.
+func ValidateRoutingSettings(candidate ...any) error {
+	repo, err := loreRepoDir()
+	if err != nil {
+		return err
+	}
+	settings := filepath.Join(os.Getenv("LORE_DATA_DIR"), "config", "settings.json")
+	if os.Getenv("LORE_DATA_DIR") == "" {
+		home, _ := os.UserHomeDir()
+		settings = filepath.Join(home, ".lore", "config", "settings.json")
+	}
+	payload := map[string]any{"operation": "validate-settings", "repo_root": repo, "settings_path": settings}
+	if len(candidate) > 1 {
+		return errors.New("validate routing settings accepts at most one candidate")
+	}
+	if len(candidate) == 1 {
+		payload["settings"] = candidate[0]
+		delete(payload, "settings_path")
+	}
+	_, err = callRouteConfigEnvelope(repo, payload)
+	return err
+}
+
+// ResolveNativeCanonicalRoute resolves a role for a harness-native invocation surface.
+func ResolveNativeCanonicalRoute(role, ceremony, harness string) (Route, error) {
+	repo, err := loreRepoDir()
+	if err != nil {
+		return Route{}, err
+	}
+	settings := filepath.Join(os.Getenv("LORE_DATA_DIR"), "config", "settings.json")
+	if os.Getenv("LORE_DATA_DIR") == "" {
+		home, _ := os.UserHomeDir()
+		settings = filepath.Join(home, ".lore", "config", "settings.json")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return Route{}, err
+	}
+	payload := map[string]any{"operation": "native", "repo_root": repo, "settings_path": settings, "cwd": cwd, "role": role, "harness": harness}
+	if ceremony != "" {
+		payload["ceremony"] = ceremony
+	}
+	return callRouteConfig(repo, payload)
+}
+
+func RouteFlags(route Route) ([]string, error) {
+	validated, err := ParseCanonicalRoute(route)
+	if err != nil {
+		return nil, fmt.Errorf("invalid canonical route: %w", err)
+	}
+	route = validated
+	switch route.Framework {
+	case "claude-code", "opencode":
+		if len(route.Options) != 0 {
+			return nil, fmt.Errorf("%s route options unsupported", route.Framework)
+		}
+		return []string{"--model", route.Model}, nil
+	case "codex":
+		for key := range route.Options {
+			if key != "effort" && key != "service_tier" {
+				return nil, fmt.Errorf("unsupported codex route option %q", key)
+			}
+		}
+		args := []string{"-m", route.Model}
+		if v := route.Options["effort"]; v != "" {
+			args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", v))
+		}
+		if v := route.Options["service_tier"]; v != "" {
+			args = append(args, "-c", fmt.Sprintf("service_tier=%q", v))
+		}
+		return args, nil
+	default:
+		return nil, fmt.Errorf("unknown route framework %q", route.Framework)
+	}
+}
 
 // HarnessInstallKind enumerates the closed set of installation surfaces lore
 // can target on a harness. New kinds MUST be added here, in scripts/lib.sh
@@ -1157,12 +1328,11 @@ func ResolveModelForRole(role string) (string, error) {
 // When ceremony == "" the ceremony layer (both its upfront query validation and
 // the overlay lookup) is skipped entirely.
 func ResolveModelForRoleInCeremony(role, ceremony string) (string, error) {
-	// Resolve the active harness up front and hand it to the shared body. The
-	// error is discarded (an unknown framework yields ""), which skips the three
-	// overlay layers and terminates in the ErrNoModelBinding miss — the
-	// pre-extraction behavior, preserved byte-for-byte.
-	active, _ := ResolveActiveFramework()
-	return resolveModelForRoleOn(role, ceremony, active)
+	route, err := ResolveCanonicalRoute(role, ceremony, nil)
+	if err != nil {
+		return "", err
+	}
+	return route.Model, nil
 }
 
 // ResolveModelForRoleInCeremonyOnFramework resolves a role binding against an
@@ -1186,14 +1356,20 @@ func ResolveModelForRoleInCeremony(role, ceremony string) (string, error) {
 // precedence — is shared verbatim through resolveModelForRoleOn.
 func ResolveModelForRoleInCeremonyOnFramework(role, ceremony, framework string) (string, error) {
 	if framework == "" {
-		return "", fmt.Errorf("resolve_model_for_role requires a framework name")
+		return "", errors.New("resolve_model_for_role requires a framework")
 	}
-	if caps, err := loadCapabilitiesFile(); err == nil {
-		if _, ok := caps.Frameworks[framework]; !ok {
-			return "", fmt.Errorf("unknown framework %q; not present in adapters/capabilities.json", framework)
-		}
+	caps, err := loadCapabilitiesFile()
+	if err != nil {
+		return "", err
 	}
-	return resolveModelForRoleOn(role, ceremony, framework)
+	if _, ok := caps.Frameworks[framework]; !ok {
+		return "", fmt.Errorf("unknown framework %q", framework)
+	}
+	route, err := ResolveNativeCanonicalRoute(role, ceremony, framework)
+	if err != nil {
+		return "", err
+	}
+	return route.Model, nil
 }
 
 // ErrNoModelBinding marks the resolver's terminal miss: every layer was
@@ -1205,128 +1381,9 @@ func ResolveModelForRoleInCeremonyOnFramework(role, ceremony, framework string) 
 // is not swallowed as "just unbound".
 var ErrNoModelBinding = errors.New("no model binding for role")
 
-// resolveModelForRoleOn is the shared resolution body. `active` is the
-// framework whose `harnesses.<active>.…` overlays layers 3-5 read; an empty
-// value skips those layers entirely.
-func resolveModelForRoleOn(role, ceremony, active string) (string, error) {
-	if role == "" {
-		return "", fmt.Errorf("resolve_model_for_role requires a role name")
-	}
-
-	// Closed-set validation of the role query. Soft-fails when
-	// adapters/roles.json is unreadable (matches bash behavior when jq is
-	// unavailable / file missing).
-	validRoles, validRolesErr := loadRoleIDs()
-	if validRolesErr == nil {
-		if _, ok := validRoles[role]; !ok {
-			return "", fmt.Errorf("unknown role %q (not in adapters/roles.json)", role)
-		}
-	}
-
-	// Optional class-qualified fallback (used at layer 4b below). Soft-fails to
-	// nil when roles.json is unreadable, matching the bash guard that leaves
-	// fallback_role empty when jq / the file is unavailable.
-	roleFallbacks, _ := loadRoleFallbacks()
-
-	// Closed-set validation of the ceremony query, upfront (before the env
-	// layer) so an unknown ceremony never resolves regardless of an env
-	// override — mirrors the bash upfront guard at scripts/lib.sh:1068-1077.
-	// Soft-fails when adapters/ceremonies.json is unreadable.
-	validCeremonies, validCeremoniesErr := loadCeremonyIDs()
-	if ceremony != "" && validCeremoniesErr == nil {
-		if _, ok := validCeremonies[ceremony]; !ok {
-			return "", fmt.Errorf("unknown ceremony %q (not in adapters/ceremonies.json)", ceremony)
-		}
-	}
-
-	// 1. Env override. Hyphens in the role id (class-qualified roles like
-	// worker-mechanical) map to underscores so the env-var name is a valid
-	// shell identifier — byte-for-byte with the bash `tr '-' '_'` (scripts/lib.sh),
-	// where a hyphenated name would otherwise trip the ${param-word} operator.
-	envVar := "LORE_MODEL_" + strings.ReplaceAll(strings.ToUpper(role), "-", "_")
-	if v := os.Getenv(envVar); v != "" {
-		return v, nil
-	}
-
-	// 2. Per-repo .lore.config.
-	if v := resolveModelForRole_perRepoConfig(role); v != "" {
-		return v, nil
-	}
-
-	// 3. Ceremony overlay `.harnesses.<active>.ceremony_roles.<ceremony>.<role>`.
-	// Consulted only when a ceremony id is passed, so role-only resolution
-	// stays byte-identical. Closed-set rejection mirrors the bash overlay guard
-	// (scripts/lib.sh:1110-1153): an unknown ceremony key or an unknown role key
-	// stored under ceremony_roles is a misconfiguration surfaced to the user,
-	// not a silently-skipped block.
-	if ceremony != "" && active != "" && validRolesErr == nil && validCeremoniesErr == nil {
-		raw, present, _ := SettingsGet("harnesses." + active + ".ceremony_roles")
-		if present {
-			var block map[string]json.RawMessage
-			if err := json.Unmarshal([]byte(raw), &block); err == nil {
-				if bad, ok := firstUnknownKey(block, validCeremonies); ok {
-					return "", fmt.Errorf("unknown ceremony %q in harnesses.%s.ceremony_roles (not in adapters/ceremonies.json)", bad, active)
-				}
-				if bad, ok := firstUnknownRoleInCeremonyMaps(block, validRoles); ok {
-					return "", fmt.Errorf("unknown role %q in harnesses.%s.ceremony_roles (not in adapters/roles.json)", bad, active)
-				}
-			}
-		}
-		if v := readSettingsRoleString("harnesses." + active + ".ceremony_roles." + ceremony + "." + role); v != "" {
-			return v, nil
-		}
-	}
-
-	// D3b closed-set rejection at the role overlay layer: any unknown role id
-	// stored under `harnesses.<active>.roles` is rejected immediately, same
-	// error class as an unknown role in the *query* above. Without this guard
-	// a misconfigured overlay would silently never be consulted (per
-	// scripts/lib.sh:1155-1176).
-	if active != "" && validRolesErr == nil {
-		raw, present, _ := SettingsGet("harnesses." + active + ".roles")
-		if present {
-			var overlay map[string]json.RawMessage
-			if err := json.Unmarshal([]byte(raw), &overlay); err == nil {
-				if bad, ok := firstUnknownKey(overlay, validRoles); ok {
-					return "", fmt.Errorf("unknown role %q in harnesses.%s.roles (not in adapters/roles.json)", bad, active)
-				}
-			}
-		}
-	}
-
-	// 4. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay).
-	if active != "" {
-		if v := readSettingsRoleString("harnesses." + active + ".roles." + role); v != "" {
-			return v, nil
-		}
-	}
-
-	// 4b. Class-qualified role fallback: a role that declares fallback_role in
-	// the registry re-resolves once with that role after all of its own layers
-	// (env, per-repo, ceremony overlay, role overlay) miss short of the shared
-	// overlay default. An unbound class-qualified role (worker-mechanical,
-	// worker-judgment-dense) therefore resolves byte-identically to plain
-	// worker; a class role bound at any layer above still wins. Placed before
-	// roles.default so the fallback role consults its own overlay binding ahead
-	// of the shared default. The fallback target declares no fallback_role of
-	// its own, so this recurses at most once.
-	if fb := roleFallbacks[role]; fb != "" {
-		return resolveModelForRoleOn(fb, ceremony, active)
-	}
-
-	// 5. Unified `.harnesses.<active>.roles.default`.
-	if active != "" {
-		if v := readSettingsRoleString("harnesses." + active + ".roles.default"); v != "" {
-			return v, nil
-		}
-	}
-
-	return "", fmt.Errorf("%w %q (no env var, no per-repo .lore.config, no harnesses.<active>.roles.%s or harnesses.<active>.roles.default in settings.json)", ErrNoModelBinding, role, role)
-}
-
-// ModelRoute is the structured sibling of the scalar role binding. Binding is
-// the exact ResolveModelForRoleInCeremony result; NativeBinding removes only a
-// registered framework qualifier.
+// ModelRoute is the legacy scalar projection of a canonical global route.
+// NativeBinding is the canonical model; Binding is qualified only when the
+// selected target differs from the requested source-framework projection.
 type ModelRoute struct {
 	Binding         string `json:"binding"`
 	SourceFramework string `json:"source_framework"`
@@ -1341,91 +1398,37 @@ func ResolveRouteForRole(role string) (ModelRoute, error) {
 	return ResolveRouteForRoleInCeremony(role, "")
 }
 
-// ResolveRouteForRoleInCeremony preserves scalar binding precedence, then
-// recognizes a framework qualifier only when the first slash segment is a key
-// in adapters/capabilities.json. Native payload validation belongs to the
-// selected target framework, not the source framework.
+// ResolveRouteForRoleInCeremony resolves through the canonical global route table and projects the result for legacy callers.
 func ResolveRouteForRoleInCeremony(role, ceremony string) (ModelRoute, error) {
-	binding, err := ResolveModelForRoleInCeremony(role, ceremony)
+	route, err := ResolveCanonicalRoute(role, ceremony, nil)
 	if err != nil {
 		return ModelRoute{}, err
 	}
-	return resolveModelRoute(role, binding)
+	return projectModelRoute(route, "")
 }
 
-// ResolveRouteForRoleInCeremonyOnFramework resolves the role's binding against
-// the named framework's role map — the framework claiming a session, not the
-// process's own — and interprets a registered framework qualifier the same way
-// ResolveRouteForRoleInCeremony does. A launch path uses it to learn whether the
-// binding it resolved is native to the harness it is about to start
-// (TargetFramework == framework) or routes the seat somewhere else.
+// ResolveRouteForRoleInCeremonyOnFramework retains the legacy source-framework projection while selection remains source-independent and canonical.
 func ResolveRouteForRoleInCeremonyOnFramework(role, ceremony, framework string) (ModelRoute, error) {
-	binding, err := ResolveModelForRoleInCeremonyOnFramework(role, ceremony, framework)
+	if framework == "" {
+		return ModelRoute{}, errors.New("resolve_route_for_role requires a source framework")
+	}
+	route, err := ResolveCanonicalRoute(role, ceremony, nil)
 	if err != nil {
 		return ModelRoute{}, err
 	}
-	return resolveModelRouteFrom(role, binding, framework)
+	return projectModelRoute(route, framework)
 }
 
-func resolveModelRoute(role, binding string) (ModelRoute, error) {
-	source, err := ResolveActiveFramework()
-	if err != nil {
-		return ModelRoute{}, err
-	}
-	return resolveModelRouteFrom(role, binding, source)
-}
-
-// resolveModelRouteFrom interprets binding as a route whose source is the given
-// framework. The qualifier and shape rules are unchanged from resolveModelRoute.
-func resolveModelRouteFrom(role, binding, source string) (ModelRoute, error) {
-	if role == "" {
-		return ModelRoute{}, fmt.Errorf("resolve_route_for_role requires a role name")
-	}
-	if binding == "" {
-		return ModelRoute{}, fmt.Errorf("role %q has empty model binding", role)
-	}
+func projectModelRoute(route Route, source string) (ModelRoute, error) {
 	if source == "" {
-		return ModelRoute{}, fmt.Errorf("resolve_route_for_role requires a source framework")
+		source, _ = ResolveActiveFramework()
 	}
-	caps, err := loadCapabilitiesFile()
-	if err != nil {
-		return ModelRoute{}, err
+	binding := route.Model
+	qualified := source != "" && source != route.Framework
+	if qualified {
+		binding = route.Framework + "/" + route.Model
 	}
-
-	route := ModelRoute{
-		Binding:         binding,
-		SourceFramework: source,
-		TargetFramework: source,
-		NativeBinding:   binding,
-	}
-	if slash := strings.IndexByte(binding, '/'); slash >= 0 {
-		prefix := binding[:slash]
-		if _, registered := caps.Frameworks[prefix]; registered {
-			route.TargetFramework = prefix
-			route.NativeBinding = binding[slash+1:]
-			route.Qualified = true
-			if route.NativeBinding == "" {
-				return ModelRoute{}, fmt.Errorf("role %q binding %q has an empty native binding after framework qualifier %q", role, binding, prefix+"/")
-			}
-		}
-	}
-
-	target := caps.Frameworks[route.TargetFramework]
-	shape := target.ModelRouting.Shape
-	if shape == "" {
-		shape = "single"
-	}
-	if strings.Contains(route.NativeBinding, "/") && shape != "multi" {
-		if route.Qualified {
-			return ModelRoute{}, fmt.Errorf("role %q binding %q has native binding %q but target framework %q has model_routing.shape=%s (single-provider harnesses require a bare model binding)", role, binding, route.NativeBinding, route.TargetFramework, shape)
-		}
-		return ModelRoute{}, fmt.Errorf("role %q binding %q names a provider but the active harness %q has model_routing.shape=%s (single-provider harnesses cannot serve cross-provider bindings)", role, binding, source, shape)
-	}
-
-	if source != route.TargetFramework && route.TargetFramework != "codex" {
-		return ModelRoute{}, fmt.Errorf("unsupported framework bridge %q for role %q binding %q", source+"->"+route.TargetFramework, role, binding)
-	}
-	return route, nil
+	return ModelRoute{Binding: binding, SourceFramework: source, TargetFramework: route.Framework, NativeBinding: route.Model, Qualified: qualified}, nil
 }
 
 // firstUnknownKey returns the lexicographically-first top-level key of block

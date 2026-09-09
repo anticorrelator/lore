@@ -23,6 +23,19 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
 
+func stageMainRouteScripts(t *testing.T) {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	if err := os.Symlink(filepath.Join(filepath.Dir(wd), "scripts"), filepath.Join(dataDir, "scripts")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LORE_DATA_DIR", dataDir)
+}
+
 // baseSessionModel builds a minimal model wired for the session substrate at a
 // temp store, with one work item that has a plan doc.
 func baseSessionModel(t *testing.T) (model, string) {
@@ -47,8 +60,9 @@ func baseSessionModel(t *testing.T) (model, string) {
 // planted request is claimed on a queue tick, a session panel is created, the
 // spawn is marked agent-initiated, and focus is left untouched.
 func TestAgentClaimSpawnsWithoutStealingFocus(t *testing.T) {
+	stageMainRouteScripts(t)
 	m, sessionsDir := baseSessionModel(t)
-	if err := session.WritePending(sessionsDir, session.Request{
+	if err := session.WritePending(sessionsDir, session.Request{Framework: strPtr("claude-code"), Model: strPtr("fixture-model"),
 		RequestID: "req-1", Type: "spec", Slug: strPtr("demo"), Initiator: "agent",
 	}); err != nil {
 		t.Fatal(err)
@@ -98,11 +112,12 @@ func TestAgentClaimSpawnsWithoutStealingFocus(t *testing.T) {
 // an older pending row with a null slug is claimed under a deterministic slug,
 // journals that slug, and promotes it into the registry writer's live set.
 func TestLegacyChatClaimDerivesAddressableIdentity(t *testing.T) {
+	stageMainRouteScripts(t)
 	m, sessionsDir := baseSessionModel(t)
 	m.eventScript = repoScriptPath(t, "session-event-append.sh")
 	const requestID = "20260815T022031Z-940ee194"
 	const slug = "chat-940ee194"
-	if err := session.WritePending(sessionsDir, session.Request{
+	if err := session.WritePending(sessionsDir, session.Request{Framework: strPtr("claude-code"), Model: strPtr("fixture-model"),
 		RequestID: requestID, Type: "chat", Initiator: "agent",
 	}); err != nil {
 		t.Fatal(err)
@@ -810,5 +825,33 @@ func TestTabIndicatorIdentityRendering(t *testing.T) {
 		} else if strings.Contains(out, "amber-otter") {
 			t.Errorf("width %d: identity should have been dropped, got %q", width, out)
 		}
+	}
+}
+
+func TestEnqueueSessionUsesSoleWriterWithFrozenRoute(t *testing.T) {
+	stageMainRouteScripts(t)
+	m, sessionsDir := baseSessionModel(t)
+	m.normalizedProjectDir = m.config.ProjectDir
+	configDir := filepath.Join(os.Getenv("LORE_DATA_DIR"), "config")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settings := map[string]any{"version": 2, "tui_launch_framework": "claude-code", "capability_overrides": map[string]string{}, "routes": map[string]any{"default": "codex/gpt-5.6-sol-high", "lead": "codex/gpt-6-astra-high"}, "harnesses": map[string]any{"claude-code": map[string]any{"args": []string{}, "native_models": map[string]any{"default": "opus"}}, "codex": map[string]any{"args": []string{}, "native_models": map[string]any{"default": "gpt-5.5-high"}}, "opencode": map[string]any{"args": []string{}, "native_models": map[string]any{"default": "anthropic/opus"}}}}
+	raw, _ := json.Marshal(settings)
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, cmd := m.enqueueSession(work.SessionDescriptor{Type: work.SessionSpec, Slug: "demo", SkipConfirm: true})
+	msg := cmd()
+	result, ok := msg.(directEnqueueResultMsg)
+	if !ok || result.err != nil {
+		t.Fatalf("enqueue result=%T %+v", msg, msg)
+	}
+	rows := session.ScanPending(sessionsDir)
+	if len(rows) != 1 || rows[0].Route == nil {
+		t.Fatalf("pending rows = %#v", rows)
+	}
+	if rows[0].Route.Framework != "codex" || rows[0].Route.Model != "gpt-6-astra" || rows[0].Route.Options["effort"] != "high" {
+		t.Fatalf("route = %#v", rows[0].Route)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/anticorrelator/lore/tui/internal/config"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,6 +54,7 @@ const (
 // an absent field, an explicit JSON null, and a present value stay distinct;
 // numeric attempts stays an int so a strict decoder rejects a quoted "0".
 type Request struct {
+	Route          *config.Route   `json:"route,omitempty"`
 	HostKey        string          `json:"host_key,omitempty"`
 	RequestID      string          `json:"request_id"`
 	Type           string          `json:"type"` // spec|implement|chat|worker
@@ -650,6 +652,11 @@ func claimableBy(req Request, myName, myVintage, myProjectDir string, now time.T
 	if target != "" && target != myName {
 		return false
 	}
+	if req.Route != nil && len(req.Route.Options) > 0 {
+		if _, err := time.Parse("2006-01-02T15:04:05Z", myVintage); err != nil {
+			return false
+		}
+	}
 	if !vintageOK(req.MinVintageValue(), myVintage) {
 		return false
 	}
@@ -782,9 +789,59 @@ func readRow(path, source string) (Request, *Diagnostic, bool) {
 	if err != nil {
 		return Request{}, nil, false
 	}
+	var rawFields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawFields); err != nil {
+		diagnostic := corruptDiagnostic(source, path, err)
+		return Request{}, &diagnostic, false
+	}
 	var req Request
 	if err := json.Unmarshal(data, &req); err != nil {
 		diagnostic := corruptDiagnostic(source, path, err)
+		return Request{}, &diagnostic, false
+	}
+	if req.MinVintage != nil && *req.MinVintage != "" {
+		if _, err := time.Parse("2006-01-02T15:04:05Z", *req.MinVintage); err != nil {
+			diagnostic := corruptDiagnostic(source, path, fmt.Errorf("invalid min_vintage: %w", err))
+			return Request{}, &diagnostic, false
+		}
+	}
+	if routeRaw, present := rawFields["route"]; present {
+		if string(routeRaw) == "null" {
+			diagnostic := corruptDiagnostic(source, path, errors.New("canonical route must not be null"))
+			return Request{}, &diagnostic, false
+		}
+		var routeValue any
+		if err := json.Unmarshal(routeRaw, &routeValue); err != nil {
+			diagnostic := corruptDiagnostic(source, path, err)
+			return Request{}, &diagnostic, false
+		}
+		route, err := config.ParseCanonicalRoute(routeValue)
+		if err != nil {
+			diagnostic := corruptDiagnostic(source, path, fmt.Errorf("invalid route: %w", err))
+			return Request{}, &diagnostic, false
+		}
+		if (req.Framework == nil) != (req.Model == nil) {
+			diagnostic := corruptDiagnostic(source, path, errors.New("canonical route requires complete framework/model projections"))
+			return Request{}, &diagnostic, false
+		}
+		if req.Framework != nil && (*req.Framework != route.Framework || *req.Model != route.Model) {
+			diagnostic := corruptDiagnostic(source, path, errors.New("canonical route disagrees with framework/model projections"))
+			return Request{}, &diagnostic, false
+		}
+		req.Route = &route
+	} else if req.Framework != nil || req.Model != nil {
+		if req.Framework == nil || req.Model == nil {
+			diagnostic := corruptDiagnostic(source, path, errors.New("legacy route requires framework and model together"))
+			return Request{}, &diagnostic, false
+		}
+		route, err := config.ParseCanonicalRoute(map[string]any{"framework": *req.Framework, "model": *req.Model})
+		if err != nil {
+			diagnostic := corruptDiagnostic(source, path, fmt.Errorf("invalid legacy route: %w", err))
+			return Request{}, &diagnostic, false
+		}
+		req.Route = &route
+	} else {
+		diagnostic := corruptDiagnostic(source, path, errors.New("request has no canonical route or complete legacy framework/model pair; re-enqueue it"))
 		return Request{}, &diagnostic, false
 	}
 	return req, nil, true
