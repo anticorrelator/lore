@@ -22,6 +22,12 @@ Every entry in the knowledge store carries provenance and a falsifier you can ch
 - When starting work in a specific area, check the index for a relevant domain file and read it
 - **The test:** if you're about to Grep for how something works, a convention, or why a decision was made — search knowledge first
 
+### Preferences (Scoped Working Style)
+
+`preferences/` holds the project's accumulated taste — how things are done here — scoped to an activity: PR bodies, review comments, work-item scoping, model routing, protocol prose. Entries come from many hands: team norms, owner calibrations, agents recording what worked. Unlike a convention or gotcha they are not claims about the code; they record judgment the code cannot confirm or refute. Check scope and currency, then follow. If one seems wrong for the case at hand, record the disagreement where the decision lives — that is how the taste moves, and it is the same steward's move as correcting any other entry.
+
+`/spec`, `/implement`, and `/coordinate` deliver preferences to you. Outside them nothing does, so look before you act: before anything another person will read (PR body, comment, commit message, docs) and before a judgment call that may already be settled here (deferral, routing, ceremony), run `lore search --preferences "<activity>"`. It searches only `preferences/`, takes no scale flag, and ranks by content and scope path. Plain `lore search` buries preferences under descriptive entries.
+
 ### Beyond Facts: Theory, Questions, Hypotheses
 Retrieval may hand you three sections beside plain facts, and each carries its own invitation. A `### Theory` entry describes how a subsystem works — it orients you, it never outranks the code, and updating it is part of changing the subsystem it describes. An `### Open questions` entry your session can actually answer is in-scope work, not a detour — answer it and settle the entry. And if your work walks past the settling test a `### Hypotheses` entry names, record what you saw as one corroborating observation via `lore claim corroborate`.
 

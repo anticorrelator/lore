@@ -4,7 +4,7 @@ Lore is memory by agents, for agents: each cycle records what it found so the ne
 
 That checkability is the system, not a feature of it. Four substrates persist, each with one sanctioned writer:
 
-- **Knowledge** — durable insights in `conventions/`, `gotchas/`, `principles/`, …; written by `lore capture` / `/remember`. What it hands you is a hypothesis to test, not an order.
+- **Knowledge** — durable insights in `conventions/`, `gotchas/`, `principles/`, `preferences/`, …; written by `lore capture` / `/remember`. What it hands you is a hypothesis to test, not an order.
 - **Work items** (`_work/`) — plans, notes, logs; written by `lore work`.
 - **Threads** (`_threads/`) — conversational memory; written by `/remember`.
 - **Scorecards** (`_scorecards/rows.jsonl`) — append-only telemetry; written only through `scripts/scorecard-append.sh`.
