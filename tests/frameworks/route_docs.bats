@@ -19,8 +19,48 @@ REPO_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME:-$0}")/../.." && pwd)"
   printf '%s' "$output" | jq -e '.framework == "claude-code" and .model == "opus" and .routing_source.layer == "native-models"'
 }
 
-@test "shipped spawn snippets bind every canonical-route consumer placeholder" {
-  run python3 -c 'import pathlib,re,sys; root=pathlib.Path(sys.argv[1]); worker=(root/"skills/implement/templates/worker-spawn.md").read_text(); advisor=(root/"skills/implement/templates/advisor-spawn.md").read_text(); session=(root/"agents/session-worker.md").read_text(); assert "--session-route \"$SESSION_ROUTE\"" in session; assert "SESSION_ROUTE=\x27{{session_route}}\x27" in session; assert "{{native_route}} set to $CODEX_ROUTE" in worker; assert "route_flags" in worker; assert re.search(r"ADVISOR_TOOL_FIELDS=.*native_tool_fields.*ADVISOR_ROUTE", advisor); assert "fields: \"$ADVISOR_TOOL_FIELDS\"" in advisor' "$REPO_DIR"
+@test "shipped native assignment lines execute without compiled-only inputs" {
+  local data; data="$(mktemp -d)"
+  mkdir -p "$data/config"
+  ln -s "$REPO_DIR/scripts" "$data/scripts"
+  printf '%s\n' '{"version":2,"tui_launch_framework":"claude-code","routes":{"default":"claude-code/sonnet","worker":"claude-code/opus","advisor":"claude-code/opus","reviewer":"claude-code/opus"},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"opus"}}}}' > "$data/config/settings.json"
+  run env LORE_DATA_DIR="$data" LORE_FRAMEWORK=claude-code REPO_DIR="$REPO_DIR" bash -c '
+    source "$REPO_DIR/scripts/lib.sh"
+    FRAMEWORK=claude-code; WORKER_ROLE=worker; ADAPTER="$REPO_DIR/adapters/agents/claude-code.sh"
+    eval "$(grep -m1 "^WORKER_NATIVE_ROUTE=" "$REPO_DIR/skills/implement/templates/worker-spawn.md")"
+    eval "$(grep -m1 "^WORKER_TOOL_FIELDS=" "$REPO_DIR/skills/implement/templates/worker-spawn.md")"
+    eval "$(grep -m1 "^ADVISOR_ROUTE=" "$REPO_DIR/skills/implement/templates/advisor-spawn.md")"
+    eval "$(grep -m1 "^ADVISOR_TOOL_FIELDS=" "$REPO_DIR/skills/implement/templates/advisor-spawn.md")"
+    LENS_FRAMEWORK=claude-code
+    eval "$(grep -m1 "^LENS_ROUTE=" "$REPO_DIR/skills/pr-review/SKILL.md")"
+    eval "$(grep -m1 "^LENS_TOOL_FIELDS=" "$REPO_DIR/skills/pr-review/SKILL.md")"
+    [[ "$(jq -r .model <<<"$WORKER_TOOL_FIELDS")" == opus ]]
+    [[ "$(jq -r .model <<<"$ADVISOR_TOOL_FIELDS")" == opus ]]
+    [[ "$(jq -r .model <<<"$LENS_TOOL_FIELDS")" == opus ]]
+  '
+  [ "$status" -eq 0 ]
+}
+
+@test "shipped session request block forwards canonical route as one argument" {
+  local block route
+  route='{"framework":"codex","model":"gpt-5.6-sol","options":{"effort":"high","service_tier":"fast"},"routing_source":{"layer":"routes","role":"worker"}}'
+  block="$(awk '/^if \[\[ "$DISPATCH_ROUTE" == "compiled" \]\]; then$/{emit=1} emit{print} /^ENQUEUE_RC=/{exit}' "$REPO_DIR/agents/session-worker.md")"
+  run env BLOCK="$block" EXPECTED_ROUTE="$route" bash -c '
+    lore() {
+      if [[ "$1 $2" == "session events" ]]; then
+        printf "%s\n" "{\"next_cursor\":0}"
+      else
+        args=("$@")
+        for ((i=0; i<${#args[@]}; i++)); do
+          if [[ "${args[i]}" == --session-route ]]; then [[ "${args[i+1]}" == "$EXPECTED_ROUTE" ]] || return 9; found=1; fi
+        done
+        [[ "${found:-}" == 1 ]] || return 8
+      fi
+    }
+    DISPATCH_ROUTE=legacy; DERIVED_SLUG=w1; SESSION_ROUTE='"'"'{"framework":"codex","model":"gpt-5.6-sol","options":{"effort":"high","service_tier":"fast"},"routing_source":{"layer":"routes","role":"worker"}}'"'"'; BRIEF_FILE=/tmp/brief
+    printf x > "$BRIEF_FILE"
+    eval "$BLOCK"
+  '
   [ "$status" -eq 0 ]
 }
 

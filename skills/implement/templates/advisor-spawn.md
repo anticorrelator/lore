@@ -113,6 +113,7 @@ Applies when the run was started and opened without `--compiled-positions`. For 
    ADVISOR_TOOL_FIELDS=$(bash "$ADAPTER" native_tool_fields "$(printf '%s' "$ADVISOR_ROUTE" | jq -c .)")
 
    Task/tool call:
+     subagent_type: "general-purpose"
      fields: "$ADVISOR_TOOL_FIELDS"
      team_name: "impl-<slug>"
      name: "<advisor-name>"

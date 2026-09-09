@@ -58,6 +58,8 @@ The compiled path has one preparation sequence, then a route-specific launch. Th
 4. **Bind, or prepare.** Every route except one binds here. The exception is a session under ordinary placement, whose root is not yet known: it takes the `prepare_session_input` call in the Session bullet below instead of `bind`, and its reference is collected after the host publishes. For a native worker, a chaperoned Codex run, or a fixed-placement session, one call freezes payload, native definition, and manifest under `position-dispatch/<attempt-id>/` and returns the six-field reference:
 
    ```bash
+   # Native branch only: the binder receives the native route resolved for this role.
+   WORKER_NATIVE_ROUTE=$(resolve_native_route_for_role "$WORKER_ROLE" implement "$TARGET_FRAMEWORK")
    python3 ~/.lore/scripts/position-bind.py bind --descriptor "$DESCRIPTOR_FILE" --bindings "$BINDINGS_FILE" \
      --kdir "$KDIR" --guidance-file "$GUIDANCE_FILE" \
      --wrapper "$WRAPPER_FILE" --prefix-file "$PREFIX_FILE" --suffix-file "$SUFFIX_FILE" \
@@ -118,6 +120,7 @@ WORKER_NATIVE_ROUTE=$(resolve_native_route_for_role "$WORKER_ROLE" implement "$F
 WORKER_TOOL_FIELDS=$(bash "$ADAPTER" native_tool_fields "$(printf '%s' "$WORKER_NATIVE_ROUTE" | jq -c .)")
 
 Task/tool call:
+  subagent_type: "general-purpose"
   fields: "$WORKER_TOOL_FIELDS"
   team_name: "impl-<slug>"
   name: "worker-N"
