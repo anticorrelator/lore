@@ -48,6 +48,35 @@ func sortStrings(xs []string) {
 	}
 }
 
+func TestHarnessRequiredNativeModelsDefaultDeletionRestoresEditor(t *testing.T) {
+	w := NewRequiredOpenKeysetKVEditor("harnesses.codex.native_models", "native_models", map[string]string{"default": "gpt-5.5-high", "worker": "gpt-5.6-sol"}, "default", nil)
+	w.Focus()
+	updated, _, _ := w.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	updated, _, intent := updated.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if intent == nil || intent.Status != IntentReject {
+		t.Fatalf("required default deletion = %+v", intent)
+	}
+	if !strings.Contains(updated.View(), "default = gpt-5.5-high") {
+		t.Fatalf("rejected deletion changed visible state:\n%s", updated.View())
+	}
+}
+
+func TestHarnessRoutesPanelPreservesCeremoniesAndRendersRoutesReadOnly(t *testing.T) {
+	models := NewRequiredOpenKeysetKVEditor("harnesses.codex.native_models", "native_models", map[string]string{"default": "gpt-5.5-high"}, "default", nil)
+	ceremonies := NewStringArrayOpenKeysetKVEditor("harnesses.codex.ceremonies", "ceremonies", map[string]string{"spec-design": "codex-plan-review"}, true, false)
+	effective := HarnessEffective{Roles: map[string]string{"worker": "codex/gpt-5.6-sol {effort=high}"}, NativeModels: map[string]string{"worker": "codex/gpt-5.6-sol {effort=high}"}}
+	panel := NewHarnessRoutesPanel("codex", true, nil, NewListEditor("harnesses.codex.args", "args", nil, nil, 0, false, true, false), models, ceremonies, effective)
+	view := panel.View()
+	for _, want := range []string{"native_models:", "ceremonies:", "spec-design", "effective routes (read-only):", "worker: route=codex/gpt-5.6-sol", "lore framework set-model"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("route panel missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "roles:") {
+		t.Fatalf("retired roles editor rendered:\n%s", view)
+	}
+}
+
 // writeCapabilitiesFixture writes a minimal capabilities.json with the given
 // framework keyset to a temp file and returns the path. Used to assert
 // PrimaryRadio enumerates from the injected fixture (no hardcoded list).

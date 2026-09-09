@@ -3210,9 +3210,10 @@ func TestRoundedBordersEverywhere(t *testing.T) {
 // escape hatches. The dynamic status-bar grammar is pinned separately by
 // TestSettingsModalStatusBarModeHints and internal/settings tests.
 func TestSettingsModalStatusBarKeybindContract(t *testing.T) {
+	const v2Settings = `{"version":2,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[],"native_models":{"default":"opus"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}},"opencode":{"args":[],"native_models":{"default":"anthropic/opus"}}},"routes":{"default":"claude-code/opus"}}`
 	settingsModel := func(t *testing.T) model {
 		t.Helper()
-		setupFakeLoreData(t, `{"version": 1, "tui_launch_framework": "claude-code"}`)
+		setupFakeLoreData(t, v2Settings)
 		m := workContractModel()
 		nm, _ := updateModel(t, m, press('S'))
 		if !nm.settingsActive || nm.settingsPanel == nil {
@@ -3222,7 +3223,7 @@ func TestSettingsModalStatusBarKeybindContract(t *testing.T) {
 	}
 	t.Run("S / Ctrl+, (open)", func(t *testing.T) {
 		_ = settingsModel(t) // S
-		setupFakeLoreData(t, `{"version": 1}`)
+		setupFakeLoreData(t, v2Settings)
 		nm, _ := updateModel(t, workContractModel(), press(',', tea.ModCtrl))
 		if !nm.settingsActive {
 			t.Error("ctrl+, should open the settings configurator")
@@ -3277,7 +3278,7 @@ func TestSettingsModalStatusBarKeybindContract(t *testing.T) {
 }
 
 func TestSettingsModalStatusBarModeHints(t *testing.T) {
-	setupFakeLoreData(t, `{"version": 1, "tui_launch_framework": "claude-code"}`)
+	setupFakeLoreData(t, `{"version":2,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[],"native_models":{"default":"opus"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}},"opencode":{"args":[],"native_models":{"default":"anthropic/opus"}}},"routes":{"default":"claude-code/opus"}}`)
 	m := workContractModel()
 	m, _ = updateModel(t, m, press('S'))
 	if !m.settingsActive || m.settingsPanel == nil {
@@ -3320,7 +3321,7 @@ func TestSettingsModalStatusBarModeHints(t *testing.T) {
 // swap it for the "undid" confirmation. Without StatusFlash plumbing the
 // model's statusMsg — including write errors — renders nowhere.
 func TestSettingsModalStatusBarSurfacesFlash(t *testing.T) {
-	setupFakeLoreData(t, `{"version": 1, "tui_launch_framework": "claude-code"}`)
+	setupFakeLoreData(t, `{"version":2,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[],"native_models":{"default":"opus"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}},"opencode":{"args":[],"native_models":{"default":"anthropic/opus"}}},"routes":{"default":"claude-code/opus"}}`)
 	m := workContractModel()
 	m, _ = updateModel(t, m, press('S'))
 	if !m.settingsActive || m.settingsPanel == nil {

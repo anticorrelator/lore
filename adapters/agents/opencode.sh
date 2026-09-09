@@ -83,6 +83,23 @@ except (ValueError, json.JSONDecodeError, RouteConfigError) as exc:
 PYTHON
 }
 
+cmd_native_tool_fields() {
+  require_opencode
+  [[ $# -eq 1 ]] || { echo 'Error: native_tool_fields requires <canonical-route-json>' >&2; return 1; }
+  python3 - "$LORE_REPO_DIR" "$1" <<'PYTHON'
+import json, sys
+sys.path.insert(0, sys.argv[1] + '/scripts')
+from route_config import parse_route, RouteConfigError
+try:
+    route = parse_route(json.loads(sys.argv[2]), sys.argv[1])
+    if route['framework'] != 'opencode': raise RouteConfigError('route_framework_mismatch', "native OpenCode fields require framework 'opencode'")
+except (ValueError, json.JSONDecodeError, RouteConfigError) as exc:
+    print('Error: invalid native OpenCode route: ' + str(exc), file=sys.stderr); raise SystemExit(2)
+print('Error: native tool fields unavailable: OpenCode task dispatch guidance is unverified', file=sys.stderr)
+raise SystemExit(1)
+PYTHON
+}
+
 # --- split_provider_model ---
 # Multi-provider role bindings use the documented `provider/model`
 # syntax (lib.sh::validate_role_model_binding splits on `/`; bats roles
@@ -353,6 +370,7 @@ cmd_render_position() {
 # --- Dispatch ---
 cmd="${1:-}"
 case "$cmd" in
+  native_tool_fields)       shift; cmd_native_tool_fields "$@" ;;
   native_selection)         shift; cmd_native_selection "$@" ;;
   native_launch)            shift; cmd_native_launch "$@" ;;
   render_position)          shift; cmd_render_position          "$@" ;;
@@ -372,6 +390,8 @@ case "$cmd" in
 Usage: $(basename "$0") <subcommand> [args]
 
 Subcommands (mirroring adapters/agents/README.md §Operation Surface):
+  native_tool_fields <canonical-route-json>
+                            Validate the route, then report unavailable.
   render_position <position> <body-file>
                             Render a native position artifact on stdout.
   spawn <role> <task_prompt> [model_override]

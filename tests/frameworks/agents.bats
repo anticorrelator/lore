@@ -407,6 +407,39 @@ PYEOF
   [ "$(jq -r '.tool_input.reasoning_effort' <<<"$output")" = "high" ]
 }
 
+@test "native_tool_fields projects canonical routes without artifact registration" {
+  set_framework claude-code
+  run bash "$CC_AGENT_ADAPTER" native_tool_fields '{"framework":"claude-code","model":"opus","options":{},"routing_source":{"layer":"routes","role":"worker"}}'
+  [ "$status" -eq 0 ]
+  [ "$output" = '{"model":"opus"}' ]
+
+  set_framework codex
+  run bash "$CODEX_AGENT_ADAPTER" native_tool_fields '{"framework":"codex","model":"gpt-5.6-sol","options":{"effort":"high"},"routing_source":{"layer":"routes","role":"worker"}}'
+  [ "$status" -eq 0 ]
+  [ "$output" = '{"model":"gpt-5.6-sol","reasoning_effort":"high"}' ]
+}
+
+@test "native_tool_fields refuses malformed foreign and unsupported routes" {
+  set_framework codex
+  run bash "$CODEX_AGENT_ADAPTER" native_tool_fields '{"framework":"claude-code","model":"opus","options":{}}'
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ framework ]]
+  run bash "$CODEX_AGENT_ADAPTER" native_tool_fields '{"framework":"codex","model":"gpt-5.6-sol","options":{"service_tier":"fast"}}'
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "unsupported native-option: service_tier" ]]
+  run bash "$CODEX_AGENT_ADAPTER" native_tool_fields '{"framework":"codex","model":"gpt","options":{"unknown":"x"}}'
+  [ "$status" -ne 0 ]
+
+  set_framework claude-code
+  run bash "$CC_AGENT_ADAPTER" native_tool_fields '{"framework":"claude-code","model":"opus","options":{"effort":"high"}}'
+  [ "$status" -ne 0 ]
+
+  set_framework opencode
+  run bash "$OC_AGENT_ADAPTER" native_tool_fields '{"framework":"opencode","model":"anthropic/opus","options":{}}'
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ unavailable ]]
+}
+
 @test "codex native_selection parses legacy effort shorthand canonically" {
   set_framework codex
   run bash "$CODEX_AGENT_ADAPTER" native_selection ignored.md attempt-1 gpt-5.5-high

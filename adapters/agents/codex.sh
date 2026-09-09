@@ -109,6 +109,25 @@ except (ValueError, json.JSONDecodeError, RouteConfigError) as exc:
 PYTHON
 }
 
+cmd_native_tool_fields() {
+  require_codex
+  [[ $# -eq 1 ]] || { echo 'Error: native_tool_fields requires <canonical-route-json>' >&2; return 1; }
+  python3 - "$LORE_REPO_DIR" "$1" <<'PYTHON'
+import json, sys
+sys.path.insert(0, sys.argv[1] + '/scripts')
+from route_config import parse_route, RouteConfigError
+try:
+    route = parse_route(json.loads(sys.argv[2]), sys.argv[1])
+    if route['framework'] != 'codex': raise RouteConfigError('route_framework_mismatch', "native Codex fields require framework 'codex'")
+    if 'service_tier' in route['options']: raise RouteConfigError('unsupported_native_option', 'unsupported native-option: service_tier')
+    fields = {'model': route['model']}
+    if 'effort' in route['options']: fields['reasoning_effort'] = route['options']['effort']
+    print(json.dumps(fields, separators=(',', ':')))
+except (ValueError, json.JSONDecodeError, RouteConfigError) as exc:
+    print('Error: invalid native Codex route: ' + str(exc), file=sys.stderr); raise SystemExit(2)
+PYTHON
+}
+
 cmd_spawn() {
   require_codex
   local role="${1:-}" task_prompt="${2:-}" override_model="${3:-}"
@@ -324,20 +343,15 @@ cmd_native_selection() {
   require_codex
   [[ "$(cap subagents)" != none ]] || { echo 'Error: native subagents unavailable' >&2; return 1; }
   [[ $# -eq 3 ]] || { echo 'Error: native_selection requires artifact, attempt, and route' >&2; return 1; }
-  local route_input="$3" route_value route
+  local route_input="$3" route_value route fields
   if [[ "$route_input" == \{* ]]; then route_value=$(jq -ce . <<<"$route_input") || return 1
   else route_value=$(jq -Rn --arg v "codex/$route_input" '$v'); fi
   route=$(printf '{"repo_root":%s,"route":%s}\n' "$(jq -Rn --arg v "$LORE_REPO_DIR" '$v')" "$route_value" | python3 "$LORE_REPO_DIR/scripts/route_config.py" parse | jq -cer '.result') || return 1
-  [[ "$(jq -r '.framework' <<<"$route")" == codex ]] || { echo 'Error: native codex selection requires a codex route' >&2; return 1; }
-  [[ "$(jq -r '.options.service_tier // empty' <<<"$route")" == "" ]] || { echo 'unsupported native-option: service_tier' >&2; return 1; }
-  python3 - "$route" <<'PYTHON'
-import json
-import sys
-route = json.loads(sys.argv[1])
-binding = {'model': route['model']}
-if 'effort' in route['options']:
-    binding['reasoning_effort'] = route['options']['effort']
-print(json.dumps({'tool': 'spawn_agent', 'tool_input': binding, 'prompt_field': 'message',
+  fields=$(cmd_native_tool_fields "$route") || return 1
+  python3 - "$fields" <<'PYTHON'
+import json, sys
+fields = json.loads(sys.argv[1])
+print(json.dumps({'tool': 'spawn_agent', 'tool_input': fields, 'prompt_field': 'message',
                   'registration': None, 'readiness': {'kind': 'native-tool-schema', 'tool': 'spawn_agent'}}))
 PYTHON
 }
@@ -360,6 +374,7 @@ cmd_render_position() {
 # --- Dispatch ---
 cmd="${1:-}"
 case "$cmd" in
+  native_tool_fields)       shift; cmd_native_tool_fields "$@" ;;
   native_selection)         shift; cmd_native_selection "$@" ;;
   native_launch)            shift; cmd_native_launch "$@" ;;
   render_position)          shift; cmd_render_position          "$@" ;;
@@ -380,6 +395,8 @@ case "$cmd" in
 Usage: $(basename "$0") <subcommand> [args]
 
 Subcommands (mirroring adapters/agents/README.md §Operation Surface):
+  native_tool_fields <canonical-route-json>
+                            Print model/effort fields for spawn_agent.
   render_position <position> <body-file>
                             Render a native position artifact on stdout.
   spawn <role> <task_prompt> [model_override]
