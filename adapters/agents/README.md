@@ -107,6 +107,15 @@ carry a present option reports `unsupported native-option` rather than
 discarding it. The compatibility `split_model_variant` command remains for old
 callers, but delegates shorthand parsing to the canonical route parser.
 
+Uncompiled native consumers call `native_tool_fields <canonical-route-json>`.
+It has no artifact or registration dependency and returns only the fields for
+the harness tool input: Claude Code returns `{"model":"..."}`; Codex also
+returns `reasoning_effort` when supplied. Codex explicitly refuses
+`service_tier`, and OpenCode reports the operation unavailable. Every adapter
+first validates the canonical envelope and requires affinity with its own
+framework. Compiled position binding continues to use `native_selection`,
+which reuses this projection before adding artifact registration metadata.
+
 ## Completion Enforcement Degradation Modes
 
 D9 from the multi-framework-agent-support plan: completion enforcement

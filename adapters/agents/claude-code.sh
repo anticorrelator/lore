@@ -84,6 +84,23 @@ except (ValueError, json.JSONDecodeError, RouteConfigError) as exc:
 PYTHON
 }
 
+cmd_native_tool_fields() {
+  require_claude_code
+  [[ $# -eq 1 ]] || { echo 'Error: native_tool_fields requires <canonical-route-json>' >&2; return 1; }
+  python3 - "$LORE_REPO_DIR" "$1" <<'PYTHON'
+import json, sys
+sys.path.insert(0, sys.argv[1] + '/scripts')
+from route_config import parse_route, RouteConfigError
+try:
+    route = parse_route(json.loads(sys.argv[2]), sys.argv[1])
+    if route['framework'] != 'claude-code': raise RouteConfigError('route_framework_mismatch', "native Claude fields require framework 'claude-code'")
+    if route['options']: raise RouteConfigError('unsupported_native_option', 'unsupported native-option for Claude')
+    print(json.dumps({'model': route['model']}, separators=(',', ':')))
+except (ValueError, json.JSONDecodeError, RouteConfigError) as exc:
+    print('Error: invalid native Claude route: ' + str(exc), file=sys.stderr); raise SystemExit(2)
+PYTHON
+}
+
 # --- cmd_spawn ---
 # Spawn a worker agent. On Claude Code this means TaskCreate (and
 # TeamCreate for the first call of a team). The bash adapter cannot
@@ -298,13 +315,12 @@ cmd_native_selection() {
   require_claude_code
   [[ "$(cap subagents)" != none ]] || { echo 'Error: native subagents unavailable' >&2; return 1; }
   [[ $# -eq 3 ]] || { echo 'Error: native_selection requires artifact, attempt, and route' >&2; return 1; }
-  local route_input="$3" route_value route
+  local route_input="$3" route_value route fields
   if [[ "$route_input" == \{* ]]; then route_value=$(jq -ce . <<<"$route_input") || return 1
   else route_value=$(jq -Rn --arg v "claude-code/$route_input" '$v'); fi
   route=$(printf '{"repo_root":%s,"route":%s}\n' "$(jq -Rn --arg v "$LORE_REPO_DIR" '$v')" "$route_value" | python3 "$LORE_REPO_DIR/scripts/route_config.py" parse | jq -cer '.result') || return 1
-  [[ "$(jq -r '.framework' <<<"$route")" == claude-code ]] || { echo 'Error: native Claude selection requires a claude-code route' >&2; return 1; }
-  [[ "$(jq -e '.options | length == 0' <<<"$route")" == true ]] || { echo 'unsupported native-option' >&2; return 1; }
-  python3 - "$1" "$2" "$route" <<'PYTHON'
+  fields=$(cmd_native_tool_fields "$route") || return 1
+  python3 - "$1" "$2" "$route" "$fields" <<'PYTHON'
 import hashlib
 import json
 from pathlib import Path
@@ -312,6 +328,7 @@ import re
 import sys
 raw = Path(sys.argv[1]).read_bytes()
 route = json.loads(sys.argv[3])
+fields = json.loads(sys.argv[4])
 activation = json.dumps({'attempt': sys.argv[2], 'route': route}, sort_keys=True).encode()
 name = 'lore-position-' + hashlib.sha256(raw + b'\0' + activation).hexdigest()
 _, header, body = raw.decode().split('---\n', 2)
@@ -319,7 +336,7 @@ header, count = re.subn(r'^name: [^\n]+$', 'name: ' + name, header, flags=re.MUL
 if count != 1:
     raise ValueError('native definition requires one name')
 content = '---\n' + header + '---\n' + body
-print(json.dumps({'tool': 'Agent', 'tool_input': {'subagent_type': name, 'model': route['model']},
+print(json.dumps({'tool': 'Agent', 'tool_input': {'subagent_type': name, **fields},
                   'prompt_field': 'prompt', 'registration': {'filename': name + '.md', 'content': content},
                   'readiness': {'kind': 'native-agent-inventory', 'selection_name': name}}))
 PYTHON
@@ -360,6 +377,7 @@ cmd_render_position() {
 # --- Dispatch ---
 cmd="${1:-}"
 case "$cmd" in
+  native_tool_fields)       shift; cmd_native_tool_fields "$@" ;;
   native_selection)         shift; cmd_native_selection "$@" ;;
   native_launch)            shift; cmd_native_launch "$@" ;;
   render_position)          shift; cmd_render_position          "$@" ;;
@@ -379,6 +397,8 @@ case "$cmd" in
 Usage: $(basename "$0") <subcommand> [args]
 
 Subcommands (mirroring adapters/agents/README.md §Operation Surface):
+  native_tool_fields <canonical-route-json>
+                            Print model fields for a native subagent call.
   render_position <position> <body-file>
                             Render a native position artifact on stdout.
   spawn <role> <task_prompt> [model_override]
