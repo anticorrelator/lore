@@ -303,7 +303,8 @@ assert r["stratum"] == "routine", r
 import json, sys
 import jsonschema
 schema = json.load(open(sys.argv[1]))
-base = {"version": 1, "tui_launch_framework": "claude-code", "harnesses": {}}
+base = {"version": 2, "tui_launch_framework": "claude-code", "harnesses": {},
+        "routes": {"default": "claude-code/opus"}}
 def valid(rs):
     inst = dict(base)
     if rs is not None:
