@@ -69,7 +69,7 @@ Usage: lore <command> [args...]
 Commands:
   read         Read a file with optional query filtering
   query        Seeds-keyed compositional retrieval (backlinks or query text)
-  search       Search knowledge and/or work items
+  search       Search knowledge and/or work items (--preferences: preferences/ only, no scale)
   capture      Capture an insight to the knowledge store
   promote      Promote a Tier 3 observation row to the knowledge commons
   test         Run lore test suites (see: lore test protocols)
@@ -1799,6 +1799,7 @@ cmd_search() {
   local json_flag=""
   local scale_set=""
   local caller="cli"
+  local preferences_only=0
   local args=()
   # Recognized here rather than passed through with the rest, because --type all
   # must route it to the knowledge half only.
@@ -1807,7 +1808,8 @@ cmd_search() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --help|-h)
-        echo "Usage: lore search <query> [--scale-set <bucket>] [--caller <id>] [--type knowledge|work|all] [--json] [--kind-sections]" >&2
+        echo "Usage: lore search <query> [--scale-set <bucket>] [--caller <id>] [--type knowledge|work|all] [--json] [--kind-sections]
+       lore search --preferences <query> [--caller <id>] [--json]" >&2
         return 0
         ;;
       --type)
@@ -1820,6 +1822,10 @@ cmd_search() {
         ;;
       --kind-sections)
         kind_sections_args=(--kind-sections)
+        shift
+        ;;
+      --preferences)
+        preferences_only=1
         shift
         ;;
       --scale-set)
@@ -1846,8 +1852,17 @@ cmd_search() {
   done
 
   if [[ ${#args[@]} -eq 0 ]]; then
-    echo "Usage: lore search <query> [--scale-set <bucket>] [--caller <id>] [--type knowledge|work|all] [--json] [--kind-sections]" >&2
+    echo "Usage: lore search <query> [--scale-set <bucket>] [--caller <id>] [--type knowledge|work|all] [--json] [--kind-sections]
+       lore search --preferences <query> [--caller <id>] [--json]" >&2
     return 1
+  fi
+
+  # --preferences: the scale-free side channel over preferences/ alone. Forward
+  # guidance is not scale-filtered, so no --scale-set is asked for here.
+  if [[ $preferences_only -eq 1 ]]; then
+    local pref_kdir
+    pref_kdir="$(resolve_kdir)"
+    exec python3 "$SCRIPTS_DIR/pk_cli.py" search-preferences "$pref_kdir" "${args[0]}" --caller "$caller" ${json_flag:+--json} "${args[@]:1}"
   fi
 
   if [[ -z "$scale_set" ]]; then
