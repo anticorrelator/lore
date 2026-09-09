@@ -579,13 +579,14 @@ if [[ ${#ROUTE_SPECS[@]} -gt 0 ]]; then
   done
 fi
 
-# min_vintage is an optional minimum build vintage, stored as a comparable ISO
-# timestamp so the read-side filter never shells out to git. An ISO-8601 UTC value
-# is stored verbatim; anything else is resolved as a git commit-ish to its
-# committer-date (UTC) against the lore source repo where these scripts live —
-# one-time at enqueue, mirroring the other write-time resolutions here. An
-# unresolvable value is refused (naming the field), never silently dropped.
+# min_vintage is stored as a comparable UTC timestamp so the read-side filter
+# never shells out to git. Option-bearing routes require the composed route-aware
+# baseline (6d55b308, 2026-09-09T01:27:42Z).
+# A caller may require a later build, but cannot lower that compatibility floor.
+# Empty-option routes retain the legacy omit-when-empty behavior. A non-ISO
+# caller value is resolved once as a source-repository commit-ish.
 MIN_VINTAGE_JSON=""
+MIN_VINTAGE_RESOLVED=""
 if [[ -n "$MIN_VINTAGE" ]]; then
   if [[ "$MIN_VINTAGE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
     MIN_VINTAGE_RESOLVED="$MIN_VINTAGE"
@@ -594,6 +595,14 @@ if [[ -n "$MIN_VINTAGE" ]]; then
       --date=format-local:'%Y-%m-%dT%H:%M:%SZ' --format='%cd' "$MIN_VINTAGE" 2>/dev/null || true)"
     [[ -n "$MIN_VINTAGE_RESOLVED" ]] || fail "invalid --min-vintage: '$MIN_VINTAGE' (expected an ISO-8601 UTC timestamp like 2026-07-05T12:00:00Z or a resolvable git commit-ish)"
   fi
+fi
+ROUTE_OPTIONS_VINTAGE="2026-09-09T01:27:42Z"
+if printf '%s' "$ROUTE_JSON" | jq -e '.options | length > 0' >/dev/null; then
+  if [[ -z "${MIN_VINTAGE_RESOLVED:-}" || "$MIN_VINTAGE_RESOLVED" < "$ROUTE_OPTIONS_VINTAGE" ]]; then
+    MIN_VINTAGE_RESOLVED="$ROUTE_OPTIONS_VINTAGE"
+  fi
+fi
+if [[ -n "${MIN_VINTAGE_RESOLVED:-}" ]]; then
   MIN_VINTAGE_JSON="$(jq -n --arg v "$MIN_VINTAGE_RESOLVED" '$v')"
 fi
 
@@ -908,8 +917,8 @@ if [[ -n "$ROUTING_JSON" ]]; then
   ROW="$(printf '%s' "$ROW" | jq -c --argjson ro "$ROUTING_JSON" '. + {routing_overrides: $ro}')"
 fi
 
-# min_vintage follows omit-when-empty: added only when --min-vintage was passed,
-# so an absent requirement stays absent (the Go decoder reads a nil *string).
+# min_vintage stays absent for empty-option routes unless the caller supplied a
+# floor; canonical options add the route-aware launcher floor automatically.
 if [[ -n "$MIN_VINTAGE_JSON" ]]; then
   ROW="$(printf '%s' "$ROW" | jq -c --argjson mv "$MIN_VINTAGE_JSON" '. + {min_vintage: $mv}')"
 fi

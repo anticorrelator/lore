@@ -66,7 +66,8 @@ def _source(layer: str, role: str, ceremony: str | None = None) -> dict[str, str
 def _validate_source(value: Any) -> dict[str, str]:
     if not isinstance(value, dict) or set(value) - {"layer", "role", "ceremony"}:
         raise RouteConfigError("invalid_routing_source", "routing_source must contain only layer, role, and optional ceremony", "routing_source")
-    if value.get("layer") not in {"env", "per-repo", "ceremony-overlay", "routes", "default", "override", "native-models"}:
+    layer = value.get("layer")
+    if not isinstance(layer, str) or layer not in {"env", "per-repo", "ceremony-overlay", "routes", "default", "override", "native-models"}:
         raise RouteConfigError("invalid_routing_source", "routing_source.layer is invalid", "routing_source.layer")
     if not isinstance(value.get("role"), str) or not value["role"]:
         raise RouteConfigError("invalid_routing_source", "routing_source.role is required", "routing_source.role")
@@ -108,6 +109,8 @@ def parse_route(value: Any, repo_root: str | os.PathLike[str], routing_source: A
             if not isinstance(raw_options, dict):
                 raise RouteConfigError("invalid_route_options", "route.options must be an object", "options")
             raw_framework = value.get("framework")
+            if not isinstance(raw_framework, str) or not raw_framework:
+                raise RouteConfigError("missing_framework", "route.framework is required", "framework")
             declared_options = frameworks.get(raw_framework, {}).get("model_routing", {}).get("options", {})
             unknown_options = set(raw_options) - set(declared_options)
             if unknown_options:
@@ -256,8 +259,10 @@ def validate_settings(settings: Any, repo_root: str | os.PathLike[str]) -> dict[
             binding = native[role]
             if role not in roles:
                 raise RouteConfigError("unknown_role", f"unknown native role '{role}'", f"harnesses.{harness}.native_models.{role}")
+            if not isinstance(binding, str) or not binding:
+                raise RouteConfigError("invalid_model", "native model must be a non-empty string", f"harnesses.{harness}.native_models.{role}")
             try:
-                parsed = parse_route(f"{harness}/{binding}" if isinstance(binding, str) else binding, repo_root)
+                parsed = parse_route(f"{harness}/{binding}", repo_root)
             except RouteConfigError as exc:
                 exc.path = f"harnesses.{harness}.native_models.{role}" + (f".{exc.path}" if exc.path else "")
                 raise

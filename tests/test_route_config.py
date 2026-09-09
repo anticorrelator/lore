@@ -60,6 +60,20 @@ class RouteConfigTests(unittest.TestCase):
             route_config.parse_route(value, ROOT)
         self.assertEqual(caught.exception.code, "invalid_routing_source")
 
+    def test_non_scalar_routing_source_layer_has_typed_error(self):
+        for layer in ([], {}):
+            value = {"framework": "codex", "model": "gpt-5.6-sol", "options": {}, "routing_source": {"layer": layer, "role": "worker"}}
+            with self.subTest(layer=layer), self.assertRaises(route_config.RouteConfigError) as caught:
+                route_config.parse_route(value, ROOT)
+            self.assertEqual((caught.exception.code, caught.exception.path), ("invalid_routing_source", "routing_source.layer"))
+
+    def test_non_scalar_canonical_framework_has_typed_error(self):
+        for framework in ([], {}):
+            value = {"framework": framework, "model": "gpt-5.6-sol", "options": {}}
+            with self.subTest(framework=framework), self.assertRaises(route_config.RouteConfigError) as caught:
+                route_config.parse_route(value, ROOT)
+            self.assertEqual((caught.exception.code, caught.exception.path), ("missing_framework", "framework"))
+
     def test_canonical_envelope_fields_are_not_valid_settings_syntax(self):
         value = settings()
         value["routes"]["worker"] = {"framework": "codex", "model": "gpt-5.6-sol", "options": {}}
@@ -91,6 +105,15 @@ class RouteConfigTests(unittest.TestCase):
         value["harnesses"]["claude-code"]["roles"] = {"default": "opus"}
         with self.assertRaisesRegex(route_config.RouteConfigError, "retired"):
             route_config.resolve_route_for_role("worker", repo_root=ROOT, settings=value, env={"LORE_MODEL_WORKER": "codex/gpt-5.5-high"})
+
+    def test_native_models_require_nonempty_strings(self):
+        for binding in (None, [], {}, 7, ""):
+            value = settings()
+            value["harnesses"]["codex"]["native_models"]["worker"] = binding
+            with self.subTest(binding=binding), self.assertRaises(route_config.RouteConfigError) as caught:
+                route_config.validate_settings(value, ROOT)
+            self.assertEqual(caught.exception.code, "invalid_model")
+            self.assertEqual(caught.exception.path, "harnesses.codex.native_models.worker")
 
     def test_precedence_and_fallback_record_actual_role(self):
         value = settings()

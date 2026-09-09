@@ -1,0 +1,42 @@
+{
+  "parse": [
+    {"id":"claude","input":"claude-code/opus","expected":{"framework":"claude-code","model":"opus","options":{}}},
+    {"id":"opencode-provider","input":"opencode/openai/gpt-5","expected":{"framework":"opencode","model":"openai/gpt-5","options":{}}},
+    {"id":"codex-minimal","input":"codex/gpt-5.5-minimal","expected":{"framework":"codex","model":"gpt-5.5","options":{"effort":"minimal"}}},
+    {"id":"codex-low","input":"codex/gpt-5.5-low","expected":{"framework":"codex","model":"gpt-5.5","options":{"effort":"low"}}},
+    {"id":"codex-medium","input":"codex/gpt-5.5-medium","expected":{"framework":"codex","model":"gpt-5.5","options":{"effort":"medium"}}},
+    {"id":"codex-high","input":"codex/gpt-5.5-high","expected":{"framework":"codex","model":"gpt-5.5","options":{"effort":"high"}}},
+    {"id":"codex-xhigh","input":"codex/gpt-5.5-xhigh","expected":{"framework":"codex","model":"gpt-5.5","options":{"effort":"xhigh"}}},
+    {"id":"codex-fast","input":{"framework":"codex","model":"gpt-5.6-sol","effort":"high","service_tier":"fast"},"expected":{"framework":"codex","model":"gpt-5.6-sol","options":{"effort":"high","service_tier":"fast"}}}
+  ],
+  "errors": [
+    {"id":"missing-framework","input":"opus","code":"missing_framework","path":"framework"},
+    {"id":"unknown-framework","input":"missing/opus","code":"unknown_framework","path":"framework"},
+    {"id":"null-option","input":{"framework":"codex","model":"gpt-5.5","effort":null},"code":"invalid_route_option","path":"effort"},
+    {"id":"unknown-option","input":{"framework":"claude-code","model":"opus","effort":"high"},"code":"unknown_route_option","path":"effort"},
+    {"id":"list-framework","input":{"framework":[],"model":"opus","options":{}},"code":"missing_framework","path":"framework"},
+    {"id":"list-source-layer","input":{"framework":"codex","model":"gpt-5.5","options":{},"routing_source":{"layer":[],"role":"worker"}},"code":"invalid_routing_source","path":"routing_source.layer"}
+  ],
+  "flags": [
+    {"id":"claude","route":{"framework":"claude-code","model":"opus","options":{}},"expected":["--model","opus"]},
+    {"id":"opencode","route":{"framework":"opencode","model":"anthropic/opus","options":{}},"expected":["--model","anthropic/opus"]},
+    {"id":"codex-options","route":{"framework":"codex","model":"gpt-5.6-sol","options":{"effort":"high","service_tier":"fast"}},"expected":["-m","gpt-5.6-sol","-c","model_reasoning_effort=\"high\"","-c","service_tier=\"fast\""]}
+  ],
+  "resolve": [
+    {"id":"role","role":"worker","expected":{"framework":"codex","model":"gpt-5.6-sol","options":{"effort":"high","service_tier":"fast"},"routing_source":{"layer":"routes","role":"worker"}}},
+    {"id":"ceremony","role":"lead","ceremony":"spec","expected":{"framework":"opencode","model":"anthropic/opus","options":{},"routing_source":{"layer":"ceremony-overlay","role":"lead","ceremony":"spec"}}},
+    {"id":"fallback","role":"worker-mechanical","expected":{"framework":"codex","model":"gpt-5.6-sol","options":{"effort":"high","service_tier":"fast"},"routing_source":{"layer":"routes","role":"worker"}}},
+    {"id":"default","role":"advisor","expected":{"framework":"claude-code","model":"opus","options":{},"routing_source":{"layer":"default","role":"advisor"}}}
+  ],
+  "native": [
+    {"id":"codex-to-claude","role":"worker","harness":"claude-code","expected":{"framework":"claude-code","model":"sonnet","options":{},"routing_source":{"layer":"native-models","role":"worker"}}},
+    {"id":"codex-to-codex","role":"worker","harness":"codex","expected":{"framework":"codex","model":"gpt-5.6-sol","options":{"effort":"high","service_tier":"fast"},"routing_source":{"layer":"routes","role":"worker"}}},
+    {"id":"codex-to-opencode","role":"worker","harness":"opencode","expected":{"framework":"opencode","model":"anthropic/opus","options":{},"routing_source":{"layer":"native-models","role":"default"}}},
+    {"id":"opencode-to-claude","role":"lead","ceremony":"spec","harness":"claude-code","expected":{"framework":"claude-code","model":"opus","options":{},"routing_source":{"layer":"native-models","role":"default","ceremony":"spec"}}},
+    {"id":"opencode-to-codex","role":"lead","ceremony":"spec","harness":"codex","expected":{"framework":"codex","model":"gpt-5.5","options":{"effort":"high"},"routing_source":{"layer":"native-models","role":"default","ceremony":"spec"}}},
+    {"id":"opencode-to-opencode","role":"lead","ceremony":"spec","harness":"opencode","expected":{"framework":"opencode","model":"anthropic/opus","options":{},"routing_source":{"layer":"ceremony-overlay","role":"lead","ceremony":"spec"}}},
+    {"id":"claude-to-claude","role":"advisor","harness":"claude-code","expected":{"framework":"claude-code","model":"opus","options":{},"routing_source":{"layer":"default","role":"advisor"}}},
+    {"id":"claude-to-codex","role":"advisor","harness":"codex","expected":{"framework":"codex","model":"gpt-5.5","options":{"effort":"high"},"routing_source":{"layer":"native-models","role":"default"}}},
+    {"id":"claude-to-opencode","role":"advisor","harness":"opencode","expected":{"framework":"opencode","model":"anthropic/opus","options":{},"routing_source":{"layer":"native-models","role":"default"}}}
+  ]
+}

@@ -53,6 +53,68 @@ func main() {
 	args := os.Args[2:]
 
 	switch helper {
+	case "parse_route":
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "Error: parse_route requires <route-json>")
+			os.Exit(1)
+		}
+		var value any
+		if err := json.Unmarshal([]byte(args[0]), &value); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		route, err := config.ParseCanonicalRoute(value)
+		printJSON(route, err)
+
+	case "resolve_canonical_route":
+		if len(args) < 1 || len(args) > 3 {
+			fmt.Fprintln(os.Stderr, "Error: resolve_canonical_route requires <role> [<ceremony> [<override-json>]]")
+			os.Exit(1)
+		}
+		ceremony := ""
+		if len(args) > 1 {
+			ceremony = args[1]
+		}
+		var override any
+		if len(args) == 3 {
+			if err := json.Unmarshal([]byte(args[2]), &override); err != nil {
+				fmt.Fprintln(os.Stderr, "Error:", err)
+				os.Exit(1)
+			}
+		}
+		route, err := config.ResolveCanonicalRoute(args[0], ceremony, override)
+		printJSON(route, err)
+
+	case "resolve_native_canonical_route":
+		if len(args) < 2 || len(args) > 3 {
+			fmt.Fprintln(os.Stderr, "Error: resolve_native_canonical_route requires <role> <harness> [<ceremony>]")
+			os.Exit(1)
+		}
+		ceremony := ""
+		if len(args) == 3 {
+			ceremony = args[2]
+		}
+		route, err := config.ResolveNativeCanonicalRoute(args[0], ceremony, args[1])
+		printJSON(route, err)
+
+	case "route_flags":
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "Error: route_flags requires <canonical-route-json>")
+			os.Exit(1)
+		}
+		var value any
+		if err := json.Unmarshal([]byte(args[0]), &value); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		route, err := config.ParseCanonicalRoute(value)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		flags, err := config.RouteFlags(route)
+		printJSON(flags, err)
+
 	case "resolve_active_framework":
 		out, err := config.ResolveActiveFramework()
 		if err != nil {
@@ -143,17 +205,8 @@ func main() {
 		if len(args) == 2 {
 			ceremony = args[1]
 		}
-		route, err := config.ResolveRouteForRoleInCeremony(args[0], ceremony)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "Error:", err)
-			os.Exit(1)
-		}
-		out, err := json.Marshal(route)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "Error:", err)
-			os.Exit(1)
-		}
-		fmt.Println(string(out))
+		route, err := config.ResolveCanonicalRoute(args[0], ceremony, nil)
+		printJSON(route, err)
 
 	case "framework_capability":
 		// These bash-only helpers were added in T6 but were not part of T10's
@@ -265,4 +318,17 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: unknown helper %q\n", helper)
 		os.Exit(1)
 	}
+}
+
+func printJSON(value any, err error) {
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
+	out, err := json.Marshal(value)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
+	fmt.Println(string(out))
 }
