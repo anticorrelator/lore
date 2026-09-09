@@ -5,8 +5,13 @@ LORE="$REPO_DIR/cli/lore"
 
 setup() {
   TEST_KDIR="$(mktemp -d)"
+  TEST_LORE_DATA_DIR="$(mktemp -d)"
   export LORE_KNOWLEDGE_DIR="$TEST_KDIR"
+  export LORE_DATA_DIR="$TEST_LORE_DATA_DIR"
   export LORE_FRAMEWORK=codex
+  mkdir -p "$TEST_LORE_DATA_DIR/config"
+  ln -s "$REPO_DIR/scripts" "$TEST_LORE_DATA_DIR/scripts"
+  printf '%s\n' '{"version":2,"tui_launch_framework":"codex","routes":{"default":"codex/default"},"harnesses":{"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}}}}' > "$TEST_LORE_DATA_DIR/config/settings.json"
   mkdir -p "$TEST_KDIR/_work/discover-item" "$TEST_KDIR/preferences" "$TEST_KDIR/conventions/nested"
   printf '%s\n' '{"title":"Discover Item","status":"active"}' > "$TEST_KDIR/_work/discover-item/_meta.json"
   printf '%s\n' '# Discover Item' '## Phases' '- [ ] Build [class: standard]' > "$TEST_KDIR/_work/discover-item/plan.md"
@@ -14,7 +19,7 @@ setup() {
   printf '%s\n' '# Convention Two' 'Keep nested enumeration visible.' > "$TEST_KDIR/conventions/nested/two.md"
 }
 
-teardown() { rm -rf "$TEST_KDIR"; unset LORE_KNOWLEDGE_DIR LORE_FRAMEWORK; }
+teardown() { rm -rf "$TEST_KDIR" "$TEST_LORE_DATA_DIR"; unset LORE_KNOWLEDGE_DIR LORE_DATA_DIR LORE_FRAMEWORK; }
 
 @test "discover returns coverage and raw source-native candidates without applicability fields" {
   run bash "$LORE" spec discover discover-item --json

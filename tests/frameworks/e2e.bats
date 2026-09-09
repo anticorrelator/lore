@@ -25,7 +25,7 @@
 #      schema, same field set, same validator.
 #
 # Coverage matrix (per-framework setup_framework helper sets up
-# settings.json harness roles + LORE_DATA_DIR):
+# settings.json routes/native models + LORE_DATA_DIR):
 #   - claude-code: native_blocking + spawn-with-bare-model + send_message=full
 #   - opencode:    lead_validator + spawn-with-provider/model split + send_message=unsupported
 #   - codex:       lead_validator + spawn-with-bare-model + send_message=unsupported
@@ -69,7 +69,7 @@ setup() {
   export HOME="$TEST_HOME"
   unset LORE_FRAMEWORK
   # Clear any LORE_MODEL_<ROLE> overrides leaking in from the parent shell —
-  # tests assert the settings.json harness roles map is the resolution source.
+  # tests assert settings.json is the resolution source.
   unset LORE_MODEL_LEAD LORE_MODEL_WORKER LORE_MODEL_RESEARCHER \
         LORE_MODEL_REVIEWER LORE_MODEL_ADVISOR LORE_MODEL_DEFAULT
 }
@@ -84,7 +84,7 @@ teardown() {
 
 # --- helpers ---
 
-# Stage settings.json with a closed harness roles map. Single-provider harnesses
+# Stage settings.json with closed canonical routes and a native default. Single-provider harnesses
 # get bare model ids; the multi-provider opencode_multi variant uses
 # provider/model bindings so the spawn directive exercises the
 # split_provider_model path.
@@ -96,14 +96,13 @@ setup_framework() {
   "version": 2,
   "tui_launch_framework": "$framework",
   "capability_overrides": {},
+  "routes": {
+    "default": "$framework/sonnet",
+    "lead":    "$framework/opus",
+    "worker":  "$framework/sonnet"
+  },
   "harnesses": {
-    "$framework": {
-      "roles": {
-        "default": "sonnet",
-        "lead":    "opus",
-        "worker":  "sonnet"
-      }
-    }
+    "$framework": {"args": [], "native_models": {"default": "sonnet"}}
   }
 }
 EOF
@@ -122,14 +121,13 @@ setup_framework_multi() {
   "version": 2,
   "tui_launch_framework": "$framework",
   "capability_overrides": {},
+  "routes": {
+    "default": "$framework/anthropic/sonnet",
+    "lead":    "$framework/anthropic/opus",
+    "worker":  "$framework/openai/gpt-4o"
+  },
   "harnesses": {
-    "$framework": {
-      "roles": {
-        "default": "anthropic/sonnet",
-        "lead":    "anthropic/opus",
-        "worker":  "openai/gpt-4o"
-      }
-    }
+    "$framework": {"args": [], "native_models": {"default": "anthropic/sonnet"}}
   }
 }
 EOF
@@ -205,7 +203,7 @@ PYEOF
   [ -f "$TEST_KNOWLEDGE_DIR/_work/$SLUG/_meta.json" ]
   [ -f "$TEST_KNOWLEDGE_DIR/_work/$SLUG/notes.md" ]
 
-  # Worker spawn directive must reflect harness roles.worker=sonnet from settings.json.
+  # Worker spawn directive must reflect routes.worker=claude-code/sonnet from settings.json.
   run bash "$CC_AGENT_ADAPTER" spawn worker "$(guidance_prompt)"
   [ "$status" -eq 0 ]
   [[ "$output" =~ delegate:TaskCreate ]]
@@ -277,7 +275,7 @@ PYEOF
   [[ "$output" =~ "model=sonnet" ]]
 
   # Mutate the binding via the canonical write path.
-  run bash "$SET_MODEL_SH" set-model worker haiku
+  run bash "$SET_MODEL_SH" set-model worker claude-code/haiku
   [ "$status" -eq 0 ]
 
   # Next spawn must reflect the new binding without any restart.

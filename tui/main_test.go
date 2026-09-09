@@ -3398,7 +3398,7 @@ func TestKnowledgeGlobalKeybindContract(t *testing.T) {
 		}
 	})
 	t.Run("S (settings configurator renders over browser)", func(t *testing.T) {
-		setupFakeLoreData(t, `{"version": 1}`)
+		setupFakeLoreData(t, `{"version":2,"tui_launch_framework":"claude-code","routes":{"default":"claude-code/opus"},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"opus"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}},"opencode":{"args":[],"native_models":{"default":"anthropic/opus"}}}}`)
 		nm, _ := updateModel(t, knowledgeModel(), press('S'))
 		if !nm.settingsActive {
 			t.Fatal("S should open the settings configurator from the knowledge browser")

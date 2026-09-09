@@ -24,7 +24,9 @@
 package settings
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -33,6 +35,56 @@ import (
 
 	"github.com/anticorrelator/lore/tui/internal/style"
 )
+
+// ProjectEditorSchema writes the subset of the canonical settings schema that
+// the application settings editor can render. Global routes stay read-only;
+// persisted candidates are validated separately against the full schema.
+func ProjectEditorSchema(schemaPath string) (string, func(), error) {
+	raw, err := os.ReadFile(schemaPath)
+	if err != nil {
+		return "", func() {}, err
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return "", func() {}, err
+	}
+	props, _ := schema["properties"].(map[string]any)
+	delete(props, "routes")
+	delete(props, "version")
+	if required, ok := schema["required"].([]any); ok {
+		kept := required[:0]
+		for _, value := range required {
+			if value != "routes" && value != "version" {
+				kept = append(kept, value)
+			}
+		}
+		schema["required"] = kept
+	}
+	defs, _ := schema["$defs"].(map[string]any)
+	for _, key := range []string{"route_value", "route_roles_overlay", "ceremony_route_overlays", "routes_config"} {
+		delete(defs, key)
+	}
+	out, err := json.Marshal(schema)
+	if err != nil {
+		return "", func() {}, err
+	}
+	f, err := os.CreateTemp("", "lore-settings-editor-*.schema.json")
+	if err != nil {
+		return "", func() {}, err
+	}
+	name := f.Name()
+	cleanup := func() { _ = os.Remove(name) }
+	if _, err = f.Write(out); err == nil {
+		err = f.Close()
+	} else {
+		_ = f.Close()
+	}
+	if err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return name, cleanup, nil
+}
 
 // ----------------------------------------------------------------------------
 // PrimaryRadio — single-select radio for tui_launch_framework. Immediate-commit.

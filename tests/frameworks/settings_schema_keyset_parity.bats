@@ -372,18 +372,26 @@ PY
   diff <(printf '%s\n' "$schema_set") <(printf '%s\n' "$caps_set")
 }
 
-@test "legacy template is explicitly pre-migration until its owning task updates it" {
+@test "generic version 2 template validates and ships framework-neutral defaults" {
   TEMPLATE="$REPO_DIR/adapters/settings.template.json"
   [ -f "$TEMPLATE" ] || skip "settings.template.json missing"
   SCHEMA="$SCHEMA" TEMPLATE="$TEMPLATE" python3 - <<'PY'
 import json, os
+import jsonschema
 with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 with open(os.environ["TEMPLATE"]) as f:
     instance = json.load(f)
-assert schema["properties"]["version"]["const"] == 2
-assert instance["version"] == 1
-assert "routes" not in instance
+jsonschema.validate(instance, schema)
+assert instance["version"] == 2
+assert set(instance["routes"].values()) == {"claude-code/opus"}
+assert instance["routes"]["default"] == "claude-code/opus"
+assert instance["harnesses"]["claude-code"]["native_models"]["default"] == "opus"
+assert instance["harnesses"]["codex"]["native_models"]["default"] == "gpt-5.5-high"
+assert instance["harnesses"]["opencode"]["native_models"]["default"] == "anthropic/opus"
+serialized = json.dumps(instance)
+assert "gpt-6-astra" not in serialized
+assert "gpt-5.6-sol" not in serialized
 PY
 }
 
