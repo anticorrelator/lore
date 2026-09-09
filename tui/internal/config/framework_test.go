@@ -1198,8 +1198,8 @@ func TestResolveModelForRoleInCeremonyOnFramework_ReadsNamedFrameworkOverlay(t *
 	if err != nil {
 		t.Fatalf("ResolveModelForRole: %v", err)
 	}
-	if active != "openai/opencode-model" {
-		t.Errorf("global route = %q", active)
+	if active != "opus" {
+		t.Errorf("active native projection = %q, want opus", active)
 	}
 }
 
@@ -1313,5 +1313,44 @@ func TestResolveRouteForRole_RejectsUnsupportedForeignBridge(t *testing.T) {
 	route, err := ResolveRouteForRole("worker")
 	if err != nil || route.TargetFramework != "opencode" {
 		t.Fatalf("cross-framework route = %#v, %v", route, err)
+	}
+}
+
+func TestScalarModelResolversUseActiveHarnessNativeSelection(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"lead": "codex/gpt-6-astra-high"})
+	for name, resolve := range map[string]func() (string, error){
+		"role":     func() (string, error) { return ResolveModelForRole("lead") },
+		"ceremony": func() (string, error) { return ResolveModelForRoleInCeremony("lead", "spec") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := resolve()
+			if err != nil || got != "opus" {
+				t.Fatalf("native scalar = %q, %v; want opus", got, err)
+			}
+		})
+	}
+}
+
+func TestValidateRoutingSettingsRejectsMalformedSuccessEnvelope(t *testing.T) {
+	for name, result := range map[string]string{"missing-valid": "{}", "false-valid": `{"valid":false}`} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			scripts := filepath.Join(root, "scripts")
+			if err := os.MkdirAll(scripts, 0755); err != nil {
+				t.Fatal(err)
+			}
+			program := "import json\nprint(json.dumps({'ok':True,'result':" + result + "}))\n"
+			if err := os.WriteFile(filepath.Join(scripts, "route_config.py"), []byte(program), 0644); err != nil {
+				t.Fatal(err)
+			}
+			data := t.TempDir()
+			if err := os.Symlink(scripts, filepath.Join(data, "scripts")); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("LORE_DATA_DIR", data)
+			if err := ValidateRoutingSettings(map[string]any{}); err == nil || !strings.Contains(err.Error(), "malformed") {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }

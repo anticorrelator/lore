@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -853,5 +854,25 @@ func TestEnqueueSessionUsesSoleWriterWithFrozenRoute(t *testing.T) {
 	}
 	if rows[0].Route.Framework != "codex" || rows[0].Route.Model != "gpt-6-astra" || rows[0].Route.Options["effort"] != "high" {
 		t.Fatalf("route = %#v", rows[0].Route)
+	}
+}
+
+func TestDirectEnqueueCompletionPreservesClaimedPanelAndRefusesPhantom(t *testing.T) {
+	m, _ := baseSessionModel(t)
+	panel := work.NewSessionPanelModel("claimed")
+	m.setSessionPanel("claimed", panel)
+	before := m.sessionPanels["claimed"].View()
+	m, _ = updateModel(t, m, directEnqueueResultMsg{descriptor: work.SessionDescriptor{Slug: "claimed"}})
+	if m.sessionPanels["claimed"].View() != before {
+		t.Fatal("writer completion replaced already-claimed panel")
+	}
+
+	m2, _ := baseSessionModel(t)
+	m2, _ = updateModel(t, m2, directEnqueueResultMsg{descriptor: work.SessionDescriptor{Slug: "failed"}, err: errors.New("writer refused")})
+	if m2.hasSessionPanel("failed") {
+		t.Fatal("writer refusal created phantom panel")
+	}
+	if !strings.Contains(m2.flashErr, "writer refused") {
+		t.Fatalf("refusal flash = %q", m2.flashErr)
 	}
 }

@@ -687,11 +687,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			m.flashErr = compactErr("enqueue session", msg.err)
 			return m, nil
 		}
-		d := msg.descriptor
-		m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: d.Slug, Type: sessionType(d.Type)})
-		panel := work.NewSessionPanelModel(d.Slug)
-		panel, _ = panel.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth() - 2, Height: m.detailPanelHeight()})
-		m.setSessionPanel(d.Slug, panel)
+		// The queue owns session creation. A tick may already have claimed and
+		// spawned this row before writer completion arrives, so success must not
+		// replace panel or live-session state.
 		return m, nil
 
 	case journalResultMsg:

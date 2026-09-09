@@ -812,9 +812,9 @@ func TestStartTerminalCmd_LeadModelOverrideBeatsRoleBinding(t *testing.T) {
 	if argsContains(started.Cmd.Args, "ceremony-model") || argsContains(started.Cmd.Args, "overlay-model") {
 		t.Errorf("role binding leaked past the per-dispatch override: %v", started.Cmd.Args)
 	}
-	notice, ok := noticeByCode(started.Notices, "lead-model-role-resolved")
+	notice, ok := noticeByCode(started.Notices, "lead-model-override")
 	if !ok || !strings.Contains(notice.Message, "dispatch-model") {
-		t.Errorf("Notices = %#v, want a canonical route notice naming dispatch-model", started.Notices)
+		t.Errorf("Notices = %#v, want an override notice naming dispatch-model", started.Notices)
 	}
 }
 
@@ -1117,5 +1117,8 @@ func TestStartTerminalCmdCodexRouteOptionsReachActualArgv(t *testing.T) {
 	joined := strings.Join(started.Cmd.Args, "\x00")
 	if !strings.Contains(joined, strings.Join(want, "\x00")) {
 		t.Fatalf("actual argv = %#v, want ordered %#v", started.Cmd.Args, want)
+	}
+	if !noticesContainCode(started.Notices, "lead-model-role-resolved") || noticesContainCode(started.Notices, "lead-model-override") {
+		t.Fatalf("route provenance notices = %#v", started.Notices)
 	}
 }

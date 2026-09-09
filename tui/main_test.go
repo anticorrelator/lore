@@ -19,6 +19,7 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/coordination/board"
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
+	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
 	"github.com/anticorrelator/lore/tui/internal/work"
 	"github.com/anticorrelator/lore/tui/internal/worktree"
@@ -270,6 +271,19 @@ func press(code rune, mods ...tea.KeyMod) tea.KeyPressMsg {
 	return k
 }
 
+func prepareConfirmEnqueue(t *testing.T, m model) model {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "adapters", "settings.template.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	setupFakeLoreData(t, string(raw))
+	kdir := t.TempDir()
+	m.config.KnowledgeDir, m.config.ProjectDir, m.normalizedProjectDir = kdir, kdir, kdir
+	m.sessionsDir = filepath.Join(kdir, "_sessions")
+	return m
+}
+
 // TestSpecConfirmModalKeybindContract verifies the keybinds displayed in
 // renderSessionConfirmModal (Enter, Esc, Shift+Enter, Alt+1, Alt+2) against the
 // modal's actual dispatch in Update.
@@ -292,16 +306,25 @@ func TestSpecConfirmModalKeybindContract(t *testing.T) {
 		}
 	})
 	t.Run("Enter (launch)", func(t *testing.T) {
-		m := specConfirmModel()
+		m := prepareConfirmEnqueue(t, specConfirmModel())
 		nm, cmd := updateModel(t, m, press(tea.KeyEnter))
 		if nm.sessionConfirmActive {
 			t.Error("modal should close on Enter")
 		}
 		if cmd == nil {
-			t.Error("Enter should dispatch the launch command")
+			t.Fatal("Enter should dispatch the enqueue command")
 		}
-		if !nm.hasSessionPanel("test-item") {
-			t.Error("Enter should pre-create the spec panel")
+		result := cmd()
+		nm, _ = updateModel(t, nm, result)
+		if nm.flashErr != "" {
+			t.Fatalf("enqueue failed: %s", nm.flashErr)
+		}
+		if nm.hasSessionPanel("test-item") {
+			t.Error("enqueue completion must leave panel creation to queue claim")
+		}
+		rows := session.ScanPending(nm.sessionsDir)
+		if len(rows) != 1 || rows[0].Route == nil {
+			t.Fatalf("pending route = %#v", rows)
 		}
 	})
 	t.Run("Esc (cancel)", func(t *testing.T) {
@@ -425,16 +448,24 @@ func TestImplementConfirmModalKeybindContract(t *testing.T) {
 		}
 	})
 	t.Run("Enter (launch implement)", func(t *testing.T) {
-		m := implementModel()
+		m := prepareConfirmEnqueue(t, implementModel())
 		nm, cmd := updateModel(t, m, press(tea.KeyEnter))
 		if nm.sessionConfirmActive {
 			t.Error("Enter should close the implement modal")
 		}
 		if cmd == nil {
-			t.Error("Enter should dispatch the launch command")
+			t.Fatal("Enter should dispatch the enqueue command")
 		}
-		if !nm.hasSessionPanel("impl-1") {
-			t.Error("Enter should pre-create the session panel")
+		nm, _ = updateModel(t, nm, cmd())
+		if nm.flashErr != "" {
+			t.Fatalf("enqueue failed: %s", nm.flashErr)
+		}
+		if nm.hasSessionPanel("impl-1") {
+			t.Error("enqueue completion must leave panel creation to queue claim")
+		}
+		rows := session.ScanPending(nm.sessionsDir)
+		if len(rows) != 1 || rows[0].Route == nil {
+			t.Fatalf("pending route = %#v", rows)
 		}
 	})
 }

@@ -149,8 +149,19 @@ func ValidateRoutingSettings(candidate ...any) error {
 		payload["settings"] = candidate[0]
 		delete(payload, "settings_path")
 	}
-	_, err = callRouteConfigEnvelope(repo, payload)
-	return err
+	raw, err := callRouteConfigEnvelope(repo, payload)
+	if err != nil {
+		return err
+	}
+	var result struct {
+		Valid bool `json:"valid"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&result); err != nil || !result.Valid {
+		return errors.New("route_config.py returned malformed validation result")
+	}
+	return nil
 }
 
 // ResolveNativeCanonicalRoute resolves a role for a harness-native invocation surface.
@@ -1298,37 +1309,15 @@ func ResolveModelForRole(role string) (string, error) {
 	return ResolveModelForRoleInCeremony(role, "")
 }
 
-// ResolveModelForRoleInCeremony mirrors scripts/lib.sh resolve_model_for_role
-// (scripts/lib.sh:1050-1208) with its optional ceremony argument. Returns the
-// model id for a role on the active framework, inserting a ceremony-scoped
-// overlay ahead of the role overlay when a non-empty ceremony id is supplied.
-//
-// The ceremony id MUST be one of the closed set in adapters/ceremonies.json
-// (spec, implement, pr-review). An unknown ceremony — passed in the query, or stored as a
-// key under `harnesses.<active>.ceremony_roles` — is rejected with an error
-// rather than routed to a default (feedback_dont_reintroduce_defaults). A role
-// key stored inside a ceremony map that is not in adapters/roles.json is the
-// same error class as the role-overlay guard below.
-//
-// Resolution order (byte-for-byte with the bash side, scripts/lib.sh:1039-1048):
-//  1. Env var LORE_MODEL_<ROLE_UPPER> (e.g., LORE_MODEL_LEAD=opus).
-//  2. Per-repo .lore.config `model_for_<role>=<model>` (walk-up from cwd).
-//  3. Unified settings.json `.harnesses.<active>.ceremony_roles.<ceremony>.<role>`
-//     — only consulted when a ceremony id is passed; an absent binding falls
-//     through (ABSENT and EXPLICIT-empty both fall through, matching the bash
-//     `. // empty` filter).
-//  4. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay).
-//     4b. Class-qualified role fallback: if the role declares a `fallback_role` in
-//     roles.json and layers 1-4 all missed, re-resolve once with that role (so
-//     an unbound worker-mechanical resolves exactly as plain worker). Runs
-//     before layer 5 so the fallback role consults its own overlay binding
-//     ahead of the shared default.
-//  5. Unified `.harnesses.<active>.roles.default` (overlay's own default).
-//
-// When ceremony == "" the ceremony layer (both its upfront query validation and
-// the overlay lookup) is skipped entirely.
+// ResolveModelForRoleInCeremony returns the active harness native model projection.
+// Global routing precedence is canonicalized first; when it targets another
+// framework, the active harness's validated native_models binding is used.
 func ResolveModelForRoleInCeremony(role, ceremony string) (string, error) {
-	route, err := ResolveCanonicalRoute(role, ceremony, nil)
+	active, err := ResolveActiveFramework()
+	if err != nil {
+		return "", err
+	}
+	route, err := ResolveNativeCanonicalRoute(role, ceremony, active)
 	if err != nil {
 		return "", err
 	}

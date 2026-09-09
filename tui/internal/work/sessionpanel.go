@@ -1837,7 +1837,11 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 		}
 		args = append(args, routeArgs...)
 		sessionEnv.Model = route.Model
-		notices = append(notices, OperatorNotice{Code: "lead-model-role-resolved", Message: fmt.Sprintf("lead model %s on %s (role %s)", route.Model, activeFramework, leadSeat)})
+		noticeCode, noticeDetail := "lead-model-role-resolved", "role "+leadSeat
+		if route.RoutingSource["layer"] == "override" {
+			noticeCode, noticeDetail = "lead-model-override", "explicit override"
+		}
+		notices = append(notices, OperatorNotice{Code: noticeCode, Message: fmt.Sprintf("lead model %s on %s (%s)", route.Model, activeFramework, noticeDetail)})
 
 		if d.FollowupMode && slug != "" {
 			if sysPrompt := loadFollowupContext(slug, knowledgeDir, d.FindingIndex); sysPrompt != "" {
