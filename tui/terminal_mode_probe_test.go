@@ -83,7 +83,7 @@ func TestActiveUnfocusedWorkListKeybindContract(t *testing.T) {
 		}
 	})
 	t.Run("S (settings)", func(t *testing.T) {
-		setupFakeLoreData(t, `{"version": 1}`)
+		setupFakeLoreData(t, `{"version":2,"tui_launch_framework":"claude-code","routes":{"default":"claude-code/opus"},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"opus"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}},"opencode":{"args":[],"native_models":{"default":"anthropic/opus"}}}}`)
 		nm, _ := updateModel(t, activeUnfocusedModel(), press('S'))
 		if !nm.settingsActive {
 			t.Error("S should open the settings configurator when the list has focus")

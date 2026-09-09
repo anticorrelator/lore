@@ -9,17 +9,17 @@ import (
 	"testing"
 )
 
-// TestLoadSchema_LiveAdaptersSchema verifies the live adapters/settings.schema.json
-// loads cleanly. This is a smoke test of the D1 commitment: every construct
-// in the verified-current schema must be in the supported taxonomy. The
-// schema file is read-only — this test never mutates it.
+// TestLoadSchema_LiveAdaptersSchema verifies the application's projection of
+// adapters/settings.schema.json loads cleanly. The full schema remains the
+// persisted-document validator; this test covers the subset passed to the
+// deliberately limited generic editor.
 func TestLoadSchema_LiveAdaptersSchema(t *testing.T) {
 	_, here, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Skip("cannot resolve caller path")
 	}
 	// internal/settings/schema_live_test.go -> repo-root/adapters/settings.schema.json
-	schemaPath := filepath.Join(filepath.Dir(here), "..", "..", "..", "adapters", "settings.schema.json")
+	schemaPath := liveEditorSchemaPath(t, filepath.Join(filepath.Dir(here), "..", "..", "..", "adapters", "settings.schema.json"))
 
 	s, err := LoadSchema(schemaPath)
 	if err != nil {
@@ -71,7 +71,7 @@ func TestLiveRender_CapabilityOverridesMatrixHasLabelsAndDescriptions(t *testing
 		t.Skip("cannot resolve caller path")
 	}
 	repoRoot := filepath.Join(filepath.Dir(here), "..", "..", "..")
-	schemaPath := filepath.Join(repoRoot, "adapters", "settings.schema.json")
+	schemaPath := liveEditorSchemaPath(t, filepath.Join(repoRoot, "adapters", "settings.schema.json"))
 	capsPath := filepath.Join(repoRoot, "adapters", "capabilities.json")
 
 	descByPath, capabilityIDs := loadCapabilityDescriptions(t, capsPath)
@@ -180,7 +180,7 @@ func TestLiveRender_NoSettlementSection(t *testing.T) {
 		t.Skip("cannot resolve caller path")
 	}
 	repoRoot := filepath.Join(filepath.Dir(here), "..", "..", "..")
-	schemaPath := filepath.Join(repoRoot, "adapters", "settings.schema.json")
+	schemaPath := liveEditorSchemaPath(t, filepath.Join(repoRoot, "adapters", "settings.schema.json"))
 	capsPath := filepath.Join(repoRoot, "adapters", "capabilities.json")
 
 	schema, err := LoadSchema(schemaPath)
@@ -237,7 +237,7 @@ func TestLiveRender_TopLevelRolesIgnored(t *testing.T) {
 		t.Skip("cannot resolve caller path")
 	}
 	repoRoot := filepath.Join(filepath.Dir(here), "..", "..", "..")
-	schemaPath := filepath.Join(repoRoot, "adapters", "settings.schema.json")
+	schemaPath := liveEditorSchemaPath(t, filepath.Join(repoRoot, "adapters", "settings.schema.json"))
 	capsPath := filepath.Join(repoRoot, "adapters", "capabilities.json")
 
 	store := newFakeStore(map[string]any{
@@ -291,6 +291,16 @@ func loadCapabilityDescriptions(t *testing.T, capsPath string) (map[string]strin
 		ids = append(ids, id)
 	}
 	return out, ids
+}
+
+func liveEditorSchemaPath(t *testing.T, canonicalPath string) string {
+	t.Helper()
+	projected, cleanup, err := ProjectEditorSchema(canonicalPath)
+	if err != nil {
+		t.Fatalf("ProjectEditorSchema: %v", err)
+	}
+	t.Cleanup(cleanup)
+	return projected
 }
 
 // stripANSI removes simple CSI sequences (ESC [ ... m) so containment checks
