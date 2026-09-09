@@ -27,11 +27,74 @@ func (hostSettingsStore) LoadAll() (map[string]any, error) {
 }
 
 func (hostSettingsStore) Patch(dotPath string, value any) error {
+	doc, err := config.LoadSettingsDocument()
+	if err != nil {
+		return err
+	}
+	candidate, err := cloneSettingsDocument(doc)
+	if err != nil {
+		return err
+	}
+	setDocumentPath(candidate, dotPath, value)
+	if err := config.ValidateRoutingSettings(candidate); err != nil {
+		return fmt.Errorf("settings validation refused edit: %w", err)
+	}
 	return config.SettingsPatch(dotPath, value)
 }
 
 func (hostSettingsStore) Delete(dotPath string) error {
+	doc, err := config.LoadSettingsDocument()
+	if err != nil {
+		return err
+	}
+	candidate, err := cloneSettingsDocument(doc)
+	if err != nil {
+		return err
+	}
+	deleteDocumentPath(candidate, dotPath)
+	if err := config.ValidateRoutingSettings(candidate); err != nil {
+		return fmt.Errorf("settings validation refused edit: %w", err)
+	}
 	return config.SettingsDelete(dotPath)
+}
+
+func cloneSettingsDocument(doc map[string]any) (map[string]any, error) {
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		return nil, err
+	}
+	var clone map[string]any
+	if err := json.Unmarshal(raw, &clone); err != nil {
+		return nil, err
+	}
+	return clone, nil
+}
+
+func setDocumentPath(doc map[string]any, dotPath string, value any) {
+	parts := strings.Split(dotPath, ".")
+	node := doc
+	for _, part := range parts[:len(parts)-1] {
+		next, ok := node[part].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			node[part] = next
+		}
+		node = next
+	}
+	node[parts[len(parts)-1]] = value
+}
+
+func deleteDocumentPath(doc map[string]any, dotPath string) {
+	parts := strings.Split(dotPath, ".")
+	node := doc
+	for _, part := range parts[:len(parts)-1] {
+		next, ok := node[part].(map[string]any)
+		if !ok {
+			return
+		}
+		node = next
+	}
+	delete(node, parts[len(parts)-1])
 }
 
 // hostCommandRunner runs the harness-toggle scripts via os/exec. Stdout/stderr
@@ -77,8 +140,13 @@ func initSettingsPanel() (*settings.SettingsModel, error) {
 	// three harness blocks don't become a wall of prose.
 	descriptions := loadFieldDescriptions(repoDir)
 
+	editorSchemaPath, cleanup, err := projectSettingsEditorSchema(schemaPath)
+	if err != nil {
+		return nil, fmt.Errorf("settings: project editor schema: %w", err)
+	}
+	defer cleanup()
 	m, err := settings.NewSettingsModel(settings.SettingsModelOptions{
-		SchemaPath:            schemaPath,
+		SchemaPath:            editorSchemaPath,
 		CapabilitiesPath:      capsPath,
 		Store:                 store,
 		Runner:                runner,
@@ -105,22 +173,79 @@ func initSettingsPanel() (*settings.SettingsModel, error) {
 	// SettingsModel.ToggleHarness, which shells out to the harness-toggle
 	// scripts with the framework as a positional arg.
 	doc, _ := store.LoadAll()
+	roleIDs, err := loadRoleIDs(filepath.Join(repoDir, "adapters", "roles.json"))
+	if err != nil {
+		return nil, fmt.Errorf("settings: load role registry: %w", err)
+	}
 	toggleFn := func(framework string, enabled bool) tea.Cmd {
 		return m.ToggleHarness(framework, enabled)
 	}
 	for _, fw := range frameworks {
-		eff := computeHarnessEffective(doc, fw)
+		eff, err := computeHarnessEffective(doc, fw, roleIDs)
+		if err != nil {
+			return nil, fmt.Errorf("settings: resolve routes for %s: %w", fw, err)
+		}
 		argsWidget := buildHarnessArgsWidget(doc, fw)
 		enabled := readHarnessEnabled(doc, fw)
-		// Roles and ceremonies are harness-local defaults. Always materialize
-		// the widgets so the TUI edits the only supported settings location.
-		rolesWidget := buildHarnessRolesWidget(doc, fw)
+		// Native models and ceremony advisor registrations are harness-local.
+		modelsWidget := buildHarnessNativeModelsWidget(doc, fw, roleIDs)
 		ceremoniesWidget := buildHarnessCeremoniesWidget(doc, fw)
-		panel := settings.NewHarnessBlockPanel(fw, enabled, toggleFn, argsWidget, rolesWidget, ceremoniesWidget, eff)
+		panel := settings.NewHarnessRoutesPanel(fw, enabled, toggleFn, argsWidget, modelsWidget, ceremoniesWidget, eff)
 		m.RegisterTopSection("harness "+fw, panel)
 	}
 
 	return m, err
+}
+
+// projectSettingsEditorSchema removes the read-only route union from the
+// schema consumed by the deliberately limited generic widget renderer. The
+// persisted document is still validated against the full canonical schema by
+// hostSettingsStore before every write.
+func projectSettingsEditorSchema(schemaPath string) (string, func(), error) {
+	raw, err := os.ReadFile(schemaPath)
+	if err != nil {
+		return "", func() {}, err
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return "", func() {}, err
+	}
+	props, _ := schema["properties"].(map[string]any)
+	delete(props, "routes")
+	delete(props, "version") // hidden migration metadata; uses unsupported const
+	if required, ok := schema["required"].([]any); ok {
+		kept := required[:0]
+		for _, v := range required {
+			if v != "routes" && v != "version" {
+				kept = append(kept, v)
+			}
+		}
+		schema["required"] = kept
+	}
+	defs, _ := schema["$defs"].(map[string]any)
+	for _, key := range []string{"route_value", "route_roles_overlay", "ceremony_route_overlays", "routes_config"} {
+		delete(defs, key)
+	}
+	out, err := json.Marshal(schema)
+	if err != nil {
+		return "", func() {}, err
+	}
+	f, err := os.CreateTemp("", "lore-settings-editor-*.schema.json")
+	if err != nil {
+		return "", func() {}, err
+	}
+	name := f.Name()
+	cleanup := func() { _ = os.Remove(name) }
+	if _, err = f.Write(out); err == nil {
+		err = f.Close()
+	} else {
+		_ = f.Close()
+	}
+	if err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return name, cleanup, nil
 }
 
 // loadFieldDescriptions assembles the per-dot-path description map the
@@ -219,14 +344,27 @@ func buildHarnessArgsWidget(doc map[string]any, fw string) settings.FieldWidget 
 	return settings.NewListEditor(dotPath, "args", current, nil, 0, false, current != nil, false)
 }
 
-// buildHarnessRolesWidget constructs an OpenKeysetKVEditor for
-// harnesses.<fw>.roles. Roles are harness-local defaults, so the editor is
-// always materialized and commits back to the harness path.
-func buildHarnessRolesWidget(doc map[string]any, fw string) settings.FieldWidget {
-	roles := lookupStringMap(doc, "harnesses", fw, "roles")
-	dotPath := "harnesses." + fw + ".roles"
-	w := settings.NewOpenKeysetKVEditor(dotPath, "roles", roles, nil, nil, true, false)
-	w.SetDisplayHints("roles", "Model defaults for this harness.")
+// buildHarnessNativeModelsWidget constructs the v2 native binding editor.
+func buildHarnessNativeModelsWidget(doc map[string]any, fw string, roleIDs []string) settings.FieldWidget {
+	models := lookupStringMap(doc, "harnesses", fw, "native_models")
+	allowed := map[string]bool{}
+	for _, id := range roleIDs {
+		allowed[id] = true
+	}
+	validate := func(key, value string) []string {
+		var errs []string
+		if !allowed[key] {
+			errs = append(errs, fmt.Sprintf("unknown role %q", key))
+		}
+		if strings.TrimSpace(value) == "" {
+			errs = append(errs, "model must not be empty")
+		}
+		return errs
+	}
+	w := settings.NewRequiredOpenKeysetKVEditor("harnesses."+fw+".native_models", "native_models", models, "default", validate)
+	if hints, ok := w.(interface{ SetDisplayHints(string, string) }); ok {
+		hints.SetDisplayHints("native_models", "Models for in-process subagents on this harness. The default binding is required.")
+	}
 	return w
 }
 
@@ -251,13 +389,58 @@ func buildHarnessCeremoniesWidget(doc map[string]any, fw string) settings.FieldW
 	return w
 }
 
-// computeHarnessEffective resolves the roles/ceremonies shown for a harness.
-// Settings keep these maps under harnesses.<fw>; there is no top-level
-// fallback.
-func computeHarnessEffective(doc map[string]any, fw string) settings.HarnessEffective {
-	roles := lookupStringMap(doc, "harnesses", fw, "roles")
-	ceremonies := lookupCeremoniesMap(doc, "harnesses", fw, "ceremonies")
-	return settings.HarnessEffective{Roles: roles, Ceremonies: ceremonies}
+// computeHarnessEffective resolves global and harness-native routes for display.
+func computeHarnessEffective(doc map[string]any, fw string, roleIDs []string) (settings.HarnessEffective, error) {
+	routes := map[string]string{}
+	native := map[string]string{}
+	for _, role := range roleIDs {
+		route, err := config.ResolveCanonicalRoute(role, "", nil)
+		if err != nil {
+			return settings.HarnessEffective{}, fmt.Errorf("global role %s: %w", role, err)
+		}
+		routes[role] = formatRoute(route)
+		nativeRoute, err := config.ResolveNativeCanonicalRoute(role, "", fw)
+		if err != nil {
+			return settings.HarnessEffective{}, fmt.Errorf("native role %s: %w", role, err)
+		}
+		native[role] = formatRoute(nativeRoute)
+	}
+	return settings.HarnessEffective{Roles: routes, NativeModels: native, Ceremonies: lookupCeremoniesMap(doc, "harnesses", fw, "ceremonies")}, nil
+}
+
+func formatRoute(route config.Route) string {
+	out := route.Framework + "/" + route.Model
+	if len(route.Options) > 0 {
+		raw, _ := json.Marshal(route.Options)
+		out += " " + string(raw)
+	}
+	return out
+}
+
+func loadRoleIDs(path string) ([]string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		Roles []struct {
+			ID string `json:"id"`
+		} `json:"roles"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("parse role registry: %w", err)
+	}
+	if len(doc.Roles) == 0 {
+		return nil, fmt.Errorf("role registry is empty")
+	}
+	out := make([]string, 0, len(doc.Roles))
+	for _, row := range doc.Roles {
+		if row.ID == "" {
+			return nil, fmt.Errorf("role registry contains empty id")
+		}
+		out = append(out, row.ID)
+	}
+	return out, nil
 }
 
 func lookupStringSlice(doc map[string]any, path ...string) []string {

@@ -191,12 +191,15 @@ type HarnessEffective struct {
 	// Ceremonies is the resolved ceremony-id -> []advisor-id mapping for
 	// this harness. Empty when no ceremonies are defined at any layer.
 	Ceremonies map[string][]string
+	// NativeModels carries the effective native fallback route for each role.
+	NativeModels map[string]string
 }
 
 // HarnessBlockPanel groups the sub-widgets for a single harnesses.<name>
 // block: per-harness enabled toggle (always present, first in tab order),
-// required `args` (always present), and harness-local `roles` and
-// `ceremonies` editors. Passing nil for roles/ceremonies still renders a
+// required `args` (always present), and two harness-local map editors. The v2
+// constructor uses these slots for `native_models` and `ceremonies`; the
+// legacy constructor remains useful to isolated generic widget tests. Passing nil still renders a
 // compact legacy fallback view, but the production settings panel passes real
 // widgets for both so users can edit harness-specific defaults without hand
 // editing settings.json.
@@ -210,6 +213,7 @@ type HarnessBlockPanel struct {
 	roles      FieldWidget // production: non-nil harness-local defaults editor
 	ceremonies FieldWidget // production: non-nil harness-local defaults editor
 	effective  HarnessEffective
+	routeView  bool
 
 	headerStyle    lipgloss.Style
 	overrideStyle  lipgloss.Style
@@ -250,6 +254,43 @@ func NewHarnessBlockPanel(name string, enabled bool, toggle HarnessToggler, args
 		dimStyle:       lipgloss.NewStyle().Foreground(style.ColorDim),
 		emptyStyle:     lipgloss.NewStyle().Foreground(style.ColorWarn),
 	}
+}
+
+// NewHarnessRoutesPanel constructs the v2 routing view: native models remain
+// editable while global routes are rendered read-only.
+func NewHarnessRoutesPanel(name string, enabled bool, toggle HarnessToggler, args, nativeModels, ceremonies FieldWidget, effective HarnessEffective) *HarnessBlockPanel {
+	h := NewHarnessBlockPanel(name, enabled, toggle, args, nativeModels, ceremonies, effective)
+	h.routeView = true
+	return h
+}
+
+// NewRequiredOpenKeysetKVEditor protects a required map member transactionally:
+// a deletion that removes it is rejected and the editor's committed and draft
+// state are restored before control returns to the panel.
+func NewRequiredOpenKeysetKVEditor(dotPath, label string, current map[string]string, required string, valueValidator func(key, value string) []string) FieldWidget {
+	return &requiredOpenKeysetKVEditor{OpenKeysetKVEditor: NewOpenKeysetKVEditor(dotPath, label, current, nil, valueValidator, true, false), required: required}
+}
+
+type requiredOpenKeysetKVEditor struct {
+	*OpenKeysetKVEditor
+	required string
+}
+
+func (w *requiredOpenKeysetKVEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
+	committed := copyStringMap(w.committed)
+	draft := copyStringMap(w.draft)
+	order := append([]string(nil), w.keyOrder...)
+	cursor := w.cursor
+	_, cmd, intent := w.OpenKeysetKVEditor.Update(msg)
+	if intent != nil && intent.Status == IntentCommit {
+		if values, ok := intent.Value.(map[string]any); ok {
+			if _, present := values[w.required]; !present {
+				w.committed, w.draft, w.keyOrder, w.cursor = committed, draft, order, cursor
+				return w, cmd, &FieldIntent{DotPath: intent.DotPath, Status: IntentReject, Errors: []string{w.required + " is required"}}
+			}
+		}
+	}
+	return w, cmd, intent
 }
 
 // SetEnabled updates the embedded enabled-toggle's visible state. Called by
@@ -453,10 +494,37 @@ func (h *HarnessBlockPanel) viewBuilder() *strings.Builder {
 		b.WriteByte('\n')
 	}
 
+	if h.routeView {
+		b.WriteString(h.renderHarnessSetting("native_models", h.roles, ""))
+		b.WriteByte('\n')
+		b.WriteString(h.renderHarnessSetting("ceremonies", h.ceremonies, h.formatEffectiveCeremonies()))
+		b.WriteByte('\n')
+		b.WriteString("  " + h.headerStyle.Render("effective routes (read-only):") + "\n")
+		b.WriteString("    " + h.effectiveStyle.Render(h.formatEffectiveRoutes()))
+		b.WriteByte('\n')
+		b.WriteString("    " + h.dimStyle.Render("Edit global routes with lore framework set-model."))
+		return &b
+	}
 	b.WriteString(h.renderHarnessSetting("roles", h.roles, h.formatEffectiveRoles()))
 	b.WriteByte('\n')
 	b.WriteString(h.renderHarnessSetting("ceremonies", h.ceremonies, h.formatEffectiveCeremonies()))
 	return &b
+}
+
+func (h *HarnessBlockPanel) formatEffectiveRoutes() string {
+	keys := make([]string, 0, len(h.effective.Roles))
+	for key := range h.effective.Roles {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		lines = append(lines, fmt.Sprintf("%s: route=%s; native=%s", key, h.effective.Roles[key], h.effective.NativeModels[key]))
+	}
+	if len(lines) == 0 {
+		return "<empty>"
+	}
+	return strings.Join(lines, "\n    ")
 }
 
 // InnerFocusYRange returns the inclusive [top, bottom] line offsets of the
