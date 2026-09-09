@@ -48,7 +48,7 @@ func sortStrings(xs []string) {
 	}
 }
 
-func TestRequiredNativeModelsDefaultDeletionRestoresEditor(t *testing.T) {
+func TestHarnessRequiredNativeModelsDefaultDeletionRestoresEditor(t *testing.T) {
 	w := NewRequiredOpenKeysetKVEditor("harnesses.codex.native_models", "native_models", map[string]string{"default": "gpt-5.5-high", "worker": "gpt-5.6-sol"}, "default", nil)
 	w.Focus()
 	updated, _, _ := w.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
