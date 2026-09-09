@@ -86,8 +86,8 @@ fi
 # --- Update follow-up status to dismissed ---
 UPDATE_SCRIPT="$SCRIPT_DIR/update-followup.sh"
 if [[ -x "$UPDATE_SCRIPT" ]]; then
-  UPDATE_ARGS=(--followup-id "$FOLLOWUP_ID" --status dismissed)
-  [[ -n "$REASON" ]] && UPDATE_ARGS+=(--reason "$REASON")
+  UPDATE_ARGS=("$FOLLOWUP_ID" --status dismissed)
+  [[ -n "$REASON" ]] && UPDATE_ARGS+=(--resolution "$REASON")
   "$UPDATE_SCRIPT" "${UPDATE_ARGS[@]}" 2>/dev/null || {
     echo "[followup] Warning: Failed to update follow-up status via update-followup.sh — updating _meta.json directly" >&2
     _update_meta_direct=1
