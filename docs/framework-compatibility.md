@@ -175,9 +175,9 @@ Other Codex cells worth flagging:
 
 The Codex-specific migration note (April 2026 hooks introduction, supersedes the stale "notify-only" assumption) lives at [`docs/codex-migration.md`](codex-migration.md).
 
-## Role registry & role→model configuration
+## Role registry and route configuration
 
-Lore defines a closed agent-role registry and persists a `roles → model` map per user. Every spawn-site resolves its model from the active role rather than accepting a `--model` flag at invocation time. The flag is preserved as a per-invocation override but is no longer the primary surface (D10).
+Lore defines eight closed roles in [`adapters/roles.json`](../adapters/roles.json). Global `routes` map those roles to qualified routes such as `codex/gpt-5.6-sol-high` or flat objects such as `{"framework":"codex","model":"gpt-5.6-sol","effort":"high","service_tier":"fast"}`. Harness `native_models` describe the model a native child receives when its global role route points elsewhere. `resolve_route_for_role` and `resolve_native_route_for_role` return the canonical `{framework,model,options,routing_source}` envelope; adapters alone translate it into launch arguments or native tool fields.
 
 ### Closed role set
 
@@ -193,36 +193,27 @@ Defined in [`adapters/roles.json`](../adapters/roles.json):
 
 Adding a role requires updating `roles.json`, `scripts/lib.sh::resolve_model_for_role`, `tui/internal/config/config.go::ResolveModelForRole`, and `tests/frameworks/roles.bats` — the closed set keeps the schema verifiable and `lore framework status` output finite.
 
-### Role binding precedence
+### Route input and diagnostics
 
-`resolve_model_for_role <role>` walks this chain (env → per-repo → user → harness default):
+Use `lore framework set-model <role> <framework/model> [--effort <value>] [--service-tier <value>]` and `unset-model` for global role routes. `lore defaults --with-routing`, `framework status`, and `framework doctor` show the selected route, options, and winning source. Invalid or retired settings are rejected before precedence selection, including when an environment or request override would otherwise win. Errors name missing frameworks, unknown fields/options, invalid option values, retired `roles`/`ceremony_roles`, and malformed unused entries.
 
-1. **`LORE_MODEL_<ROLE>` env var** (uppercased role name; e.g. `LORE_MODEL_LEAD`). Per-shell override.
-2. **`$KDIR/.lore.config` per-repo `[model.role]` table** (when present in the repo). Repo-scoped override.
-3. **`$LORE_DATA_DIR/config/framework.json::role_bindings.<role>`** (user-level binding, written by `lore framework set-model` once T22 ships).
-4. **Harness default** — for `model_routing=single` harnesses (claude-code, codex), the role map collapses to one binding without affecting call sites.
-5. **`adapters/roles.json::default_role` fallback** (typically `"default"`).
-
-### Multi-provider syntax (model_routing=multi)
+### Multi-provider syntax
 
 Multi-provider harnesses (today: OpenCode) honor per-role bindings using the `<provider>/<model>` syntax:
 
 ```jsonc
-// $LORE_DATA_DIR/config/framework.json
+// $LORE_DATA_DIR/config/settings.json
 {
-  "framework": "opencode",
-  "role_bindings": {
-    "lead":       "anthropic/opus",       // Opus for the coordinator
-    "worker":     "anthropic/haiku",      // Haiku for fanout workers (cost-optimized)
-    "researcher": "openai/gpt-4o",        // Cross-provider for design exploration
-    "default":    "anthropic/sonnet"
+  "version": 2,
+  "routes": {
+    "lead": "opencode/anthropic/opus",
+    "worker": "opencode/openai/gpt-5.5",
+    "default": "opencode/anthropic/sonnet"
   }
 }
 ```
 
-The separator is `/` (slash), not `:` (colon). `lib.sh::validate_role_model_binding` and `tests/frameworks/roles.bats` pin this convention; adapters writing role bindings MUST use `/`.
-
-Single-provider harnesses (claude-code, codex) reject `provider/model` syntax — `framework_model_routing_shape == "single"` plus a binding naming a provider the harness cannot serve returns non-zero with a remediation message naming the conflict. `lore framework doctor` flags these conflicts with set-model hints.
+The first segment always names a registered framework. OpenCode then retains `provider/model` as its native model. Object `model` values are literal; effort suffix shorthand is parsed only from strings.
 
 ### Inspecting the resolved view
 

@@ -1,6 +1,6 @@
 # Worker Spawn Template
 
-Three spawn routes. Dispatch precedence is: an explicit per-run model or route pin, then the class's qualified standing route, then the native default. Same-framework targets spawn natively. A foreign target uses the chaperone only when `target_framework` is `codex`; every other foreign pair refuses before spawn. An unqualified binding can still use the legacy Codex route when the user or plan explicitly selects it. The **session-routed** route remains explicit — a `[route: session]` task-line marker (surfaced as the task's `route` field) or a user directive at dispatch. Confirm the effective implementation model against the stated intent before dispatch.
+The spawn routes consume the canonical route selected by `lore impl start`; route choice and readiness come from the implementation dispatch protocol and the selected framework adapter.
 
 Route selection and model selection are one axis; what the worker reads is another. A run opened with `--compiled-positions` sends each worker the compiled worker brief for its target framework, bound to its task through the position binder, and this file's first half describes that. A run opened without the flag stays on the long `agents/worker.md` template with the legacy hashes, and the second half is unchanged for it. Both halves keep the same pins, class roles, placement rules, and report landing, because those were never properties of the template text.
 
@@ -26,7 +26,7 @@ A class role with no binding anywhere resolves identically to plain `worker` (re
 
 **Group the batch by role before spawning:** tasks that resolve the same role can share a model resolution; distinct classes get distinct workers. When same-file serialization merges tasks of different classes onto one worker (the `chain_class` on a `next-batch` collision group), spawn that chain at its `chain_class` — the max class present (judgment-dense > standard > mechanical) — so judgment-dense work never lands on a cheaper binding.
 
-**A user model or route pin at dispatch beats every class binding.** If the user pinned a model for this run, it applies to all classes regardless of `judgment_class`; do not resolve per-class bindings. Otherwise select the matching entry from `worker_class_routes` returned by `lore impl start`. Its keys are `binding`, `source_framework`, `target_framework`, `native_binding`, and `qualified`; `worker_class_models` remains the raw-scalar display surface. Confirm the effective per-class routes against the user's stated intent before spawning.
+**A user route pin at dispatch beats every class binding.** Otherwise select the matching canonical object from `worker_class_routes` returned by `lore impl start`. It carries `framework`, `model`, `options`, and `routing_source`; `worker_class_models` remains the scalar display projection. Confirm the effective per-class routes against the user's stated intent before spawning.
 
 ## Compiled dispatch
 
@@ -62,14 +62,14 @@ The compiled path has one preparation sequence, then a route-specific launch. Th
      --kdir "$KDIR" --guidance-file "$GUIDANCE_FILE" \
      --wrapper "$WRAPPER_FILE" --prefix-file "$PREFIX_FILE" --suffix-file "$SUFFIX_FILE" \
      --require task_id --require revision_id --require packet_id --require packet_pointer \
-     [--native-model "$WORKER_MODEL"]
+     [--native-model "$(printf '%s' "$WORKER_NATIVE_ROUTE" | jq -c .)"]
    ```
 
    Pass `--native-model` on the two native routes; omit it on the chaperone route and the fixed-placement session route, where the payload is consumed as a primary prompt. The reference (`manifest_path`, `manifest_sha256`, `payload_path`, `payload_sha256`, `native_path`, `native_sha256`) is the lead's independent copy of this attempt's identity. Hold it per task. On the native routes record it on the team task with `TaskUpdate` as `metadata.position_dispatch`, with `metadata.lore_task_id` set to the plan task id, before the launch call; the completion hook reads the reference from there and never from the report. On a chaperone route the chaperone records it on its own task before completing. On an ordinary-placement session there is no reference yet: retain the admitted context and collect the reference later with `session-reference`. An identical retry returns the same reference; a changed payload under the same attempt refuses, and a real retry mints a fresh attempt and report id.
 
 5. **Launch by route.**
 
-   - **Native, Claude Code** (`source_framework == target_framework == claude-code`). The compiled definition has to be a name the running session's `Agent` tool offers, and the binder owns the file:
+   - **Native, Claude Code**. The compiled definition has to be a name the running session's `Agent` tool offers, and the binder owns the file:
 
      ```bash
      python3 ~/.lore/scripts/position-bind.py register-native "$MANIFEST_PATH" --sha256 "$MANIFEST_SHA256" --scope "$AGENTS_SCOPE"
@@ -80,9 +80,9 @@ The compiled path has one preparation sequence, then a route-specific launch. Th
 
      The compiled Claude definition carries Read, Glob, Grep, Bash, Write, and Edit, and no task or messaging tools, so the worker's report comes back as the call's result, and a required consultation comes back the same way: the worker returns its `## Consultation` request and stops, and the reply sent to its `name` resumes it. On the two native routes the lead holds the team task, because no process between the lead and the worker can: set `owner` at launch, re-read the task once before the call to confirm the claim still holds (another lead on the same team could have taken it), land the result with `lore coordinate report "$SLUG" --report-id "$REPORT_ID"`, run the completion check with `{"position_dispatch": <reference>, "lore_task_id": "<task-id>"}` on stdin (Step 4 §1), and only then mark the task completed. On the chaperone and session routes the chaperone claims, re-checks, and completes its own outer team task as its file says; typed completion there is the hook's check of the landed report, and acceptance stays the lead's in Step 4 either way.
 
-   - **Native, Codex** (`source_framework == target_framework == codex`). Run `native-input` without `--scope`; nothing is registered, because Codex takes the prepared text directly. `tool_input` carries the split model and effort keys plus `message` filled with the exact payload, and `readiness` is `{kind: native-tool-schema, tool: spawn_agent}`: the check owed is that the tool exposed in this session accepts those fields. Supplement only the caller fields its schema requires — a `task_name`, a non-inheriting fork setting — and pass the rest as returned. A model or effort the tool rejects is reported as rejected, not dropped. Keep the handle the tool returns with the attempt: a Codex child's tools are supplied by its harness, not by the compiled definition, and the child's report and any consultation reach you through the collection and follow-up operations the live tool exposes for that handle.
+   - **Native, Codex**. Run `native-input` without `--scope`; nothing is registered, because Codex takes the prepared text directly. `tool_input` carries the split model and effort keys plus `message` filled with the exact payload, and `readiness` is `{kind: native-tool-schema, tool: spawn_agent}`: the check owed is that the tool exposed in this session accepts those fields. Supplement only the caller fields its schema requires — a `task_name`, a non-inheriting fork setting — and pass the rest as returned. A model or effort the tool rejects is reported as rejected, not dropped. Keep the handle the tool returns with the attempt: a Codex child's tools are supplied by its harness, not by the compiled definition, and the child's report and any consultation reach you through the collection and follow-up operations the live tool exposes for that handle.
 
-   - **Chaperone** (a qualified route whose `target_framework` is `codex` from another source, or the legacy explicit Codex selection). Bind without `--native-model`, with the codex-worker wrapper and its note as the suffix, then dispatch `agents/codex-worker.md` with the compiled variables described in its route section below. The chaperone runs `codex exec` on the exact payload bytes and relays what Codex returned.
+   - **Chaperone**. Bind without `--native-model`, with the codex-worker wrapper and its note as the suffix, then dispatch `agents/codex-worker.md` with the compiled variables described in its route section below. The chaperone runs `codex exec` on the exact payload bytes and relays what Codex returned.
 
    - **Session** (explicit selection only). Placement decides which of two contexts the session request carries; both use this file's identity lines as the prefix and the session note in `agents/session-worker.md` as the suffix, under the wrapper identity `implement/session-worker` (that file's `template-version.sh` hash, path, and sha256), because the text the session reads around the brief is the chaperone file's. Under ordinary placement the host allocates the tree, so nothing can be published here: the bindings carry `execution_root` null with a reason, and the context is the binder's pending preparation, which retains the exact wrapper source, prefix, suffix, and activation so the host publishes exactly what was admitted. No CLI verb wraps this call, so load the library by path:
 
@@ -110,15 +110,15 @@ Whether a reply can reach a running worker mid-task is a property of the live su
 
 ## Native route — same-harness worker (legacy template)
 
-Applies when the run was started and opened without `--compiled-positions`. Use the selected route's `native_binding` when `source_framework == target_framework`, whether the original binding was qualified or not. `impl start` already resolved the `implement` ceremony, class fallback, framework registry, and target-native shape. Do not parse the original `binding` again at spawn.
+Applies when the run was started and opened without `--compiled-positions`. Resolve the class role through `resolve_native_route_for_role` for the active framework, then project its compact canonical JSON through the adapter's `native_tool_fields` operation. The resolver applies the `implement` ceremony and class fallback.
 
 ```
 # WORKER_ROUTE is the selected worker_class_routes entry for this group's class.
-WORKER_MODEL=$(printf '%s' "$WORKER_ROUTE" | jq -r '.native_binding')
+WORKER_NATIVE_ROUTE=$(resolve_native_route_for_role "$WORKER_ROLE" implement "$FRAMEWORK")
+WORKER_TOOL_FIELDS=$(bash "$ADAPTER" native_tool_fields "$(printf '%s' "$WORKER_NATIVE_ROUTE" | jq -c .)")
 
-Task:
-  subagent_type: "general-purpose"
-  model: "$WORKER_MODEL"
+Task/tool call:
+  fields: "$WORKER_TOOL_FIELDS"
   team_name: "impl-<slug>"
   name: "worker-N"
   mode: "bypassPermissions"
@@ -131,14 +131,14 @@ Task:
 
 ## Codex-routed route — chaperone worker
 
-When a qualified standing route has different source and target frameworks and `target_framework == codex`, dispatch `agents/codex-worker.md` automatically. Pass the selected class role and the route's already-resolved `native_binding`; the chaperone must not re-read the Codex settings block for this path. A Codex source targeting Codex uses the native route. The legacy user/plan-directed Codex route remains available for unqualified bindings and passes an empty native binding so the chaperone re-resolves under `LORE_FRAMEWORK=codex`.
+When the implementation dispatch protocol selects the Codex chaperone, pass the complete compact canonical route JSON to `agents/codex-worker.md`.
 
 The relay uses the first validated tier from the source framework's cheapest-first `model_routing.tiers` ladder. The coordination ledger approved the named model-floor exception on 2026-07-21 (`haiku relay OK`); do not prompt again. Read the ladder through its capability helper rather than spelling an alias:
 
 ```
 source ~/.lore/scripts/lib.sh
-SOURCE_FRAMEWORK=$(printf '%s' "$WORKER_ROUTE" | jq -r '.source_framework')
-CODEX_NATIVE_BINDING=$(printf '%s' "$WORKER_ROUTE" | jq -r '.native_binding')
+SOURCE_FRAMEWORK=$(resolve_active_framework)
+CODEX_ROUTE=$(printf '%s' "$WORKER_ROUTE" | jq -c .)
 CHAPERONE_MODEL=$(framework_model_routing_tiers "$SOURCE_FRAMEWORK" | head -n1)
 ```
 
@@ -163,7 +163,7 @@ Task:
 
     <contents of agents/codex-worker.md with {{template}} variables resolved,
      including {{worker_role}} set to the class-qualified role for this task,
-     {{native_binding}} set to $CODEX_NATIVE_BINDING, {{template_version}} set
+     {{native_route}} set to $CODEX_ROUTE, {{template_version}} set
      to the codex-worker file's own version, and on the compiled path the
      payload, reference, producer version, report id, slug, and shape above>
     <legacy path only — launch-seam instruction: before §4 assembles the Codex
@@ -171,11 +171,11 @@ Task:
      if rendering fails, and write the complete block first in that prompt>
 ```
 
-The chaperone sends only the native Codex payload to `adapters/agents/codex.sh split_model_variant`. For a standing route that payload is `{{native_binding}}`; for the legacy explicit route it comes from `LORE_FRAMEWORK=codex resolve_model_for_role {{worker_role}} implement`. The chaperone marks its result `degraded` when Codex returns no parseable report; on a degraded return, re-dispatch the task through the native same-harness route. Routing through Codex remains an optimization, never a dependency.
+The chaperone sends the canonical Codex route JSON to `adapters/agents/codex.sh route_flags`, so supported effort and service tier travel with the model. It marks its result `degraded` when Codex returns no parseable report; on a degraded return, re-dispatch the task through the native same-harness route.
 
 The chaperone also captures the Codex run's token spend (its terminal `token_count` event) plus its own wall-clock, and relays them as a `**Spend:**` section in the closed spend vocabulary (duration-only, never fabricated tokens, on a degraded run). At task acceptance the lead copies that section into the task's execution-log atom as one `Spend: task=<id> …` line (Step 4 §3); `impl-close` joins it onto the scorecard row's `task_attribution`. Native same-harness workers expose no token stream through this route, so their tasks relay no `**Spend:**` section and carry `spend: null`.
 
-## Session-routed route — worker-session chaperone (marker/user-directed only)
+## Session-routed route — worker-session chaperone
 
 The Task tool spawns Claude-native subagents that report at turn boundaries, so a PTY-hosted worker session — which completes on its own poll-based lifecycle — needs a chaperone: a cheap Claude subagent (`agents/session-worker.md`) that enqueues one `--type worker` session request, blocks in a bounded poll loop over the session journal while the session runs its brief in its own TUI panel, reads the durable report the session leaves behind, and relays it. Spend spreads the same way the codex route spreads it: the chaperone sits cheap on a poll loop while the session burns the implementation tokens.
 
@@ -185,7 +185,7 @@ The Task tool spawns Claude-native subagents that report at turn boundaries, so 
 
 **Compose what the session receives and write it to a file.** The chaperone never reads this file; it points the request at it, which keeps its own context minimal, and the file doubles as the record of exactly what the session was asked to do. Its shape depends on the path:
 
-- **Compiled path.** The file is the session context from the compiled dispatch section: under ordinary placement the binder's pending preparation (bindings with `execution_root` null and a reason, descriptor, admitted guidance, activation, and the composition — wrapper identity, wrapper source, identity-line prefix, session-note suffix); under fixed placement the fixed reference (`dispatch_guidance` and `position_dispatch`) from a `bind` at the manager-owned directory. `session request` admits either at enqueue; under ordinary placement the claiming host publishes the immutable payload after it knows its physical directory, and a publication or activation failure returns an error before the process spawns. The session receives the compiled brief as its native definition or prompt, then the identity lines, the identity envelope, and the session note, and the manifest path and digest in `LORE_POSITION_DISPATCH_MANIFEST` and `LORE_POSITION_DISPATCH_SHA256`. Write the context to `$KDIR/_work/<work-item-slug>/worker-reports/<report-id>.context.json` and pass that path as `{{context_file}}`, with `{{dispatch_route}}` `compiled`, `{{framework}}`, `{{report_file}}` (the bound `report_path`), `{{producer_template_version}}`, and — only for fixed placement — `{{worktree_id}}` and `{{execution_dir}}` from the allocation; leave both empty under ordinary placement, because a placement flag added to an unallocated request would name a directory nobody allocated.
+- **Compiled path.** The file is the session context from the compiled dispatch section: under ordinary placement the binder's pending preparation (bindings with `execution_root` null and a reason, descriptor, admitted guidance, activation, and the composition — wrapper identity, wrapper source, identity-line prefix, session-note suffix); under fixed placement the fixed reference (`dispatch_guidance` and `position_dispatch`) from a `bind` at the manager-owned directory. `session request` admits either at enqueue; under ordinary placement the claiming host publishes the immutable payload after it knows its physical directory, and a publication or activation failure returns an error before the process spawns. The session receives the compiled brief as its native definition or prompt, then the identity lines, the identity envelope, and the session note, and the manifest path and digest in `LORE_POSITION_DISPATCH_MANIFEST` and `LORE_POSITION_DISPATCH_SHA256`. Write the context to `$KDIR/_work/<work-item-slug>/worker-reports/<report-id>.context.json` and pass that path as `{{context_file}}`, with `{{dispatch_route}}` `compiled`, `{{report_file}}` (the bound `report_path`), `{{producer_template_version}}`, and — only for fixed placement — `{{worktree_id}}` and `{{execution_dir}}` from the allocation; leave both empty under ordinary placement, because a placement flag added to an unallocated request would name a directory nobody allocated.
 - **Legacy path.** The brief needs no guidance render of its own — `session request --type worker` renders the floor and prepends it at enqueue; the brief carries task content alone. (The chaperone's own Task prompt still gets its fresh rendering.) The brief is the same worker protocol content the default route resolves from `agents/worker.md` (task assignment with its composed brief + prior knowledge + evidence contract), adapted for session execution. Write it to `$KDIR/_work/<work-item-slug>/worker-reports/<derived-slug>.brief.md` and pass that path as `{{brief_file}}`, with `{{dispatch_route}}` `legacy`. The session is a standalone harness session, not a team subagent, so the brief's adaptations are:
 
   - **Report lands as a file, not a SendMessage.** The session writes its completion report to `$KDIR/_work/<work-item-slug>/worker-reports/<derived-slug>.md` (`mkdir -p` the directory first) as its final step before terminus — there is no lead to message and no journal event carries a report body. The chaperone reads that file after terminus.
@@ -195,7 +195,7 @@ The Task tool spawns Claude-native subagents that report at turn boundaries, so 
 
   On the compiled path the same four facts hold, and they reach the session through the session note, not through the brief: the compiled worker brief names the report contract and the sole writer but knows nothing of derived slugs, the terminus command, or the environment variables a hosted session receives. The note in `agents/session-worker.md` says the report lands at the bound `report_path` through `lore coordinate report` before terminus, that Tier 2 rows are self-appended with the task id from the envelope, that there are no team tools, and that terminus is `lore session close --self --reason protocol_terminus`; it is retained as `wrapper-suffix.md` under the session-worker identity, so the words the session read are the words on record.
 
-**Resolve the worker-session model and surface it — two model decisions, both user-facing.** The worker *session* model resolves per judgment class through the same role bindings the default route uses (`resolve_model_for_role <role> implement`, class-qualified per the mapping table above), held at the opus floor for the session itself, and **surfaced to the user at dispatch** — never silently inherited from the interactive session (honor [[knowledge:preferences/worker-sub-agent-model-selection-is-user-directed]]). That resolved model is passed to the chaperone as `{{worker_model}}` and becomes the session request's `--model`.
+**Resolve the worker-session route and surface it — two model decisions, both user-facing.** The worker session uses the selected class's canonical `worker_class_routes` object, preserving its ceremony/class provenance and options. Pass that object to the chaperone as `{{session_route}}`; it becomes the request's `--session-route`.
 
 The chaperone's *own* Claude tier is the second decision, and it mirrors the codex precedent exactly. The chaperone only relays (it sits blocked on the poll loop doing no implementation work), so the wrapper design wants it on the cheapest validated tier — `tiers[0]`. But the standing model-floor directive ([[knowledge:preferences/model-floor-directive-2026-07-05-for-time-being]]) holds work-doing agents at opus minimum and reserves the chaperone-tier question to the user. So at the dispatch that first routes a worker to a session, ask the user which tier the chaperone runs on — `tiers[0]` (cheapest, per the wrapper design) or opus (per the floor) — and use their answer; do not silently pick either.
 
@@ -204,8 +204,8 @@ source ~/.lore/scripts/lib.sh
 framework_model_routing_tiers claude-code   # cheapest-first alias ladder — present tiers[0] and the opus option to the user
 CHAPERONE_MODEL=<the tier the user chose at this dispatch>   # empty when claude-code has no validated tiers
 
-# WORKER_SESSION_MODEL is resolved per class (opus floor) and confirmed with the user above.
-WORKER_SESSION_MODEL=$(bash "$ADAPTER" resolve_model_for_role "$WORKER_ROLE" implement)
+# WORKER_SESSION_ROUTE is the canonical class route confirmed with the user above.
+WORKER_SESSION_ROUTE=$(printf '%s' "$WORKER_ROUTE" | jq -c .)
 
 Task:
   subagent_type: "general-purpose"
@@ -217,15 +217,15 @@ Task:
     $DISPATCH_GUIDANCE
 
     <contents of agents/session-worker.md with {{template}} variables resolved:
-     {{work_item_slug}}, {{derived_slug}}, {{worker_model}} set to
-     $WORKER_SESSION_MODEL, {{dispatch_route}}, {{template_version}} set to the
+     {{work_item_slug}}, {{derived_slug}}, {{session_route}} set to
+     $WORKER_SESSION_ROUTE, {{dispatch_route}}, {{template_version}} set to the
      session-worker file's own version, and either {{brief_file}} (legacy) or
-     {{context_file}}, {{framework}}, {{report_file}}, {{producer_template_version}},
+     {{context_file}}, {{report_file}}, {{producer_template_version}},
      and the fixed-placement pair {{worktree_id}} / {{execution_dir}}, empty under
      ordinary placement (compiled)>
 ```
 
-**Empty-tiers handling** is identical to the codex route: an empty `tiers` array means claude-code has no validated alias ladder — omit the `model:` line so the chaperone inherits the session default, and note the tier selection is lost (the session itself still routes to `{{worker_model}}`).
+**Empty-tiers handling** is identical to the codex route: an empty `tiers` array means claude-code has no validated alias ladder — omit the chaperone's `model:` line and note that tier selection is lost. The worker session still receives `{{session_route}}` unchanged.
 
 The chaperone marks its result `degraded` when the request goes unclaimed, the session never reaches terminus, or the report file is missing/unparseable. On a degraded return, re-dispatch the task as a default-route same-harness worker — session routing is an observability choice, never a dependency.
 

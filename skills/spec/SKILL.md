@@ -460,10 +460,10 @@ print(json.dumps({"ordinal": directive["ordinal"], "route": p["route"], "framewo
 
     - **Session** (`route` is `session`). The context file written by the directive-context recipe is what the request carries; keep it. `SESSION_SLUG` is the derived `<slug>--w<n>`; the report still belongs to the base work item. Enqueue with exactly one placement stance (`TARGET_INSTANCE` names one live instance, otherwise any instance may claim), with `MODEL` and `TARGET_FRAMEWORK` named explicitly from the payload, and with the worktree pair only under fixed placement:
 
-      **Recipe inputs:** SESSION_SLUG, TARGET_FRAMEWORK, MODEL, CONTEXT_FILE, TARGET_INSTANCE, MIN_VINTAGE, WORKTREE_ID, EXECUTION_DIR.
+      **Recipe inputs:** SESSION_SLUG, SESSION_ROUTE, CONTEXT_FILE, TARGET_INSTANCE, MIN_VINTAGE, WORKTREE_ID, EXECUTION_DIR.
       <!-- spec-recipe: request-session -->
       ```bash
-      args=(--type worker --slug "$SESSION_SLUG" --framework "$TARGET_FRAMEWORK" --model "$MODEL"
+      args=(--type worker --slug "$SESSION_SLUG" --session-route "$SESSION_ROUTE"
             --context "$CONTEXT_FILE" --initiator agent --json)
       if [[ -n "$TARGET_INSTANCE" ]]; then args+=(--target "$TARGET_INSTANCE"); else args+=(--anywhere); fi
       [[ -n "$MIN_VINTAGE" ]] && args+=(--min-vintage "$MIN_VINTAGE")

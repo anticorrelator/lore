@@ -15,7 +15,7 @@ For each persistent advisor:
 2. **Hold the identity you will bind later** — the advisor's name and domain from `open`, the designer descriptor `start` returned under `position_descriptors[<framework>][designer]` (a snapshot; the actual dispatch compiles again), and the advisor model:
 
    ```bash
-   ADVISOR_MODEL=$(bash "$ADAPTER" resolve_model_for_role advisor)
+   ADVISOR_ROUTE=$(resolve_native_route_for_role advisor implement "$FRAMEWORK")
    ```
 
    Consultation designers resolve through the `advisor` role; this is the existing mapping, not a new one.
@@ -47,7 +47,7 @@ A worker's `## Consultation` request carries `consultation-id`, `domain`, `reaso
    python3 ~/.lore/scripts/position-bind.py bind --descriptor "$DESCRIPTOR_FILE" --bindings "$BINDINGS_FILE" \
      --kdir "$KDIR" --guidance-file "$GUIDANCE_FILE" \
      --wrapper "$WRAPPER_FILE" --prefix-file "$PREFIX_FILE" --suffix-file "$SUFFIX_FILE" \
-     --require packet_id --require packet_pointer --native-model "$ADVISOR_MODEL"
+     --require packet_id --require packet_pointer --native-model "$(printf '%s' "$ADVISOR_ROUTE" | jq -c .)"
    ```
 
    The wrapper is this file (`template_id` `implement/advisor-spawn`, its `template-version.sh` hash, path, and sha256). The prefix is the identity lines `Packet-id:`, `Report-id:`, `Dispatch-attempt-id:` (no `Revision-id:`, since none is bound). The suffix is the designer note at the end of this file, filled with the advisor's name, domain, baseline, and reply destination. The descriptor's `template_version` is `$DESIGNER_TEMPLATE_VERSION[<advisor-name>]` from here on: it is what the designer stamps as `advisor_template_version`, what `consult-log` files, and what the rollup groups by. Hold the returned six-field reference with the request.
@@ -104,16 +104,16 @@ Applies when the run was started and opened without `--compiled-positions`. For 
    - `{{domain_context}}` → the investigation excerpt from sub-step 1
    - `{{template_version}}` → `$ADVISOR_TEMPLATE_VERSION`
 
-   Per-spawn model selection for advisors routes through `bash "$ADAPTER" resolve_model_for_role advisor`. The Claude Code path produces a `delegate:TaskCreate` directive with the resolved model id; opencode honors `provider/model` syntax for advisor bindings independently of worker bindings.
+   Per-spawn advisor selection resolves through `resolve_native_route_for_role advisor implement "$FRAMEWORK"` and projects its compact canonical JSON through the framework adapter's `native_tool_fields` operation. This keeps native-model fallback and supported options together.
 
    Immediately before assembling this advisor's prompt, run `lore dispatch guidance`. If rendering fails, stop before the Task call. Prepend the complete single-use output verbatim before the resolved advisor template; render again for every advisor and retry.
 
    ```
-   ADVISOR_MODEL=$(bash "$ADAPTER" resolve_model_for_role advisor)
+   ADVISOR_ROUTE=$(resolve_native_route_for_role advisor implement "$FRAMEWORK")
+   ADVISOR_TOOL_FIELDS=$(bash "$ADAPTER" native_tool_fields "$(printf '%s' "$ADVISOR_ROUTE" | jq -c .)")
 
-   Task:
-     subagent_type: "general-purpose"
-     model: "$ADVISOR_MODEL"
+   Task/tool call:
+     fields: "$ADVISOR_TOOL_FIELDS"
      team_name: "impl-<slug>"
      name: "<advisor-name>"
      mode: "bypassPermissions"

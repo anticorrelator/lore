@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import os
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('managed', ROOT / 'scripts/session-managed.py')
@@ -20,7 +21,14 @@ class ManagedSessions(unittest.TestCase):
         m.atomic(self.kdir / '_work/task/_meta.json', {})
         self.context = self.kdir / 'context.txt'
         self.context.write_text('Do the task.')
-
+        self.data = self.kdir / 'data'
+        m.atomic(self.data / 'config/settings.json', {
+            'version': 2, 'tui_launch_framework': 'codex',
+            'routes': {'default': 'codex/default', 'worker': 'codex/model-a'},
+            'harnesses': {'codex': {'args': [], 'native_models': {'default': 'gpt-5.5-high'}}}})
+        environment = patch.dict(os.environ, {'LORE_DATA_DIR': str(self.data)})
+        environment.start()
+        self.addCleanup(environment.stop)
     def args(self, **kwargs):
         values = dict(workspace=str(self.source), handle='task', framework='codex',
                       model='model-a', context=str(self.context), key='request-a', timeout=0)

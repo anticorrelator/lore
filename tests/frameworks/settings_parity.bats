@@ -302,11 +302,12 @@ go_helper() {
   fi
   export LORE_FRAMEWORK=claude-code
   write_settings '{
-    "version": 1,
+    "version": 2,
     "tui_launch_framework": "claude-code",
+    "routes": {"lead": "claude-code/opus", "default": "claude-code/sonnet"},
     "harnesses": {
-      "claude-code": {"args": [], "roles": {"lead": "opus", "default": "sonnet"}},
-      "opencode": {"args": [], "roles": {"lead": "anthropic/opus", "default": "anthropic/opus"}}
+      "claude-code": {"args": [], "native_models": {"default": "sonnet"}},
+      "opencode": {"args": [], "native_models": {"default": "anthropic/opus"}}
     }
   }'
   bash_out=$(bash -c "source '$LIB_SH' && resolve_model_for_role lead" 2>/dev/null)
@@ -321,11 +322,12 @@ go_helper() {
   fi
   export LORE_FRAMEWORK=opencode
   write_settings '{
-    "version": 1,
+    "version": 2,
     "tui_launch_framework": "opencode",
+    "routes": {"default": "opencode/anthropic/opus"},
     "harnesses": {
-      "claude-code": {"args": [], "roles": {"lead": "opus", "default": "sonnet"}},
-      "opencode": {"args": [], "roles": {"default": "anthropic/opus"}}
+      "claude-code": {"args": [], "native_models": {"default": "sonnet"}},
+      "opencode": {"args": [], "native_models": {"default": "anthropic/opus"}}
     }
   }'
   bash_out=$(bash -c "source '$LIB_SH' && resolve_model_for_role lead" 2>/dev/null)
@@ -340,9 +342,10 @@ go_helper() {
   fi
   export LORE_FRAMEWORK=claude-code
   write_settings '{
-    "version": 1,
+    "version": 2,
     "tui_launch_framework": "claude-code",
-    "harnesses": {"claude-code": {"args": [], "roles": {"default": "sonnet"}}}
+    "routes": {"default": "claude-code/sonnet"},
+    "harnesses": {"claude-code": {"args": [], "native_models": {"default": "sonnet"}}}
   }'
   run bash -c "source '$LIB_SH' && resolve_model_for_role unknown_role_xyz"
   [ "$status" -ne 0 ]
@@ -352,7 +355,7 @@ go_helper() {
   [[ "$output" == *"unknown role"* ]]
 }
 
-@test "parity: closed-set rejection — unknown role in harness-local map rejected on both stacks" {
+@test "parity: closed-set rejection — unknown role in routes map rejected on both stacks" {
   if [ -z "${HARNESS_BIN:-}" ]; then
     skip "Go parity harness not available"
   fi
@@ -362,21 +365,23 @@ go_helper() {
   # scripts/lib.sh:964-985.
   export LORE_FRAMEWORK=claude-code
   write_settings '{
-    "version": 1,
+    "version": 2,
     "tui_launch_framework": "claude-code",
+    "routes": {"default": "claude-code/sonnet"},
     "harnesses": {
-      "claude-code": {"args": [], "roles": {"unknown_role_xyz": "opus"}}
+      "claude-code": {"args": [], "native_models": {"default": "sonnet"}}
     }
   }'
+  write_settings "$(jq -c '.routes.unknown_role_xyz = "claude-code/opus"' "$TEST_LORE_DATA_DIR/config/settings.json")"
   # Querying "lead" should still error because the overlay block contains
   # an unknown role id (misconfigured overlay must surface, not be silently
   # ignored).
   run bash -c "source '$LIB_SH' && resolve_model_for_role lead"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"unknown role"* ]]
+  [[ "$output" == *"unknown_role"* ]]
   run "$HARNESS_BIN" resolve_model_for_role lead
   [ "$status" -ne 0 ]
-  [[ "$output" == *"unknown role"* ]]
+  [[ "$output" == *"unknown_role"* ]]
 }
 
 # ============================================================

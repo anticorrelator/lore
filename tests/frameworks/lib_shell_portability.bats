@@ -26,7 +26,15 @@ LIB_SH="$REPO_DIR/scripts/lib.sh"
 setup() {
   [ -f "$LIB_SH" ] || skip "scripts/lib.sh missing"
   command -v zsh >/dev/null 2>&1 || skip "zsh not installed"
+  TEST_LORE_DATA_DIR="$(mktemp -d)"
+  mkdir -p "$TEST_LORE_DATA_DIR/config"
+  ln -s "$REPO_DIR/scripts" "$TEST_LORE_DATA_DIR/scripts"
+  export LORE_DATA_DIR="$TEST_LORE_DATA_DIR"
+  unset LORE_FRAMEWORK
+  printf '%s\n' '{"version":2,"tui_launch_framework":"claude-code","routes":{"default":"claude-code/sonnet","lead":"claude-code/opus"},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"sonnet"}}}}' > "$TEST_LORE_DATA_DIR/config/settings.json"
 }
+
+teardown() { rm -rf "$TEST_LORE_DATA_DIR"; }
 
 @test "lib.sh: LORE_LIB_DIR points at scripts/ when sourced under bash" {
   run bash -c "source '$LIB_SH' && printf '%s\n' \"\$LORE_LIB_DIR\""
@@ -92,7 +100,7 @@ setup() {
   # the assignment-prefix on a builtin doesn't make VAR visible inside
   # the sourced file. Export the var into the parent zsh process instead,
   # which matches how users actually set role overrides.
-  LORE_MODEL_LEAD=opus-test run zsh -c "source '$LIB_SH' && resolve_model_for_role lead"
+  LORE_MODEL_LEAD=claude-code/opus-test run zsh -c "source '$LIB_SH' && resolve_model_for_role lead"
   [ "$status" -eq 0 ]
   [ "$output" = "opus-test" ]
 }

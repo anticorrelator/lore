@@ -37,12 +37,12 @@ teardown() {
 write_settings() {
   local marker="$1"
   local claude_default="${2-opus-test}"
-  local claude_block=""
+  local claude_route=""
   if [[ -n "$claude_default" ]]; then
-    claude_block=",\"claude-code\":{\"roles\":{\"default\":\"$claude_default\"}}"
+    claude_route=",\"default\":\"claude-code/$claude_default\""
   fi
   cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
-{"version":1,"dispatch_test":"$marker","harnesses":{"codex":{"roles":{"worker":"gpt-test"}}$claude_block}}
+{"version":2,"tui_launch_framework":"codex","routes":{"worker":"codex/$marker"$claude_route},"harnesses":{"codex":{"args":[],"native_models":{"default":"gpt-test"}},"claude-code":{"args":[],"native_models":{"default":"${claude_default:-sonnet}"}}}}
 EOF
 }
 
@@ -66,7 +66,7 @@ render_prompt() {
   run bash "$CLI" dispatch guidance
   [ "$status" -eq 0 ]
   [[ "$output" == *"<!-- lore-dispatch-guidance:v1:begin -->"* ]]
-  [[ "$output" == *"dispatch_test: alpha"* ]]
+  [[ "$output" == *"routes.worker: codex/alpha"* ]]
 }
 
 @test "lib.sh exposes stable renderer and validator dispatch helpers" {
@@ -177,7 +177,7 @@ render_prompt() {
   short_floor="$(bash "$RENDERER" --short)"
   [ "$updated_prompt" = "$short_floor"$'\n'"Task only" ]
   [[ "$updated_prompt" != *"lore-dispatch-guidance:v1:"* ]]
-  [[ "$updated_prompt" != *"dispatch_test:"* ]]
+  [[ "$updated_prompt" != *"routes.worker:"* ]]
   [[ "$output" == *"This launch named no model, so the settings-resolved default for this harness (opus-test) was supplied at the admission gate."* ]]
 
   # Guidance and model arrive in the same rewrite.

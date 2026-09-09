@@ -24,7 +24,7 @@ Hand on the pointer, not the bodies: `--packet <id>` on `lore session start` or 
 ## Managed sessions
 
 ```bash
-lore session start <item> --workspace <source-checkout> --framework <id> --model <model> \
+lore session start <item> --workspace <source-checkout> --session-route <canonical-route-json> \
   --context <brief> --packet <packet-id> --key <dispatch-id> --json
 ```
 

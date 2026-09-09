@@ -260,14 +260,16 @@ in the diff or source. The brief alone is never sufficient basis for a finding.
 
 **Dispatch guidance gate:** For every built-in, Structural Read, or ceremony lens launch or retry, run `lore dispatch guidance` immediately before assembling that launch's prompt. Prepend that launch attempt's complete output verbatim as the first block; never copy, summarize, cache, or reuse it for another launch. If any render fails while preparing the single parallel lens batch, issue none of that batch; a retry renders a fresh block independently for every member before launch. This changes neither model routing nor concurrency.
 
-**Lens model routing:** Lens agents resolve their model through the settings layer — the reviewer role in the pr-review ceremony — not by inheriting whatever model this session happens to run. Once, at lens-launch preparation:
+**Lens route selection:** Resolve the reviewer role through the active harness's native route and project it through that harness adapter. Once, at lens-launch preparation:
 
 ```bash
 source ~/.lore/scripts/lib.sh
-LENS_MODEL=$(resolve_model_for_role reviewer pr-review) || LENS_MODEL=""
+LENS_FRAMEWORK=$(resolve_active_framework)
+LENS_ROUTE=$(resolve_native_route_for_role reviewer pr-review "$LENS_FRAMEWORK")
+LENS_TOOL_FIELDS=$(bash "$LORE_REPO_DIR/adapters/agents/$LENS_FRAMEWORK.sh" native_tool_fields "$(printf '%s' "$LENS_ROUTE" | jq -c .)")
 ```
 
-Stamp `$LENS_MODEL` as the `model` parameter on **every** lens agent spawn in the batch — diff-local, Structural Read, and ceremony alike — and on every retry launch. Retries re-render their dispatch-guidance block per launch; the model stamp applies to each launch the same way, outside that per-launch render — if the resolved value is no longer at hand when preparing a retry, re-run the resolver rather than launching unstamped. When the resolver misses (non-zero exit or empty output), compose **no** model parameter — the lens inherits this session's model — and name that in the Step 5a preamble. Never substitute a hardcoded tier for a miss.
+Use the fields from `$LENS_TOOL_FIELDS` on every lens spawn and retry; the resolver and adapter are the routing contract.
 
 For each selected lens, read its Step 3 methodology:
 

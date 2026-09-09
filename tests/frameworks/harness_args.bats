@@ -46,7 +46,7 @@ setup() {
   ln -s "$REPO_DIR/scripts" "$TEST_LORE_DATA_DIR/scripts"
   # Default unified settings.json — individual tests rewrite as needed.
   cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
-{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":["--dangerously-skip-permissions"]},"opencode":{"args":[]},"codex":{"args":[]}}}
+{"version":2,"tui_launch_framework":"claude-code","capability_overrides":{},"routes":{"default":"claude-code/sonnet"},"harnesses":{"claude-code":{"args":["--dangerously-skip-permissions"],"native_models":{"default":"sonnet"}},"opencode":{"args":[],"native_models":{"default":"anthropic/opus"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}}}}
 EOF
   export LORE_DATA_DIR="$TEST_LORE_DATA_DIR"
   unset LORE_FRAMEWORK
@@ -411,7 +411,7 @@ seq_hex() {
 
 @test "bash: framework_interaction_field — value rows carry the closed-vocabulary token" {
   [ "$(bash_helper 'framework_interaction_field honors_bracketed_paste value codex')" = "true" ]
-  [ "$(bash_helper 'framework_interaction_field mid_generation_semantics value codex')" = "buffered-draft" ]
+  [ "$(bash_helper 'framework_interaction_field mid_generation_semantics value codex')" = "queued-autosubmit" ]
   [ "$(bash_helper 'framework_interaction_field mid_generation_semantics value claude-code')" = "queued-autosubmit" ]
 }
 
@@ -428,7 +428,7 @@ seq_hex() {
 @test "parity: resolve_model_for_role — env-aware role binding" {
   export LORE_FRAMEWORK=claude-code
   write_settings <<EOF
-{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"lead":"opus","default":"sonnet"}},"opencode":{"args":[]},"codex":{"args":[]}}}
+{"version":2,"tui_launch_framework":"claude-code","capability_overrides":{},"routes":{"lead":"claude-code/opus","default":"claude-code/sonnet"},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"sonnet"}},"opencode":{"args":[],"native_models":{"default":"anthropic/opus"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}}}}
 EOF
   go_out=$(go_helper resolve_model_for_role lead)
   if [ "$go_out" = "T10-pending" ]; then
@@ -442,7 +442,7 @@ EOF
 @test "parity: resolve_model_for_role — ceremony binding beats role overlay" {
   export LORE_FRAMEWORK=claude-code
   write_settings <<EOF
-{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"researcher":"opus","default":"sonnet"},"ceremony_roles":{"spec":{"researcher":"haiku"}}},"opencode":{"args":[]},"codex":{"args":[]}}}
+{"version":2,"tui_launch_framework":"claude-code","capability_overrides":{},"routes":{"researcher":"claude-code/opus","default":"claude-code/sonnet","ceremony_overlays":{"spec":{"researcher":"claude-code/haiku"}}},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"sonnet"}},"opencode":{"args":[],"native_models":{"default":"anthropic/opus"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}}}}
 EOF
   go_out=$(go_helper resolve_model_for_role researcher spec)
   bash_out=$(bash_helper "resolve_model_for_role researcher spec")
@@ -450,10 +450,10 @@ EOF
   [ "$go_out" = "haiku" ]
 }
 
-@test "parity: resolve_model_for_role — role-only ignores ceremony_roles" {
+@test "parity: resolve_model_for_role — role-only ignores ceremony overlays" {
   export LORE_FRAMEWORK=claude-code
   write_settings <<EOF
-{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"researcher":"opus","default":"sonnet"},"ceremony_roles":{"spec":{"researcher":"haiku"}}},"opencode":{"args":[]},"codex":{"args":[]}}}
+{"version":2,"tui_launch_framework":"claude-code","capability_overrides":{},"routes":{"researcher":"claude-code/opus","default":"claude-code/sonnet","ceremony_overlays":{"spec":{"researcher":"claude-code/haiku"}}},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"sonnet"}},"opencode":{"args":[],"native_models":{"default":"anthropic/opus"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}}}}
 EOF
   go_out=$(go_helper resolve_model_for_role researcher)
   bash_out=$(bash_helper "resolve_model_for_role researcher")
@@ -474,7 +474,7 @@ EOF
 @test "parity: resolve_model_for_role — unknown ceremony key stored rejected on both sides" {
   export LORE_FRAMEWORK=claude-code
   write_settings <<EOF
-{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"researcher":"opus","default":"sonnet"},"ceremony_roles":{"deploy":{"researcher":"haiku"}}},"opencode":{"args":[]},"codex":{"args":[]}}}
+{"version":2,"tui_launch_framework":"claude-code","capability_overrides":{},"routes":{"researcher":"claude-code/opus","default":"claude-code/sonnet","ceremony_overlays":{"deploy":{"researcher":"claude-code/haiku"}}},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"sonnet"}},"opencode":{"args":[],"native_models":{"default":"anthropic/opus"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}}}}
 EOF
   go_status=0
   go_out=$(go_helper resolve_model_for_role researcher spec) || go_status=$?
@@ -487,29 +487,30 @@ EOF
 @test "parity: resolve_route_for_role — registered Codex target" {
   export LORE_FRAMEWORK=claude-code
   write_settings <<EOF
-{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"worker-mechanical":"codex/gpt-5.5-medium","worker":"sonnet"}},"opencode":{"args":[]},"codex":{"args":[]}}}
+{"version":2,"tui_launch_framework":"claude-code","capability_overrides":{},"routes":{"worker-mechanical":"codex/gpt-5.5-medium","worker":"claude-code/sonnet","default":"claude-code/sonnet"},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"sonnet"}},"opencode":{"args":[],"native_models":{"default":"anthropic/opus"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}}}}
 EOF
   go_out=$(go_helper resolve_route_for_role worker-mechanical implement)
   bash_out=$(bash_helper "resolve_route_for_role worker-mechanical implement")
   [ "$go_out" = "$bash_out" ]
-  [ "$(printf '%s' "$go_out" | jq -r '.native_binding')" = "gpt-5.5-medium" ]
+  [ "$(printf '%s' "$go_out" | jq -r '.model')" = "gpt-5.5" ]
+  [ "$(printf '%s' "$go_out" | jq -r '.options.effort')" = "medium" ]
 }
 
 @test "parity: resolve_route_for_role — unqualified provider/model remains source-native" {
   export LORE_FRAMEWORK=opencode
   write_settings <<EOF
-{"version":1,"tui_launch_framework":"opencode","capability_overrides":{},"harnesses":{"claude-code":{"args":[]},"opencode":{"args":[],"roles":{"worker":"openai/gpt-5.5"}},"codex":{"args":[]}}}
+{"version":2,"tui_launch_framework":"opencode","capability_overrides":{},"routes":{"worker":"opencode/openai/gpt-5.5","default":"opencode/anthropic/opus"},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"sonnet"}},"opencode":{"args":[],"native_models":{"default":"anthropic/opus"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}}}}
 EOF
   go_out=$(go_helper resolve_route_for_role worker)
   bash_out=$(bash_helper "resolve_route_for_role worker")
   [ "$go_out" = "$bash_out" ]
-  [ "$(printf '%s' "$go_out" | jq -r '.qualified')" = "false" ]
+  [ "$(printf '%s' "$go_out" | jq -r '.framework')" = "opencode" ]
 }
 
 @test "parity: resolve_route_for_role — malformed qualifier rejected on both sides" {
   export LORE_FRAMEWORK=claude-code
   write_settings <<EOF
-{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"worker":"codex/"}},"opencode":{"args":[]},"codex":{"args":[]}}}
+{"version":2,"tui_launch_framework":"claude-code","capability_overrides":{},"routes":{"worker":"codex/","default":"claude-code/sonnet"},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"sonnet"}},"opencode":{"args":[],"native_models":{"default":"anthropic/opus"}},"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}}}}
 EOF
   go_status=0
   go_out=$(go_helper resolve_route_for_role worker) || go_status=$?

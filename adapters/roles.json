@@ -17,7 +17,9 @@
       "call_sites": [
         "agents/worker.md",
         "agents/codex-worker.md",
-        "skills/implement/SKILL.md"
+        "agents/session-worker.md",
+        "skills/implement/SKILL.md",
+        "skills/implement/templates/worker-spawn.md"
       ]
     },
     {
@@ -45,7 +47,8 @@
       "description": "Task-iterating investigation agent that explores design space and produces synthesis reports without modifying source files.",
       "call_sites": [
         "agents/researcher.md",
-        "skills/spec/SKILL.md"
+        "skills/spec/SKILL.md",
+        "scripts/spec-open.sh"
       ]
     },
     {
@@ -63,6 +66,7 @@
       "call_sites": [
         "agents/advisor.md",
         "skills/implement/SKILL.md",
+        "skills/implement/templates/advisor-spawn.md",
         "scripts/agent-protocols/advisory-consultation.md"
       ]
     },

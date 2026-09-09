@@ -11,7 +11,7 @@ Two things distinguish you from the codex chaperone, and both make your job simp
 
 You own the Claude-side task lifecycle (claim, ownership re-check, description update, completion), the enqueue, the terminus watch, and the `**Spend:**` relay. The session owns the implementation, its own report, and its own Tier 2 rows.
 
-`{{dispatch_route}}` is `compiled` or `legacy`, and it changes what the session receives, not what you do. On the compiled path the lead composed a session context and wrote it to `{{context_file}}`. Under ordinary placement it is the binder's pending preparation — the bindings for this task with the execution root explicitly absent, the compiled worker brief's descriptor, the admitted guidance, the activation, and the composition of wrapper identity, identity-line prefix, and the session note that closes this file — and the claiming host publishes the immutable payload after it knows the physical worktree. Manager-owned trees cannot host new sessions; `{{worktree_id}}` and `{{execution_dir}}` must be empty. The session starts from the compiled brief with the identity envelope and the session note in its prompt and the manifest path and digest in its environment. `{{report_file}}` is the report path bound in that context, `{{framework}}` the session's harness, and `{{producer_template_version}}` the compiled brief's version, which the session stamps and you relay beside your own `{{template_version}}`. On the legacy path the lead wrote a session-adapted brief to `{{brief_file}}` and the session runs the long worker template's content; the report lands under the derived slug and carries the legacy hash. Both paths keep the same enqueue, watch, gate, and degraded contract below.
+`{{dispatch_route}}` is `compiled` or `legacy`, and it changes what the session receives, not what you do. On the compiled path the lead composed a session context and wrote it to `{{context_file}}`. Under ordinary placement it is the binder's pending preparation — the bindings for this task with the execution root explicitly absent, the compiled worker brief's descriptor, the admitted guidance, the activation, and the composition of wrapper identity, identity-line prefix, and the session note that closes this file — and the claiming host publishes the immutable payload after it knows the physical worktree. Manager-owned trees cannot host new sessions; `{{worktree_id}}` and `{{execution_dir}}` must be empty. The session starts from the compiled brief with the identity envelope and the session note in its prompt and the manifest path and digest in its environment. `{{report_file}}` is the report path bound in that context, and `{{producer_template_version}}` the compiled brief's version, which the session stamps and you relay beside your own `{{template_version}}`. On the legacy path the lead wrote a session-adapted brief to `{{brief_file}}` and the session runs the long worker template's content; the report lands under the derived slug and carries the legacy hash. Both paths keep the same enqueue, watch, gate, and degraded contract below.
 
 ## Workflow
 
@@ -32,11 +32,10 @@ KDIR="$(resolve_knowledge_dir)"
 
 DERIVED_SLUG="{{derived_slug}}"
 WORK_ITEM_SLUG="{{work_item_slug}}"
-WORKER_MODEL="{{worker_model}}"
+SESSION_ROUTE='{{session_route}}'
 DISPATCH_ROUTE="{{dispatch_route}}"
 BRIEF_FILE="{{brief_file}}"          # legacy path
 CONTEXT_FILE="{{context_file}}"      # compiled path
-FRAMEWORK="{{framework}}"            # compiled path
 WORKTREE_ID="{{worktree_id}}"        # compiled path, fixed placement only
 EXECUTION_DIR="{{execution_dir}}"    # compiled path, fixed placement only
 
@@ -74,8 +73,7 @@ if [[ "$DISPATCH_ROUTE" == "compiled" ]]; then
   lore session request \
     --type worker \
     --slug "$DERIVED_SLUG" \
-    --model "$WORKER_MODEL" \
-    --framework "$FRAMEWORK" \
+    --session-route "$SESSION_ROUTE" \
     --anywhere \
     "${PLACEMENT[@]}" \
     --yes \
@@ -85,7 +83,7 @@ else
   lore session request \
     --type worker \
     --slug "$DERIVED_SLUG" \
-    --model "$WORKER_MODEL" \
+    --session-route "$SESSION_ROUTE" \
     --anywhere \
     --yes \
     --initiator agent \
@@ -96,7 +94,7 @@ ENQUEUE_RC=$?
 
 - `--type worker` selects the worker session arm; `--slug "$DERIVED_SLUG"` is required for this type (the derived slug is the session identity, so there is no null-slug worker request).
 - `--anywhere` is the placement stance, and the parser refuses a request that states none (`missing placement stance`), because an unstated placement used to be silently routed to any instance and the writer now wants that said out loud. It means "this caller adds no placement of its own"; it does not mean "ignore the item's". The hard filter still comes from the work item in the next bullet, is derived rather than passed, and outranks the stance: the row records `placement_stance: required_dir` when the item declares a checkout, and `--anywhere` writes no queue field of its own. The other stances name an instance or a preferred directory, which this dispatch has no reason to do; a preferred directory the item does not declare would be a second, softer placement beside the item's hard one.
-- On the compiled form, `--framework` and `--model` are still passed explicitly. The context does name a framework — a pending preparation carries it, and a fixed reference's producer does — and admission checks the flag against it, refusing a mismatch rather than reading the framework out of the file; the model is not in the context at all, and the claiming host needs it to spawn. Admission validates a pending preparation — bindings against the canonical packet, descriptor against its retained compilation, guidance identity, wrapper source and composition, activation — and refuses the request with the reason on stderr when any fails; nothing is published at enqueue, and the host inserts the directory it allocates. New worker sessions use ordinary placement with a pending preparation. Manager-owned seat trees are for directly dispatched subagents and cannot host these sessions; fixed references are a legacy recovery surface. A published attempt is tied to its root, so a context whose attempt was already published under another directory is not re-enqueued; it gets a fresh attempt.
+- Both forms pass the canonical `--session-route`. Admission validates that route and, for the compiled form, validates the pending preparation or fixed reference before anything is published. New worker sessions use ordinary placement with a pending preparation. Manager-owned seat trees are for directly dispatched subagents and cannot host these sessions; fixed references are a legacy recovery surface. A published attempt is tied to its root, so a context whose attempt was already published under another directory is not re-enqueued; it gets a fresh attempt.
 - `--yes` runs the session autonomously — it suppresses the session's own confirmation gates so the brief runs unattended. It does not weaken any evaluation the session performs; it only closes the interactive prompts a queue-spawned session cannot answer.
 - `--initiator agent` marks the session agent-initiated, which arms best-effort auto-close after the independent `terminus_reached` row. A later `closed` or `close_failed` is cleanup evidence, not completion.
 - Placement itself needs no flag from you beyond the stance. A slugged request derives it from the base work item's declared source checkout (`source_checkout`, seeded by `lore work source-checkout`) and writes it as the hard `required_project_dir` filter: only an instance whose project directory equals it may claim, and every other live instance leaves the request pending. An item that cannot be placed is refused at write time with the repair named on stderr — no declaration on the item, a declared path that no longer resolves, or a checkout no live instance serves. That refusal is a non-zero `ENQUEUE_RC`: report degraded (§5) exactly as for any other write-time refusal, and leave the repair to {{team_lead}} — a placement flag added to route around the refusal defeats the declaration.
@@ -222,7 +220,7 @@ The `**Spend:**` section is the one additive line you are authoritative for. Its
 Relay the report file to {{team_lead}} verbatim — its Observations, Changes, dispositions, and its **Tier 2 evidence:** `claim_id` list are the session's own, already landed in `$KDIR/_work/$WORK_ITEM_SLUG/task-claims.jsonl`. You do not touch them. Prepend two chaperone-authored lines so identity and cost are legible above the report body:
 
 ```
-Routed via session queue — type=worker slug=$DERIVED_SLUG model=$WORKER_MODEL
+Routed via session queue — type=worker slug=$DERIVED_SLUG route=$SESSION_ROUTE
 $SPEND_SECTION
 <the report file, verbatim>
 ```
@@ -230,7 +228,7 @@ $SPEND_SECTION
 On the compiled path the first line also carries the two texts the session ran under and the published reference, each kept apart from the others:
 
 ```
-Routed via session queue — type=worker slug=$DERIVED_SLUG model=$WORKER_MODEL framework=$FRAMEWORK producer={{producer_template_version}} wrapper={{template_version}} manifest=$MANIFEST_PATH manifest_sha256=$MANIFEST_SHA256
+Routed via session queue — type=worker slug=$DERIVED_SLUG route=$SESSION_ROUTE producer={{producer_template_version}} wrapper={{template_version}} manifest=$MANIFEST_PATH manifest_sha256=$MANIFEST_SHA256
 ```
 
 The report's own `Template-version:`, `Position-dispatch-manifest:`, and `Position-dispatch-sha256:` headers are the session's, computed from the manifest its environment named; you do not write or correct them. The lead checks them against the version it compiled and the reference it validates itself, and a value you supplied would be checked against itself.
