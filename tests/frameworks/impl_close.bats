@@ -32,6 +32,12 @@ setup() {
 
   TEST_KDIR="$(mktemp -d)"
   export LORE_KNOWLEDGE_DIR="$TEST_KDIR"
+  TEST_DATA_DIR="$(mktemp -d)"
+  mkdir -p "$TEST_DATA_DIR/config"
+  ln -s "$REPO_DIR/scripts" "$TEST_DATA_DIR/scripts"
+  printf '%s\n' '{"version":2,"tui_launch_framework":"claude-code","routes":{"default":"claude-code/sonnet"},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"sonnet"}}}}' > "$TEST_DATA_DIR/config/settings.json"
+  export LORE_DATA_DIR="$TEST_DATA_DIR"
+  export LORE_FRAMEWORK=claude-code
 
   WORK_DIR="$TEST_KDIR/_work"
   mkdir -p "$WORK_DIR/anchored-done" "$WORK_DIR/anchored-open" "$WORK_DIR/legacy-done"
@@ -59,7 +65,7 @@ write_hosted_registry() {
 
 teardown() {
   if [ -n "${TEST_KDIR:-}" ] && [ -d "$TEST_KDIR" ]; then
-    rm -rf "$TEST_KDIR"
+    rm -rf "$TEST_KDIR" "${TEST_DATA_DIR:-}"
   fi
   unset LORE_KNOWLEDGE_DIR
   unset LORE_SESSION_INSTANCE LORE_SESSION_SLUG LORE_SESSION_TYPE
@@ -331,9 +337,9 @@ PYEOF
 @test "telemetry row carries a per-task class-routing attribution array" {
   # Env override is resolution order #1, so the standard class resolves without
   # touching operator settings; the class-qualified roles fall back to it.
-  export LORE_MODEL_WORKER="test-worker-model"
-  export LORE_MODEL_WORKER_MECHANICAL="test-worker-model"
-  export LORE_MODEL_WORKER_JUDGMENT_DENSE="test-worker-model"
+  export LORE_MODEL_WORKER="claude-code/test-worker-model"
+  export LORE_MODEL_WORKER_MECHANICAL="claude-code/test-worker-model"
+  export LORE_MODEL_WORKER_JUDGMENT_DENSE="claude-code/test-worker-model"
   cat > "$WORK_DIR/anchored-done/tasks.json" <<'EOF'
 {"plan_checksum": "x", "phases": [
   {"phase_number": 1, "tasks": [
