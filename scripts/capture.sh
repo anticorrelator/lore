@@ -462,9 +462,10 @@ fi
 
 # --- Provenance validator ---
 if [[ -z "$PRODUCER_ROLE" || -z "$PROTOCOL_SLOT" ]]; then
-  echo "[capture] WARNING: Missing provenance — --producer-role=${PRODUCER_ROLE}, --protocol-slot=${PROTOCOL_SLOT}." >&2
-  echo "[capture] Captures without provenance cannot be scale-typed and degrade renormalize drift detection." >&2
-  echo "[capture] If this is a manual /remember, pass --producer-role and --protocol-slot explicitly." >&2
+  echo "[capture] WARNING: Missing provenance — --producer-role=${PRODUCER_ROLE:-<unset>}, --protocol-slot=${PROTOCOL_SLOT:-<unset>}." >&2
+  echo "[capture] The entry still lands, but without both it shows no byline and renormalize drift detection degrades." >&2
+  echo "[capture] Bare interactive session (no skill running): --producer-role interactive --protocol-slot Reflection." >&2
+  echo "[capture] Inside a skill or dispatch: the position and slot the brief named (e.g. --producer-role worker --protocol-slot implement)." >&2
 fi
 
 # --- Resolve knowledge directory ---

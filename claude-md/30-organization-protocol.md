@@ -7,4 +7,4 @@ Captures are filed automatically by `lore capture` — no manual inbox-to-catego
 **When to suggest curate:**
 - After a session with >5 captures — briefly mention curation is available
 - When you notice duplicates or stale entries during normal work
-- Never run curate automatically — it is always the user's choice to invoke
+- Never run curate automatically — it is always the user's choice to invoke. This is the one knowledge-store write that waits for the owner; capture never does (see Capture Protocol)
