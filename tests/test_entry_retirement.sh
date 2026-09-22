@@ -450,6 +450,19 @@ HELP=$(HOME="$FAKE_HOME" bash "$REPO_DIR/cli/lore" --help 2>&1)
 assert_contains "the verb is listed in lore --help" "$HELP" "retire"
 
 # =============================================
+# Test 17: every position the frame addresses can retire and restore
+# =============================================
+echo ""
+echo "Test 17: position seats retire and restore"
+for seat in investigator designer reviewer; do
+  setup_store
+  OUTPUT=$(retire_entry --source "$seat" 2>&1)
+  assert_contains "$seat can retire" "$OUTPUT" "retired"
+  OUTPUT=$(restore_entry --source "$seat" 2>&1)
+  assert_contains "$seat can restore" "$OUTPUT" "restored"
+done
+
+# =============================================
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]]

@@ -20,7 +20,7 @@
 #   retire-append.sh <knowledge-path>
 #       --reason <why it no longer earns its place>
 #       --falsifier <what would show this was wrong>
-#       --source <worker|researcher|spec-lead|implement-lead|drift-sweep|audit|
+#       --source <investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|drift-sweep|audit|
 #                 settlement|apply-correction|renormalize|interactive|coordinator>
 #       [--superseded-by <path>] [--work-item <slug>] [--reported-by <role>]
 #       [--date <YYYY-MM-DD>] [--kdir <path>] [--json]
@@ -60,7 +60,7 @@ usage() {
 Usage: retire-append.sh <knowledge-path> \
            --reason <why it no longer earns its place> \
            --falsifier <what would show this was wrong> \
-           --source <worker|researcher|spec-lead|implement-lead|drift-sweep| \
+           --source <investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|drift-sweep| \
                      audit|settlement|apply-correction|renormalize|interactive| \
                      coordinator> \
            [--superseded-by <path>] [--work-item <slug>] [--reported-by <role>] \
@@ -150,9 +150,9 @@ if [[ -z "$KNOWLEDGE_PATH" ]]; then
 fi
 
 case "$SOURCE_KIND" in
-  worker|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator) : ;;
+  investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator) : ;;
   "") fail "--source is required" ;;
-  *)  fail "--source must be one of worker|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator (got '$SOURCE_KIND')" ;;
+  *)  fail "--source must be one of investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator (got '$SOURCE_KIND')" ;;
 esac
 
 if [[ $RESTORE -eq 1 ]]; then

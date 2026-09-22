@@ -138,6 +138,8 @@ today = datetime.date.today()
 assert b._line('captured', 'worker', None, (today-datetime.timedelta(days=12)).isoformat()) == 'captured by a worker, 12 days ago'
 assert b._line('captured', 'worker', None, (today-datetime.timedelta(days=1)).isoformat()) == 'captured by a worker, 1 day ago'
 assert b._line('captured', 'worker', None, None) == 'captured by a worker'
+assert b._line('captured', 'investigator', None, None) == 'captured by an investigator'
+assert b._line('captured', 'designer', None, None) == 'captured by a designer'
 assert b._line('captured', None, None, today.isoformat()) == ''
 assert b._line('captured', 'gpt-6-astra', 'missing', None) == ''
 assert b._line('captured', None, 'fixture-item', None) == 'captured during "Widget pipeline consolidation"'
