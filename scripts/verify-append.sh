@@ -321,8 +321,10 @@ fi
 # required: a contradiction found outside tracked work (a bare interactive
 # session) is still one the finder owns, and the grounded trio plus rationale
 # and falsifier carry the evidence without it.
-if [[ -n "$WORK_ITEM" && ! -d "$KNOWLEDGE_DIR/_work/$WORK_ITEM" ]]; then
-  fail "work item not found: $WORK_ITEM (expected $KNOWLEDGE_DIR/_work/$WORK_ITEM)"
+# An archived item is still the work the contradiction was found during, so
+# it is as good a citation as an active one.
+if [[ -n "$WORK_ITEM" && ! -d "$KNOWLEDGE_DIR/_work/$WORK_ITEM" && ! -d "$KNOWLEDGE_DIR/_work/_archive/$WORK_ITEM" ]]; then
+  fail "work item not found: $WORK_ITEM (looked in $KNOWLEDGE_DIR/_work/ and _work/_archive/)"
 fi
 
 # --- Defaults ---
@@ -520,7 +522,11 @@ else
   echo "[verify] duplicate — $DISPOSITION event for $ENTRY_PATH already recorded ($EVENT_ID)"
 fi
 if [[ "$RESOLUTION" == "corrected" ]]; then
-  echo "[verify] resolution: corrected — $ENTRY_PATH rewritten ($RESOLUTION_REF, entry $ENTRY_ACTION)"
+  if [[ "$ENTRY_ACTION" == "noop" ]]; then
+    echo "[verify] resolution: corrected — $ENTRY_PATH already carries this correction; unchanged ($RESOLUTION_REF)"
+  else
+    echo "[verify] resolution: corrected — $ENTRY_PATH rewritten ($RESOLUTION_REF)"
+  fi
 elif [[ "$RESOLUTION" == "disputed" ]]; then
   echo "[verify] resolution: disputed — dated marker on $ENTRY_PATH ($RESOLUTION_REF, entry $ENTRY_ACTION)"
 fi

@@ -738,6 +738,20 @@ assert_eq "a disposition argument is rejected" "$RC" "1"
 assert_contains "points held at verify" "$OUT" "lore verify <entry> held"
 
 # =============================================
+# Test 16: archived work items cite; a repeated correction says it changed nothing
+# =============================================
+echo ""
+echo "Test 16: archived citation and honest no-op"
+setup_store
+mkdir -p "$KNOWLEDGE_DIR/_work/_archive/old-item"
+correct_args=(--superseded-text "A claim." --replacement-text "A repaired claim." \
+  --confidence high --evidence-scope multi-callsite --claim-scale implementation)
+OUT=$(verify_bare --source interactive --work-item old-item --resolution corrected "${correct_args[@]}" 2>&1)
+assert_contains "archived work item is accepted" "$OUT" "rewritten"
+OUT=$(verify_bare --source interactive --work-item old-item --resolution corrected "${correct_args[@]}" 2>&1)
+assert_contains "re-run says the entry is unchanged" "$OUT" "unchanged"
+
+# =============================================
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]]
