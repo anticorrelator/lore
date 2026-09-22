@@ -5,7 +5,7 @@
 - Request architectural observations in the agent's return format (e.g., "report any non-obvious patterns or design decisions you discover")
 
 **When Running As an Agent:**
-- Check the project knowledge store before raw exploration — run `lore prefetch "<topic>"` or read relevant domain files from `_index.md`
+- Check the project knowledge store before raw exploration — run `lore prefetch "<topic>" --scale-set <bucket>`, or `lore index [--category <name>]` to walk the store's entries
 - Include discovered architectural patterns or conventions in your report back to the lead
 - Use `lore capture` to persist reusable insights, same as interactive sessions
 

@@ -1,6 +1,6 @@
 ## Self-Healing
 
-- Regenerate missing `_index.md` or `_manifest.json` when encountered
+- Regenerate a missing `_manifest.json` when encountered — `lore heal --fix`; there is no index file to regenerate, `lore index` walks the store on demand
 - Correct contradicted entries when you encounter the relevant topic during normal work — `lore correct <entry>`, in that turn, not noted for later
 - Consolidate duplicates when noticed
 - Use `/memory heal` for full structural repair

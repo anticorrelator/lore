@@ -105,7 +105,7 @@ This lists inbox remnants, medium-confidence entries, and entries missing backli
 3. **Deduplicate:** Merge entries that describe the same insight from different contexts.
 4. **Backlinks:** Add missing `[[backlinks]]` cross-references between related entries.
 5. **Title quality:** Improve vague or generic titles to be specific and scannable.
-6. **Stale entries:** An entry that contradicts current code is wrong, not merely unneeded — resolve it through `lore verify contradicted` (repair or dispute) rather than retiring it.
+6. **Stale entries:** An entry that contradicts current code is wrong, not merely unneeded — resolve it through `lore correct <entry>` (rewrite, or `--dispute` to leave a dated marker) rather than retiring it.
 7. Report what was found and fixed. Include the per-entry evaluator rollup from step 2 so the user can object to specific retirements or escalations:
    ```
    [curate] Done.
