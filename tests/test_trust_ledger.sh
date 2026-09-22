@@ -21,6 +21,8 @@
 #   - trust confirm front: holds→held mapping, source default, dedupe by sha,
 #     new-sha-new-row, usage errors leave nothing appended
 #   - trust-confirmation source-enum extension (interactive, coordinator)
+#   - verify from a bare session: interactive/coordinator sources, no work
+#     item required; a named work item must still exist
 #   - Rejections leave no ledger file behind (validate-before-disk)
 
 set -euo pipefail
@@ -30,6 +32,7 @@ APPEND="$SCRIPT_DIR/trust-event-append.sh"
 MIGRATE="$SCRIPT_DIR/trust-event-migrate.sh"
 VERIFY="$SCRIPT_DIR/verify-append.sh"
 CONFIRM="$SCRIPT_DIR/trust-confirm.sh"
+CORRECT="$SCRIPT_DIR/correct.sh"
 TEST_DIR=$(mktemp -d)
 KNOWLEDGE_DIR="$TEST_DIR/knowledge"
 SLUG="test-slug"
@@ -340,7 +343,7 @@ OUT=$("$VERIFY" "$ENTRY" contradicted --source worker --file /f --line-range 1-2
 RC=$?
 set -e
 assert_eq "missing observation fields exits 1" "$RC" "1"
-assert_contains "names the missing flag" "$OUT" "--work-item is required"
+assert_contains "names the missing flag" "$OUT" "--rationale is required"
 assert_not_exist "no ledger row from rejected contradicted" "$LEDGER"
 
 # The legacy form — a contradiction with no resolution — must write nothing at
@@ -650,6 +653,89 @@ run_expect_fail "confirm missing sha" "--sha is required" \
 run_expect_fail "confirm malformed sha" "hex string of at least 7" \
   --event trust-confirmation --entry-path "$ENTRY" --source interactive \
   --verdict held --sha nothex --kdir "$KNOWLEDGE_DIR"
+
+# =============================================
+# Test 14: a bare session can resolve what it finds
+# =============================================
+# The consumer is the only checker, and the commonest consumer is an
+# interactive session with no work item. Its correction and dispute must land
+# the same transaction a worker's does.
+echo ""
+echo "Test 14: interactive and coordinator verify without a work item"
+verify_bare() {
+  "$VERIFY" "$ENTRY" contradicted \
+    --file "/abs/path/to/code.sh" --line-range "30-40" --exact-snippet "baz qux" \
+    --rationale "code disagrees" --claim-text "the entry claim" --falsifier "evidence X" \
+    --kdir "$KNOWLEDGE_DIR" "$@"
+}
+setup_store
+OUTPUT=$(verify_bare --source interactive --resolution corrected \
+  --superseded-text "A claim." --replacement-text "A repaired claim." \
+  --confidence high --evidence-scope multi-callsite --claim-scale implementation --json)
+assert_eq "interactive correction applied" "$(echo "$OUTPUT" | jq -r '.entry_action')" "applied"
+assert_eq "interactive correction event appended" "$(echo "$OUTPUT" | jq -r '.correction_event_appended')" "true"
+NEG_ROW=$(grep '"disposition":"contradicted"' "$LEDGER" | head -1)
+assert_eq "ledger source is interactive" "$(echo "$NEG_ROW" | jq -r '.source')" "interactive"
+assert_eq "no work item recorded" "$(echo "$NEG_ROW" | jq -r '.payload.work_item // "none"')" "none"
+assert_contains "entry rewritten" "$(cat "$KNOWLEDGE_DIR/$ENTRY")" "A repaired claim."
+assert_contains "entry marked corrected" "$(cat "$KNOWLEDGE_DIR/$ENTRY")" "status: corrected"
+
+setup_store
+OUTPUT=$(verify_bare --source coordinator --resolution disputed \
+  --dispute-note "Two readings; could not tell which the entry means." --json)
+assert_eq "coordinator dispute applied" "$(echo "$OUTPUT" | jq -r '.entry_action')" "applied"
+assert_contains "dispute marker names the reporter" "$(cat "$KNOWLEDGE_DIR/$ENTRY")" "Reported by coordinator"
+
+setup_store
+set +e
+OUT=$(verify_bare --source interactive --work-item no-such-item --resolution disputed \
+  --dispute-note "n" 2>&1)
+RC=$?
+set -e
+assert_eq "named-but-missing work item exits 1" "$RC" "1"
+assert_contains "names the missing work item" "$OUT" "work item not found: no-such-item"
+assert_not_exist "missing work item writes no ledger row" "$LEDGER"
+
+# =============================================
+# Test 15: lore correct is verify under a findable name
+# =============================================
+echo ""
+echo "Test 15: correct front door"
+correct_base() {
+  "$CORRECT" "$ENTRY" \
+    --file "/abs/path/to/code.sh" --line-range "30-40" --exact-snippet "baz qux" \
+    --rationale "code disagrees" --claim-text "the entry claim" --falsifier "evidence X" \
+    --kdir "$KNOWLEDGE_DIR" "$@"
+}
+assert_contains "correct usage names --dispute" "$("$CORRECT" --help 2>&1)" "--dispute"
+setup_store
+OUTPUT=$(correct_base --superseded-text "A claim." --replacement-text "A repaired claim." \
+  --confidence high --evidence-scope multi-callsite --claim-scale implementation --json)
+assert_eq "defaults to corrected" "$(echo "$OUTPUT" | jq -r '.resolution')" "corrected"
+assert_eq "defaults to source interactive" \
+  "$(grep '"disposition":"contradicted"' "$LEDGER" | head -1 | jq -r '.source')" "interactive"
+assert_contains "entry rewritten via correct" "$(cat "$KNOWLEDGE_DIR/$ENTRY")" "A repaired claim."
+
+setup_store
+OUTPUT=$(correct_base --dispute --dispute-note "Two readings." --source worker --json)
+assert_eq "--dispute selects disputed" "$(echo "$OUTPUT" | jq -r '.resolution')" "disputed"
+assert_eq "explicit source passes through" "$(head -1 "$LEDGER" | jq -r '.source')" "worker"
+
+setup_store
+set +e
+OUT=$(correct_base --superseded-text "A claim." --replacement-text "x" \
+  --confidence low --evidence-scope multi-callsite --claim-scale implementation 2>&1)
+RC=$?
+set -e
+assert_eq "weak evidence still exits 3 through correct" "$RC" "3"
+assert_not_exist "exit 3 writes nothing" "$LEDGER"
+
+set +e
+OUT=$("$CORRECT" "$ENTRY" held --kdir "$KNOWLEDGE_DIR" 2>&1)
+RC=$?
+set -e
+assert_eq "a disposition argument is rejected" "$RC" "1"
+assert_contains "points held at verify" "$OUT" "lore verify <entry> held"
 
 # =============================================
 echo ""

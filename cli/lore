@@ -83,6 +83,8 @@ Commands:
                for a knowledge entry, resolving a contradiction by correcting
                the entry or marking it disputed (see: lore verify --help), or
                report per-entry ledger events (lore verify --report --help)
+  correct      Resolve an entry the code contradicts: rewrite it, or leave a
+               dated marker with --dispute (see: lore correct --help)
   retire       Retire a knowledge entry that no longer earns its place, with a
                reason and a falsifier, or restore one with 'lore retire <path>
                --restore --note ...' (see: lore retire --help)
@@ -2343,6 +2345,10 @@ case "$1" in
     else
       exec "$SCRIPTS_DIR/verify-append.sh" "$@"
     fi
+    ;;
+  correct)
+    shift
+    exec "$SCRIPTS_DIR/correct.sh" "$@"
     ;;
   retire)
     shift

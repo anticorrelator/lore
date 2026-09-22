@@ -35,13 +35,13 @@
 #
 # Usage:
 #   verify-append.sh <knowledge-path> <held|contradicted>
-#       --source <investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead>
+#       --source <investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|interactive|coordinator>
 #       --file <absolute-path>
 #       --line-range <N-M>
 #       --exact-snippet <verbatim>
 #       # required when disposition is contradicted:
 #       [--resolution <corrected|disputed>]
-#       [--work-item <slug>]
+#       [--work-item <slug>]         # optional; validated when given
 #       [--rationale <why the code confirms/falsifies the entry>]
 #       [--claim-text <the entry assertion being verified>]
 #       [--falsifier <what evidence would disprove>]
@@ -81,12 +81,12 @@ source "$SCRIPT_DIR/lib.sh"
 usage() {
   cat >&2 <<'EOF'
 Usage: verify-append.sh <knowledge-path> <held|contradicted> \
-           --source <investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead> \
+           --source <investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|interactive|coordinator> \
            --file <absolute-path> \
            --line-range <N-M> \
            --exact-snippet <verbatim> \
            [--resolution <corrected|disputed>]  # required for contradicted \
-           [--work-item <slug>]          # required for contradicted \
+           [--work-item <slug>]          # optional; must exist when given \
            [--rationale <text>]          # required for contradicted \
            [--claim-text <text>]         # required for contradicted \
            [--falsifier <text>]          # required for contradicted \
@@ -206,11 +206,11 @@ case "$DISPOSITION" in
   *)  fail "disposition must be 'held' or 'contradicted' (got '$DISPOSITION')" ;;
 esac
 
-# --- Source enum: agent producers only ---
+# --- Source enum: every seat that consumes entries, positions and bare sessions alike ---
 case "$SOURCE_KIND" in
-  investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead) : ;;
+  investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|interactive|coordinator) : ;;
   "") fail "--source is required" ;;
-  *)  fail "--source must be 'investigator', 'designer', 'worker', 'reviewer', 'researcher', 'spec-lead', or 'implement-lead' (got '$SOURCE_KIND')" ;;
+  *)  fail "--source must be 'investigator', 'designer', 'worker', 'reviewer', 'researcher', 'spec-lead', 'implement-lead', 'interactive', or 'coordinator' (got '$SOURCE_KIND')" ;;
 esac
 
 # --- Grounded-or-nothing: BOTH dispositions ---
@@ -226,7 +226,6 @@ fi
 # cannot complete leaves the ledger and the entry exactly as it found them.
 if [[ "$DISPOSITION" == "contradicted" ]]; then
   for _pair in \
-    "work-item:$WORK_ITEM" \
     "rationale:$RATIONALE" \
     "claim-text:$CLAIM_TEXT" \
     "falsifier:$FALSIFIER"
@@ -316,10 +315,13 @@ if [[ ! -f "$KNOWLEDGE_DIR/$ENTRY_PATH" ]]; then
   fi
 fi
 
-# --- Contradicted: verify the work item exists before touching anything ---
+# --- Work item: optional, but a named one must exist before touching anything ---
 # It is provenance on both the ledger event and the entry record, so a bad
-# slug has to fail here rather than midway through the transaction.
-if [[ "$DISPOSITION" == "contradicted" && ! -d "$KNOWLEDGE_DIR/_work/$WORK_ITEM" ]]; then
+# slug has to fail here rather than midway through the transaction. It is not
+# required: a contradiction found outside tracked work (a bare interactive
+# session) is still one the finder owns, and the grounded trio plus rationale
+# and falsifier carry the evidence without it.
+if [[ -n "$WORK_ITEM" && ! -d "$KNOWLEDGE_DIR/_work/$WORK_ITEM" ]]; then
   fail "work item not found: $WORK_ITEM (expected $KNOWLEDGE_DIR/_work/$WORK_ITEM)"
 fi
 
