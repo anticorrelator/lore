@@ -8,7 +8,7 @@
 #     "kind": "hypothesis", "kind_status": "untested"}, ...]
 #
 # Required fields per entry: insight, scale
-# Optional fields: context, category, confidence, related_files, source, example,
+# Optional fields: title, context, category, confidence, related_files, source, example,
 #   kind, kind_status, where_looked, answered_by, subsystem
 #   scale must be one of: abstract, architecture, subsystem, implementation
 #   kind must be one of: fact, hypothesis, question, theory (default: fact); each kind's
@@ -49,7 +49,7 @@ Input JSON format:
   [{"insight": "...", "scale": "implementation", "category": "...", "confidence": "high", ...}, ...]
 
 Required per entry: insight, scale
-Optional per entry: context, category, confidence, related_files, source, example,
+Optional per entry: title, context, category, confidence, related_files, source, example,
                     kind, kind_status, where_looked, answered_by, subsystem
 scale must be one of: abstract, architecture, subsystem, implementation
 kind must be one of: fact, hypothesis, question, theory (default: fact)
@@ -131,6 +131,7 @@ args = ['--insight', entry['insight'], '--scale', entry['scale']]
 # Entry field -> capture.sh flag. A field missing from this table is silently
 # dropped from the capture, so extend it whenever capture.sh gains a flag.
 PASSTHROUGH = (
+    ('title', '--title'),
     ('context', '--context'),
     ('category', '--category'),
     ('confidence', '--confidence'),

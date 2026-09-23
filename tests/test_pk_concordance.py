@@ -1545,6 +1545,82 @@ class TestComputeVocabularyDrift:
 
 
 # ---------------------------------------------------------------------------
+# Scoring new text against stored vectors
+# ---------------------------------------------------------------------------
+
+class TestTextVectorizer:
+    """text_vectorizer() and latest_vectors() score text in the stored vectors' space."""
+
+    def test_indexed_entry_text_reproduces_its_stored_vector(self, indexed_db, knowledge_dir):
+        from pk_markdown import MarkdownParser
+        conc = Concordance(indexed_db)
+        vectorize = conc.text_vectorizer()
+        stored = conc.latest_vectors()
+        assert stored
+        for (file_path, _heading), vec in stored.items():
+            content = MarkdownParser.parse_entry_file(file_path)[0]["content"]
+            rebuilt = vectorize(content)
+            assert rebuilt.keys() == vec.keys()
+            for k in vec:
+                assert rebuilt[k] == pytest.approx(vec[k], rel=1e-5)
+
+    def test_column_vocab_doc_frequencies_match_instance_scan(self, indexed_db):
+        conc = Concordance(indexed_db)
+        conn = conc._connect()
+        try:
+            assert conc._content_doc_frequencies(conn) == conc._get_doc_frequencies(conn)
+        finally:
+            conn.close()
+
+    def test_unseen_terms_match_each_other_but_no_stored_vector(self, indexed_db):
+        conc = Concordance(indexed_db)
+        vectorize = conc.text_vectorizer()
+        a = vectorize("quokka marsupials burrow under eucalyptus")
+        b = vectorize("eucalyptus shelters the quokka")
+        shared = a.keys() & b.keys()
+        assert shared and all(k < 0 for k in shared)
+        assert sparse_cosine_similarity(a, b) > 0
+        for vec in conc.latest_vectors().values():
+            assert sparse_cosine_similarity(a, vec) == 0.0
+
+    def test_unseen_terms_dilute_similarity_to_stored_vectors(self, indexed_db):
+        conc = Concordance(indexed_db)
+        vectorize = conc.text_vectorizer()
+        plain = vectorize("snake_case columns and foreign keys")
+        padded = vectorize("snake_case columns and foreign keys quokka eucalyptus marsupial burrow")
+        target = next(v for (fp, _), v in conc.latest_vectors().items() if fp.endswith("database-naming.md"))
+        assert sparse_cosine_similarity(padded, target) < sparse_cosine_similarity(plain, target)
+
+    def test_latest_vectors_leave_out_rows_from_earlier_builds(self, indexed_db):
+        conn = sqlite3.connect(indexed_db)
+        conn.execute(
+            "INSERT INTO tfidf_vectors (file_path, heading, vector, source_type, updated_at) "
+            "VALUES (?, ?, ?, 'knowledge', 1.0)",
+            ("/gone/conventions/old.md", "Old", serialize_sparse_vector({0: 1.0})),
+        )
+        conn.commit()
+        conn.close()
+
+        conc = Concordance(indexed_db)
+        latest = {fp for fp, _ in conc.latest_vectors()}
+        assert "/gone/conventions/old.md" not in latest
+        assert len(latest) == 4
+
+    def test_latest_vectors_empty_without_a_build(self, tmp_path):
+        kd = tmp_path / "knowledge"
+        kd.mkdir()
+        db = kd / ".pk_search.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "CREATE TABLE tfidf_vectors (file_path TEXT, heading TEXT, vector BLOB, "
+            "source_type TEXT, updated_at REAL, PRIMARY KEY (file_path, heading))"
+        )
+        conn.commit()
+        conn.close()
+        assert Concordance(str(db)).latest_vectors() == {}
+
+
+# ---------------------------------------------------------------------------
 # Removed entries leave no vectors or concordance pairs behind
 # ---------------------------------------------------------------------------
 

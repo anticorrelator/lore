@@ -1,12 +1,30 @@
 #!/usr/bin/env bash
 # capture.sh — Capture an insight to the knowledge store
-# Usage: lore capture --insight "..." --scale "<bucket>" [--context "..."] [--category "..."] [--confidence "..."] [--related-files "..."] [--source "..."] [--example "..."]
+# Usage: lore capture --insight "..." --scale "<bucket>" [--title "..."] [--context "..."] [--category "..."] [--confidence "..."] [--related-files "..."] [--source "..."] [--example "..."]
 #        [--producer-role "..."] [--protocol-slot "..."] [--template-version "..."] [--capturer-role "..."] [--source-artifact-ids "..."]
 #        [--captured-at-branch "..."] [--captured-at-sha "..."] [--captured-at-merge-base-sha "..."] [--work-item "..."]
 #        [--kind "<kind>"] [--kind-status "<value>"] [--where-looked "..."] [--answered-by "..."] [--subsystem "..."]
 #        [--executable-falsifier '<json>'] [--kdir "<path>"]
 #
 # Writes an individual entry file to the category directory (e.g., conventions/<slug>.md).
+#
+# Title:
+#   --title "<headline>"  The entry's H1 and the source of its filename slug, flattened onto one
+#     line. When omitted, the title is the first eight words of --insight, title-cased.
+#
+# Similar entries:
+#   After filing, the entry is compared with the store's other entries by TF-IDF cosine similarity,
+#   the metric `lore analyze merge-candidates` reports. Each entry at or above the threshold, at
+#   most three, gets one line after the "Filed to" line:
+#     [capture] similar entry: <category/relative/path.md> (similarity 0.NN)
+#   Only live entries are named: none that has been deleted, and none whose status default search
+#   withholds (retired, superseded, and so on).
+#   When the comparison cannot run, exactly one line says so instead, so a missing check never
+#   reads as "nothing similar":
+#     [capture] similarity check skipped: <reason>
+#   With --json the object carries "similar": [{"path": ..., "similarity": ...}, ...] ([] when
+#   nothing matched), or "similar": null plus "similar_skipped": "<reason>" with the skip line on
+#   stderr. The check never delays or refuses filing and never changes the exit status.
 #
 # Store selection:
 #   --kdir <path>  Write to this knowledge store, skipping resolution. Normally the store is
@@ -93,6 +111,7 @@ WHERE_LOOKED=""
 ANSWERED_BY=""
 SUBSYSTEM=""
 EXECUTABLE_FALSIFIER=""
+TITLE_ARG=""
 JSON_MODE=0
 SKIP_MANIFEST=0
 KDIR_OVERRIDE=""
@@ -102,6 +121,14 @@ while [[ $# -gt 0 ]]; do
     --insight)
       INSIGHT="$2"
       shift 2
+      ;;
+    --title)
+      TITLE_ARG="$2"
+      shift 2
+      ;;
+    --title=*)
+      TITLE_ARG="${1#--title=}"
+      shift
       ;;
     --context)
       CONTEXT="$2"
@@ -229,7 +256,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: capture.sh --insight \"...\" [--context \"...\"] [--category \"...\"] [--confidence \"...\"] [--related-files \"...\"] [--source \"...\"] [--example \"...\"] [--producer-role \"...\"] [--protocol-slot \"...\"] [--template-version \"...\"] [--capturer-role \"...\"] [--source-artifact-ids \"...\"] [--captured-at-branch \"...\"] [--captured-at-sha \"...\"] [--captured-at-merge-base-sha \"...\"] [--work-item \"...\"] [--kind \"...\"] [--kind-status \"...\"] [--where-looked \"...\"] [--answered-by \"...\"] [--subsystem \"...\"] [--executable-falsifier '<json>'] [--kdir <path>] [--json] [--skip-manifest]" >&2
+      echo "Usage: capture.sh --insight \"...\" [--title \"...\"] [--context \"...\"] [--category \"...\"] [--confidence \"...\"] [--related-files \"...\"] [--source \"...\"] [--example \"...\"] [--producer-role \"...\"] [--protocol-slot \"...\"] [--template-version \"...\"] [--capturer-role \"...\"] [--source-artifact-ids \"...\"] [--captured-at-branch \"...\"] [--captured-at-sha \"...\"] [--captured-at-merge-base-sha \"...\"] [--work-item \"...\"] [--kind \"...\"] [--kind-status \"...\"] [--where-looked \"...\"] [--answered-by \"...\"] [--subsystem \"...\"] [--executable-falsifier '<json>'] [--kdir <path>] [--json] [--skip-manifest]" >&2
       exit 1
       ;;
   esac
@@ -526,7 +553,7 @@ if [[ -z "$CATEGORY" ]]; then
   CATEGORY="conventions"
 fi
 
-# --- Generate title from the insight ---
+# --- Title: --title verbatim, otherwise generated from the insight ---
 # For lifecycle kinds, a leading kind marker in the prose ("Hypothesis
 # (untested):", "Believed:", "Open question —", "PROSPECTIVE TRIGGER —")
 # duplicates the footer's kind/kind_status fields and bakes a status into the
@@ -562,8 +589,17 @@ generate_title() {
   derive_entry_title "$source_text"
 }
 
-TITLE=$(generate_title "$INSIGHT")
-SLUG=$(slugify "$TITLE")
+TITLE_ARG=$(printf '%s' "$TITLE_ARG" | tr '\r\n\t' '   ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
+if [[ -n "$TITLE_ARG" ]]; then
+  TITLE="$TITLE_ARG"
+  SLUG=$(slugify "$TITLE")
+  if [[ -z "$SLUG" ]]; then
+    SLUG=$(slugify "$(generate_title "$INSIGHT")")
+  fi
+else
+  TITLE=$(generate_title "$INSIGHT")
+  SLUG=$(slugify "$TITLE")
+fi
 
 # --- Determine target directory ---
 DATE_TODAY=$(date +"%Y-%m-%d")
@@ -695,6 +731,23 @@ if [[ $SKIP_MANIFEST -eq 0 ]]; then
   bash "$SCRIPT_DIR/export-obsidian.sh" --file "$TARGET_FILE" > /dev/null 2>&1 || true
 fi
 
+# --- Similar-entry notice ---
+# The helper reports its own skip reasons and exits 0; a nonzero exit means it
+# never got that far, which still has to surface as a skip rather than silence.
+SIMILAR_ARGS=(--kdir "$KNOWLEDGE_DIR" --entry "$TARGET_FILE")
+if [[ $JSON_MODE -eq 1 ]]; then
+  SIMILAR_ARGS+=(--json)
+fi
+SIMILAR_STATUS=0
+SIMILAR_OUT=$(python3 "$SCRIPT_DIR/capture-similar.py" "${SIMILAR_ARGS[@]}" 2>/dev/null) || SIMILAR_STATUS=$?
+if [[ $SIMILAR_STATUS -ne 0 ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    SIMILAR_OUT="{\"similar\": null, \"skipped\": \"similarity helper exited $SIMILAR_STATUS\"}"
+  else
+    SIMILAR_OUT="[capture] similarity check skipped: similarity helper exited $SIMILAR_STATUS"
+  fi
+fi
+
 # --- Output ---
 if [[ $JSON_MODE -eq 1 ]]; then
   JSON_RESULT=$(python3 -c "
@@ -704,9 +757,20 @@ if len(sys.argv) > 5 and sys.argv[5]:
     # Shape-validated above; surfaced for the orchestrating layer to persist
     # into the producer row (never written into the entry .md).
     d['executable_falsifier'] = json.loads(sys.argv[5])
+try:
+    similar = json.loads(sys.argv[6])
+except ValueError:
+    similar = {'similar': None, 'skipped': 'similarity helper returned no result'}
+d['similar'] = similar.get('similar')
+if d['similar'] is None:
+    d['similar_skipped'] = similar.get('skipped') or 'similarity helper returned no result'
+    print('[capture] similarity check skipped: ' + d['similar_skipped'], file=sys.stderr)
 print(json.dumps(d))
-" "$RELPATH" "$CATEGORY" "$TITLE" "$CONFIDENCE" "$EXECUTABLE_FALSIFIER")
+" "$RELPATH" "$CATEGORY" "$TITLE" "$CONFIDENCE" "$EXECUTABLE_FALSIFIER" "$SIMILAR_OUT")
   json_output "$JSON_RESULT"
 fi
 
 echo "[capture] Filed to $RELPATH"
+if [[ -n "$SIMILAR_OUT" ]]; then
+  printf '%s\n' "$SIMILAR_OUT"
+fi

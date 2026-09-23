@@ -510,6 +510,88 @@ class Concordance:
 
         return vec
 
+    def _content_doc_frequencies(self, conn: sqlite3.Connection) -> dict[str, int]:
+        """The mapping _get_doc_frequencies() returns, without scanning every instance.
+
+        A column-level fts5vocab table reads each term's per-column document count
+        straight from the index. The instance-level GROUP BY behind
+        _get_doc_frequencies() walks every token in the store, which build_vectors()
+        can afford once per rebuild but a per-capture lookup cannot.
+        """
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS temp.entry_terms_col "
+            "USING fts5vocab(main, entries, 'col')"
+        )
+        rows = conn.execute(
+            "SELECT term, doc FROM temp.entry_terms_col WHERE col = 'content'"
+        ).fetchall()
+        return {term: doc_count for term, doc_count in rows}
+
+    def text_vectorizer(self):
+        """Return a function that weighs arbitrary text the way build_vectors() weighs an entry.
+
+        Same porter tokenizer, same content-column IDF, same term index — so the
+        vector of an indexed entry's content equals its stored vector, and the
+        vector of any other text can be compared with stored vectors directly.
+
+        A term the index has never seen is weighted as if one document held it,
+        which is what indexing the text would make of it, under a negative index
+        this function assigns. It counts toward the text's norm and can match the
+        same term in another text vectorized by this function, never a stored
+        vector. Dropping it instead would score two texts on an unindexed topic
+        by the few common words they happen to share.
+
+        The term index and IDF are read once, now. They match the stored vectors
+        only while the index is unchanged since the last build_vectors(); a caller
+        that needs that guarantee holds IndexWriteLock across this call and
+        latest_vectors().
+        """
+        conn = self._connect()
+        total_docs = self._get_doc_count(conn)
+        doc_freqs = self._content_doc_frequencies(conn)
+        conn.close()
+        term_index = self._build_term_index(doc_freqs)
+        unseen_index: dict[str, int] = {}
+
+        def vectorize(text: str) -> dict[int, float]:
+            vec: dict[int, float] = {}
+            for term, count in self._stem_and_count(text).items():
+                df = doc_freqs.get(term)
+                if df:
+                    idx = term_index[term]
+                else:
+                    df = 1
+                    idx = unseen_index.setdefault(term, -1 - len(unseen_index))
+                tfidf = (1.0 + math.log(count)) * math.log(max(total_docs, 1) / df)
+                if tfidf > 0:
+                    vec[idx] = tfidf
+            return vec
+
+        return vectorize
+
+    def latest_vectors(self, source_type: str = "knowledge") -> dict[tuple[str, str], dict[int, float]]:
+        """Stored vectors written by the most recent build_vectors(), keyed by (file_path, heading).
+
+        Every row one build writes shares that build's timestamp. An index last
+        built before build_vectors() cleared the rows it rebuilds can still hold
+        rows from earlier builds, for entries removed since and in an older
+        vocabulary's term indices; the timestamp is what leaves them out.
+        """
+        conn = self._connect()
+        rows = conn.execute(
+            "SELECT file_path, heading, vector, updated_at FROM tfidf_vectors WHERE source_type = ?",
+            (source_type,),
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return {}
+        latest = max(updated_at for *_, updated_at in rows)
+        return {
+            (file_path, heading): deserialize_sparse_vector(blob)
+            for file_path, heading, blob, updated_at in rows
+            if updated_at == latest and blob
+        }
+
     def run_full_analysis(
         self,
         see_also_limit: int = 10,
