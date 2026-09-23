@@ -149,6 +149,22 @@ JSON_OUT=$(bash "$BROKEN_SCRIPTS/capture.sh" --kdir "$KNOWLEDGE_DIR" --scale imp
   --producer-role worker --protocol-slot test --insight "$RATE_LIMIT" --json 2>/dev/null)
 assert_eq "json similar is null" "$(json_field "$JSON_OUT" similar)" "null"
 
+echo "Test 8: captures sharing only a session's provenance are not reported; a duplicate among them is"
+seed_store
+SESSION_FLAGS=(--work-item quarterly-ledger-reconciliation-probe --template-version 9f3c2a1b7d4e
+  --captured-at-branch ledger-reconcile-probe
+  --captured-at-sha 3b9e2c4d8f1a6e7b5c0d9a8f7e6d5c4b3a291807
+  --captured-at-merge-base-sha 7f6e5d4c3b2a19087f6e5d4c3b2a19087f6e5d4c)
+LEDGER="Ledger exports round half-even, so cent totals drift from the bank statement by a cent or two each month."
+capture "${SESSION_FLAGS[@]}" --insight "$LEDGER" >/dev/null
+index_store
+OUT=$(capture "${SESSION_FLAGS[@]}" --insight "The pager rotation skips public holidays and doubles the next person's shift.")
+assert_no_match "unrelated sibling not reported" "$OUT" "[capture] similar entry:"
+assert_no_match "no skip line" "$OUT" "similarity check skipped"
+OUT=$(capture "${SESSION_FLAGS[@]}" --insight "$LEDGER Seen again in the March close.")
+assert_eq "duplicate sibling reported" \
+  "$(count_lines "$OUT" "[capture] similar entry: gotchas/ledger-exports-round-half-even-so-cent-totals-drif.md")" "1"
+
 echo ""
 echo "=== Results ==="
 echo "  Passed: $PASS"

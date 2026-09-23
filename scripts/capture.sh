@@ -13,8 +13,9 @@
 #     line. When omitted, the title is the first eight words of --insight, title-cased.
 #
 # Similar entries:
-#   After filing, the entry is compared with the store's other entries by TF-IDF cosine similarity,
-#   the metric `lore analyze merge-candidates` reports. Each entry at or above the threshold, at
+#   After filing, the entry is compared with the store's other entries by TF-IDF cosine similarity
+#   over their text without the metadata footer, the metric `lore analyze merge-candidates`
+#   reports. Each entry at or above the threshold, at
 #   most three, gets one line after the "Filed to" line:
 #     [capture] similar entry: <category/relative/path.md> (similarity 0.NN)
 #   Only live entries are named: none that has been deleted, and none whose status default search

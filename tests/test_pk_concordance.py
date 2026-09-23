@@ -1692,3 +1692,46 @@ class TestRemovedEntriesAreCleared:
             c["target_path"] != removed and c["source_path"] != removed
             for c in conc.find_merge_candidates(threshold=0.0)
         )
+
+
+# ---------------------------------------------------------------------------
+# HTML comments (the metadata footer) are not content for vectors
+# ---------------------------------------------------------------------------
+
+class TestCommentsLeftOutOfVectors:
+    """build_vectors() and text_vectorizer() both vectorize text with <!-- --> blocks removed."""
+
+    FOOTER_A = ("<!-- learned: 2026-01-01 | work_item: alpha-ledger-probe "
+                "| captured_at_sha: 1111aaaa2222bbbb3333cccc4444dddd5555eeee | status: current -->")
+    FOOTER_B = ("<!-- learned: 2026-02-02 | work_item: omega-pager-probe "
+                "| captured_at_sha: 9999ffff8888eeee7777dddd6666cccc5555bbbb | status: current -->")
+
+    def test_entries_differing_only_in_footer_get_identical_vectors(self, knowledge_dir):
+        body = "# Ledger Rounding\nLedger exports round half-even so cent totals drift.\n"
+        (knowledge_dir / "conventions" / "ledger-a.md").write_text(body + self.FOOTER_A + "\n", encoding="utf-8")
+        (knowledge_dir / "conventions" / "ledger-b.md").write_text(body + self.FOOTER_B + "\n", encoding="utf-8")
+        Indexer(str(knowledge_dir)).index_all()
+        conc = Concordance(os.path.join(str(knowledge_dir), ".pk_search.db"))
+        vecs = {os.path.basename(fp): v for (fp, _), v in conc.latest_vectors().items()}
+        assert vecs["ledger-a.md"] == vecs["ledger-b.md"]
+
+    def test_footer_tokens_stay_searchable(self, knowledge_dir):
+        (knowledge_dir / "conventions" / "ledger-a.md").write_text(
+            "# Ledger Rounding\nLedger exports round half-even.\n" + self.FOOTER_A + "\n", encoding="utf-8")
+        Indexer(str(knowledge_dir)).index_all()
+        conn = sqlite3.connect(os.path.join(str(knowledge_dir), ".pk_search.db"))
+        hits = conn.execute("SELECT count(*) FROM entries WHERE entries MATCH '\"1111aaaa2222bbbb3333cccc4444dddd5555eeee\"'").fetchone()[0]
+        conn.close()
+        assert hits == 1
+
+    def test_vectorizer_ignores_comments(self, indexed_db):
+        vectorize = Concordance(indexed_db).text_vectorizer()
+        text = "Unit tests should cover edge cases and error paths."
+        assert vectorize(text + "\n" + self.FOOTER_A) == vectorize(text)
+        assert vectorize("error<!-- x -->paths") == vectorize("error paths")
+
+    def test_comment_only_document_gets_no_vector(self, knowledge_dir):
+        (knowledge_dir / "conventions" / "only-comment.md").write_text(self.FOOTER_A + "\n", encoding="utf-8")
+        Indexer(str(knowledge_dir)).index_all()
+        conc = Concordance(os.path.join(str(knowledge_dir), ".pk_search.db"))
+        assert not any(fp.endswith("only-comment.md") for fp, _ in conc.latest_vectors())

@@ -3,7 +3,8 @@
 
 Scores the filed entry against every other knowledge entry by TF-IDF cosine
 similarity — the metric `lore analyze merge-candidates` reports, over the same
-stored vectors — and prints one line per entry at or above the threshold, most
+stored vectors, with HTML comments (the metadata footer) left out of the text on
+both sides — and prints one line per entry at or above the threshold, most
 similar first:
 
     [capture] similar entry: <category/relative/path.md> (similarity 0.NN)
@@ -47,11 +48,12 @@ from pk_search import (  # noqa: E402
     IndexWriteLock,
 )
 
-# Held out of the index, the 14 hand-labelled duplicate pairs from the
-# 2026-09-23 merge-candidate list scored 0.54-0.74 against their partner, 12 of
-# them at 0.55 or above; a random entry's best match reaches 0.55 about one time
-# in thirteen.
-DEFAULT_THRESHOLD = 0.55
+# Held out of the index, 11 of 14 hand-labelled duplicate pairs from the
+# 2026-09-23 merge-candidate list scored 0.5 or above against their partner,
+# while none of 198 held-out entries reached 0.5 against a sibling captured in
+# the same session (max 0.48); a random entry's best match reaches 0.5 about
+# one time in twenty-four.
+DEFAULT_THRESHOLD = 0.5
 DEFAULT_LIMIT = 3
 LOCK_WAIT_SECS = 0.5
 
@@ -110,6 +112,8 @@ def read_vector_space(kdir: str, db_path: str):
     concordance = Concordance(db_path)
     try:
         with IndexWriteLock(kdir, wait_secs=LOCK_WAIT_SECS):
+            if not concordance.vectors_exclude_comments():
+                raise Skipped("the search index's vectors predate footer-free similarity; the next index update rebuilds them")
             return concordance.latest_vectors(), concordance.text_vectorizer()
     except IndexLockBusy:
         raise Skipped("the search index is being rebuilt")

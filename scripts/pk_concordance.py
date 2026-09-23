@@ -7,14 +7,43 @@ Uses fts5vocab virtual tables for accurate porter-stemmed term statistics:
   - entry_terms (row-level): corpus-wide document frequency per term
   - entry_terms_instance (instance-level): per-document term occurrences
 
-Dependencies: Python stdlib only (sqlite3, struct, math).
+Vectors are built from what an entry says, not from its bookkeeping: HTML
+comments, the metadata footer among them, are left out of term frequencies
+(strip_html_comments). The FTS index itself keeps them, so search still matches
+footer text.
+
+Dependencies: Python stdlib only (sqlite3, struct, math, re).
 """
 
 import math
+import re
 import sqlite3
 import struct
 import time
 from collections import Counter
+
+
+# ---------------------------------------------------------------------------
+# Comment stripping
+# ---------------------------------------------------------------------------
+
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+# index_meta row a whole build_vectors() run writes, saying its vectors leave
+# comments out. Vectors from before that change still count footer tokens.
+VECTOR_TEXT_KEY = "tfidf_vector_text"
+VECTOR_TEXT_WITHOUT_COMMENTS = "html-comments-removed"
+
+
+def strip_html_comments(text: str) -> str:
+    """Remove every <!-- ... --> block, the metadata footer included.
+
+    A footer's capture SHA, merge-base SHA, work-item slug and template version
+    are rare tokens that every entry captured in one session shares; counted as
+    content, they score unrelated siblings as near-duplicates. Each block becomes
+    a space so the words on either side cannot fuse into a new token.
+    """
+    return _HTML_COMMENT_RE.sub(" ", text)
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +168,22 @@ class Concordance:
 
         return doc_tfs
 
+    def _comment_free_term_frequencies(self, conn: sqlite3.Connection) -> dict[int, Counter]:
+        """Term frequencies recounted without HTML comments, for the documents that have any.
+
+        The instance table counts every token the FTS index holds, footers
+        included, so each document whose content carries a comment is
+        re-tokenized from its stripped text. A document that was nothing but
+        comments comes back with an empty count and gets no vector.
+        """
+        rows = conn.execute(
+            "SELECT rowid, content FROM entries WHERE instr(content, '<!--') > 0"
+        ).fetchall()
+        counts = self._stem_and_count_many(
+            {rowid: strip_html_comments(content) for rowid, content in rows}
+        )
+        return {rowid: counts.get(rowid, Counter()) for rowid, _ in rows}
+
     def _get_entry_rowids(self, conn: sqlite3.Connection, source_type_filter: str | None = None) -> dict[int, tuple[str, str, str]]:
         """Map FTS5 rowids to (file_path, heading, source_type).
 
@@ -158,6 +203,8 @@ class Concordance:
 
         Uses fts5vocab instance table for per-document TF (porter-stemmed) and
         fts5vocab row table for IDF. TF-IDF = (1 + log(tf)) * log(N / df).
+        TF leaves out HTML comments; document frequencies still count the full
+        indexed content, which only changes how the remaining terms are weighed.
 
         The rows being rebuilt are cleared first, in the same transaction, so an
         entry removed from the index since the last build leaves no vector behind.
@@ -178,9 +225,17 @@ class Concordance:
                 conn.execute("DELETE FROM tfidf_vectors")
 
         # Get corpus stats from fts5vocab
+        def record_vector_text() -> None:
+            if not source_type_filter:
+                conn.execute(
+                    "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+                    (VECTOR_TEXT_KEY, VECTOR_TEXT_WITHOUT_COMMENTS),
+                )
+
         total_docs = self._get_doc_count(conn)
         if total_docs == 0:
             clear_rebuilt_rows()
+            record_vector_text()
             conn.commit()
             conn.close()
             return {"vectors_built": 0, "elapsed_seconds": 0.0}
@@ -195,6 +250,7 @@ class Concordance:
 
         # Get per-document term frequencies from instance-level fts5vocab
         doc_tfs = self._get_instance_term_frequencies(conn)
+        doc_tfs.update(self._comment_free_term_frequencies(conn))
 
         # Map rowids to entry metadata
         entry_map = self._get_entry_rowids(conn, source_type_filter)
@@ -230,6 +286,7 @@ class Concordance:
             )
             vectors_built += 1
 
+        record_vector_text()
         conn.commit()
         conn.close()
 
@@ -467,13 +524,20 @@ class Concordance:
         Creates a temporary in-memory FTS5 table to leverage the exact same
         tokenizer used by the main entries table, ensuring term alignment.
         """
+        return Concordance._stem_and_count_many({1: text}).get(1, Counter())
+
+    @staticmethod
+    def _stem_and_count_many(texts: dict[int, str]) -> dict[int, Counter]:
+        """_stem_and_count() for many texts through one in-memory FTS5 table, keyed as given."""
         conn = sqlite3.connect(":memory:")
         conn.execute("CREATE VIRTUAL TABLE _stem USING fts5(t, tokenize='porter unicode61')")
         conn.execute("CREATE VIRTUAL TABLE _stem_v USING fts5vocab(_stem, 'instance')")
-        conn.execute("INSERT INTO _stem(rowid, t) VALUES (1, ?)", (text,))
-        rows = conn.execute("SELECT term FROM _stem_v WHERE col = 't'").fetchall()
+        conn.executemany("INSERT INTO _stem(rowid, t) VALUES (?, ?)", texts.items())
+        counts: dict[int, Counter] = {}
+        for term, doc in conn.execute("SELECT term, doc FROM _stem_v WHERE col = 't'"):
+            counts.setdefault(doc, Counter())[term] += 1
         conn.close()
-        return Counter(r[0] for r in rows)
+        return counts
 
     def build_query_vector(self, query: str) -> dict[int, float]:
         """Build a TF-IDF vector for a query string.
@@ -530,9 +594,10 @@ class Concordance:
     def text_vectorizer(self):
         """Return a function that weighs arbitrary text the way build_vectors() weighs an entry.
 
-        Same porter tokenizer, same content-column IDF, same term index — so the
-        vector of an indexed entry's content equals its stored vector, and the
-        vector of any other text can be compared with stored vectors directly.
+        Same porter tokenizer, same comment stripping, same content-column IDF,
+        same term index — so the vector of an indexed entry's content equals its
+        stored vector, and the vector of any other text can be compared with
+        stored vectors directly.
 
         A term the index has never seen is weighted as if one document held it,
         which is what indexing the text would make of it, under a negative index
@@ -555,7 +620,7 @@ class Concordance:
 
         def vectorize(text: str) -> dict[int, float]:
             vec: dict[int, float] = {}
-            for term, count in self._stem_and_count(text).items():
+            for term, count in self._stem_and_count(strip_html_comments(text)).items():
                 df = doc_freqs.get(term)
                 if df:
                     idx = term_index[term]
@@ -568,6 +633,24 @@ class Concordance:
             return vec
 
         return vectorize
+
+    def vectors_exclude_comments(self) -> bool:
+        """Whether the stored vectors come from a build_vectors() that leaves HTML comments out.
+
+        An index last built before that change holds vectors that still count
+        footer tokens; compared with comment-free text they understate every
+        similarity until the next build replaces them.
+        """
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT value FROM index_meta WHERE key = ?", (VECTOR_TEXT_KEY,)
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        finally:
+            conn.close()
+        return row is not None and row[0] == VECTOR_TEXT_WITHOUT_COMMENTS
 
     def latest_vectors(self, source_type: str = "knowledge") -> dict[tuple[str, str], dict[int, float]]:
         """Stored vectors written by the most recent build_vectors(), keyed by (file_path, heading).

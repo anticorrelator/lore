@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -180,3 +181,58 @@ def test_a_withheld_match_does_not_use_up_the_limit(store, status):
     lines = run_helper(store, entry)
     assert len(lines) == 3
     assert not any("api-rate-limiter-counts-requests" in line for line in lines)
+
+
+SESSION_FOOTER = (
+    "<!-- learned: 2026-09-23 | confidence: high | source: manual "
+    "| related_files: scripts/uploader.sh | producer_role: worker | protocol_slot: implement "
+    "| template_version: 9f3c2a1b7d4e | capturer_role: worker "
+    "| source_artifact_ids: probe-artifact-7731 | work_item: quarterly-ledger-reconciliation-probe "
+    "| scale: implementation | kind: fact | captured_at_branch: ledger-reconcile-probe "
+    "| captured_at_sha: 3b9e2c4d8f1a6e7b5c0d9a8f7e6d5c4b3a291807 "
+    "| captured_at_merge_base_sha: 7f6e5d4c3b2a19087f6e5d4c3b2a19087f6e5d4c | status: current -->"
+)
+
+
+def write_session_entry(kd, rel, body, footer=SESSION_FOOTER):
+    path = kd / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    title = os.path.splitext(os.path.basename(rel))[0].replace("-", " ").title()
+    path.write_text(f"# {title}\n{body}\n{footer}\n", encoding="utf-8")
+    return path
+
+
+def test_entries_sharing_only_a_footer_are_not_reported(store):
+    write_session_entry(store, "gotchas/ledger-export-rounds-half-even.md",
+                        "Ledger exports round half-even, so cent totals drift from the bank statement.")
+    Indexer(str(store)).index_all()
+    entry = write_session_entry(store, "gotchas/pager-rotation-skips-holidays.md",
+                                "The pager rotation skips public holidays and doubles the next shift.")
+    assert run_helper(store, entry) == []
+
+
+def test_a_duplicate_captured_in_the_same_session_is_still_reported(store):
+    write_session_entry(store, "gotchas/ledger-export-rounds-half-even.md",
+                        "Ledger exports round half-even, so cent totals drift from the bank statement.")
+    Indexer(str(store)).index_all()
+    entry = write_session_entry(store, "gotchas/ledger-exports-drift-from-bank.md",
+                                "Ledger exports round half-even, which makes cent totals drift from the bank statement.")
+    assert [line.split(" (similarity")[0] for line in run_helper(store, entry)] == [
+        "[capture] similar entry: gotchas/ledger-export-rounds-half-even.md"
+    ]
+
+
+def test_vectors_built_before_footer_stripping_print_one_skip_line(store):
+    conn = sqlite3.connect(str(store / ".pk_search.db"))
+    conn.execute("DELETE FROM index_meta WHERE key = 'tfidf_vector_text'")
+    conn.commit()
+    conn.close()
+    entry = write_entry(store, "gotchas/rate-limiter-again.md", RATE_LIMIT)
+    lines = run_helper(store, entry)
+    assert len(lines) == 1
+    assert lines[0].startswith("[capture] similarity check skipped: ")
+
+    Indexer(str(store)).build_concordance()
+    assert [line.split(" (similarity")[0] for line in run_helper(store, entry)] == [
+        "[capture] similar entry: gotchas/api-rate-limiter-counts-requests.md"
+    ]
