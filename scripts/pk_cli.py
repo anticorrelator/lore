@@ -23,6 +23,8 @@ import json
 import os
 import sqlite3
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Library imports from the same directory
@@ -66,6 +68,61 @@ def ensure_index_or_exit(searcher: Searcher) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+
+CONCORDANCE_BUILT_KEY = "concordance_built_at"
+CONCORDANCE_REPAIR = (
+    "lore analyze concordance (scores every entry against every other; "
+    "about 2-3 minutes on a ~1,600-entry store)"
+)
+
+
+def concordance_build(db_path: str) -> tuple[int, float | None]:
+    """Return (see_also pair count, epoch of the last recorded build or None)."""
+    conn = sqlite3.connect(db_path)
+    try:
+        pairs = conn.execute(
+            "SELECT count(*) FROM concordance_results WHERE result_type = 'see_also'"
+        ).fetchone()[0]
+        row = conn.execute(
+            "SELECT value FROM index_meta WHERE key = ?", (CONCORDANCE_BUILT_KEY,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return 0, None
+    finally:
+        conn.close()
+    return pairs, float(row[0]) if row else None
+
+
+def describe_concordance_build(built_at: float | None) -> str:
+    if built_at is None:
+        return (
+            "concordance build time not recorded; rerun "
+            "`lore analyze concordance` to record one"
+        )
+    iso = datetime.fromtimestamp(built_at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    hours = int(max(0.0, time.time() - built_at) // 3600)
+    age = f"{hours}h ago" if hours < 48 else f"{hours // 24}d ago"
+    return f"concordance built {iso} ({age})"
+
+
+def require_concordance_or_exit(db_path: str) -> None:
+    """Stop when the similarity table was never built; otherwise say how old it is.
+
+    An unbuilt table reads as zero pairs, which is indistinguishable from a
+    store with no similar entries. A recorded build with zero pairs is an
+    honest empty result and goes through.
+    """
+    pairs, built_at = concordance_build(db_path)
+    if pairs == 0 and built_at is None:
+        print(
+            "Error: the concordance table is empty, so there are no similarity "
+            "pairs to read; an empty result here would not mean none exist.\n"
+            f"Build it first: {CONCORDANCE_REPAIR}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(describe_concordance_build(built_at), file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -643,6 +700,14 @@ def cmd_analyze_concordance(args: argparse.Namespace) -> None:
         related_files_threshold=related_threshold,
     )
 
+    conn = sqlite3.connect(searcher.db_path)
+    conn.execute(
+        "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+        (CONCORDANCE_BUILT_KEY, str(time.time())),
+    )
+    conn.commit()
+    conn.close()
+
     if args.json:
         print(json.dumps(result, indent=2))
         return
@@ -687,6 +752,7 @@ def cmd_analyze_merge_candidates(args: argparse.Namespace) -> None:
 
     searcher = Searcher(args.knowledge_dir)
     ensure_index_or_exit(searcher)
+    require_concordance_or_exit(searcher.db_path)
 
     concordance = Concordance(searcher.db_path)
     threshold = getattr(args, "threshold", 0.5)
@@ -749,6 +815,7 @@ def cmd_generate_backlinks(args: argparse.Namespace) -> None:
     # Ensure index is up to date
     searcher = Searcher(knowledge_dir)
     ensure_index_or_exit(searcher)
+    require_concordance_or_exit(searcher.db_path)
 
     conn = sqlite3.connect(searcher.db_path)
     rows = conn.execute(
@@ -777,6 +844,7 @@ def cmd_generate_backlinks(args: argparse.Namespace) -> None:
         return "/".join(parts)  # include category dir for backlink format
 
     pairs_checked = 0
+    pairs_stale = 0
     links_added = 0
     links_skipped = 0
     added_details: list[dict] = []
@@ -792,8 +860,8 @@ def cmd_generate_backlinks(args: argparse.Namespace) -> None:
         pairs_checked += 1
         target_backlink = f"[[knowledge:{target_slug}]]"
 
-        # Check if target backlink already exists in source file
-        if not os.path.isfile(source_fp):
+        if not (os.path.isfile(source_fp) and os.path.isfile(target_fp)):
+            pairs_stale += 1
             continue
 
         try:
@@ -870,6 +938,7 @@ def cmd_generate_backlinks(args: argparse.Namespace) -> None:
 
     result = {
         "pairs_checked": pairs_checked,
+        "pairs_stale": pairs_stale,
         "links_added": links_added,
         "links_skipped": links_skipped,
         "dry_run": dry_run,
@@ -885,6 +954,7 @@ def cmd_generate_backlinks(args: argparse.Namespace) -> None:
     prefix = "[dry-run] " if dry_run else ""
     print(f"{prefix}Generate backlinks from concordance (threshold >= {threshold}):")
     print(f"  Pairs checked: {pairs_checked}")
+    print(f"  Pairs skipped (entry moved or deleted since the build): {pairs_stale}")
     print(f"  Links {'would add' if dry_run else 'added'}: {links_added}")
     print(f"  Links skipped (already present): {links_skipped}")
     if added_details:

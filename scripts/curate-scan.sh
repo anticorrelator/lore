@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # curate-scan.sh — Mechanical pre-scan for /memory curate
 # Lists quality issues that need judgment: medium-confidence entries,
-# missing backlinks, inbox remnants. Does NOT modify files.
+# duplicate candidates, inbox remnants. Does not modify entries; the only
+# write is _meta/renormalize-flags.json.
 #
 # Usage: bash curate-scan.sh [knowledge_dir]
 
@@ -34,57 +35,79 @@ if [[ -d "$INBOX_DIR" ]]; then
   fi
 fi
 
-# 2. Medium-confidence entries (scan category directories)
+# 2. Medium-confidence entries (category directories at any depth)
+MEDIUM_ENTRIES=$(
+  for dir in "$KDIR"/*/; do
+    dir="${dir%/}"
+    [[ -d "$dir" && "$(basename "$dir")" != _* ]] || continue
+    find "$dir" -type d -name '_*' -prune -o -type f -name '*.md' -print0
+  done | xargs -0 grep -l 'confidence: medium' 2>/dev/null | sort
+) || true
+
 MEDIUM_TOTAL=0
-for dir in "$KDIR"/*/; do
-  [[ -d "$dir" ]] || continue
-  DIRNAME=$(basename "$dir")
-  [[ "$DIRNAME" == _* ]] && continue
-
-  for f in "$dir"*.md; do
-    [[ -e "$f" ]] || continue
-    if grep -q 'confidence: medium' "$f" 2>/dev/null; then
-      if [[ "$MEDIUM_TOTAL" -eq 0 ]]; then
-        echo "## Medium-confidence entries (need quality gate review):"
-      fi
-      RELPATH="${f#$KDIR/}"
-      echo "  $RELPATH"
-      MEDIUM_TOTAL=$((MEDIUM_TOTAL + 1))
-    fi
-  done
-done
-
-if [[ "$MEDIUM_TOTAL" -gt 0 ]]; then
+if [[ -n "$MEDIUM_ENTRIES" ]]; then
+  echo "## Medium-confidence entries (need quality gate review):"
+  while IFS= read -r f; do
+    echo "  ${f#$KDIR/}"
+    MEDIUM_TOTAL=$((MEDIUM_TOTAL + 1))
+  done <<< "$MEDIUM_ENTRIES"
   echo "  Total: $MEDIUM_TOTAL"
   echo ""
   ISSUES=$((ISSUES + MEDIUM_TOTAL))
 fi
 
-# 3. Entries without backlinks (scan category directories)
-NO_BACKLINKS=0
-for dir in "$KDIR"/*/; do
-  [[ -d "$dir" ]] || continue
-  DIRNAME=$(basename "$dir")
-  [[ "$DIRNAME" == _* ]] && continue
+# 3. Duplicate candidates — near-identical pairs from the concordance build.
+#    First output line is the pair count; the rest is the section.
+if DUP_REPORT=$(python3 - "$KDIR" "$SCRIPT_DIR" <<'PY'
+import os
+import sys
 
-  for f in "$dir"*.md; do
-    [[ -e "$f" ]] || continue
-    if ! grep -q '\[\[' "$f" 2>/dev/null; then
-      if [[ $NO_BACKLINKS -eq 0 ]]; then
-        echo "## Entries without backlinks:"
-      fi
-      RELPATH="${f#$KDIR/}"
-      echo "  $RELPATH"
-      NO_BACKLINKS=$((NO_BACKLINKS + 1))
-    fi
-  done
-done
+kdir, script_dir = sys.argv[1], sys.argv[2]
+sys.path.insert(0, script_dir)
+from pk_cli import CONCORDANCE_REPAIR, concordance_build, describe_concordance_build
+from pk_concordance import Concordance
+from pk_search import DB_FILENAME
 
-if [[ $NO_BACKLINKS -gt 0 ]]; then
-  echo "  Total: $NO_BACKLINKS"
-  echo ""
-  ISSUES=$((ISSUES + NO_BACKLINKS))
+THRESHOLD = 0.6
+SHOWN = 20
+
+db_path = os.path.join(kdir, DB_FILENAME)
+pairs, built_at = concordance_build(db_path) if os.path.isfile(db_path) else (0, None)
+if pairs == 0 and built_at is None:
+    print(0)
+    print("## Duplicate candidates: check did not run (no concordance build to read)")
+    print(f"  Build one with {CONCORDANCE_REPAIR}.")
+    sys.exit()
+
+candidates = []
+gone = 0
+for c in Concordance(db_path).find_merge_candidates(threshold=THRESHOLD):
+    if os.path.isfile(c["target_path"]) and os.path.isfile(c["source_path"]):
+        candidates.append(c)
+    else:
+        gone += 1
+
+print(len(candidates))
+print(f"## Duplicate candidates (similarity >= {THRESHOLD}): {len(candidates)}")
+print(f"  {describe_concordance_build(built_at)}")
+for c in candidates[:SHOWN]:
+    print(f"  {c['similarity']:.2f}  {os.path.relpath(c['target_path'], kdir)}")
+    print(f"        <-> {os.path.relpath(c['source_path'], kdir)}")
+if len(candidates) > SHOWN:
+    print(f"  ... and {len(candidates) - SHOWN} more")
+if gone:
+    print(f"  {gone} more pair(s) name an entry moved or deleted since the build")
+PY
+); then
+  DUP_COUNT="${DUP_REPORT%%$'\n'*}"
+  echo "${DUP_REPORT#*$'\n'}"
+else
+  DUP_COUNT=0
+  echo "## Duplicate candidates: check did not run (the similarity reader failed; see stderr)"
 fi
+echo ""
+[[ "$DUP_COUNT" =~ ^[0-9]+$ ]] || DUP_COUNT=0
+ISSUES=$((ISSUES + DUP_COUNT))
 
 # 4. Renormalize flags — detect categories needing reorganization
 #    Writes _meta/renormalize-flags.json with:

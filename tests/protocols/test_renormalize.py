@@ -56,3 +56,10 @@ def test_staleness_analysis_step(renorm: str) -> None:
     """Staleness analysis must be run in Step 2."""
     body = extract_section(renorm, "Step 1: Analyze (direct verbs)")
     assert "staleness" in body.lower(), "staleness analysis not in Step 2"
+
+
+def test_concordance_built_before_merge_candidates(renorm: str) -> None:
+    """merge-candidates reads the concordance table, so Step 1 must build it first."""
+    body = extract_section(renorm, "Step 1: Analyze (direct verbs)")
+    assert "lore analyze concordance" in body, "Step 1 does not build the concordance table"
+    assert body.index("lore analyze concordance") < body.index("lore analyze merge-candidates")

@@ -79,6 +79,7 @@ Deterministic analysis is lead-run, never dispatched:
 ```bash
 lore analyze staleness --json        # writes $KDIR/_meta/staleness-report.json
 lore analyze usage --json --write    # writes $KDIR/_meta/usage-report.json
+lore analyze concordance --json      # fills the similarity table; ~2-3 min on ~1,600 entries
 lore analyze merge-candidates        # writes $KDIR/_meta/merge-candidates.json
 ```
 

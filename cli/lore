@@ -216,7 +216,9 @@ Subcommands:
   staleness         Scan entries for staleness (age, confidence, missing files)
   usage             Analyze entry access patterns from retrieval logs
   concordance       Compute see-also and related-files via TF-IDF similarity
+                    (about 2-3 min on a ~1,600-entry store)
   merge-candidates  Find knowledge entries that may be duplicates
+                    (reads the concordance build; refuses if it was never run)
 
 Options:
   --help, -h    Show this help
@@ -1346,7 +1348,8 @@ cmd_analyze_concordance() {
   if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo "Usage: lore analyze concordance [--json] [--see-also-limit N] [--related-files-threshold F]" >&2
     echo "  Compute see-also and related-files for all knowledge entries via TF-IDF." >&2
-    echo "  Stores results in the concordance_results table." >&2
+    echo "  Stores results in the concordance_results table and records the build time." >&2
+    echo "  Takes about 2-3 minutes on a ~1,600-entry store." >&2
     return 0
   fi
 
@@ -1360,6 +1363,8 @@ cmd_analyze_merge_candidates() {
   if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo "Usage: lore analyze merge-candidates [--threshold F] [--json]" >&2
     echo "  Find knowledge entries that may be duplicates (high similarity)." >&2
+    echo "  Reads the concordance build: exits non-zero if 'lore analyze concordance'" >&2
+    echo "  has never run, and prints the build time otherwise." >&2
     echo "  Writes report to _meta/merge-candidates.json and prints a summary." >&2
     return 0
   fi
