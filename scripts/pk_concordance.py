@@ -159,8 +159,11 @@ class Concordance:
         Uses fts5vocab instance table for per-document TF (porter-stemmed) and
         fts5vocab row table for IDF. TF-IDF = (1 + log(tf)) * log(N / df).
 
+        The rows being rebuilt are cleared first, in the same transaction, so an
+        entry removed from the index since the last build leaves no vector behind.
+
         Args:
-            source_type_filter: If set, only build vectors for entries of this source_type.
+            source_type_filter: If set, only build (and clear) vectors for entries of this source_type.
 
         Returns:
             Stats dict with vectors_built, elapsed_seconds.
@@ -168,9 +171,17 @@ class Concordance:
         start_time = time.time()
         conn = self._connect()
 
+        def clear_rebuilt_rows() -> None:
+            if source_type_filter:
+                conn.execute("DELETE FROM tfidf_vectors WHERE source_type = ?", (source_type_filter,))
+            else:
+                conn.execute("DELETE FROM tfidf_vectors")
+
         # Get corpus stats from fts5vocab
         total_docs = self._get_doc_count(conn)
         if total_docs == 0:
+            clear_rebuilt_rows()
+            conn.commit()
             conn.close()
             return {"vectors_built": 0, "elapsed_seconds": 0.0}
 
@@ -188,6 +199,7 @@ class Concordance:
         # Map rowids to entry metadata
         entry_map = self._get_entry_rowids(conn, source_type_filter)
 
+        clear_rebuilt_rows()
         vectors_built = 0
         now = time.time()
 
@@ -524,9 +536,6 @@ class Concordance:
         start_time = time.time()
         conn = self._connect()
 
-        # Clear previous results
-        conn.execute("DELETE FROM concordance_results")
-
         # Get all knowledge entries
         rows = conn.execute(
             "SELECT DISTINCT file_path, heading FROM entries WHERE source_type = 'knowledge'"
@@ -537,8 +546,10 @@ class Concordance:
         see_also_pairs = 0
         related_file_pairs = 0
 
-        # Use a single connection for all inserts
+        # Use a single connection for all inserts. Previous results are cleared
+        # in the same transaction, so readers see the old set or the new one.
         write_conn = self._connect()
+        write_conn.execute("DELETE FROM concordance_results")
 
         for file_path, heading in rows:
             # See-also: similar knowledge entries

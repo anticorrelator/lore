@@ -1542,3 +1542,77 @@ class TestComputeVocabularyDrift:
         for name in result["detail"]["absent_term_names"]:
             assert isinstance(name, str)
             assert not name.startswith("<unknown:")
+
+
+# ---------------------------------------------------------------------------
+# Removed entries leave no vectors or concordance pairs behind
+# ---------------------------------------------------------------------------
+
+class TestRemovedEntriesAreCleared:
+    """A deleted entry must not survive a rebuild in tfidf_vectors or concordance_results."""
+
+    def test_build_vectors_drops_vectors_of_removed_entries(self, knowledge_dir):
+        idx = Indexer(str(knowledge_dir))
+        idx.index_all()
+        removed = knowledge_dir / "conventions" / "database-naming.md"
+        removed.unlink()
+        idx.incremental_index()
+
+        conc = Concordance(os.path.join(str(knowledge_dir), ".pk_search.db"))
+        paths = {e["file_path"] for e in conc.get_all_vectors()}
+        assert str(removed) not in paths
+        assert len(paths) == 3
+
+    def test_build_vectors_with_filter_keeps_other_source_types(self, indexed_db):
+        conn = sqlite3.connect(indexed_db)
+        conn.execute(
+            "INSERT INTO tfidf_vectors (file_path, heading, vector, source_type, updated_at) "
+            "VALUES ('/repo/tool.py', 'tool.py', ?, 'source', 1.0)",
+            (serialize_sparse_vector({0: 1.0}),),
+        )
+        conn.commit()
+        conn.close()
+
+        conc = Concordance(indexed_db)
+        conc.build_vectors(source_type_filter="knowledge")
+        assert [e["file_path"] for e in conc.get_all_vectors(source_type="source")] == ["/repo/tool.py"]
+
+    def test_build_vectors_on_emptied_index_clears_vectors(self, knowledge_dir):
+        idx = Indexer(str(knowledge_dir))
+        idx.index_all()
+        for entry in (knowledge_dir / "conventions").glob("*.md"):
+            entry.unlink()
+        idx.incremental_index()
+        idx.build_concordance()
+
+        conc = Concordance(os.path.join(str(knowledge_dir), ".pk_search.db"))
+        assert conc.get_all_vectors() == []
+
+    def test_full_analysis_drops_pairs_of_removed_entries(self, knowledge_dir):
+        idx = Indexer(str(knowledge_dir))
+        idx.index_all()
+        db_path = os.path.join(str(knowledge_dir), ".pk_search.db")
+        conc = Concordance(db_path)
+        conc.run_full_analysis()
+        removed = str(knowledge_dir / "conventions" / "test-architecture.md")
+
+        def mentions_removed():
+            conn = sqlite3.connect(db_path)
+            try:
+                return conn.execute(
+                    "SELECT count(*) FROM concordance_results "
+                    "WHERE file_path = ? OR similar_entry_path = ?",
+                    (removed, removed),
+                ).fetchone()[0]
+            finally:
+                conn.close()
+
+        assert mentions_removed() > 0
+        os.unlink(removed)
+        idx.incremental_index()
+        conc.run_full_analysis()
+        assert mentions_removed() == 0
+        assert all(
+            c["target_path"] != removed and c["source_path"] != removed
+            for c in conc.find_merge_candidates(threshold=0.0)
+        )
