@@ -152,7 +152,7 @@ Build `<comments.json>` from the findings that carry an honest `file` + `line` a
 ## Step 6: Capture
 
 ```
-/remember PR blast radius analysis from PR #<N> — capture: cross-module dependency patterns, interface contract conventions, consumer update requirements discovered in the codebase. Use confidence: medium for reviewer observations. Skip: findings specific to this PR that don't generalize, one-off consumer lists, repo-specific import topology.
+/remember PR blast radius analysis from PR #<N> — capture: cross-module dependency patterns, interface contract conventions, consumer update requirements discovered in the codebase. Verify each claim against the code before capturing it; skip what you can't verify. Skip: findings specific to this PR that don't generalize, one-off consumer lists, repo-specific import topology.
 ```
 
 ## Error Handling

@@ -417,25 +417,6 @@ After capturing:
 - Run `lore heal`.
 - If a plan was updated, run `lore work heal`.
 
-### Renormalize check
-
-After running heal, check for renormalize flags:
-
-```bash
-cat "$KNOWLEDGE_DIR/_meta/renormalize-flags.json" 2>/dev/null
-```
-
-If the file exists, sum flags across `oversized_categories`, `stale_related_files`, `zero_access_entries`. If **2 or more total**, append to Step 6 report:
-
-```
-  [renormalize] N flags detected (oversized: X, stale refs: Y, zero-access: Z) — run /memory renormalize
-```
-
-If 1 flag:
-```
-  [renormalize] 1 flag (oversized: conventions at 41 entries) — /memory renormalize available when ready
-```
-
 ### Step 8: Resume work
 
 After the checkpoint, return to whatever was being worked on. The checkpoint is a pause, not a redirect.

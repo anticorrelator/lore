@@ -66,13 +66,13 @@ Show the script output. For top matches, briefly summarize relevant context. Dec
 
 ### `curate`
 
-Periodic refinement of the knowledge store (optional, not required).
+Backlog cleanup, run when the owner chooses. The session that meets a title, a near-duplicate or a contradicted entry settles it in-band (see the Capture and Organization protocols). Curate reaches what those checks don't: older entries, and anything they missed.
 
 Start with the mechanical pre-scan:
 ```bash
 lore curate
 ```
-This lists inbox remnants, medium-confidence entries, and entries missing backlinks. Then apply judgment:
+It lists inbox remnants, medium-confidence entries, duplicate candidates from the concordance build, and entries whose related files no longer exist. Entries that search withholds by default (retired, superseded, historical, …) are left out and counted. A section that couldn't run says so, so a missing duplicate list never reads as a clean result. Then apply judgment:
 
 1. **Refile inbox remnants:** If `$KDIR/_inbox/` has `.md` files (from interrupted captures), review each and either file to the correct category or drop.
 2. **Quality gate for medium-confidence entries (per-entry agent-evaluator):** Scan entry files for `confidence: medium` in their HTML comment metadata (typically from agent captures). For each entry, the evaluator (you, the agent running `/memory curate`) records a one-line verdict naming the gate-leg decision, then aggregates the verdicts into the summary report at step 7 below. The evaluator IS the quality-gate; the retirement authority at step 8's "Retirement authority" note still applies.
@@ -102,9 +102,13 @@ This lists inbox remnants, medium-confidence entries, and entries missing backli
    5. **Stable at architecture or subsystem altitude** — tag the entry `architecture`, `subsystem`, or `architecture,subsystem`. Implementation-scale orientation is malformed — route to the 4-condition gate as a fact, or drop.
 
    Retire entries that fail BOTH gates. Upgrade passing entries to `confidence: high`. If an orientation-shaped entry passes the orientation gate but its current `--scale` is `implementation`, fix the scale tag — do not silently downgrade by retiring it as a fact.
-3. **Deduplicate:** Merge entries that describe the same insight from different contexts.
-4. **Backlinks:** Add missing `[[backlinks]]` cross-references between related entries.
-5. **Title quality:** Improve vague or generic titles to be specific and scannable.
+3. **Duplicate candidates:** Read both entries of each listed pair.
+   - Same claim: keep the better-anchored, more current one and retire the other with `lore retire <path> --superseded-by <kept>`.
+   - One overturns the other: the older one is wrong, so `lore correct` it.
+   - They only share a subject: both stand.
+   If the scan says the duplicate check did not run, build the similarity table first (`lore analyze concordance`, about 2–3 minutes).
+4. **Missing related files:** An entry whose anchors are gone usually describes a removed subsystem. If the claim no longer holds anywhere, retire it and name the removal in the reason. If the code moved, point the entry at its new home.
+5. **Title quality:** Older entries were titled with the first eight words of their claim and often stop mid-sentence. Rewrite those titles so they state the claim.
 6. **Stale entries:** An entry that contradicts current code is wrong, not merely unneeded — resolve it through `lore correct <entry>` (rewrite, or `--dispute` to leave a dated marker) rather than retiring it.
 7. Report what was found and fixed. Include the per-entry evaluator rollup from step 2 so the user can object to specific retirements or escalations:
    ```
@@ -116,9 +120,10 @@ This lists inbox remnants, medium-confidence entries, and entries missing backli
        high-cost-to-verify: <count>
        low-surface-area: <count>
      Escalated: E entries (surfaced via AskUserQuestion)
-     Merged: N duplicates
+     Duplicates settled: N
+     Missing-file entries resolved: N
      Upgraded: N to high confidence
-     Backlinks added: N
+     Titles rewritten: N
    ```
    Omit retirement-reason or escalation rows whose count is zero.
 8. Run `lore heal`

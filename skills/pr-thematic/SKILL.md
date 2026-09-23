@@ -139,7 +139,7 @@ Build `<comments.json>` from the findings that carry an honest `file` + `line` a
 ## Step 6: Capture
 
 ```
-/remember PR thematic analysis from PR #<N> — capture: scope management patterns, PR decomposition conventions, thematic coherence signals discovered in the codebase. Use confidence: medium for reviewer observations. Skip: findings specific to this PR that don't generalize, per-file alignment details, one-off scope decisions.
+/remember PR thematic analysis from PR #<N> — capture: scope management patterns, PR decomposition conventions, thematic coherence signals discovered in the codebase. Verify each claim against the code before capturing it; skip what you can't verify. Skip: findings specific to this PR that don't generalize, per-file alignment details, one-off scope decisions.
 ```
 
 ## Error Handling

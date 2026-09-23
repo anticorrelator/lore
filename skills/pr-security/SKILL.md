@@ -171,7 +171,7 @@ Build `<comments.json>` from the findings that carry an honest `file` + `line` a
 ## Step 6: Capture
 
 ```
-/remember PR security analysis from PR #<N> — capture: security patterns and conventions observed in the codebase, auth/authz architecture, input validation approaches, cryptographic usage patterns, secrets management practices. Use confidence: medium for reviewer observations. Skip: findings specific to this PR that don't generalize, style preferences.
+/remember PR security analysis from PR #<N> — capture: security patterns and conventions observed in the codebase, auth/authz architecture, input validation approaches, cryptographic usage patterns, secrets management practices. Verify each claim against the code before capturing it; skip what you can't verify. Skip: findings specific to this PR that don't generalize, style preferences.
 ```
 
 ## Error Handling

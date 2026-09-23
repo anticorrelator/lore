@@ -146,7 +146,7 @@ All review skills enrich substantive findings with context from the knowledge st
 
 ### Capture Convention
 
-All review skills end with `/remember` using review-scoped constraints. The key difference from standard capture: insights from external reviewers use `confidence: medium` (not `high`) because reviewer observations haven't been verified against codebase internals. The `/remember` invocation includes explicit skip criteria for style preferences, naming opinions, and subjective taste.
+All review skills end with `/remember` using review-scoped constraints. Review captures meet the same bar as any other: a reviewer checks each claim against the code before filing it and skips what it can't check. An unverified observation isn't filed at lower confidence for someone else to verify later. The `/remember` invocation includes explicit skip criteria for style preferences, naming opinions, and subjective taste.
 
 ### Output Convention
 

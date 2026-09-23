@@ -162,7 +162,7 @@ Build `<comments.json>` from the findings that carry an honest `file` + `line` a
 ## Step 6: Capture
 
 ```
-/remember PR test quality analysis from PR #<N> — capture: testing conventions, assertion patterns, tautological test anti-patterns, edge case coverage expectations discovered in the codebase. Use confidence: medium for reviewer observations. Skip: findings specific to this PR that don't generalize, test file names, one-off coverage gaps.
+/remember PR test quality analysis from PR #<N> — capture: testing conventions, assertion patterns, tautological test anti-patterns, edge case coverage expectations discovered in the codebase. Verify each claim against the code before capturing it; skip what you can't verify. Skip: findings specific to this PR that don't generalize, test file names, one-off coverage gaps.
 ```
 
 ## Error Handling

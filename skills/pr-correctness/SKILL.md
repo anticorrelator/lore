@@ -147,7 +147,7 @@ Build `<comments.json>` from the findings that carry an honest `file` + `line` a
 ## Step 6: Capture
 
 ```
-/remember PR correctness analysis from PR #<N> — capture: non-obvious correctness patterns, error handling conventions, type safety gotchas discovered in the codebase. Use confidence: medium for reviewer observations. Skip: findings specific to this PR that don't generalize, style preferences, naming opinions.
+/remember PR correctness analysis from PR #<N> — capture: non-obvious correctness patterns, error handling conventions, type safety gotchas discovered in the codebase. Verify each claim against the code before capturing it; skip what you can't verify. Skip: findings specific to this PR that don't generalize, style preferences, naming opinions.
 ```
 
 ## Error Handling

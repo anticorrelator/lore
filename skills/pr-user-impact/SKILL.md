@@ -181,7 +181,7 @@ Build `<comments.json>` from the findings that carry an honest `file` + `line` a
 ## Step 6: Capture
 
 ```
-/remember PR user impact analysis from PR #<N> — capture: user-impact design trade-offs, workflow assumptions, UX patterns discovered in the codebase. Use confidence: medium for reviewer observations. Skip: findings specific to this PR that don't generalize, subjective preferences without concrete user impact.
+/remember PR user impact analysis from PR #<N> — capture: user-impact design trade-offs, workflow assumptions, UX patterns discovered in the codebase. Verify each claim against the code before capturing it; skip what you can't verify. Skip: findings specific to this PR that don't generalize, subjective preferences without concrete user impact.
 ```
 
 ## Error Handling
