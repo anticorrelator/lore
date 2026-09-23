@@ -35,6 +35,7 @@ from pk_search import (  # noqa: E402
     Stats,
     LinkChecker,
     DEFAULT_LIMIT,
+    DEFAULT_STATUS_FILTER,
     DEFAULT_THRESHOLD,
     DEGRADED_UNAVAILABLE,
     SOURCE_TYPES,
@@ -43,6 +44,7 @@ from pk_search import (  # noqa: E402
     status_excluded_totals,
     withheld_retired_notice,
 )
+from pk_markdown import MarkdownParser  # noqa: E402
 from pk_resolve import Resolver, resolve_read_path  # noqa: E402
 import pk_retrieval  # noqa: E402
 
@@ -123,6 +125,22 @@ def require_concordance_or_exit(db_path: str) -> None:
         )
         sys.exit(1)
     print(describe_concordance_build(built_at), file=sys.stderr)
+
+
+def withheld_status(path: str) -> str | None:
+    """The entry's status when search leaves it out by default, else None."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    status = MarkdownParser._extract_metadata(text)["entry_status"] or "current"
+    return None if status in DEFAULT_STATUS_FILTER else status
+
+
+def describe_statuses(counts: dict[str, int]) -> str:
+    """'superseded 2, retired 1' — most frequent first."""
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return ", ".join(f"{status} {n}" for status, n in ordered)
 
 
 # ---------------------------------------------------------------------------

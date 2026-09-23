@@ -35,20 +35,22 @@ if [[ -d "$INBOX_DIR" ]]; then
   fi
 fi
 
-# 2. Medium-confidence entries (category directories at any depth). Retired
-#    entries need no review. First output line is the entry count; the rest
-#    is the section.
+# 2. Medium-confidence entries (category directories at any depth). Entries
+#    search leaves out by default need no review. First output line is the
+#    entry count; the rest is the section.
 if MEDIUM_REPORT=$(python3 - "$KDIR" "$SCRIPT_DIR" <<'PY'
 import os
 import sys
+from collections import Counter
 
 kdir, script_dir = sys.argv[1], sys.argv[2]
 sys.path.insert(0, script_dir)
+from pk_cli import describe_statuses, withheld_status
 from pk_markdown import MarkdownParser
 from pk_search import CATEGORY_DIRS
 
 medium = []
-retired = 0
+withheld = Counter()
 for cat in sorted(CATEGORY_DIRS):
     for root, dirs, files in os.walk(os.path.join(kdir, cat)):
         dirs[:] = [d for d in dirs if not d.startswith("_")]
@@ -62,19 +64,23 @@ for cat in sorted(CATEGORY_DIRS):
                 continue
             if (meta["confidence"] or "").lower() != "medium":
                 continue
-            if meta["entry_status"] == "retired":
-                retired += 1
+            status = withheld_status(path)
+            if status:
+                withheld[status] += 1
             else:
                 medium.append(os.path.relpath(path, kdir))
 
 print(len(medium))
-if medium or retired:
+if medium or withheld:
     print("## Medium-confidence entries (need quality gate review):")
     for rel in sorted(medium):
         print(f"  {rel}")
     print(f"  Total: {len(medium)}")
-    if retired:
-        print(f"  Left out: {retired} retired")
+    if withheld:
+        print(
+            f"  Left out: {sum(withheld.values())} kept for the record "
+            f"({describe_statuses(withheld)})"
+        )
 PY
 ); then
   MEDIUM_TOTAL="${MEDIUM_REPORT%%$'\n'*}"
@@ -96,12 +102,18 @@ ISSUES=$((ISSUES + MEDIUM_TOTAL))
 if DUP_REPORT=$(python3 - "$KDIR" "$SCRIPT_DIR" <<'PY'
 import os
 import sys
+from collections import Counter
 
 kdir, script_dir = sys.argv[1], sys.argv[2]
 sys.path.insert(0, script_dir)
-from pk_cli import CONCORDANCE_REPAIR, concordance_build, describe_concordance_build
+from pk_cli import (
+    CONCORDANCE_REPAIR,
+    concordance_build,
+    describe_concordance_build,
+    describe_statuses,
+    withheld_status,
+)
 from pk_concordance import Concordance
-from pk_markdown import MarkdownParser
 from pk_search import DB_FILENAME
 
 THRESHOLD = 0.6
@@ -115,22 +127,16 @@ if pairs == 0 and built_at is None:
     print(f"  Build one with {CONCORDANCE_REPAIR}.")
     sys.exit()
 
-
-def is_retired(path):
-    try:
-        text = open(path, encoding="utf-8").read()
-    except (OSError, UnicodeDecodeError):
-        return False
-    return MarkdownParser._extract_metadata(text)["entry_status"] == "retired"
-
-
 candidates = []
-gone = retired = 0
+gone = 0
+withheld = Counter()
 for c in Concordance(db_path).find_merge_candidates(threshold=THRESHOLD):
     if not (os.path.isfile(c["target_path"]) and os.path.isfile(c["source_path"])):
         gone += 1
-    elif is_retired(c["target_path"]) or is_retired(c["source_path"]):
-        retired += 1
+        continue
+    status = withheld_status(c["target_path"]) or withheld_status(c["source_path"])
+    if status:
+        withheld[status] += 1
     else:
         candidates.append(c)
 
@@ -142,8 +148,11 @@ for c in candidates[:SHOWN]:
     print(f"        <-> {os.path.relpath(c['source_path'], kdir)}")
 if len(candidates) > SHOWN:
     print(f"  ... and {len(candidates) - SHOWN} more")
-if retired:
-    print(f"  Left out: {retired} pair(s) naming a retired entry")
+if withheld:
+    print(
+        f"  Left out: {sum(withheld.values())} pair(s) naming an entry kept for the "
+        f"record ({describe_statuses(withheld)})"
+    )
 if gone:
     print(f"  Left out: {gone} pair(s) naming an entry moved or deleted since the build")
 PY
@@ -172,10 +181,11 @@ import importlib.util
 import json
 import os
 import sys
+from collections import Counter
 
 kdir, repo_root, script_dir = sys.argv[1], sys.argv[2], sys.argv[3]
 sys.path.insert(0, script_dir)
-from pk_markdown import MarkdownParser
+from pk_cli import describe_statuses, withheld_status
 from pk_search import CATEGORY_DIRS
 
 spec = importlib.util.spec_from_file_location(
@@ -203,7 +213,7 @@ def related_file_exists(path):
     return any(os.path.exists(os.path.join(root, path)) for root in (repo_root, kdir))
 
 
-retired = 0
+withheld = Counter()
 if repo_root:
     for cat in sorted(CATEGORY_DIRS):
         for root, dirs, files in os.walk(os.path.join(kdir, cat)):
@@ -216,9 +226,9 @@ if repo_root:
                 missing = [r for r in related if not related_file_exists(r)]
                 if not missing:
                     continue
-                text = open(fpath, encoding="utf-8").read()
-                if MarkdownParser._extract_metadata(text)["entry_status"] == "retired":
-                    retired += 1
+                status = withheld_status(fpath)
+                if status:
+                    withheld[status] += 1
                     continue
                 flags["stale_related_files"].append(
                     {"entry": os.path.relpath(fpath, kdir), "missing": missing}
@@ -248,8 +258,11 @@ else:
         print(f"    {e['entry']}: missing {', '.join(e['missing'])}")
     if len(stale) > SHOWN:
         print(f"    ... and {len(stale) - SHOWN} more (all in _meta/renormalize-flags.json)")
-if retired:
-    print(f"  Left out: {retired} retired")
+if withheld:
+    print(
+        f"  Left out: {sum(withheld.values())} kept for the record "
+        f"({describe_statuses(withheld)})"
+    )
 if stale:
     print("")
     print("  Run /memory renormalize to address structural issues.")

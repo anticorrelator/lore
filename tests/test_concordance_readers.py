@@ -231,35 +231,55 @@ class TestCurateScan:
         assert "architecture/database-sharding.md" in result.stdout
         assert "<-> conventions/sharding-restated.md" in result.stdout
 
-    def test_medium_section_leaves_out_retired_entries(self, kdir):
-        _write(
-            kdir / "gotchas" / "deep" / "under-review.md",
-            "# Under Review\nText.\n<!-- learned: 2025-03-01 | confidence: medium -->\n",
-        )
-        _write(
-            kdir / "gotchas" / "deep" / "already-retired.md",
-            "# Already Retired\nText.\n"
-            "<!-- learned: 2025-03-01 | confidence: medium | status: retired -->\n",
-        )
+    def test_medium_section_leaves_out_entries_kept_for_the_record(self, kdir):
+        def medium(name, status=""):
+            _write(
+                kdir / "gotchas" / "deep" / f"{name}.md",
+                f"# {name}\nText.\n<!-- learned: 2025-03-01 | confidence: medium{status} -->\n",
+            )
+
+        medium("under-review")
+        medium("was-corrected", " | status: corrected")
+        medium("already-retired", " | status: retired")
+        medium("was-superseded", " | status: superseded")
 
         result = _scan(kdir)
 
         assert result.returncode == 0, result.stderr
         assert "  gotchas/deep/under-review.md\n" in result.stdout
+        assert "  gotchas/deep/was-corrected.md\n" in result.stdout
         assert "already-retired" not in result.stdout
-        assert "  Total: 1\n  Left out: 1 retired\n" in result.stdout
+        assert "was-superseded" not in result.stdout
+        assert (
+            "  Total: 2\n  Left out: 2 kept for the record (retired 1, superseded 1)\n"
+            in result.stdout
+        )
 
-    def test_duplicate_section_leaves_out_pairs_naming_a_retired_entry(self, kdir):
+    def test_duplicate_section_leaves_out_pairs_naming_an_entry_kept_for_the_record(self, kdir):
+        cache = (
+            "Redis evicts keys with an allkeys-lru policy once maxmemory is reached; "
+            "warm the cache after a failover before routing reads to it.\n"
+        )
+        _write(kdir / "workflows" / "cache-warmup.md", "# Cache Warmup\n" + cache)
+        _write(kdir / "workflows" / "cache-warmup-again.md", "# Cache Warmup Again\n" + cache)
         _build(kdir)
         _write(
             kdir / "conventions" / "sharding-restated.md",
             "# Sharding Restated\n" + SHARDING
             + "<!-- learned: 2025-02-16 | confidence: high | status: retired -->\n",
         )
+        _write(
+            kdir / "workflows" / "cache-warmup-again.md",
+            "# Cache Warmup Again\n" + cache
+            + "<!-- learned: 2025-02-18 | confidence: high | status: historical -->\n",
+        )
 
         result = _scan(kdir)
 
         assert result.returncode == 0, result.stderr
         assert "## Duplicate candidates (similarity >= 0.6): 0" in result.stdout
-        assert "Left out: 1 pair(s) naming a retired entry" in result.stdout
+        assert (
+            "Left out: 2 pair(s) naming an entry kept for the record (historical 1, retired 1)"
+            in result.stdout
+        )
         assert "<-> conventions/sharding-restated.md" not in result.stdout
