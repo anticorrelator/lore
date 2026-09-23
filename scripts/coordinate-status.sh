@@ -86,6 +86,9 @@ json_mode = sys.argv[3] == "1"
 observed_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 SESSION_EVENTS = set(os.environ["SESSION_EVENT_VOCAB"].split())
+# Retired tokens stay in old journal rows. quiescent always fired paired with
+# needs_input on the same edge (removed in 36ca1dec), so skipping it drops nothing.
+RETIRED_SESSION_EVENTS = {"quiescent"}
 RETRO_ACTIONS = set(os.environ["RETRO_ACTION_VOCAB"].split())
 CEREMONY_OUTCOMES = set(os.environ["CEREMONY_OUTCOME_VOCAB"].split())
 CEREMONY_DISPOSITIONS = set(os.environ["CEREMONY_DISPOSITION_VOCAB"].split())
@@ -501,6 +504,8 @@ if session_events is not None and isinstance(session_events.get("events"), list)
             session_errors.append(f"session event {pos} is not an object")
             continue
         token = event.get("event")
+        if token in RETIRED_SESSION_EVENTS:
+            continue
         if token not in SESSION_EVENTS:
             session_errors.append(f"session event {pos} unknown event={token!r}")
             continue

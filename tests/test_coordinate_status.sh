@@ -256,6 +256,13 @@ assert_eq "malformed close_requests is a named session-journal coverage gap" "1"
   "$(jq -r '[.source_manifest[] | select(.source_id=="session-journal" and .read_status=="gap" and (.error|contains("malformed closed.links.close_requests")))] | length' "$MALFORMED_JSON")"
 assert_eq "malformed declaration clears nothing" "1" \
   "$(jq -r '[.buckets.needs_judgment[] | select(.observed_facts.request_id?=="request-malformed")] | length' "$MALFORMED_JSON")"
+RETIRED="$TEST_DIR/retired-token"
+setup_store "$RETIRED"
+echo '{"event":"quiescent","event_id":"legacy-quiescent","slug":"legacy","session_type":"worker","initiator":"agent","ts":"2026-08-01T00:00:00Z"}' >> "$RETIRED/_sessions/events.jsonl"
+RETIRED_JSON="$TEST_DIR/retired-token.json"
+bash "$COORDINATE" --kdir "$RETIRED" --json > "$RETIRED_JSON"
+assert_eq "a legacy row of a retired event token is not a session-journal gap" "0" \
+  "$(jq -r '[.source_manifest[] | select(.source_id=="session-journal" and .read_status=="gap")] | length' "$RETIRED_JSON")"
 CLI_HELP=$(bash "$CLI" coordinate --help 2>&1)
 assert_contains "coordinate help advertises status" "$CLI_HELP" "status"
 
