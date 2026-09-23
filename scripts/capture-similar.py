@@ -36,7 +36,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from pk_concordance import Concordance, sparse_cosine_similarity  # noqa: E402
+from pk_concordance import (  # noqa: E402
+    SIMILAR_ENTRY_THRESHOLD,
+    Concordance,
+    sparse_cosine_similarity,
+)
 from pk_markdown import MarkdownParser  # noqa: E402
 from pk_search import (  # noqa: E402
     CATEGORY_DIRS,
@@ -48,12 +52,7 @@ from pk_search import (  # noqa: E402
     IndexWriteLock,
 )
 
-# Held out of the index, 11 of 14 hand-labelled duplicate pairs from the
-# 2026-09-23 merge-candidate list scored 0.5 or above against their partner,
-# while none of 198 held-out entries reached 0.5 against a sibling captured in
-# the same session (max 0.48); a random entry's best match reaches 0.5 about
-# one time in twenty-four.
-DEFAULT_THRESHOLD = 0.5
+DEFAULT_THRESHOLD = SIMILAR_ENTRY_THRESHOLD
 DEFAULT_LIMIT = 3
 LOCK_WAIT_SECS = 0.5
 

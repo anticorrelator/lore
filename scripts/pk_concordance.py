@@ -34,6 +34,14 @@ _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 VECTOR_TEXT_KEY = "tfidf_vector_text"
 VECTOR_TEXT_WITHOUT_COMMENTS = "html-comments-removed"
 
+# One cutoff for "similar entry" everywhere: the capture-time notice and
+# curate's duplicate candidates. Calibrated 2026-09-23 on footer-free vectors:
+# held out of the index, 11 of 14 hand-labelled duplicate pairs scored 0.5 or
+# above against their partner, while none of 198 held-out entries reached 0.5
+# against a sibling captured in the same session (max 0.48); a random entry's
+# best match reaches 0.5 about one time in twenty-four.
+SIMILAR_ENTRY_THRESHOLD = 0.5
+
 
 def strip_html_comments(text: str) -> str:
     """Remove every <!-- ... --> block, the metadata footer included.

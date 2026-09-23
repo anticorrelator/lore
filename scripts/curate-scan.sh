@@ -113,10 +113,10 @@ from pk_cli import (
     describe_statuses,
     withheld_status,
 )
-from pk_concordance import Concordance
+from pk_concordance import SIMILAR_ENTRY_THRESHOLD, Concordance
 from pk_search import DB_FILENAME
 
-THRESHOLD = 0.6
+THRESHOLD = SIMILAR_ENTRY_THRESHOLD
 SHOWN = 20
 
 db_path = os.path.join(kdir, DB_FILENAME)

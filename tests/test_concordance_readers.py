@@ -226,7 +226,7 @@ class TestCurateScan:
         result = _scan(kdir)
 
         assert result.returncode == 0, result.stderr
-        assert "## Duplicate candidates (similarity >= 0.6): 1" in result.stdout
+        assert "## Duplicate candidates (similarity >= 0.5): 1" in result.stdout
         assert BUILT_LINE.search(result.stdout)
         assert "architecture/database-sharding.md" in result.stdout
         assert "<-> conventions/sharding-restated.md" in result.stdout
@@ -277,7 +277,7 @@ class TestCurateScan:
         result = _scan(kdir)
 
         assert result.returncode == 0, result.stderr
-        assert "## Duplicate candidates (similarity >= 0.6): 0" in result.stdout
+        assert "## Duplicate candidates (similarity >= 0.5): 0" in result.stdout
         assert (
             "Left out: 2 pair(s) naming an entry kept for the record (historical 1, retired 1)"
             in result.stdout
