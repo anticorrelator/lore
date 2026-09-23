@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # curate-scan.sh — Mechanical pre-scan for /memory curate
 # Lists quality issues that need judgment: medium-confidence entries,
-# duplicate candidates, inbox remnants. Does not modify entries; the only
-# write is _meta/renormalize-flags.json.
+# duplicate candidates, entries whose related_files are gone, inbox remnants.
+# Does not modify entries; the only write is _meta/renormalize-flags.json.
 #
 # Usage: bash curate-scan.sh [knowledge_dir]
 
@@ -109,156 +109,102 @@ echo ""
 [[ "$DUP_COUNT" =~ ^[0-9]+$ ]] || DUP_COUNT=0
 ISSUES=$((ISSUES + DUP_COUNT))
 
-# 4. Renormalize flags — detect categories needing reorganization
-#    Writes _meta/renormalize-flags.json with:
-#    - oversized_categories: dirs with >20 entries
-#    - stale_related_files: entries whose related_files no longer exist
-#    - zero_access_entries: entries never accessed (if log has >10 sessions)
-RENORM_FLAGS=$(python3 -c "
-import json, os, re, sys
+# 4. Renormalize flags — writes _meta/renormalize-flags.json, which status.sh
+#    and /remember read. First output line is the flag count; the rest is the
+#    section. related_files resolve against the checkout this store belongs to.
+REPO_ROOT=""
+if TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null) \
+  && [[ "$("$SCRIPT_DIR/resolve-repo.sh" "$TOPLEVEL" 2>/dev/null)" -ef "$KDIR" ]]; then
+  REPO_ROOT="$TOPLEVEL"
+fi
 
-kdir = sys.argv[1]
-repo_root = os.getcwd()
+if RENORM_REPORT=$(python3 - "$KDIR" "$REPO_ROOT" "$SCRIPT_DIR" <<'PY'
+import importlib.util
+import json
+import os
+import sys
 
-CATEGORY_DIRS = {'abstractions', 'architecture', 'conventions', 'gotchas', 'principles', 'workflows', 'domains', 'preferences'}
-SKIP_FILES = {'_inbox.md', '_index.md', '_meta.md', '_meta.json', '_index.json', '_manifest.json'}
-OVERSIZED_THRESHOLD = 20
+kdir, repo_root, script_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, script_dir)
+from pk_search import CATEGORY_DIRS
 
-META_RE = re.compile(
-    r'<!--\s*'
-    r'learned:\s*(?P<learned>\S+)'
-    r'\s*\|\s*confidence:\s*(?P<confidence>\w+)'
-    r'(?:\s*\|\s*source:\s*(?P<source>[^|]+?))?'
-    r'(?:\s*\|\s*related_files:\s*(?P<related_files>[^-]+?))?'
-    r'\s*-->',
-    re.DOTALL,
+spec = importlib.util.spec_from_file_location(
+    "staleness_scan", os.path.join(script_dir, "staleness-scan.py")
 )
+staleness_scan = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(staleness_scan)
 
+SHOWN = 20
+
+# status.sh and /remember sum these three lists. The category-size and
+# zero-access checks are retired; their keys stay, empty, so those readers
+# keep working.
 flags = {
-    'oversized_categories': [],
-    'stale_related_files': [],
-    'zero_access_entries': [],
+    "oversized_categories": [],
+    "stale_related_files": [],
+    "zero_access_entries": [],
 }
 
-# --- Oversized categories ---
-for cat in sorted(CATEGORY_DIRS):
-    cat_path = os.path.join(kdir, cat)
-    if not os.path.isdir(cat_path):
-        continue
-    count = 0
-    for root, dirs, files in os.walk(cat_path):
-        dirs[:] = [d for d in dirs if not d.startswith('_')]
-        count += sum(1 for f in files if f.endswith('.md') and f not in SKIP_FILES)
-    if count > OVERSIZED_THRESHOLD:
-        flags['oversized_categories'].append({'category': cat, 'entry_count': count})
 
-# --- Stale related_files ---
-for cat in sorted(CATEGORY_DIRS):
-    cat_path = os.path.join(kdir, cat)
-    if not os.path.isdir(cat_path):
-        continue
-    for root, dirs, files in os.walk(cat_path):
-        dirs[:] = [d for d in dirs if not d.startswith('_')]
-        for fname in sorted(files):
-            if not fname.endswith('.md') or fname in SKIP_FILES:
-                continue
-            fpath = os.path.join(root, fname)
-            try:
-                text = open(fpath, encoding='utf-8').read()
-            except (OSError, UnicodeDecodeError):
-                continue
-            m = META_RE.search(text)
-            if not m or not m.group('related_files'):
-                continue
-            rf_str = m.group('related_files').strip()
-            if not rf_str:
-                continue
-            related = [f.strip() for f in rf_str.split(',') if f.strip()]
-            missing = [r for r in related if not os.path.exists(os.path.join(repo_root, r))]
-            if missing:
-                rel = os.path.relpath(fpath, kdir)
-                flags['stale_related_files'].append({'entry': rel, 'missing': missing})
+def related_file_exists(path):
+    path = os.path.expanduser(path)
+    if os.path.isabs(path):
+        return os.path.exists(path)
+    return any(os.path.exists(os.path.join(root, path)) for root in (repo_root, kdir))
 
-# --- Zero access entries (only if retrieval log has >10 sessions) ---
-log_path = os.path.join(kdir, '_meta', 'retrieval-log.jsonl')
-if os.path.isfile(log_path):
-    sessions = set()
-    try:
-        with open(log_path, encoding='utf-8') as lf:
-            for line in lf:
-                line = line.strip()
-                if not line:
+
+if repo_root:
+    for cat in sorted(CATEGORY_DIRS):
+        for root, dirs, files in os.walk(os.path.join(kdir, cat)):
+            dirs[:] = sorted(d for d in dirs if not d.startswith("_"))
+            for fname in sorted(files):
+                if not fname.endswith(".md") or fname in staleness_scan.SKIP_FILES:
                     continue
-                try:
-                    entry = json.loads(line)
-                    ts = entry.get('timestamp', '')[:10]
-                    branch = entry.get('git_branch', '')
-                    sessions.add(f'{ts}:{branch}')
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        sessions = set()
+                fpath = os.path.join(root, fname)
+                related = staleness_scan.parse_metadata(fpath)["related_files"]
+                missing = [r for r in related if not related_file_exists(r)]
+                if missing:
+                    flags["stale_related_files"].append(
+                        {"entry": os.path.relpath(fpath, kdir), "missing": missing}
+                    )
+else:
+    flags["not_checked"] = {
+        "stale_related_files": "not run from a checkout of the repository this store belongs to"
+    }
 
-    if len(sessions) > 10:
-        # Load usage report for cold entries
-        usage_path = os.path.join(kdir, '_meta', 'usage-report.json')
-        if os.path.isfile(usage_path):
-            try:
-                with open(usage_path, encoding='utf-8') as uf:
-                    usage = json.load(uf)
-                cold = usage.get('cold_entries', [])
-                flags['zero_access_entries'] = cold
-            except (OSError, json.JSONDecodeError):
-                pass
-
-# Write flags
-meta_dir = os.path.join(kdir, '_meta')
+meta_dir = os.path.join(kdir, "_meta")
 os.makedirs(meta_dir, exist_ok=True)
-out_path = os.path.join(meta_dir, 'renormalize-flags.json')
-with open(out_path, 'w', encoding='utf-8') as of:
-    json.dump(flags, of, indent=2)
-    of.write('\n')
+with open(os.path.join(meta_dir, "renormalize-flags.json"), "w", encoding="utf-8") as f:
+    json.dump(flags, f, indent=2)
+    f.write("\n")
 
-# Print summary for curate-scan output
-total_flags = (len(flags['oversized_categories'])
-    + len(flags['stale_related_files'])
-    + len(flags['zero_access_entries']))
-print(total_flags)
-" "$KDIR" 2>&1) || true
-
-RENORM_COUNT="${RENORM_FLAGS##*$'\n'}"
-RENORM_COUNT="${RENORM_COUNT:-0}"
-
-if [[ "$RENORM_COUNT" =~ ^[0-9]+$ ]] && [[ "$RENORM_COUNT" -gt 0 ]]; then
-  echo "## Renormalize flags: $RENORM_COUNT"
-
-  # Read and display the flags file
-  python3 -c "
-import json, sys
-with open(sys.argv[1]) as f:
-    flags = json.load(f)
-if flags.get('oversized_categories'):
-    print('  Oversized categories (>20 entries):')
-    for c in flags['oversized_categories']:
-        print(f\"    {c['category']}: {c['entry_count']} entries\")
-if flags.get('stale_related_files'):
-    print('  Entries with stale related_files:')
-    for e in flags['stale_related_files']:
-        print(f\"    {e['entry']}: missing {', '.join(e['missing'])}\")
-if flags.get('zero_access_entries'):
-    count = len(flags['zero_access_entries'])
-    print(f'  Zero-access entries: {count}')
-    for e in flags['zero_access_entries'][:10]:
-        print(f'    {e}')
-    if count > 10:
-        print(f'    ... and {count - 10} more')
-" "$KDIR/_meta/renormalize-flags.json" 2>/dev/null || true
-
-  echo ""
-  echo "  Run /memory renormalize to address structural issues."
-  echo ""
-  ISSUES=$((ISSUES + RENORM_COUNT))
+stale = flags["stale_related_files"]
+print(len(stale))
+if not repo_root:
+    print("## Renormalize flags: stale related_files check did not run")
+    print("  Run lore curate from a checkout of the repository this store belongs to.")
+elif not stale:
+    print("## Renormalize flags: 0")
+else:
+    print(f"## Renormalize flags: {len(stale)}")
+    print("  Entries whose related_files no longer exist:")
+    for e in stale[:SHOWN]:
+        print(f"    {e['entry']}: missing {', '.join(e['missing'])}")
+    if len(stale) > SHOWN:
+        print(f"    ... and {len(stale) - SHOWN} more (all in _meta/renormalize-flags.json)")
+    print("")
+    print("  Run /memory renormalize to address structural issues.")
+PY
+); then
+  RENORM_COUNT="${RENORM_REPORT%%$'\n'*}"
+  echo "${RENORM_REPORT#*$'\n'}"
+else
+  RENORM_COUNT=0
+  echo "## Renormalize flags: check did not run (the flag scan failed; see stderr)"
 fi
+echo ""
+[[ "$RENORM_COUNT" =~ ^[0-9]+$ ]] || RENORM_COUNT=0
+ISSUES=$((ISSUES + RENORM_COUNT))
 
 # Summary
 if [[ $ISSUES -eq 0 ]]; then
