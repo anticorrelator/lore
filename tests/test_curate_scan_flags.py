@@ -152,3 +152,17 @@ def test_retired_checks_keep_their_keys_empty(store):
     assert flags["oversized_categories"] == []
     assert flags["zero_access_entries"] == []
     assert flags["stale_related_files"] == []
+
+
+def test_retired_entries_are_not_flagged(store):
+    repo, kd = store
+    _write(kd / "gotchas" / "live.md", _entry("Live", "scripts/gone-away.sh"))
+    _write(
+        kd / "gotchas" / "retired.md",
+        _entry("Retired", "scripts/gone-away.sh").replace("status: current", "status: retired"),
+    )
+
+    stdout, flags = _scan(kd, cwd=repo)
+
+    assert _stale(flags) == {"gotchas/live.md": ["scripts/gone-away.sh"]}
+    assert "  Left out: 1 retired\n" in stdout

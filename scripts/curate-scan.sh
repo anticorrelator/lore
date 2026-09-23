@@ -35,26 +35,61 @@ if [[ -d "$INBOX_DIR" ]]; then
   fi
 fi
 
-# 2. Medium-confidence entries (category directories at any depth)
-MEDIUM_ENTRIES=$(
-  for dir in "$KDIR"/*/; do
-    dir="${dir%/}"
-    [[ -d "$dir" && "$(basename "$dir")" != _* ]] || continue
-    find "$dir" -type d -name '_*' -prune -o -type f -name '*.md' -print0
-  done | xargs -0 grep -l 'confidence: medium' 2>/dev/null | sort
-) || true
+# 2. Medium-confidence entries (category directories at any depth). Retired
+#    entries need no review. First output line is the entry count; the rest
+#    is the section.
+if MEDIUM_REPORT=$(python3 - "$KDIR" "$SCRIPT_DIR" <<'PY'
+import os
+import sys
 
-MEDIUM_TOTAL=0
-if [[ -n "$MEDIUM_ENTRIES" ]]; then
-  echo "## Medium-confidence entries (need quality gate review):"
-  while IFS= read -r f; do
-    echo "  ${f#$KDIR/}"
-    MEDIUM_TOTAL=$((MEDIUM_TOTAL + 1))
-  done <<< "$MEDIUM_ENTRIES"
-  echo "  Total: $MEDIUM_TOTAL"
+kdir, script_dir = sys.argv[1], sys.argv[2]
+sys.path.insert(0, script_dir)
+from pk_markdown import MarkdownParser
+from pk_search import CATEGORY_DIRS
+
+medium = []
+retired = 0
+for cat in sorted(CATEGORY_DIRS):
+    for root, dirs, files in os.walk(os.path.join(kdir, cat)):
+        dirs[:] = [d for d in dirs if not d.startswith("_")]
+        for fname in files:
+            if not fname.endswith(".md"):
+                continue
+            path = os.path.join(root, fname)
+            try:
+                meta = MarkdownParser._extract_metadata(open(path, encoding="utf-8").read())
+            except (OSError, UnicodeDecodeError):
+                continue
+            if (meta["confidence"] or "").lower() != "medium":
+                continue
+            if meta["entry_status"] == "retired":
+                retired += 1
+            else:
+                medium.append(os.path.relpath(path, kdir))
+
+print(len(medium))
+if medium or retired:
+    print("## Medium-confidence entries (need quality gate review):")
+    for rel in sorted(medium):
+        print(f"  {rel}")
+    print(f"  Total: {len(medium)}")
+    if retired:
+        print(f"  Left out: {retired} retired")
+PY
+); then
+  MEDIUM_TOTAL="${MEDIUM_REPORT%%$'\n'*}"
+  MEDIUM_BODY="${MEDIUM_REPORT#"$MEDIUM_TOTAL"}"
+  if [[ -n "$MEDIUM_BODY" ]]; then
+    echo "${MEDIUM_BODY#$'\n'}"
+    echo ""
+  fi
+else
+  MEDIUM_TOTAL=0
+  echo "## Medium-confidence entries: check did not run (the footer reader failed; see stderr)"
   echo ""
-  ISSUES=$((ISSUES + MEDIUM_TOTAL))
 fi
+[[ "$MEDIUM_TOTAL" =~ ^[0-9]+$ ]] || MEDIUM_TOTAL=0
+ISSUES=$((ISSUES + MEDIUM_TOTAL))
 
 # 3. Duplicate candidates — near-identical pairs from the concordance build.
 #    First output line is the pair count; the rest is the section.
@@ -66,6 +101,7 @@ kdir, script_dir = sys.argv[1], sys.argv[2]
 sys.path.insert(0, script_dir)
 from pk_cli import CONCORDANCE_REPAIR, concordance_build, describe_concordance_build
 from pk_concordance import Concordance
+from pk_markdown import MarkdownParser
 from pk_search import DB_FILENAME
 
 THRESHOLD = 0.6
@@ -79,13 +115,24 @@ if pairs == 0 and built_at is None:
     print(f"  Build one with {CONCORDANCE_REPAIR}.")
     sys.exit()
 
+
+def is_retired(path):
+    try:
+        text = open(path, encoding="utf-8").read()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return MarkdownParser._extract_metadata(text)["entry_status"] == "retired"
+
+
 candidates = []
-gone = 0
+gone = retired = 0
 for c in Concordance(db_path).find_merge_candidates(threshold=THRESHOLD):
-    if os.path.isfile(c["target_path"]) and os.path.isfile(c["source_path"]):
-        candidates.append(c)
-    else:
+    if not (os.path.isfile(c["target_path"]) and os.path.isfile(c["source_path"])):
         gone += 1
+    elif is_retired(c["target_path"]) or is_retired(c["source_path"]):
+        retired += 1
+    else:
+        candidates.append(c)
 
 print(len(candidates))
 print(f"## Duplicate candidates (similarity >= {THRESHOLD}): {len(candidates)}")
@@ -95,8 +142,10 @@ for c in candidates[:SHOWN]:
     print(f"        <-> {os.path.relpath(c['source_path'], kdir)}")
 if len(candidates) > SHOWN:
     print(f"  ... and {len(candidates) - SHOWN} more")
+if retired:
+    print(f"  Left out: {retired} pair(s) naming a retired entry")
 if gone:
-    print(f"  {gone} more pair(s) name an entry moved or deleted since the build")
+    print(f"  Left out: {gone} pair(s) naming an entry moved or deleted since the build")
 PY
 ); then
   DUP_COUNT="${DUP_REPORT%%$'\n'*}"
@@ -126,6 +175,7 @@ import sys
 
 kdir, repo_root, script_dir = sys.argv[1], sys.argv[2], sys.argv[3]
 sys.path.insert(0, script_dir)
+from pk_markdown import MarkdownParser
 from pk_search import CATEGORY_DIRS
 
 spec = importlib.util.spec_from_file_location(
@@ -153,6 +203,7 @@ def related_file_exists(path):
     return any(os.path.exists(os.path.join(root, path)) for root in (repo_root, kdir))
 
 
+retired = 0
 if repo_root:
     for cat in sorted(CATEGORY_DIRS):
         for root, dirs, files in os.walk(os.path.join(kdir, cat)):
@@ -163,10 +214,15 @@ if repo_root:
                 fpath = os.path.join(root, fname)
                 related = staleness_scan.parse_metadata(fpath)["related_files"]
                 missing = [r for r in related if not related_file_exists(r)]
-                if missing:
-                    flags["stale_related_files"].append(
-                        {"entry": os.path.relpath(fpath, kdir), "missing": missing}
-                    )
+                if not missing:
+                    continue
+                text = open(fpath, encoding="utf-8").read()
+                if MarkdownParser._extract_metadata(text)["entry_status"] == "retired":
+                    retired += 1
+                    continue
+                flags["stale_related_files"].append(
+                    {"entry": os.path.relpath(fpath, kdir), "missing": missing}
+                )
 else:
     flags["not_checked"] = {
         "stale_related_files": "not run from a checkout of the repository this store belongs to"
@@ -192,6 +248,9 @@ else:
         print(f"    {e['entry']}: missing {', '.join(e['missing'])}")
     if len(stale) > SHOWN:
         print(f"    ... and {len(stale) - SHOWN} more (all in _meta/renormalize-flags.json)")
+if retired:
+    print(f"  Left out: {retired} retired")
+if stale:
     print("")
     print("  Run /memory renormalize to address structural issues.")
 PY

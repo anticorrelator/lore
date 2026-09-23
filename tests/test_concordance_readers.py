@@ -230,3 +230,36 @@ class TestCurateScan:
         assert BUILT_LINE.search(result.stdout)
         assert "architecture/database-sharding.md" in result.stdout
         assert "<-> conventions/sharding-restated.md" in result.stdout
+
+    def test_medium_section_leaves_out_retired_entries(self, kdir):
+        _write(
+            kdir / "gotchas" / "deep" / "under-review.md",
+            "# Under Review\nText.\n<!-- learned: 2025-03-01 | confidence: medium -->\n",
+        )
+        _write(
+            kdir / "gotchas" / "deep" / "already-retired.md",
+            "# Already Retired\nText.\n"
+            "<!-- learned: 2025-03-01 | confidence: medium | status: retired -->\n",
+        )
+
+        result = _scan(kdir)
+
+        assert result.returncode == 0, result.stderr
+        assert "  gotchas/deep/under-review.md\n" in result.stdout
+        assert "already-retired" not in result.stdout
+        assert "  Total: 1\n  Left out: 1 retired\n" in result.stdout
+
+    def test_duplicate_section_leaves_out_pairs_naming_a_retired_entry(self, kdir):
+        _build(kdir)
+        _write(
+            kdir / "conventions" / "sharding-restated.md",
+            "# Sharding Restated\n" + SHARDING
+            + "<!-- learned: 2025-02-16 | confidence: high | status: retired -->\n",
+        )
+
+        result = _scan(kdir)
+
+        assert result.returncode == 0, result.stderr
+        assert "## Duplicate candidates (similarity >= 0.6): 0" in result.stdout
+        assert "Left out: 1 pair(s) naming a retired entry" in result.stdout
+        assert "<-> conventions/sharding-restated.md" not in result.stdout
