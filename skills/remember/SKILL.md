@@ -194,7 +194,7 @@ Every capture passes `--producer-role <position> --work-item <slug>`. Entries re
 When capturing interactively (outside Step 5's automated flow), use the CLI directly. The `--scale` flag is required — missing it is an error, not a default:
 
 ```bash
-lore capture --insight "..." --scale "<bucket>" --context "..." --category "..." --confidence "high" --related-files "..."
+lore capture --insight "..." --title "<the claim as a headline>" --scale "<bucket>" --context "..." --category "..." --confidence "high" --related-files "..."
 ```
 
 Scale values: `abstract`, `architecture`, `subsystem`, `implementation` (single label or two adjacent labels comma-delimited, e.g. `subsystem,implementation`). See Step 5 for `--producer-role`, `--protocol-slot`, and `--template-version` provenance flags.
@@ -309,7 +309,7 @@ echo '<tier3-json-row>' | lore promote --work-item "$RESOLVED_SLUG" \
 **Use `lore capture` (Tier 1 path)** for everything else — interactive sessions, work-scoped insights, scoped preference captures, and any candidate that fails any of the four Tier 3 predicates:
 
 ```bash
-lore capture --insight "..." --context "..." --category "..." --confidence "..." --related-files "..." \
+lore capture --insight "..." --title "..." --context "..." --category "..." --confidence "..." --related-files "..." \
   --producer-role <role> --protocol-slot <slot> --template-version <hash> [--work-item <slug>]
 ```
 
