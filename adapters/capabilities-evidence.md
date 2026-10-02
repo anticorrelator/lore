@@ -210,8 +210,7 @@ non-`none` cell points at an id that exists here.
 - **Retrieved:** 2026-05-03
 - **Product / version:** Claude Code, unversioned
 - **Claim:** `claude -p <prompt>` (also `--print`) runs Claude Code
-  non-interactively, prints the assistant response to stdout, and exits;
-  used by `audit-artifact.sh` and other batch judges.
+  non-interactively, prints the assistant response to stdout, and exits.
 - **Consumed by:** `claude-code.capabilities.headless_runner`.
 
 ### claude-code-headless-argument-contract
@@ -226,9 +225,8 @@ non-`none` cell points at an id that exists here.
   option list rather than as a subcommand. Non-interactive runs therefore
   accept exactly the options an interactive session accepts, so the
   `headless_runner` argument contract is `shared_parser` and no configured
-  argument is filtered out. `audit-artifact.sh` spawns both `claude-code` and
-  `opencode` judges through this same `claude` binary, so the finding covers
-  both frameworks.
+  argument is filtered out. Non-interactive `claude-code` and `opencode` runs
+  go through this same `claude` binary, so the finding covers both frameworks.
 - **Consumed by:** `claude-code.capabilities.headless_runner.argument_contract`,
   `opencode.capabilities.headless_runner.argument_contract`.
 
@@ -402,9 +400,8 @@ non-`none` cell points at an id that exists here.
 - **Product / version:** OpenCode, "Last updated: May 1, 2026"
 - **Claim:** OpenCode supports non-interactive prompt invocation via
   `opencode run <prompt>` (subcommand spelling differs from Claude's
-  `claude -p`). `audit-artifact.sh` routes through the
-  `headless_runner` adapter rather than calling the binary directly,
-  hence `partial` until the per-harness invocation table is finalized.
+  `claude -p`), hence `partial` until the per-harness invocation table is
+  finalized.
 - **Consumed by:** `opencode.capabilities.headless_runner`.
 
 ### opencode-plugin-runtime
@@ -640,8 +637,6 @@ non-`none` cell points at an id that exists here.
 - **Claim:** `codex exec [PROMPT]` (alias `codex e`) runs without
   human interaction. Supports stdin (`codex exec -`), `--json`
   newline-delimited event output, `--ephemeral`, and `--model, -m`.
-  Used by `audit-artifact.sh` and other batch judges via the
-  `headless_runner` adapter.
 - **Consumed by:** `codex.capabilities.headless_runner`.
 
 ### codex-headless-argument-contract

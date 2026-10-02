@@ -62,8 +62,6 @@ Derived automatically by `evidence-append.sh` at capture time. The validator typ
 
 These fields exist to give the audit-side claim-reconciliation cascade (see `architecture/evidence/claim-reconciliation-in-lore-anchors-on-content-no.md`) a stable mid-tier anchor between the volatile `captured_at_sha` (orphaned by squash) and the over-broad `origin/main` (which decays as the file evolves). Phase 2's preflight cascade reads them; Phase 1's substrate captures them.
 
-Both audit-side resolvers ground on `file_relative` ahead of `file`: `scripts/grounding-preflight.py`'s reconciliation cascade reads it exclusively, and `scripts/reverse-auditor-inline-evidence.py` tries it first and falls back to `file`. `scripts/audit-artifact.sh`'s task-claims extractor carries `file_relative`, `captured_at_sha`, and `captured_origin_ref` into each `claim_payload` entry so downstream consumers can see them.
-
 ## Validation model
 
 - Validation is inline jq + Python in `scripts/validate-tier2.sh`. No separate JSON Schema file. See `[[knowledge:conventions/schema-validation-in-settlement-sidecar-substrate]]`.
