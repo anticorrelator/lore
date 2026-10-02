@@ -307,8 +307,7 @@ fi
 # Stamp which model generation produced the evidence so /retro and /evolve
 # can segment signal across model transitions (behavioral-rate claims do not
 # transfer across generations; structural claims do). Priority: the row's own
-# model field > --model flag > LORE_MODEL env (exported by judge pipelines,
-# e.g. audit-artifact.sh) > "unrecorded". Stamping is provenance, not
+# model field > --model flag > LORE_MODEL env > "unrecorded". Stamping is provenance, not
 # validation — rows are never rejected for missing model.
 ROW_MODEL=$(printf '%s' "$ROW" | jq -r '.model // ""')
 if [[ -z "$ROW_MODEL" ]]; then

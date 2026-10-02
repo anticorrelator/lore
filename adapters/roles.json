@@ -55,9 +55,7 @@
       "id": "reviewer",
       "description": "Single-batch evaluator that consumes a finished artifact (PR, plan, capture) and returns a verdict against a rubric.",
       "call_sites": [
-        "skills/pr-review/SKILL.md",
-        "scripts/audit-artifact.sh",
-        "scripts/capture-quality-fixture.sh"
+        "skills/pr-review/SKILL.md"
       ]
     },
     {

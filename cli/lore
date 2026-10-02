@@ -88,7 +88,6 @@ Commands:
   retire       Retire a knowledge entry that no longer earns its place, with a
                reason and a falsifier, or restore one with 'lore retire <path>
                --restore --note ...' (see: lore retire --help)
-  audit        Route a producer artifact through the judge templates
   trust        Trust-ledger verbs — cheaply confirm an entry's verdict
                (see: lore trust --help)
   resolve      Resolve repo path or [[backlink]] references
@@ -461,8 +460,6 @@ Usage: lore scorecard <subcommand> [args...]
 Subcommands:
   append    Append a validated JSON row to _scorecards/rows.jsonl (from --row or stdin)
   rollup    Aggregate rows.jsonl into _scorecards/_current.json
-  calibrate Run a calibration fixture-set against a judge; flip marker on pass,
-            append to history on every run (passing or failing).
   current   Read the versioned current-rollup snapshot
   rows      Read scorecard rows, optionally in a half-open time window
 
@@ -860,9 +857,6 @@ cmd_scorecard() {
       ;;
     rollup)
       exec "$SCRIPTS_DIR/scorecard-rollup.sh" "$@"
-      ;;
-    calibrate)
-      exec "$SCRIPTS_DIR/scorecards-calibrate.sh" "$@"
       ;;
     current|rows)
       exec "$SCRIPTS_DIR/scorecard-read.sh" "$subcmd" "$@"
@@ -2268,10 +2262,6 @@ case "$1" in
   retire)
     shift
     exec "$SCRIPTS_DIR/retire-append.sh" "$@"
-    ;;
-  audit)
-    shift
-    exec "$SCRIPTS_DIR/audit-artifact.sh" "$@"
     ;;
   resolve)
     shift

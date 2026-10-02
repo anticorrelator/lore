@@ -2030,7 +2030,7 @@ validate_route_settings() {
 #     this sentinel rather than treating it as a path.
 #   - On unknown kinds (not in the closed set) or when the active framework
 #     has no install_paths block: an Error on stderr, exit 1.
-# Used by audit-artifact.sh, agent-toggle/{enable,disable}.sh, doctor.sh,
+# Used by agent-toggle/{enable,disable}.sh, doctor.sh,
 # status.sh, load-work.sh, task-completed-capture-check.sh after T19/T29/T53/
 # T68/T69 migrate them off hardcoded ~/.claude/* paths. mcp_servers added
 # by T20 names the per-harness MCP-server config file (claude-code/opencode
@@ -2157,8 +2157,6 @@ list_supported_frameworks() {
 # Output:
 #   - Absolute path on stdout, exit 0 when the template file exists.
 #   - Error on stderr, exit 1 when the file is missing or the name is empty.
-# Used by audit-artifact.sh (correctness-gate, curator, reverse-auditor) and
-# any future caller that previously hardcoded $HOME/.claude/agents/<name>.md.
 # Mirrors config.ResolveAgentTemplate() in tui/internal/config/config.go.
 resolve_agent_template() {
   local name="$1"
