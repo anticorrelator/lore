@@ -134,8 +134,6 @@ allowed_inv = required_inv | {"dispatch"}
 allowed_prefetch = {"query", "scale_set"}
 allowed_scales = {"abstract", "architecture", "subsystem", "implementation"}
 seen = set()
-fixed_external = 0
-fixed_preferences = 0
 normalized = []
 for index, inv in enumerate(investigations):
     where = f"investigations[{index}]"
@@ -201,17 +199,9 @@ for index, inv in enumerate(investigations):
         report_destination = kdir / "_work" / slug / "worker-reports" / (dispatch["bindings"]["report_id"] + ".md")
         if dispatch["bindings"]["report_path"] != str(report_destination):
             reject(f"{where}.dispatch report_path must match the coordinate report destination")
-    lowered = question.lower()
-    if inv.get("kind") == "fixed" and "external skill" in lowered and "agent" in lowered:
-        fixed_external += 1
-    if inv.get("kind") == "fixed" and "preference" in lowered and "convention" in lowered:
-        fixed_preferences += 1
     normalized.append({"id": ident, "kind": inv["kind"], "question": question,
                        "complexity": inv["complexity"], "prefetch": normalized_prefetch,
                        **({"dispatch": dispatch} if dispatch is not None else {})})
-
-if fixed_external != 1: reject("exactly one fixed external-skill/agent investigation is required")
-if fixed_preferences != 1: reject("exactly one fixed preference/convention investigation is required")
 
 def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")

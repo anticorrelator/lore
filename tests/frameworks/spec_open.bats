@@ -75,6 +75,15 @@ assert atom["input_fingerprint"]==d["input_fingerprint"]
 PY
 }
 
+@test "a wave of only lead-authored questions opens without the fixed investigations" {
+  jq '.investigations |= map(select(.kind == "lead-authored"))' "$MANIFEST" > "$MANIFEST.seat"
+  jq -e '.investigations | length == 1' "$MANIFEST.seat"
+  run bash "$LORE" spec open open-item --investigations "$MANIFEST.seat" --json
+  [ "$status" -eq 0 ]
+  json_line | jq -e '.status == "created" and (.directives | length == 1) and .directives[0].payload.investigation_id == "code"'
+  [ -f "$TEST_KDIR/_work/open-item/spec-dispatch.json" ]
+}
+
 @test "every generated researcher directive carries guidance accepted by the canonical validator" {
   run bash "$LORE" spec open open-item --investigations "$MANIFEST" --json
   [ "$status" -eq 0 ]
