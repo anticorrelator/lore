@@ -716,16 +716,6 @@ if [[ -n "$WORK_ITEM" ]]; then
   "$SCRIPT_DIR/infer-parent-edges.sh" --entry "$TARGET_FILE" --work-item "$WORK_ITEM" 2>/dev/null || true
 fi
 
-# --- Append to capture log ---
-# Schema: timestamp,source,category,confidence,template_version
-# The `template_version` column was added in Phase 2 (work item 02-durable-signal-foundation).
-# Readers must tolerate legacy rows lacking this column — a missing trailing field is treated as empty.
-LOG_FILE="$KNOWLEDGE_DIR/_capture_log.csv"
-if [[ ! -f "$LOG_FILE" ]]; then
-  echo "timestamp,source,category,confidence,template_version" > "$LOG_FILE"
-fi
-echo "$(timestamp_iso),$SOURCE,$CATEGORY,$CONFIDENCE,$TEMPLATE_VERSION" >> "$LOG_FILE"
-
 # --- Run manifest update ---
 if [[ $SKIP_MANIFEST -eq 0 ]]; then
   "$SCRIPT_DIR/update-manifest.sh" > /dev/null 2>&1 || true

@@ -33,7 +33,6 @@ import json, os
 with open(os.environ["TEMPLATE"], encoding="utf-8") as handle:
     doc = json.load(handle)
 doc.pop("retro_sampling", None)
-doc.pop("conformance_sampling", None)
 with open(os.environ["SETTINGS"], "w", encoding="utf-8") as handle:
     json.dump(doc, handle, indent=2)
     handle.write("\n")
@@ -49,16 +48,14 @@ value_at() {
   jq -c ".$2" "$1"
 }
 
-@test "sampling schema blocks are closed and constrain both rates to zero through one" {
+@test "sampling schema block is closed and constrains the rate to zero through one" {
   run python3 - "$SCHEMA" <<'PY'
 import json, sys
 schema = json.load(open(sys.argv[1], encoding="utf-8"))
 properties = schema["properties"]
 defs = schema["$defs"]
 assert properties["retro_sampling"]["$ref"] == "#/$defs/retro_sampling_config"
-assert properties["conformance_sampling"]["$ref"] == "#/$defs/conformance_sampling_config"
-for block, key in (("retro_sampling_config", "routine_rate"),
-                   ("conformance_sampling_config", "render_rate")):
+for block, key in (("retro_sampling_config", "routine_rate"),):
     definition = defs[block]
     rate = definition["properties"][key]
     assert definition["additionalProperties"] is False
@@ -108,7 +105,7 @@ for path in paths:
 # consumer families. If one is intentionally removed, update this set with the
 # same review that removes its call sites.
 expected = {"harnesses", "capability_overrides", "coordination",
-            "retro_sampling", "conformance_sampling"}
+            "retro_sampling"}
 found = {key for key, _, _ in reads}
 assert expected <= found, f"settings consumer scan lost live families: {sorted(expected - found)}"
 
@@ -125,9 +122,8 @@ PY
 
   run_backfill
   [ "$status" -eq 0 ]
-  [[ "$output" == *"backfilled: retro_sampling, conformance_sampling"* ]]
+  [[ "$output" == *"backfilled: retro_sampling"* ]]
   [ "$(value_at "$SETTINGS" retro_sampling.routine_rate)" = "0.25" ]
-  [ "$(value_at "$SETTINGS" conformance_sampling.render_rate)" = "0.25" ]
 }
 
 @test "backfill never merges inside an existing top-level key" {
@@ -147,7 +143,6 @@ PY
   [ "$status" -eq 0 ]
   [ "$(value_at "$SETTINGS" retro_sampling)" = "$before" ]
   grep -Fq "$raw_before" "$SETTINGS"
-  [ "$(value_at "$SETTINGS" conformance_sampling.render_rate)" = "0.25" ]
 }
 
 @test "backfill is byte-idempotent after missing keys are added" {
@@ -246,9 +241,9 @@ PY
 @test "settings patch permits declared-key creation and existing unknown-key writes" {
   printf '{"legacy_block":{"value":1}}\n' > "$DATA_DIR/config/settings.json"
 
-  run env LORE_DATA_DIR="$DATA_DIR" bash "$SETTINGS_SH" patch conformance_sampling.render_rate 0.5
+  run env LORE_DATA_DIR="$DATA_DIR" bash "$SETTINGS_SH" patch retro_sampling.routine_rate 0.5
   [ "$status" -eq 0 ]
-  [ "$(value_at "$DATA_DIR/config/settings.json" conformance_sampling.render_rate)" = "0.5" ]
+  [ "$(value_at "$DATA_DIR/config/settings.json" retro_sampling.routine_rate)" = "0.5" ]
 
   run env LORE_DATA_DIR="$DATA_DIR" bash "$SETTINGS_SH" patch legacy_block.value 2
   [ "$status" -eq 0 ]

@@ -155,16 +155,13 @@ Accept every report per the contract, then journal `renormalize:wave1` and `reno
 
 ### Step 6: Telemetry, Maintenance, Close
 
-**Telemetry first** — the drift guardrail reads `classification-report.json`, so this runs before cleanup deletes it. Each script derives rows from on-disk state and appends through the sanctioned scorecard writer. All four metrics are diagnostic telemetry only — they must not feed `/evolve` citations or primary scoring.
+**Telemetry first** — the drift guardrail reads `classification-report.json`, so this runs before cleanup deletes it. The script derives rows from on-disk state and appends through the sanctioned scorecard writer. The metric is diagnostic telemetry only — it must not feed `/evolve` citations or primary scoring.
 
 ```bash
 bash ~/.lore/scripts/renormalize-emit-drift-guardrails.sh --kdir "$KDIR" --run-id "$RUN_ID"
-bash ~/.lore/scripts/renormalize-emit-retention.sh --kdir "$KDIR" --run-id "$RUN_ID"
-bash ~/.lore/scripts/emit-downstream-adoption.sh --kdir "$KDIR" --run-id "$RUN_ID" --window 30
-bash ~/.lore/scripts/emit-correction-metrics.sh --kdir "$KDIR" --run-id "$RUN_ID" --window-days 30
 ```
 
-(Scale drift per producer role; per-entry renormalize-cycle survival; per-entry retrieval adoption; correction and precedent rates.) A first run with no prune history emits zero-survival retention rows — expected; the metric matures as runs accumulate.
+(Scale drift per producer role.)
 
 **Maintenance verbs:**
 

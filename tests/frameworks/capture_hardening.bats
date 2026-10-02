@@ -95,8 +95,6 @@ entry_count() {
 
   [ "$(entry_count "$PROJECT_STORE")" -eq 0 ]
   [ "$(entry_count "$SIBLING_STORE")" -eq 0 ]
-  [ ! -f "$PROJECT_STORE/_capture_log.csv" ]
-  [ ! -f "$SIBLING_STORE/_capture_log.csv" ]
 }
 
 @test "--json refusal is a machine-readable error, not a success envelope" {

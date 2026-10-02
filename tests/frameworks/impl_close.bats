@@ -206,60 +206,14 @@ PYEOF
   [ "$status_field" = "archived" ]
 }
 
-@test "full close renders conformance before moving the item to the archive" {
-  run env LORE_CONFORMANCE_RENDER_RATE=1 bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done"
-  [ "$status" -eq 0 ]
-  artifact="$WORK_DIR/_archive/anchored-done/closure-conformance.md"
-  [ -f "$artifact" ]
-  grep -Fq "# Closure Conformance Aggregate" "$artifact"
-}
-
-@test "routine close sampled out skips the render and announces the on-demand path" {
-  run env LORE_CONFORMANCE_RENDER_RATE=0 bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done"
-  [ "$status" -eq 0 ]
-  [ ! -f "$WORK_DIR/_archive/anchored-done/closure-conformance.md" ]
-  echo "$output" | grep -q "conformance render sampled out"
-  echo "$output" | grep -q "lore work conformance anchored-done"
-}
-
-@test "unset render_rate notes the 0.25 fallback without changing close success" {
-  settings_dir="$TEST_KDIR/settings-data"
-  mkdir -p "$settings_dir/config"
-  printf '{}\n' > "$settings_dir/config/settings.json"
-
-  run env LORE_DATA_DIR="$settings_dir" bash "$CLOSE_SH" anchored-done \
-    --verdict full --summary "done"
-  [ "$status" -eq 0 ]
-  echo "$output" | grep -Fq "conformance_sampling.render_rate is unset; using built-in fallback 0.25"
-  echo "$output" | grep -Fq "Run install.sh to declare the key"
-  [ -d "$WORK_DIR/_archive/anchored-done" ]
-}
-
-@test "degraded verdict always renders conformance regardless of rate" {
-  LORE_CONFORMANCE_RENDER_RATE=0 run partial_close
-  [ "$status" -eq 3 ]
-  artifact="$WORK_DIR/anchored-done/closure-conformance.md"
-  [ -f "$artifact" ]
-  echo "$output" | grep -q "degraded_closure"
-}
-
-@test "conformance failure warns but does not block close" {
-  run bash -c 'cd "$1" && exec env LORE_CONFORMANCE_RENDER_RATE=1 "$2" impl close anchored-done --verdict full --summary done' \
-    _ "$TEST_KDIR" "$LORE_CLI"
-  [ "$status" -eq 0 ]
-  echo "$output" | grep -q "conformance aggregate render failed; close continues"
-  [ -d "$WORK_DIR/_archive/anchored-done" ]
-}
-
-@test "close ordering is telemetry then conformance then archive then terminus" {
+@test "close ordering is telemetry then archive then terminus" {
   python3 - "$CLOSE_SH" <<'PYEOF'
 import sys
 text = open(sys.argv[1], encoding="utf-8").read()
 telemetry = text.index('if ! printf \'%s\' "$TELEMETRY_ROW"')
-render = text.index('if ! bash "$SCRIPT_DIR/conformance-render.sh"')
-archive = text.index('if ! bash "$SCRIPT_DIR/archive-work.sh"', render)
+archive = text.index('if ! bash "$SCRIPT_DIR/archive-work.sh"', telemetry)
 terminus = text.index('session-terminus.sh', archive)
-assert telemetry < render < archive < terminus
+assert telemetry < archive < terminus
 PYEOF
 }
 
