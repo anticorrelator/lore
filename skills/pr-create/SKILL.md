@@ -125,13 +125,14 @@ Extract:
 - **Architecture diagram** — `plan.md` `## Architecture Diagram` section (fenced code block), if present
 - **Design decisions** — `plan.md` `## Design Decisions` section bullets (titles only, not full rationale)
 
-### 5. Push the branch
+### 5. Bring the branch current, run the pre-push gate, push
 
-```bash
-git push -u origin HEAD
-```
+CI on a pull request tests the merge of the branch into the *current* base, installed the way the project's CI installs it. It does not test the branch as it sits in your checkout. A targeted test run plus the project's lint target is not that check: lint targets often leave out the formatters CI diffs against, and targeted tests miss the suite a change breaks elsewhere.
 
-Ask before force-pushing if the branch already tracks a remote with diverged history.
+1. **Current base.** Run `git fetch origin <base>`. If `origin/<base>` has moved past the merge-base, rebase onto it (ask first when the branch is already pushed and shared). Base-side changes, such as a removed path, a bumped tool pin, or a new test, fail the PR's merge ref while the branch still looks green locally.
+2. **The gate.** `lore search --preferences "pre-push gate"` returns the project's gate: the commands that reproduce its CI checks the way CI runs them, each with the paths that trigger it. Run every command whose trigger matches `git diff origin/<base>...HEAD --name-only`. Fix any failure and re-run the gate before pushing.
+   - **No gate entry yet:** derive one from the workflows that run on pull requests. Include each check's command as CI invokes it (formatters too), every regenerate-then-`git diff --exit-code` step, the type checker at its configured scope, and the tests the diff affects. Run it, then record it with `lore capture --category preferences --title "Pre-push gate: <project>" --scale implementation --related-files <workflow files> …` so the next PR starts from it.
+3. **Push.** Run `git push -u origin HEAD`. Use `--force-with-lease` after rebasing a branch that was already pushed. Ask before force-pushing if the branch tracks a remote with diverged history.
 
 ### 6. Draft the PR
 
@@ -188,6 +189,15 @@ Always pass `--base "<base>"` using the branch confirmed in Step 1. Pass `--draf
 
 After creation, fetch the PR title and body from GitHub and perform a final external-artifact conformance check. Confirm that they describe only the shipped change in shared professional vocabulary and contain no internal process, agent/worker/skill/lore references, session links, attribution trailers, or harness-generated footers. If the created artifact violates this contract, edit it into conformance and re-fetch it before continuing. Do not report success from the local draft alone.
 
+### 7b. Watch CI to a verdict
+
+A PR is delivered when CI on its head SHA is green, or when every red check is triaged. Creating it is not delivery.
+
+1. **Watch without blocking.** Run `gh pr checks <n> --watch`, or use the harness's background monitor. Then confirm the heavy workflows registered on the current head SHA (`gh run list --branch <branch> --json headSha,workflowName,conclusion`). A force-push can fire only the lightweight workflows, which leaves green checks that describe an older commit.
+2. **Triage each red check before touching code.**
+   - **Ambient:** the same failure appears on the base or on unrelated branches in the same window. Check with `gh run list --workflow <workflow> --limit 20 --json conclusion,headBranch,createdAt`. Typical causes are an upstream dependency release, a red base branch, or a known flake. Do not patch the PR around it. Report it with that evidence. Once the base is fixed, rebase and push, because a re-run reuses the original merge SHA and cannot pick up the fix. A suspected flake gets one re-run.
+   - **PR-caused:** fix it, re-run the gate, push, and watch again. If the gate should have caught the failure, add the missing command to the project's gate entry in the same turn, so the gap closes for the next PR.
+
 ### 8. Update the work item
 
 After successful PR creation, record the PR URL in the work item:
@@ -199,7 +209,7 @@ Skip if no work item was resolved.
 
 ### 9. Report
 
-Return the PR URL. One line.
+Return the PR URL and the CI verdict: green, or each red check with its triage (ambient with its evidence, or PR-caused and fixed). One or two lines.
 
 ## Guidelines
 
@@ -210,3 +220,4 @@ Return the PR URL. One line.
 - The body describes what shipped, not how it got there — no historical log, no chronology; downstream agents parse PR text for release summaries and need a clean description of the end state
 - The controlled register (Step 6) binds the whole body: short sentences, active voice, one idea per sentence, common words
 - If multiple work items match equally, prefer the one whose title is most similar to the current branch name
+- A PR is not done at creation. Report it only with its CI verdict. An ambient red check is reported with its evidence, not fixed inside the PR.
