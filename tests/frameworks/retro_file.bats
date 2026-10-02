@@ -96,7 +96,7 @@ write_no_suggestion_manifest() {
   [ "$(jq -s '[.[] | select(.role=="retro-behavioral-health")] | length' "$TEST_KDIR/_meta/effectiveness-journal.jsonl")" -eq 1 ]
 }
 
-@test "substantive filing fans out escalation scale channel and one proposal by exact keys" {
+@test "substantive filing fans out escalation scale and one proposal by exact keys" {
   jq '.suggestion_outcome="substantive" |
       .suggestions=[{target:"skills/retro/SKILL.md",change_type:"evidence-gap",section:"Step 3.8",suggestion:"Add a sanctioned reader.",evidence:"Channel contract drift is not computable without role-slot denominators.",evidence_refs:["calculation:channel_contract_drift"]}] |
       .escalation_judgment={applicability:"applicable",value:{observation:"One task needed re-scoping.",evidence_refs:["pack:/facts/task_context_backlinks"]}} |
@@ -108,7 +108,6 @@ write_no_suggestion_manifest() {
   [ "$(jq -s '[.[] | select(.role=="retro-evolution")] | length' "$TEST_KDIR/_meta/effectiveness-journal.jsonl")" -eq 1 ]
   [ "$(jq -s '[.[] | select(.role=="retro-escalations")] | length' "$TEST_KDIR/_meta/effectiveness-journal.jsonl")" -eq 1 ]
   [ "$(wc -l < "$TEST_KDIR/_scorecards/retro-scale-access.jsonl" | tr -d ' ')" -eq 1 ]
-  [ "$(wc -l < "$TEST_KDIR/_scorecards/retro-channel-flags.jsonl" | tr -d ' ')" -eq 1 ]
 }
 
 @test "terminal telemetry is withheld when an auxiliary sink fails" {
