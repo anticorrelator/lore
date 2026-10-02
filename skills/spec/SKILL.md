@@ -822,7 +822,7 @@ PY
 
   Keep this block at the **full permissive surfaced set** regardless of what binds to a task. The manifest is permissive; the *weave* into task lines is strict (Step 5b "Deliverable contract gate" — only scope-overlapping judgment-class norms become constraint clauses). A backlink staying here while its norm is also woven into a task is correct: the manifest is provenance, the task line is delivery.
 
-  The block is also a parse target: at close, the conformance renderer reads it as the spec-time discovery panel of `closure-conformance.md` and cross-tabulates each label against woven norms, recorded dispositions, and the shipped diff. Keep every bullet in the `[[knowledge:...]] — annotation` shape with a substantive annotation — a thinned or malformed manifest doesn't just weaken review, it blinds the closure read to norms nobody dispositioned.
+  The block is also a parse target: the conformance renderer (`lore work conformance`) reads it as the spec-time discovery panel of `closure-conformance.md` and cross-tabulates each label against woven norms, recorded dispositions, and the shipped diff. Keep every bullet in the `[[knowledge:...]] — annotation` shape with a substantive annotation — a thinned or malformed manifest doesn't just weaken review, it blinds the closure read to norms nobody dispositioned.
 - **Advisor declarations:** For each matched skill whose domain overlaps a task's owned surface, consider adding an `**Advisors:**` entry to that task. Set mode by the task's complexity — `must-consult` if the skill defines invariants workers must respect, `on-demand` otherwise.
 
 ### Ceremony outcome filing contract

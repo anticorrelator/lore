@@ -53,8 +53,5 @@
   },
   "retro_sampling": {
     "routine_rate": 0.25
-  },
-  "conformance_sampling": {
-    "render_rate": 0.25
   }
 }
