@@ -15,7 +15,7 @@
 #   - finalization adopts fresh plans, reuses unchanged revisions, and publishes
 #     semantic edits without changing prepared/sealed review identities
 #   - resolver tri-state passthrough (no match 1, ambiguous 2)
-#   - SKILL.md Step 5.5 routes through the verb (no hand-run verifier sequence)
+#   - /spec prose routes through the verb (no hand-run verifier sequence)
 #
 # All tests use an isolated knowledge directory via LORE_KNOWLEDGE_DIR.
 
@@ -570,29 +570,12 @@ EOF
   echo "$output" | grep -q "archived"
 }
 
-# --- SKILL.md Step 5.6 finalize contract -------------------------------------------
+# --- /spec prose leaves finalize's parts to the verb ---------------------------------
 
-skill_step_5_6() {
-  awk '/^### Step 5\.6/,/^### Step 6/' "$REPO_DIR/skills/spec/SKILL.md"
-}
-
-@test "spec SKILL.md Step 5.6 invokes lore spec finalize" {
-  skill_step_5_6 | grep -q "lore spec finalize"
-}
-
-@test "spec SKILL.md Step 5.6 no longer hand-runs the verifier or regen sequence" {
-  ! skill_step_5_6 | grep -q "verify-plan-intent-anchor.sh"
-  ! skill_step_5_6 | grep -q "lore work regen-tasks"
-}
-
-@test "spec SKILL.md Step 5.6 retains the two lead-owned preflight asserts" {
-  skill_step_5_6 | grep -q "live script"
-  skill_step_5_6 | grep -q "Tier-2 emission instructions"
-}
-
-@test "spec SKILL.md Step 5.6 instructs fixing plan.md and re-running on refusal" {
-  skill_step_5_6 | grep -qi "fix \`plan.md\`"
-  skill_step_5_6 | grep -q "re-run"
+@test "spec prose no longer hand-runs the verifier or regen sequence" {
+  run grep -e "verify-plan-intent-anchor.sh" -e "lore work regen-tasks" \
+    "$REPO_DIR/skills/spec/SKILL.md" "$REPO_DIR/skills/spec/commissioning.md"
+  [ "$status" -eq 1 ]
 }
 
 # --- D4 protocol-terminus close-request --------------------------------------

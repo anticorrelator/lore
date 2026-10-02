@@ -266,9 +266,9 @@ def spec_sessions(frameworks):
         context_path.write_text(json.dumps(context))
         sys.path.insert(0, str(original / 'tests/helpers'))
         from implement_recipes import inventory
-        document_inventory, bodies = inventory(repo / 'skills/spec/SKILL.md', 'spec')
+        document_inventory, bodies = inventory([repo / 'skills/spec/SKILL.md', repo / 'skills/spec/commissioning.md'], 'spec')
         recipe_row = next(row for row in document_inventory['recipes'] if row['id'] == 'request-session')
-        values = {'SESSION_SLUG': 'fixture--w1', 'MODEL': payload['model'], 'TARGET_FRAMEWORK': payload['framework'],
+        values = {'SESSION_SLUG': 'fixture--w1', 'SESSION_ROUTE': json.dumps(payload['session_route']),
                   'CONTEXT_FILE': str(context_path), 'WORKTREE_ID': '', 'EXECUTION_DIR': '',
                   'TARGET_INSTANCE': '', 'MIN_VINTAGE': ''}
         assert set(values) == set(recipe_row['inputs'])

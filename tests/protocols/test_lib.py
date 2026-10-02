@@ -72,13 +72,6 @@ def test_extract_section_case_insensitive():
     assert "content A line 1" in body
 
 
-def test_extract_section_real_skill():
-    spec = read_skill("spec")
-    body = extract_section(spec, "Short Flow (`/spec short`)")
-    # Short Flow section must be non-empty in current prose
-    assert len(body) > 10
-
-
 # ---------------------------------------------------------------------------
 # in_code_context
 # ---------------------------------------------------------------------------

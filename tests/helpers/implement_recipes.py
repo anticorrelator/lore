@@ -26,6 +26,8 @@ def digest(data):
 
 
 def inventory(source, namespace="implement"):
+    if isinstance(source, (list, tuple)):
+        return combined_inventory(source, namespace)
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", namespace):
         raise ValueError("invalid recipe namespace: " + namespace)
     marker_prefix = "<!-- " + namespace + "-recipe:"
@@ -105,8 +107,28 @@ def inventory(source, namespace="implement"):
                 recipes=recipes, declarative_examples=examples), bodies
 
 
+def combined_inventory(sources, namespace):
+    if not sources:
+        raise ValueError("no recipe sources")
+    parts, bodies = [], {}
+    for source in sources:
+        document, found = inventory(Path(source), namespace)
+        for row in document["recipes"] + document["declarative_examples"]:
+            row["source_path"] = document["source_path"]
+        for name in found:
+            if name in bodies:
+                raise ValueError("duplicate recipe id: " + name)
+        bodies.update(found)
+        parts.append(document)
+    return dict(schema_version=1, source_path=[d["source_path"] for d in parts],
+                source_sha256=[d["source_sha256"] for d in parts],
+                recipes=[row for d in parts for row in d["recipes"]],
+                declarative_examples=[row for d in parts for row in d["declarative_examples"]]), bodies
+
+
 def assert_coverage(document, bodies, namespace="implement"):
-    current, current_bodies = inventory(Path(document["source_path"]), namespace)
+    source = document["source_path"]
+    current, current_bodies = inventory([Path(p) for p in source] if isinstance(source, list) else Path(source), namespace)
     if current["source_sha256"] != document["source_sha256"]:
         raise AssertionError("recipe source changed after inventory")
     if current_bodies != bodies:

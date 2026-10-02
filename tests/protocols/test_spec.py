@@ -16,36 +16,6 @@ def spec() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Stage presence
-# ---------------------------------------------------------------------------
-
-def test_short_flow_section_present(spec: str) -> None:
-    """Short Flow section must exist (single-agent path)."""
-    body = extract_section(spec, "Short Flow (`/spec short`)")
-    assert len(body) > 50
-
-
-def test_full_flow_section_present(spec: str) -> None:
-    """Full Flow section must exist (team investigation path)."""
-    body = extract_section(spec, "Full Flow (`/spec`)")
-    assert len(body) > 50
-
-
-def test_synthesis_step_present(spec: str) -> None:
-    """Synthesis step must be present in the full flow."""
-    hits = find_invocation(spec, "Synthesize")
-    assert any("Step 5" in line for _, line in hits), (
-        "Expected 'Step 5: Synthesize' or similar — synthesis stage missing"
-    )
-
-
-def test_design_decisions_produced(spec: str) -> None:
-    """Design Decisions section must be instructed in the plan output."""
-    hits = find_invocation(spec, "Design Decisions")
-    assert len(hits) >= 2, "Expected multiple references to 'Design Decisions' in spec"
-
-
-# ---------------------------------------------------------------------------
 # Forbidden / deprecated patterns (enforced post-spec-rewrite)
 # ---------------------------------------------------------------------------
 
@@ -80,17 +50,12 @@ def test_without_verification_flag_absent(spec: str) -> None:
     )
 
 
-
-
-def test_plan_template_investigations_no_assertions(spec: str) -> None:
+def test_plan_template_investigations_no_assertions() -> None:
     """Post-rewrite: the Plan.md Template's ## Investigations section must not contain **Assertions:**."""
-    from lib import extract_embedded_template
+    from lib import SKILLS_DIR, extract_embedded_template
 
-    # Pull fenced blocks whose opening line references a Plan.md template
-    templates = extract_embedded_template(spec, r"[Pp]lan")
-    if not templates:
-        # No embedded Plan.md template found — pass vacuously (template may be inline prose)
-        return
+    templates = extract_embedded_template((SKILLS_DIR / SKILL / "templates/plan.md").read_text(), r"[Pp]lan")
+    assert templates, "the plan template's fenced Plan.md block is missing"
 
     for block in templates:
         investigations = extract_section(block, "Investigations")
@@ -114,48 +79,12 @@ def test_lore_resolve_invoked(spec: str) -> None:
     assert len(hits) >= 1
 
 
-def test_investigation_plan_section_present(spec: str) -> None:
-    """Full flow must include an Investigation Plan table section."""
-    hits = find_invocation(spec, "Investigation Plan")
-    assert len(hits) >= 1
-
-
 # ---------------------------------------------------------------------------
 # Capability / intent-anchor preservation discipline
 # ---------------------------------------------------------------------------
 
-def test_intent_anchor_preserved_verbatim_for_downstream(spec: str) -> None:
-    """spec must require verbatim preservation of intent_anchor.
-
-    Sentinel concept #4 (spec side) — spec/SKILL.md (line 69) instructs the
-    spec to 'preserve the wording verbatim when restating it' and names the
-    downstream consumers (Step 5.5 verifier, /implement anchor prompts) that
-    detect drift by string comparison. The verbatim-preservation discipline
-    is the load-bearing contract for the cross-skill audit chain.
-    """
-    assert "intent_anchor" in spec, (
-        "intent_anchor not referenced in spec/SKILL.md — "
-        "the capability anchor is the cross-skill audit chain's anchor field"
-    )
-
-    # The plan-section schema instruction must name `## Intent Anchor` as the
-    # section that renders the anchor body verbatim from _meta.json.intent_anchor.
-    intent_anchor_section_hits = find_invocation(spec, "## Intent Anchor")
-    assert len(intent_anchor_section_hits) >= 1, (
-        "spec must document the `## Intent Anchor` plan.md section — "
-        "the section name is what the Step 5.5 verifier reads"
-    )
-
-    # The verbatim-preservation discipline must be stated explicitly so that
-    # paraphrase by spec authors breaks the downstream string-comparison audit.
-    verbatim_hits = find_invocation(spec, "verbatim")
-    assert len(verbatim_hits) >= 3, (
-        "spec must instruct verbatim preservation in multiple places "
-        "(intake restatement, plan.md anchor section, plan template) — "
-        "found fewer 'verbatim' references than expected for downstream-audit support"
-    )
-
-    # The Scope delta line is the second verifier-enforced field
+def test_scope_delta_line_named_for_the_anchor_gate(spec: str) -> None:
+    """The `**Scope delta:**` line is the field publication and the finalize gate verify beside the anchor body."""
     scope_delta_hits = find_invocation(spec, "**Scope delta:**")
     assert len(scope_delta_hits) >= 1, (
         "`**Scope delta:**` line missing from spec/SKILL.md — "

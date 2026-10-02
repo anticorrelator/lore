@@ -70,20 +70,21 @@
   },
   "test_spec.py": {
     "retired": {
-      "test_consumer_contradiction_emission_present": "Old consumer-contradiction emission token retired; current spec outcome records retain evaluator findings."
+      "test_consumer_contradiction_emission_present": "Old consumer-contradiction emission token retired; current spec outcome records retain evaluator findings.",
+      "test_short_flow_section_present": "The /spec rewrite has one flow; the short/full flow sections and their numbered steps are gone, and the remaining recipes run in tests/test_spec_recipes.bats.",
+      "test_full_flow_section_present": "The /spec rewrite has one flow; the short/full flow sections and their numbered steps are gone, and the remaining recipes run in tests/test_spec_recipes.bats.",
+      "test_synthesis_step_present": "The /spec rewrite has one flow; the short/full flow sections and their numbered steps are gone, and the remaining recipes run in tests/test_spec_recipes.bats.",
+      "test_design_decisions_produced": "Plan format moved to skills/spec/templates/plan.md; the Design Decisions parser is covered by test_generate_tasks_design_decisions.py.",
+      "test_investigation_plan_section_present": "The Investigation Plan table left with the fixed full-flow wave; commissioned questions are an investigations document that lore spec open validates (tests/frameworks/spec_open.bats).",
+      "test_intent_anchor_preserved_verbatim_for_downstream": "The rewrite states the anchor rule without the intent_anchor token or repeated verbatim wording; the **Scope delta:** check continues as test_scope_delta_line_named_for_the_anchor_gate, and the anchor gate runs in tests/test_spec_recipes.bats and tests/frameworks/spec_finalize.bats."
     },
     "retained": [
-      "test_short_flow_section_present",
-      "test_full_flow_section_present",
-      "test_synthesis_step_present",
-      "test_design_decisions_produced",
       "test_step_4b_verifier_verdict_forbidden",
       "test_key_assertions_section_forbidden",
       "test_without_verification_flag_absent",
       "test_plan_template_investigations_no_assertions",
       "test_lore_resolve_invoked",
-      "test_investigation_plan_section_present",
-      "test_intent_anchor_preserved_verbatim_for_downstream"
+      "test_scope_delta_line_named_for_the_anchor_gate"
     ]
   },
   "test_renormalize.py": {
@@ -107,7 +108,9 @@
     ]
   },
   "test_lib.py": {
-    "retired": {},
+    "retired": {
+      "test_extract_section_real_skill": "Read a /spec section the rewrite removed; extract_section stays covered by the synthetic-markdown cases."
+    },
     "retained": [
       "test_read_skill_returns_string",
       "test_read_agent_returns_string",
@@ -115,7 +118,6 @@
       "test_extract_section_includes_subsections",
       "test_extract_section_missing_returns_empty",
       "test_extract_section_case_insensitive",
-      "test_extract_section_real_skill",
       "test_in_code_context_inside_fence",
       "test_in_code_context_outside_fence",
       "test_in_code_context_fence_delimiter_line",

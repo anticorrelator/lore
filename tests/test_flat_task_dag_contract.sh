@@ -172,30 +172,14 @@ assert_prose_lacks "spec SKILL no longer claims task size is empirically tuned" 
   "$SPEC_SKILL" "empirically tuned via the (class, model, size) rework attribution"
 
 echo ""
-echo "Test 4: one two-sided sizing band is stated at task level"
-# "design center" is the band's currency — the coined term that decides whether
-# a deliverable is one unit or several. Without it the band has no stated
-# center and reduces to an unfalsifiable size preference.
-assert_prose_contains_i "spec SKILL names the design center as the band's currency" \
-  "$SPEC_SKILL" "design center"
-# Both directions must be argued in writing. Dropping either side restores the
-# asymmetry the band exists to remove: whichever direction goes unpriced becomes
-# the free default the author lands on.
+echo "Test 4: both sizing directions are priced at task level"
+# Both directions must be argued in writing; finalize refuses a plan that
+# carries neither block. Dropping either side restores the asymmetry: whichever
+# direction goes unpriced becomes the free default the author lands on.
 assert_prose_contains_i "spec SKILL requires a split rationale" \
   "$SPEC_SKILL" "split rationale"
 assert_prose_contains_i "spec SKILL requires a merge rationale" \
   "$SPEC_SKILL" "merge rationale"
-# The hard bounds survive the band and are not weighable against it. No residue
-# bounds task size from below; the context envelope bounds it from above and is
-# the only condition that forces a split on its own.
-assert_prose_contains_i "spec SKILL keeps the no-residue floor" \
-  "$SPEC_SKILL" "no residue"
-assert_prose_contains_i "spec SKILL keeps the context-envelope ceiling" \
-  "$SPEC_SKILL" "context-envelope ceiling"
-# The task block vocabulary has to reach the spec author, not only the template:
-# the skill is what the author reads while decomposing.
-assert_prose_contains "spec SKILL names the required Deliverable block" \
-  "$SPEC_SKILL" "**Deliverable:**"
 
 echo ""
 echo "Test 5: the dependency marker and the output contract are documented"

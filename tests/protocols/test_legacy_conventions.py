@@ -219,7 +219,7 @@ GROUNDING_TEMPLATE_RE = re.compile(r"\*\*Grounding:\*\*")
 # preservation discipline. pr-create is excluded (no `intent_anchor` prose
 # surface today; tracked as a follow-on in the plan's Open Questions).
 
-INTENT_ANCHOR_SKILLS = ["spec", "implement"]
+INTENT_ANCHOR_SKILLS = ["implement"]
 
 
 @pytest.mark.parametrize(
