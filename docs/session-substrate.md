@@ -807,7 +807,7 @@ protocol terminal verbs, stop hooks) appends through the one sanctioned writer,
 | `option` | integer | Positive displayed modal option number; required on `answer_requested`, `answered`, and `answer_refused`. |
 | `reason` | string | Failure/reclaim reason, carried by `spawn_failed`, `request_reclaimed`, `request_abandoned`; `request_expired` requires exactly `ttl_elapsed`; `modal_blocked` requires exactly `modal`; `answer_refused` uses its closed refusal set; `terminus_reached` requires `spec-finalize` or `impl-close`. |
 | `modal_signature` | string | Screen evidence for a `modal_blocked` row, and valid only there. Omit-when-empty; single line, at most 160 characters. Holds the parsed modal title when the classifier read one, otherwise a token naming which interactive predicate fired (`cc-permission-modal`, `cc-option-select`, `cc-permission-modal+cc-option-select`, or `<framework>-interactive`). The screen a modal row is derived from is repainted within seconds and peek responses are consumed on read, so without this the row cannot afterwards be told apart from a misfire on a partially repainted screen. |
-| `step_id` | string | Stable machine-readable milestone identity. Required on `step_completed`; `/spec` uses `spec:investigation`, `spec:design`, and `spec:plan-ready`, while `/implement` uses `implement:task:<task-id>`. |
+| `step_id` | string | Stable machine-readable milestone identity. Required on `step_completed`; `/spec` uses `spec:design` and `spec:plan-ready`, while `/implement` uses `implement:task:<task-id>`. |
 | `step_label` | string | Concise human-readable milestone label. Required on `step_completed`. |
 | `links` | object | `{work_item?, artifact?, close_requests?}` — string-valued pointers and correlations. On `closed` only, `close_requests` is a string containing a compact JSON array of distinct, non-empty consumed close-request IDs in first-consumed order (for example `"[\"term-1\",\"explicit-2\"]"`); the string representation preserves existing `map[string]string` Go readers while safely carrying opaque IDs. Writer defaults to `{}`. For a worker session (derived slug `<work-item-slug>--w<n>`) the writer derives `links.work_item` = the base work-item slug when the caller did not set it, so every worker lifecycle row points back at its work item (see [Worker sessions](#worker-sessions)). |
 | `spend` | object \| null | Session token spend, on `closed` and `orphaned`. `duration_seconds` is always present; a `basis` enum (`transcript\|rollout\|store\|duration-only`) marks how the tokens were sourced. When the harness exposes a deterministic transcript binding (claude-code, via a spawn-time `--session-id`), the TUI merges the D1 token vocabulary — `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `reasoning_output_tokens`, `total_tokens`, `cost_usd`, `model`, `harness` (fields the harness does not expose are omitted, never zero-filled). Every gap — codex/opencode-hosted sessions, an absent transcript, a probe timeout, an abrupt quit — degrades to `{duration_seconds, basis:"duration-only"}`. Extraction runs at teardown or recovery via `scripts/session-spend.sh`; the row still flows only through the sole writer. |
@@ -863,10 +863,8 @@ the three answer events also require a non-empty slug and positive integer
 its `close_requested`.)
 
 **Protocol-transition events** — `step_completed` marks durable progress within a
-hosted protocol. `/spec` emits `spec:investigation` after investigation findings,
-evidence, and logs persist; `spec:design` after design-ceremony dispositions and
-accepted revisions persist; and `spec:plan-ready` after the post-plan ceremony and
-preflight succeed. `/implement` emits `implement:task:<task-id>` only after the
+hosted protocol. `/spec` emits `spec:design` once the owner accepts the design at
+its first stop, and `spec:plan-ready` once the plan is accepted at its second. `/implement` emits `implement:task:<task-id>` only after the
 lead accepts and logs the task report and its completed checkbox persists. These
 are the only step producers: researcher or worker completions, individual evidence
 claims, consultations, phase-close echoes, and bare-terminal sessions do not emit.

@@ -40,6 +40,7 @@ Each directive's payload has these fields:
 - `position_dispatch` — the six-field reference to the frozen attempt. This is your independent copy, never read back from the report.
 - `producer` — the compiled investigator's version, which the report stamps as `Template-version:`.
 - `route`, `framework` and `model` — resolved once and never re-resolved, because the prompt bytes were frozen against them.
+- `session_route` — the canonical route a session request carries, in the same resolved form.
 - `native_selection` — the native tool and its fields on a native route; otherwise null.
 - `completion_input` — what the completion check reads. None of it comes from the report.
 - `session_context` — what a session request carries.
@@ -96,7 +97,7 @@ Before calling, check that `selection_name` appears among the `subagent_type` va
 
 **Chaperone** (`route` is `codex-chaperone`, set when a native request named Codex from another framework). Dispatch through the Codex chaperone with `payload.model` and `payload.prompt`. Tell it the return shape is the investigator report, so it relays the body verbatim; a relay reshaped into worker fields would replace a finding with a claim nobody made.
 
-**Session** (`route` is `session`). The request carries the context file the directive-context recipe wrote. `SESSION_SLUG` is `<slug>--w<n>`, and the report still belongs to the base item. Give exactly one placement stance. Name `MODEL` and `TARGET_FRAMEWORK` from the payload. Pass the worktree pair only for a `prepared` context frozen against a fixed placement, using that exact directory. A `pending-execution-root` context goes with an empty pair, and the host supplies the root:
+**Session** (`route` is `session`). The request carries the context file the directive-context recipe wrote. `SESSION_SLUG` is `<slug>--w<n>`, and the report still belongs to the base item. Give exactly one placement stance. `SESSION_ROUTE` is the payload's `session_route` as JSON. Pass the worktree pair only for a `prepared` context frozen against a fixed placement, using that exact directory. A `pending-execution-root` context goes with an empty pair, and the host supplies the root:
 
 **Recipe inputs:** SESSION_SLUG, SESSION_ROUTE, CONTEXT_FILE, TARGET_INSTANCE, MIN_VINTAGE, WORKTREE_ID, EXECUTION_DIR.
 <!-- spec-recipe: request-session -->
