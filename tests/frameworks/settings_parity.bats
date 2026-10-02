@@ -6,8 +6,8 @@
 # T3 ships scripts/lore_settings.py (Python parity covered there);
 # T4 (this suite) asserts the Go-side mirror at tui/internal/config/settings.go
 # produces byte-equivalent output to scripts/settings.sh against the same
-# on-disk state, and that harness-local role/ceremony settings are wired
-# identically across both stacks.
+# on-disk state, and that harness-local role settings are wired identically
+# across both stacks.
 #
 # Parity surface (D5 table — the four bash↔Go rows lifted from plan.md):
 #   1. tui_launch_framework     — top-level scalar
@@ -421,56 +421,6 @@ EOF
   go_out=$("$HARNESS_BIN" load_harness_args claude-code 2>/dev/null)
   [ "$bash_out" = "--dangerously-skip-permissions" ]
   [ "$go_out"   = "--dangerously-skip-permissions" ]
-}
-
-# ============================================================
-# Ceremony advisor resolution (harness-local only)
-# ============================================================
-
-@test "ceremony: resolve_ceremony_advisors reads active harness only" {
-  export LORE_FRAMEWORK=codex
-  write_settings '{
-    "version": 1,
-    "tui_launch_framework": "codex",
-    "harnesses": {
-      "claude-code": {"args": [], "ceremonies": {"spec-design": ["pr-review"]}},
-      "codex": {"args": [], "ceremonies": {"spec-design": ["pr-self-review"]}}
-    },
-    "ceremonies": {"spec-design": ["pr-create"]}
-  }'
-  out=$(bash -c "source '$LIB_SH' && resolve_ceremony_advisors spec-design" 2>/dev/null)
-  [ "$out" = '["pr-self-review"]' ]
-}
-
-@test "ceremony: top-level and ceremonies.json are ignored" {
-  cat > "$TEST_LORE_DATA_DIR/ceremonies.json" <<'EOF'
-{"spec-design":["pr-review"]}
-EOF
-  export LORE_FRAMEWORK=codex
-  write_settings '{
-    "version": 1,
-    "tui_launch_framework": "codex",
-    "harnesses": {
-      "codex": {"args": []}
-    },
-    "ceremonies": {"spec-design": ["pr-create"]}
-  }'
-  out=$(bash -c "source '$LIB_SH' && resolve_ceremony_advisors spec-design" 2>/dev/null)
-  [ "$out" = '[]' ]
-}
-
-@test "ceremony: advisor validation uses the requested harness skill surface" {
-  mkdir -p "$TEST_HOME/.agents/skills/opencode-only-review"
-
-  run env HOME="$TEST_HOME" bash -c \
-    "source '$LIB_SH' && validate_ceremony_advisors opencode test-layer '[\"opencode-only-review\"]'"
-  [ "$status" -eq 0 ]
-
-  run env HOME="$TEST_HOME" bash -c \
-    "source '$LIB_SH' && validate_ceremony_advisors codex test-layer '[\"opencode-only-review\"]'"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"unknown ceremony advisor 'opencode-only-review'"* ]]
-  [[ "$output" == *"harness 'codex'"* ]]
 }
 
 # ============================================================

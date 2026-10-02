@@ -242,7 +242,7 @@ def validate_settings(settings: Any, repo_root: str | os.PathLike[str]) -> dict[
             raise RouteConfigError("unknown_framework", f"unknown harness '{harness}'", f"harnesses.{harness}")
         if not isinstance(block, dict):
             raise RouteConfigError("invalid_harness", "harness settings must be an object", f"harnesses.{harness}")
-        for retired in ("roles", "ceremony_roles"):
+        for retired in ("roles", "ceremony_roles", "ceremonies"):
             if retired in block:
                 raise RouteConfigError("retired_settings_key", f"harnesses.{harness}.{retired} is retired", f"harnesses.{harness}.{retired}")
         allowed_harness = set(schema["$defs"]["harness_block"]["properties"])

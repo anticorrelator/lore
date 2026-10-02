@@ -694,7 +694,7 @@ For tasks with subjects starting with "Update stale knowledge entry":
     - `lead` — the lead answered inline using its own investigation/plan/code-read tools. No template-version field is carried (attribution is to the lead via `LEAD_TEMPLATE_VERSION` through other channels).
     - `skill` — the lead invoked a skill via the `Skill` tool and replied with its output. Carries `skill_template_version`.
     - `agent` — a persistent advisor agent answered (opt-in route only). Carries `advisor_template_version`.
-  - `domain` — REQUIRED. One-word or short-phrase domain the consultation targeted (e.g. `auth-middleware`, `serialization`, `codex-plan-review`). Used by the lead's required-consultation matcher and by the rollup grouping.
+  - `domain` — REQUIRED. One-word or short-phrase domain the consultation targeted (e.g. `auth-middleware`, `serialization`). Used by the lead's required-consultation matcher and by the rollup grouping.
   - `advisor_template_version` — REQUIRED when `handler: agent`, OMITTED otherwise. 12-char hash identifying the advisor's template at the time of consultation. Without it the agent-handled consultation cannot be attributed to a scorecard row.
   - `skill_template_version` — REQUIRED when `handler: skill`, OMITTED otherwise. 12-char content hash of the invoked skill's SKILL.md at the time the lead invoked it.
   - `query_summary` — REQUIRED. One-sentence description of what you asked. Keep it concrete and evidence-anchored; vague summaries inflate consultation_rate without informing advice_followed_rate.
@@ -706,7 +706,7 @@ For tasks with subjects starting with "Update stale knowledge entry":
   - `consultation_rate` — fraction of worker reports in a window that carry at least one consultation. Measures how often the advisor is used when available.
   - `advice_followed_rate` — fraction of consultations where `was_followed=true`. Measures advisor accuracy from the worker's perspective.
 
-  Both metrics land as scorecard rows with `template_id = <advisor_template_version>` and `kind=scored`, attributing to the advisor (not the worker's or producer's template). The rollup filters input entries to `handler: agent` only before grouping by `advisor_template_version`; `handler: lead` and `handler: skill` entries bypass the advisor scorecard path. This is the Phase 8 advisor-impact path; codex-plan-review / codex-pr-review verdicts against the *reviewed artifact's producer* template are a separate settlement channel (task-52, `codex-verdict-capture.sh`). Conflating the two would let advisor-reliability noise drive producer-template mutations.
+  Both metrics land as scorecard rows with `template_id = <advisor_template_version>` and `kind=scored`, attributing to the advisor (not the worker's or producer's template). The rollup filters input entries to `handler: agent` only before grouping by `advisor_template_version`; `handler: lead` and `handler: skill` entries bypass the advisor scorecard path.
 
   **Do not fabricate** consultation entries. Workers who synthesize consultations to inflate consultation_rate corrupt the advisor scorecard with noise; the advisor template receives tuning pressure from work that didn't happen.
 

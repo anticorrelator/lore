@@ -417,7 +417,7 @@ for raw, entry in zip(rows, summary):
 PY
 }
 
-@test "sealed review text dispositions and bound outcomes enter pack identity while prepare atoms do not" {
+@test "sealed review text and dispositions enter pack identity while prepare atoms do not" {
   source "$REPO_DIR/tests/helpers/packet_revision.bash"
   item="$TEST_KDIR/_work/cycle-a"
   packet_revision_fixture "$item" cycle-a
@@ -426,18 +426,12 @@ PY
   printf '%s\n' 'The criterion checks the intended behavior; the review raises a coverage question.' > "$TEST_KDIR/review.txt"
   printf '%s\n' '{"schema_version":1,"outcome":"completed","verdict":"PASS","reason":null,"judgments":[{"purpose":"criterion-adequacy","judgment":"adequate","rationale":"The criterion addresses the original anchor.","result_ids":[]}],"dispositions":[{"finding":"Coverage question","disposition":"resolved","reason":"The second branch is covered."}]}' > "$TEST_KDIR/dispositions.json"
   printf '%s\n' '{"evaluator_locator":"skill://review","evaluator_template_version":"123456789abc","framework":"codex","model":"review-model","final_round":1}' > "$TEST_KDIR/evaluator.json"
-  bash "$REPO_DIR/scripts/plan-review.sh" seal cycle-a --attempt-id review-retro --output "$TEST_KDIR/review.txt" --dispositions "$TEST_KDIR/dispositions.json" --evaluator-manifest "$TEST_KDIR/evaluator.json" | jq '.evidence_manifest' > "$TEST_KDIR/review-manifest.json"
+  bash "$REPO_DIR/scripts/plan-review.sh" seal cycle-a --attempt-id review-retro --output "$TEST_KDIR/review.txt" --dispositions "$TEST_KDIR/dispositions.json" --evaluator-manifest "$TEST_KDIR/evaluator.json" >/dev/null
   run_prepare
   first=$(jq -r '.pack_id' "$item/retro-evidence-pack.json")
   run_prepare
   [ "$first" = "$(jq -r '.pack_id' "$item/retro-evidence-pack.json")" ]
   jq -e '.source_data.cycle_work.evidence.sources.reviews.entries | map(.content // "") | join("\n") | contains("coverage question") and contains("The second branch is covered.")' "$item/retro-evidence-pack.json"
-  bash "$REPO_DIR/scripts/spec-outcome.sh" cycle-a --ceremony spec-design --advisor reviewer --attempt-id review-retro --outcome completed --verdict PASS --evidence-manifest "$TEST_KDIR/review-manifest.json" --json >/dev/null
-  run_prepare
-  [ "$first" != "$(jq -r '.pack_id' "$item/retro-evidence-pack.json")" ]
-  after=$(jq -r '.pack_id' "$item/retro-evidence-pack.json")
-  run_prepare
-  [ "$after" = "$(jq -r '.pack_id' "$item/retro-evidence-pack.json")" ]
   bash "$REPO_DIR/scripts/load-work-item.sh" cycle-a --json > "$TEST_KDIR/work-view.json"
   bash "$REPO_DIR/scripts/coordinate-status.sh" --kdir "$TEST_KDIR" --json > "$TEST_KDIR/coordinator-view.json"
   python3 - "$TEST_KDIR" <<'PY'
@@ -448,7 +442,6 @@ work=json.loads((root/'work-view.json').read_text())['evidence']
 coord=next(r for r in json.loads((root/'coordinator-view.json').read_text())['work_evidence'] if r['slug']=='cycle-a')
 assert pack['review_summary']==work['review_summary']==coord['review_summary']
 assert pack['revision']['review_requirement']==work['revision']['review_requirement']==coord['revision']['review_requirement']
-assert pack['sources']['outcomes']['rows'][0]['schema_version']==2
 PY
 }
 

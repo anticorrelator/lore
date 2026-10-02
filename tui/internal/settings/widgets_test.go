@@ -687,16 +687,17 @@ func TestOpenKeysetKVEditor_NumberMapRejectsOutOfBounds(t *testing.T) {
 }
 
 func TestOpenKeysetKVEditor_StringArrayMapCommitsTypedSlice(t *testing.T) {
-	w := NewStringArrayOpenKeysetKVEditor("ceremonies", "ceremonies", map[string]string{}, false, true)
+	valueSchema := &SchemaNode{Kind: KindArray, Items: &SchemaNode{Kind: KindString}}
+	w := NewTypedOpenKeysetKVEditor("groups", "groups", map[string]string{}, nil, openMapValueParser(valueSchema), false, true)
 	w.Focus()
 	_, _ = dispatch(w, "enter")
 
 	_, _ = dispatch(w, "a")
-	for _, k := range []string{"p", "l", "a", "n", "-", "r", "e", "v", "i", "e", "w"} {
+	for _, k := range []string{"t", "e", "a", "m"} {
 		_, _ = dispatch(w, k)
 	}
 	_, _ = dispatch(w, "enter")
-	for _, k := range []string{"s", "h", "a", "r", "p", "-", "e", "d", "g", "e", "s", ",", "c", "o", "d", "e", "x", "-", "p", "r", "-", "r", "e", "v", "i", "e", "w"} {
+	for _, k := range []string{"a", "l", "p", "h", "a", ",", "b", "e", "t", "a"} {
 		_, _ = dispatch(w, k)
 	}
 	_, intent := dispatch(w, "enter")
@@ -707,9 +708,9 @@ func TestOpenKeysetKVEditor_StringArrayMapCommitsTypedSlice(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected map[string]any, got %T", intent.Value)
 	}
-	want := []string{"sharp-edges", "codex-pr-review"}
-	if advisors, ok := got["plan-review"].([]string); !ok || !reflect.DeepEqual(advisors, want) {
-		t.Fatalf("expected %v, got %T %v", want, got["plan-review"], got["plan-review"])
+	want := []string{"alpha", "beta"}
+	if members, ok := got["team"].([]string); !ok || !reflect.DeepEqual(members, want) {
+		t.Fatalf("expected %v, got %T %v", want, got["team"], got["team"])
 	}
 }
 

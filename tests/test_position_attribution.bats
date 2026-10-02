@@ -299,19 +299,6 @@ def reader_checks():
     def json_output(result):
         return json.loads(result.stdout)
 
-    def audit(path, gate=None, curator=None):
-        args = ['bash', str(repo/'scripts/audit-artifact.sh'), str(path), '--kdir', str(store), '--json']
-        if Path(path).name == 'promoted-commons.jsonl':
-            args = ['bash',str(repo/'scripts/audit-artifact.sh'),'--kdir',str(store),'--json',
-                    '--work-item','fixture','--kind','commons','--id','reader-promoted']
-        if gate is None:
-            args += ['--dry-run']
-        else:
-            args += ['--gate-output-file', str(gate)]
-            if curator is not None:
-                args += ['--curator-output-file', str(curator)]
-        return call(args)
-
     def candidate(cid, ids):
         return dict(claim_id=cid, tier='reusable', claim='Compiled fixture attribution '+cid,
                     producer_role='worker', protocol_slot='implement-step-3', scale='implementation',
@@ -337,36 +324,6 @@ def reader_checks():
     emit_claim('reader-legacy')
     missing = dict(ref1, manifest_sha256='0'*64)
     emit_claim('reader-unknown', missing)
-    claims_path = item/'task-claims.jsonl'
-    resolved = json_output(audit(claims_path))
-    claims = {c['claim_id']:c for c in resolved['claim_payload']}
-    for name, attempt in [('reader-first',first),('reader-second',second)]:
-        producer = claims[name]['producer_attribution']
-        assert producer['status'] == 'resolved', producer
-        assert producer['template_version'] == attempt[0]['template_version']
-        assert producer['template_id'] == attempt[0]['template_id']
-    assert claims['reader-unknown']['producer_attribution']['status'] == 'unknown'
-    assert 'producer_attribution' not in claims['reader-legacy']
-    assert resolved['producer_template_version'] == 'unknown'
-
-    gate = item/'reader-gate.json'
-    gate.write_text(json.dumps({'judge':'correctness-gate','judge_template_version':'reader-fixture',
-        'verdicts':[{'claim_id':name,'verdict':'verified','evidence':'isolated fixture'}
-                    for name in ['reader-first','reader-second','reader-legacy','reader-unknown']]}))
-    curator = item/'reader-curator.json'
-    curator.write_text(json.dumps({'judge':'curator','judge_template_version':'reader-fixture',
-        'selected':[{'claim_id':'reader-first','selection_rationale':'fixture'}],
-        'dropped':[{'claim_id':name,'drop_rationale':'fixture'}
-                   for name in ['reader-second','reader-legacy','reader-unknown']]}))
-    audit(claims_path,gate,curator)
-    rows = [json.loads(line) for line in (store/'_scorecards/rows.jsonl').read_text().splitlines() if line.strip()]
-    for attempt in [first,second]:
-        matching = [r for r in rows if r.get('template_version') == attempt[0]['template_version']]
-        assert any(r['metric']=='factual_precision' and r['value']==1 for r in matching), matching
-        assert any(r['metric']=='curated_rate' for r in matching), matching
-        assert all(r['template_id']==attempt[0]['template_id'] for r in matching)
-    assert any(r.get('template_version')=='unknown' for r in rows)
-    assert any(r.get('template_version')=='task-claims-jsonl' for r in rows)
 
     candidates = item/'reader-candidates.json'
     candidates.write_text(json.dumps([candidate('reader-promoted',['reader-first']),
@@ -384,8 +341,6 @@ def reader_checks():
     assert row['source_artifact_ids'] == ['reader-first']
     assert row['template_version'] == first[0]['template_version']
     assert first[0]['template_version'] in (store/row['entry_path']).read_text()
-    projected = json_output(audit(item/'promoted-commons.jsonl'))
-    assert next(c for c in projected['claim_payload'] if c['claim_id']=='reader-promoted')['producer_attribution']['status']=='resolved'
 
     # Assert the finalized legacy vocabulary directly, without deriving the
     # expected role from the same resolver that is under test.
@@ -400,16 +355,6 @@ def reader_checks():
         typed_result = [json.loads(line) for line in result.stdout.decode().splitlines() if line.startswith('{')][-1]
         assert typed_result['accepted_count'] == 1, typed_result
 
-    # Corrupt only the isolated registry: the reader must not emit an eligible
-    # compiled hash when the sanctioned registration writer refuses the store.
-    registry = store/'_scorecards/template-registry.json'
-    registry_bytes = registry.read_bytes()
-    registry.write_text('{"schema_version":"broken","entries":[]}')
-    try:
-        broken = json_output(audit(claims_path))
-        assert next(c for c in broken['claim_payload'] if c['claim_id']=='reader-first')['producer_attribution']['status']=='unknown'
-    finally:
-        registry.write_bytes(registry_bytes)
 
     call(['bash',str(repo/'scripts/template-registry-register.sh'),'--kdir',str(store),
           '--template-id',first[0]['template_id'],'--template-version',first[0]['template_version'],
@@ -643,11 +588,6 @@ report=''.join(f'{k}: {v}\n' for k,v in headers.items())+'**Question:** External
 script('coordinate-report.sh','preplan-fixture','--report-id',bindings['report_id'],'--json',input=report.encode())
 script('task-completed-capture-check.sh',input=json.dumps(payload['completion_input']).encode())
 
-resolved=json.loads(script('audit-artifact.sh',str(item/'task-claims.jsonl'),'--kdir',str(store),'--dry-run','--json').stdout)
-claims={r['claim_id']:r for r in resolved['claim_payload']}
-assert claims['preplan-good']['producer_attribution']['status']=='resolved',claims['preplan-good']
-assert all(claims[cid]['producer_attribution']['status']=='unknown' for cid in negative)
-
 def candidate(cid,sid):return {'claim_id':cid,'tier':'reusable','claim':'Pre-plan assertion attribution remains recoverable.',
     'producer_role':'researcher','protocol_slot':'spec','scale':'implementation','why_future_agent_cares':'The producing attempt predates plan task allocation.',
     'falsifier':'A different attempt is recovered.','related_files':[str(repo/'fixture.txt')],'source_artifact_ids':[sid],
@@ -659,8 +599,6 @@ assert result['accepted_count']==1 and len(result['rejected'])==4,result
 commons=json.loads((item/'promoted-commons.jsonl').read_text().splitlines()[-1])
 assert commons['position_dispatch']==ref and commons['source_artifact_ids']==['preplan-good']
 assert commons['template_version']==payload['producer']['template_version']
-again=json.loads(script('audit-artifact.sh','--kdir',str(store),'--work-item','preplan-fixture','--kind','commons','--id','promoted-good','--dry-run','--json').stdout)
-assert again['claim_payload'][0]['producer_attribution']['status']=='resolved',again
 
 # A real bound task still demands its exact task identity, even with the correct report/attempt pair.
 (item/'plan.md').write_text('''# Bound fixture
@@ -696,7 +634,7 @@ assert emit(right)['producer_attribution']['status']=='resolved'
 assert project(good,expected={'work_item':'preplan-fixture','task_id':'external'})['status']=='resolved'
 assert project(good,expected={'work_item':'preplan-fixture','task_id':None})['status']=='resolved'
 (temporary/'commands.json').write_text(json.dumps(commands,indent=2))
-print('Pre-plan canonical spec-open, completion, evidence, audit and promotion passed; all missing/wrong association and exact-bound-task controls passed.')
+print('Pre-plan canonical spec-open, completion, evidence and promotion passed; all missing/wrong association and exact-bound-task controls passed.')
 PY
 }
 

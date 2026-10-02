@@ -25,8 +25,8 @@
 # template scored is the ADVISOR's template (template_id =
 # advisor_template_version), NOT the producer's — advisor quality is
 # scored separately from the quality of artifacts the advisor reviews.
-# Conflating them (as codex-verdict-capture.sh's note warns) would let
-# advisor-regression noise drive producer-template mutation.
+# Conflating them would let advisor-regression noise drive
+# producer-template mutation.
 #
 # Usage (flag form):
 #   lore advisor-impact rollup \

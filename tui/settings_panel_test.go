@@ -18,14 +18,11 @@ func stripANSI(s string) string {
 	return settingsPanelANSIPattern.ReplaceAllString(s, "")
 }
 
-func TestBuildHarnessDefaultsWidgets_IgnoreTopLevelCeremonies(t *testing.T) {
+func TestBuildHarnessNativeModelsWidget_IgnoresTopLevelRoles(t *testing.T) {
 	doc := map[string]any{
 		"roles": map[string]any{
 			"lead":    "opus",
 			"default": "sonnet",
-		},
-		"ceremonies": map[string]any{
-			"spec-design": []any{"codex-design-review"},
 		},
 		"harnesses": map[string]any{
 			"codex": map[string]any{
@@ -45,27 +42,12 @@ func TestBuildHarnessDefaultsWidgets_IgnoreTopLevelCeremonies(t *testing.T) {
 	if strings.Contains(rolesView, "lead = opus") || strings.Contains(rolesView, "default = sonnet") {
 		t.Fatalf("roles widget should ignore top-level roles:\n%s", rolesView)
 	}
-
-	ceremonies := buildHarnessCeremoniesWidget(doc, "codex")
-	if ceremonies == nil {
-		t.Fatalf("ceremonies widget should always be materialized")
-	}
-	if ceremonies.DotPath() != "harnesses.codex.ceremonies" {
-		t.Fatalf("ceremonies widget dot path = %q", ceremonies.DotPath())
-	}
-	ceremoniesView := stripANSI(ceremonies.View())
-	if strings.Contains(ceremoniesView, "spec-design") || strings.Contains(ceremoniesView, "codex-design-review") {
-		t.Fatalf("ceremonies widget should ignore top-level ceremonies:\n%s", ceremoniesView)
-	}
 }
 
-func TestBuildHarnessDefaultsWidgets_PreferHarnessLocalValues(t *testing.T) {
+func TestBuildHarnessNativeModelsWidget_PrefersHarnessLocalValues(t *testing.T) {
 	doc := map[string]any{
 		"roles": map[string]any{
 			"lead": "opus",
-		},
-		"ceremonies": map[string]any{
-			"spec-design": []any{"codex-design-review"},
 		},
 		"harnesses": map[string]any{
 			"codex": map[string]any{
@@ -74,9 +56,6 @@ func TestBuildHarnessDefaultsWidgets_PreferHarnessLocalValues(t *testing.T) {
 					"lead":    "gpt-5.2",
 					"default": "gpt-5.5-high",
 				},
-				"ceremonies": map[string]any{
-					"spec-design": []any{"codex-plan-review"},
-				},
 			},
 		},
 	}
@@ -84,11 +63,6 @@ func TestBuildHarnessDefaultsWidgets_PreferHarnessLocalValues(t *testing.T) {
 	rolesView := stripANSI(buildHarnessNativeModelsWidget(doc, "codex", []string{"default", "lead"}).View())
 	if !strings.Contains(rolesView, "lead = gpt-5.2") || strings.Contains(rolesView, "lead = opus") {
 		t.Fatalf("roles widget should prefer harness-local values:\n%s", rolesView)
-	}
-
-	ceremoniesView := stripANSI(buildHarnessCeremoniesWidget(doc, "codex").View())
-	if !strings.Contains(ceremoniesView, "spec-design = codex-plan-review") || strings.Contains(ceremoniesView, "codex-design-review") {
-		t.Fatalf("ceremonies widget should read only harness-local values:\n%s", ceremoniesView)
 	}
 }
 

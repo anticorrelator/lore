@@ -26,7 +26,7 @@ exit 37
 EOF
   chmod +x "$TEST_SCRIPTS/session-wait.sh"
 
-  for leaf in spec-start spec-discover spec-open spec-outcome; do
+  for leaf in spec-start spec-discover spec-open; do
     cp "$TEST_SCRIPTS/session-wait.sh" "$TEST_SCRIPTS/$leaf.sh"
   done
   for leaf in retro-prepare retro-file; do
@@ -90,7 +90,7 @@ EOF
 
 @test "all new spec leaves exec at the deepest external dispatch arm" {
   local verb
-  for verb in start discover open outcome; do
+  for verb in start discover open; do
     : > "$PID_FILE"
     rm -f "$RELEASE_FILE"
     HOME="$TEST_HOME" PID_FILE="$PID_FILE" RELEASE_FILE="$RELEASE_FILE" \

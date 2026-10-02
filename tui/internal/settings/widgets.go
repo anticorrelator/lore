@@ -1859,7 +1859,7 @@ func (p *ClosedObjectSubPanel) ViewBody() string {
 }
 
 // ----------------------------------------------------------------------------
-// OpenKeysetKVEditor — open-keyset map editor (e.g. ceremonies_map).
+// OpenKeysetKVEditor — open-keyset map editor.
 // ----------------------------------------------------------------------------
 
 // OpenKeysetKVEditor manages an open-keyset map for fields whose keyset is
@@ -1867,7 +1867,7 @@ func (p *ClosedObjectSubPanel) ViewBody() string {
 // commits the full typed map; Enter/Esc at the navigation level exits editing.
 // Per-value parsing delegates to a caller-supplied OpenMapValueParser so the
 // generic editor can still emit schema-shaped values (number maps commit
-// numbers, ceremony maps commit []string, nested object maps commit objects).
+// numbers, array maps commit []string, nested object maps commit objects).
 type OpenMapValueParser func(key, value string) (any, []string)
 
 type OpenKeysetKVEditor struct {
@@ -1940,26 +1940,6 @@ func NewTypedOpenKeysetKVEditor(dotPath, label string, current map[string]string
 		allowUnset:  allowUnset,
 		styles:      defaultStyles(),
 	}
-}
-
-// NewStringArrayOpenKeysetKVEditor constructs the common open-map shape used
-// by ceremonies maps: dynamic key -> []string. Values are displayed as comma-
-// separated strings for fast editing and commit as []string, not as the raw
-// display text.
-func NewStringArrayOpenKeysetKVEditor(dotPath, label string, current map[string]string, present, allowUnset bool) *OpenKeysetKVEditor {
-	itemMin := 1
-	itemPattern := regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
-	valueSchema := &SchemaNode{
-		Kind:        KindArray,
-		UniqueItems: true,
-		Items: &SchemaNode{
-			Kind:            KindString,
-			Pattern:         itemPattern.String(),
-			PatternCompiled: itemPattern,
-			minLength:       &itemMin,
-		},
-	}
-	return NewTypedOpenKeysetKVEditor(dotPath, label, current, nil, openMapValueParser(valueSchema), present, allowUnset)
 }
 
 func (kv *OpenKeysetKVEditor) Init() tea.Cmd   { return nil }

@@ -136,8 +136,8 @@ func initSettingsPanel() (*settings.SettingsModel, error) {
 
 	// Build the per-dot-path description map by sourcing rich text from the
 	// adapter registries. Keep this to capability_overrides; harness-local
-	// roles/ceremonies use short section help in their dedicated panels so
-	// three harness blocks don't become a wall of prose.
+	// native_models uses short section help in its panel so three harness
+	// blocks don't become a wall of prose.
 	descriptions := loadFieldDescriptions(repoDir)
 
 	editorSchemaPath, cleanup, err := projectSettingsEditorSchema(schemaPath)
@@ -181,16 +181,14 @@ func initSettingsPanel() (*settings.SettingsModel, error) {
 		return m.ToggleHarness(framework, enabled)
 	}
 	for _, fw := range frameworks {
-		eff, err := computeHarnessEffective(doc, fw, roleIDs)
+		eff, err := computeHarnessEffective(fw, roleIDs)
 		if err != nil {
 			return nil, fmt.Errorf("settings: resolve routes for %s: %w", fw, err)
 		}
 		argsWidget := buildHarnessArgsWidget(doc, fw)
 		enabled := readHarnessEnabled(doc, fw)
-		// Native models and ceremony advisor registrations are harness-local.
 		modelsWidget := buildHarnessNativeModelsWidget(doc, fw, roleIDs)
-		ceremoniesWidget := buildHarnessCeremoniesWidget(doc, fw)
-		panel := settings.NewHarnessRoutesPanel(fw, enabled, toggleFn, argsWidget, modelsWidget, ceremoniesWidget, eff)
+		panel := settings.NewHarnessRoutesPanel(fw, enabled, toggleFn, argsWidget, modelsWidget, eff)
 		m.RegisterTopSection("harness "+fw, panel)
 	}
 
@@ -325,29 +323,8 @@ func buildHarnessNativeModelsWidget(doc map[string]any, fw string, roleIDs []str
 	return w
 }
 
-// buildHarnessCeremoniesWidget constructs an OpenKeysetKVEditor for
-// harnesses.<fw>.ceremonies. Ceremony advisors are harness-local defaults now,
-// so the editor is always materialized and reads only the harness-local map.
-//
-// Ceremony values are arrays of advisor ids in the schema. The editor displays
-// each array as a comma-joined string for compact editing, then parses it back
-// to []string on commit so the persisted value remains schema-shaped.
-func buildHarnessCeremoniesWidget(doc map[string]any, fw string) settings.FieldWidget {
-	ceremonies := lookupCeremoniesMap(doc, "harnesses", fw, "ceremonies")
-	// Flatten array-of-strings values to comma-joined strings for display.
-	// The reverse direction (commit) is the gap noted above.
-	flat := make(map[string]string, len(ceremonies))
-	for k, advisors := range ceremonies {
-		flat[k] = strings.Join(advisors, ",")
-	}
-	dotPath := "harnesses." + fw + ".ceremonies"
-	w := settings.NewStringArrayOpenKeysetKVEditor(dotPath, "ceremonies", flat, true, false)
-	w.SetDisplayHints("ceremonies", "Advisor skills for this harness's ceremonies.")
-	return w
-}
-
 // computeHarnessEffective resolves global and harness-native routes for display.
-func computeHarnessEffective(doc map[string]any, fw string, roleIDs []string) (settings.HarnessEffective, error) {
+func computeHarnessEffective(fw string, roleIDs []string) (settings.HarnessEffective, error) {
 	routes := map[string]string{}
 	native := map[string]string{}
 	for _, role := range roleIDs {
@@ -362,7 +339,7 @@ func computeHarnessEffective(doc map[string]any, fw string, roleIDs []string) (s
 		}
 		native[role] = formatRoute(nativeRoute)
 	}
-	return settings.HarnessEffective{Roles: routes, NativeModels: native, Ceremonies: lookupCeremoniesMap(doc, "harnesses", fw, "ceremonies")}, nil
+	return settings.HarnessEffective{Roles: routes, NativeModels: native}, nil
 }
 
 func formatRoute(route config.Route) string {
@@ -428,29 +405,6 @@ func lookupStringMap(doc map[string]any, path ...string) map[string]string {
 		if s, ok := v.(string); ok {
 			out[k] = s
 		}
-	}
-	return out
-}
-
-func lookupCeremoniesMap(doc map[string]any, path ...string) map[string][]string {
-	node := lookup(doc, path...)
-	obj, ok := node.(map[string]any)
-	if !ok {
-		return nil
-	}
-	out := make(map[string][]string, len(obj))
-	for k, v := range obj {
-		arr, ok := v.([]any)
-		if !ok {
-			continue
-		}
-		advisors := make([]string, 0, len(arr))
-		for _, x := range arr {
-			if s, ok := x.(string); ok {
-				advisors = append(advisors, s)
-			}
-		}
-		out[k] = advisors
 	}
 	return out
 }

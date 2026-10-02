@@ -877,7 +877,7 @@ func TestHarnessToggleAsyncResult_ReconcilesRegisteredPanel(t *testing.T) {
 		},
 	})
 	args := NewListEditor("harnesses.claude-code.args", "args", []string{}, nil, 0, false, true, false)
-	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{})
+	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, HarnessEffective{})
 	m.RegisterTopSection("harness claude-code", panel)
 
 	if err := setDotPath(store.doc, "harnesses.claude-code.enabled", false); err != nil {
@@ -905,7 +905,7 @@ func TestHarnessToggleAsyncResult_RollsBackRegisteredPanelOnError(t *testing.T) 
 	args := NewListEditor("harnesses.claude-code.args", "args", []string{}, nil, 0, false, true, false)
 	// Simulate the optimistic checkbox already flipped off before the
 	// shell-out failure returns.
-	panel := NewHarnessBlockPanel("claude-code", false, nil, args, nil, nil, HarnessEffective{})
+	panel := NewHarnessBlockPanel("claude-code", false, nil, args, nil, HarnessEffective{})
 	m.RegisterTopSection("harness claude-code", panel)
 
 	_, _ = m.Update(harnessToggleResultMsg{
@@ -1026,9 +1026,9 @@ func TestHierarchicalNavigation_JKMovesTopLevelUntilEnter(t *testing.T) {
 	m, _, _ := newTestModel(t, nil)
 
 	args := NewListEditor("harnesses.claude-code.args", "args", []string{"--alpha"}, nil, 0, false, true, false)
-	panel1 := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{})
+	panel1 := NewHarnessBlockPanel("claude-code", true, nil, args, nil, HarnessEffective{})
 	args2 := makeArgsWidget("harnesses.codex.args", []string{})
-	panel2 := NewHarnessBlockPanel("codex", true, nil, args2, nil, nil, HarnessEffective{})
+	panel2 := NewHarnessBlockPanel("codex", true, nil, args2, nil, HarnessEffective{})
 	m.RegisterTopSection("harness claude-code", panel1)
 	m.RegisterTopSection("harness codex", panel2)
 
@@ -1116,7 +1116,7 @@ func TestHierarchicalNavigation_EnterDescendsOneLevel(t *testing.T) {
 
 	args := NewListEditor("harnesses.claude-code.args", "args", []string{"--alpha"}, nil, 0, false, true, false)
 	roles := NewOpenKeysetKVEditor("harnesses.claude-code.roles", "roles", map[string]string{"lead": "opus"}, nil, nil, true, true)
-	panel := NewHarnessBlockPanel("claude-code", true, nil, args, roles, nil, HarnessEffective{})
+	panel := NewHarnessBlockPanel("claude-code", true, nil, args, roles, HarnessEffective{})
 	m.RegisterTopSection("harness claude-code", panel)
 
 	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
@@ -1276,7 +1276,7 @@ func TestHierarchicalNavigation_EscBacksOutOneLevel(t *testing.T) {
 	m, _, _ := newTestModel(t, nil)
 
 	args := NewListEditor("harnesses.claude-code.args", "args", []string{"--alpha"}, nil, 0, false, true, false)
-	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{})
+	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, HarnessEffective{})
 	m.RegisterTopSection("harness claude-code", panel)
 
 	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
@@ -1305,7 +1305,7 @@ func TestHierarchicalNavigation_FocusConsumesRunesOnlyInLeafEditMode(t *testing.
 	m, _, _ := newTestModel(t, nil)
 
 	args := NewListEditor("harnesses.claude-code.args", "args", []string{"--alpha"}, nil, 0, false, true, false)
-	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{})
+	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, HarnessEffective{})
 	m.RegisterTopSection("harness claude-code", panel)
 
 	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
@@ -1437,7 +1437,7 @@ func TestComputeFocusedYRange_AlignsWithRenderedBody(t *testing.T) {
 	// joined by "\n\n". Three is enough to exercise the drift math.
 	for _, fw := range []string{"alpha", "beta", "gamma"} {
 		args := makeArgsWidget("harnesses."+fw+".args", []string{})
-		panel := NewHarnessBlockPanel(fw, true, nil, args, nil, nil, HarnessEffective{})
+		panel := NewHarnessBlockPanel(fw, true, nil, args, nil, HarnessEffective{})
 		m.RegisterTopSection("harness "+fw, panel)
 	}
 

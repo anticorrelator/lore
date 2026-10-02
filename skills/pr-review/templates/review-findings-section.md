@@ -39,12 +39,4 @@ Render each finding as the **reviewer-cockpit variant** from Step 6d-ii (interna
 **File:** `path/to/other.ext:15`
 
 <open question, as written>
-
-### Supplementary Reports
-
-<Include only if non-conforming ceremony output exists — omit this heading entirely otherwise>
-
-#### <skill-name> [ceremony]
-
-<raw output from the ceremony lens>
 ```

@@ -61,13 +61,12 @@ func TestHarnessRequiredNativeModelsDefaultDeletionRestoresEditor(t *testing.T) 
 	}
 }
 
-func TestHarnessRoutesPanelPreservesCeremoniesAndRendersRoutesReadOnly(t *testing.T) {
+func TestHarnessRoutesPanelRendersRoutesReadOnly(t *testing.T) {
 	models := NewRequiredOpenKeysetKVEditor("harnesses.codex.native_models", "native_models", map[string]string{"default": "gpt-5.5-high"}, "default", nil)
-	ceremonies := NewStringArrayOpenKeysetKVEditor("harnesses.codex.ceremonies", "ceremonies", map[string]string{"spec-design": "codex-plan-review"}, true, false)
 	effective := HarnessEffective{Roles: map[string]string{"worker": "codex/gpt-5.6-sol {effort=high}"}, NativeModels: map[string]string{"worker": "codex/gpt-5.6-sol {effort=high}"}}
-	panel := NewHarnessRoutesPanel("codex", true, nil, NewListEditor("harnesses.codex.args", "args", nil, nil, 0, false, true, false), models, ceremonies, effective)
+	panel := NewHarnessRoutesPanel("codex", true, nil, NewListEditor("harnesses.codex.args", "args", nil, nil, 0, false, true, false), models, effective)
 	view := panel.View()
-	for _, want := range []string{"native_models:", "ceremonies:", "spec-design", "effective routes (read-only):", "worker: route=codex/gpt-5.6-sol", "lore framework set-model"} {
+	for _, want := range []string{"native_models:", "effective routes (read-only):", "worker: route=codex/gpt-5.6-sol", "lore framework set-model"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("route panel missing %q:\n%s", want, view)
 		}
@@ -262,14 +261,13 @@ func makeRolesWidget(dotPath string, current map[string]string) FieldWidget {
 }
 
 // TestHarnessBlockPanel_AbsentOverlayTabThroughDoesNotEmitCommit is the
-// core D9 invariant: tabbing through a panel where roles and ceremonies are
-// absent (nil widgets) must produce zero IntentCommit messages — regardless
-// of how many tab gestures the user issues.
+// core D9 invariant: tabbing through a panel where roles is absent (nil
+// widget) must produce zero IntentCommit messages — regardless of how many
+// tab gestures the user issues.
 func TestHarnessBlockPanel_AbsentOverlayTabThroughDoesNotEmitCommit(t *testing.T) {
 	args := makeArgsWidget("harnesses.claude-code.args", []string{"--flag"})
-	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{
-		Roles:      map[string]string{"lead": "opus"},
-		Ceremonies: map[string][]string{"plan-review": {"sharp-edges"}},
+	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, HarnessEffective{
+		Roles: map[string]string{"lead": "opus"},
 	})
 	panel.Focus()
 
@@ -285,7 +283,7 @@ func TestHarnessBlockPanel_AbsentOverlayTabThroughDoesNotEmitCommit(t *testing.T
 // is visually distinguishable per D9.
 func TestHarnessBlockPanel_AbsentOverlayRendersInherited(t *testing.T) {
 	args := makeArgsWidget("harnesses.claude-code.args", []string{})
-	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{
+	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, HarnessEffective{
 		Roles: map[string]string{"lead": "opus"},
 	})
 
@@ -305,13 +303,13 @@ func TestHarnessBlockPanel_ExplicitEmptyDistinctFromAbsent(t *testing.T) {
 	args := makeArgsWidget("harnesses.claude-code.args", []string{})
 
 	// Absent — nil widget.
-	absentPanel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{})
+	absentPanel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, HarnessEffective{})
 	absentView := absentPanel.View()
 
 	// Explicit-empty — non-nil widget, empty draft.
 	emptyRoles := makeRolesWidget("harnesses.claude-code.roles", map[string]string{})
 	args2 := makeArgsWidget("harnesses.claude-code.args", []string{})
-	emptyPanel := NewHarnessBlockPanel("claude-code", true, nil, args2, emptyRoles, nil, HarnessEffective{})
+	emptyPanel := NewHarnessBlockPanel("claude-code", true, nil, args2, emptyRoles, HarnessEffective{})
 	emptyView := emptyPanel.View()
 
 	if absentView == emptyView {
@@ -328,9 +326,9 @@ func TestHarnessBlockPanel_ExplicitEmptyDistinctFromAbsent(t *testing.T) {
 	}
 }
 
-// extractOverlaySection returns the lines of view from "<label>" through the
-// next overlay header or end-of-view. Used to inspect a single overlay's
-// rendered output without conflation across overlays.
+// extractOverlaySection returns the lines of view from "<label>" through
+// end-of-view. Used to inspect a single overlay's rendered output apart from
+// the rows above it.
 func extractOverlaySection(view, label string) string {
 	lines := strings.Split(view, "\n")
 	var (
@@ -340,8 +338,6 @@ func extractOverlaySection(view, label string) string {
 	for _, line := range lines {
 		if strings.Contains(line, label) {
 			inside = true
-		} else if inside && strings.HasPrefix(strings.TrimSpace(line), "ceremonies:") && label != "ceremonies:" {
-			break
 		}
 		if inside {
 			out = append(out, line)
@@ -356,7 +352,7 @@ func extractOverlaySection(view, label string) string {
 func TestHarnessBlockPanel_ExplicitNonEmptyRendersOverride(t *testing.T) {
 	args := makeArgsWidget("harnesses.claude-code.args", []string{})
 	roles := makeRolesWidget("harnesses.claude-code.roles", map[string]string{"lead": "sonnet"})
-	panel := NewHarnessBlockPanel("claude-code", true, nil, args, roles, nil, HarnessEffective{
+	panel := NewHarnessBlockPanel("claude-code", true, nil, args, roles, HarnessEffective{
 		Roles: map[string]string{"lead": "sonnet"},
 	})
 
@@ -379,7 +375,7 @@ func TestHarnessBlockPanel_UnsetGestureOnExplicitOverrideEmitsIntentUnset(t *tes
 	// allowUnset=true is required for the unset gesture; the OpenKeysetKVEditor
 	// constructor accepts that as the trailing param.
 	roles := NewOpenKeysetKVEditor("harnesses.claude-code.roles", "roles", map[string]string{"lead": "sonnet"}, nil, nil, true, true)
-	panel := NewHarnessBlockPanel("claude-code", true, nil, args, roles, nil, HarnessEffective{})
+	panel := NewHarnessBlockPanel("claude-code", true, nil, args, roles, HarnessEffective{})
 	panel.Focus()
 	_, _ = dispatch(panel, "enter")
 
@@ -405,7 +401,7 @@ func TestHarnessBlockPanel_UnsetGestureOnExplicitOverrideEmitsIntentUnset(t *tes
 // "unset" because it isn't set.
 func TestHarnessBlockPanel_UnsetGestureOnAbsentOverlayCannotFire(t *testing.T) {
 	args := makeArgsWidget("harnesses.claude-code.args", []string{})
-	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{})
+	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, HarnessEffective{})
 	panel.Focus()
 
 	for _, k := range []string{"tab", "u", "tab", "u"} {
@@ -420,12 +416,11 @@ func TestHarnessBlockPanel_UnsetGestureOnAbsentOverlayCannotFire(t *testing.T) {
 // lands on absent overlays — the user cannot accidentally tab into a
 // non-widget and trigger a nil-dispatch panic. The per-harness enabled toggle
 // is always materialized (constructed by NewHarnessBlockPanel), so it occupies
-// logical slot 0; args sits at slot 1, and absent overlays compress the rest.
+// logical slot 0; args sits at slot 1, and an absent roles overlay takes no
+// slot.
 func TestHarnessBlockPanel_TabCyclesOnlyMaterializedChildren(t *testing.T) {
 	args := makeArgsWidget("harnesses.claude-code.args", []string{})
-	// Only enabled toggle (always present) + args + ceremonies; roles absent.
-	cer := NewOpenKeysetKVEditor("harnesses.claude-code.ceremonies", "ceremonies", map[string]string{"plan-review": "sharp-edges"}, nil, nil, true, true)
-	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, cer, HarnessEffective{})
+	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, HarnessEffective{})
 	panel.Focus()
 
 	if c, _ := panel.childAt(0); c == nil {
@@ -436,11 +431,8 @@ func TestHarnessBlockPanel_TabCyclesOnlyMaterializedChildren(t *testing.T) {
 	if c, _ := panel.childAt(1); c != args {
 		t.Fatalf("expected args at logical 1, got %T", c)
 	}
-	if c, _ := panel.childAt(2); c != cer {
-		t.Fatalf("expected ceremonies at logical 2 (roles skipped), got %T", c)
-	}
-	if c, _ := panel.childAt(3); c != nil {
-		t.Fatalf("expected nothing at logical 3, got %T", c)
+	if c, _ := panel.childAt(2); c != nil {
+		t.Fatalf("expected nothing at logical 2 (roles absent), got %T", c)
 	}
 }
 
@@ -469,7 +461,7 @@ func TestHarnessBlockPanel_EffectiveColumnRendersAllThreeStates(t *testing.T) {
 	args := makeArgsWidget("harnesses.claude-code.args", []string{})
 
 	// Case 1: absent override + populated effective from inheritance.
-	absent := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{
+	absent := NewHarnessBlockPanel("claude-code", true, nil, args, nil, HarnessEffective{
 		Roles: map[string]string{"lead": "opus"},
 	})
 	if !strings.Contains(absent.View(), "lead=opus") {
@@ -479,7 +471,7 @@ func TestHarnessBlockPanel_EffectiveColumnRendersAllThreeStates(t *testing.T) {
 	// Case 2: explicit-empty harness-local roles.
 	emptyRoles := makeRolesWidget("harnesses.claude-code.roles", map[string]string{})
 	args2 := makeArgsWidget("harnesses.claude-code.args", []string{})
-	explicit := NewHarnessBlockPanel("claude-code", true, nil, args2, emptyRoles, nil, HarnessEffective{})
+	explicit := NewHarnessBlockPanel("claude-code", true, nil, args2, emptyRoles, HarnessEffective{})
 	view := stripANSI(explicit.View())
 	if !strings.Contains(view, "roles: (0 entries)") {
 		t.Fatalf("explicit-empty harness-local roles must show an empty editor, got:\n%s", view)
@@ -488,7 +480,7 @@ func TestHarnessBlockPanel_EffectiveColumnRendersAllThreeStates(t *testing.T) {
 	// Case 3: explicit non-empty harness-local roles.
 	roles3 := makeRolesWidget("harnesses.claude-code.roles", map[string]string{"lead": "haiku"})
 	args3 := makeArgsWidget("harnesses.claude-code.args", []string{})
-	override := NewHarnessBlockPanel("claude-code", true, nil, args3, roles3, nil, HarnessEffective{
+	override := NewHarnessBlockPanel("claude-code", true, nil, args3, roles3, HarnessEffective{
 		Roles: map[string]string{"lead": "haiku"},
 	})
 	if !strings.Contains(override.View(), "lead = haiku") {
@@ -502,7 +494,7 @@ func TestHarnessBlockPanel_EffectiveColumnRendersAllThreeStates(t *testing.T) {
 // materialization is the explicit anti-pattern D9 prevents.
 func TestHarnessBlockPanel_TabThroughAbsentOverlayDoesNotMaterializeWidget(t *testing.T) {
 	args := makeArgsWidget("harnesses.claude-code.args", []string{})
-	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{})
+	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, HarnessEffective{})
 	panel.Focus()
 
 	for i := 0; i < 5; i++ {
@@ -511,9 +503,6 @@ func TestHarnessBlockPanel_TabThroughAbsentOverlayDoesNotMaterializeWidget(t *te
 	}
 	if panel.roles != nil {
 		t.Fatalf("absent overlay materialized to a widget after tab-through")
-	}
-	if panel.ceremonies != nil {
-		t.Fatalf("absent ceremonies materialized to a widget after tab-through")
 	}
 }
 
@@ -532,7 +521,7 @@ func TestHarnessBlockPanel_TabThroughAbsentOverlayDoesNotMaterializeWidget(t *te
 // ListEditor mid-append → claim (j/k typed into the buffer).
 func TestHarnessBlockPanel_ConsumesNavRunes_DelegatesToActiveChild(t *testing.T) {
 	args := makeArgsWidget("harnesses.claude-code.args", []string{"a", "b"})
-	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{})
+	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, HarnessEffective{})
 	panel.Focus()
 
 	// The selected but unopened panel releases nav runes to top-level movement.
@@ -582,7 +571,7 @@ func TestHarnessBlockPanel_ConsumesNavRunes_FalseWhenEmpty(t *testing.T) {
 func TestHarnessBlockPanel_InnerFocusYRange_TracksCursor(t *testing.T) {
 	args := makeArgsWidget("harnesses.claude-code.args", []string{"--alpha"})
 	roles := NewOpenKeysetKVEditor("harnesses.claude-code.roles", "roles", map[string]string{"lead": "opus"}, nil, nil, true, true)
-	panel := NewHarnessBlockPanel("claude-code", true, nil, args, roles, nil, HarnessEffective{})
+	panel := NewHarnessBlockPanel("claude-code", true, nil, args, roles, HarnessEffective{})
 	panel.Focus()
 	_, _ = dispatch(panel, "enter")
 
@@ -616,7 +605,7 @@ func TestHarnessBlockPanel_InnerFocusYRange_TracksCursor(t *testing.T) {
 // short-circuit the scroll math with stale offsets.
 func TestHarnessBlockPanel_InnerFocusYRange_NotFocused(t *testing.T) {
 	args := makeArgsWidget("harnesses.claude-code.args", []string{})
-	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{})
+	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, HarnessEffective{})
 	// Note: not Focus()'d.
 	top, bot := panel.InnerFocusYRange()
 	if top != -1 || bot != -1 {
@@ -630,7 +619,7 @@ func TestHarnessBlockPanel_InnerFocusYRange_NotFocused(t *testing.T) {
 // to a y-coordinate that doesn't correspond to a rendered cursor row.
 func TestHarnessBlockPanel_InnerFocusYRange_OffsetsAlignWithViewLines(t *testing.T) {
 	args := makeArgsWidget("harnesses.claude-code.args", []string{"--alpha"})
-	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{})
+	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, HarnessEffective{})
 	panel.Focus()
 	_, _ = dispatch(panel, "enter")
 	_, _ = dispatch(panel, "tab") // advance to args slot
@@ -673,12 +662,11 @@ func TestHarnessBlockPanel_InnerFocusYRange_OffsetsAlignWithViewLines(t *testing
 func TestHarnessBlockPanel_NonNilOverlaysAreNavigable(t *testing.T) {
 	args := makeArgsWidget("harnesses.claude-code.args", []string{})
 	roles := NewOpenKeysetKVEditor("harnesses.claude-code.roles", "roles", map[string]string{"lead": "opus"}, nil, nil, true, true)
-	cer := NewOpenKeysetKVEditor("harnesses.claude-code.ceremonies", "ceremonies", map[string]string{"plan-review": "sharp-edges"}, nil, nil, true, true)
-	panel := NewHarnessBlockPanel("claude-code", true, nil, args, roles, cer, HarnessEffective{})
+	panel := NewHarnessBlockPanel("claude-code", true, nil, args, roles, HarnessEffective{})
 	panel.Focus()
 
 	// Slot order with everything materialized: enabled (0), args (1), roles
-	// (2), ceremonies (3).
+	// (2).
 	if c, _ := panel.childAt(0); c == nil {
 		t.Fatalf("expected enabled at slot 0")
 	}
@@ -688,11 +676,8 @@ func TestHarnessBlockPanel_NonNilOverlaysAreNavigable(t *testing.T) {
 	if c, _ := panel.childAt(2); c != roles {
 		t.Fatalf("expected roles at slot 2; got %T", c)
 	}
-	if c, _ := panel.childAt(3); c != cer {
-		t.Fatalf("expected ceremonies at slot 3; got %T", c)
-	}
-	if c, _ := panel.childAt(4); c != nil {
-		t.Fatalf("expected nothing past slot 3; got %T", c)
+	if c, _ := panel.childAt(3); c != nil {
+		t.Fatalf("expected nothing past slot 2; got %T", c)
 	}
 }
 

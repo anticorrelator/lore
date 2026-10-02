@@ -60,9 +60,7 @@ Derived automatically by `evidence-append.sh` at capture time. The validator typ
 | `captured_origin_ref` | string \| null | First ref under `refs/remotes/origin/` that contains the cwd repo's HEAD (e.g. `"origin/main"`). `null` when HEAD is not reachable from any `origin/*` ref. Omitted when not inside a git work tree. |
 | `anchor_warning` | string | Set to `"unpushed_local_only"` iff `captured_origin_ref` is `null`. `evidence-append.sh` additionally emits a single-line stderr soft-warning so the producer sees the anchor is fragile. Capture continues — this is informational, not gating. |
 
-These fields exist to give the audit-side claim-reconciliation cascade (see `architecture/evidence/claim-reconciliation-in-lore-anchors-on-content-no.md`) a stable mid-tier anchor between the volatile `captured_at_sha` (orphaned by squash) and the over-broad `origin/main` (which decays as the file evolves). Phase 2's preflight cascade reads them; Phase 1's substrate captures them.
-
-Both audit-side resolvers ground on `file_relative` ahead of `file`: `scripts/grounding-preflight.py`'s reconciliation cascade reads it exclusively, and `scripts/reverse-auditor-inline-evidence.py` tries it first and falls back to `file`. `scripts/audit-artifact.sh`'s task-claims extractor carries `file_relative`, `captured_at_sha`, and `captured_origin_ref` into each `claim_payload` entry so downstream consumers can see them.
+These fields give a claim a stable mid-tier anchor between the volatile `captured_at_sha` (orphaned by squash) and the over-broad `origin/main` (which decays as the file evolves). The substrate captures them; nothing reads them today.
 
 ## Validation model
 

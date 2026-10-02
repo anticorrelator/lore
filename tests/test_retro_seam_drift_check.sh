@@ -215,7 +215,7 @@ expect_pass "$repo" "$base"
 
 # Each producer and display seam needs a reader contract companion, including
 # the first commit that creates a planned producer.
-for protected in scripts/plan-revise.sh scripts/plan-review.sh scripts/criteria-run.sh scripts/packet-append.sh scripts/spec-outcome.sh scripts/work-evidence.py scripts/load-work-item.sh scripts/coordinate-status.sh tui/internal/work/detail.go tui/polling.go; do
+for protected in scripts/plan-revise.sh scripts/plan-review.sh scripts/criteria-run.sh scripts/packet-append.sh scripts/work-evidence.py scripts/load-work-item.sh scripts/coordinate-status.sh tui/internal/work/detail.go tui/polling.go; do
   repo="$TMP/expanded-$(basename "$protected")"
   new_repo "$repo"
   base="$(git -C "$repo" rev-parse HEAD)"

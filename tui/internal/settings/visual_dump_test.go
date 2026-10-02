@@ -51,7 +51,7 @@ func TestVisualDumpForManualInspection(t *testing.T) {
 	radio := NewPrimaryRadio("tui_launch_framework", []string{"claude-code", "opencode", "codex"}, nil, "claude-code")
 	m.RegisterTopSection("primary harness", radio)
 	args := NewListEditor("harnesses.claude-code.args", "args", []string{"--dangerously-skip-permissions"}, nil, 0, false, true, false)
-	hp := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{Roles: map[string]string{"lead": "opus", "default": "sonnet"}})
+	hp := NewHarnessBlockPanel("claude-code", true, nil, args, nil, HarnessEffective{Roles: map[string]string{"lead": "opus", "default": "sonnet"}})
 	m.RegisterTopSection("harness claude-code", hp)
 
 	m.SetSize(80, 40)

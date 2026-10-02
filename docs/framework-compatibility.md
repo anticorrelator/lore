@@ -74,9 +74,6 @@ The matrix below classifies skills by their hardest required capability. Skills 
 | `/pr-review` (incl. `--self`) | yes (lens fanout) | no (lead-only aggregation) | no                          | no                                       |
 | `/pr-create`         | no                 | no                      | no                                 | no                                       |
 | Single-lens reviews (`/pr-{correctness,security,blast-radius,test-quality,interface-clarity,regressions,thematic,user-impact}`) | no | no | no | no |
-| `/codex-plan-review` | no (delegates to codex CLI) | no                | no                                 | no                                       |
-| `/codex-pr-review`   | no (delegates to codex CLI) | no                | no                                 | no                                       |
-| `/codex-design-review` | no (delegates)            | no                | no                                 | no                                       |
 
 The full per-skill `requires` schema (with `min_level` and `partial_below` thresholds) lives in [`adapters/capabilities.json::skills`](../adapters/capabilities.json). T41 / T9 wired the team-heavy skills (`bootstrap`, `implement`, `spec`) to the partial-mode contract: a `partial_below` floor splits "downgrade to partial-mode" from "refuse outright".
 
@@ -93,8 +90,6 @@ The classification below applies the dependency table above against each harness
 | `/retro`             | full        | partial   | partial   |
 | `/work`              | full        | full      | full      |
 | `/pr-review`         | full        | full      | full      |
-| `/codex-plan-review` | full        | full      | full      |
-| `/codex-pr-review`   | full        | full      | full      |
 | Single-agent skills  | full        | full      | full      |
 
 The `/pr-review` family is `full` on every harness because its lens fanout uses lead-only aggregation today — no skill in that family relies on `team_messaging` or `task_completed_hook`. If a future revision adds inter-lens messaging, this matrix re-classifies them.
@@ -188,7 +183,7 @@ Defined in [`adapters/roles.json`](../adapters/roles.json):
 | `lead`       | Coordinator agent that plans a work item's tasks, spawns workers, and accepts each report before dependent tasks dispatch. | `skills/spec/SKILL.md`, `skills/implement/SKILL.md`     |
 | `worker`     | Task-iterating implementation agent emitting Tier 2 evidence anchored to file:line ranges.               | `agents/worker.md`, `skills/implement`, `batch-implement` |
 | `researcher` | Task-iterating investigation agent that explores design space without modifying source files.            | `agents/researcher.md`, `skills/spec`, `batch-spec`     |
-| `reviewer`   | Single-batch evaluator that consumes a finished artifact and returns a verdict against a rubric.         | `skills/pr-review`, `audit-artifact.sh`                  |
+| `reviewer`   | Single-batch evaluator that consumes a finished artifact and returns a verdict against a rubric.         | `skills/pr-review`                                       |
 | `default`    | Resolution fallback consulted when a role binding is unset; never named directly by a call site.         | (fallback only)                                         |
 
 Adding a role requires updating `roles.json`, `scripts/lib.sh::resolve_model_for_role`, `tui/internal/config/config.go::ResolveModelForRole`, and `tests/frameworks/roles.bats` — the closed set keeps the schema verifiable and `lore framework status` output finite.

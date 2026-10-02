@@ -22,58 +22,31 @@ seal_review() {
     --output "$TEST_KDIR/review.md" --dispositions "$TEST_KDIR/dispositions.json" \
     --evaluator-manifest "$TEST_KDIR/evaluator.json"
 }
-file_review() {
-  bash "$REPO_DIR/scripts/spec-outcome.sh" review-item --ceremony spec-post-plan --advisor reviewer \
-    --attempt-id review-1 --outcome completed --verdict PASS --evidence-manifest "$TEST_KDIR/manifest.json" --json
-}
-seal_manifest() { seal_review | jq '.evidence_manifest' > "$TEST_KDIR/manifest.json"; }
 
-@test "prepared review files outcome against N after live plan becomes N+1 and retries retain exact identity" {
+@test "prepared review seals against N after live plan becomes N+1 and retries retain exact identity" {
   prepare_review > "$TEST_KDIR/prepare.json"
   cp "$ITEM/reviews/review-1/prepared.json" "$TEST_KDIR/prepared-original"
   sed -i.bak 's/Record history/Record revised history/g' "$ITEM/plan.md"
   bash "$REPO_DIR/scripts/plan-revise.sh" review-item >/dev/null
   [ "$RID" != "$(jq -r '.revision_id' "$ITEM/tasks.json")" ]
-  seal_manifest
+  seal_review >/dev/null
   cp "$ITEM/reviews/review-1/sealed/seal.json" "$TEST_KDIR/seal-original"
   run prepare_review; [ "$status" -eq 0 ]; [[ "$output" == *'"reused"'* ]]
   run seal_review; [ "$status" -eq 0 ]; [[ "$output" == *'"reused"'* ]]
-  file_review > "$TEST_KDIR/outcome.json"
-  run file_review; [ "$status" -eq 0 ]; [[ "$output" == *'"reused"'* ]]
-  [ "$(grep -c '^Spec-outcome-record:' "$ITEM/execution-log.md")" -eq 1 ]
   cmp "$TEST_KDIR/prepared-original" "$ITEM/reviews/review-1/prepared.json"
   cmp "$TEST_KDIR/seal-original" "$ITEM/reviews/review-1/sealed/seal.json"
   bash "$REPO_DIR/scripts/load-work-item.sh" review-item --json > "$TEST_KDIR/work.json"
-  jq -e --arg rid "$RID" '.evidence.sources.outcomes.rows[0] | .schema_version==2 and .revision_id==$rid' "$TEST_KDIR/work.json"
   jq -e '.evidence.review_summary[0] | .state=="sealed" and .binding.state=="stale" and .execution_evidence=="none"' "$TEST_KDIR/work.json"
 }
 
-@test "conflicting prepare seal and outcome attempt reuse preserve accepted artifacts" {
-  prepare_review >/dev/null; seal_manifest; file_review >/dev/null
+@test "conflicting prepare and seal attempt reuse preserve accepted artifacts" {
+  prepare_review >/dev/null; seal_review >/dev/null
   cp "$ITEM/reviews/review-1/sealed/seal.json" "$TEST_KDIR/original"
   run bash "$REPO_DIR/scripts/plan-review.sh" prepare review-item --attempt-id review-1 --revision "$RID" --ceremony spec-design --purpose criterion-adequacy
   [ "$status" -eq 1 ]; [[ "$output" == *collision* ]]
   printf 'Changed verdict text\n' > "$TEST_KDIR/review.md"
   run seal_review; [ "$status" -eq 1 ]; [[ "$output" == *collision* ]]
-  run bash "$REPO_DIR/scripts/spec-outcome.sh" review-item --ceremony spec-post-plan --advisor reviewer --attempt-id review-1 --outcome failed --verdict FAIL --evidence-manifest "$TEST_KDIR/manifest.json" --json
-  [ "$status" -eq 1 ]
   cmp "$TEST_KDIR/original" "$ITEM/reviews/review-1/sealed/seal.json"
-  [ "$(grep -c '^Spec-outcome-record:' "$ITEM/execution-log.md")" -eq 1 ]
-}
-
-@test "wrong snapshot ledger and manifest hashes fail before outcome filing" {
-  prepare_review >/dev/null; seal_manifest
-  cp "$ITEM/reviews/review-1/plan.md" "$TEST_KDIR/original-plan"
-  printf 'wrong\n' > "$ITEM/reviews/review-1/plan.md"
-  run file_review; [ "$status" -eq 1 ]
-  cp "$TEST_KDIR/original-plan" "$ITEM/reviews/review-1/plan.md"
-  printf 'wrong\n' >> "$ITEM/reviews/review-1/sealed/dispositions.json"
-  run file_review; [ "$status" -eq 1 ]
-  cp "$TEST_KDIR/dispositions.json" "$ITEM/reviews/review-1/sealed/dispositions.json"
-  jq '.review_sha256="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"' "$TEST_KDIR/manifest.json" > "$TEST_KDIR/bad.json"
-  mv "$TEST_KDIR/bad.json" "$TEST_KDIR/manifest.json"
-  run file_review; [ "$status" -eq 1 ]
-  [ ! -f "$ITEM/execution-log.md" ]
 }
 
 @test "seal refuses command results and invented result ids" {
@@ -100,7 +73,7 @@ seal_manifest() { seal_review | jq '.evidence_manifest' > "$TEST_KDIR/manifest.j
 }
 
 @test "required pending dispatch and prior review reuse stay separate authored decisions" {
-  prepare_review >/dev/null; seal_manifest; file_review >/dev/null
+  prepare_review >/dev/null; seal_review >/dev/null
   sed -i.bak 's/Record history/Record revised history/g' "$ITEM/plan.md"
   bash "$REPO_DIR/scripts/plan-revise.sh" review-item >/dev/null
   NEW_RID=$(jq -r '.revision_id' "$ITEM/tasks.json")
@@ -146,7 +119,7 @@ PY
   [ "$status" -eq 0 ]
   jq '.judgments += [{"purpose":"integration","judgment":"consistent","rationale":"The composed source meets the anchor; no execution evidence is cited.","result_ids":[]}]' "$TEST_KDIR/dispositions.json" > "$TEST_KDIR/both.json"
   mv "$TEST_KDIR/both.json" "$TEST_KDIR/dispositions.json"
-  seal_manifest; file_review >/dev/null
+  seal_review >/dev/null
   printf 'changed\n' >> "$CODE/source"
   run bash "$REPO_DIR/scripts/plan-review.sh" prepare review-item --attempt-id review-1 --revision "$RID" --ceremony spec-post-plan --purpose integration --execution-worktree "$CODE"
   [ "$status" -eq 0 ]; [[ "$output" == *'"reused"'* ]]
@@ -159,7 +132,6 @@ api=runpy.run_path(sys.argv[1]+'/scripts/work-evidence.py')
 root=Path(sys.argv[2]); item=root/'_work/_archive/review-item'
 e=api['project'](item,root)
 assert e['review_summary'][0]['state']=='sealed'
-assert e['sources']['outcomes']['records'][0]['binding']['state']=='current'
 assert any('composed source' in (x.get('content') or '') for x in e['sources']['reviews']['entries'])
 PY
 }
@@ -178,40 +150,13 @@ row={'schema_version':1,'result_id':'r1','execution_attempt_id':'run-r1','task_i
 (item/'results.jsonl').write_text(json.dumps(row)+'\n')
 p=Path(sys.argv[3]); d=json.loads(p.read_text());d['judgments'][0]['result_ids']=['r1'];p.write_text(json.dumps(d))
 PY
-  seal_manifest
+  seal_review >/dev/null
   cp "$ITEM/reviews/review-1/sealed/cited-results.json" "$TEST_KDIR/frozen"
   printf 'changed output\n' > "$ITEM/results/r1/output.txt"
   printf 'malformed live ledger\n' > "$ITEM/results.jsonl"
   run seal_review; [ "$status" -eq 0 ]; [[ "$output" == *'"reused"'* ]]
-  run file_review; [ "$status" -eq 0 ]
   cmp "$TEST_KDIR/frozen" "$ITEM/reviews/review-1/sealed/cited-results.json"
   jq -e '.results[0].artifacts[0].content=="failed assertion\n" and .result_ids==["r1"]' "$TEST_KDIR/frozen"
-  printf 'changed frozen copy\n' >> "$ITEM/reviews/review-1/sealed/cited-results.json"
-  run file_review; [ "$status" -eq 1 ]
-}
-
-@test "concurrent identical outcome filing appends a single authoritative record" {
-  prepare_review >/dev/null; seal_manifest
-  file_review > "$TEST_KDIR/first" & first=$!
-  file_review > "$TEST_KDIR/second" & second=$!
-  wait "$first"; wait "$second"
-  [ "$(grep -c '^Spec-outcome-record:' "$ITEM/execution-log.md")" -eq 1 ]
-}
-
-@test "bound needs-decision replay recovers missing auxiliary sink without changing outcome" {
-  prepare_review >/dev/null
-  jq '.outcome="needs-decision" | .verdict="UNRESOLVED" | .reason="Coverage needs an authored decision."' "$TEST_KDIR/dispositions.json" > "$TEST_KDIR/needs.json"
-  mv "$TEST_KDIR/needs.json" "$TEST_KDIR/dispositions.json"
-  seal_manifest
-  invoke_needs() {
-    bash "$REPO_DIR/scripts/spec-outcome.sh" review-item --ceremony spec-post-plan --advisor reviewer --attempt-id review-1 --outcome needs-decision --verdict UNRESOLVED --reason 'Coverage needs an authored decision.' --evidence-manifest "$TEST_KDIR/manifest.json" --json
-  }
-  invoke_needs > "$TEST_KDIR/first"
-  cp "$ITEM/execution-log.md" "$TEST_KDIR/original-log"
-  rm "$TEST_KDIR/_scorecards/rows.jsonl"
-  run invoke_needs; [ "$status" -eq 0 ]; [[ "$output" == *'"recovered"'* ]]
-  cmp "$TEST_KDIR/original-log" "$ITEM/execution-log.md"
-  jq -e 'select(.outcome=="needs-decision" and .outcome_id)' "$TEST_KDIR/_scorecards/rows.jsonl"
 }
 
 @test "integration code identity excludes only this attempt and detects older review edits" {

@@ -109,23 +109,13 @@ cat ~/.lore/claude-md/review-protocol/risk-triage.md
 
 ### 2b. Select lenses
 
-**Diff-size gate:** if the total changed lines are below 50 and mode is not `--thorough`, do not fan out — a diff this small does not repay a team of parallel readings. Select no built-in lenses and take the holistic path at Step 3-solo instead. Ceremony lenses are exempt from the gate: they are user-configured and dispatch regardless of diff size (Step 3b-ceremony). Above the threshold, select lenses as follows.
+**Diff-size gate:** if the total changed lines are below 50 and mode is not `--thorough`, do not fan out — a diff this small does not repay a team of parallel readings. Select no built-in lenses and take the holistic path at Step 3-solo instead. Above the threshold, select lenses as follows.
 
 **If mode is `--thorough`:** Select all lenses. Skip signal matching.
 
 **Otherwise:** Start with the default set (Correctness + Regressions + Test Quality + Interface Clarity + User Impact + Structural Read), then: 1. For each remaining lens (Security, Blast Radius), check trigger signals against the PR's changed files and diff content 2. If risk tier is High: force-add Security regardless of signals 3. Apply skip conditions — only skip a lens if ALL its skip conditions are true
 
 **Structural Read is always in the default set and has no skip condition** — it is the one whole-PR lens (solution-shape, not changed lines) and runs on every non-`--thorough` review. Its substrate is the promoted Narrative + Diagram built in Step 3, so it reads the PR end to end rather than line by line; see `~/.lore/claude-md/review-protocol/structural-altitude.md` for the altitude boundary that keeps it from re-filing what interface-clarity (local) or thematic (scope) already own.
-
-**Ceremony config lookup:** After adaptive selection, check for ceremony-configured lenses:
-
-```bash
-lore ceremony get pr-review
-```
-
-If the result is non-empty (not `[]`), append each returned skill to the selected lens set. Ceremony lenses are tagged `[ceremony]` in the triage table with reason "Ceremony config" and are **not** subject to adaptive skip conditions — they always run when configured.
-
-**Agency constraint:** The user — and only the user — can remove a ceremony lens at Step 2c. The agent MUST NOT self-remove a ceremony lens on the basis of latency, PR size, perceived low signal, or any other judgment call. Invalid skip rationales — do not act on any of these: the PR is small, the review is low-signal, the run will take too long, or the user did not explicitly ask for ceremony lenses this session. The user configured them; only the user can unconfigure them.
 
 ### 2c. Present triage
 
@@ -170,7 +160,6 @@ When the diff-size gate selected no built-in lenses, run Step 3 as one pass, you
 - Build the review brief (3a) and the narrative (3a-narrative) as usual — on a diff this small the diagram's multi-module gate rarely fires, and that is fine.
 - Run a single prefetch at diff-local scale: `lore prefetch "<primary topic>" --scale-set subsystem,implementation` (Step 3a-knowledge reduced to one topic; the same empty-vs-failed handling applies).
 - Read the diff once, end to end, holding the default lens concerns together — correctness, regressions, test coverage, interface clarity, user impact, solution shape — plus the security methodology when the change type warrants it. Emit findings in the same Findings Output Format, subject to the same grounding, hunk-anchoring, budget, and voice rules the lens prompt imposes (Step 3b Output).
-- Ceremony lenses, when configured, still dispatch per Step 3b-ceremony and are collected per Step 3d.
 
 Then continue at Step 4. Compound detection has nothing to correlate with a single source, but the materiality gate, deduplication, verdict, and the full Step 5–7 pipeline apply unchanged.
 
@@ -258,7 +247,7 @@ in the diff or source. The brief alone is never sufficient basis for a finding.
 
 ### 3b. Read lens methodologies and spawn agents
 
-**Dispatch guidance gate:** For every built-in, Structural Read, or ceremony lens launch or retry, run `lore dispatch guidance` immediately before assembling that launch's prompt. Prepend that launch attempt's complete output verbatim as the first block; never copy, summarize, cache, or reuse it for another launch. If any render fails while preparing the single parallel lens batch, issue none of that batch; a retry renders a fresh block independently for every member before launch. This changes neither model routing nor concurrency.
+**Dispatch guidance gate:** For every lens launch or retry, run `lore dispatch guidance` immediately before assembling that launch's prompt. Prepend that launch attempt's complete output verbatim as the first block; never copy, summarize, cache, or reuse it for another launch. If any render fails while preparing the single parallel lens batch, issue none of that batch; a retry renders a fresh block independently for every member before launch. This changes neither model routing nor concurrency.
 
 **Lens route selection:** Resolve the reviewer role through the active harness's native route and project it through that harness adapter. Once, at lens-launch preparation:
 
@@ -368,7 +357,7 @@ Report back with your findings JSON when complete.
 
 The diff-local lens prompt above asks for `{file, line}` findings JSON. The Structural Read lens is the **deliberate whole-PR exception** — it carries observations, not diff-anchored findings — so it gets the distinct prompt in Step 3b-structural, not the generic template above.
 
-Construct one Agent task per built-in lens (Structural Read included), each carrying the resolved lens model from the routing step above as its `model` parameter (or no model parameter on a resolver miss), but **do not dispatch yet** — ceremony lens tasks and the structural lens must launch together with the diff-local lens tasks in the same parallel batch (see Step 3b-structural and Step 3b-ceremony, then Step 3b-launch).
+Construct one Agent task per built-in lens (Structural Read included), each carrying the resolved lens model from the routing step above as its `model` parameter (or no model parameter on a resolver miss), but **do not dispatch yet** — the structural lens must launch together with the diff-local lens tasks in the same parallel batch (see Step 3b-structural, then Step 3b-launch).
 
 ### 3b-structural. Construct the Structural Read lens task
 
@@ -447,27 +436,13 @@ fake line anchors to look correlatable.
 Report back with your structural assessment when complete.
 ```
 
-### 3b-ceremony. Construct ceremony lens tasks
-
-**This step is mandatory and must not be skipped.** Ceremony lenses are identified by the `[ceremony]` tag assigned during Step 2b. For each ceremony lens in the selected set, construct an `Agent` task — *not* a `Skill` invocation — using the `general-purpose` subagent type with this prompt structure: read `skills/pr-review/templates/ceremony-lens-prompt.md`. Ceremony lens tasks carry the same resolved lens model from Step 3b's routing step as their `model` parameter (none on a resolver miss).
-
-Immediately before each ceremony launch or retry, render a new complete dispatch-guidance block and prepend that launch's output verbatim before the ceremony template content. The template remains otherwise unchanged.
-
-The `Agent`-wrapped invocation — rather than a direct `Skill` call from the main conversation — is what makes parallel execution with built-in lens agents possible. `Skill` invocations run synchronously in the main thread; `Agent` invocations issued in a single message run concurrently.
-
 <!-- section-boundary -->
 
 ### 3b-launch. Spawn all lens agents in a single parallel batch
 
-Issue every `Agent` tool call — one per selected lens (diff-local, the Structural Read lens, and ceremony) — in a **single message**, each stamped with the resolved lens model per Step 3b's routing step (no model parameter on a resolver miss). Spawning built-in lens agents first and then dispatching the structural or ceremony lens in a follow-up message serializes that work behind built-in completion and erases the latency gain the parallel design is meant to capture. The structural lens is dispatched in this same batch as the diff-local lenses — its whole-PR scope does not move it to a serial post-pass.
+Issue every `Agent` tool call — one per selected lens (diff-local and the Structural Read lens) — in a **single message**, each stamped with the resolved lens model per Step 3b's routing step (no model parameter on a resolver miss). Spawning the diff-local lens agents first and then dispatching the structural lens in a follow-up message serializes that work behind their completion and erases the latency gain the parallel design is meant to capture. The structural lens is dispatched in this same batch as the diff-local lenses — its whole-PR scope does not move it to a serial post-pass.
 
-There is no fixed concurrent-agent cap; spawn the full selected set together. Typical batches run 6–9 agents (defaults including Structural Read, plus 0–3 ceremony lenses).
-
-**Why unconditional parallel dispatch matters.** A downstream telemetry consumer — tournament reconciliation, coverage dashboards, session observability — cannot distinguish "ceremony not configured" from "agent chose not to run it" when the dispatch is silently skipped. Silent omission corrupts the signal: configured lenses appear as absent lenses, and the consumer has no way to recover the distinction after the fact.
-
-Do NOT skip this step. Do NOT omit a ceremony lens because the PR is small. Do NOT omit because the run seems low-signal. Do NOT omit because the user did not explicitly re-request ceremony lenses this session. Do NOT omit because of perceived latency cost. Do NOT defer ceremony dispatch to a follow-up message under any of these rationales — deferral is functionally a skip from the parallelism perspective. None of these are valid rationales — the user configured the ceremony; only the user can remove it. If a ceremony lens is genuinely inapplicable, stop and ask the user whether to remove it at Step 2c rather than self-removing.
-
-Ceremony lens results are collected in Step 3d alongside built-in results; output not in the standard Findings Output Format is handled as non-conforming there.
+There is no fixed concurrent-agent cap; spawn the full selected set together. Typical batches run 6–8 agents.
 
 ### 3c. Self-review verification passes (--self mode only)
 
@@ -476,13 +451,6 @@ If mode is `--self`, after the parallel lens batch completes, run the grounded v
 ### 3d. Collect and finalize
 
 As each lens agent reports findings JSON, verify it conforms to the Findings Output Format. If an agent fails or times out, proceed with available findings and note the coverage gap.
-
-**Ceremony lens two-tier classification:** For each ceremony lens result, check whether the output conforms to the Findings Output Format (`lens`, `pr`, `repo`, `findings[]` with each finding having `severity`, `title`, `file`, `line`, `body`):
-
-- **Conforming:** Include findings in the synthesis pipeline (Step 4) alongside built-in lens findings. These participate in compound detection, severity grouping, and deduplication.
-- **Non-conforming:** Store the raw output separately as a supplementary report. Tag it with the ceremony lens name. Non-conforming output does **not** enter synthesis — it is presented verbatim in the Supplementary Reports section (Step 5b).
-- **Malformed JSON:** Treat as non-conforming with an additional `[malformed]` tag. Store the raw text for supplementary presentation.
-- **Failure/timeout:** Note the coverage gap in the verdict. The review continues with available findings.
 
 **Structural Read lens result:** the structural lens returns an assessment (`verdict` + rationale + `observations[]`), not the diff-local `{file, line}` findings format — by design, it is the whole-PR lens. Hold its observations aside; they do **not** join compound detection or the severity counts as ordinary findings. They feed two places: the cockpit-only correlation in Step 4d-structural and the altitude routing in Step 6d-structural. If the structural agent fails, times out, or returns malformed output, record that in the Structural Assessment section (Step 6d-structural) and propose no structural posted comment — never fabricate observations.
 
@@ -583,13 +551,9 @@ The verdict, severity counts, and `minor (filtered)` tally are reviewer-facing �
 
 ### 5b. Findings by severity
 
-Present findings grouped by severity (compound findings first within each group). Read `skills/pr-review/templates/step5b-presentation.md` for the by-severity and supplementary-reports templates (supplementary block renders only when ceremony lenses produced non-conforming output per Step 3d).
+Present findings grouped by severity (compound findings first within each group). Read `skills/pr-review/templates/step5b-presentation.md` for the by-severity template.
 
 After the severity groups, present the **Structural Assessment** (Step 3d's structural lens result): the structural verdict, rationale, and observations with any Step 4d-structural corroboration notes. This is the whole-PR read and is reviewer-facing — it does not enter the severity counts. The full section is assembled into the report body at Step 6d-structural; here, surface it so the reviewer sees the solution-shape read alongside the line-level findings.
-
-### 5b-supplementary. Supplementary Reports
-
-Supplementary reports are: - **Excluded** from synthesis (Step 4) — they do not affect compound detection, severity counts, or the verdict - **Excluded** from `proposed-comments.json` — they are never posted as GitHub review comments - **Included** in the followup report body (Step 6d) for record-keeping
 
 ### 5c. User interaction
 
@@ -687,7 +651,7 @@ Assemble the `--content` value with **all** of the following sections. Every sec
 
 **Section 3 — Review Findings:**
 
-Render the **reviewer-cockpit variant** of each finding from Step 6d-ii (full mechanism and caveats kept; internal protocol labels stripped for readability). This report is **reviewer-facing** — it lives in your knowledge store and is read in the TUI to triage; it is never posted (only the curated comments in Section 4 reach the PR). So it **retains** the severity grouping, counts, and verdict line, using the same reviewer-facing labels as Step 5a (see `findings-format.md` → External Output Formatting → reviewer-facing surfaces). If ceremony lenses produced non-conforming output (Step 5b-supplementary), append the Supplementary Reports block after the structured findings. Supplementary reports are presentation-only — they do **not** generate review code blocks in Section 4 or entries in `proposed-comments.json`. Read `skills/pr-review/templates/review-findings-section.md` for the Section 3 markdown template.
+Render the **reviewer-cockpit variant** of each finding from Step 6d-ii (full mechanism and caveats kept; internal protocol labels stripped for readability). This report is **reviewer-facing** — it lives in your knowledge store and is read in the TUI to triage; it is never posted (only the curated comments in Section 4 reach the PR). So it **retains** the severity grouping, counts, and verdict line, using the same reviewer-facing labels as Step 5a (see `findings-format.md` → External Output Formatting → reviewer-facing surfaces). Read `skills/pr-review/templates/review-findings-section.md` for the Section 3 markdown template.
 
 **Section 4 — Proposed Comments:**
 
@@ -756,7 +720,7 @@ Deltas from the standard flow:
 
 **Setup (Step 1).** The usual invocation is bare `--self` on the PR branch; Step 1a's branch detection resolves the PR. Skip Step 1c-ii: commit-before-reading is structurally unavailable to the author — there is no naive expectation left to write down — so fetch order stops mattering; fetch everything at once.
 
-**Lens selection (Step 2b).** Force-add Blast Radius to the selected set. Its evidence is gathered outside the diff — callers, consumers, invariants in files you did not open — which is exactly where the author can still be surprised. Everything else, including the diff-size gate and the ceremony agency constraint, applies unchanged.
+**Lens selection (Step 2b).** Force-add Blast Radius to the selected set. Its evidence is gathered outside the diff — callers, consumers, invariants in files you did not open — which is exactly where the author can still be surprised. Everything else, including the diff-size gate, applies unchanged.
 
 **Lens dispatch (Step 3b).** One modification to the Correctness lens prompt — append: "Skip intent alignment — the author already knows the intent. Spend that effort tracing execution paths instead." All other prompt structure, prior knowledge, grounding, budget, and anchoring rules are identical: the lens agents are the fresh eyes the author lacks.
 

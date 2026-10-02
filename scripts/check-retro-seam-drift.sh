@@ -36,7 +36,6 @@ PROTECTED_READERS=(
   scripts/packet-assess.py
   scripts/impl-open.sh
   scripts/impl-next-batch.sh
-  scripts/spec-outcome.sh
   scripts/regen-tasks.sh
   scripts/generate-tasks.py
   scripts/load-tasks.sh

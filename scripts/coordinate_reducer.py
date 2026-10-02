@@ -11,7 +11,6 @@ RELEASING_ATTEMPT_STATUS = "coord_report_accepted"
 RULES = {
     "act.work.pending-unblocked": "An unchecked task whose explicit DAG has no pending blockers is actionable.",
     "act.evolve.unconsumed": "A versioned accepted cluster with consumed_at_run_id=null is staged and unconsumed.",
-    "needs.ceremony.unhandled": "A ceremony-resolution outcome row explicitly says outcome=needs-decision and disposition=unhandled, and no later correlated transition row records its outcome_id as handled.",
     "needs.retro.unhandled-due": "The retro native fold reports a DUE outcome without a handling disposition.",
     "needs.session.unmatched-close-failed": "A close_failed event has no later closed event whose links.close_requests explicitly includes the failed request.",
     "waiting.session.live": "A session appears in the native live-instance fold.",

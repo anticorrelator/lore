@@ -159,12 +159,6 @@ fi
 
 bash "$SCRIPT_DIR/plan-revise.sh" "$SLUG" --reconcile --allow-legacy-progress >/dev/null || fail "plan reconciliation failed for '$SLUG'"
 
-CEREMONY_JSON=$(bash "$SCRIPT_DIR/ceremony-config.sh" get implement 2>/dev/null) || CEREMONY_JSON="[]"
-if ! printf '%s' "$CEREMONY_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, list)' 2>/dev/null; then
-  echo "[impl] Warning: ceremony config for 'implement' is not a JSON array; treating as empty" >&2
-  CEREMONY_JSON="[]"
-fi
-
 # --- Provenance: stamp the producing template's version at emission ---------
 if [[ -z "$TEMPLATE_VERSION" ]]; then
   SKILL_TEMPLATE="$LORE_REPO_DIR/skills/implement/SKILL.md"
@@ -175,7 +169,7 @@ fi
 
 ACTIVE_CSV=$(IFS=','; echo "${ACTIVE_TASKS[*]-}")
 
-PAYLOAD=$(_LORE_CEREMONY_JSON="$CEREMONY_JSON" python3 - "$ITEM_DIR" "$SLUG" "$ACTIVE_CSV" "$SCRIPT_DIR" "$TEMPLATE_VERSION" <<'PYEOF'
+PAYLOAD=$(python3 - "$ITEM_DIR" "$SLUG" "$ACTIVE_CSV" "$SCRIPT_DIR" "$TEMPLATE_VERSION" <<'PYEOF'
 import json
 import os
 import re
@@ -185,7 +179,6 @@ import uuid
 
 item_dir, slug, active_csv, script_dir, template_version = sys.argv[1:6]
 active = {a for a in active_csv.split(",") if a}
-ceremony_skills = json.loads(os.environ.get("_LORE_CEREMONY_JSON", "[]"))
 
 publication_lock = None
 if os.path.exists(os.path.join(item_dir, "revisions.jsonl")):
@@ -463,15 +456,12 @@ lead_inline_conditions = {
     "single_task": single_task,
     "prescriptive": prescriptive,
     "no_persistent_advisor": not persistent_advisors,
-    "no_required_consultation": (not consultations_by_unit
-                                 and not ceremony_skills
-                                 and not related_skills),
+    "no_required_consultation": not consultations_by_unit and not related_skills,
     "detail": {
         "task_count": task_count,
         "task_format_by_unit": task_format_by_unit,
         "persistent_advisors": persistent_advisors,
         "consultations_required_by_unit": consultations_by_unit,
-        "ceremony_skills": ceremony_skills,
         "related_skills": related_skills,
         "file_count_diagnostic": (
             len(all_tasks[0].get("file_targets", [])) if single_task else None),
