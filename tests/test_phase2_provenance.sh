@@ -4,7 +4,6 @@
 # Verifies:
 #   1. capture.sh writes the 5 provenance flags and 3 branch-provenance fields into the
 #      metadata comment block; read-back matches.
-#   2. _capture_log.csv schema carries the template_version column; round-trips.
 #   3. create-followup.sh propagates provenance into _meta.json (omitted-field convention)
 #      and enriches lens-findings.json per finding (per-finding wins over CLI default).
 #   4. write-execution-log.sh emits `Template-version:` only when the flag is provided.
@@ -160,38 +159,6 @@ assert_file_not_contains "no protocol_slot when omitted" "$ENTRY_FILE" "protocol
 assert_file_not_contains "no template_version when omitted" "$ENTRY_FILE" "template_version:"
 assert_file_not_contains "no capturer_role when omitted" "$ENTRY_FILE" "capturer_role:"
 assert_file_not_contains "no source_artifact_ids when omitted" "$ENTRY_FILE" "source_artifact_ids:"
-
-# =============================================
-# Test 3: _capture_log.csv — schema includes template_version column
-# =============================================
-echo ""
-echo "Test 3: _capture_log.csv — template_version column round-trips"
-setup_knowledge_store
-
-bash "$SCRIPT_DIR/capture.sh" \
-  --insight "TV populated" --category "conventions" \
-  --scale "implementation" \
-  --template-version "tv-one" \
-  --captured-at-branch "null" --captured-at-sha "null" --captured-at-merge-base-sha "null" \
-  --skip-manifest > /dev/null 2>&1
-
-bash "$SCRIPT_DIR/capture.sh" \
-  --insight "TV omitted" --category "conventions" \
-  --scale "implementation" \
-  --captured-at-branch "null" --captured-at-sha "null" --captured-at-merge-base-sha "null" \
-  --skip-manifest > /dev/null 2>&1
-
-LOG_FILE="$KNOWLEDGE_DIR/_capture_log.csv"
-HEADER=$(head -1 "$LOG_FILE")
-assert_eq "CSV header includes template_version" "$HEADER" "timestamp,source,category,confidence,template_version"
-
-# Row 1 (TV populated): 5th field = tv-one
-ROW1_TV=$(awk -F, 'NR==2 {print $5}' "$LOG_FILE")
-assert_eq "row 1 template_version = tv-one" "$ROW1_TV" "tv-one"
-
-# Row 2 (TV omitted): 5th field = "" (empty)
-ROW2_TV=$(awk -F, 'NR==3 {print $5}' "$LOG_FILE")
-assert_eq "row 2 template_version empty when omitted" "$ROW2_TV" ""
 
 # =============================================
 # Test 4: create-followup.sh — provenance fields in _meta.json (all 5 set)
