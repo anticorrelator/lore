@@ -49,11 +49,9 @@
 #   --entry-path <rel>        required (KDIR-relative; for provenance-migration
 #                             it defaults to --to-entry-path and must match it
 #                             when supplied)
-#   --source <enum>           required: investigator|designer|worker|reviewer|
-#                             researcher|spec-lead|
-#                             implement-lead|drift-sweep|expire-sweep|audit|
-#                             settlement|apply-correction|renormalize|interactive|
-#                             coordinator
+#   --source <enum>           required: any seat in scripts/seat-registry.json,
+#                             or drift-sweep|expire-sweep|audit|settlement|
+#                             apply-correction|renormalize
 #   [--observed-at <iso8601>] [--kdir <path>] [--json]
 #
 # Grounded-or-nothing: consumption-verification rows require file, line-range,
@@ -101,7 +99,7 @@ usage() {
 Usage: trust-event-append.sh \
            --event <mechanical-check|consumption-verification|correction|retirement|adjudication|provenance-migration|trust-confirmation> \
            --entry-path <path-relative-to-KDIR> \
-           --source <investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|drift-sweep|expire-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator> \
+           --source <seat|drift-sweep|expire-sweep|audit|settlement|apply-correction|renormalize> \
            [--observed-at <iso8601>] [--kdir <path>] [--json] \
            <event-specific payload flags>
 
@@ -278,11 +276,15 @@ case "$EVENT" in
 esac
 
 # --- Source enum ---
-case "$SOURCE_KIND" in
-  investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|drift-sweep|expire-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator) : ;;
-  "") fail "--source is required" ;;
-  *)  fail "--source must be one of investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|drift-sweep|expire-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator (got '$SOURCE_KIND')" ;;
-esac
+SEATS=$(jq -r '.seats[]' "$SCRIPT_DIR/seat-registry.json")
+if [[ -z "$SOURCE_KIND" ]]; then
+  fail "--source is required"
+elif ! grep -qxF -- "$SOURCE_KIND" <<<"$SEATS"; then
+  case "$SOURCE_KIND" in
+    drift-sweep|expire-sweep|audit|settlement|apply-correction|renormalize) : ;;
+    *) fail "--source must be a seat ($(echo $SEATS | tr ' ' '|')) or one of drift-sweep|expire-sweep|audit|settlement|apply-correction|renormalize (got '$SOURCE_KIND')" ;;
+  esac
+fi
 
 # --- Entry-path shape: KDIR-relative, no traversal ---
 validate_rel_path() {

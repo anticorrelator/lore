@@ -1,0 +1,14 @@
+{
+  "_comment": "The seats lore's protocol prose addresses: every participant that may read an entry and act on it. A writer that accepts a participant-authored write accepts every seat listed here; writers that also take mechanical sources (drift-sweep, audit, ...) keep those locally. Add a seat here, once, and every writer picks it up.",
+  "seats": [
+    "interactive",
+    "coordinator",
+    "investigator",
+    "designer",
+    "worker",
+    "reviewer",
+    "researcher",
+    "spec-lead",
+    "implement-lead"
+  ]
+}

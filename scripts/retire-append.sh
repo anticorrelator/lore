@@ -20,8 +20,8 @@
 #   retire-append.sh <knowledge-path>
 #       --reason <why it no longer earns its place>
 #       --falsifier <what would show this was wrong>
-#       --source <investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|drift-sweep|audit|
-#                 settlement|apply-correction|renormalize|interactive|coordinator>
+#       --source <seat|drift-sweep|audit|settlement|apply-correction|renormalize>
+#                 (seats: scripts/seat-registry.json)
 #       [--superseded-by <path>] [--work-item <slug>] [--reported-by <role>]
 #       [--date <YYYY-MM-DD>] [--kdir <path>] [--json]
 #
@@ -60,9 +60,8 @@ usage() {
 Usage: retire-append.sh <knowledge-path> \
            --reason <why it no longer earns its place> \
            --falsifier <what would show this was wrong> \
-           --source <investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|drift-sweep| \
-                     audit|settlement|apply-correction|renormalize|interactive| \
-                     coordinator> \
+           --source <seat|drift-sweep|audit|settlement|apply-correction|renormalize> \
+                     (seats: scripts/seat-registry.json) \
            [--superseded-by <path>] [--work-item <slug>] [--reported-by <role>] \
            [--date <YYYY-MM-DD>] [--kdir <path>] [--json]
 
@@ -149,11 +148,15 @@ if [[ -z "$KNOWLEDGE_PATH" ]]; then
   fail "<knowledge-path> is required"
 fi
 
-case "$SOURCE_KIND" in
-  investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator) : ;;
-  "") fail "--source is required" ;;
-  *)  fail "--source must be one of investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator (got '$SOURCE_KIND')" ;;
-esac
+SEATS=$(jq -r '.seats[]' "$SCRIPT_DIR/seat-registry.json")
+if [[ -z "$SOURCE_KIND" ]]; then
+  fail "--source is required"
+elif ! grep -qxF -- "$SOURCE_KIND" <<<"$SEATS"; then
+  case "$SOURCE_KIND" in
+    drift-sweep|audit|settlement|apply-correction|renormalize) : ;;
+    *) fail "--source must be a seat ($(echo $SEATS | tr ' ' '|')) or one of drift-sweep|audit|settlement|apply-correction|renormalize (got '$SOURCE_KIND')" ;;
+  esac
+fi
 
 if [[ $RESTORE -eq 1 ]]; then
   ACTION="restored"

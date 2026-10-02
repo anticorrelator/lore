@@ -4,10 +4,13 @@ import re
 from pathlib import Path
 
 
-_ROLES = {
-    "worker", "researcher", "lead", "reviewer", "advisor", "investigator", "designer",
-    "interactive", "coordinator", "classifier", "curator",
-    "implement-lead", "spec-lead", "worker-mechanical", "worker-judgment-dense",
+# Seats come from the shared registry so a new seat shows in bylines the day it
+# can write. The extras are routing and pipeline roles that also author
+# entries. Model names never appear here, which is why this is an allowlist.
+_SEATS = set(json.loads((Path(__file__).with_name("seat-registry.json")).read_text())["seats"])
+_ROLES = _SEATS | {
+    "lead", "advisor", "classifier", "curator",
+    "worker-mechanical", "worker-judgment-dense",
     "spec-researcher", "spec-worker", "implement-worker",
 }
 

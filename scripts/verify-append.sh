@@ -35,7 +35,7 @@
 #
 # Usage:
 #   verify-append.sh <knowledge-path> <held|contradicted>
-#       --source <investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|interactive|coordinator>
+#       --source <seat>  # any seat in scripts/seat-registry.json
 #       --file <absolute-path>
 #       --line-range <N-M>
 #       --exact-snippet <verbatim>
@@ -81,7 +81,7 @@ source "$SCRIPT_DIR/lib.sh"
 usage() {
   cat >&2 <<'EOF'
 Usage: verify-append.sh <knowledge-path> <held|contradicted> \
-           --source <investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|interactive|coordinator> \
+           --source <seat>  # any seat in scripts/seat-registry.json \
            --file <absolute-path> \
            --line-range <N-M> \
            --exact-snippet <verbatim> \
@@ -206,12 +206,15 @@ case "$DISPOSITION" in
   *)  fail "disposition must be 'held' or 'contradicted' (got '$DISPOSITION')" ;;
 esac
 
-# --- Source enum: every seat that consumes entries, positions and bare sessions alike ---
-case "$SOURCE_KIND" in
-  investigator|designer|worker|reviewer|researcher|spec-lead|implement-lead|interactive|coordinator) : ;;
-  "") fail "--source is required" ;;
-  *)  fail "--source must be 'investigator', 'designer', 'worker', 'reviewer', 'researcher', 'spec-lead', 'implement-lead', 'interactive', or 'coordinator' (got '$SOURCE_KIND')" ;;
-esac
+# --- Source: any seat in seat-registry.json ---
+SEATS=$(jq -r '.seats[]' "$SCRIPT_DIR/seat-registry.json")
+if [[ -z "$SOURCE_KIND" ]]; then
+  fail "--source is required"
+elif ! grep -qxF -- "$SOURCE_KIND" <<<"$SEATS"; then
+  case "$SOURCE_KIND" in
+    *) fail "--source must be a seat ($(echo $SEATS | tr ' ' '|')) (got '$SOURCE_KIND')" ;;
+  esac
+fi
 
 # --- Grounded-or-nothing: BOTH dispositions ---
 if [[ -z "$CLAIM_FILE" || -z "$LINE_RANGE" || -z "$EXACT_SNIPPET" ]]; then
