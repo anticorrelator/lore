@@ -33,7 +33,7 @@ SKILLS_DIR=$(resolve_harness_install_path skills)
 REMEMBER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$SKILLS_DIR/remember/SKILL.md")
 ```
 
-When invoked by another skill (e.g., `/implement` or `/spec` post-work extraction), the caller passes its own template-version via the delegation prompt — see Step 5 for the lead-synthesis path. Interactive invocations use `$REMEMBER_TEMPLATE_VERSION` directly. On hash-command failure, fall through with an empty string; downstream scripts treat that as "no template version."
+When invoked by another skill (e.g., `/implement` post-work extraction), the caller passes its own template-version via the delegation prompt — see Step 5 for the lead-synthesis path. Interactive invocations use `$REMEMBER_TEMPLATE_VERSION` directly. On hash-command failure, fall through with an empty string; downstream scripts treat that as "no template version."
 
 ### Step 0a: Pending Captures Intake
 
@@ -281,7 +281,7 @@ Review the conversation for thread-worthy content:
 
 ### Step 5: Act
 
-Capture every qualifying candidate now. This step is mandatory and must not be skipped. /implement Step 5 and /spec Step 5.4 both delegate capture invocation to /remember — a missed capture here propagates silently to every upstream caller with no recovery path. Do NOT defer with "I'll capture later." Do NOT skip because the insight seems obvious. Do NOT skip because the session was short. None of these are valid rationales.
+Capture every qualifying candidate now. This step is mandatory and must not be skipped. /implement Step 5 delegates capture invocation to /remember — a missed capture here propagates silently to the caller with no recovery path. Do NOT defer with "I'll capture later." Do NOT skip because the insight seems obvious. Do NOT skip because the session was short. None of these are valid rationales.
 
 Before capturing, confirm the candidate passes **the 4-condition gate OR the orientation gate** (Step 2 canonical body has the full criteria for both):
 - **4-condition gate** (all four must be true): (1) Reusable, (2) Non-obvious, (3) Stable, (4) High confidence.

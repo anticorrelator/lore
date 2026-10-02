@@ -36,7 +36,7 @@ For a feature-scale arc, before it runs:
 
 - **Inventory the unknowns** and route each: research for what you know you don't know, prefetch and friction logs for what you can't see, the interview for what only the human knows.
 - **Interview the human** at open and at any fork the substrate can't resolve — highest architecture-sensitivity first. The interview never closes: a mid-arc question is live steering, propagated into running workers; answer-and-park is the defect shape.
-- **Prototype first when acceptance is taste-shaped**; **strawman before a full spec** — the simplest thing that could work, sketched from the whole-feature view in minutes. The strawman holds the burden of proof: deviations are expected, and each names what the strawman fails to do — that naming is what it is for.
+- **Prototype first when acceptance is taste-shaped**; **strawman before a spec** — the simplest thing that could work, sketched from the whole-feature view in minutes. The strawman holds the burden of proof: deviations are expected, and each names what the strawman fails to do — that naming is what it is for.
 - **Decompose at contract seams.** An item is as large as possible subject to: no self-consumption, a checkable tail, one absorbable review packet. Decided boundaries stay decided. No meta-work, no insurance items. A step that would spec to one trivial task is mis-sized — drop it to rung 0–1 or merge it until the item holds real judgment room.
 - **Price the arc** against the single-session alternative and tell the owner both at open; the owner's reference for moderate feature work is tens of minutes, not hours. Collapse spec+build to one worker session wherever the design is settled.
 
@@ -50,14 +50,14 @@ Pick the next step, shape it, do it or dispatch it, verify, close, ledger, re-jo
 
 | Rung | Shape | Record |
 |---|---|---|
-| 3 | full `/spec` + ceremonies + `/implement` | ledger row |
-| 2 | `/spec short` + `/implement` | ledger row |
+| 3 | `/spec` with commissioned investigators or a review + `/implement` | ledger row |
+| 2 | `/spec` + `/implement` | ledger row |
 | 1 | micro-dispatch — one head besides the seat holding an item; the brief is the plan | ledger row |
 | 0 | seat edit, or one throwaway subagent; no item | the commit — in an arc, also a ledger row |
 
 Rung selects ceremony, not executor. Every route leaves the same row — what was done, why this route, how it was checked — so the next seat can reconsider the route with the reason in view; when only one direction gets written down, work drifts toward the other. Over-ceremony is a defect to the same degree under-ceremony is: ceremony that doesn't scale down trains bypass.
 
-**Spec depth.** Short when the design is settled and checkable; full when the item creates contracts other work consumes or holds design-reshaping unknowns.
+**Spec breadth.** `/spec` reads and designs in one context. Commission investigators when the reading is wider than one context holds, and a review when the item creates contracts other work consumes or rests on an unknown the reading could not settle.
 
 **Step selection.** From board state: dependencies, active attempts, the settings-derived concurrency ceiling, file ownership, decay risk, leverage. A predecessor clears an edge at `done` / `full` with verified cleanup. Dispatch every ready stream while capacity remains; an unrelated writer never creates a barrier. Judgment-dense work never routes below its class; within that, merge is the default and a split earns its overhead through real parallelism. A session's framework and model come from its role's route — `lore defaults` shows the effective route per role — never from the seat's own model; a harness-native subagent states its model explicitly, and the gate fills the default when it doesn't. Spend arrives on `closed` events — ledger it per routing call.
 

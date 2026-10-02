@@ -1,6 +1,6 @@
 # Plan.md Template
 
-Read this template when emitting `plan.md` in Step 5 (abstract sections) and Step 5b (concrete sections). The fenced block below is the canonical plan structure the designer copies (HTML comments inline are load-bearing enforcement — keep them with the section they govern). Comments reach the plan author only; an obligation a worker must act on travels in a task line and its generated brief.
+Read this template when writing `plan.md`: the design sections in `/spec` § 3, the tasks in § 4. The fenced block below is the canonical plan structure (HTML comments inline are load-bearing enforcement — keep them with the section they govern). Comments reach the plan author only; an obligation a worker must act on travels in a task line and its generated brief.
 
 ```markdown Plan.md Template
 # <Work Item Title>
@@ -16,7 +16,7 @@ Read this template when emitting `plan.md` in Step 5 (abstract sections) and Ste
 
 ## Intent Anchor
 <!-- Conditional — emit this section only when the work item's `_meta.json.intent_anchor` is present.
-     For legacy or no-anchor work items, omit the section entirely; the Step 5.6 verifier skips with a stderr info message.
+     For legacy or no-anchor work items, omit the section entirely; the finalize verifier skips with a stderr info message.
 
      Three fields, in this order:
        1. The anchor body verbatim from `_meta.json.intent_anchor` (no quoting, no prefix label — just the raw text).
@@ -24,10 +24,9 @@ Read this template when emitting `plan.md` in Step 5 (abstract sections) and Ste
        3. `**Tempting narrower implementation:**` heading — the spec author names the tempting narrower implementation that
           would appear successful while violating the anchor.
 
-     Fields 1 and 2 are rendered at the abstract stage (Step 5), because `lore plan revise` runs the anchor verifier on
-     every publication and the abstract revision cannot be published without them; the concrete stage (Step 5b item 0)
-     preserves them and adds field 3.
-     Verifier-enforced fields (load-bearing for every publication and the Step 5.6 gate): anchor body and `**Scope delta:**` line.
+     Fields 1 and 2 are written with the design (§ 3), because `lore plan revise` runs the anchor verifier on
+     every publication and the design revision cannot be published without them; the tasks (§ 4) add field 3.
+     Verifier-enforced fields (every publication and the finalize gate): anchor body and `**Scope delta:**` line.
      Template-only field (not verifier-enforced): `**Tempting narrower implementation:**` body. -->
 <anchor body verbatim from `_meta.json.intent_anchor`>
 
@@ -36,7 +35,7 @@ Read this template when emitting `plan.md` in Step 5 (abstract sections) and Ste
 **Tempting narrower implementation:** <name the tempting narrower implementation that would appear successful while violating the anchor>
 
 ## Strategy
-<!-- Optional. Written verbatim from user input at the strategy gate (Step 4).
+<!-- Optional. Written verbatim from the owner's answer at the first stop (§ 3).
      Omit this section entirely if the user skips the strategy prompt — absence is the default.
      On continuation runs, this section is read silently and used to shape synthesis.
 
@@ -48,15 +47,12 @@ Read this template when emitting `plan.md` in Step 5 (abstract sections) and Ste
      Write it so a worker reading it for the first time understands what to do. -->
 
 ## Context
-<!-- Optional, both modes. 3-6 bullets summarizing key files, constraints, and patterns found.
-     In short mode this is where the seat's own reading is summarized; the findings themselves
-     still go under ## Investigations, because the short reading is an investigation with a
-     landed report. Omit the section when the Investigations entries carry everything. -->
+<!-- Optional. 3-6 bullets summarizing key files, constraints, and patterns found. The findings
+     themselves go under ## Investigations; omit this section when those entries carry everything. -->
 
 ## Investigations
-<!-- Both modes. One entry per investigation: the dispatched investigators in full mode, and the
-     seat's inline investigation in short mode. Findings and Observations are copied verbatim
-     from the landed report; the entry is not a paraphrase. -->
+<!-- One entry per question: the seat's own reading, and each commissioned investigator's landed
+     report. Findings and Observations are recorded as they stood, not paraphrased. -->
 
 ### <Topic 1>
 **Question:** <what was investigated>
@@ -68,8 +64,8 @@ Read this template when emitting `plan.md` in Step 5 (abstract sections) and Ste
 **Observations:**
 - <mechanism-level pattern, design rationale, or structural footprint signal, preserved verbatim from the investigator report>
 
-<!-- Note: investigator assertions are emitted to task-claims.jsonl (Tier 2)
-     via evidence-append.sh — they do not appear in plan.md. See architecture/artifacts/tier2-evidence-schema.md. -->
+<!-- Grounded assertions go to task-claims.jsonl (Tier 2) through evidence-append.sh, not into
+     plan.md; scripts/validate-tier2.sh holds the required fields. -->
 
 ## Design Decisions
 
@@ -88,8 +84,8 @@ Read this template when emitting `plan.md` in Step 5 (abstract sections) and Ste
 
 ## Tasks
 <!-- One `### Task N:` block per unit of work — the plan holds its tasks directly.
-     Size each one by the Step 5b sizing band: one design center per task, and both
-     directions of the sizing decision argued in writing below.
+     Size each one by /spec § 4: one design center per task, and the sizing decision
+     recorded below in whichever direction it went.
 
      The heading number is the task's id: `### Task 3:` is `task-3`. It stays fixed as
      earlier work is checked off, so `[depends-on: task-3]` keeps naming the same task.
@@ -101,7 +97,7 @@ Read this template when emitting `plan.md` in Step 5 (abstract sections) and Ste
        - two headings share a number
        - the document mixes `### Task N:` headings with any other unit-heading form
 
-     Every task carries the standing premise-wrong exit (Step 5b): a worker report that
+     Every task carries the standing premise-wrong exit (§ 4): a worker report that
      the task cannot be built as scoped, naming what blocked it, is a sanctioned
      deliverable — never write a task whose only expressible outcome is success. -->
 
@@ -127,14 +123,14 @@ Read this template when emitting `plan.md` in Step 5 (abstract sections) and Ste
      One or two sentences naming what the split buys — parallel wall-time, separate acceptance
      boundaries, fresh context per worker, worker-tier separation, a scoped premise-wrong exit —
      set against what it costs in spawn ceremony, brief duplication, and integration risk.
-     Step 5.6 finalize refuses a plan of more than one task that lacks this block. -->
+     Finalize refuses a plan of more than one task that lacks this block. -->
 <why this plan splits into N tasks — what the extra worker spawns buy, and against what cost>
 
 **Merge rationale:**
 <!-- REQUIRED when this plan carries exactly one task; omit entirely for a multi-task plan.
      One or two sentences naming the single design center the parts share — the one interface,
      mechanism, or subsystem whose shape one worker decides.
-     Step 5.6 finalize refuses a one-task plan that lacks this block. -->
+     Finalize refuses a one-task plan that lacks this block. -->
 <why this deliverable is one task — the design center its parts share>
 
 ### Task 1: <Name>
@@ -167,16 +163,43 @@ Read this template when emitting `plan.md` in Step 5 (abstract sections) and Ste
 **Task format:** prescriptive  <!-- optional — omit for default intent+constraints format -->
 **Knowledge delivery:** full  <!-- optional — omit for default annotation-only delivery -->
 **Retrieval directive:**
-<!-- Optional — omit when the task has no Knowledge context backlinks and no Files entries.
-     Seeds are derived from (a) [[knowledge:...]] backlinks in Knowledge context, resolved to
-     title vocabulary, and (b) file paths in Files. Deduplication applied. hop_budget defaults to 1.
-     scale_set: REQUIRED — declare the appropriate bucket (abstract | architecture | subsystem | implementation); multi-label form (e.g., architecture,subsystem) is allowed for adjacent pairs. Omitting is an error.
+<!-- Optional — omit when the task has no Knowledge context backlinks and no Files entries, and leave
+     an HTML comment in its place saying there were no backlinks or files to derive seeds from.
+     Place it after **Knowledge delivery:** (or after **Files:** when that is absent), before **Knowledge context:**.
+     Derived from this task's own content only, never a neighbour's:
+       - Exactly one `focal` topic: the task's own subject, default scale [subsystem, implementation], limit 8.
+         Seeds are the task's owned **Files:** paths plus the title vocabulary of its Knowledge context entries —
+         title words, because a raw `knowledge:` string tokenizes as one literal and misses the index.
+       - Up to five `adjacent` topics: subsystems the task touches but does not own, typically
+         [architecture, subsystem], limit 4, seeded from the titles of entries about that subsystem.
+         Right scale with the wrong entries is the usual failure; re-derive from those entries' titles.
+       - `activity_vocab` (optional, per topic): tokens looked up in `$KDIR/_meta/activity-vocab.yaml` by
+         matching its path globs against the topic's files; never invented inline.
+       - `scale_set` is required on every topic. A topic whose seeds come out empty is dropped.
+     A v2 directive with zero or several focal topics is a parse error in generate-tasks.py. When no
+     genuine focal topic exists, use the legacy flat form (seeds, hop_budget, scale_set as bullets).
      Consumed at dispatch: `lore impl open` resolves this directive through the shared packet builder
      into the task's knowledge packet, which the implement seat synthesizes before the worker reads it. -->
-- seeds: [[knowledge:file#heading]], path/to/file.py
-- hop_budget: 1
-<!-- scale_set: REQUIRED — declare one bucket: abstract | architecture | subsystem | implementation (multi-label form architecture,subsystem etc. allowed for adjacent pairs) -->
-<!-- - filters: type=knowledge, exclude_category=... (optional; omit when not filtering) -->
+```yaml
+retrieval_directive:
+  version: 2
+  topics:
+    - role: focal
+      topic: "<short label>"
+      seeds:
+        - "<title-vocabulary terms resolved from a Knowledge context backlink>"
+        - "path/to/owned/file.py"
+      scale_set: [subsystem, implementation]
+      activity_vocab: [pytest, fixture]   # optional; from _meta/activity-vocab.yaml
+      limit: 8
+    - role: adjacent
+      topic: "<adjacent subsystem label>"
+      seeds:
+        - "<title-vocabulary terms from an entry about the adjacent subsystem>"
+      scale_set: [architecture, subsystem]
+      limit: 4
+  hop_budget: 1
+```
 **Knowledge context:**
 <!-- Each entry MUST include a "— why relevant" annotation after the backlink.
      Annotations are implementation-facing: tell the worker what to DO with the entry.
@@ -221,17 +244,17 @@ Read this template when emitting `plan.md` in Step 5 (abstract sections) and Ste
 <!-- Exactly one `- [ ]` line per task block.
      Valid primary verbs: Implement / Refactor / Author / Migrate / Add support for / Wire.
      Banned as primary verb: Verify / Check / Inspect / Run / Capture / Append / Cross-link / Note / Document-only.
-     See Step 5b "Deliverable contract gate" for routing of invalid units.
+     /spec § 4 says where checks, captures and single edits go instead.
 
      Every task line ends with a trailing [class: mechanical | standard | judgment-dense] marker
      (after any [[knowledge:...]] backlinks) declaring the worker tier /implement routes it to.
-     Step 5.6 finalize refuses any unannotated task line.
+     Finalize refuses any unannotated task line.
 
      Append `[depends-on: task-N, task-M]` to declare an ordering no shared file expresses; the ids
      are heading numbers, and the marker seeds `blockedBy` before file-overlap chaining adds to it.
      Tasks that share a file are chained automatically — no marker needed for those.
 
-     Weave the binding subset defined by Step 5b into the constraint clause, name each norm by its stable label,
+     Weave the binding subset defined in /spec § 4 into the constraint clause, name each norm by its stable label,
      and keep the [[knowledge:...]] backlink for provenance.
      The stable label is the identifier the /implement worker's `Convention handling:` report keys on. -->
 - [ ] <Verb> <deliverable> in <owned file/surface> — <design or integration constraint>[; honor <stable-label> (<what to do>)] [[knowledge:conventions/<woven-norm-entry>]] [class: mechanical|standard|judgment-dense] [depends-on: task-N]
