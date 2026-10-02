@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # apply-correction.sh — Apply a correction, mark an entry disputed, retire or
-# restore an entry, record a corroboration, move an entry's epistemic lifecycle
-# state, add a new entry, or advance an entry's confidence in the knowledge
-# commons.
+# restore an entry, record a corroboration, or move an entry's epistemic
+# lifecycle state in the knowledge commons.
 #
-# Eight modes, keyed on --add-entry / --advance-confidence / --corroborate /
-# --dispute / --retire / --restore / --set-kind-status (default: mutate):
+# Six modes, keyed on --corroborate / --dispute / --retire / --restore /
+# --set-kind-status (default: mutate):
 #
 # Retire mode:
 #   apply-correction.sh --retire
@@ -66,38 +65,17 @@
 #                        [--date <YYYY-MM-DD>]
 #                        [--dry-run]
 #
-# Advance-confidence mode:
-#   apply-correction.sh --advance-confidence
-#                        --entry <path>
-#                        --verdict-id <id> --verdict-source <source>
-#                        --evidence "<file:line quote>"
-#                        --allow-settlement-verdict
-#                        [--date <YYYY-MM-DD>]
-#                        [--dry-run]
-#
 # Mutation mode (default):
-#   apply-correction.sh --entry <path> --verdict-id <id> --verdict-source <source>
+#   apply-correction.sh --entry <path>
+#                        --observation-id <id>
+#                        --verdict-source peer-verification
+#                        --allow-peer-verification
 #                        --evidence "<file:line quote>"
 #                        --superseded-text "<snippet>"
 #                        --replacement-text "<snippet>"
 #                        [--date <YYYY-MM-DD>]
 #                        [--check-escalation]
 #                        [--backlink-threshold N]
-#                        [--allow-settlement-verdict]
-#                        [--allow-peer-verification --observation-id <id>]
-#                        [--dry-run]
-#
-# Add-entry mode:
-#   apply-correction.sh --add-entry
-#                        --entry <new-path>
-#                        --title <title>
-#                        --body <body>
-#                        --scale <scale>
-#                        --verdict-id <id> --verdict-source <source>
-#                        --evidence "<file:line quote>"
-#                        --allow-settlement-verdict
-#                        [--meta-fields <key=val,...>]
-#                        [--date <YYYY-MM-DD>]
 #                        [--dry-run]
 #
 # Mutation mode: replaces the superseded_text snippet in <entry> with
@@ -111,29 +89,13 @@
 #     touched the entry's lead paragraph, META gains title_stale: <date> and a
 #     notice goes to stderr.
 #   - Otherwise the H1 is left alone.
-# Authorization (default scorecard path): requires the verdict's
-# calibration_state in rows.jsonl to be 'calibrated'.
-# Authorization with --allow-peer-verification: the authority is the caller's
-# own grounded evidence, which `lore verify` validated before invoking this
-# script; no external run record is consulted. Peer edits stay checkable
+# Authorization (--allow-peer-verification, required in every mode): the
+# authority is the caller's own grounded evidence, which `lore verify`
+# validated before invoking this script; no external run record is consulted. Peer edits stay checkable
 # because --observation-id ties the record written here to the trust-ledger
 # event that reports the same observation, and the next reader can compare the
 # two. Peer mutations set `status: corrected` and are idempotent on
 # --observation-id, so a partially-failed transaction converges on retry.
-# Authorization with --allow-settlement-verdict: validates against
-# _settlement/runs/<verdict-id>.json — verdict.verdict must be 'contradicted'
-# from a calibrated hard-cal gate (correctness-gate-assertion or
-# correctness-gate-contradiction) with a non-empty correction.
-#
-# Add-entry mode: creates a NEW commons entry at <new-path> from <title>,
-# <body>, <scale>, and optional --meta-fields. Forbids --superseded-text and
-# --replacement-text. Authorization always requires --allow-settlement-verdict
-# and validates against _settlement/runs/<verdict-id>.json — verdict.verdict
-# must be 'verified' and the run must be either
-#   (a) kind=task-claim with curator-selected + capture-gate-passed markers, OR
-#   (b) kind=omission with capture-gate-passed marker.
-# The capture-gate / curator markers land on the run record in Phase 2; for
-# now the gate accepts a non-empty 'verified' verdict with matching kind.
 #
 # Retire mode: records that a reader judged the entry no longer worth carrying
 # in default retrieval. It writes a dated marker into the entry body naming the
@@ -184,14 +146,6 @@
 # still live, and the marker is the context, not a demotion. Idempotent on
 # --observation-id.
 #
-# Advance-confidence mode: advances an existing entry's confidence from
-# 'unaudited' to 'high' in its META block and appends a confidence_advances[]
-# provenance item. Forbids the mutation/add-entry text flags. Authorization
-# always requires --allow-settlement-verdict and validates against
-# _settlement/runs/<verdict-id>.json — verdict.verdict must be 'verified'.
-# Idempotent: an entry already at 'high' is a no-op (exit 0) that appends no
-# duplicate confidence_advances[] item, so the settlement terminus can re-run it.
-#
 # With --check-escalation (mutation mode only), also evaluates L3 conditions:
 #   (a) entry has >= N inbound backlinks (default 3) in _manifest.json
 #   (b) entry's scale: field in META == 'architecture'
@@ -203,26 +157,18 @@
 #   - New version gains 'supersedes: <archived_path>' and 'precedent_note: ...' in its META block
 #
 # The META block extension looks like:
-#   <!-- learned: ... | ... | corrections: [{date: 2026-04-23, verdict_source: correctness-gate, verdict_id: abc123, evidence: "scripts/foo.sh:10 — quote", superseded_text: "old snippet", replacement_text: "new snippet"}] -->
+#   <!-- learned: ... | ... | corrections: [{date: 2026-04-23, verdict_source: peer-verification, verdict_id: abc123, evidence: "scripts/foo.sh:10 — quote", superseded_text: "old snippet", replacement_text: "new snippet"}] -->
 #
 # Attribution: to the evidence anchor (file:line quote), not to the producing agent.
-# This is blame-free per the settlement architecture (work-03 leak policy).
-#
-# Write gate (task-62): pre-calibration verdicts are logged to rows.jsonl as usual
-# but MUST NOT reach the commons. Only verdicts with calibration_state=calibrated
-# may modify entries. This prevents calibration-run noise from corrupting the
-# knowledge base before judges have passed their discrimination tests.
 #
 # Exit codes:
 #   0 — success
 #   1 — usage error
-#   2 — entry not found, superseded_text not found in body, add-entry path
-#       conflict, or a transition the entry's recorded state cannot carry
-#       (restoring an entry that is not retired; a retired entry whose
+#   2 — entry not found, superseded_text not found in body, or a transition
+#       the entry's recorded state cannot carry (restoring an entry that is not retired; a retired entry whose
 #       retirements[] record is missing; a kind_status move on an entry whose
 #       kind has no lifecycle)
 #   3 — META block not found (unexpected entry format)
-#   4 — verdict not authorized (write gate rejected)
 
 set -euo pipefail
 
@@ -239,10 +185,7 @@ DATE_TODAY=$(date +"%Y-%m-%d")
 CHECK_ESCALATION=0
 BACKLINK_THRESHOLD=3
 DRY_RUN=0
-ALLOW_SETTLEMENT_VERDICT=0
 ALLOW_PEER_VERIFICATION=0
-ADD_ENTRY_MODE=0
-ADVANCE_CONFIDENCE_MODE=0
 DISPUTE_MODE=0
 RETIRE_MODE=0
 RESTORE_MODE=0
@@ -263,10 +206,6 @@ OBSERVATION_ID=""
 DISPUTE_NOTE=""
 REPORTED_BY=""
 WORK_ITEM=""
-NEW_TITLE=""
-NEW_BODY=""
-NEW_SCALE=""
-META_FIELDS=""
 KDIR_OVERRIDE=""
 
 usage() {
@@ -325,68 +264,36 @@ Dispute mode:
                        [--date <YYYY-MM-DD>]
                        [--dry-run]
 
-Advance-confidence mode:
-  apply-correction.sh --advance-confidence --entry <path>
-                       --verdict-id <id> --verdict-source <source>
-                       --evidence "<file:line quote>"
-                       --allow-settlement-verdict
-                       [--date <YYYY-MM-DD>]
-                       [--dry-run]
-
 Mutation mode:
-  apply-correction.sh --entry <path> --verdict-id <id> --verdict-source <source>
+  apply-correction.sh --entry <path> --observation-id <id>
+                       --verdict-source peer-verification
+                       --allow-peer-verification
                        --evidence "<file:line quote>"
                        --superseded-text "<snippet>"
                        --replacement-text "<snippet>"
                        [--date <YYYY-MM-DD>]
                        [--check-escalation]
                        [--backlink-threshold N]
-                       [--allow-settlement-verdict]
-                       [--dry-run]
-
-Add-entry mode:
-  apply-correction.sh --add-entry --entry <new-path>
-                       --title <title> --body <body> --scale <scale>
-                       --verdict-id <id> --verdict-source <source>
-                       --evidence "<file:line quote>"
-                       --allow-settlement-verdict
-                       [--meta-fields key=val,...]
-                       [--date <YYYY-MM-DD>]
                        [--dry-run]
 
 Required (mutation):
   --entry PATH              Absolute path to the target knowledge entry (.md file)
-  --verdict-id ID           The verdict_id from the scorecard row
-  --verdict-source SOURCE   'correctness-gate' or 'reverse-auditor'
-  --evidence TEXT           file:line citation from the verdict's claim_anchor
+  --observation-id ID       The observation the correction answers; also its
+                            verdict_id unless --verdict-id is given
+  --verdict-source SOURCE   'peer-verification'
+  --evidence TEXT           file:line citation
   --superseded-text TEXT    The text snippet in the entry body to replace
   --replacement-text TEXT   The replacement text
-
-Required (add-entry):
-  --add-entry                  Switch to add-entry mode (creates NEW commons entry)
-  --entry PATH                 Absolute target path under \$KDIR/; MUST NOT exist
-  --title TEXT                 H1 title for the new entry
-  --body TEXT                  Prose body content
-  --scale SCALE                Scale bucket — abstract|architecture|subsystem|implementation
-  --verdict-id ID              Settlement run id
-  --verdict-source SOURCE      'correctness-gate' or 'reverse-auditor'
-  --evidence TEXT              file:line citation
-  --allow-settlement-verdict   Required in add-entry mode; validates the run
 
 Optional:
   --date YYYY-MM-DD            Override the correction date (default: today)
   --kdir PATH                  Override the knowledge directory (default: lore resolve)
   --check-escalation           [mutation mode only] Evaluate L3 escalation conditions
   --backlink-threshold N       Backlink in-degree >= N triggers escalation (default: 3)
-  --meta-fields key=val,...    [add-entry mode only] Additional META fields
-  --allow-settlement-verdict   Bypass the scorecard calibration_state gate; validate
-                               against _settlement/runs/<verdict-id>.json instead.
-                               Used by the autonomous settlement->commons loop.
-                               Required in add-entry mode.
   --allow-peer-verification    Authorize from the caller's own grounded evidence
                                (the 'lore verify' path). Requires
                                --verdict-source peer-verification and
-                               --observation-id. Required in --dispute mode.
+                               --observation-id. Required in every mode.
   --observation-id ID          Stable id of the observation this record answers;
                                correction and dispute identities derive from it,
                                which is what makes a retry converge.
@@ -464,14 +371,6 @@ while [[ $# -gt 0 ]]; do
     --kdir)
       KDIR_OVERRIDE="$2"
       shift 2
-      ;;
-    --allow-settlement-verdict)
-      # Bypass the scorecard calibration_state gate; validate against
-      # _settlement/runs/<verdict-id>.json instead. The settlement pipeline
-      # IS the independent review — the calibrated-only gate is a permanent
-      # stop in practice since nothing automatically promotes to calibrated.
-      ALLOW_SETTLEMENT_VERDICT=1
-      shift
       ;;
     --allow-peer-verification)
       ALLOW_PEER_VERIFICATION=1
@@ -557,30 +456,6 @@ while [[ $# -gt 0 ]]; do
       WORK_ITEM="$2"
       shift 2
       ;;
-    --add-entry)
-      ADD_ENTRY_MODE=1
-      shift
-      ;;
-    --advance-confidence)
-      ADVANCE_CONFIDENCE_MODE=1
-      shift
-      ;;
-    --title)
-      NEW_TITLE="$2"
-      shift 2
-      ;;
-    --body)
-      NEW_BODY="$2"
-      shift 2
-      ;;
-    --scale)
-      NEW_SCALE="$2"
-      shift 2
-      ;;
-    --meta-fields)
-      META_FIELDS="$2"
-      shift 2
-      ;;
     --help|-h)
       usage
       exit 0
@@ -594,8 +469,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- Validate required args (per mode) ---
-if [[ $((ADD_ENTRY_MODE + ADVANCE_CONFIDENCE_MODE + CORROBORATE_MODE + DISPUTE_MODE + RETIRE_MODE + RESTORE_MODE + SET_KIND_STATUS_MODE)) -gt 1 ]]; then
-  echo "Error: --add-entry, --advance-confidence, --corroborate, --dispute, --retire, --restore, and --set-kind-status are mutually exclusive" >&2
+if [[ $((CORROBORATE_MODE + DISPUTE_MODE + RETIRE_MODE + RESTORE_MODE + SET_KIND_STATUS_MODE)) -gt 1 ]]; then
+  echo "Error: --corroborate, --dispute, --retire, --restore, and --set-kind-status are mutually exclusive" >&2
   exit 1
 fi
 
@@ -604,10 +479,6 @@ fi
 is_blank() {
   [[ -z "$(printf '%s' "$1" | tr -d '[:space:]')" ]]
 }
-if [[ "$ALLOW_PEER_VERIFICATION" == "1" && "$ALLOW_SETTLEMENT_VERDICT" == "1" ]]; then
-  echo "Error: --allow-peer-verification and --allow-settlement-verdict are mutually exclusive" >&2
-  exit 1
-fi
 if [[ "$ALLOW_PEER_VERIFICATION" == "1" ]]; then
   # Retirement, corroboration, and kind-status records key to the entry's own
   # history rather than to an observation, so they are the peer-authorized paths
@@ -621,18 +492,14 @@ if [[ "$ALLOW_PEER_VERIFICATION" == "1" ]]; then
     echo "Error: --allow-peer-verification requires --verdict-source peer-verification (got '$VERDICT_SOURCE')" >&2
     exit 1
   fi
-elif [[ "$VERDICT_SOURCE" == "peer-verification" ]]; then
-  echo "Error: --verdict-source peer-verification requires --allow-peer-verification" >&2
+else
+  echo "Error: --allow-peer-verification is required" >&2
   exit 1
 fi
 if [[ "$RETIRE_MODE" == "1" || "$RESTORE_MODE" == "1" ]]; then
-  if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" || -n "$NEW_TITLE" || -n "$NEW_BODY" || -n "$NEW_SCALE" ]]; then
-    echo "Error: --retire and --restore forbid --superseded-text, --replacement-text, --title, --body, --scale" >&2
+  if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" ]]; then
+    echo "Error: --retire and --restore forbid --superseded-text and --replacement-text" >&2
     usage
-    exit 1
-  fi
-  if [[ "$ALLOW_PEER_VERIFICATION" != "1" ]]; then
-    echo "Error: --retire and --restore require --allow-peer-verification" >&2
     exit 1
   fi
   if [[ -z "$ENTRY_PATH" ]]; then
@@ -677,13 +544,9 @@ if [[ "$RETIRE_MODE" == "1" || "$RESTORE_MODE" == "1" ]]; then
     fi
   fi
 elif [[ "$CORROBORATE_MODE" == "1" ]]; then
-  if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" || -n "$NEW_TITLE" || -n "$NEW_BODY" || -n "$NEW_SCALE" ]]; then
-    echo "Error: --corroborate forbids --superseded-text, --replacement-text, --title, --body, --scale" >&2
+  if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" ]]; then
+    echo "Error: --corroborate forbids --superseded-text and --replacement-text" >&2
     usage
-    exit 1
-  fi
-  if [[ "$ALLOW_PEER_VERIFICATION" != "1" ]]; then
-    echo "Error: --corroborate requires --allow-peer-verification" >&2
     exit 1
   fi
   if [[ -z "$ENTRY_PATH" ]]; then
@@ -718,13 +581,9 @@ elif [[ "$CORROBORATE_MODE" == "1" ]]; then
     OBSERVED_AT="$DATE_TODAY"
   fi
 elif [[ "$SET_KIND_STATUS_MODE" == "1" ]]; then
-  if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" || -n "$NEW_TITLE" || -n "$NEW_BODY" || -n "$NEW_SCALE" ]]; then
-    echo "Error: --set-kind-status forbids --superseded-text, --replacement-text, --title, --body, --scale" >&2
+  if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" ]]; then
+    echo "Error: --set-kind-status forbids --superseded-text and --replacement-text" >&2
     usage
-    exit 1
-  fi
-  if [[ "$ALLOW_PEER_VERIFICATION" != "1" ]]; then
-    echo "Error: --set-kind-status requires --allow-peer-verification" >&2
     exit 1
   fi
   if [[ -z "$ENTRY_PATH" ]]; then
@@ -741,13 +600,9 @@ elif [[ "$SET_KIND_STATUS_MODE" == "1" ]]; then
     exit 1
   fi
 elif [[ "$DISPUTE_MODE" == "1" ]]; then
-  if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" || -n "$NEW_TITLE" || -n "$NEW_BODY" || -n "$NEW_SCALE" ]]; then
-    echo "Error: --dispute forbids --superseded-text, --replacement-text, --title, --body, --scale" >&2
+  if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" ]]; then
+    echo "Error: --dispute forbids --superseded-text and --replacement-text" >&2
     usage
-    exit 1
-  fi
-  if [[ "$ALLOW_PEER_VERIFICATION" != "1" ]]; then
-    echo "Error: --dispute requires --allow-peer-verification" >&2
     exit 1
   fi
   for flag_name in ENTRY_PATH EVIDENCE DISPUTE_NOTE; do
@@ -762,63 +617,9 @@ elif [[ "$DISPUTE_MODE" == "1" ]]; then
       exit 1
     fi
   done
-elif [[ "$ADVANCE_CONFIDENCE_MODE" == "1" ]]; then
-  # Advance-confidence forbids the text flags (it edits no body, only the META
-  # confidence field) and demands the settlement authorization.
-  if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" || -n "$NEW_TITLE" || -n "$NEW_BODY" || -n "$NEW_SCALE" ]]; then
-    echo "Error: --advance-confidence forbids --superseded-text, --replacement-text, --title, --body, --scale" >&2
-    usage
-    exit 1
-  fi
-  for flag_name in ENTRY_PATH VERDICT_ID VERDICT_SOURCE EVIDENCE; do
-    if [[ -z "${!flag_name}" ]]; then
-      flag_dashed=$(printf '%s' "$flag_name" | tr '[:upper:]_' '[:lower:]-')
-      echo "Error: --$flag_dashed is required in --advance-confidence mode" >&2
-      usage
-      exit 1
-    fi
-  done
-  if [[ "$ALLOW_SETTLEMENT_VERDICT" != "1" ]]; then
-    echo "Error: --advance-confidence requires --allow-settlement-verdict" >&2
-    exit 1
-  fi
-elif [[ "$ADD_ENTRY_MODE" == "1" ]]; then
-  # Add-entry mode forbids the mutation-specific text flags and demands the
-  # new-entry-specific ones plus the settlement authorization. This branch
-  # creates a NEW commons entry rather than mutating an existing one.
-  if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" ]]; then
-    echo "Error: --add-entry forbids --superseded-text and --replacement-text" >&2
-    usage
-    exit 1
-  fi
-  for flag_name in ENTRY_PATH VERDICT_ID VERDICT_SOURCE EVIDENCE NEW_TITLE NEW_BODY NEW_SCALE; do
-    if [[ -z "${!flag_name}" ]]; then
-      flag_dashed=$(printf '%s' "$flag_name" | tr '[:upper:]_' '[:lower:]-')
-      case "$flag_name" in
-        NEW_TITLE) flag_label="--title" ;;
-        NEW_BODY)  flag_label="--body" ;;
-        NEW_SCALE) flag_label="--scale" ;;
-        *)         flag_label="--$flag_dashed" ;;
-      esac
-      echo "Error: $flag_label is required in --add-entry mode" >&2
-      usage
-      exit 1
-    fi
-  done
-  if [[ "$ALLOW_SETTLEMENT_VERDICT" != "1" ]]; then
-    echo "Error: --add-entry requires --allow-settlement-verdict" >&2
-    exit 1
-  fi
-  case "$NEW_SCALE" in
-    abstract|architecture|subsystem|implementation) : ;;
-    *)
-      echo "Error: --scale must be 'abstract', 'architecture', 'subsystem', or 'implementation' (got '$NEW_SCALE')" >&2
-      exit 1
-      ;;
-  esac
 else
   # A peer correction's provenance id is the observation it answers.
-  if [[ "$ALLOW_PEER_VERIFICATION" == "1" && -z "$VERDICT_ID" ]]; then
+  if [[ -z "$VERDICT_ID" ]]; then
     VERDICT_ID="$OBSERVATION_ID"
   fi
   for flag_name in ENTRY_PATH VERDICT_ID VERDICT_SOURCE EVIDENCE SUPERSEDED_TEXT REPLACEMENT_TEXT; do
@@ -831,151 +632,15 @@ else
   done
 fi
 
-case "$VERDICT_SOURCE" in
-  correctness-gate|reverse-auditor|peer-verification) ;;
-  *)
-    echo "Error: --verdict-source must be 'correctness-gate', 'reverse-auditor', or 'peer-verification', got: '$VERDICT_SOURCE'" >&2
-    exit 1
-    ;;
-esac
-
-if [[ "$ADD_ENTRY_MODE" == "1" ]]; then
-  if [[ -e "$ENTRY_PATH" ]]; then
-    echo "Error: --add-entry target already exists: $ENTRY_PATH" >&2
-    exit 2
-  fi
-elif [[ ! -f "$ENTRY_PATH" ]]; then
+if [[ ! -f "$ENTRY_PATH" ]]; then
   echo "Error: entry not found: $ENTRY_PATH" >&2
   exit 2
 fi
 
-# --- Write gate ---
-# Two paths:
-#   (a) --allow-settlement-verdict: validate against _settlement/runs/<id>.json.
-#       The settlement pipeline IS the independent review; "calibrated-only" is a
-#       permanent stop in practice because nothing automatically promotes to
-#       calibrated. Replacing the gate with a settlement-authorization check
-#       (run exists + verdict=contradicted + nonempty correction) lets the loop
-#       actually run while preserving git history + in-entry corrections[] META
-#       as the visible accountability layer.
-#   (b) default: scorecard rows.jsonl calibration_state==calibrated (task-62).
 if [[ -n "$KDIR_OVERRIDE" ]]; then
   KDIR="$KDIR_OVERRIDE"
 else
   KDIR=$(resolve_knowledge_dir)
-fi
-
-if [[ "$ALLOW_PEER_VERIFICATION" == "1" ]]; then
-  # The grounded evidence the caller already validated is the authorization;
-  # there is no run record or scorecard row to consult. What keeps the edit
-  # accountable is provenance, not permission: --observation-id links this
-  # record to the ledger event reporting the same observation.
-  :
-elif [[ "$ALLOW_SETTLEMENT_VERDICT" == "1" ]]; then
-  # A settled run may have been compacted out of the hot dir into the archive
-  # (immutable terminal state, ≥7 days old). Resolve hot first, then archive.
-  RUN_FILE="$KDIR/_settlement/runs/${VERDICT_ID}.json"
-  if [[ ! -f "$RUN_FILE" ]]; then
-    ARCHIVE_RUN_FILE="$KDIR/_settlement/archive/runs/${VERDICT_ID}.json"
-    if [[ -f "$ARCHIVE_RUN_FILE" ]]; then
-      RUN_FILE="$ARCHIVE_RUN_FILE"
-    fi
-  fi
-  if [[ ! -f "$RUN_FILE" ]]; then
-    echo "Correction rejected: --allow-settlement-verdict set but settlement run not found in hot or archive: _settlement/runs/${VERDICT_ID}.json" >&2
-    exit 4
-  fi
-  # Authorization branches keyed on mode:
-  #   mutate            → verdict.verdict == "contradicted" + non-empty correction
-  #   add-entry         → verdict.verdict == "verified" + matching kind (task-claim
-  #                       with curator-selected + capture-gate-passed, OR omission
-  #                       with capture-gate-passed). The curator/capture markers are
-  #                       written on the run record in Phase 2; for now we accept a
-  #                       verified verdict with kind ∈ {task-claim, omission}.
-  #   advance-confidence → verdict.verdict == "verified" (the commons audit
-  #                       confirmed the promoted claim).
-  if [[ "$ADVANCE_CONFIDENCE_MODE" == "1" ]]; then
-    SETTLEMENT_OK=$(python3 -c '
-import json, sys
-try:
-    with open(sys.argv[1], encoding="utf-8") as f:
-        run = json.load(f)
-except (OSError, json.JSONDecodeError):
-    print("unreadable"); sys.exit(0)
-verdict = run.get("verdict") if isinstance(run.get("verdict"), dict) else {}
-if verdict.get("verdict") != "verified":
-    print("not_verified"); sys.exit(0)
-print("ok")
-' "$RUN_FILE" 2>/dev/null || echo "error")
-  elif [[ "$ADD_ENTRY_MODE" == "1" ]]; then
-    SETTLEMENT_OK=$(python3 -c '
-import json, sys
-try:
-    with open(sys.argv[1], encoding="utf-8") as f:
-        run = json.load(f)
-except (OSError, json.JSONDecodeError):
-    print("unreadable"); sys.exit(0)
-verdict = run.get("verdict") if isinstance(run.get("verdict"), dict) else {}
-if verdict.get("verdict") != "verified":
-    print("not_verified"); sys.exit(0)
-kind = run.get("kind") or "task-claim"
-if kind not in ("task-claim", "omission"):
-    print(f"non_addable_kind:{kind}"); sys.exit(0)
-print("ok")
-' "$RUN_FILE" 2>/dev/null || echo "error")
-  else
-    SETTLEMENT_OK=$(python3 -c '
-import json, sys
-try:
-    with open(sys.argv[1], encoding="utf-8") as f:
-        run = json.load(f)
-except (OSError, json.JSONDecodeError):
-    print("unreadable"); sys.exit(0)
-verdict = run.get("verdict") if isinstance(run.get("verdict"), dict) else {}
-if verdict.get("verdict") != "contradicted":
-    print("not_contradicted"); sys.exit(0)
-correction = verdict.get("correction")
-if not (isinstance(correction, str) and correction.strip()):
-    print("empty_correction"); sys.exit(0)
-print("ok")
-' "$RUN_FILE" 2>/dev/null || echo "error")
-  fi
-  if [[ "$SETTLEMENT_OK" != "ok" ]]; then
-    echo "Correction rejected: settlement verdict $VERDICT_ID failed authorization check ($SETTLEMENT_OK)" >&2
-    exit 4
-  fi
-else
-  ROWS_FILE="$KDIR/_scorecards/rows.jsonl"
-
-  if [[ -f "$ROWS_FILE" ]]; then
-    CAL_STATE=$(python3 -c '
-import json, sys
-rows_file, verdict_id = sys.argv[1], sys.argv[2]
-with open(rows_file, encoding="utf-8") as f:
-    for line in f:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        ids = {row.get("verdict_id"), row.get("calibrated_by_verdict_id")}
-        ids.update(row.get("verdict_ids") or [])
-        if verdict_id in ids:
-            print(row.get("calibration_state", "unknown"))
-            sys.exit(0)
-# Not found — treat as unknown
-print("unknown")
-' "$ROWS_FILE" "$VERDICT_ID" 2>/dev/null || echo "unknown")
-  else
-    CAL_STATE="unknown"
-  fi
-
-  if [[ "$CAL_STATE" != "calibrated" ]]; then
-    echo "Correction rejected: verdict $VERDICT_ID is in calibration_state=$CAL_STATE. Only calibrated verdicts may modify the commons." >&2
-    exit 4
-  fi
 fi
 
 # --- Retire / restore mode: move the entry out of or back into default
@@ -1627,183 +1292,6 @@ with open(entry_path, "w", encoding="utf-8") as f:
 print(f"[dispute] result=applied dispute_id={dispute_id}")
 print(f"[dispute] {rel_path}: dispute marker added ({date_str})")
 DISPUTE_PY
-  exit 0
-fi
-
-# --- Add-entry mode: write the new commons entry and exit. ---
-# The new entry layout is the canonical lore commons format:
-#   # <title>
-#   <body>
-#   <!-- learned: <date> | scale: <scale> | source: settlement-add-entry | verdict_id: <id> | verdict_source: <source> [| <meta-fields>] -->
-# The entry path was validated earlier (must not exist; must resolve under $KDIR).
-if [[ "$ADD_ENTRY_MODE" == "1" ]]; then
-  # Reject attempts to plant entries outside $KDIR.
-  abs_entry=$(python3 -c '
-import os, sys
-p = os.path.abspath(sys.argv[1])
-print(p)
-' "$ENTRY_PATH")
-  abs_kdir=$(python3 -c '
-import os, sys
-print(os.path.abspath(sys.argv[1]))
-' "$KDIR")
-  case "$abs_entry" in
-    "$abs_kdir"/*) : ;;
-    *)
-      echo "Error: --entry path must resolve under \$KDIR ($abs_kdir): $abs_entry" >&2
-      exit 1
-      ;;
-  esac
-
-  if [[ "$DRY_RUN" == "1" ]]; then
-    echo "[dry-run][add-entry] Would create: $abs_entry"
-    echo "[dry-run][add-entry]   title:  $NEW_TITLE"
-    echo "[dry-run][add-entry]   scale:  $NEW_SCALE"
-    echo "[dry-run][add-entry]   verdict_id: $VERDICT_ID  verdict_source: $VERDICT_SOURCE"
-    if [[ -n "$META_FIELDS" ]]; then
-      echo "[dry-run][add-entry]   meta:   $META_FIELDS"
-    fi
-    exit 0
-  fi
-
-  mkdir -p "$(dirname "$abs_entry")"
-  ADD_ENTRY_PATH="$abs_entry" \
-  ADD_ENTRY_TITLE="$NEW_TITLE" \
-  ADD_ENTRY_BODY="$NEW_BODY" \
-  ADD_ENTRY_SCALE="$NEW_SCALE" \
-  ADD_ENTRY_DATE="$DATE_TODAY" \
-  ADD_ENTRY_VERDICT_ID="$VERDICT_ID" \
-  ADD_ENTRY_VERDICT_SOURCE="$VERDICT_SOURCE" \
-  ADD_ENTRY_EVIDENCE="$EVIDENCE" \
-  ADD_ENTRY_META_FIELDS="$META_FIELDS" \
-  python3 <<'ADDENTRY_PY'
-import os, json
-
-path = os.environ["ADD_ENTRY_PATH"]
-title = os.environ["ADD_ENTRY_TITLE"].strip()
-body = os.environ["ADD_ENTRY_BODY"]
-scale = os.environ["ADD_ENTRY_SCALE"]
-date_today = os.environ["ADD_ENTRY_DATE"]
-verdict_id = os.environ["ADD_ENTRY_VERDICT_ID"]
-verdict_source = os.environ["ADD_ENTRY_VERDICT_SOURCE"]
-evidence = os.environ["ADD_ENTRY_EVIDENCE"]
-meta_fields = os.environ.get("ADD_ENTRY_META_FIELDS", "")
-
-meta_parts = [
-    f"learned: {date_today}",
-    f"scale: {scale}",
-    "source: settlement-add-entry",
-    f"verdict_source: {verdict_source}",
-    f"verdict_id: {verdict_id}",
-]
-if evidence:
-    meta_parts.append(f"evidence: {evidence}")
-if meta_fields:
-    for pair in meta_fields.split(","):
-        pair = pair.strip()
-        if not pair:
-            continue
-        if "=" not in pair:
-            continue
-        k, v = pair.split("=", 1)
-        k = k.strip()
-        v = v.strip()
-        if not k:
-            continue
-        meta_parts.append(f"{k}: {v}")
-
-meta_block = "<!-- " + " | ".join(meta_parts) + " -->"
-content_parts = [f"# {title}", "", body.rstrip(), "", meta_block, ""]
-content = "\n".join(content_parts)
-with open(path, "w", encoding="utf-8") as fh:
-    fh.write(content)
-ADDENTRY_PY
-
-  rel=$(python3 -c '
-import os, sys
-print(os.path.relpath(sys.argv[1], sys.argv[2]))
-' "$abs_entry" "$abs_kdir")
-  echo "[add-entry] Created $rel"
-  echo "  verdict_id=$VERDICT_ID  verdict_source=$VERDICT_SOURCE"
-  echo "  scale=$NEW_SCALE"
-  exit 0
-fi
-
-# --- Advance-confidence mode: advance META confidence and exit. ---
-# Rewrites `confidence: unaudited` -> `confidence: high` in the entry's META
-# block and appends a confidence_advances[] provenance item (mirroring the
-# corrections[] trail). Idempotent: an entry already at `high` is a no-op that
-# appends nothing, so the settlement terminus can re-run on a retried verdict.
-if [[ "$ADVANCE_CONFIDENCE_MODE" == "1" ]]; then
-  python3 - "$ENTRY_PATH" "$VERDICT_ID" "$VERDICT_SOURCE" "$EVIDENCE" "$DATE_TODAY" "$DRY_RUN" "$KDIR" <<'ADVANCE_PY'
-import sys, os, re, json
-
-entry_path     = sys.argv[1]
-verdict_id     = sys.argv[2]
-verdict_source = sys.argv[3]
-evidence       = sys.argv[4]
-date_str       = sys.argv[5]
-dry_run        = sys.argv[6] == '1'
-kdir           = sys.argv[7]
-
-try:
-    original = open(entry_path, encoding='utf-8').read()
-except (OSError, UnicodeDecodeError) as e:
-    print(f"Error: cannot read entry: {e}", file=sys.stderr)
-    sys.exit(2)
-
-META_RE = re.compile(r'(<!--)(.*?)(-->)', re.DOTALL)
-meta_matches = list(META_RE.finditer(original))
-if not meta_matches:
-    print(f"Error: no HTML META block found in entry: {entry_path!r}", file=sys.stderr)
-    sys.exit(3)
-meta_match = meta_matches[-1]
-meta_inner = meta_match.group(2)
-
-rel_path = os.path.relpath(entry_path, kdir) if kdir else entry_path
-
-# Read current confidence from META. Absent confidence is treated as unaudited.
-conf_match = re.search(r'\|\s*confidence:\s*(\S+)', meta_inner)
-current = conf_match.group(1) if conf_match else "unaudited"
-if current == "high":
-    print(f"[advance-confidence] {rel_path}: already high — no-op")
-    sys.exit(0)
-
-advance_item = json.dumps({
-    "date": date_str,
-    "verdict_source": verdict_source,
-    "verdict_id": verdict_id,
-    "evidence": evidence,
-    "from": current,
-    "to": "high",
-}, ensure_ascii=False, separators=(', ', ': '))
-
-if conf_match:
-    new_inner = meta_inner[:conf_match.start(1)] + "high" + meta_inner[conf_match.end(1):]
-else:
-    new_inner = meta_inner.rstrip() + " | confidence: high"
-
-ADVANCES_RE = re.compile(r'\|\s*confidence_advances:\s*\[.*?\]', re.DOTALL)
-existing = ADVANCES_RE.search(new_inner)
-if existing:
-    block = existing.group(0)
-    new_inner = new_inner.replace(block, block.rstrip(']') + ', ' + advance_item + ']')
-else:
-    new_inner = new_inner.rstrip() + f' | confidence_advances: [{advance_item}]'
-
-final = original[:meta_match.start()] + meta_match.group(1) + new_inner + meta_match.group(3) + original[meta_match.end():]
-
-if dry_run:
-    print(f"[dry-run][advance-confidence] Would update: {rel_path}")
-    print(f"[dry-run][advance-confidence]   confidence: {current} -> high")
-    print(f"[dry-run][advance-confidence]   confidence_advances item: {advance_item}")
-    sys.exit(0)
-
-with open(entry_path, 'w', encoding='utf-8') as f:
-    f.write(final)
-print(f"[advance-confidence] {rel_path}: confidence {current} -> high")
-print(f"  verdict_id={verdict_id}  verdict_source={verdict_source}")
-ADVANCE_PY
   exit 0
 fi
 

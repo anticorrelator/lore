@@ -62,7 +62,7 @@
 #                             command and expected_output_shape are non-empty
 #                             strings; root, when present, is a non-empty string.
 # When present, the object is type-checked but never required — the prose
-# `falsifier` field stays mandatory regardless. Executed by falsifier-run.py.
+# `falsifier` field stays mandatory regardless.
 
 set -euo pipefail
 

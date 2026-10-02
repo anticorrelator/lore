@@ -13,7 +13,7 @@
 # not persist it into the entry .md, so this row is the sole reconstructable
 # source for the correctness-gate that audits the entry. The same holds for the
 # optional executable_falsifier {command, expected_output_shape[, root]} — when
-# the row carries one, this row is its durable home (run via falsifier-run.py).
+# the row carries one, this row is its durable home.
 #
 # SOLE-WRITER INVARIANT: promote-commons-append.sh is the only sanctioned writer
 # of $KDIR/_work/<slug>/promoted-commons.jsonl. It is a Tier-3 *producer* log (a
@@ -148,7 +148,7 @@ esac
 # {command, expected_output_shape[, root]} — never required; rows without it
 # validate exactly as before. When present it must be well-formed: like the
 # prose falsifier, this row is the sole surviving copy, so a malformed object
-# here is unrecoverable at audit time. Executed by falsifier-run.py.
+# here is unrecoverable at audit time.
 if printf '%s' "$ROW" | jq -e 'has("executable_falsifier")' >/dev/null 2>&1; then
   EF_ERR=$(printf '%s' "$ROW" | jq -r '
     def nonempty_str: type == "string" and (gsub("^\\s+|\\s+$"; "") | length) > 0;

@@ -8,17 +8,13 @@
 #      matching change_context.changed_files entry moves with `file`, and the
 #      row passes validate-tier2.sh.
 #   2. Durability: after `git worktree remove`, the recorded `file` resolves at
-#      HEAD in the main checkout, and reverse-auditor-inline-evidence.py grounds
-#      the claim from it.
+#      HEAD in the main checkout.
 #   3. Sibling changed_files entries under the same repo root are stripped by
 #      the same derived prefix.
 #   4. Capture from a plain (non-worktree) checkout is canonicalized the same
 #      way — the rule is unconditional wherever a git root is derivable.
 #   5. No git root: `file` is left verbatim and no file_relative is stamped.
 #   6. An already-relative `file` passes through unchanged.
-#   7. audit-artifact.sh's task-claims extractor carries file_relative,
-#      captured_at_sha, and captured_origin_ref into claim_payload — without
-#      them the resolver has no durable anchor to prefer.
 
 set -uo pipefail
 
@@ -27,7 +23,6 @@ SCRIPTS_DIR="$REPO_DIR/scripts"
 APPEND="$SCRIPTS_DIR/evidence-append.sh"
 VALIDATE="$SCRIPTS_DIR/validate-tier2.sh"
 NORMALIZE_PY="$SCRIPTS_DIR/snippet_normalize.py"
-RESOLVER="$SCRIPTS_DIR/reverse-auditor-inline-evidence.py"
 
 PASS=0
 FAIL=0
@@ -132,37 +127,6 @@ RECORDED=$(row_field "$CLAIMS" wt-1 file)
 assert_eq "recorded file resolves at HEAD in the main checkout" \
   "$(git -C "$MAIN_REPO" show "HEAD:$RECORDED" >/dev/null 2>&1 && echo ok || echo fail)" "ok"
 
-# The audit-side resolver grounds the claim from the same recorded reference.
-RA_INPUT="$TEST_ROOT/ra-input.json"
-RA_OUT="$TEST_ROOT/ra-out.json"
-python3 - "$CLAIMS" "$RA_INPUT" <<'PYEOF'
-import json, sys
-claims_path, out_path = sys.argv[1:3]
-rows = [json.loads(l) for l in open(claims_path) if l.strip()]
-row = next(r for r in rows if r["claim_id"] == "wt-1")
-json.dump({
-    "artifact_id": "wi",
-    "work_item": "wi",
-    "curated_top_k": [{
-        "claim_id": row["claim_id"],
-        "claim_text": row["claim"],
-        "file": row["file"],
-        "file_relative": row.get("file_relative"),
-        "line_range": row["line_range"],
-        "exact_snippet": row["exact_snippet"],
-    }],
-    "change_context": row["change_context"],
-    "referenced_files": [],
-}, open(out_path, "w"), indent=2)
-PYEOF
-python3 "$RESOLVER" "$RA_INPUT" "$RA_OUT" --lore-repo "$MAIN_REPO" --kdir "$KDIR" >/dev/null 2>&1
-assert_eq "resolver grounds the post-removal claim" \
-  "$(python3 -c "
-import json,sys
-w=json.load(open(sys.argv[1]))['inlined_evidence']['claim_windows'][0]
-print(f\"{w['resolved']}|{w['content_locate_verdict']}\")
-" "$RA_OUT")" "True|verified"
-
 echo ""
 echo "Test 3: capture from a plain checkout is canonicalized the same way"
 ROW=$(build_row plain-1 "$MAIN_REPO/scripts/foo.py" "[\"$MAIN_REPO/scripts/foo.py\"]")
@@ -200,25 +164,6 @@ while IFS= read -r line; do
   printf '%s' "$line" | bash "$VALIDATE" >/dev/null 2>&1 || BAD=$((BAD + 1))
 done < "$CLAIMS"
 assert_eq "no invalid rows in the appended file" "$BAD" "0"
-
-echo ""
-echo "Test 7: the audit extractor carries the durable anchor into claim_payload"
-DRY_JSON=$(bash "$SCRIPTS_DIR/audit-artifact.sh" "$CLAIMS" --kdir "$KDIR" --dry-run --json 2>/dev/null)
-payload_field() { printf '%s' "$DRY_JSON" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-c=next(c for c in d['claim_payload'] if c['claim_id']==sys.argv[1])
-print(c.get(sys.argv[2]))
-" "$1" "$2"; }
-assert_eq "claim_payload carries file_relative" "$(payload_field wt-1 file_relative)" "scripts/foo.py"
-assert_eq "claim_payload carries captured_at_sha" "$(payload_field wt-1 captured_at_sha)" "deadbeef"
-assert_eq "claim_payload exposes captured_origin_ref" \
-  "$(printf '%s' "$DRY_JSON" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-c=next(c for c in d['claim_payload'] if c['claim_id']=='wt-1')
-print('present' if 'captured_origin_ref' in c else 'absent')
-")" "present"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

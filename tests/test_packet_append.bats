@@ -11,7 +11,7 @@
 #   - The assessment writer owns assessments.jsonl with the same
 #     validate-before-disk contract.
 #
-# Style: pure bats with isolated $KDIR per test (scorecards-calibrate.bats).
+# Style: pure bats with isolated $KDIR per test.
 
 REPO_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME:-$0}")/.." && pwd)"
 PACKET_APPEND="$REPO_DIR/scripts/packet-append.sh"

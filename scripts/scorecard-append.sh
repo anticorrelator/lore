@@ -56,20 +56,6 @@
 #   window_start, window_end, source_artifact_ids, granularity
 # These are not hard-validated at append time (Phase 2 is substrate-only;
 # downstream consumers encode stricter checks).
-#
-# Grounded-or-nothing enforcement (task-21, Phase 4):
-#   When verdict_source == "reverse-auditor" AND kind == "scored", the row
-#   must carry a non-empty claim_anchor object with file, line_range, and
-#   exact_snippet fields all present and non-empty. Scored reverse-auditor
-#   rows without grounded anchors are rejected. Telemetry-kind rows
-#   (e.g., grounding_failure_rate) do not require the anchor — ungrounded
-#   diagnostic telemetry is explicit and permitted.
-#   Rationale: the reverse-auditor's scorecard weight is grounded-or-nothing
-#   — ungrounded concerns may surface in /retro narrative but cannot drive
-#   producer-evaluation scoring. This is
-#   enforced at the writer (not the agent prompt) because the writer is
-#   the last line of defense: any path that reaches rows.jsonl without
-#   this check corrupts the signal irreversibly.
 
 set -euo pipefail
 
@@ -168,44 +154,7 @@ case "$CAL_STATE" in
     ;;
 esac
 
-# --- Grounded-or-nothing enforcement for reverse-auditor scored rows (task-21) ---
-# If the row declares verdict_source == "reverse-auditor" AND kind == "scored",
-# require claim_anchor.{file, line_range, exact_snippet} all non-empty for
-# per-claim tier=reusable rows. tier=template aggregate rows (emitted by the
-# rollup --aggregate-window mode) can EITHER carry the single claim_anchor
-# (aggregating a one-claim window) OR aggregate-provenance: non-empty
-# source_artifact_ids AND a source_anchor_count (integer) equal to sample_size,
-# signifying every underlying tier=reusable row carried a grounded claim_anchor.
-# Telemetry rows (e.g., grounding_failure_rate) are exempt — ungrounded
-# diagnostic signal is explicit and permitted under the kind discriminator.
-VERDICT_SOURCE=$(printf '%s' "$ROW" | jq -r '.verdict_source // ""')
-ROW_TIER_PRECHECK=$(printf '%s' "$ROW" | jq -r '.tier // ""')
-if [[ "$VERDICT_SOURCE" == "reverse-auditor" && "$KIND" == "scored" ]]; then
-  ANCHOR_OK=$(printf '%s' "$ROW" | jq -e '
-    (.claim_anchor // null) as $a
-    | ($a != null)
-      and (($a.file // "") != "")
-      and (($a.line_range // "") != "")
-      and (($a.exact_snippet // "") != "")
-  ' >/dev/null 2>&1 && echo "true" || echo "false")
-  if [[ "$ANCHOR_OK" != "true" ]]; then
-    AGGREGATE_PROVENANCE_OK="false"
-    if [[ "$ROW_TIER_PRECHECK" == "template" ]]; then
-      AGGREGATE_PROVENANCE_OK=$(printf '%s' "$ROW" | jq -e '
-        ((.source_artifact_ids // []) | type == "array" and length > 0)
-        and ((.source_anchor_count // null) | (type == "number") and (. >= 0))
-        and ((.sample_size // null) | (type == "number") and (. > 0))
-        and ((.source_anchor_count) == (.sample_size))
-      ' >/dev/null 2>&1 && echo "true" || echo "false")
-    fi
-    if [[ "$AGGREGATE_PROVENANCE_OK" != "true" ]]; then
-      fail "reverse-auditor scored row rejected: grounded-or-nothing enforced — claim_anchor.{file, line_range, exact_snippet} all required and non-empty for per-claim rows (tier=reusable). tier=template rows may instead carry aggregate-provenance: non-empty source_artifact_ids AND source_anchor_count == sample_size. Telemetry-kind rows are exempt; surface ungrounded concerns in /retro narrative instead."
-    fi
-  fi
-fi
-
 # --- Tier validation (task-15, extended in task-1 Phase 1) ---
-# Mirror the grounded-or-nothing jq pattern above.
 # Allowed values: reusable | task-evidence | telemetry | template | correction
 # Conditional rules:
 #   reusable      rows REQUIRE non-empty source_artifact_ids
@@ -502,8 +451,8 @@ fi
 # Stamp which model generation produced the evidence so /retro and /evolve
 # can segment signal across model transitions (behavioral-rate claims do not
 # transfer across generations; structural claims do). Priority: the row's own
-# model field > --model flag > LORE_MODEL env (exported by judge pipelines,
-# e.g. audit-artifact.sh) > "unrecorded". Stamping is provenance, not
+# model field > --model flag > LORE_MODEL env > "unrecorded". Stamping is
+# provenance, not
 # validation — rows are never rejected for missing model.
 ROW_MODEL=$(printf '%s' "$ROW" | jq -r '.model // ""')
 if [[ -z "$ROW_MODEL" ]]; then
