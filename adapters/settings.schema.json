@@ -128,18 +128,6 @@
       ],
       "description": "Closed role registry. MUST stay in lockstep with adapters/roles.json `roles[].id` — drift is caught by tests/frameworks/settings_schema_keyset_parity.bats. Adding a role requires updating roles.json AND this enum AND $defs/roles_map_overlay properties AND scripts/lib.sh resolve_model_for_role AND tui/internal/config/framework.go ResolveModelForRoleInCeremony AND tests/frameworks/roles.bats."
     },
-    "skill_id": {
-      "type": "string",
-      "pattern": "^[a-z][a-z0-9-]*$",
-      "minLength": 1,
-      "description": "Kebab-case skill id (e.g. \"spec-design\", \"pr-review\", \"codex-plan-review\"). Open at the schema layer — closed-set rejection against adapters/capabilities.json `skills` map happens in the loaders and doctor, not here. Pattern blocks obvious typos and uppercase/whitespace mistakes."
-    },
-    "advisor_id": {
-      "type": "string",
-      "pattern": "^[a-z][a-z0-9-]*$",
-      "minLength": 1,
-      "description": "Kebab-case advisor id (e.g. \"codex-design-review\", \"codex-plan-review\", \"codex-pr-review\"). Open at the schema layer — closed-set rejection against the skills registry happens in the loaders and doctor."
-    },
     "ceremony_id": {
       "type": "string",
       "enum": [
@@ -149,19 +137,6 @@
       ],
       "description": "Closed ceremony registry. MUST stay in lockstep with adapters/ceremonies.json `ceremonies[].id` — drift is caught by tests/frameworks/settings_schema_keyset_parity.bats. Adding a ceremony requires updating ceremonies.json AND this enum AND $defs/ceremony_roles properties AND scripts/lib.sh resolve_model_for_role AND tui/internal/config/framework.go."
     },
-    "ceremonies_map": {
-      "type": "object",
-      "description": "Skill -> advisor list. Property keys are kebab-case skill ids; values are arrays of kebab-case advisor ids. Empty array is valid and means \"run with no advisors\". Absent key means no ceremony configured for this harness. Keyset is open at the schema layer; closed-set rejection against the skills registry lives in the loaders and doctor.",
-      "additionalProperties": {
-        "type": "array",
-        "items": {
-          "$ref": "#/$defs/advisor_id"
-        },
-        "minItems": 0,
-        "uniqueItems": true,
-        "description": "Empty array = explicit no-advisors binding. Non-empty = explicit advisor list. Absent key = no ceremony configured for this harness."
-      }
-    },
     "harness_block": {
       "type": "object",
       "additionalProperties": false,
@@ -169,7 +144,7 @@
         "args",
         "native_models"
       ],
-      "description": "Per-harness configuration block. `args` is required (every harness has a CLI arg list, possibly empty). New settings should include `roles` and `ceremonies` here because agent defaults and ceremony skills vary by harness. `ceremony_roles` is the optional ceremony-scoped role overlay consulted ahead of `roles` when resolve_model_for_role is passed a ceremony. Absent `enabled` is default-on; explicit `false` disables this harness's integration.",
+      "description": "Per-harness configuration block. `args` is required (every harness has a CLI arg list, possibly empty). Absent `enabled` is default-on; explicit `false` disables this harness's integration.",
       "properties": {
         "args": {
           "type": "array",
@@ -188,9 +163,6 @@
         "enabled": {
           "type": "boolean",
           "description": "Per-harness integration toggle. When false, scripts/harness-toggle/disable.sh has removed this harness's skill/agent symlinks and cleared its instruction-file lore region. Absent = enabled. Mutated only via `lore harness {enable,disable}`; direct settings.json patches that bypass the toggle scripts are rejected by the unified loaders to keep symlink/instruction-file state in sync with the flag."
-        },
-        "ceremonies": {
-          "$ref": "#/$defs/ceremonies_map"
         },
         "native_models": {
           "$ref": "#/$defs/native_models"

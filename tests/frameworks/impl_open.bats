@@ -7,13 +7,13 @@
 #   - the four lead-inline conditions as separate fields, no aggregate boolean
 #   - 3-branch prior-knowledge gate routing with per-phase error containment
 #   - per-task Tier 2 extracts (task_id and file-target overlap)
-#   - skill-invocation map (plan + ceremony injection)
+#   - skill-invocation map (plan Related skills)
 #   - selection modes (--all / --task), explicit-selection requirement
 #   - the execution-log attribution row is the only filesystem write
 #   - checksum gate, missing tasks.json, resolver tri-state propagation
 #
 # All tests use an isolated knowledge dir (LORE_KNOWLEDGE_DIR) and an isolated
-# LORE_DATA_DIR so ceremony/settings/capability lookups never touch the
+# LORE_DATA_DIR so settings/capability lookups never touch the
 # operator's real config.
 
 REPO_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME:-$0}")/../.." && pwd)"
@@ -301,91 +301,18 @@ assert [r["claim_id"] for r in t2["task-4"]] == ["c2"]    # file overlap
 '
 }
 
-# --- Skill-invocation map + ceremony injection ---------------------------------
+# --- Skill-invocation map -----------------------------------------------------
 
-@test "ceremony-configured skills merge into the map and are logged in the attribution row" {
-  mkdir -p "$TEST_DATA_DIR/config"
-  printf '{"harnesses": {"claude-code": {"ceremonies": {"implement": ["pr-review"]}}}}\n' \
-    > "$TEST_DATA_DIR/config/settings.json"
+@test "plan Related skills populate the skill-invocation map" {
   run bash "$OPEN_SH" widget-pipeline --all --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
-import json, re, sys
+import json, sys
 d = json.loads(sys.stdin.read())
 m = d["skill_invocation_map"]
+assert list(m) == ["semgrep"]
 assert m["semgrep"]["source"] == "plan"
-assert m["pr-review"]["source"] == "ceremony"
-assert re.fullmatch(r"[0-9a-f]{12}", m["pr-review"]["skill_template_version"])
-assert d["lead_inline_conditions"]["detail"]["ceremony_skills"] == ["pr-review"]
 '
-  grep -q "Ceremony-injected skill: pr-review" "$ITEM_DIR/execution-log.md"
-}
-
-@test "stale ceremony registration marks the work item and remains non-blocking" {
-  mkdir -p "$TEST_DATA_DIR/config" "$BATS_TEST_TMPDIR/home/.lore"
-  ln -s "$REPO_DIR/scripts" "$BATS_TEST_TMPDIR/home/.lore/scripts"
-  printf '{"harnesses": {"opencode": {"ceremonies": {"implement": ["codex-plan-review"]}}}}\n' \
-    > "$TEST_DATA_DIR/config/settings.json"
-
-  run env LORE_FRAMEWORK=opencode HOME="$BATS_TEST_TMPDIR/home" \
-    bash "$OPEN_SH" widget-pipeline --all --json
-
-  [ "$status" -eq 0 ]
-  payload | python3 -c '
-import json, sys
-d = json.loads(sys.stdin.read())
-assert d["status"] == "ready"
-assert d["lead_inline_conditions"]["detail"]["ceremony_skills"] == []
-assert "codex-plan-review" not in d["skill_invocation_map"]
-'
-  echo "$output" | grep -q "codex-plan-review"
-  echo "$output" | grep -Fq "[ceremony] Divergence:"
-  echo "$output" | grep -q "work_item='widget-pipeline'"
-  echo "$output" | grep -q "Corrective action:"
-
-  [ "$(wc -l < "$TEST_KDIR/_scorecards/rows.jsonl")" -eq 1 ]
-  python3 - "$TEST_KDIR/_scorecards/rows.jsonl" <<'PYEOF'
-import json, sys
-rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
-assert len(rows) == 1
-row = rows[0]
-assert row["kind"] == "telemetry"
-assert row["tier"] == "telemetry"
-assert row["event_type"] == "ceremony-resolution"
-assert row["metric"] == "ceremony_resolution_outcome"
-assert row["outcome"] == "needs-decision"
-assert row["disposition"] == "unhandled"
-assert row["ceremony"] == "implement"
-assert row["advisor"] == "codex-plan-review"
-assert row["harness"] == "opencode"
-PYEOF
-
-  grep -q "source: ceremony" "$ITEM_DIR/execution-log.md"
-  grep -q "codex-plan-review" "$ITEM_DIR/execution-log.md"
-  grep -q "source: impl-verb" "$ITEM_DIR/execution-log.md"
-}
-
-@test "stale ceremony registration stays fail-open when scorecard writing fails" {
-  mkdir -p "$TEST_DATA_DIR/config" "$BATS_TEST_TMPDIR/home/.lore"
-  ln -s "$REPO_DIR/scripts" "$BATS_TEST_TMPDIR/home/.lore/scripts"
-  printf '{"harnesses": {"opencode": {"ceremonies": {"implement": ["codex-plan-review"]}}}}\n' \
-    > "$TEST_DATA_DIR/config/settings.json"
-  printf 'blocks scorecard directory creation\n' > "$TEST_KDIR/_scorecards"
-
-  run env LORE_FRAMEWORK=opencode HOME="$BATS_TEST_TMPDIR/home" \
-    bash "$OPEN_SH" widget-pipeline --all --json
-
-  [ "$status" -eq 0 ]
-  payload | python3 -c '
-import json, sys
-d = json.loads(sys.stdin.read())
-assert d["status"] == "ready"
-assert d["lead_inline_conditions"]["detail"]["ceremony_skills"] == []
-'
-  echo "$output" | grep -Fq \
-    "[ceremony-outcome] Warning: scorecard outcome write failed; ceremony resolution continues."
-  grep -q "source: ceremony" "$ITEM_DIR/execution-log.md"
-  grep -q "source: impl-verb" "$ITEM_DIR/execution-log.md"
 }
 
 # --- Selection modes -----------------------------------------------------------

@@ -26,7 +26,7 @@ Lens skills produce structured JSON findings that can be rendered into followup 
 
 #### Field definitions
 
-- **lens** — Identifier for the lens that produced the findings. Built-in IDs: `correctness`, `security`, `regressions`, `thematic`, `blast-radius`, `test-quality`, `interface-clarity`, `user-impact`. Ceremony-registered lenses use their skill name as the lens ID (e.g., `codex-pr-review`). This field is not restricted to the built-in set.
+- **lens** — Identifier for the lens that produced the findings. Built-in IDs: `correctness`, `security`, `regressions`, `thematic`, `blast-radius`, `test-quality`, `interface-clarity`, `user-impact`.
 - **pr** — The PR number (integer).
 - **repo** — Repository in `owner/repo` format. Derived from the current git remote.
 - **findings** — Array of finding objects. Empty array `[]` when the lens finds no issues.

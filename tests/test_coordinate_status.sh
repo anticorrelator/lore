@@ -138,7 +138,6 @@ JSON
 JSONL
 
   cat > "$kdir/_scorecards/rows.jsonl" <<'JSONL'
-{"schema_version":"1","kind":"telemetry","tier":"telemetry","calibration_state":"unknown","event_type":"ceremony-resolution","metric":"ceremony_resolution_outcome","outcome":"needs-decision","disposition":"unhandled","ceremony":"spec-post-plan","advisor":"codex-plan-review","harness":"codex","reason":"advisor unavailable","corrective_action":"run registered advisor","timestamp":"2026-07-09T00:00:00Z","source_artifact_ids":[]}
 {"schema_version":"1","kind":"telemetry","tier":"telemetry","calibration_state":"unknown","metric":"experiment_window","window_id":"window-1","window_start":"2026-07-01T00:00:00Z","window_end":"2099-01-01T00:00:00Z"}
 JSONL
   cat > "$kdir/_scorecards/retro-deferred-queue.jsonl" <<'JSONL'
@@ -187,7 +186,7 @@ assert_eq "every manifest row carries the complete contract" "true" \
   "$(jq -r 'all(.source_manifest[]; (.source_id|length)>0 and (.read_status|length)>0 and (.observed_at|length)>0 and (.schema_version|length)>0 and (.vocabulary_version|length)>0 and (.locator|length)>0 and has("error"))' "$JSON_OUT")"
 
 assert_eq "Act now contains task plus unconsumed evolve cluster" "2" "$(jq -r '.bucket_counts.act_now' "$JSON_OUT")"
-assert_eq "Needs judgment contains ceremony, retro, and four frozen unmatched close failures" "6" "$(jq -r '.bucket_counts.needs_judgment' "$JSON_OUT")"
+assert_eq "Needs judgment contains retro and four frozen unmatched close failures" "5" "$(jq -r '.bucket_counts.needs_judgment' "$JSON_OUT")"
 assert_eq "matched close_failed is not surfaced" "0" \
   "$(jq -r '[.buckets.needs_judgment[] | select(.observed_facts.request_id?=="request-2")] | length' "$JSON_OUT")"
 assert_eq "matching top-level closed.request_id without declaration clears nothing" "1" \
@@ -199,8 +198,6 @@ assert_eq "dead-target retirement is not unmatched recovery" "0" \
 assert_eq "all four frozen pre-extension failures remain visible" "4" \
   "$(jq -r '[.buckets.needs_judgment[] | select(.observed_facts.event_id? as $id | ["1889880106a9a922","648b75f906159750","1a91175bc35f694b","1d77a8b177268b18"] | index($id))] | length' "$JSON_OUT")"
 assert_eq "Waiting contains live session, blocker, not_before, and window" "4" "$(jq -r '.bucket_counts.waiting' "$JSON_OUT")"
-assert_eq "unresolvable ceremony is visible" "1" \
-  "$(jq -r '[.buckets.needs_judgment[] | select(.kind=="unhandled-ceremony")] | length' "$JSON_OUT")"
 assert_eq "unhandled retro DUE is visible" "1" \
   "$(jq -r '[.buckets.needs_judgment[] | select(.kind=="unhandled-due")] | length' "$JSON_OUT")"
 assert_eq "unconsumed evolve cluster is visible" "1" \
@@ -233,7 +230,7 @@ for heading in "Coverage manifest" "Act now" "Needs judgment" "Waiting" "Reconci
   assert_contains "human render includes $heading" "$(cat "$HUMAN_OUT")" "$heading"
 done
 assert_contains "human render includes evidence facts" "$(cat "$HUMAN_OUT")" "facts={"
-assert_contains "human render includes literal rules" "$(cat "$HUMAN_OUT")" "rule=needs.ceremony.unhandled"
+assert_contains "human render includes literal rules" "$(cat "$HUMAN_OUT")" "rule=needs.retro.unhandled-due"
 
 SECOND_JSON="$TEST_DIR/status-second.json"
 bash "$COORDINATE" --kdir "$BASE" --json > "$SECOND_JSON"
@@ -316,38 +313,9 @@ for source in work-index session-journal scorecard-rows evolve-staging; do
     "$(jq -r --arg s "$source" '[.source_manifest[] | select(.source_id==$s and .read_status=="gap" and (.error|length)>0)] | length' "$UNKNOWN_JSON")"
 done
 assert_eq "valid scorecard evidence survives an unknown-version sibling row" "1" \
-  "$(jq -r '[.buckets.needs_judgment[] | select(.kind=="unhandled-ceremony")] | length' "$UNKNOWN_JSON")"
+  "$(jq -r '[.buckets.waiting[] | select(.kind=="registered-window")] | length' "$UNKNOWN_JSON")"
 assert_eq "valid evolve evidence survives a missing-version sibling row" "1" \
   "$(jq -r '[.buckets.act_now[] | select(.observed_facts.cluster_id?=="cluster-ready")] | length' "$UNKNOWN_JSON")"
-
-# A ceremony obligation leaves the board only when a correlated transition
-# records it as handled. The fixture's pre-transition row carries no
-# outcome_id, so it must stay visible either way — absence is unhandled, not
-# an error.
-CASE="$TEST_DIR/ceremony-handled"
-cp -R "$BASE" "$CASE"
-cat >> "$CASE/_scorecards/rows.jsonl" <<'JSONL'
-{"schema_version":"1","kind":"telemetry","tier":"telemetry","calibration_state":"unknown","event_type":"ceremony-resolution","metric":"ceremony_resolution_outcome","outcome":"needs-decision","disposition":"unhandled","ceremony":"spec-design","advisor":"codex-design-review","harness":"codex","reason":"two-round cap reached","corrective_action":"lead adjudication required","timestamp":"2026-07-09T01:00:00Z","outcome_id":"ceremony-handled-1","source_artifact_ids":[]}
-{"schema_version":"1","kind":"telemetry","tier":"telemetry","calibration_state":"unknown","event_type":"ceremony-resolution","metric":"ceremony_resolution_outcome","outcome":"needs-decision","disposition":"unhandled","ceremony":"spec-design","advisor":"codex-design-review","harness":"codex","reason":"two-round cap reached","corrective_action":"lead adjudication required","timestamp":"2026-07-09T02:00:00Z","outcome_id":"ceremony-open-1","source_artifact_ids":[]}
-JSONL
-CEREMONY_OPEN_JSON="$TEST_DIR/ceremony-open.json"
-bash "$COORDINATE" --kdir "$CASE" --json > "$CEREMONY_OPEN_JSON"
-assert_eq "an unhandled ceremony outcome is on the board" "3" \
-  "$(jq -r '[.buckets.needs_judgment[] | select(.kind=="unhandled-ceremony")] | length' "$CEREMONY_OPEN_JSON")"
-
-cat >> "$CASE/_scorecards/rows.jsonl" <<'JSONL'
-{"schema_version":"1","kind":"telemetry","tier":"telemetry","calibration_state":"unknown","event_type":"ceremony-resolution","metric":"ceremony_resolution_outcome","record_type":"disposition","outcome":"needs-decision","disposition":"handled","outcome_id":"ceremony-handled-1","ceremony":"spec-design","advisor":"codex-design-review","action":"adjudicated","handled_by":"coordinate","handled_at":"2026-07-09T03:00:00Z","timestamp":"2026-07-09T03:00:00Z","source_artifact_ids":[]}
-JSONL
-CEREMONY_HANDLED_JSON="$TEST_DIR/ceremony-handled.json"
-bash "$COORDINATE" --kdir "$CASE" --json > "$CEREMONY_HANDLED_JSON"
-assert_eq "a handled ceremony outcome leaves the board" "0" \
-  "$(jq -r '[.buckets.needs_judgment[] | select(.kind=="unhandled-ceremony" and .observed_facts.outcome_id?=="ceremony-handled-1")] | length' "$CEREMONY_HANDLED_JSON")"
-assert_eq "its uncorrelated siblings stay on the board" "2" \
-  "$(jq -r '[.buckets.needs_judgment[] | select(.kind=="unhandled-ceremony")] | length' "$CEREMONY_HANDLED_JSON")"
-assert_eq "the transition row is not itself an obligation" "0" \
-  "$(jq -r '[.buckets.needs_judgment[] | select(.observed_facts.record_type?=="disposition")] | length' "$CEREMONY_HANDLED_JSON")"
-assert_eq "the handled vocabulary is known, so the source stays ok" "ok" \
-  "$(jq -r '.source_manifest[] | select(.source_id=="scorecard-rows") | .read_status' "$CEREMONY_HANDLED_JSON")"
 
 CASE="$TEST_DIR/malformed-native-readers"
 cp -R "$BASE" "$CASE"

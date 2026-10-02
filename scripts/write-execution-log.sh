@@ -6,7 +6,7 @@
 #        [--filing-template-version <hash>] [--producer-role <legacy-role>]
 #        Entry body is read from stdin.
 # Creates execution-log.md if missing (with header).
-# Sources: implement-lead | spec-lead | remember | manual | audit | impl-verb | spec-verb | ceremony
+# Sources: implement-lead | spec-lead | remember | manual | audit | impl-verb | spec-verb
 #
 # Optional flags:
 #   --template-version   Template-version hash of the producing agent template (see scripts/template-version.sh).
@@ -98,9 +98,9 @@ if [[ -z "$SOURCE" ]]; then
 fi
 
 case "$SOURCE" in
-  implement-lead|spec-lead|remember|manual|audit|impl-verb|spec-verb|ceremony) ;;
+  implement-lead|spec-lead|remember|manual|audit|impl-verb|spec-verb) ;;
   *)
-    echo "[execution-log] Error: --source must be one of: implement-lead, spec-lead, remember, manual, audit, impl-verb, spec-verb, ceremony" >&2
+    echo "[execution-log] Error: --source must be one of: implement-lead, spec-lead, remember, manual, audit, impl-verb, spec-verb" >&2
     exit 1
     ;;
 esac

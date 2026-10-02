@@ -14,30 +14,15 @@
   "harnesses": {
     "claude-code": {
       "args": ["--dangerously-skip-permissions"],
-      "native_models": {"default": "opus"},
-      "ceremonies": {
-        "spec-design": ["codex-design-review"],
-        "spec-post-plan": ["codex-plan-review"],
-        "pr-review": ["codex-pr-review"]
-      }
+      "native_models": {"default": "opus"}
     },
     "opencode": {
       "args": [],
-      "native_models": {"default": "anthropic/opus"},
-      "ceremonies": {
-        "spec-design": ["codex-design-review"],
-        "spec-post-plan": ["codex-plan-review"],
-        "pr-review": ["codex-pr-review"]
-      }
+      "native_models": {"default": "anthropic/opus"}
     },
     "codex": {
       "args": [],
-      "native_models": {"default": "gpt-5.5-high"},
-      "ceremonies": {
-        "spec-design": ["codex-design-review"],
-        "spec-post-plan": ["codex-plan-review"],
-        "pr-review": ["codex-pr-review"]
-      }
+      "native_models": {"default": "gpt-5.5-high"}
     }
   },
   "capability_overrides": {},

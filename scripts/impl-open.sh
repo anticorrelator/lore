@@ -24,8 +24,7 @@
 #     returned as status=needs-prefetch with the suggested query — scale is
 #     the caller's declaration, never a default)
 #   - per-task Tier 2 extracts from task-claims.jsonl (task_id or file overlap)
-#   - skill-invocation map from plan.md `**Related skills:**` merged with
-#     `lore ceremony get implement` entries (source: ceremony)
+#   - skill-invocation map from plan.md `**Related skills:**`
 #   - persistent-advisor declarations (mode: persistent only)
 #   - same-file collision intersection: concurrent selected tasks sharing a
 #     file target with no dependency path between them get a serialization
@@ -282,16 +281,6 @@ if [[ -z "$TEAM_MESSAGING" ]]; then
   TEAM_MESSAGING="unknown"
 fi
 
-# --- Ceremony config (lead-invocation entries; [] when unconfigured) --------
-if ! CEREMONY_JSON=$(bash "$SCRIPT_DIR/ceremony-config.sh" get implement --work-item "$SLUG"); then
-  echo "[impl] Warning: ceremony config lookup for 'implement' failed; treating as empty" >&2
-  CEREMONY_JSON="[]"
-fi
-if ! printf '%s' "$CEREMONY_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, list)' 2>/dev/null; then
-  echo "[impl] Warning: ceremony config for 'implement' is not a JSON array; treating as empty" >&2
-  CEREMONY_JSON="[]"
-fi
-
 # --- Provenance: stamp the producing template's version at emission ---------
 if [[ -z "$TEMPLATE_VERSION" ]]; then
   SKILL_TEMPLATE="$LORE_REPO_DIR/skills/implement/SKILL.md"
@@ -303,7 +292,7 @@ fi
 # --- Assemble the dispatch payload -------------------------------------------
 SELECT_TASKS_CSV=$(IFS=','; echo "${SELECT_TASKS[*]-}")
 
-PAYLOAD=$(_LORE_CEREMONY_JSON="$CEREMONY_JSON" python3 - "$ITEM_DIR" "$SLUG" \
+PAYLOAD=$(python3 - "$ITEM_DIR" "$SLUG" \
   "$SELECT_ALL" "$SELECT_TASKS_CSV" \
   "$FALLBACK_SCALE_SET" "$FRAMEWORK" "$ENFORCEMENT" "$TEAM_MESSAGING" \
   "$SCRIPT_DIR" "$LORE_REPO_DIR" "$CHECKSUM_LINE" "$TEMPLATE_VERSION" "$COMPILED_POSITIONS" <<'PYEOF'
@@ -317,8 +306,6 @@ import uuid
 (item_dir, slug, select_all, tasks_csv, fallback_scale_set,
  framework, enforcement, team_messaging, script_dir, repo_dir,
  checksum_line, template_version, compiled_positions) = sys.argv[1:14]
-
-ceremony_skills = json.loads(os.environ.get("_LORE_CEREMONY_JSON", "[]"))
 
 with open(os.path.join(item_dir, "_meta.json"), encoding="utf-8") as f:
     meta = json.load(f)
@@ -809,7 +796,7 @@ for key, content in sorted(plan_blocks.items()):
     m = re.search(r"\*\*Task format:\*\*\s*(.*)", content)
     task_format_by_unit[key] = (m.group(1).strip().lower() if m else None)
 
-# --- Skill-invocation map: plan Related skills + ceremony injection ------------
+# --- Skill-invocation map: plan Related skills -------------------------------
 related_skills = []
 m = re.search(r"^\*\*Related skills:\*\*\s*\n((?:- .*\n?)*)", plan, re.MULTILINE)
 if m:
@@ -851,18 +838,6 @@ for entry in related_skills:
         "annotation": entry["annotation"],
     }
 
-ceremony_injected = []
-for name in ceremony_skills:
-    if not isinstance(name, str) or name in skill_invocation_map or name in persistent_names:
-        continue
-    tv = skill_template_version(name)
-    skill_invocation_map[name] = {
-        "skill": name,
-        "skill_template_version": tv,
-        "source": "ceremony",
-    }
-    ceremony_injected.append({"skill": name, "skill_template_version": tv})
-
 # --- Lead-inline gate conditions: four separate fields, never an aggregate -----
 task_count = len(all_tasks)
 single_task = task_count == 1
@@ -874,9 +849,7 @@ else:
 prescriptive = bool(
     single_task and task_format_by_unit.get(single_unit) == "prescriptive")
 no_persistent_advisor = not persistent_advisors
-no_required_consultation = (not consultations_by_unit
-                            and not ceremony_skills
-                            and not related_skills)
+no_required_consultation = not consultations_by_unit and not related_skills
 
 lead_inline_conditions = {
     "single_task": single_task,
@@ -888,7 +861,6 @@ lead_inline_conditions = {
         "task_format_by_unit": task_format_by_unit,
         "persistent_advisors": persistent_advisors,
         "consultations_required_by_unit": consultations_by_unit,
-        "ceremony_skills": ceremony_skills,
         "related_skills": [e["skill"] for e in related_skills],
         "file_count_diagnostic": (
             len(all_tasks[0].get("file_targets", [])) if single_task else None),
@@ -946,7 +918,6 @@ print(json.dumps({
     "packets": packets,
     "tier2_extracts": tier2_extracts,
     "skill_invocation_map": skill_invocation_map,
-    "ceremony_injected": ceremony_injected,
     "advisors": persistent_advisors,
     "position_descriptors": position_descriptors,
     "lead_inline_conditions": lead_inline_conditions,
@@ -976,9 +947,6 @@ lines = [
     f"Collisions serialized: {len(d['collisions'])}",
     f"Task-scope packets appended: {len(d.get('packets', []))}",
 ]
-for c in d["ceremony_injected"]:
-    tv = c["skill_template_version"] or "unknown"
-    lines.append(f"Ceremony-injected skill: {c['skill']} (template-version {tv})")
 print("\n".join(lines))
 PYEOF
 )

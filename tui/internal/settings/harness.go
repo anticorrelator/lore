@@ -10,12 +10,11 @@
 //     `len(options)`; an unlisted candidate cannot be emitted (D6 closed-set
 //     enforcement is also re-asserted at the SettingsModel layer per task 4).
 //
-//   - HarnessBlockPanel (D9): renders one `harnesses.<name>` block (args,
-//     harness-local roles, harness-local ceremonies). Nil role/ceremony
-//     children are still supported for legacy tests and migration views, but
-//     production materializes both editors so harness defaults are editable
-//     directly. Tab/Shift-Tab cycles between sub-fields and routes the
-//     child's Blur() leave intent.
+//   - HarnessBlockPanel (D9): renders one `harnesses.<name>` block: the
+//     enabled toggle, args, and one harness-local map editor (`native_models`
+//     in production). A nil map editor renders a legacy fallback view.
+//     Tab/Shift-Tab cycles between sub-fields and routes the child's Blur()
+//     leave intent.
 //
 // Both widgets implement FieldWidget so the host SettingsModel can dispatch
 // uniformly. Per D3 and the lipgloss O(n)-per-frame gotcha, every
@@ -228,10 +227,10 @@ func (r *PrimaryRadio) View() string {
 // ----------------------------------------------------------------------------
 
 // HarnessEffective carries the *resolved* values for a harness overlay — i.e.
-// the effective roles map and ceremonies map after the parent overlay has
-// been overlaid with the local override (or with nothing, when absent). The
-// host SettingsModel computes this once per harness at modal open and passes
-// it in; the widget renders it side-by-side with the override per D9.
+// the effective roles map after the parent overlay has been overlaid with the
+// local override (or with nothing, when absent). The host SettingsModel
+// computes this once per harness at modal open and passes it in; the widget
+// renders it side-by-side with the override per D9.
 //
 // Computing effective state inside the widget would require it to know about
 // parent overlay precedence rules and schema defaults — couplings that
@@ -240,32 +239,26 @@ type HarnessEffective struct {
 	// Roles is the resolved role-id -> capability-id mapping for this
 	// harness. Empty when no roles are defined at any layer.
 	Roles map[string]string
-	// Ceremonies is the resolved ceremony-id -> []advisor-id mapping for
-	// this harness. Empty when no ceremonies are defined at any layer.
-	Ceremonies map[string][]string
 	// NativeModels carries the effective native fallback route for each role.
 	NativeModels map[string]string
 }
 
 // HarnessBlockPanel groups the sub-widgets for a single harnesses.<name>
 // block: per-harness enabled toggle (always present, first in tab order),
-// required `args` (always present), and two harness-local map editors. The v2
-// constructor uses these slots for `native_models` and `ceremonies`; the
-// legacy constructor remains useful to isolated generic widget tests. Passing nil still renders a
-// compact legacy fallback view, but the production settings panel passes real
-// widgets for both so users can edit harness-specific defaults without hand
-// editing settings.json.
+// required `args` (always present), and one harness-local map editor. The v2
+// constructor uses that slot for `native_models`; the legacy constructor
+// labels it `roles` and remains useful to isolated generic widget tests.
+// Passing nil renders a compact legacy fallback view.
 type HarnessBlockPanel struct {
-	containerBase // cursor: 0=enabled, 1=args, 2=roles (skipped if nil), 3=ceremonies (if non-nil)
+	containerBase // cursor: 0=enabled, 1=args, 2=roles (skipped if nil)
 
-	name       string // harness id, e.g. "claude-code"
-	dotPath    string // "harnesses.<name>"
-	enabled    *harnessEnabledToggle
-	args       FieldWidget
-	roles      FieldWidget // production: non-nil harness-local defaults editor
-	ceremonies FieldWidget // production: non-nil harness-local defaults editor
-	effective  HarnessEffective
-	routeView  bool
+	name      string // harness id, e.g. "claude-code"
+	dotPath   string // "harnesses.<name>"
+	enabled   *harnessEnabledToggle
+	args      FieldWidget
+	roles     FieldWidget // production: non-nil harness-local defaults editor
+	effective HarnessEffective
+	routeView bool
 
 	headerStyle    lipgloss.Style
 	overrideStyle  lipgloss.Style
@@ -282,23 +275,22 @@ type HarnessBlockPanel struct {
 type HarnessToggler func(framework string, enabled bool) tea.Cmd
 
 // NewHarnessBlockPanel constructs a panel for the named harness. args MUST be
-// non-nil (the schema requires it). roles and ceremonies SHOULD be non-nil in
-// production because those values are harness-local defaults. Nil remains a
-// legacy fallback display for older tests/fixtures.
+// non-nil (the schema requires it). roles SHOULD be non-nil in production
+// because it holds harness-local defaults. Nil remains a legacy fallback
+// display for older tests/fixtures.
 //
 // `enabled` is the current per-harness enabled state (read by the host from
 // `harnesses.<name>.enabled`; absence ≡ true per the schema's default-on
 // semantic). `toggle` is the host-supplied callback that fires the
 // harness-toggle shell-out; pass nil only in tests that don't exercise the
 // toggle path.
-func NewHarnessBlockPanel(name string, enabled bool, toggle HarnessToggler, args, roles, ceremonies FieldWidget, effective HarnessEffective) *HarnessBlockPanel {
+func NewHarnessBlockPanel(name string, enabled bool, toggle HarnessToggler, args, roles FieldWidget, effective HarnessEffective) *HarnessBlockPanel {
 	return &HarnessBlockPanel{
 		name:           name,
 		dotPath:        "harnesses." + name,
 		enabled:        newHarnessEnabledToggle(name, enabled, toggle),
 		args:           args,
 		roles:          roles,
-		ceremonies:     ceremonies,
 		effective:      effective,
 		headerStyle:    lipgloss.NewStyle().Foreground(style.ColorAccent).Bold(true),
 		overrideStyle:  lipgloss.NewStyle().Foreground(style.ColorAccent),
@@ -310,8 +302,8 @@ func NewHarnessBlockPanel(name string, enabled bool, toggle HarnessToggler, args
 
 // NewHarnessRoutesPanel constructs the v2 routing view: native models remain
 // editable while global routes are rendered read-only.
-func NewHarnessRoutesPanel(name string, enabled bool, toggle HarnessToggler, args, nativeModels, ceremonies FieldWidget, effective HarnessEffective) *HarnessBlockPanel {
-	h := NewHarnessBlockPanel(name, enabled, toggle, args, nativeModels, ceremonies, effective)
+func NewHarnessRoutesPanel(name string, enabled bool, toggle HarnessToggler, args, nativeModels FieldWidget, effective HarnessEffective) *HarnessBlockPanel {
+	h := NewHarnessBlockPanel(name, enabled, toggle, args, nativeModels, effective)
 	h.routeView = true
 	return h
 }
@@ -390,8 +382,7 @@ func (h *HarnessBlockPanel) NavStep(delta int) (bool, *FieldIntent) {
 // childAt returns the FieldWidget at logical cursor index, skipping nil
 // (absent) overlays. Returns (nil, -1) when the cursor is out of range.
 //
-// The mapping is: 0 → enabled toggle, 1 → args, 2 → roles (if non-nil),
-// 3 → ceremonies (if non-nil). Absent overlays are skipped.
+// The mapping is: 0 → enabled toggle, 1 → args, 2 → roles (if non-nil).
 func (h *HarnessBlockPanel) childAt(idx int) (FieldWidget, int) {
 	children := h.children()
 	if idx < 0 || idx >= len(children) {
@@ -402,10 +393,10 @@ func (h *HarnessBlockPanel) childAt(idx int) (FieldWidget, int) {
 
 // children returns the navigable child widgets in display order, skipping
 // absent overlays. The slice is rebuilt each call rather than cached — the
-// underlying child set is small (≤4) and rebuilds avoid invalidation
+// underlying child set is small (≤3) and rebuilds avoid invalidation
 // concerns when the host swaps a nil overlay for a real widget.
 func (h *HarnessBlockPanel) children() []FieldWidget {
-	out := make([]FieldWidget, 0, 4)
+	out := make([]FieldWidget, 0, 3)
 	if h.enabled != nil {
 		out = append(out, h.enabled)
 	}
@@ -414,9 +405,6 @@ func (h *HarnessBlockPanel) children() []FieldWidget {
 	}
 	if h.roles != nil {
 		out = append(out, h.roles)
-	}
-	if h.ceremonies != nil {
-		out = append(out, h.ceremonies)
 	}
 	return out
 }
@@ -476,15 +464,15 @@ func (h *HarnessBlockPanel) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldInt
 	}
 	child, cmd, intent := children[h.cursor].Update(msg)
 	// Re-anchor the child slot the children() list was built from. This is
-	// safe because children() preserves the order args → roles → ceremonies
+	// safe because children() preserves the order enabled → args → roles
 	// and we know which slot was at h.cursor.
 	h.replaceChildAt(h.cursor, child)
 	return h, cmd, intent
 }
 
 // replaceChildAt updates the underlying field corresponding to the logical
-// cursor position. Mirrors children() ordering (enabled → args → roles →
-// ceremonies, skipping nil).
+// cursor position. Mirrors children() ordering (enabled → args → roles,
+// skipping nil).
 func (h *HarnessBlockPanel) replaceChildAt(idx int, w FieldWidget) {
 	pos := 0
 	if h.enabled != nil {
@@ -503,18 +491,8 @@ func (h *HarnessBlockPanel) replaceChildAt(idx int, w FieldWidget) {
 		}
 		pos++
 	}
-	if h.roles != nil {
-		if pos == idx {
-			h.roles = w
-			return
-		}
-		pos++
-	}
-	if h.ceremonies != nil {
-		if pos == idx {
-			h.ceremonies = w
-			return
-		}
+	if h.roles != nil && pos == idx {
+		h.roles = w
 	}
 }
 
@@ -549,8 +527,6 @@ func (h *HarnessBlockPanel) viewBuilder() *strings.Builder {
 	if h.routeView {
 		b.WriteString(h.renderHarnessSetting("native_models", h.roles, ""))
 		b.WriteByte('\n')
-		b.WriteString(h.renderHarnessSetting("ceremonies", h.ceremonies, h.formatEffectiveCeremonies()))
-		b.WriteByte('\n')
 		b.WriteString("  " + h.headerStyle.Render("effective routes (read-only):") + "\n")
 		b.WriteString("    " + h.effectiveStyle.Render(h.formatEffectiveRoutes()))
 		b.WriteByte('\n')
@@ -558,8 +534,6 @@ func (h *HarnessBlockPanel) viewBuilder() *strings.Builder {
 		return &b
 	}
 	b.WriteString(h.renderHarnessSetting("roles", h.roles, h.formatEffectiveRoles()))
-	b.WriteByte('\n')
-	b.WriteString(h.renderHarnessSetting("ceremonies", h.ceremonies, h.formatEffectiveCeremonies()))
 	return &b
 }
 
@@ -607,7 +581,7 @@ func (h *HarnessBlockPanel) InnerFocusYRange() (int, int) {
 
 	var b strings.Builder
 	// Slot order MUST mirror viewBuilder's emit order: header, enabled,
-	// args, roles overlay (rendered even when absent), ceremonies overlay.
+	// args, roles overlay.
 	b.WriteString(h.headerStyle.Render("▼ harnesses." + h.name))
 	b.WriteByte('\n')
 
@@ -660,18 +634,6 @@ func (h *HarnessBlockPanel) InnerFocusYRange() (int, int) {
 		if logical == h.cursor {
 			return top, bottom
 		}
-		logical++
-	} else {
-		// Absent overlays still occupy vertical space (the "(inherited)"
-		// row is always rendered). Walk the layout but don't claim a logical
-		// slot — absent overlays aren't navigable.
-		emit(h.renderHarnessSetting("roles", nil, h.formatEffectiveRoles()))
-	}
-	if h.ceremonies != nil {
-		top, bottom := emit(h.renderHarnessSetting("ceremonies", h.ceremonies, h.formatEffectiveCeremonies()))
-		if logical == h.cursor {
-			return top, bottom
-		}
 	}
 	return -1, -1
 }
@@ -718,26 +680,6 @@ func (h *HarnessBlockPanel) formatEffectiveRoles() string {
 	parts := make([]string, 0, len(keys))
 	for _, k := range keys {
 		parts = append(parts, fmt.Sprintf("%s=%s", k, h.effective.Roles[k]))
-	}
-	return strings.Join(parts, ", ")
-}
-
-// formatEffectiveCeremonies renders the resolved ceremonies map as a compact
-// one-liner. Per-ceremony advisor lists join with `+`, ceremony entries
-// join with `, `.
-func (h *HarnessBlockPanel) formatEffectiveCeremonies() string {
-	if len(h.effective.Ceremonies) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(h.effective.Ceremonies))
-	for k := range h.effective.Ceremonies {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, k := range keys {
-		advisors := h.effective.Ceremonies[k]
-		parts = append(parts, fmt.Sprintf("%s=[%s]", k, strings.Join(advisors, "+")))
 	}
 	return strings.Join(parts, ", ")
 }

@@ -1,4 +1,4 @@
-# Step 5b presentation templates (severity groups + supplementary)
+# Step 5b presentation template (severity groups)
 
 Load when presenting the review at Step 5b.
 
@@ -37,24 +37,4 @@ Present findings grouped by severity. Compound findings appear first within each
 
 ### Minor (filtered): <count>
 Dropped by the materiality gate — not posted. Titles available on request (don't list by default).
-```
-
-## 5b-supplementary. Supplementary Reports
-
-Include this block **only** when one or more ceremony lenses produced non-conforming output (classified in Step 3d). Present each non-conforming ceremony lens result verbatim under its own header:
-
-```
-### Supplementary Reports
-
-These reports are from ceremony-configured lenses that did not produce findings in the standard format. They are presented as-is and are not included in the synthesis verdict.
-
-#### <skill-name> [ceremony]
-
-<raw output from the ceremony lens>
-
----
-
-#### <skill-name> [ceremony] [malformed]
-
-<raw text from the ceremony lens that produced malformed JSON>
 ```

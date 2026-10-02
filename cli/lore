@@ -125,7 +125,6 @@ Commands:
   manifest     Manifest management (see: lore manifest --help)
   analyze      Knowledge store analysis (see: lore analyze --help)
   bootstrap    Bootstrap knowledge store (see: lore bootstrap --help)
-  ceremony     Ceremony bindings and outcome handling (see: lore ceremony --help)
   config       Read framework/role/capability config (see: lore config --help)
   framework    Diagnose the active harness profile (see: lore framework --help)
   harness      Per-harness integration toggle (see: lore harness --help)
@@ -334,36 +333,6 @@ Options:
 EOF
 }
 
-ceremony_usage() {
-  cat >&2 <<EOF
-lore ceremony — ceremony bindings and outcome handling
-
-Usage: lore ceremony [--harness <name>] <subcommand> [args...]
-
-Subcommands:
-  get <ceremony>              Get advisor list for a ceremony on the target harness
-  add <ceremony> <advisor>    Add an advisor to a ceremony on the target harness
-  remove <ceremony> <advisor> Remove an advisor from a ceremony on the target harness
-  list                        List ceremony bindings for the target harness
-  handle                      Record how a needs-decision outcome was handled
-
-Handle options:
-  --outcome-id <id>   The outcome_id of the ceremony-resolution row being handled
-  --action <action>   adjudicated | deferred | skipped
-  --handled-by <who>  The seat or actor that handled it
-  --json              Emit the append result as JSON
-
-Options:
-  --harness <name>  Target a harness explicitly. Defaults to active harness.
-  --help, -h    Show this help
-
-Notes:
-  'handle' clears the outcome from the coordination board's needs-judgment
-  bucket. Repeating the same call is a no-op; a different action or actor for
-  the same outcome is refused.
-EOF
-}
-
 config_usage() {
   cat >&2 <<EOF
 lore config — read persisted framework/role/capability configuration
@@ -560,7 +529,6 @@ Verbs:
   start       Assemble read-only branch-selection state and provenance
   discover    Enumerate source-manifested discovery candidates without matching
   open        Publish a reusable investigation-dispatch manifest and directives
-  outcome     File a lead-normalized ceremony outcome through existing writers
   finalize    Run the terminal gate sequence (backlink verify, intent-anchor
               gate, regen-tasks, heal, emission-contract asserts) and emit
               one adoption-telemetry scorecard row
@@ -691,7 +659,7 @@ Usage: lore coordinate <verb> [args...]
 Verbs:
   read      Read the committed operational display; --refresh maintains it,
             --reconcile observes metadata, --rebuild repairs derived state
-  status    Project work, session, ceremony, retro, and evolve evidence into
+  status    Project work, session, retro, and evolve evidence into
             Act now, Needs judgment, Waiting, and Reconcile
   reconcile Freeze and validate immutable per-stream reconciliation evidence
   watch     Sleep until anything on the board needs you: follows the whole
@@ -1006,9 +974,6 @@ cmd_spec() {
       ;;
     open)
       exec "$SCRIPTS_DIR/spec-open.sh" "$@"
-      ;;
-    outcome)
-      exec "$SCRIPTS_DIR/spec-outcome.sh" "$@"
       ;;
     finalize)
       exec "$SCRIPTS_DIR/spec-finalize.sh" "$@"
@@ -1426,61 +1391,6 @@ cmd_backlinks() {
       echo "Error: unknown backlinks subcommand '$subcmd'" >&2
       echo "" >&2
       backlinks_usage
-      return 1
-      ;;
-  esac
-}
-
-# --- Ceremony subgroup ---
-cmd_ceremony() {
-  if [[ $# -eq 0 ]]; then
-    ceremony_usage
-    return 1
-  fi
-
-  local harness_args=()
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --harness)
-        [[ -n "${2:-}" ]] || { echo "Error: --harness requires a name" >&2; return 1; }
-        harness_args+=(--harness "$2")
-        shift 2
-        ;;
-      --help|-h)
-        ceremony_usage
-        return 0
-        ;;
-      *)
-        break
-        ;;
-    esac
-  done
-
-  if [[ $# -eq 0 ]]; then
-    ceremony_usage
-    return 1
-  fi
-
-  local subcmd="$1"
-  shift
-
-  case "$subcmd" in
-    get|add|remove|list)
-      exec "$SCRIPTS_DIR/ceremony-config.sh" ${harness_args[@]+"${harness_args[@]}"} "$subcmd" "$@"
-      ;;
-    handle)
-      # Handling names an outcome that already records the harness it came
-      # from, so a --harness selector here would only be able to disagree.
-      if [[ ${#harness_args[@]} -gt 0 ]]; then
-        echo "Error: 'lore ceremony handle' takes no --harness; the outcome row already carries it" >&2
-        return 1
-      fi
-      exec "$SCRIPTS_DIR/ceremony-handle.sh" "$@"
-      ;;
-    *)
-      echo "Error: unknown ceremony subcommand '$subcmd'" >&2
-      echo "" >&2
-      ceremony_usage
       return 1
       ;;
   esac
@@ -2460,10 +2370,6 @@ case "$1" in
   backlinks)
     shift
     cmd_backlinks "$@"
-    ;;
-  ceremony)
-    shift
-    cmd_ceremony "$@"
     ;;
   config)
     shift

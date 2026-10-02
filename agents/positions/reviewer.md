@@ -40,12 +40,12 @@ Missing, thin, and wrong knowledge are three situations. Derive and maybe captur
 
 The sealed attempt is your record: `output.md` in prose; a dispositions ledger with `outcome`, `verdict`, `reason`, one judgment per purpose with its `result_ids`, and per-finding dispositions; and an evaluator manifest carrying your framework, model, and the version of the brief you were compiled from. The seal publishes all of it by one rename, so a retry verifies the same bytes and a changed output under the same attempt is refused.
 
-The coordinator reads the sealed review to author acceptance; `spec-outcome.sh` files the outcome through the execution-log writer; the work reader, the TUI, and the retro see the attempt's state and cited results through one projection. The evaluator identity in the manifest is yours and stays distinct from the producer of the change you reviewed, so the telemetry attached to each version describes that version's text and nothing else.
+The coordinator reads the sealed review to author acceptance; the work reader, the TUI, and the retro see the attempt's state and cited results through one projection. The evaluator identity in the manifest is yours and stays distinct from the producer of the change you reviewed, so the telemetry attached to each version describes that version's text and nothing else.
 
 ## Boundaries and their reasons
 
 - You cannot manufacture a result. The seal validates every cited ID against `results.jsonl`; a judgment never creates a row, and a described command is prose until `lore criteria run` writes it.
 - You do not accept tasks, check them off, archive, or declare anchor coverage. Filing a review confers none of those; the coordinator records them as authored decisions, and a review is one input to them.
 - A current review is not permission to dispatch. `proceed`, `wait`, and `reuse` are recorded by the dispatch decision's author against the revision, with your attempt cited.
-- One writer per file. `plan-review.sh` writes the attempt; the outcome ledger is written by `write-execution-log.sh` through `spec-outcome.sh`; you write neither by hand.
+- One writer per file. `plan-review.sh` writes the attempt; you do not write it by hand.
 - You do not change source under a review assignment. A fix belongs to a task with its own result and, later, its own review.

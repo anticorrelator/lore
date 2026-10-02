@@ -286,7 +286,7 @@ assert "autonomous_args" not in hb["required"], "autonomous_args must be optiona
 props = set(hb["properties"].keys())
 # `enabled` is the per-harness toggle (default-on; absence ≡ enabled).
 # `autonomous_args` is the optional agent-initiated arg profile (absent ≡ use args).
-assert props == {"args", "autonomous_args", "enabled", "native_models", "ceremonies"}, f"unexpected harness_block props: {props}"
+assert props == {"args", "autonomous_args", "enabled", "native_models"}, f"unexpected harness_block props: {props}"
 aa = hb["properties"]["autonomous_args"]
 assert aa.get("type") == "array" and aa.get("items") == {"type": "string"}, f"autonomous_args shape: {aa}"
 # enabled must be a plain boolean (no enum, no minLength) so absence ≡ enabled
@@ -304,19 +304,6 @@ with open(os.environ["SCHEMA"]) as f:
 rv = s["$defs"]["route_value"]["oneOf"][0]
 assert rv.get("minLength") >= 1, f"route shorthand must be non-empty, got {rv}"
 assert rv.get("type") == "string"
-PY
-}
-
-@test "ceremonies_map permits empty arrays (minItems 0) and uniqueItems" {
-  SCHEMA="$SCHEMA" python3 - <<'PY'
-import json, os
-with open(os.environ["SCHEMA"]) as f:
-    s = json.load(f)
-cm = s["$defs"]["ceremonies_map"]
-ap = cm["additionalProperties"]
-assert ap["type"] == "array"
-assert ap.get("minItems") == 0, "empty-array suppression override must be allowed"
-assert ap.get("uniqueItems") is True
 PY
 }
 
@@ -503,7 +490,7 @@ sys.exit("schema FAILED to reject empty-string role value")
 PY
 }
 
-@test "schema accepts harness ceremonies overlay with empty array (suppression override)" {
+@test "schema rejects retired harness ceremonies" {
   python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os, sys
@@ -528,7 +515,11 @@ instance = {
         }
     }
 }
-jsonschema.validate(instance, schema)
+try:
+    jsonschema.validate(instance, schema)
+except jsonschema.ValidationError:
+    sys.exit(0)
+sys.exit("schema FAILED to reject retired harness ceremonies")
 PY
 }
 

@@ -74,9 +74,6 @@ The matrix below classifies skills by their hardest required capability. Skills 
 | `/pr-review` (incl. `--self`) | yes (lens fanout) | no (lead-only aggregation) | no                          | no                                       |
 | `/pr-create`         | no                 | no                      | no                                 | no                                       |
 | Single-lens reviews (`/pr-{correctness,security,blast-radius,test-quality,interface-clarity,regressions,thematic,user-impact}`) | no | no | no | no |
-| `/codex-plan-review` | no (delegates to codex CLI) | no                | no                                 | no                                       |
-| `/codex-pr-review`   | no (delegates to codex CLI) | no                | no                                 | no                                       |
-| `/codex-design-review` | no (delegates)            | no                | no                                 | no                                       |
 
 The full per-skill `requires` schema (with `min_level` and `partial_below` thresholds) lives in [`adapters/capabilities.json::skills`](../adapters/capabilities.json). T41 / T9 wired the team-heavy skills (`bootstrap`, `implement`, `spec`) to the partial-mode contract: a `partial_below` floor splits "downgrade to partial-mode" from "refuse outright".
 
@@ -93,8 +90,6 @@ The classification below applies the dependency table above against each harness
 | `/retro`             | full        | partial   | partial   |
 | `/work`              | full        | full      | full      |
 | `/pr-review`         | full        | full      | full      |
-| `/codex-plan-review` | full        | full      | full      |
-| `/codex-pr-review`   | full        | full      | full      |
 | Single-agent skills  | full        | full      | full      |
 
 The `/pr-review` family is `full` on every harness because its lens fanout uses lead-only aggregation today — no skill in that family relies on `team_messaging` or `task_completed_hook`. If a future revision adds inter-lens messaging, this matrix re-classifies them.

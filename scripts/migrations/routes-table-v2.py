@@ -211,6 +211,7 @@ def migrate(document: dict[str, Any], repo_root: Path) -> dict[str, Any]:
         block = copy.deepcopy(original_block)
         legacy_roles = block.pop("roles", None)
         block.pop("ceremony_roles", None)
+        block.pop("ceremonies", None)
         if not isinstance(legacy_roles, dict) or "default" not in legacy_roles:
             raise MigrationError(f"harnesses.{framework}.roles.default: required for native_models.default")
         unknown_roles = sorted(set(legacy_roles) - set(roles))
