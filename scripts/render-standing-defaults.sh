@@ -4,7 +4,7 @@
 #
 # Purpose: settings.json values are consumed by scripts but were never rendered
 # into any agent-visible surface, so agents could not learn the project's agent
-# defaults (role→model maps, ceremony registrations, sampling rates) without
+# defaults (role→model maps, sampling rates) without
 # happening to run a script that used them. This verb is the universal delivery
 # mechanism — invocation-fresh on every harness because it needs only bash.
 # Skills call it at step 0 of their orient sections; coordinator briefs open
@@ -96,14 +96,40 @@ echo "-- Preference directives in force (titles; retrieve full text via lore sea
 KNOWLEDGE_DIR="$(resolve_knowledge_dir 2>/dev/null || true)"
 PREF_DIR="$KNOWLEDGE_DIR/preferences"
 if [[ -n "$KNOWLEDGE_DIR" && -d "$PREF_DIR" ]]; then
-  found=0
-  while IFS= read -r f; do
-    found=1
-    title="$(grep -m1 '^# ' "$f" 2>/dev/null | sed 's/^# //')"
-    [[ -n "$title" ]] || title="$(basename "$f" .md)"
-    echo "- $title"
-  done < <(find "$PREF_DIR" -name '*.md' ! -name 'README.md' -type f | LC_ALL=C sort)
-  [[ $found -eq 1 ]] || echo "(none)"
+  # Only entries default search would return are in force. A retired or
+  # superseded directive stays on disk for its history, but listing it here
+  # presents it as binding: on 2026-09-24 a retired split-provider routing
+  # posture was still rendered in this section. The rule is the store's own
+  # (pk_search.DEFAULT_STATUS_FILTER read through pk_markdown's footer reader),
+  # imported rather than restated.
+  if ! directives="$(python3 - "$SCRIPT_DIR" "$PREF_DIR" <<'PY'
+import os
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from pk_markdown import MarkdownParser  # noqa: E402
+from pk_search import DEFAULT_STATUS_FILTER  # noqa: E402
+
+pref_dir = sys.argv[2]
+paths = []
+for root, _dirs, files in os.walk(pref_dir):
+    paths.extend(os.path.join(root, f) for f in files if f.endswith(".md") and f != "README.md")
+for path in sorted(paths):
+    with open(path, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    status = MarkdownParser._extract_metadata(text)["entry_status"]
+    if status and status not in DEFAULT_STATUS_FILTER:
+        continue
+    title = next((line[2:].strip() for line in text.splitlines() if line.startswith("# ")), "")
+    print("- " + (title or os.path.splitext(os.path.basename(path))[0]))
+PY
+)"; then
+    echo "(preference directives not renderable: could not read $PREF_DIR)"
+  elif [[ -n "$directives" ]]; then
+    printf '%s\n' "$directives"
+  else
+    echo "(none)"
+  fi
 else
   echo "(no preferences directory in the knowledge store)"
 fi

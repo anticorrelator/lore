@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/anticorrelator/lore/tui/internal/worktree"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
@@ -299,5 +301,82 @@ func TestHostCloseKeepsTranscriptSpend(t *testing.T) {
 	}
 	if spend["basis"] != "transcript" || spend["total_tokens"] != float64(150) {
 		t.Fatalf("cost attribution lost: %s", d.Event.Spend)
+	}
+}
+
+// The 2026-09-24 crash-loop: one stale checkout holding content no ref
+// describes made the startup sweep fail, the host exit, and the supervisor
+// restart it into the same refusal until its restart budget ran out, so no
+// session could start for that source. The checkout is now logged as retained
+// and the host comes up, with the checkout's bytes untouched.
+func TestHostStartupSweepRetainsUnprovenCheckoutAndComesUp(t *testing.T) {
+	root, _, identity := closedSessionWorktree(t, "20260721T205159Z-46d1320f")
+	lateWork := filepath.Join(identity.CanonicalPath, "late-work.txt")
+	if err := os.WriteFile(lateWork, []byte("not in any ref\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := model{config: config.Config{KnowledgeDir: root, ProjectDir: root}, sessionsDir: filepath.Join(root, "_sessions"), hostKey: "key"}
+	h := &sessionHostModel{runtime: m, options: hostOptions{Key: "key"}}
+
+	for pass := 1; pass <= 2; pass++ {
+		result := h.runtime.sweepSessionWorktreesCmd()().(sessionWorktreeSweptMsg)
+		if len(result.failures) != 0 || len(result.retained) != 1 {
+			t.Fatalf("pass %d: failures %v, retained %v; want the stale checkout retained", pass, result.failures, result.retained)
+		}
+		h.Update(hostSweepDoneMsg{result})
+		if h.err != nil {
+			t.Fatalf("pass %d: host failed on a retained checkout: %v", pass, h.err)
+		}
+		if !h.swept {
+			t.Fatalf("pass %d: startup sweep never completed", pass)
+		}
+	}
+	if len(h.retainedReported) != 1 {
+		t.Fatalf("retained reports = %v, want the checkout logged once", h.retainedReported)
+	}
+	if b, err := os.ReadFile(lateWork); err != nil || string(b) != "not in any ref\n" {
+		t.Fatalf("retained checkout content changed: %q %v", b, err)
+	}
+
+	// A removal that started and failed still stops the host.
+	h = &sessionHostModel{runtime: m, options: hostOptions{Key: "key"}}
+	h.Update(hostSweepDoneMsg{sessionWorktreeSweptMsg{failures: []error{errors.New("remove session worktree: permission denied")}}})
+	if h.err == nil {
+		t.Fatal("a failed removal no longer stops the host")
+	}
+}
+
+// The host's own close path meets the same refusal when a session's checkout
+// drifted after its result was preserved. It records a settled receipt naming
+// why the checkout stayed, instead of failing and retrying the refusal on every
+// restart.
+func TestHostCloseRetainsUnprovenCheckoutWithSettledReceipt(t *testing.T) {
+	m, sessionsDir := baseSessionModel(t)
+	m.hostKey = "key"
+	h := &sessionHostModel{runtime: m, options: hostOptions{Key: "key"}}
+	refusal := fmt.Errorf("%w: content at /tmp/demo is not reachable from any preserved ref", worktree.ErrContentUnproven)
+	h.Update(sessionWorktreeCleanedMsg{slug: "demo--w1", epoch: "e1", err: refusal})
+	if h.err != nil {
+		t.Fatalf("host failed on a retained close: %v", h.err)
+	}
+	b, err := os.ReadFile(filepath.Join(sessionsDir, "hosts", "key", "cleanup", "demo--w1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt struct {
+		Epoch    string `json:"epoch"`
+		Cleaned  bool   `json:"cleaned"`
+		Retained string `json:"retained"`
+	}
+	if err = json.Unmarshal(b, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Epoch != "e1" || receipt.Cleaned || receipt.Retained != refusal.Error() {
+		t.Fatalf("receipt = %+v, want a retained receipt naming the refusal", receipt)
+	}
+
+	h.Update(sessionWorktreeCleanedMsg{slug: "demo--w2", epoch: "e2", err: errors.New("remove session worktree: permission denied")})
+	if h.err == nil {
+		t.Fatal("a failed removal on close no longer stops the host")
 	}
 }

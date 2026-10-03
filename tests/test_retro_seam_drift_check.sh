@@ -166,15 +166,14 @@ commit_all "$repo" "revert transient reader change"
 expect_pass "$repo" "$base"
 
 # A protected path that no longer exists protects nothing: the pattern stops
-# matching and the pairing silently stops being enforced. Both the checker and
-# the pre-push hook must name only live files.
+# matching and the pairing silently stops being enforced. The checker must name
+# only live files.
 python3 - "$REPO_ROOT" <<'PY'
 import re, sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
 checker = (root / "scripts/check-retro-seam-drift.sh").read_text()
-hook = (root / "githooks/pre-push").read_text()
 
 named = set(re.findall(r"^\s+(scripts/[\w./-]+)$",
                        checker.split("PROTECTED_READERS=(", 1)[1].split(")", 1)[0], re.M))
@@ -182,15 +181,6 @@ named |= set(re.findall(r"^\s+((?:scripts|tests)/[\w./-]+)$",
                         checker.split("SKILL_COMPANIONS=(", 1)[1].split(")", 1)[0], re.M))
 for extra in ("CONTRACT_TEST", "RETRO_SKILL"):
     named.add(re.search(rf'{extra}="([^"]+)"', checker).group(1))
-
-pattern = re.search(r"PROTECTED_PATTERN='\^\((.*)\)\$'", hook).group(1)
-for alternative in pattern.split("|"):
-    literal = alternative.replace("\\.", ".")
-    if ".*" in literal:
-        stem, suffix = literal.split(".*", 1)
-        assert list(root.glob(f"{stem}*{suffix}")), f"pre-push pattern matches nothing: {alternative}"
-        continue
-    named.add(literal)
 
 missing = sorted(path for path in named if not (root / path).exists())
 assert not missing, f"protected paths that no longer exist: {missing}"

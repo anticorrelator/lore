@@ -271,8 +271,12 @@ func TestCleanupRefusesCheckoutContentNoRefDescribes(t *testing.T) {
 	// The harness kept writing after teardown began.
 	writeFile(t, filepath.Join(sessionPath, "late-work.txt"), []byte("not in any ref\n"))
 
-	if _, err := CleanupSessionCheckout(ctx, outcome.Identity); err == nil {
+	_, err = CleanupSessionCheckout(ctx, outcome.Identity)
+	if err == nil {
 		t.Fatal("cleanup accepted content no ref describes")
+	}
+	if !errors.Is(err, ErrContentUnproven) {
+		t.Fatalf("refusal = %v, want ErrContentUnproven so callers can retain the checkout", err)
 	}
 	assertBytes(t, filepath.Join(sessionPath, "late-work.txt"), []byte("not in any ref\n"))
 }
@@ -338,11 +342,12 @@ func TestSweepReclaimsAbandonedCheckoutAndSkipsLiveAndReserved(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(stranger, "note.txt"), []byte("unrelated\n"))
 
-	proofs, failures := SweepSessionWorktrees(ctx, worktreesDir,
+	result := SweepSessionWorktrees(ctx, worktreesDir,
 		ReservedWorktreePaths([]string{reservedIdentity.CanonicalPath}))
-	if len(failures) != 0 {
-		t.Fatalf("sweep failures: %v", failures)
+	if len(result.Failures) != 0 || len(result.Retained) != 0 {
+		t.Fatalf("sweep failures %v, retained %v", result.Failures, result.Retained)
 	}
+	proofs := result.Proofs
 	if len(proofs) != 1 || proofs[0].Epoch != "abandoned" {
 		t.Fatalf("proofs = %+v, want exactly the abandoned checkout", proofs)
 	}
@@ -396,20 +401,124 @@ func TestSweepIsIdempotent(t *testing.T) {
 	}
 
 	for pass := 1; pass <= 2; pass++ {
-		proofs, failures := SweepSessionWorktrees(ctx, worktreesDir, nil)
-		if len(failures) != 0 {
-			t.Fatalf("pass %d failures: %v", pass, failures)
+		result := SweepSessionWorktrees(ctx, worktreesDir, nil)
+		if len(result.Failures) != 0 {
+			t.Fatalf("pass %d failures: %v", pass, result.Failures)
 		}
 		want := 1
 		if pass == 2 {
 			want = 0
 		}
-		if len(proofs) != want {
-			t.Fatalf("pass %d proofs = %d, want %d", pass, len(proofs), want)
+		if len(result.Proofs) != want {
+			t.Fatalf("pass %d proofs = %d, want %d", pass, len(result.Proofs), want)
 		}
 	}
 	if revParse(t, source, resultRefFor("once")) == "" {
 		t.Fatal("result ref was deleted across repeated sweeps")
+	}
+}
+
+// publishedCheckout creates a session checkout under dir that reached a
+// terminal state with its result preserved, as a crashed owner would leave it.
+func publishedCheckout(t *testing.T, ctx context.Context, source, dir, epoch string) Identity {
+	t.Helper()
+	identity, err := Create(ctx, source, filepath.Join(dir, epoch), epoch)
+	if err != nil {
+		t.Fatalf("Create %s: %v", epoch, err)
+	}
+	identity, _ = Transition(identity, StateActive)
+	identity, artifact, err := MakePublishable(ctx, identity)
+	if err != nil {
+		t.Fatalf("MakePublishable %s: %v", epoch, err)
+	}
+	outcome, err := Publish(ctx, identity, artifact, source)
+	if err != nil {
+		t.Fatalf("Publish %s: %v", epoch, err)
+	}
+	return outcome.Identity
+}
+
+// One terminal checkout holding content no ref describes is the case that
+// crash-looped the session host (2026-09-24): its refusal came back as a sweep
+// failure, and every host start died on it. It must come back as retained,
+// untouched, while the sweep still reclaims everything else.
+func TestSweepRetainsUnprovenCheckoutAndReclaimsTheRest(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	initRepository(t, source)
+	writeFile(t, filepath.Join(source, "tracked.txt"), []byte("generation A\n"))
+	git(t, source, "add", "tracked.txt")
+	git(t, source, "commit", "-m", "generation A")
+	worktreesDir := filepath.Join(root, "_sessions", "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	drifted := publishedCheckout(t, ctx, source, worktreesDir, "drifted")
+	writeFile(t, filepath.Join(drifted.CanonicalPath, "late-work.txt"), []byte("not in any ref\n"))
+	clean := publishedCheckout(t, ctx, source, worktreesDir, "clean")
+
+	for pass := 1; pass <= 2; pass++ {
+		result := SweepSessionWorktrees(ctx, worktreesDir, nil)
+		if len(result.Failures) != 0 {
+			t.Fatalf("pass %d: a checkout the sweep never touched came back as a failure: %v", pass, result.Failures)
+		}
+		if len(result.Retained) != 1 || !errors.Is(result.Retained[0], ErrContentUnproven) ||
+			!strings.HasPrefix(result.Retained[0].Error(), "drifted: ") {
+			t.Fatalf("pass %d retained = %v, want exactly the drifted checkout", pass, result.Retained)
+		}
+		wantProofs := 1
+		if pass == 2 {
+			wantProofs = 0
+		}
+		if len(result.Proofs) != wantProofs {
+			t.Fatalf("pass %d proofs = %+v, want %d", pass, result.Proofs, wantProofs)
+		}
+	}
+	assertBytes(t, filepath.Join(drifted.CanonicalPath, "late-work.txt"), []byte("not in any ref\n"))
+	if _, err := os.Lstat(clean.CanonicalPath); !os.IsNotExist(err) {
+		t.Fatalf("clean checkout survived the sweep: %v", err)
+	}
+}
+
+// Hosts that share a store sweep the same directory. When another one finishes
+// reclaiming a checkout while this sweep is digesting it, the digest fails on
+// vanished files (observed as "digest session worktree: fatal: unable to
+// stat"). That is not a failure: the checkout is gone and every ref survived.
+func TestSweepAcceptsCheckoutReclaimedConcurrently(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	initRepository(t, source)
+	writeFile(t, filepath.Join(source, "tracked.txt"), []byte("generation A\n"))
+	git(t, source, "add", "tracked.txt")
+	git(t, source, "commit", "-m", "generation A")
+	worktreesDir := filepath.Join(root, "_sessions", "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	identity := publishedCheckout(t, ctx, source, worktreesDir, "raced")
+	result := revParse(t, source, resultRefFor("raced"))
+
+	defer func(original func(context.Context, string, string) (string, error)) { digestCheckout = original }(digestCheckout)
+	digestCheckout = func(ctx context.Context, path, gitDir string) (string, error) {
+		git(t, source, "worktree", "remove", "--force", path)
+		return "", errors.New("fatal: unable to stat 'tracked.txt': No such file or directory")
+	}
+
+	swept := SweepSessionWorktrees(ctx, worktreesDir, nil)
+	if len(swept.Failures) != 0 || len(swept.Retained) != 0 {
+		t.Fatalf("failures %v, retained %v; want the concurrent reclaim accepted", swept.Failures, swept.Retained)
+	}
+	if len(swept.Proofs) != 1 || !swept.Proofs[0].Verified {
+		t.Fatalf("proofs = %+v, want one verified proof", swept.Proofs)
+	}
+	if _, err := os.Lstat(identity.CanonicalPath); !os.IsNotExist(err) {
+		t.Fatalf("checkout still present: %v", err)
+	}
+	if got := revParse(t, source, resultRefFor("raced")); got != result {
+		t.Fatalf("result ref = %q, want %q", got, result)
 	}
 }
 

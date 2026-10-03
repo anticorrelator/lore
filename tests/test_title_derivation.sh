@@ -61,24 +61,26 @@ assert_not_contains() {
   fi
 }
 
-# Fresh KDIR with a contradicted settlement run so --allow-settlement-verdict
-# authorizes mutation mode without a scorecard fixture.
 setup_kdir() {
   rm -rf "$KDIR"
-  mkdir -p "$KDIR/conventions" "$KDIR/_settlement/runs"
+  mkdir -p "$KDIR/conventions"
   echo '{"format_version": 2}' > "$KDIR/_manifest.json"
-  cat > "$KDIR/_settlement/runs/run-title.json" <<'EOF'
-{"run_id":"run-title","kind":"commons","verdict":{"verdict":"contradicted","evidence":"x","correction":"y"}}
-EOF
 }
 
+# Each call is a distinct observation, so a repeated correction on the same
+# entry is applied rather than recognized as a retry. The counter lives in a
+# file because callers run this inside command substitutions.
 apply_mutation() {
   local entry="$1" superseded="$2" replacement="$3"; shift 3
+  local seq_file="$TEST_DIR/observation-seq" seq
+  seq=$(( $(cat "$seq_file" 2>/dev/null || echo 0) + 1 ))
+  echo "$seq" > "$seq_file"
   LORE_KNOWLEDGE_DIR="$KDIR" bash "$APPLY" \
-    --entry "$entry" --verdict-id run-title --verdict-source correctness-gate \
+    --entry "$entry" --observation-id "obs-title-$seq" \
+    --verdict-source peer-verification --allow-peer-verification \
     --evidence "scripts/fixture.py:1 — contradicting behavior observed" \
     --superseded-text "$superseded" --replacement-text "$replacement" \
-    --allow-settlement-verdict --date 2026-07-02 "$@"
+    --date 2026-07-02 "$@"
 }
 
 echo "=== Title Derivation Tests ==="

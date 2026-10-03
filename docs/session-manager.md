@@ -84,6 +84,13 @@ Managed `close` waits for its own correlated teardown outcome and reports worktr
 publication, quarantine, or refusal, including retained result references and
 cleanup disposition. Removing an execution directory does not prove integration.
 A quarantined result remains available for the coordinator's composition judgment.
+A session-owned checkout is removed only when its content on disk matches a
+preserved ref. When nothing matches, the checkout is retained. `close` reports
+`cleanup: retained` with the reason, and the host logs it and keeps serving. The
+startup and idle sweeps treat an abandoned checkout the same way. A retained
+checkout stays on disk until someone preserves its content in a ref (for example
+`refs/lore/quarantine/<epoch>`) or removes it by hand. Only a removal that
+started and did not finish stops the host.
 Protocol-terminus close retains the existing cooperative gate; explicit coordinator
 close retains its existing authority. Source-generation and worktree ownership
 guards apply equally to visible and headless hosts.

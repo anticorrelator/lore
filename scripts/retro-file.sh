@@ -271,7 +271,6 @@ fi
 
 JOURNAL="$KDIR/_meta/effectiveness-journal.jsonl"
 SCALE_SIDECAR="$KDIR/_scorecards/retro-scale-access.jsonl"
-CHANNEL_SIDECAR="$KDIR/_scorecards/retro-channel-flags.jsonl"
 ROWS="$KDIR/_scorecards/rows.jsonl"
 
 has_journal_sink() {
@@ -369,38 +368,6 @@ PY
     rc=$?; set -e
     if [[ $rc -eq 0 ]]; then completed+=(scale-access); WRITES_MADE=$((WRITES_MADE+1)); else missing+=(scale-access); failed=1; fi
   fi
-fi
-
-CHANNEL_APP=$(jq -r '.artifact.judgments.channel_flags.applicability' "$VALIDATED")
-if [[ "$CHANNEL_APP" == applicable ]]; then
-  CHANNEL_COUNT=$(jq '.artifact.judgments.channel_flags.value | length' "$VALIDATED")
-  i=0
-  while [[ $i -lt "$CHANNEL_COUNT" ]]; do
-    flag=$(jq -c --argjson i "$i" '.artifact.judgments.channel_flags.value[$i]' "$VALIDATED")
-    role=$(jq -r .role <<<"$flag"); slot=$(jq -r .slot <<<"$flag"); signal=$(jq -r .signal_type <<<"$flag")
-    sink="channel:$role:$slot:$signal"
-    state=$(python3 - "$CHANNEL_SIDECAR" "$SLUG" "$flag" <<'PY'
-import json,os,sys
-p,slug,want_raw=sys.argv[1:]; want=json.loads(want_raw); rows=[]
-if os.path.isfile(p):
- for line in open(p,encoding="utf-8"):
-  try:r=json.loads(line)
-  except Exception:continue
-  if (r.get("cycle_id"),r.get("role"),r.get("slot"),r.get("signal_type"))==(slug,want.get("role"),want.get("slot"),want.get("signal_type")):rows.append(r)
-keys=("role","slot","signal_type","rate","window_cycles","remedy_hint")
-print("missing" if not rows else "landed" if len(rows)==1 and all(rows[0].get(k)==want.get(k) for k in keys) else "collision")
-PY
-)
-    if [[ "$state" == landed ]]; then completed+=("$sink")
-    elif [[ "$state" == collision || "${LORE_RETRO_FILE_FAIL_SINK:-}" == "$sink" ]]; then missing+=("$sink"); failed=1
-    else
-      args=(--kdir "$KDIR" --cycle-id "$SLUG" --role "$role" --slot "$slot" --signal-type "$signal" --rate "$(jq -r .rate <<<"$flag")" --window-cycles "$(jq -r .window_cycles <<<"$flag")")
-      remedy=$(jq -r '.remedy_hint // empty' <<<"$flag"); [[ -z "$remedy" ]] || args+=(--remedy-hint "$remedy")
-      set +e; LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPT_DIR/retro-channel-flag-append.sh" "${args[@]}" >/dev/null; rc=$?; set -e
-      if [[ $rc -eq 0 ]]; then completed+=("$sink"); WRITES_MADE=$((WRITES_MADE+1)); else missing+=("$sink"); failed=1; fi
-    fi
-    i=$((i+1))
-  done
 fi
 
 # Each scored dimension is independently retryable under its frozen rubric.

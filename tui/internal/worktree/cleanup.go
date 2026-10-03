@@ -62,6 +62,15 @@ type CleanupProof struct {
 // It is an ordinary, expected outcome: the directory is left exactly as it was.
 var ErrNotCleanupEligible = errors.New("session worktree is not cleanup-eligible")
 
+// ErrContentUnproven reports a terminal checkout whose bytes on disk could not
+// be matched to any preserved ref, either because no ref's tree equals them or
+// because they could not be digested at all. It is a refusal, not a failure:
+// it is returned before anything is removed, so the directory is exactly as it
+// was. Retrying cannot change the answer. Someone has to preserve that content
+// in a ref or discard it by hand, so a caller reports the checkout as retained
+// and carries on.
+var ErrContentUnproven = errors.New("session worktree content is not proven preserved")
+
 // checkout is the physical facts about one session worktree directory — enough
 // to remove it and to prove the removal, without a persisted identity record.
 // The close path derives one from the identity it already holds; the crash
@@ -110,19 +119,20 @@ func CleanupSessionCheckout(ctx context.Context, identity Identity) (CleanupProo
 // its preserved refs. An entry that cannot prove all three is left alone — a
 // leaked directory is a survivable cost, a wrongly deleted one is not.
 //
-// It returns one proof per reclaimed checkout and one error per checkout that
-// failed *during* removal. Entries that simply did not qualify are silent: not
-// qualifying is the normal state of a live session's tree.
-func SweepSessionWorktrees(ctx context.Context, worktreesDir string, reserved map[string]bool) ([]CleanupProof, []error) {
+// Entries that are not terminal are silent, because that is the normal state
+// of a live session's tree. A terminal entry whose content cannot be proven
+// preserved is reported in Retained rather than Failures: nothing was touched,
+// and one such tree must not stop a caller from reclaiming the rest or from
+// serving new sessions.
+func SweepSessionWorktrees(ctx context.Context, worktreesDir string, reserved map[string]bool) SweepResult {
 	entries, err := os.ReadDir(worktreesDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return SweepResult{}
 		}
-		return nil, []error{fmt.Errorf("scan session worktrees: %w", err)}
+		return SweepResult{Failures: []error{fmt.Errorf("scan session worktrees: %w", err)}}
 	}
-	var proofs []CleanupProof
-	var failures []error
+	var result SweepResult
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -145,15 +155,29 @@ func SweepSessionWorktrees(ctx context.Context, worktreesDir string, reserved ma
 			continue // still live, or never reached a terminal state
 		}
 		proof, err := removeCheckout(ctx, c)
-		if err != nil {
-			if !errors.Is(err, ErrNotCleanupEligible) {
-				failures = append(failures, fmt.Errorf("%s: %w", c.Epoch, err))
-			}
-			continue
+		switch {
+		case err == nil:
+			result.Proofs = append(result.Proofs, proof)
+		case errors.Is(err, ErrNotCleanupEligible):
+		case errors.Is(err, ErrContentUnproven):
+			result.Retained = append(result.Retained, fmt.Errorf("%s: %w", c.Epoch, err))
+		default:
+			result.Failures = append(result.Failures, fmt.Errorf("%s: %w", c.Epoch, err))
 		}
-		proofs = append(proofs, proof)
 	}
-	return proofs, failures
+	return result
+}
+
+// SweepResult is what one sweep did. Proofs are the checkouts it reclaimed.
+// Retained are terminal checkouts it left in place because their content could
+// not be proven preserved (ErrContentUnproven). A later sweep gives the same
+// answer until someone preserves or discards that content. Failures are
+// checkouts whose removal started and did not finish, plus a scan that could
+// not read the directory.
+type SweepResult struct {
+	Proofs   []CleanupProof
+	Retained []error
+	Failures []error
 }
 
 // ReservedWorktreePaths canonicalizes the checkout paths a caller wants held
@@ -257,6 +281,16 @@ func removeCheckout(ctx context.Context, c checkout) (CleanupProof, error) {
 		errContent = statErr
 	} else {
 		contentRef, errContent = contentPreservedBy(ctx, c, preserved)
+		if errContent != nil {
+			if _, statErr := os.Lstat(c.Path); os.IsNotExist(statErr) {
+				// Hosts sharing a store sweep the same directory, so another one can
+				// finish reclaiming this checkout while it is being digested. With the
+				// directory gone there is no content left to prove, and the
+				// assertions below still check that removal was complete.
+				contentRef, errContent = "terminal refs (checkout removed concurrently)", nil
+				proof.BranchDisposition = "checkout removed concurrently; branches unchanged"
+			}
+		}
 	}
 	err = errContent
 	if err != nil {
@@ -306,13 +340,17 @@ func removeCheckout(ctx context.Context, c checkout) (CleanupProof, error) {
 	return proof, nil
 }
 
+// digestCheckout is snapshotTree, held in a variable so a test can reproduce
+// another host reclaiming the checkout while this one is digesting it.
+var digestCheckout = snapshotTree
+
 // contentPreservedBy returns the ref whose tree equals the checkout's current
 // content. Any preserved ref counts: matching captured means the session changed
 // nothing, matching result or quarantine means its output was materialized.
 func contentPreservedBy(ctx context.Context, c checkout, preserved []RefOID) (string, error) {
-	live, err := snapshotTree(ctx, c.Path, c.GitDir)
+	live, err := digestCheckout(ctx, c.Path, c.GitDir)
 	if err != nil {
-		return "", fmt.Errorf("digest session worktree: %w", err)
+		return "", fmt.Errorf("%w: digest session worktree at %s: %v", ErrContentUnproven, c.Path, err)
 	}
 	for _, ref := range preserved {
 		tree, err := gitString(ctx, c.GitCommonDir, "rev-parse", "--verify", "--quiet", ref.OID+"^{tree}")
@@ -323,7 +361,7 @@ func contentPreservedBy(ctx context.Context, c checkout, preserved []RefOID) (st
 			return ref.Ref, nil
 		}
 	}
-	return "", fmt.Errorf("session worktree content at %s is not reachable from any preserved ref", c.Path)
+	return "", fmt.Errorf("%w: content at %s is not reachable from any preserved ref", ErrContentUnproven, c.Path)
 }
 
 func registeredWorktreePaths(ctx context.Context, repositoryPath string) (map[string]bool, error) {

@@ -2153,10 +2153,12 @@ list_supported_frameworks() {
 # dirs (resolve_harness_install_path agents) but the canonical content
 # always reads from the repo path so version drift between repo and
 # harness-side symlink cannot mask itself.
-# Args: $1 = template name (e.g., "worker", "researcher", "correctness-gate")
+# Args: $1 = template name (e.g., "worker", "researcher", "advisor")
 # Output:
 #   - Absolute path on stdout, exit 0 when the template file exists.
 #   - Error on stderr, exit 1 when the file is missing or the name is empty.
+# Used by spec-open.sh, impl-start.sh, impl-promote-batch.sh, and any caller
+# that would otherwise hardcode $HOME/.claude/agents/<name>.md.
 # Mirrors config.ResolveAgentTemplate() in tui/internal/config/config.go.
 resolve_agent_template() {
   local name="$1"
@@ -2279,6 +2281,124 @@ resolve_completion_enforcement_mode() {
       echo "unavailable"
       ;;
   esac
+}
+
+# --- validate_ceremony_advisors ---
+# Validate a JSON array of advisor names against the skills resolvable by a
+# specific harness. On failure, CEREMONY_UNRESOLVABLE_ADVISOR names the first
+# unresolvable advisor so resolution callers can report the exact binding.
+#
+# Usage: validate_ceremony_advisors <harness> <layer-label> <json-array>
+# Returns 0 when every advisor resolves; otherwise returns 1 with a diagnostic.
+validate_ceremony_advisors() {
+  local harness="$1"
+  local layer="$2"
+  local list_json="$3"
+  CEREMONY_UNRESOLVABLE_ADVISOR=""
+
+  if [[ -z "$harness" ]]; then
+    echo "Error: validate_ceremony_advisors requires a harness name" >&2
+    return 1
+  fi
+  if ! printf '%s' "$list_json" | jq -e 'type == "array"' &>/dev/null; then
+    echo "Error: ceremony advisors in $layer must be a JSON array" >&2
+    return 1
+  fi
+
+  local repo_root="$LORE_REPO_DIR"
+  local installed_skills_dir=""
+  installed_skills_dir=$(resolve_harness_install_path skills "$harness" 2>/dev/null || true)
+  [[ "$installed_skills_dir" == "unsupported" ]] && installed_skills_dir=""
+
+  local valid_set
+  valid_set=$( {
+    [[ -d "$repo_root/skills" ]] && find "$repo_root/skills" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null
+    [[ -d "$repo_root/scripts/agent-protocols" ]] && find "$repo_root/scripts/agent-protocols" -mindepth 1 -maxdepth 1 -type f -name '*.md' -exec basename {} .md \; 2>/dev/null
+    [[ -n "$installed_skills_dir" && -d "$installed_skills_dir" ]] && find "$installed_skills_dir" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -exec basename {} \; 2>/dev/null
+  } | sort -u | jq -R . | jq -sc .)
+  [[ -z "$valid_set" || "$valid_set" == "null" ]] && valid_set="[]"
+
+  local bad
+  bad=$(printf '%s' "$list_json" | jq -r --argjson valid "$valid_set" \
+    '. - $valid | .[]' 2>/dev/null | head -1)
+  if [[ -n "$bad" ]]; then
+    CEREMONY_UNRESOLVABLE_ADVISOR="$bad"
+    echo "Error: unknown ceremony advisor '$bad' in $layer for harness '$harness' (not a registered skill)" >&2
+    return 1
+  fi
+  return 0
+}
+
+# --- resolve_ceremony_advisors ---
+# Print the resolved advisor list for a ceremony as a JSON array on stdout.
+# Ceremony advisors are harness-local: resolution reads only
+# `.harnesses.<active>.ceremonies.<skill>` from settings.json. There is no
+# top-level ceremonies fallback and no ceremonies.json fallback.
+# Missing key resolves to `[]` (no advisors configured). Explicit empty `[]`
+# remains meaningful as the stored value for "no advisors on this harness".
+# A registered advisor that is no longer resolvable on the target harness is
+# recorded as a needs-decision outcome, then resolves fail-open to `[]`.
+# Closed advisor set: the union of skill names under scripts/agent-protocols/,
+# repo-local skills/, and the target harness's installed skills directory.
+# The set is resolved at call time, so no hardcoded list is maintained here.
+# Optional arguments select a target harness and attach work-item context;
+# callers that omit them retain active-harness, context-free behavior.
+# Mirrors no Go counterpart in v1 (TUI does not read ceremonies — bash-only
+# parity surface per D5).
+resolve_ceremony_advisors() {
+  local skill="$1"
+  local target_harness="${2:-}"
+  local work_item="${3:-}"
+  [[ -z "$skill" ]] && { echo "Error: resolve_ceremony_advisors requires a skill name" >&2; return 1; }
+
+  command -v jq &>/dev/null || { echo "Error: resolve_ceremony_advisors requires jq" >&2; return 1; }
+
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+  local settings_sh="$LORE_LIB_DIR/settings.sh"
+  local active="$target_harness"
+  if [[ -z "$active" ]]; then
+    active=$(resolve_active_framework 2>/dev/null) || active=""
+  fi
+
+  if [[ -n "$active" ]]; then
+    local raw
+    raw=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.ceremonies.$skill" 2>/dev/null || true)
+    if [[ -n "$raw" ]]; then
+      if printf '%s' "$raw" | jq -e 'type == "array"' &>/dev/null; then
+        if ! validate_ceremony_advisors "$active" "harnesses.$active.ceremonies.$skill" "$raw" 2>/dev/null; then
+          local advisor="$CEREMONY_UNRESOLVABLE_ADVISOR"
+          local work_label="none"
+          [[ -n "$work_item" ]] && work_label="$work_item"
+          local reason="registered ceremony advisor is not resolvable on the target harness"
+          echo "[ceremony] Divergence: ceremony='$skill' advisor='$advisor' harness='$active' work_item='$work_label' reason='$reason'. Corrective action: run the advisor where it is registered before consuming the artifact, or update the harness-local ceremony binding." >&2
+
+          local recorder="$LORE_LIB_DIR/ceremony-outcome-record.sh"
+          if [[ ! -f "$recorder" ]]; then
+            echo "[ceremony] Warning: outcome recorder is unavailable at $recorder; continuing with an empty advisor list" >&2
+          else
+            local recorder_args=(
+              --ceremony "$skill"
+              --advisor "$advisor"
+              --harness "$active"
+              --reason "$reason"
+            )
+            if [[ -n "$work_item" ]]; then
+              recorder_args+=(--work-item "$work_item")
+            fi
+            if ! bash "$recorder" "${recorder_args[@]}"; then
+              echo "[ceremony] Warning: failed to record unresolved advisor '$advisor'; continuing with an empty advisor list" >&2
+            fi
+          fi
+          echo "[]"
+          return 0
+        fi
+        printf '%s\n' "$raw"
+        return 0
+      fi
+    fi
+  fi
+
+  echo "[]"
 }
 
 # --- check_fts_available ---

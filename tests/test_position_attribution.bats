@@ -324,7 +324,6 @@ def reader_checks():
     emit_claim('reader-legacy')
     missing = dict(ref1, manifest_sha256='0'*64)
     emit_claim('reader-unknown', missing)
-
     candidates = item/'reader-candidates.json'
     candidates.write_text(json.dumps([candidate('reader-promoted',['reader-first']),
         candidate('reader-mixed',['reader-first','reader-second']),
@@ -354,7 +353,6 @@ def reader_checks():
         result = call(['bash',str(repo/'scripts/impl-promote-batch.sh'),'fixture','--candidates',str(typed_candidates),'--json'])
         typed_result = [json.loads(line) for line in result.stdout.decode().splitlines() if line.startswith('{')][-1]
         assert typed_result['accepted_count'] == 1, typed_result
-
 
     call(['bash',str(repo/'scripts/template-registry-register.sh'),'--kdir',str(store),
           '--template-id',first[0]['template_id'],'--template-version',first[0]['template_version'],
@@ -419,7 +417,7 @@ def reader_checks():
     assert project({'position_dispatch':ref1})['status']=='resolved'
     assert project({'position_dispatch':ref2})['status']=='resolved'
     assert project({'position_dispatch':missing})['status']=='unknown'
-    print('reader_checks: mixed versions, audit, promotion, registry refusal, sampling, close and archive passed')
+    print('reader_checks: mixed versions, promotion, registry refusal, sampling, close and archive passed')
 
 reader_checks()
 

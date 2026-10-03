@@ -125,10 +125,13 @@ type sessionWorktreeCleanedMsg struct {
 }
 
 // sessionWorktreeSweptMsg carries the crash-resume backstop's results.
+// retained names terminal checkouts left in place because their content is not
+// proven preserved; it is reported, never treated as a failure.
 type sessionWorktreeSweptMsg struct {
 	deferred error
 
 	proofs   []worktree.CleanupProof
+	retained []error
 	failures []error
 }
 
@@ -408,10 +411,10 @@ func (m model) sweepSessionWorktreesCmd() tea.Cmd {
 				}
 			}
 		}
-		proofs, failures := worktree.SweepSessionWorktrees(context.Background(), worktreesDir,
+		result := worktree.SweepSessionWorktrees(context.Background(), worktreesDir,
 			worktree.ReservedWorktreePaths(claimed))
-		worktree.SortProofs(proofs)
-		return sessionWorktreeSweptMsg{proofs: proofs, failures: failures}
+		worktree.SortProofs(result.Proofs)
+		return sessionWorktreeSweptMsg{proofs: result.Proofs, retained: result.Retained, failures: result.Failures}
 	}
 }
 
@@ -420,9 +423,17 @@ func (m model) handleSessionWorktreeSwept(msg sessionWorktreeSweptMsg) (model, t
 		m.flashErr = compactErr("session worktree sweep", msg.failures[0])
 		return m, nil
 	}
+	var notices []string
 	if len(msg.proofs) > 0 {
-		m.statusNotice = fmt.Sprintf("reclaimed %s left by earlier sessions",
-			pluralize(len(msg.proofs), "leaked worktree", "leaked worktrees"))
+		notices = append(notices, fmt.Sprintf("reclaimed %s left by earlier sessions",
+			pluralize(len(msg.proofs), "leaked worktree", "leaked worktrees")))
+	}
+	if len(msg.retained) > 0 {
+		notices = append(notices, fmt.Sprintf("left %s in place (content not in any ref): %v",
+			pluralize(len(msg.retained), "session worktree", "session worktrees"), msg.retained[0]))
+	}
+	if len(notices) > 0 {
+		m.statusNotice = strings.Join(notices, "; ")
 	}
 	return m, nil
 }

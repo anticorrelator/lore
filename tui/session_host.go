@@ -16,6 +16,7 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
+	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
 
 type hostOptions struct {
@@ -226,6 +227,10 @@ type sessionHostModel struct {
 	idleSince               time.Time
 	lastSweep               time.Time
 	err                     error
+	// retainedReported holds the retained-checkout reports already written to
+	// the host log, so a checkout the sweep keeps finding is logged once per
+	// host process rather than on every pass.
+	retainedReported map[string]bool
 }
 
 func (h *sessionHostModel) View() tea.View { return tea.NewView("") }
@@ -251,6 +256,24 @@ func hostTick() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return hostTickMsg{} })
 }
 func (h *sessionHostModel) fail(err error) (tea.Model, tea.Cmd) { h.err = err; return h, tea.Quit }
+
+// reportRetained logs checkouts a sweep or close left in place because their
+// content is not proven preserved. They are never fatal: one such checkout
+// must not keep the host from serving new sessions, and restarting cannot
+// change the answer.
+func (h *sessionHostModel) reportRetained(retained []error) {
+	for _, err := range retained {
+		line := err.Error()
+		if h.retainedReported[line] {
+			continue
+		}
+		if h.retainedReported == nil {
+			h.retainedReported = map[string]bool{}
+		}
+		h.retainedReported[line] = true
+		fmt.Fprintln(os.Stderr, "session worktree retained:", line)
+	}
+}
 func (h *sessionHostModel) publishReady() error {
 	if err := session.WriteInstance(h.runtime.sessionsDir, h.runtime.instanceRow()); err != nil {
 		return err
@@ -280,6 +303,7 @@ func (h *sessionHostModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if v.result.deferred != nil {
 			fmt.Fprintln(os.Stderr, "shared orphan cleanup deferred:", v.result.deferred)
 		}
+		h.reportRetained(v.result.retained)
 		if len(v.result.failures) > 0 {
 			return h.fail(v.result.failures[0])
 		}
@@ -328,12 +352,23 @@ func (h *sessionHostModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.runtime = next.(model)
 		cmds = append(cmds, h.wrap(cmd))
 	case sessionWorktreeCleanedMsg:
-		if v.err != nil {
+		var retained error
+		if errors.Is(v.err, worktree.ErrContentUnproven) {
+			retained = v.err
+			h.reportRetained([]error{fmt.Errorf("%s: %w", v.epoch, v.err)})
+		} else if v.err != nil {
 			return h.fail(v.err)
 		}
-		if err := hostAtomicJSON(filepath.Join(h.runtime.sessionsDir, "hosts", h.options.Key, "cleanup", v.slug+".json"), map[string]any{"schema_version": 1, "slug": v.slug, "epoch": v.epoch, "proof": v.proof, "cleaned": true}); err != nil {
+		if err := h.runtime.writeHostCleanupReceipt(v.slug, v.epoch, v.proof, retained); err != nil {
 			return h.fail(err)
 		}
+	case sessionWorktreeSweptMsg:
+		// The periodic sweep. Failures still reach the log through the runtime's
+		// flash; retained checkouts are logged here, once each.
+		h.reportRetained(v.retained)
+		next, cmd := h.runtime.Update(msg)
+		h.runtime = next.(model)
+		cmds = append(cmds, h.wrap(cmd))
 	case instanceSyncedMsg:
 		if v.err != nil {
 			return h.fail(v.err)
@@ -491,6 +526,7 @@ func (h *sessionHostModel) withdrawIfIdle() (bool, error) {
 		}
 	}
 	result := h.runtime.sweepSessionWorktreesCmd()().(sessionWorktreeSweptMsg)
+	h.reportRetained(result.retained)
 	if len(result.failures) > 0 {
 		return false, result.failures[0]
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/anticorrelator/lore/tui/internal/worktree"
 	"os"
@@ -157,15 +158,32 @@ func (m model) recoverHostDeliveries() error {
 				return err
 			}
 			proof, err := worktree.CleanupSessionCheckout(context.Background(), *d.Cleanup)
+			var retained error
+			if errors.Is(err, worktree.ErrContentUnproven) {
+				retained, err = err, nil
+			}
 			if err != nil {
 				return err
 			}
-			if err = hostAtomicJSON(filepath.Join(m.sessionsDir, "hosts", m.hostKey, "cleanup", d.Event.Slug+".json"), map[string]any{"schema_version": 1, "slug": d.Event.Slug, "epoch": d.Cleanup.Epoch, "proof": proof, "cleaned": true}); err != nil {
+			if err = m.writeHostCleanupReceipt(d.Event.Slug, d.Cleanup.Epoch, proof, retained); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// writeHostCleanupReceipt records what the close path did with a session's
+// checkout. retained is nil when the checkout was reclaimed. Otherwise it is the
+// ErrContentUnproven refusal: the checkout is still on disk because its content
+// is not proven preserved. That is a settled outcome, and `lore session close`
+// reports it instead of waiting for a cleanup that cannot happen.
+func (m model) writeHostCleanupReceipt(slug, epoch string, proof worktree.CleanupProof, retained error) error {
+	receipt := map[string]any{"schema_version": 1, "slug": slug, "epoch": epoch, "proof": proof, "cleaned": retained == nil}
+	if retained != nil {
+		receipt["retained"] = retained.Error()
+	}
+	return hostAtomicJSON(filepath.Join(m.sessionsDir, "hosts", m.hostKey, "cleanup", slug+".json"), receipt)
 }
 
 func (m model) hostWorktreeOutcome(outcome session.Event, epoch string, completion ...hostDelivery) (tea.Cmd, error) {

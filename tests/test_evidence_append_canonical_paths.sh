@@ -127,7 +127,6 @@ RECORDED=$(row_field "$CLAIMS" wt-1 file)
 assert_eq "recorded file resolves at HEAD in the main checkout" \
   "$(git -C "$MAIN_REPO" show "HEAD:$RECORDED" >/dev/null 2>&1 && echo ok || echo fail)" "ok"
 
-
 echo ""
 echo "Test 3: capture from a plain checkout is canonicalized the same way"
 ROW=$(build_row plain-1 "$MAIN_REPO/scripts/foo.py" "[\"$MAIN_REPO/scripts/foo.py\"]")

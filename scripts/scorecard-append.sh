@@ -40,25 +40,22 @@
 #   correction    rows REQUIRE corrected_entry_path, correction_target
 #                 (claim|observation|doctrine), calibrated_by_verdict_id
 #
+# Recognized free-form event_type values under kind=telemetry (not enforced;
+# readers consume for window filtering):
+#   ceremony-resolution   unresolvable registered advisor. Two correlated
+#                         shapes, discriminated by `record_type`: an `outcome`
+#                         row (needs-decision/unhandled, the default when the
+#                         field is absent) and a `disposition` row recording
+#                         the handled transition for one outcome_id. Repeating
+#                         a transition is a no-op; a different action or actor
+#                         for the same outcome_id is refused.
+#                         `lore ceremony handle` is the front for the latter.
+#
 # The row schema (see architecture/scorecards/row-schema.md) also defines:
 #   template_id, template_version, metric, value, sample_size,
 #   window_start, window_end, source_artifact_ids, granularity
 # These are not hard-validated at append time (Phase 2 is substrate-only;
 # downstream consumers encode stricter checks).
-#
-# Grounded-or-nothing enforcement (task-21, Phase 4):
-#   When verdict_source == "reverse-auditor" AND kind == "scored", the row
-#   must carry a non-empty claim_anchor object with file, line_range, and
-#   exact_snippet fields all present and non-empty. Scored reverse-auditor
-#   rows without grounded anchors are rejected. Telemetry-kind rows
-#   (e.g., grounding_failure_rate) do not require the anchor — ungrounded
-#   diagnostic telemetry is explicit and permitted.
-#   Rationale: the reverse-auditor's scorecard weight is grounded-or-nothing
-#   — ungrounded concerns may surface in /retro narrative but cannot drive
-#   producer-evaluation scoring. This is
-#   enforced at the writer (not the agent prompt) because the writer is
-#   the last line of defense: any path that reaches rows.jsonl without
-#   this check corrupts the signal irreversibly.
 
 set -euo pipefail
 
@@ -157,44 +154,7 @@ case "$CAL_STATE" in
     ;;
 esac
 
-# --- Grounded-or-nothing enforcement for reverse-auditor scored rows (task-21) ---
-# If the row declares verdict_source == "reverse-auditor" AND kind == "scored",
-# require claim_anchor.{file, line_range, exact_snippet} all non-empty for
-# per-claim tier=reusable rows. tier=template aggregate rows (emitted by the
-# rollup --aggregate-window mode) can EITHER carry the single claim_anchor
-# (aggregating a one-claim window) OR aggregate-provenance: non-empty
-# source_artifact_ids AND a source_anchor_count (integer) equal to sample_size,
-# signifying every underlying tier=reusable row carried a grounded claim_anchor.
-# Telemetry rows (e.g., grounding_failure_rate) are exempt — ungrounded
-# diagnostic signal is explicit and permitted under the kind discriminator.
-VERDICT_SOURCE=$(printf '%s' "$ROW" | jq -r '.verdict_source // ""')
-ROW_TIER_PRECHECK=$(printf '%s' "$ROW" | jq -r '.tier // ""')
-if [[ "$VERDICT_SOURCE" == "reverse-auditor" && "$KIND" == "scored" ]]; then
-  ANCHOR_OK=$(printf '%s' "$ROW" | jq -e '
-    (.claim_anchor // null) as $a
-    | ($a != null)
-      and (($a.file // "") != "")
-      and (($a.line_range // "") != "")
-      and (($a.exact_snippet // "") != "")
-  ' >/dev/null 2>&1 && echo "true" || echo "false")
-  if [[ "$ANCHOR_OK" != "true" ]]; then
-    AGGREGATE_PROVENANCE_OK="false"
-    if [[ "$ROW_TIER_PRECHECK" == "template" ]]; then
-      AGGREGATE_PROVENANCE_OK=$(printf '%s' "$ROW" | jq -e '
-        ((.source_artifact_ids // []) | type == "array" and length > 0)
-        and ((.source_anchor_count // null) | (type == "number") and (. >= 0))
-        and ((.sample_size // null) | (type == "number") and (. > 0))
-        and ((.source_anchor_count) == (.sample_size))
-      ' >/dev/null 2>&1 && echo "true" || echo "false")
-    fi
-    if [[ "$AGGREGATE_PROVENANCE_OK" != "true" ]]; then
-      fail "reverse-auditor scored row rejected: grounded-or-nothing enforced — claim_anchor.{file, line_range, exact_snippet} all required and non-empty for per-claim rows (tier=reusable). tier=template rows may instead carry aggregate-provenance: non-empty source_artifact_ids AND source_anchor_count == sample_size. Telemetry-kind rows are exempt; surface ungrounded concerns in /retro narrative instead."
-    fi
-  fi
-fi
-
 # --- Tier validation (task-15, extended in task-1 Phase 1) ---
-# Mirror the grounded-or-nothing jq pattern above.
 # Allowed values: reusable | task-evidence | telemetry | template | correction
 # Conditional rules:
 #   reusable      rows REQUIRE non-empty source_artifact_ids
@@ -282,6 +242,92 @@ if [[ "$TIER" == "correction" ]]; then
   fi
 fi
 
+# Registered ceremony obligations that cannot resolve are operational
+# telemetry, not advisor verdicts. Keep this conditional schema at the sole
+# physical appender so every producer path receives the same validation.
+#
+# A ceremony-resolution row takes one of two shapes, discriminated by
+# `record_type`:
+#   outcome      the needs-decision/unhandled row a ceremony files when the
+#                advisor cannot resolve it
+#   disposition  a correlated handled transition, keyed by outcome_id, that
+#                records who adjudicated the outcome and how
+# Rows written before the transition shape existed carry no record_type and
+# read as `outcome` — absence means unhandled, never a validation error.
+EVENT_TYPE=$(printf '%s' "$ROW" | jq -r '.event_type // ""')
+CEREMONY_RECORD_TYPE=""
+if [[ "$EVENT_TYPE" == "ceremony-resolution" ]]; then
+  CEREMONY_RECORD_TYPE=$(printf '%s' "$ROW" | jq -r '.record_type // "outcome"')
+  case "$CEREMONY_RECORD_TYPE" in
+    outcome)
+      CEREMONY_OUTCOME_OK=$(printf '%s' "$ROW" | jq -e '
+        (.kind == "telemetry")
+          and (.tier == "telemetry")
+          and (.calibration_state == "unknown")
+          and (.outcome == "needs-decision")
+          and (.disposition == "unhandled")
+          and ((.ceremony // "") != "")
+          and ((.advisor // "") != "")
+          and ((.harness // "") != "")
+          and ((.reason // "") != "")
+          and ((.corrective_action // "") != "")
+          and ((.timestamp // "") != "")
+          and ((.source_artifact_ids // null) | type == "array")
+          and (
+            if has("work_item") then
+              ((.work_item | type) == "string")
+                and (.work_item != "")
+                and (.source_artifact_ids == [.work_item])
+            else
+              (.source_artifact_ids == [])
+            end
+          )
+      ' >/dev/null 2>&1 && echo "true" || echo "false")
+      if [[ "$CEREMONY_OUTCOME_OK" != "true" ]]; then
+        fail "ceremony-resolution row rejected: kind=telemetry, tier=telemetry, calibration_state=unknown, outcome=needs-decision, disposition=unhandled, ceremony, advisor, harness, reason, corrective_action, timestamp, and work-item-aligned source_artifact_ids are required"
+      fi
+      ;;
+    disposition)
+      # A transition carries the correlation key and the handling facts. It
+      # carries none of the outcome's evidence fields — reason, corrective
+      # action, and harness belong to the row being handled, and restating
+      # them here would create a second, divergent copy of that evidence.
+      CEREMONY_TRANSITION_OK=$(printf '%s' "$ROW" | jq -e '
+        (.kind == "telemetry")
+          and (.tier == "telemetry")
+          and (.calibration_state == "unknown")
+          and (.metric == "ceremony_resolution_outcome")
+          and (.outcome == "needs-decision")
+          and (.disposition == "handled")
+          and ((.outcome_id // "") != "")
+          and ((.action // "") | test("^(adjudicated|deferred|skipped)$"))
+          and ((.handled_by // "") != "")
+          and ((.handled_at // "") != "")
+          and ((.timestamp // "") != "")
+          and ((.ceremony // "") != "")
+          and ((.advisor // "") != "")
+          and ((has("reason") or has("corrective_action") or has("harness")) | not)
+          and ((.source_artifact_ids // null) | type == "array")
+          and (
+            if has("work_item") then
+              ((.work_item | type) == "string")
+                and (.work_item != "")
+                and (.source_artifact_ids == [.work_item])
+            else
+              (.source_artifact_ids == [])
+            end
+          )
+      ' >/dev/null 2>&1 && echo "true" || echo "false")
+      if [[ "$CEREMONY_TRANSITION_OK" != "true" ]]; then
+        fail "ceremony-resolution transition rejected: kind=telemetry, tier=telemetry, calibration_state=unknown, metric=ceremony_resolution_outcome, outcome=needs-decision, disposition=handled, outcome_id, action (adjudicated|deferred|skipped), handled_by, handled_at, timestamp, ceremony, advisor, and work-item-aligned source_artifact_ids are required; reason, corrective_action, and harness belong to the outcome row and must be omitted"
+      fi
+      ;;
+    *)
+      fail "ceremony-resolution row rejected: record_type must be 'outcome' or 'disposition' (got '$CEREMONY_RECORD_TYPE')"
+      ;;
+  esac
+fi
+
 # --- Resolve knowledge directory ---
 if [[ -n "$KDIR_OVERRIDE" ]]; then
   KNOWLEDGE_DIR="$KDIR_OVERRIDE"
@@ -303,11 +349,110 @@ if [[ ! -f "$SCORECARDS_DIR/README.md" ]]; then
   "$SCRIPT_DIR/seed-scorecards-readme.sh" "$SCORECARDS_DIR" 2>/dev/null || true
 fi
 
+# --- Correlated ceremony transition (sole-writer owned) ---
+# A handled transition must name an outcome row that already exists in this
+# store and must not contradict it. Repeating the same transition is a no-op;
+# a different action or actor for the same outcome_id is a conflict and fails
+# loudly rather than layering two answers on one obligation. This lives at the
+# physical appender so every front inherits the same idempotence.
+CEREMONY_TRANSITION_IDEMPOTENT=0
+if [[ "$CEREMONY_RECORD_TYPE" == "disposition" ]]; then
+  set +e
+  CORRELATION=$(python3 - "$ROWS_FILE" "$ROW" <<'PY'
+import json, os, sys
+
+rows_path, row_json = sys.argv[1:3]
+row = json.loads(row_json)
+outcome_id = row.get("outcome_id")
+
+source = None
+existing = []
+if os.path.isfile(rows_path):
+    with open(rows_path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                candidate = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("event_type") != "ceremony-resolution":
+                continue
+            if candidate.get("outcome_id") != outcome_id:
+                continue
+            if candidate.get("record_type") == "disposition":
+                existing.append(candidate)
+            else:
+                source = candidate
+
+if source is None:
+    print(f"no ceremony-resolution outcome row carries outcome_id '{outcome_id}'")
+    sys.exit(1)
+
+for field in ("ceremony", "advisor", "work_item", "source_artifact_ids"):
+    if row.get(field) != source.get(field):
+        print(
+            f"{field}={row.get(field)!r} contradicts the correlated outcome row "
+            f"({field}={source.get(field)!r})"
+        )
+        sys.exit(1)
+
+if existing:
+    if all(
+        prior.get("action") == row.get("action")
+        and prior.get("handled_by") == row.get("handled_by")
+        for prior in existing
+    ):
+        print("idempotent")
+        sys.exit(0)
+    recorded = "; ".join(
+        f"action={prior.get('action')} handled_by={prior.get('handled_by')}"
+        for prior in existing
+    )
+    print(
+        f"outcome_id '{outcome_id}' already carries a different handled transition "
+        f"({recorded}); requested action={row.get('action')} handled_by={row.get('handled_by')}"
+    )
+    sys.exit(1)
+
+print("append")
+PY
+  )
+  CORRELATION_RC=$?
+  set -e
+  if [[ $CORRELATION_RC -ne 0 ]]; then
+    fail "ceremony-resolution transition rejected: ${CORRELATION:-correlation check failed}"
+  fi
+  if [[ "$CORRELATION" == "idempotent" ]]; then
+    CEREMONY_TRANSITION_IDEMPOTENT=1
+  fi
+fi
+
+if [[ $CEREMONY_TRANSITION_IDEMPOTENT -eq 1 ]]; then
+  TRANSITION_OUTCOME_ID=$(printf '%s' "$ROW" | jq -r '.outcome_id')
+  if [[ $JSON_MODE -eq 1 ]]; then
+    RESULT=$(jq -n \
+      --arg path "$RELPATH" \
+      --arg kind "$KIND" \
+      --arg calibration_state "$CAL_STATE" \
+      --arg tier "$TIER" \
+      --arg outcome_id "$TRANSITION_OUTCOME_ID" \
+      '{path: $path, kind: $kind, tier: $tier, calibration_state: $calibration_state, outcome_id: $outcome_id, appended: false, idempotent: true}')
+    json_output "$RESULT"
+  fi
+  echo "[scorecard] Ceremony transition for outcome $TRANSITION_OUTCOME_ID is already recorded — no row appended"
+  exit 0
+fi
+
 # --- Model provenance stamp ---
 # Stamp which model generation produced the evidence so /retro and /evolve
 # can segment signal across model transitions (behavioral-rate claims do not
 # transfer across generations; structural claims do). Priority: the row's own
-# model field > --model flag > LORE_MODEL env > "unrecorded". Stamping is provenance, not
+# model field > --model flag > LORE_MODEL env > "unrecorded". Stamping is
+# provenance, not
 # validation — rows are never rejected for missing model.
 ROW_MODEL=$(printf '%s' "$ROW" | jq -r '.model // ""')
 if [[ -z "$ROW_MODEL" ]]; then

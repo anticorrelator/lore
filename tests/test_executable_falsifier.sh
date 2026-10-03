@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test_executable_falsifier.sh — Phase 3 tests for the optional
-# executable_falsifier field and its pure runner.
+# executable_falsifier field.
 #
 # Covers:
 #   Validators (validate-tier2.sh / validate-tier3.sh) — additive, non-gating:
@@ -13,12 +13,6 @@
 #     6. promote-commons-append.sh accepts without / accepts well-formed /
 #        rejects malformed
 #     7. evidence-append.sh passes the field through to task-claims.jsonl
-#   Runner (falsifier-run.py) — pure, no-write, exit 0 on both verdicts:
-#     8. row without the field -> {"pass": null, "reason": "skipped"}, exit 0
-#     9. matched / output-mismatch / command-failed / timeout /
-#        malformed-falsifier all exit 0 with the documented reason
-#    10. bare falsifier object accepted; row-named root honored
-#    11. usage errors exit 1; missing --repo-root exits 2
 
 set -euo pipefail
 
@@ -28,7 +22,6 @@ VALIDATE2="$SCRIPTS_DIR/validate-tier2.sh"
 VALIDATE3="$SCRIPTS_DIR/validate-tier3.sh"
 APPEND="$SCRIPTS_DIR/evidence-append.sh"
 COMMONS="$SCRIPTS_DIR/promote-commons-append.sh"
-RUNNER="$SCRIPTS_DIR/falsifier-run.py"
 NORMALIZE_PY="$SCRIPTS_DIR/snippet_normalize.py"
 
 PASS=0
@@ -215,60 +208,6 @@ if printf '%s' "$(build_tier2_row 'executable_falsifier={"command": 42, "expecte
 else
   assert_eq "evidence-append rejects malformed field" "reject" "reject"
 fi
-
-# --- 8-11. falsifier-run.py --------------------------------------------------
-echo "falsifier-run.py:"
-run_runner() {
-  # run_runner <json-input> [extra args...] -> "<exit>|<pass>|<reason>"
-  local input="$1"; shift
-  local out exit_code
-  out=$(printf '%s' "$input" | python3 "$RUNNER" "$@" 2>/dev/null) && exit_code=0 || exit_code=$?
-  local p r
-  p=$(printf '%s' "$out" | jq -r 'if has("pass") then (.pass | tostring) else "NOOUT" end' 2>/dev/null || echo "NOOUT")
-  r=$(printf '%s' "$out" | jq -r '.reason // "NOOUT"' 2>/dev/null || echo "NOOUT")
-  echo "${exit_code}|${p}|${r}"
-}
-
-assert_eq "runner skips row without field" "$(run_runner "$(build_tier2_row)")" "0|null|skipped"
-assert_eq "runner matched" "$(run_runner "$(build_tier2_row "executable_falsifier=$GOOD_EF")")" "0|true|matched"
-assert_eq "runner bare falsifier object" "$(run_runner "$GOOD_EF")" "0|true|matched"
-assert_eq "runner output-mismatch" "$(run_runner '{"command": "echo hello", "expected_output_shape": "goodbye"}')" "0|false|output-mismatch"
-assert_eq "runner command-failed" "$(run_runner '{"command": "exit 3", "expected_output_shape": "x"}')" "0|false|command-failed"
-assert_eq "runner timeout" "$(run_runner '{"command": "sleep 5", "expected_output_shape": "x"}' --timeout 1)" "0|false|timeout"
-assert_eq "runner malformed (empty command)" "$(run_runner '{"executable_falsifier": {"command": "", "expected_output_shape": "x"}}')" "0|false|malformed-falsifier"
-assert_eq "runner malformed (bad regex)" "$(run_runner '{"command": "echo hi", "expected_output_shape": "["}')" "0|false|malformed-falsifier"
-assert_eq "runner malformed (non-object field)" "$(run_runner '{"executable_falsifier": "echo hi"}')" "0|false|malformed-falsifier"
-assert_eq "runner pipes supported in command" "$(run_runner '{"command": "printf \"a\\nb\\n\" | wc -l", "expected_output_shape": "2"}')" "0|true|matched"
-
-# row-named root: command proves its cwd
-mkdir -p "$TEST_DIR/rootcheck/subdir"
-assert_eq "runner honors row-named relative root" \
-  "$(run_runner '{"command": "basename \"$PWD\"", "expected_output_shape": "^subdir$", "root": "subdir"}' --repo-root "$TEST_DIR/rootcheck")" \
-  "0|true|matched"
-assert_eq "runner missing row-named root is malformed" \
-  "$(run_runner '{"command": "true", "expected_output_shape": "x", "root": "no-such-dir"}' --repo-root "$TEST_DIR/rootcheck")" \
-  "0|false|malformed-falsifier"
-
-# repo-root default: command runs from --repo-root
-assert_eq "runner runs from --repo-root" \
-  "$(run_runner '{"command": "basename \"$PWD\"", "expected_output_shape": "^rootcheck$"}' --repo-root "$TEST_DIR/rootcheck")" \
-  "0|true|matched"
-
-# usage / I-O errors
-printf '' | python3 "$RUNNER" >/dev/null 2>&1 && EC=0 || EC=$?
-assert_eq "runner empty input exits 1" "$EC" "1"
-printf 'not json' | python3 "$RUNNER" >/dev/null 2>&1 && EC=0 || EC=$?
-assert_eq "runner unparseable input exits 1" "$EC" "1"
-printf '%s' "$GOOD_EF" | python3 "$RUNNER" --repo-root "$TEST_DIR/does-not-exist" >/dev/null 2>&1 && EC=0 || EC=$?
-assert_eq "runner missing --repo-root exits 2" "$EC" "2"
-python3 "$RUNNER" --row-file "$TEST_DIR/no-such-file.json" >/dev/null 2>&1 && EC=0 || EC=$?
-assert_eq "runner unreadable --row-file exits 2" "$EC" "2"
-
-# runner is pure: no writes into the repo-root it runs from
-find "$TEST_DIR/rootcheck" -type f | wc -l | tr -d ' ' | {
-  read -r COUNT
-  assert_eq "runner performed no writes" "$COUNT" "0"
-}
 
 # --- Summary -----------------------------------------------------------------
 echo ""
