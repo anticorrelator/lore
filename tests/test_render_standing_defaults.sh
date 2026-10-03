@@ -91,7 +91,28 @@ grep -q "Effective routing (role -> route/options/source)" <<<"$out4" || fail "r
 grep -q -- '- lead -> {"framework":"codex","model":"gpt-6-astra"' <<<"$out4" || fail "lead route not rendered"
 grep -q "End standing defaults" <<<"$out4" || fail "footer missing with --with-routing"
 
-# --- Case 5: unknown arguments are refused ---------------------------------------
+# --- Case 5: only directives in force are listed ---------------------------------
+# A retired or superseded preference keeps its file for history but is not in
+# force; listing it presents it as binding to every dispatch that reads this.
+KSTORE="$TMP/store"
+mkdir -p "$KSTORE/preferences/nested"
+printf '# Current Directive\nBody.\n<!-- learned: 2026-09-01 | status: current -->\n' > "$KSTORE/preferences/current.md"
+printf '# Corrected Directive\nBody.\n<!-- learned: 2026-09-01 | status: corrected -->\n' > "$KSTORE/preferences/corrected.md"
+printf '# Unstamped Directive\nBody.\n' > "$KSTORE/preferences/nested/unstamped.md"
+printf '# Retired Routing Directive\nBody.\n**Retired 2026-09-25.** Stale.\n<!-- learned: 2026-07-06 | status: retired -->\n' > "$KSTORE/preferences/retired.md"
+printf '# Superseded Directive\nBody.\n<!-- learned: 2026-07-06 | status: superseded -->\n' > "$KSTORE/preferences/superseded.md"
+printf '# Store Readme\n' > "$KSTORE/preferences/README.md"
+out5="$(LORE_DATA_DIR="$TMP" LORE_KNOWLEDGE_DIR="$KSTORE" bash "$SCRIPT")" || fail "exit nonzero with a preferences directory"
+directives5="$(sed -n '/Preference directives in force/,/End standing defaults/p' <<<"$out5")"
+for title in "Current Directive" "Corrected Directive" "Unstamped Directive"; do
+  grep -qx -- "- $title" <<<"$directives5" || fail "live directive '$title' not listed"
+done
+for title in "Retired Routing Directive" "Superseded Directive" "Store Readme"; do
+  grep -q -- "$title" <<<"$directives5" && fail "'$title' listed as a directive in force"
+done
+[[ "$(grep -c '^- ' <<<"$directives5")" -eq 3 ]] || fail "directive count is not 3: $directives5"
+
+# --- Case 6: unknown arguments are refused ---------------------------------------
 LORE_DATA_DIR="$TMP" bash "$SCRIPT" --bogus >/dev/null 2>&1 && fail "unknown argument accepted"
 
 echo "render standing defaults: PASS"
