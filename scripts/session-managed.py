@@ -296,6 +296,10 @@ def disposition(kdir, handle):
     manifest = read(manifest_path(kdir, handle), {})
     cleanup = read(host_dir(kdir, manifest.get('host_key', 'unknown')) / 'cleanup' / (handle + '.json'), {})
     cleaned = closed and cleanup.get('cleaned') is True
+    # A retained receipt is settled: the host left the checkout on disk because
+    # its content is not proven preserved, and no later pass will reclaim it
+    # until someone preserves or discards that content.
+    retained = cleanup.get('retained') if closed and not cleaned else None
     worktree_path = links.get('worktree_path')
     if closed and not cleaned and worktree_path and not Path(worktree_path).exists():
         source = manifest.get('source_dir')
@@ -309,9 +313,14 @@ def disposition(kdir, handle):
                 result_oid=links.get('result_oid'), patch_path=links.get('patch_path'),
                 destination_path=links.get('destination_path'),
                 cleanup_confirmed=cleaned,
+                cleanup_retained=retained or None,
                 integrated=outcome == 'worktree_published',
                 composition_judgment_required=outcome in {'worktree_quarantined', 'restore_refused'},
                 reason=latest.get('reason'))
+
+
+def cleanup_settled(disposition):
+    return disposition['cleanup_confirmed'] or bool(disposition.get('cleanup_retained'))
 
 
 def inspect(kdir, manifest):
@@ -526,7 +535,7 @@ def await_outcome(kdir, manifest, rid, operation, timeout):
             matches = row.get('request_id') == rid or rid in (close_ids or []) or rid in row.get('close_request_ids', [])
             if matches and row.get('event') in terminals:
                 event = row['event']
-                if operation == 'close' and event == 'closed' and not disposition(kdir, manifest['handle'])['cleanup_confirmed']:
+                if operation == 'close' and event == 'closed' and not cleanup_settled(disposition(kdir, manifest['handle'])):
                     continue
                 outcome = 'uncertain' if event.endswith('_uncertain') or row.get('reason') == 'delivery-uncertain' else event
                 return receipt(kdir, manifest, rid, operation, outcome, event=row)
@@ -550,12 +559,12 @@ def operate_attempt(args, kdir, manifest):
     current = inspect(kdir, manifest)
     if current['state'] in TERMINAL:
         if args.verb in {'wait', 'close'}:
-            if args.verb == 'close' and current['state'] == 'closed' and not current['disposition']['cleanup_confirmed']:
+            if args.verb == 'close' and current['state'] == 'closed' and not cleanup_settled(current['disposition']):
                 ensure(kdir, manifest['host_key'], manifest['source_dir'])
                 deadline = time.monotonic() + args.timeout
                 while time.monotonic() < deadline:
                     current = inspect(kdir, manifest)
-                    if current['disposition']['cleanup_confirmed']:
+                    if cleanup_settled(current['disposition']):
                         return current
                     time.sleep(.15)
                 current.update(outcome='uncertain', outcome_confirmed=False)
@@ -740,7 +749,12 @@ def main(argv=None):
         if args.verb == 'close' and result.get('disposition'):
             disposition = result['disposition']
             print('result: ' + disposition['worktree_outcome'])
-            print('cleanup: ' + ('confirmed' if disposition['cleanup_confirmed'] else 'pending'))
+            if disposition['cleanup_confirmed']:
+                print('cleanup: confirmed')
+            elif disposition.get('cleanup_retained'):
+                print('cleanup: retained — ' + disposition['cleanup_retained'])
+            else:
+                print('cleanup: pending')
             if disposition.get('result_ref'):
                 print('retained result: ' + disposition['result_ref'])
             if disposition['composition_judgment_required']:

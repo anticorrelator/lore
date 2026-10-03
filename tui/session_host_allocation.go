@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 
@@ -93,7 +94,10 @@ func (m model) recoverHostAllocations() error {
 				if result := cmd().(journalResultMsg); result.err != nil {
 					return result.err
 				}
-				if _, err = worktree.CleanupSessionCheckout(context.Background(), *a.Quarantined); err != nil {
+				// A checkout whose content is not proven preserved stays on disk; the
+				// sweep reports it as retained. Only a removal that started and failed
+				// stops recovery.
+				if _, err = worktree.CleanupSessionCheckout(context.Background(), *a.Quarantined); err != nil && !errors.Is(err, worktree.ErrContentUnproven) {
 					return err
 				}
 			}

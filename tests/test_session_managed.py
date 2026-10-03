@@ -138,6 +138,20 @@ class ManagedSessions(unittest.TestCase):
         self.assertEqual(result['outcome'], 'uncertain')
         self.assertFalse(result['disposition']['cleanup_confirmed'])
 
+    def test_close_settles_on_a_retained_checkout(self):
+        # The host left the checkout on disk because its content is not in any
+        # ref. Close reports that instead of waiting for a cleanup that cannot
+        # happen and timing out as uncertain.
+        reason = 'e1: session worktree content is not proven preserved: content at /tmp/x is not reachable from any preserved ref'
+        m.atomic(m.host_dir(self.kdir, 'unknown') / 'cleanup/task--w123.json',
+                 {'epoch': 'e1', 'cleaned': False, 'retained': reason})
+        row = dict(event='closed', slug='task--w123', request_id='own')
+        with patch.object(m, 'events', return_value=[row]):
+            result = m.await_outcome(self.kdir, {'handle': 'task--w123'}, 'own', 'close', 0)
+        self.assertEqual(result['outcome'], 'closed')
+        self.assertFalse(result['disposition']['cleanup_confirmed'])
+        self.assertEqual(result['disposition']['cleanup_retained'], reason)
+
     def test_real_appender_accepts_uncertain_answer(self):
         m.append(self.kdir, dict(event='answer_refused', slug='task--w123', request_id='op1', option=2, reason='delivery-uncertain'))
         self.assertEqual(m.events(self.kdir, 'task--w123')[0]['reason'], 'delivery-uncertain')
