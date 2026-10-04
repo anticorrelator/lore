@@ -12,6 +12,13 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/coordination/board"
 )
 
+// renderBoardFlag is a variable, not a constant, so its bytes stay in the
+// binary: the compiler turns a comparison against a short constant string into
+// integer compares, leaving nothing to find. cli/lore looks for these bytes in
+// the installed lore-tui before running it, because an older binary ignores the
+// flag and opens the full-screen TUI.
+var renderBoardFlag = "--render-board"
+
 const renderBoardUsage = `Usage: lore coordinate board --arc <slug> --width <n> [--json]
 
 Print one arc's stream board as the coordination view draws it: one line per
@@ -26,7 +33,8 @@ Options:
                  status words begin, or -1 when the line has none
   --help, -h     Show this help
 
-Exit status: 0 rendered, 1 unknown arc or unreadable snapshot, 2 usage error.
+Exit status: 0 rendered, 1 unknown arc or unreadable snapshot, 2 usage error,
+3 the installed lore-tui is missing or older than this command (run lore rebuild).
 `
 
 type renderedBoard struct {

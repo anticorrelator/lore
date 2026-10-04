@@ -486,7 +486,7 @@ func (m DetailModel) renderBoard() string {
 			if !m.closed && i == m.rowCursor {
 				prefix = "▸ "
 			}
-			b.WriteString(prefix + styleBoardLine(renderedLine, row.Gate, !m.closed) + "\n")
+			b.WriteString(prefix + styleBoardLine(renderedLine, board.Held(row) && !m.closed) + "\n")
 		}
 	}
 	if m.boardErr != "" {
@@ -495,18 +495,13 @@ func (m DetailModel) renderBoard() string {
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
-func styleBoardLine(line board.RenderedLine, gate string, emphasize bool) string {
+func styleBoardLine(line board.RenderedLine, held bool) string {
 	lead, metadata := line.Text, ""
 	if line.MetadataAt >= 0 {
 		lead, metadata = line.Text[:line.MetadataAt], line.Text[line.MetadataAt:]
 	}
-	if emphasize {
-		switch gate {
-		case "hold":
-			lead = holdStyle.Render(lead)
-		case "flag":
-			lead = flagStyle.Render(lead)
-		}
+	if held {
+		lead = holdStyle.Render(lead)
 	}
 	if metadata != "" {
 		metadata = style.Dim.Render(metadata)

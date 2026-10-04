@@ -174,8 +174,10 @@ teardown() {
 @test "coordinate board execs lore-tui's board renderer with its arguments" {
   local bin="$TEST_ROOT/bin" args_file="$TEST_ROOT/board.args"
   mkdir -p "$bin"
+  # The router runs only a binary that carries the render flag's bytes.
   cat > "$bin/lore-tui" <<'EOF'
 #!/usr/bin/env bash
+# --render-board
 printf '%s\n' "$*" > "$ARGS_FILE"
 printf '%s\n' "$$" > "$PID_FILE"
 while [[ ! -e "$RELEASE_FILE" ]]; do
@@ -203,6 +205,55 @@ EOF
   wait "$ROUTER_PID" || leaf_status=$?
   ROUTER_PID=""
   [[ "$leaf_status" -eq 37 ]]
+}
+
+# Runs the router against a lore-tui that would hang if it were ever started,
+# as an older binary does when it opens the full-screen TUI, and requires a
+# prompt exit 3 naming the remedy without running it.
+board_refuses_without_running() {
+  local path="$1" want="$2" out="$TEST_ROOT/board.out" ran="$TEST_ROOT/board.ran"
+  HOME="$TEST_HOME" PATH="$path" RAN_FILE="$ran" \
+    bash "$TEST_ROUTER" coordinate board --arc some-arc --width 80 > "$out" 2>&1 &
+  ROUTER_PID=$!
+  local waited=0
+  while kill -0 "$ROUTER_PID" 2>/dev/null; do
+    sleep 0.05
+    waited=$((waited + 1))
+    [[ "$waited" -lt 100 ]] || break
+  done
+  if kill -0 "$ROUTER_PID" 2>/dev/null; then
+    kill "$ROUTER_PID" 2>/dev/null || true
+    ROUTER_PID=""
+    false
+  fi
+  local status=0
+  wait "$ROUTER_PID" || status=$?
+  ROUTER_PID=""
+  [[ "$status" -eq 3 ]]
+  [[ ! -e "$ran" ]]
+  [[ "$(<"$out")" == "lore coordinate board: $want" ]]
+}
+
+@test "coordinate board refuses a lore-tui older than the render mode without running it" {
+  local bin="$TEST_ROOT/old-bin"
+  mkdir -p "$bin"
+  cat > "$bin/lore-tui" <<'EOF'
+#!/usr/bin/env bash
+: > "$RAN_FILE"
+sleep 30
+EOF
+  chmod +x "$bin/lore-tui"
+  board_refuses_without_running "$bin:$PATH" "lore-tui is older than this command — run lore rebuild"
+}
+
+@test "coordinate board names the remedy when lore-tui is not installed" {
+  local bin="$TEST_ROOT/empty-bin"
+  mkdir -p "$bin"
+  ln -s "$(command -v bash)" "$bin/bash"
+  for tool in realpath dirname readlink; do
+    ln -s "$(command -v "$tool")" "$bin/$tool"
+  done
+  board_refuses_without_running "$bin" "lore-tui is not installed — run lore rebuild"
 }
 
 @test "coordinate --help lists every verb and returns promptly" {

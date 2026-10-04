@@ -731,6 +731,48 @@ func normalizeDetailGolden(value string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+func TestDetailEmphasizesOnlyRowsHeldForTheOwner(t *testing.T) {
+	m := sizedDetail()
+	m.SetArc("arc-a")
+	m.SetBoard([]board.Row{
+		{Arc: "arc-a", StreamID: "a", Label: "finished hold", Gate: "hold", Status: "done", Verdict: "full"},
+		{Arc: "arc-a", StreamID: "b", Label: "dropped hold", Gate: "hold", Status: "dropped"},
+		{Arc: "arc-a", StreamID: "c", Label: "queued hold", Gate: "hold", Status: "pending"},
+		{Arc: "arc-a", StreamID: "d", Label: "running hold", Gate: "hold", Status: "in-flight"},
+		{Arc: "arc-a", StreamID: "e", Label: "queued flag", Gate: "flag", Status: "pending"},
+		{Arc: "arc-a", StreamID: "f", Label: "finished flag", Gate: "flag", Status: "done", Verdict: "full"},
+		{Arc: "arc-a", StreamID: "g", Label: "asks the owner", Gate: "hold", Status: "blocked-on-input"},
+	}, true, nil)
+	holdOn, _, _ := strings.Cut(holdStyle.Render("x"), "x")
+	flagOn, _, _ := strings.Cut(flagStyle.Render("x"), "x")
+	if holdOn == "" || flagOn == "" {
+		t.Fatal("styles render no escape sequence; this test cannot observe emphasis")
+	}
+	emphasized := func(view, label string) (hold, flag bool) {
+		for _, line := range strings.Split(view, "\n") {
+			if strings.Contains(stripANSI(line), label) {
+				return strings.Contains(line, holdOn), strings.Contains(line, flagOn)
+			}
+		}
+		t.Fatalf("no line for %q:\n%s", label, stripANSI(view))
+		return false, false
+	}
+	view := m.View()
+	for label, wantHold := range map[string]bool{
+		"finished hold": false, "dropped hold": false, "queued hold": true, "running hold": true,
+		"queued flag": false, "finished flag": false, "asks the owner": false,
+	} {
+		hold, flag := emphasized(view, label)
+		if hold != wantHold || flag {
+			t.Errorf("%s: hold emphasis %v (want %v), flag emphasis %v (want false)", label, hold, wantHold, flag)
+		}
+	}
+	m.SetClosed(true)
+	if hold, _ := emphasized(m.View(), "queued hold"); hold {
+		t.Error("a closed arc's board must not emphasize a held row")
+	}
+}
+
 func TestDetailIntegratedBodyGolden(t *testing.T) {
 	want, err := os.ReadFile(filepath.Join("testdata", "integrated_detail.golden"))
 	if err != nil {
