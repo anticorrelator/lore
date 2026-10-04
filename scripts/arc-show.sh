@@ -26,7 +26,8 @@ Options:
   --json         Emit the record joined with the document list as JSON, plus
                  files (every file under the arc, recursively), brief (the
                  ledger's Brief as {label, text}) and decisions (digest.md
-                 paragraphs as {text}).
+                 paragraphs as {text, heading}, heading being the nearest
+                 heading above the paragraph, or null).
   --kdir <path>  Override the resolved knowledge dir (testing).
   --help, -h     Show this help.
 EOF
@@ -113,6 +114,7 @@ HIDDEN = ("_", ".")
 COMMENT = re.compile(r"<!--.*?-->", re.S)
 HEADING = re.compile(r"^#{1,6}(\s|$)")
 RULE = re.compile(r"^([-*_])(\s*\1){2,}$")
+CLOSING_HASHES = re.compile(r"\s+#+$")
 LIST_ITEM = re.compile(r"^(\d+[.)]|[-*+])\s")
 BRIEF_LABEL = re.compile(r"^\*\*(?P<label>[^*]+?)(:\*\*|\*\*:)\s*(?P<text>.*)$")
 
@@ -172,24 +174,32 @@ def brief_entries():
 # A digest is prose for the owner with no fixed shape: numbered items, bold
 # leads, bare paragraphs, or a heading per decision. Every paragraph is one
 # entry, and a list item starts a new entry even with no blank line before it.
+# Each entry carries the nearest heading above it, which is the decision's title
+# in a digest written as one heading per decision.
 def decision_entries():
     digest_path = os.path.join(RECORD_DIR, "digest.md")
     if not os.path.isfile(digest_path):
         return []
     with open(digest_path, encoding="utf-8") as handle:
         text = COMMENT.sub("", handle.read())
-    blocks = []
+    entries = []
     current = None
+    heading = None
     for line in text.splitlines():
         line = line.strip()
-        if not line or HEADING.match(line) or RULE.match(line):
+        if HEADING.match(line):
+            heading = CLOSING_HASHES.sub("", line.lstrip("#")).strip()
+            current = None
+            continue
+        if not line or RULE.match(line):
             current = None
             continue
         if current is None or LIST_ITEM.match(line):
-            current = []
-            blocks.append(current)
-        current.append(line)
-    return [{"text": "\n".join(block)} for block in blocks]
+            current = {"lines": [], "heading": heading}
+            entries.append(current)
+        current["lines"].append(line)
+    return [{"text": "\n".join(entry["lines"]), "heading": entry["heading"]}
+            for entry in entries]
 
 
 if JSON_MODE:

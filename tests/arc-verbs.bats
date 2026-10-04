@@ -13,7 +13,8 @@
 #   - list: default sections, filter composition, sort order, the normative JSON
 #     row shape, member counts scoped to live work, malformed record omitted.
 #   - show --json: the recursive file list, the Brief as labeled paragraphs
-#     with placeholders emptied, and the digest's decisions across its shapes.
+#     with placeholders emptied, and the digest's decisions across its shapes,
+#     each with the nearest heading above it.
 #   - list / show: proven side-effect-free by filesystem snapshot.
 #   - the writer: field mutability, creation-only import, atomic write.
 #   - search: arc hits reachable from `lore work search`, carrying a kind.
@@ -809,13 +810,43 @@ EOF
   printf '%s' "$output" | python3 -c '
 import json, sys
 decisions = json.load(sys.stdin)["decisions"]
+title = "Decision digest — Arc one (2026-08-20)"
 assert decisions == [
-    {"text": "Ordered by how likely you are to want one changed."},
-    {"text": "1. **Numbered with a bold lead.** Its body."},
-    {"text": "2. Numbered on the very next line."},
-    {"text": "**3. Bold number, body on the next line.**\nWhy it was done."},
-    {"text": "The paragraph under it."},
-    {"text": "- A bullet decision.\nIts wrapped second line."},
+    {"text": "Ordered by how likely you are to want one changed.", "heading": title},
+    {"text": "1. **Numbered with a bold lead.** Its body.", "heading": title},
+    {"text": "2. Numbered on the very next line.", "heading": title},
+    {"text": "**3. Bold number, body on the next line.**\nWhy it was done.", "heading": title},
+    {"text": "The paragraph under it.", "heading": "A heading per decision"},
+    {"text": "- A bullet decision.\nIts wrapped second line.", "heading": "Follow-up"},
+], decisions
+'
+}
+
+@test "show --json gives each decision the heading above it, or null before any heading" {
+  open_arc --title "Arc one" --anchor "one" >/dev/null
+  cat > "$TEST_KDIR/_work/_arcs/arc-one/digest.md" <<'EOF'
+A decision with no heading above it.
+
+<!-- ## A commented-out heading is not a heading -->
+
+## Migration sequencing: rehearsal first
+The rehearsal ran on a copy.
+
+It reached the live file second.
+
+## `settings.template.json` stays generic ##
+The template carries defaults only.
+EOF
+  run bash "$SHOW" --kdir "$TEST_KDIR" arc-one --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | python3 -c '
+import json, sys
+decisions = json.load(sys.stdin)["decisions"]
+assert decisions == [
+    {"text": "A decision with no heading above it.", "heading": None},
+    {"text": "The rehearsal ran on a copy.", "heading": "Migration sequencing: rehearsal first"},
+    {"text": "It reached the live file second.", "heading": "Migration sequencing: rehearsal first"},
+    {"text": "The template carries defaults only.", "heading": "`settings.template.json` stays generic"},
 ], decisions
 '
 }
