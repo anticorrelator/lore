@@ -731,7 +731,7 @@ func normalizeDetailGolden(value string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-func TestDetailEmphasizesOnlyRowsHeldForTheOwner(t *testing.T) {
+func TestDetailEmphasizesOnlyRowsHeldForOrWaitingOnTheOwner(t *testing.T) {
 	m := sizedDetail()
 	m.SetArc("arc-a")
 	m.SetBoard([]board.Row{
@@ -741,7 +741,9 @@ func TestDetailEmphasizesOnlyRowsHeldForTheOwner(t *testing.T) {
 		{Arc: "arc-a", StreamID: "d", Label: "running hold", Gate: "hold", Status: "in-flight"},
 		{Arc: "arc-a", StreamID: "e", Label: "queued flag", Gate: "flag", Status: "pending"},
 		{Arc: "arc-a", StreamID: "f", Label: "finished flag", Gate: "flag", Status: "done", Verdict: "full"},
-		{Arc: "arc-a", StreamID: "g", Label: "asks the owner", Gate: "hold", Status: "blocked-on-input"},
+		{Arc: "arc-a", StreamID: "g", Label: "asks under hold", Gate: "hold", Status: "blocked-on-input"},
+		{Arc: "arc-a", StreamID: "h", Label: "asks under notify", Gate: "notify", Status: "blocked-on-input"},
+		{Arc: "arc-a", StreamID: "i", Label: "asks under flag", Gate: "flag", Status: "blocked-on-input"},
 	}, true, nil)
 	holdOn, _, _ := strings.Cut(holdStyle.Render("x"), "x")
 	flagOn, _, _ := strings.Cut(flagStyle.Render("x"), "x")
@@ -760,7 +762,8 @@ func TestDetailEmphasizesOnlyRowsHeldForTheOwner(t *testing.T) {
 	view := m.View()
 	for label, wantHold := range map[string]bool{
 		"finished hold": false, "dropped hold": false, "queued hold": true, "running hold": true,
-		"queued flag": false, "finished flag": false, "asks the owner": false,
+		"queued flag": false, "finished flag": false,
+		"asks under hold": true, "asks under notify": true, "asks under flag": true,
 	} {
 		hold, flag := emphasized(view, label)
 		if hold != wantHold || flag {
@@ -768,8 +771,11 @@ func TestDetailEmphasizesOnlyRowsHeldForTheOwner(t *testing.T) {
 		}
 	}
 	m.SetClosed(true)
-	if hold, _ := emphasized(m.View(), "queued hold"); hold {
-		t.Error("a closed arc's board must not emphasize a held row")
+	closed := m.View()
+	for _, label := range []string{"queued hold", "asks under notify"} {
+		if hold, _ := emphasized(closed, label); hold {
+			t.Errorf("a closed arc's board must not emphasize %q", label)
+		}
 	}
 }
 
