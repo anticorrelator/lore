@@ -12,6 +12,8 @@
 #   - set: field updates and every flag-exclusivity refusal.
 #   - list: default sections, filter composition, sort order, the normative JSON
 #     row shape, member counts scoped to live work, malformed record omitted.
+#   - show --json: the recursive file list, the Brief as labeled paragraphs
+#     with placeholders emptied, and the digest's decisions across its shapes.
 #   - list / show: proven side-effect-free by filesystem snapshot.
 #   - the writer: field mutability, creation-only import, atomic write.
 #   - search: arc hits reachable from `lore work search`, carrying a kind.
@@ -664,6 +666,158 @@ assert record["path"] == "_work/_arcs/arc-one"
   run bash "$SHOW" --kdir "$TEST_KDIR" arc-one
   [ "$status" -eq 0 ]
   echo "$output" | grep -qF "| 1 | spec X | — | read-only | 2 | session | why | notify | done | full | — | abc123 |"
+}
+
+@test "show --json lists every file under the arc, recursively, skipping _ and . names" {
+  open_arc --title "Arc one" --anchor "one" >/dev/null
+  ARC="$TEST_KDIR/_work/_arcs/arc-one"
+  mkdir -p "$ARC/drafts/deeper" "$ARC/_private" "$ARC/.cache" "$ARC/drafts/_scratch"
+  printf 'abc' > "$ARC/drafts/A-notes.md"
+  printf 'x' > "$ARC/drafts/deeper/z.md"
+  printf '{}' > "$ARC/drafts/_meta.json"
+  printf 'x' > "$ARC/drafts/.hidden"
+  printf 'x' > "$ARC/drafts/_scratch/skip.md"
+  printf 'x' > "$ARC/_private/skip.md"
+  printf 'x' > "$ARC/.cache/skip.md"
+  ln -s "$ARC/drafts/A-notes.md" "$ARC/drafts/link.md"
+  touch -t 202601020304.05 "$ARC/drafts/A-notes.md"
+  run bash "$SHOW" --kdir "$TEST_KDIR" arc-one --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | python3 -c '
+import json, sys
+record = json.load(sys.stdin)
+paths = [entry["path"] for entry in record["files"]]
+assert paths == ["coordination.md", "drafts/A-notes.md", "drafts/deeper/z.md"], paths
+notes = record["files"][1]
+assert notes["size"] == 3, notes
+assert sorted(notes) == ["mtime", "path", "size"], notes
+assert record["documents"] == ["coordination.md"], record["documents"]
+'
+  # touch -t reads local time; compare against the same instant rendered in UTC.
+  EXPECTED="$(python3 -c '
+import os, sys
+from datetime import datetime, timezone
+print(datetime.fromtimestamp(os.stat(sys.argv[1]).st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+' "$ARC/drafts/A-notes.md")"
+  printf '%s' "$output" | python3 -c '
+import json, sys
+record = json.load(sys.stdin)
+assert record["files"][1]["mtime"] == sys.argv[1], (record["files"][1], sys.argv[1])
+' "$EXPECTED"
+}
+
+@test "show --json reads a freshly opened ledger's Brief as labels with empty text" {
+  open_arc --title "Arc one" --anchor "one" >/dev/null
+  run bash "$SHOW" --kdir "$TEST_KDIR" arc-one --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | python3 -c '
+import json, sys
+brief = json.load(sys.stdin)["brief"]
+assert brief, brief
+assert brief[0]["label"] == "Landed", brief
+for entry in brief:
+    assert sorted(entry) == ["label", "text"], entry
+    assert entry["label"], entry
+    assert entry["text"] == "", entry
+'
+}
+
+@test "show --json reads Brief labels as written, in order" {
+  open_arc --title "Arc one" --anchor "one" >/dev/null
+  cat > "$TEST_KDIR/_work/_arcs/arc-one/coordination.md" <<'EOF'
+# Coordination Ledger — Arc one
+
+**Feature under coordination:** not part of the Brief
+
+## Brief
+
+<!-- Rewritten in place at every step closure.
+     **Ignored:** a label inside a comment. -->
+
+**Landed:** Shipped `abc123` to main.
+**Open (until Friday):** Two streams
+still running.
+**Review-flags:** <what deserves a colleague's eyes>
+
+A paragraph with no label.
+
+**Surprises**: none.
+
+## Step Ledger
+
+**Not brief:** after the section.
+EOF
+  run bash "$SHOW" --kdir "$TEST_KDIR" arc-one --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | python3 -c '
+import json, sys
+brief = json.load(sys.stdin)["brief"]
+assert brief == [
+    {"label": "Landed", "text": "Shipped `abc123` to main."},
+    {"label": "Open (until Friday)", "text": "Two streams\nstill running."},
+    {"label": "Review-flags", "text": ""},
+    {"label": "", "text": "A paragraph with no label."},
+    {"label": "Surprises", "text": "none."},
+], brief
+'
+}
+
+@test "show --json yields empty brief and decisions when the arc has neither" {
+  open_arc --title "Arc one" --anchor "one" >/dev/null
+  printf '# Ledger\n\n## Step Ledger\n' > "$TEST_KDIR/_work/_arcs/arc-one/coordination.md"
+  import_arc no-ledger --title "No ledger" --status active --opened 2026-01-01T00:00:00Z
+  for slug in arc-one no-ledger; do
+    run bash "$SHOW" --kdir "$TEST_KDIR" "$slug" --json
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | python3 -c '
+import json, sys
+record = json.load(sys.stdin)
+assert record["brief"] == [], record["brief"]
+assert record["decisions"] == [], record["decisions"]
+'
+  done
+}
+
+@test "show --json reads digest decisions one per paragraph across real digest shapes" {
+  open_arc --title "Arc one" --anchor "one" >/dev/null
+  cat > "$TEST_KDIR/_work/_arcs/arc-one/digest.md" <<'EOF'
+# Decision digest — Arc one (2026-08-20)
+
+Ordered by how likely you are to want one changed.
+
+1. **Numbered with a bold lead.** Its body.
+2. Numbered on the very next line.
+
+**3. Bold number, body on the next line.**
+Why it was done.
+
+<!-- a comment is not a decision -->
+
+## A heading per decision
+
+The paragraph under it.
+
+---
+
+### Follow-up
+
+- A bullet decision.
+Its wrapped second line.
+EOF
+  run bash "$SHOW" --kdir "$TEST_KDIR" arc-one --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | python3 -c '
+import json, sys
+decisions = json.load(sys.stdin)["decisions"]
+assert decisions == [
+    {"text": "Ordered by how likely you are to want one changed."},
+    {"text": "1. **Numbered with a bold lead.** Its body."},
+    {"text": "2. Numbered on the very next line."},
+    {"text": "**3. Bold number, body on the next line.**\nWhy it was done."},
+    {"text": "The paragraph under it."},
+    {"text": "- A bullet decision.\nIts wrapped second line."},
+], decisions
+'
 }
 
 @test "show refuses an unknown slug" {

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # arc-show.sh — show one arc: its record joined with the documents in its
 # directory, and its ledger rows reproduced exactly as the coordinator wrote them.
+# --json adds every file in the arc's directory tree, the ledger's Brief, and the
+# digest's decisions, so a reader never has to parse the arc's markdown itself.
 #
 # Usage: bash arc-show.sh <slug> [--json]
 #
@@ -21,7 +23,10 @@ Ledger rows are printed verbatim — they are coordinator shorthand and reformat
 them loses information.
 
 Options:
-  --json         Emit the record joined with the document list as JSON.
+  --json         Emit the record joined with the document list as JSON, plus
+                 files (every file under the arc, recursively), brief (the
+                 ledger's Brief as {label, text}) and decisions (digest.md
+                 paragraphs as {text}).
   --kdir <path>  Override the resolved knowledge dir (testing).
   --help, -h     Show this help.
 EOF
@@ -68,14 +73,21 @@ RECORD_DIR="$KNOWLEDGE_DIR/_work/_arcs/$SLUG"
 [[ -f "$RECORD_DIR/_meta.json" ]] || fail "no arc named '$SLUG'"
 
 ARC_RECORD_DIR="$RECORD_DIR" \
+ARC_SCRIPT_DIR="$SCRIPT_DIR" \
 ARC_SLUG="$SLUG" \
 ARC_JSON_MODE="$JSON_MODE" \
 python3 - <<'PYEOF'
 import json
 import os
+import re
+import stat
 import sys
+from datetime import datetime, timezone
 
 env = os.environ
+sys.path.insert(0, env["ARC_SCRIPT_DIR"])
+from extract_section import extract_section
+
 RECORD_DIR = env["ARC_RECORD_DIR"]
 SLUG = env["ARC_SLUG"]
 JSON_MODE = env["ARC_JSON_MODE"] == "1"
@@ -97,12 +109,98 @@ documents = sorted(
 ledger_path = os.path.join(RECORD_DIR, "coordination.md")
 has_ledger = os.path.isfile(ledger_path)
 
+HIDDEN = ("_", ".")
+COMMENT = re.compile(r"<!--.*?-->", re.S)
+HEADING = re.compile(r"^#{1,6}(\s|$)")
+RULE = re.compile(r"^([-*_])(\s*\1){2,}$")
+LIST_ITEM = re.compile(r"^(\d+[.)]|[-*+])\s")
+BRIEF_LABEL = re.compile(r"^\*\*(?P<label>[^*]+?)(:\*\*|\*\*:)\s*(?P<text>.*)$")
+
+
+def arc_files():
+    found = []
+    for root, dirs, names in os.walk(RECORD_DIR):
+        dirs[:] = [name for name in dirs if not name.startswith(HIDDEN)]
+        for name in names:
+            if name.startswith(HIDDEN):
+                continue
+            full = os.path.join(root, name)
+            info = os.lstat(full)
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            found.append({
+                "path": os.path.relpath(full, RECORD_DIR).replace(os.sep, "/"),
+                "size": info.st_size,
+                "mtime": datetime.fromtimestamp(info.st_mtime, timezone.utc)
+                .strftime("%Y-%m-%dT%H:%M:%SZ"),
+            })
+    return sorted(found, key=lambda entry: entry["path"])
+
+
+def brief_entries():
+    if not has_ledger:
+        return []
+    section = extract_section(ledger_path, "Brief", exact=True)
+    if section is None:
+        return []
+    body = COMMENT.sub("", section.partition("\n")[2])
+    entries = []
+    current = None
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or HEADING.match(line):
+            current = None
+            continue
+        match = BRIEF_LABEL.match(line)
+        if match:
+            current = [match.group("label").strip(), match.group("text")]
+            entries.append(current)
+        elif current is None:
+            current = ["", line]
+            entries.append(current)
+        else:
+            current.append(line)
+    out = []
+    for entry in entries:
+        text = "\n".join(entry[1:]).strip()
+        if text.startswith("<") and text.endswith(">"):
+            text = ""
+        out.append({"label": entry[0], "text": text})
+    return out
+
+
+# A digest is prose for the owner with no fixed shape: numbered items, bold
+# leads, bare paragraphs, or a heading per decision. Every paragraph is one
+# entry, and a list item starts a new entry even with no blank line before it.
+def decision_entries():
+    digest_path = os.path.join(RECORD_DIR, "digest.md")
+    if not os.path.isfile(digest_path):
+        return []
+    with open(digest_path, encoding="utf-8") as handle:
+        text = COMMENT.sub("", handle.read())
+    blocks = []
+    current = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or HEADING.match(line) or RULE.match(line):
+            current = None
+            continue
+        if current is None or LIST_ITEM.match(line):
+            current = []
+            blocks.append(current)
+        current.append(line)
+    return [{"text": "\n".join(block)} for block in blocks]
+
+
 if JSON_MODE:
     out = dict(record)
     out["path"] = os.path.join("_work", "_arcs", SLUG)
     out["documents"] = documents
     out["has_ledger"] = has_ledger
     out["has_report"] = "report.md" in documents
+    out["files"] = arc_files()
+    out["brief"] = brief_entries()
+    out["decisions"] = decision_entries()
     print(json.dumps(out, indent=2))
     sys.exit(0)
 
