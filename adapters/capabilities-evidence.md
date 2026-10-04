@@ -247,6 +247,24 @@ non-`none` cell points at an id that exists here.
 
 ---
 
+### claude-code-plugin-runtime
+
+- **Source:** Claude Code's own plugin API declarations and checker
+  (function hooks, "mods"), as the engine writes them beside a loaded mod
+- **URL / path:** `adapters/claude-code-mod/.claude-plugin/types/claude-code/index.d.ts`
+  (written by the engine on load; not committed), `claude plugin validate
+  adapters/claude-code-mod`, `claude plugin test adapters/claude-code-mod`
+- **Retrieved:** 2026-10-04
+- **Product / version:** Claude Code 2.1.289 (early access: "may change
+  between releases without notice")
+- **Claim:** Claude Code loads a plugin's TypeScript hooks module into its
+  own process and calls it on lifecycle events (`session.start`,
+  `tool.call`, `command.run`, `ui.render` for panes and the band above the
+  prompt). Plugin folders load from `env.CLAUDE_CODE_PLUGIN_DIRS` in
+  `~/.claude/settings.json`, read by the CLI and the desktop app alike.
+  lore ships `adapters/claude-code-mod/` there.
+- **Consumed by:** `claude-code.capabilities.plugin_runtime`.
+
 ## OpenCode
 
 ### opencode-instructions
@@ -816,10 +834,6 @@ the exact binary version probed; refresh when the harness is upgraded.
 These are intentionally `none` (or out of scope) and are listed here so
 T70 / `lore doctor` can distinguish a gap from a missing-evidence error.
 
-- **`claude-code.plugin_runtime` = none.** Claude Code hooks are shell
-  or python commands; there is no in-process plugin runtime equivalent
-  to OpenCode's TypeScript plugins. Scripts handle every extension
-  need. No evidence pointer required.
 - **`codex.plugin_runtime` = none.** Codex hooks are shell commands
   invoked from `config.toml`; no in-process plugin runtime. (The
   changelog mentions `0.128.0` "plugin workflows" via marketplace, but
@@ -890,6 +904,7 @@ matches the union of all `evidence:` fields in capabilities.json.
 - claude-code-model-routing
 - claude-code-interaction
 - claude-code-spend-telemetry
+- claude-code-plugin-runtime
 - opencode-instructions
 - opencode-skills
 - opencode-mcp

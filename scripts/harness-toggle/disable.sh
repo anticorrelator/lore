@@ -154,6 +154,10 @@ fi
 for fw in "${FRAMEWORKS[@]}"; do
   remove_symlinks_for "$fw"
   clear_claude_md_for "$fw"
+  if [[ "$fw" == "claude-code" ]]; then
+    bash "$SCRIPT_DIR/../claude-code-mod-install.sh" disable \
+      || echo "  [warn] [$fw] claude-code-mod-install.sh disable failed (non-fatal)" >&2
+  fi
 
   # Mirror to settings.json::harnesses.<fw>.enabled
   LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" patch "harnesses.${fw}.enabled" 'false'

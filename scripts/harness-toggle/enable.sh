@@ -212,6 +212,10 @@ for fw in "${FRAMEWORKS[@]}"; do
 
   restore_symlinks_for "$fw"
   restore_claude_md_for "$fw"
+  if [[ "$fw" == "claude-code" ]]; then
+    bash "$SCRIPT_DIR/../claude-code-mod-install.sh" enable \
+      || echo "  [warn] [$fw] claude-code-mod-install.sh enable failed (non-fatal)" >&2
+  fi
 
   echo "Lore harness '$fw': enabled"
 done
