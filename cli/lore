@@ -112,6 +112,8 @@ Commands:
   backlinks    Backlink management (see: lore backlinks --help)
   rebuild      Rebuild and reinstall the lore-tui binary
   doctor       Check installation health and detect stale components
+  herdr        Open a project as a Herdr workspace: coordination TUI plus
+               live worker panes (lore herdr up|down [DIR])
   export-obsidian
                Export the knowledge store as an Obsidian-flavor vault
                (see: lore export-obsidian --help)
@@ -2448,6 +2450,10 @@ case "$1" in
   doctor)
     shift
     exec "$SCRIPTS_DIR/doctor.sh" "$@"
+    ;;
+  herdr)
+    shift
+    exec python3 "$SCRIPTS_DIR/herdr-workspace.py" "$@"
     ;;
   export-obsidian)
     shift
