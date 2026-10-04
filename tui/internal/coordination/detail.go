@@ -486,7 +486,10 @@ func (m DetailModel) renderBoard() string {
 			if !m.closed && i == m.rowCursor {
 				prefix = "▸ "
 			}
-			b.WriteString(prefix + styleBoardLine(renderedLine, board.Held(row) && !m.closed) + "\n")
+			// A step waiting on the owner's input is the one live ask, so it
+			// stands out whatever gate it was dispatched under.
+			emphasize := !m.closed && (board.Held(row) || row.Status == "blocked-on-input")
+			b.WriteString(prefix + styleBoardLine(renderedLine, emphasize) + "\n")
 		}
 	}
 	if m.boardErr != "" {
@@ -495,12 +498,12 @@ func (m DetailModel) renderBoard() string {
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
-func styleBoardLine(line board.RenderedLine, held bool) string {
+func styleBoardLine(line board.RenderedLine, emphasize bool) string {
 	lead, metadata := line.Text, ""
 	if line.MetadataAt >= 0 {
 		lead, metadata = line.Text[:line.MetadataAt], line.Text[line.MetadataAt:]
 	}
-	if held {
+	if emphasize {
 		lead = holdStyle.Render(lead)
 	}
 	if metadata != "" {
