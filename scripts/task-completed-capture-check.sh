@@ -254,6 +254,7 @@ try:
             require(isinstance(metadata, dict), 'invalid native task metadata')
     if not marked(event) and not marked(metadata):
         sys.exit(3)
+    sys.path.insert(0, str(scripts / 'vendor'))  # lore's vendored PyYAML
     import yaml
     binder = module('completion_position_bind', 'position-bind.py')
     assigned = metadata.get('position_dispatch', event.get('position_dispatch'))

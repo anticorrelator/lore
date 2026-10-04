@@ -26,6 +26,8 @@ it is a bounded window again and a dense enough single-topic fact corpus can
 still bury a section's candidates.
 """
 
+from __future__ import annotations
+
 import os
 import sqlite3
 import sys

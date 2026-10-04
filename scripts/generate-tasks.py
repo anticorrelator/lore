@@ -21,6 +21,8 @@ emitted follows the plan's own grammar, and only one is ever present:
                    "files": [...], "tasks": [{ "id": "task-1", ... }] }] }
 """
 
+from __future__ import annotations
+
 import argparse
 import hashlib
 import importlib.util
@@ -1272,6 +1274,9 @@ def _parse_v2_directive_yaml(body: str, unit_label: str) -> dict | None:
     wrong focal count) raises ``ValueError`` with the same messages as the
     yaml-ish path — invalid is loud, not a silent legacy downgrade.
     """
+    vendor = str(Path(__file__).resolve().parent / "vendor")
+    if vendor not in sys.path:
+        sys.path.insert(0, vendor)  # lore's vendored PyYAML (scripts/vendor)
     try:
         import yaml
     except ImportError:

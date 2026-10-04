@@ -31,6 +31,7 @@ import subprocess
 import sys
 import textwrap
 
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "vendor"))  # lore's vendored PyYAML
 import yaml
 
 original, temporary, scenario = sys.argv[1:]

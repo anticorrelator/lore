@@ -1107,6 +1107,7 @@ TOML
   # their own LORE_FRAMEWORK. Read the installed TOML rather than the heredoc
   # so the assertion covers what codex actually loads.
   [ -f "$CODEX_ADAPTER" ] || skip "adapters/codex/hooks.sh missing"
+  python3 -c 'import tomllib' 2>/dev/null || skip "python3 < 3.11 has no tomllib to parse the installed TOML"
   set_framework codex
   export HOME="$TEST_LORE_DATA_DIR/home"
   mkdir -p "$HOME/.codex"

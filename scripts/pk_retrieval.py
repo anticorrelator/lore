@@ -11,6 +11,8 @@ the single authority for those, including the preferences-category and
 abstract-scale bypass rules.
 """
 
+from __future__ import annotations
+
 # Shared char ceiling for prompt-formatted ## Prior Knowledge bundles
 # (prefetch single-pass budget and manifest v2 global ceiling).
 DEFAULT_PROMPT_BUDGET = 12000

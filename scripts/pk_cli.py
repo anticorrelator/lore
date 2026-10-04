@@ -16,6 +16,8 @@ Usage:
     python pk_cli.py generate-backlinks <knowledge_dir> [--json] [--threshold F] [--dry-run]
 """
 
+from __future__ import annotations
+
 from pk_byline import Bylines
 
 import argparse

@@ -35,10 +35,30 @@ FRAMEWORK="claude-code"
 # install.sh accept a framework that capabilities.json rejects (or vice
 # versa); reading once prevents that drift class.
 _caps_file="$LORE_REPO_DIR/adapters/capabilities.json"
-if ! command -v jq >/dev/null 2>&1; then
-  echo "Error: install.sh requires jq on PATH (used to read $_caps_file)" >&2
+
+# --- Preflight: what install.sh itself cannot run without ---
+# prereqs.sh is pure bash, so it runs before jq or python3 are known to exist.
+# Stop on a required prerequisite (git, jq, a python3 at lore's floor) and
+# print the package-manager commands that fix it. PATH and optional tools do
+# not block; the digest at the end of the install reports them.
+# shellcheck source=scripts/prereqs.sh
+source "$LORE_REPO_DIR/scripts/prereqs.sh"
+_blocking=""
+while IFS= read -r _record; do
+  [ -z "$_record" ] && continue
+  case "$_record" in
+    "required${_LORE_US}path${_LORE_US}"*) ;;
+    "required${_LORE_US}"*) _blocking="${_blocking}${_record}"$'\n' ;;
+  esac
+done <<< "$(lore_prereq_records)"
+if [ -n "$_blocking" ]; then
+  echo "lore can't be installed until these are in place:" >&2
+  echo "" >&2
+  lore_render_digest "$_blocking" >&2 || true
+  echo "  Then re-run: bash $LORE_REPO_DIR/install.sh" >&2
   exit 1
 fi
+unset _blocking _record
 if [ ! -f "$_caps_file" ]; then
   echo "Error: capabilities file not found: $_caps_file" >&2
   exit 1
@@ -746,15 +766,8 @@ info "Installing CLI to ~/.local/bin/lore"
 dry mkdir -p "$HOME/.local/bin"
 dry ln -sf "$LORE_REPO_DIR/cli/lore" "$HOME/.local/bin/lore"
 
-# Check if ~/.local/bin is on PATH
-if ! echo "$PATH" | tr ':' '\n' | grep -qx "$HOME/.local/bin"; then
-  echo ""
-  echo "  [warning] ~/.local/bin is not on your PATH."
-  echo "  Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
-  echo ""
-  echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
-  echo ""
-fi
+# Whether ~/.local/bin is on PATH is reported, with the line for the user's
+# shell, in the next-steps digest at the end of the install.
 
 # --- 3b. Build and install TUI ---
 # The TUI links the vendored libghostty-vt static archive via cgo, so in
@@ -781,9 +794,13 @@ if command -v go >/dev/null 2>&1; then
       info "Building TUI (build ${BUILD_SHA:-dev})"
     fi
     if ! $DRY_RUN; then
-      (cd "$LORE_REPO_DIR/tui" && CGO_ENABLED=1 \
+      # A failed TUI build must not abort the install: everything else lore
+      # does works without the TUI, and the digest reports it as unbuilt.
+      if ! (cd "$LORE_REPO_DIR/tui" && CGO_ENABLED=1 \
         PKG_CONFIG="$(tui_ghostty_pkg_config_shim "$LORE_REPO_DIR/tui")" \
-        go build ${TUI_BUILD_TAGS:+-tags "$TUI_BUILD_TAGS"} -ldflags "$TUI_LDFLAGS" -o "$HOME/.local/bin/lore-tui" .)
+        go build ${TUI_BUILD_TAGS:+-tags "$TUI_BUILD_TAGS"} -ldflags "$TUI_LDFLAGS" -o "$HOME/.local/bin/lore-tui" .); then
+        info "TUI build failed (output above); continuing without it"
+      fi
     else
       echo "  [dry-run] (cd $LORE_REPO_DIR/tui && go build${TUI_BUILD_TAGS:+ -tags $TUI_BUILD_TAGS} -ldflags \"$TUI_LDFLAGS\" -o ~/.local/bin/lore-tui .)"
     fi
@@ -1126,7 +1143,7 @@ echo "  CLI:         ~/.local/bin/lore -> $LORE_REPO_DIR/cli/lore"
 if [ -f "$HOME/.local/bin/lore-tui" ]; then
   echo "  TUI:         ~/.local/bin/lore-tui (built)"
 else
-  echo "  TUI:         skipped (go not found)"
+  echo "  TUI:         not built (see next steps)"
 fi
 # Resolve summary paths from the active framework's install_paths so the
 # summary reflects what was actually written. claude-code resolves to
@@ -1156,3 +1173,23 @@ else
 fi
 echo ""
 echo "To uninstall: bash $LORE_REPO_DIR/install.sh --uninstall"
+
+# --- 9. Next steps ---
+# The same checks `lore doctor` runs, reduced to numbered steps with the
+# command for each. A dry run installs nothing, so only prerequisites apply.
+echo ""
+if $DRY_RUN; then
+  _records=$(lore_prereq_records)
+  draw_separator "lore: next steps"
+  echo ""
+  if [ -z "$_records" ]; then
+    echo "  All prerequisites are met."
+    echo ""
+  else
+    lore_render_digest "$_records" || true
+  fi
+  draw_separator
+  unset _records
+else
+  bash "$LORE_REPO_DIR/scripts/doctor.sh" --digest || true
+fi

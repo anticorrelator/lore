@@ -8,6 +8,8 @@ Extracted from pk_search.py. Provides:
 Used by: pk_search.py (LinkChecker, CLI), staleness-scan.py
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re

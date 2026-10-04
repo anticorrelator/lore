@@ -18,6 +18,8 @@ Usage:
     python staleness-scan.py <knowledge_dir> [--repo-root PATH] [--json]
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os

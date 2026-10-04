@@ -298,10 +298,11 @@ assert r["stratum"] == "routine", r
 
 @test "schema accepts routine_rate at bounds and rejects out-of-range / unknown key" {
   command -v python3 >/dev/null 2>&1 || skip
-  python3 -c 'import jsonschema' 2>/dev/null || skip "jsonschema not installed"
   run python3 - "$SCHEMA" <<'PYEOF'
 import json, sys
-import jsonschema
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(sys.argv[1])), "..", "scripts"))
+import lore_schema as jsonschema  # lore's stdlib validator; nothing to pip install
 schema = json.load(open(sys.argv[1]))
 base = {"version": 2, "tui_launch_framework": "claude-code", "harnesses": {},
         "routes": {"default": "claude-code/opus"}}

@@ -15,6 +15,8 @@ footer text.
 Dependencies: Python stdlib only (sqlite3, struct, math, re).
 """
 
+from __future__ import annotations
+
 import math
 import re
 import sqlite3

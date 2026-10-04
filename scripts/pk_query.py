@@ -10,6 +10,8 @@ preferences-category and abstract-scale bypass rules); no post-filter is
 applied here.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sys

@@ -15,7 +15,8 @@ import sys
 import tempfile
 import time
 
-import yaml
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "vendor"))  # lore's vendored PyYAML
+import yaml  # noqa: E402
 
 
 EXECUTABLE = {"bash", "sh", "shell", "python", "python3"}

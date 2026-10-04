@@ -5,11 +5,10 @@ CORPUS="$REPO_DIR/tests/fixtures/route-parity.json"
 
 setup_file() {
   source "$REPO_DIR/scripts/lib.sh"
-  ensure_yaml_python
+  ensure_lore_python
   command -v python3 >/dev/null || return 1
   command -v jq >/dev/null || return 1
   command -v go >/dev/null || return 1
-  python3 -c 'import jsonschema' || return 1
   ROUTE_PARITY_DIR="$(mktemp -d)"
   export GOCACHE=/tmp/routes-task9-gocache
   mkdir -p "$ROUTE_PARITY_DIR/config"

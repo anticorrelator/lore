@@ -20,14 +20,13 @@ SKILLS_DIR="$REPO_DIR/skills"
 setup() {
   [ -d "$SKILLS_DIR" ] || skip "skills/ missing"
   command -v python3 >/dev/null 2>&1 || skip "python3 required for YAML validation"
-  python3 -c "import yaml" 2>/dev/null || skip "PyYAML not installed"
 }
 
 # Parse the frontmatter of one SKILL.md and print the parsed dict's keys, or
 # print "ERR: <message>" on parse failure. Used by the per-file asserts below.
 parse_frontmatter() {
   local skill_md="$1"
-  python3 - "$skill_md" <<'PYEOF'
+  PYTHONPATH="$REPO_DIR/scripts/vendor${PYTHONPATH:+:$PYTHONPATH}" python3 - "$skill_md" <<'PYEOF'
 import sys, yaml
 path = sys.argv[1]
 with open(path) as f:

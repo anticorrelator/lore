@@ -14,7 +14,9 @@ import subprocess
 import sys
 import tempfile
 
-import yaml
+# Lore ships PyYAML under scripts/vendor so nothing has to be pip-installed.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "vendor"))
+import yaml  # noqa: E402
 
 POSITIONS = ("investigator", "designer", "worker", "reviewer")
 CONTRACT = "docs/position-report-contracts.md"

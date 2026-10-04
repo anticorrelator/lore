@@ -22,6 +22,8 @@ Examples:
 Both importable and CLI-callable.
 """
 
+from __future__ import annotations
+
 import argparse
 import re
 import sys

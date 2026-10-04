@@ -9,6 +9,8 @@ Other extracted modules:
     pk_resolve.py  — Resolver, resolve_read_path, BACKLINK_RE
 """
 
+from __future__ import annotations
+
 import fcntl
 import hashlib
 import json

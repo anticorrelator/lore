@@ -204,7 +204,7 @@ SH
   chmod +x "$TEST_ROOT/bin/go"
   export PATH="$TEST_ROOT/bin:$PATH"
   source "$REPO_DIR/scripts/lib.sh"
-  ensure_yaml_python
+  ensure_lore_python
   python3 - "$LORE_DATA_DIR/config/framework.json" "$REPO_DIR/adapters/roles.json" <<'PY'
 import json, sys
 roles = json.load(open(sys.argv[2]))["roles"]

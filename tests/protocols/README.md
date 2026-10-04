@@ -4,7 +4,7 @@
 
 The helpers read `skills`, `agents`, `claude-md`, and `scripts` relative to this directory. Tests that invoke hooks supply an isolated store and explicit framework so personal settings cannot bypass the tested path.
 
-Run `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 lore test protocols -q` for an isolated pytest environment; this suite needs pytest and PyYAML, but no third-party pytest plugins. Additional arguments are forwarded unchanged.
+Run `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 lore test protocols -q` for an isolated pytest environment; this suite needs pytest (PyYAML ships with lore under scripts/vendor), but no third-party pytest plugins. Additional arguments are forwarded unchanged.
 
 ## Coverage ownership
 

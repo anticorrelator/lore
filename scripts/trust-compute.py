@@ -49,6 +49,8 @@ CLI:
     trust-compute.py <knowledge_dir> [--entry REL_PATH]... [--json]
 """
 
+from __future__ import annotations
+
 import argparse
 import hashlib
 import json

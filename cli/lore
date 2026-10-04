@@ -111,7 +111,7 @@ Commands:
   batch-capture    Capture multiple insights from a JSON array
   backlinks    Backlink management (see: lore backlinks --help)
   rebuild      Rebuild and reinstall the lore-tui binary
-  doctor       Check installation health and detect stale components
+  doctor       Check prerequisites and installation health; --digest lists next steps
   export-obsidian
                Export the knowledge store as an Obsidian-flavor vault
                (see: lore export-obsidian --help)
@@ -2339,7 +2339,7 @@ case "$1" in
     cmd_trust "$@"
     ;;
   impl)
-    ensure_yaml_python
+    ensure_lore_python
     shift
     cmd_impl "$@"
     ;;

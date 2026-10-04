@@ -10,14 +10,20 @@ gotchas, architecture notes, in-flight work.
 
 ## Install
 
-Requires bash, Python 3, and Go (builds the TUI). Go can be skipped for
-knowledge and memory use alone, but the TUI is required for `/coordinate` —
-it allows coordinator agents to manage worker sessions.
+Runs on macOS and Linux. Requires git, jq, and Python 3.9 or newer (macOS's
+built-in `python3` qualifies). Nothing is installed with pip: lore ships the
+Python libraries it uses. Go and a C compiler build the TUI. They can be
+skipped for knowledge and memory use alone, but the TUI is required for
+`/coordinate` — it allows coordinator agents to manage worker sessions.
 
 ```bash
 git clone git@github.com:anticorrelator/lore.git && cd lore
 bash install.sh                # --framework claude-code (default) | opencode | codex
 ```
+
+The installer stops early if a requirement is missing. It finishes with a
+numbered list of anything left to do, each with the command for your package
+manager. `lore doctor` shows that list again at any time.
 
 Then, in a project you work on:
 

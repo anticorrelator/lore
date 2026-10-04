@@ -11,7 +11,6 @@ teardown() {
 }
 
 spec_scenario() {
-  python3 -c 'import yaml'
   local recipe_root="$BATS_SUITE_TMPDIR/spec-recipes/$1"
   if [ -n "${SPEC_RECIPE_OUTPUT_ROOT:-}" ]; then
     recipe_root="$SPEC_RECIPE_OUTPUT_ROOT/$1"

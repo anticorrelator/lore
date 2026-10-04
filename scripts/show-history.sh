@@ -70,6 +70,8 @@ fi
 [[ "$ENTRY_ID" == *.md ]] || ENTRY_ID="${ENTRY_ID}.md"
 
 python3 - "$KDIR" "$ENTRY_ID" <<'PYEOF'
+from __future__ import annotations
+
 import json
 import os
 import re

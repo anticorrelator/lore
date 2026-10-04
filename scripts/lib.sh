@@ -3098,19 +3098,30 @@ draw_separator() {
 
   if [[ -z "$title" ]]; then
     # Full-width line
-    printf '%*s\n' "$width" '' | tr ' ' '─'
+    _draw_rule "$width"
   else
     local prefix="── "
     local suffix=" "
     local decorated="${prefix}${title}${suffix}"
-    local decorated_len=${#decorated}
+    # Prefix and suffix are 4 columns; counting them via ${#decorated} would
+    # count bytes, not characters, outside a UTF-8 locale.
+    local decorated_len=$(( ${#title} + 4 ))
     local remaining=$((width - decorated_len))
     if [[ "$remaining" -lt 1 ]]; then
       remaining=1
     fi
     printf '%s' "$decorated"
-    printf '%*s\n' "$remaining" '' | tr ' ' '─'
+    _draw_rule "$remaining"
   fi
+}
+
+# _draw_rule <n> — print n box-drawing dashes and a newline. Built with bash
+# substitution, not `tr ' ' '─'`: GNU tr maps bytes, so on Linux it emits only
+# the first byte of the three-byte '─' and the rule renders as garbage.
+_draw_rule() {
+  local line
+  printf -v line '%*s' "$1" ''
+  printf '%s\n' "${line// /─}"
 }
 
 # --- render_table ---
@@ -3538,26 +3549,32 @@ tui_ghostty_preflight() {
   return 0
 }
 
-# Select a Python with the compiler dependency and propagate it to child scripts.
-# Search PATH candidates before conventional user installations; never install.
-ensure_yaml_python() {
+# ensure_lore_python — select a python3 that meets lore's floor (prereqs.sh:
+# LORE_PYTHON_MIN_*) and propagate it to child scripts via PATH and
+# LORE_PYTHON. LORE_PYTHON wins, then PATH order. Never installs anything:
+# lore's Python libraries are vendored (scripts/vendor), so any python3 at or
+# above the floor is enough.
+ensure_lore_python() {
   local candidate directory
   local -a candidates=()
+  # shellcheck source=scripts/prereqs.sh
+  source "$(dirname "${BASH_SOURCE[0]}")/prereqs.sh"
   [[ -z "${LORE_PYTHON:-}" ]] || candidates+=("$LORE_PYTHON")
   local old_ifs="$IFS"
   IFS=:
   for directory in $PATH; do candidates+=("${directory:-.}/python3"); done
   IFS="$old_ifs"
-  candidates+=("$HOME/.lore/venv/bin/python3" "$HOME/miniconda3/bin/python3" "$HOME/miniforge3/bin/python3" /opt/homebrew/Caskroom/miniconda/base/bin/python3)
   for candidate in "${candidates[@]}"; do
+    # Children run `python3` from PATH, so only a file named python3 can be
+    # propagated by prepending its directory.
     [[ -x "$candidate" && "$(basename "$candidate")" == python3 ]] || continue
-    if "$candidate" -c 'import sys, yaml; assert sys.version_info >= (3, 10)' >/dev/null 2>&1; then
+    if lore_python_ok "$candidate"; then
       directory="$(cd "$(dirname "$candidate")" && pwd)"
       export LORE_PYTHON="$directory/$(basename "$candidate")"
       export PATH="$directory:$PATH"
       return 0
     fi
   done
-  echo "[lore] Python >=3.10 with PyYAML is required; no tested python3 satisfies both. Tried: ${candidates[*]}. Set LORE_PYTHON to a Python with PyYAML." >&2
+  echo "[lore] Python >=$LORE_PYTHON_MIN_MAJOR.$LORE_PYTHON_MIN_MINOR is required; none found (tried: ${candidates[*]}). Run \`lore doctor\` for the install command." >&2
   return 1
 }

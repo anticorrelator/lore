@@ -8,28 +8,39 @@
 #   bash doctor.sh --json    # Structured JSON output (D5 schema)
 #   bash doctor.sh --quiet   # Silent when clean, one-line summary when drifted;
 #                            # skips checks if ~/.lore/.doctor-last-run is <24h old
+#   bash doctor.sh --digest  # Only the numbered next steps (install.sh ends with it)
+#
+# Prerequisites (python3, jq, git, PATH, and the optional TUI/PR tooling) come
+# from prereqs.sh. Every issue carries the command that fixes it. Optional
+# prerequisites are listed but never count as drift: --quiet stays silent and
+# the exit status stays 0 when only optional tools are missing.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=scripts/prereqs.sh
+source "$SCRIPT_DIR/prereqs.sh"
 
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 MODE_JSON=0
 MODE_QUIET=0
+MODE_DIGEST=0
 
 for arg in "$@"; do
   case "$arg" in
     --json)    MODE_JSON=1 ;;
     --quiet)   MODE_QUIET=1 ;;
+    --digest)  MODE_DIGEST=1 ;;
     --help|-h)
-      echo "Usage: lore doctor [--json] [--quiet]" >&2
+      echo "Usage: lore doctor [--json] [--quiet] [--digest]" >&2
       echo "  Check installation for drift between repo source and installed state." >&2
       echo "  --json    Output structured JSON (D5 schema)" >&2
       echo "  --quiet   Silent when clean; one-line summary when drifted" >&2
       echo "            Throttled: skips checks if last run was <24h ago" >&2
+      echo "  --digest  Print only the numbered next steps that clear the issues" >&2
       exit 0
       ;;
     *) echo "Unknown flag: $arg" >&2; exit 1 ;;
@@ -90,17 +101,91 @@ HARNESS_SETTINGS_FILE=$(harness_path_or_empty settings)
 # ---------------------------------------------------------------------------
 # Issue collection
 # ---------------------------------------------------------------------------
-# Each issue is stored as a pipe-delimited string: component|type|artifact|detail
+# Each issue is one string of five fields joined by the ASCII unit separator:
+# component, type, artifact, detail, fix. Details can hold '|' and newlines
+# (schema messages), so neither can separate fields. An empty fix falls back
+# to _default_fix at render time.
+US=$'\x1f'
 ISSUES=()
 CHECKED=()
+PREREQ_RECORDS=""
 
 add_issue() {
   local component="$1"
   local type="$2"
   local artifact="$3"
   local detail="$4"
-  ISSUES+=("${component}|${type}|${artifact}|${detail}")
+  local fix="${5:-}"
+  ISSUES+=("${component}${US}${type}${US}${artifact}${US}${detail}${US}${fix}")
 }
+
+# _split_issue <issue> — set I_COMPONENT, I_TYPE, I_ARTIFACT, I_DETAIL, I_FIX.
+_split_issue() {
+  local rest="$1"
+  I_COMPONENT="${rest%%"$US"*}"; rest="${rest#*"$US"}"
+  I_TYPE="${rest%%"$US"*}"; rest="${rest#*"$US"}"
+  I_ARTIFACT="${rest%%"$US"*}"; rest="${rest#*"$US"}"
+  I_DETAIL="${rest%%"$US"*}"; I_FIX="${rest#*"$US"}"
+  if [[ -z "$I_FIX" ]]; then
+    I_FIX=$(_default_fix "$I_COMPONENT" "$I_TYPE")
+  fi
+}
+
+# _default_fix <component> <type> — the repair for drift that names no fix.
+_default_fix() {
+  case "$1:$2" in
+    *:n/a) echo "" ;;
+    claude_md:stale) echo "lore assemble" ;;
+    *) echo "bash $LORE_REPO_DIR/install.sh" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Check 0: Prerequisites (prereqs.sh). Required ones are drift; optional ones
+# are reported with type "optional" and never change status or exit code.
+# Later checks that need python3 skip themselves when it is unusable, so a
+# missing interpreter surfaces once, here, instead of as false config errors.
+# ---------------------------------------------------------------------------
+CHECKED+=("prerequisites")
+PREREQ_RECORDS=$(lore_prereq_records)
+while IFS= read -r _record; do
+  [[ -z "$_record" ]] && continue
+  _rest="$_record"
+  _level="${_rest%%"$US"*}"; _rest="${_rest#*"$US"}"
+  _name="${_rest%%"$US"*}"; _rest="${_rest#*"$US"}"
+  _detail="${_rest%%"$US"*}"; _rest="${_rest#*"$US"}"
+  _fix="${_rest#*"$US"}"
+  if [[ "$_level" == required ]]; then
+    add_issue "prerequisites" "missing" "$_name" "$_detail" "$_fix"
+  else
+    add_issue "prerequisites" "optional" "$_name" "$_detail" "$_fix"
+  fi
+done <<< "$PREREQ_RECORDS"
+unset _record _rest _level _name _detail _fix
+PYTHON_OK=0
+if command -v python3 >/dev/null 2>&1 && lore_python_ok python3; then
+  PYTHON_OK=1
+fi
+
+# ---------------------------------------------------------------------------
+# Check 0b: TUI binary (optional, like the toolchain that builds it). Only
+# reported when go and a C compiler are present — otherwise Check 0 already
+# names what is missing — so a build that failed or was never run, or a
+# platform with no vendored terminal library, still shows up.
+# ---------------------------------------------------------------------------
+CHECKED+=("tui")
+if [[ ! -x "$HOME/.local/bin/lore-tui" ]] && command -v go >/dev/null 2>&1 \
+  && { command -v cc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; }; then
+  if _tui_blocker=$(tui_ghostty_preflight "$LORE_REPO_DIR/tui"); then
+    add_issue "tui" "optional" "lore-tui" \
+      "the TUI (run \`lore\`, needed by /coordinate) is not built" \
+      "bash $LORE_REPO_DIR/install.sh   (rebuilds it; a failed build prints its error)"
+  else
+    add_issue "tui" "optional" "lore-tui" "the TUI cannot be built here: $_tui_blocker" \
+      "none on this platform yet"
+  fi
+  unset _tui_blocker
+fi
 
 # ---------------------------------------------------------------------------
 # Check 1: scripts symlink
@@ -325,14 +410,31 @@ if [[ "$GUIDANCE_HOOK_SUPPORT" == "full" && "$ACTIVE_FRAMEWORK" == "codex" ]]; t
     add_issue "hooks" "missing" "$expected_guidance_command" "$HARNESS_SETTINGS_FILE not found"
   else
     installed_guidance_commands="$(python3 - "$HARNESS_SETTINGS_FILE" <<'PYEOF' 2>/dev/null || true
-import sys, tomllib
-with open(sys.argv[1], "rb") as f:
-    settings = tomllib.load(f)
-for entries in settings.get("hooks", {}).values():
-    for entry in entries:
-        command = entry.get("command")
-        if command:
-            print(command)
+import json, re, sys
+try:
+    import tomllib  # Python 3.11+
+except ImportError:
+    tomllib = None
+if tomllib is not None:
+    with open(sys.argv[1], "rb") as f:
+        settings = tomllib.load(f)
+    for entries in settings.get("hooks", {}).values():
+        for entry in entries:
+            command = entry.get("command")
+            if command:
+                print(command)
+else:
+    # Python 3.9 and 3.10 ship no TOML parser. The lore-managed block writes
+    # each hook as a command key holding a TOML basic string (see
+    # adapters/codex/hooks.sh); basic strings escape exactly as JSON strings
+    # do, so reading those lines finds every lore command. Quote characters
+    # are spelled as \x22 here because bash 3.2 miscounts quotes inside a
+    # heredoc nested in command substitution.
+    with open(sys.argv[1], encoding="utf-8") as f:
+        for line in f:
+            m = re.match(r"\s*command\s*=\s*(\x22(?:[^\x22\\]|\\.)*\x22)\s*(#.*)?$", line)
+            if m:
+                print(json.loads(m.group(1)))
 PYEOF
 )"
     if ! echo "$installed_guidance_commands" | grep -qxF "$expected_guidance_command"; then
@@ -343,6 +445,8 @@ PYEOF
 elif [[ -z "$HARNESS_SETTINGS_FILE" || "$HARNESS_SETTINGS_FILE" != *.json ]]; then
   add_issue "hooks" "n/a" "settings" \
     "active harness has no JSON settings file (was: ${HARNESS_SETTINGS_FILE:-unsupported})"
+elif [[ "$PYTHON_OK" -eq 0 ]]; then
+  :  # cannot read the settings file without python3; Check 0 reports why
 elif [[ ! -f "$HARNESS_SETTINGS_FILE" ]]; then
   for cmd in "${EXPECTED_HOOK_COMMANDS[@]}"; do
     add_issue "hooks" "missing" "$cmd" "$HARNESS_SETTINGS_FILE not found"
@@ -381,6 +485,7 @@ _check_role_config() {
   local config_file="$1"
   local artifact_label="$2"
   [[ -f "$config_file" ]] || return 0
+  [[ "$PYTHON_OK" -eq 1 ]] || return 0
   local result
   result=$(python3 -c '
 import json, sys
@@ -402,11 +507,13 @@ else:
     ok) return 0 ;;
     unparseable)
       add_issue "role_config" "malformed" "$artifact_label" \
-        "config file is not valid JSON: $config_file" ;;
+        "config file is not valid JSON: $config_file" \
+        "repair the JSON syntax in $config_file" ;;
     invalid:*)
       local bad_role="${result#invalid:}"
       add_issue "role_config" "malformed" "$artifact_label" \
-        "role value '$bad_role' not in {maintainer, contributor}: $config_file" ;;
+        "role value '$bad_role' not in {maintainer, contributor}: $config_file" \
+        "set \"role\" to \"maintainer\" or \"contributor\" in $config_file" ;;
   esac
 }
 
@@ -423,9 +530,8 @@ _check_role_config "$ROLE_CONFIG_DATA_DIR/config/settings.json" \
 
 # ---------------------------------------------------------------------------
 # Check 9: Unified settings.json validates against adapters/settings.schema.json
-# Strict full-document validation via Python jsonschema (D7). jsonschema is a
-# doctor-only dependency: when missing, doctor surfaces an actionable install
-# message rather than a Python traceback.
+# Strict full-document validation (D7) via scripts/lore_schema.py, a stdlib
+# validator, so the check runs on any python3 without installing anything.
 # ---------------------------------------------------------------------------
 CHECKED+=("settings_schema")
 doctor_validate_settings_schema() {
@@ -441,38 +547,21 @@ doctor_validate_settings_schema() {
     return 0
   fi
 
-  if ! python3 -c "import jsonschema" >/dev/null 2>&1; then
-    add_issue "settings_schema" "missing_dep" "jsonschema" \
-      "Python jsonschema package missing — install with: pip install jsonschema"
-    return 0
-  fi
+  [[ "$PYTHON_OK" -eq 1 ]] || return 0
 
-  # Capture stdout under `set -e`: || true ensures the validator's non-zero
-  # exit (on schema violation) doesn't abort the script.
+  # Capture stdout under `set -e`: || rc=$? keeps the validator's non-zero
+  # exit (1 = violation, 2 = unreadable input or unsupported schema) from
+  # aborting the script.
   local validation_output rc=0
-  validation_output=$(SETTINGS="$settings_file" SCHEMA="$schema_file" python3 - <<'PYEOF' 2>&1
-import json, os, sys
-import jsonschema
-
-settings_path = os.environ["SETTINGS"]
-schema_path = os.environ["SCHEMA"]
-
-with open(settings_path) as f:
-    instance = json.load(f)
-with open(schema_path) as f:
-    schema = json.load(f)
-
-try:
-    jsonschema.validate(instance, schema)
-except jsonschema.ValidationError as e:
-    path = "/".join(str(p) for p in e.absolute_path) or "<root>"
-    print(f"validation failed at {path}: {e.message}")
-    sys.exit(1)
-PYEOF
-  ) || rc=$?
-  if [[ $rc -ne 0 ]]; then
+  validation_output=$(python3 "$LORE_REPO_DIR/scripts/lore_schema.py" "$schema_file" "$settings_file" 2>&1) || rc=$?
+  if [[ $rc -eq 1 ]]; then
     add_issue "settings_schema" "schema_violation" "$settings_file" \
-      "$validation_output"
+      "$validation_output" \
+      "edit $settings_file at the path named above (bash $LORE_REPO_DIR/install.sh repairs keys it manages)"
+  elif [[ $rc -ne 0 ]]; then
+    add_issue "settings_schema" "malformed" "$settings_file" \
+      "$validation_output" \
+      "repair $settings_file, or move it aside and re-run bash $LORE_REPO_DIR/install.sh"
   fi
   return 0
 }
@@ -497,7 +586,7 @@ doctor_aggregate_fallbacks() {
     fi
   fi
 
-  if command -v python3 >/dev/null 2>&1; then
+  if [[ "$PYTHON_OK" -eq 1 ]]; then
     local py_pairs
     py_pairs=$(LORE_DATA_DIR="$ROLE_CONFIG_DATA_DIR" \
       PYTHONPATH="$LORE_REPO_DIR/scripts" \
@@ -537,8 +626,20 @@ doctor_aggregate_fallbacks
 # ---------------------------------------------------------------------------
 # Determine overall status
 # ---------------------------------------------------------------------------
-ISSUE_COUNT="${#ISSUES[@]}"
-if [[ "$ISSUE_COUNT" -eq 0 ]]; then
+# Optional prerequisites are informational: they never make the install
+# "drift", never wake --quiet, and never set a failing exit status.
+ACTION_COUNT=0
+OPTIONAL_COUNT=0
+for _issue in ${ISSUES[@]+"${ISSUES[@]}"}; do
+  _split_issue "$_issue"
+  if [[ "$I_TYPE" == optional ]]; then
+    OPTIONAL_COUNT=$((OPTIONAL_COUNT + 1))
+  else
+    ACTION_COUNT=$((ACTION_COUNT + 1))
+  fi
+done
+unset _issue
+if [[ "$ACTION_COUNT" -eq 0 ]]; then
   STATUS="clean"
 else
   STATUS="drift"
@@ -552,92 +653,195 @@ if [[ "$MODE_QUIET" -eq 1 && "$STATUS" == "clean" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Next steps: prerequisite records as prereqs.sh produced them (they carry the
+# package name, so installs batch into one command), plus one record per
+# distinct fix for everything else, so thirty missing symlinks read as one
+# step. n/a issues have nothing to do and are left out.
+# ---------------------------------------------------------------------------
+build_digest_records() {
+  local -a g_fix=() g_count=() g_components=() g_first=()
+  local issue i found n
+  for issue in ${ISSUES[@]+"${ISSUES[@]}"}; do
+    _split_issue "$issue"
+    [[ "$I_COMPONENT" == prerequisites || "$I_TYPE" == n/a || -z "$I_FIX" ]] && continue
+    found=-1
+    n=${#g_fix[@]}
+    for (( i = 0; i < n; i++ )); do
+      if [[ "${g_fix[$i]}" == "$I_FIX" ]]; then found=$i; break; fi
+    done
+    if [[ "$found" -lt 0 ]]; then
+      g_fix+=("$I_FIX"); g_count+=(1); g_components+=("$I_COMPONENT")
+      g_first+=("$I_COMPONENT: ${I_DETAIL//$'\n'/; }")
+    else
+      g_count[$found]=$(( ${g_count[$found]} + 1 ))
+      case ", ${g_components[$found]}, " in
+        *", $I_COMPONENT, "*) ;;
+        *) g_components[$found]="${g_components[$found]}, $I_COMPONENT" ;;
+      esac
+    fi
+  done
+  [[ -n "$PREREQ_RECORDS" ]] && printf '%s\n' "$PREREQ_RECORDS"
+  n=${#g_fix[@]}
+  for (( i = 0; i < n; i++ )); do
+    local detail="${g_first[$i]}"
+    if [[ "${g_count[$i]}" -gt 1 ]]; then
+      detail="${g_count[$i]} installation issues (${g_components[$i]}), e.g. ${g_first[$i]}"
+    fi
+    printf 'required%sinstall%s%s%s%s%s\n' "$US" "$US" "$detail" "$US" "$US" "${g_fix[$i]}"
+  done
+}
+
+print_next_steps() {
+  local records
+  records=$(build_digest_records)
+  lore_render_digest "$records" || true
+  if [[ "$ACTION_COUNT" -eq 0 && "$OPTIONAL_COUNT" -gt 0 ]]; then
+    echo "  Lore is ready. The optional items above unlock the features they name."
+    echo ""
+  fi
+  echo "  Re-check any time with: lore doctor"
+}
+
+# ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
 
+# _json_str <s> — a JSON string literal, for when python3 is unusable.
+_json_str() {
+  local s="$1"
+  s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"; s="${s//$'\r'/\\r}"; s="${s//$'\t'/\\t}"
+  printf '"%s"' "$s"
+}
+
 if [[ "$MODE_JSON" -eq 1 ]]; then
-  # Build JSON output (D5 schema)
-  python3 -c "
+  # Build JSON output (D5 schema). Each issue gains "fix": the command that
+  # clears it (null for n/a).
+  if [[ "$PYTHON_OK" -eq 1 ]]; then
+    _resolved=()
+    for _issue in ${ISSUES[@]+"${ISSUES[@]}"}; do
+      _split_issue "$_issue"
+      _resolved+=("${I_COMPONENT}${US}${I_TYPE}${US}${I_ARTIFACT}${US}${I_DETAIL}${US}${I_FIX}")
+    done
+    python3 -c "
 import json, sys
 
-status = sys.argv[1]
-issues_raw = sys.argv[2]
-checked_raw = sys.argv[3]
-
+status, checked_raw, agent_state = sys.argv[1], sys.argv[2], sys.argv[3]
 issues = []
-if issues_raw:
-    for line in issues_raw.strip().split('\n'):
-        parts = line.split('|', 3)
-        if len(parts) == 4:
-            issues.append({
-                'component': parts[0],
-                'type': parts[1],
-                'artifact': parts[2],
-                'detail': parts[3],
-            })
+for raw in sys.argv[4:]:
+    component, type_, artifact, detail, fix = raw.split('\x1f', 4)
+    issues.append({
+        'component': component,
+        'type': type_,
+        'artifact': artifact,
+        'detail': detail,
+        'fix': fix or None,
+    })
 
-checked = [c for c in checked_raw.split(',') if c]
-# Deduplicate while preserving order
-seen = set()
-checked_deduped = []
-for c in checked:
-    if c not in seen:
-        seen.add(c)
-        checked_deduped.append(c)
+# Deduplicate checked while preserving order
+checked = list(dict.fromkeys(c for c in checked_raw.split(',') if c))
 
-output = {
+print(json.dumps({
     'status': status,
-    'agent_state': sys.argv[4],
+    'agent_state': agent_state,
     'issues': issues,
-    'checked': checked_deduped,
-}
-print(json.dumps(output, indent=2))
-" "$STATUS" "$(printf '%s\n' "${ISSUES[@]+"${ISSUES[@]}"}")" "$(IFS=','; echo "${CHECKED[*]}")" "$AGENT_STATE"
-  exit $(( ISSUE_COUNT > 0 ? 1 : 0 ))
+    'checked': checked,
+}, indent=2))
+" "$STATUS" "$(IFS=','; echo "${CHECKED[*]}")" "$AGENT_STATE" ${_resolved[@]+"${_resolved[@]}"}
+  else
+    # No usable python3 (Check 0 says why): emit the same shape from bash.
+    printf '{\n  "status": %s,\n  "agent_state": %s,\n  "issues": [' "$(_json_str "$STATUS")" "$(_json_str "$AGENT_STATE")"
+    _sep=""
+    for _issue in ${ISSUES[@]+"${ISSUES[@]}"}; do
+      _split_issue "$_issue"
+      printf '%s\n    {"component": %s, "type": %s, "artifact": %s, "detail": %s, "fix": %s}' "$_sep" \
+        "$(_json_str "$I_COMPONENT")" "$(_json_str "$I_TYPE")" "$(_json_str "$I_ARTIFACT")" \
+        "$(_json_str "$I_DETAIL")" "$(if [[ -n "$I_FIX" ]]; then _json_str "$I_FIX"; else echo null; fi)"
+      _sep=","
+    done
+    printf '\n  ],\n  "checked": ['
+    _sep=""
+    for _c in "${CHECKED[@]}"; do printf '%s%s' "$_sep" "$(_json_str "$_c")"; _sep=", "; done
+    printf ']\n}\n'
+  fi
+  exit $(( ACTION_COUNT > 0 ? 1 : 0 ))
 fi
 
 if [[ "$MODE_QUIET" -eq 1 ]]; then
   if [[ "$STATUS" == "clean" ]]; then
     exit 0
   else
-    echo "lore doctor: $ISSUE_COUNT issue(s) detected — run 'lore doctor' for details"
+    echo "lore doctor: $ACTION_COUNT issue(s) detected — run 'lore doctor' for details"
     echo "  agent: $AGENT_STATE"
     exit 1
   fi
 fi
 
+if [[ "$MODE_DIGEST" -eq 1 ]]; then
+  draw_separator "lore: next steps"
+  echo ""
+  if [[ "$ACTION_COUNT" -eq 0 && "$OPTIONAL_COUNT" -eq 0 ]]; then
+    echo "  Everything checks out: prerequisites are met and the installation is verified."
+    echo ""
+  else
+    print_next_steps
+    echo ""
+  fi
+  draw_separator
+  exit $(( ACTION_COUNT > 0 ? 1 : 0 ))
+fi
+
 # ---------------------------------------------------------------------------
-# Verbose (default) output
+# Verbose (default) output: every issue with its fix, then the deduplicated
+# next steps.
 # ---------------------------------------------------------------------------
 draw_separator "lore doctor"
 echo ""
 echo "  agent: $AGENT_STATE"
 echo ""
 
-if [[ "$STATUS" == "clean" ]]; then
+if [[ "$ACTION_COUNT" -eq 0 && "$OPTIONAL_COUNT" -eq 0 ]]; then
   echo "  All checks passed. Installation is up to date."
   echo ""
   draw_separator
   exit 0
 fi
 
-echo "  Found $ISSUE_COUNT issue(s):"
-echo ""
+print_issue() {
+  _split_issue "$1"
+  echo "  [$I_TYPE] [$I_COMPONENT] $I_ARTIFACT"
+  printf '%s\n' "$I_DETAIL" | sed 's/^/    /'
+  if [[ -n "$I_FIX" ]]; then
+    echo "    fix: $I_FIX"
+  fi
+}
 
-for issue_str in "${ISSUES[@]}"; do
-  IFS='|' read -r component type artifact detail <<< "$issue_str"
-  case "$type" in
-    missing)      marker="[missing]" ;;
-    wrong_target) marker="[wrong_target]" ;;
-    stale)        marker="[stale]" ;;
-    *)            marker="[$type]" ;;
-  esac
-  echo "  $marker [$component] $artifact"
-  echo "    $detail"
-done
+if [[ "$ACTION_COUNT" -gt 0 ]]; then
+  echo "  Found $ACTION_COUNT issue(s):"
+  echo ""
+  for issue_str in "${ISSUES[@]}"; do
+    _split_issue "$issue_str"
+    [[ "$I_TYPE" == optional ]] || print_issue "$issue_str"
+  done
+  echo ""
+else
+  echo "  All checks passed. Installation is up to date."
+  echo ""
+fi
 
+if [[ "$OPTIONAL_COUNT" -gt 0 ]]; then
+  echo "  Optional — lore works without these; the feature each names does not:"
+  echo ""
+  for issue_str in "${ISSUES[@]}"; do
+    _split_issue "$issue_str"
+    [[ "$I_TYPE" != optional ]] || print_issue "$issue_str"
+  done
+  echo ""
+fi
+
+echo "  Next steps:"
 echo ""
-echo "  Run 'bash install.sh' to repair installation."
+print_next_steps
 echo ""
 draw_separator
-exit 1
+exit $(( ACTION_COUNT > 0 ? 1 : 0 ))

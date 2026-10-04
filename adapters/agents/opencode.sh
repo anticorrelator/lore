@@ -335,7 +335,8 @@ cmd_native_selection() {
 }
 
 cmd_native_launch() {
-  python3 - "$@" <<'PYTHON'
+  # PyYAML comes from lore's vendored copy (scripts/vendor), never a pip install.
+  PYTHONPATH="$LORE_REPO_DIR/scripts/vendor${PYTHONPATH:+:$PYTHONPATH}" python3 - "$@" <<'PYTHON'
 import hashlib
 import json
 from pathlib import Path

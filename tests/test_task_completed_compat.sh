@@ -376,6 +376,7 @@ import runpy
 import shutil
 import subprocess
 import sys
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "vendor"))  # lore's vendored PyYAML
 import yaml
 
 original, temporary = map(Path, sys.argv[1:])

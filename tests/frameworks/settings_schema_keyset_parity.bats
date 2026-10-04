@@ -364,7 +364,9 @@ PY
   [ -f "$TEMPLATE" ] || skip "settings.template.json missing"
   SCHEMA="$SCHEMA" TEMPLATE="$TEMPLATE" python3 - <<'PY'
 import json, os
-import jsonschema
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(_os.environ["SCHEMA"])), "..", "scripts"))
+import lore_schema as jsonschema  # lore's stdlib validator; nothing to pip install
 with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 with open(os.environ["TEMPLATE"]) as f:
@@ -446,10 +448,11 @@ PY
 }
 
 @test "schema rejects _deprecated_legacy_source at root" {
-  python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os, sys
-import jsonschema
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(_os.environ["SCHEMA"])), "..", "scripts"))
+import lore_schema as jsonschema  # lore's stdlib validator; nothing to pip install
 with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {
@@ -467,10 +470,11 @@ PY
 }
 
 @test "schema rejects empty-string role_value (harness role overlay)" {
-  python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os, sys
-import jsonschema
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(_os.environ["SCHEMA"])), "..", "scripts"))
+import lore_schema as jsonschema  # lore's stdlib validator; nothing to pip install
 with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {
@@ -491,10 +495,11 @@ PY
 }
 
 @test "schema rejects retired harness ceremonies" {
-  python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os, sys
-import jsonschema
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(_os.environ["SCHEMA"])), "..", "scripts"))
+import lore_schema as jsonschema  # lore's stdlib validator; nothing to pip install
 with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {
@@ -524,10 +529,11 @@ PY
 }
 
 @test "schema rejects top-level ceremonies" {
-  python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os, sys
-import jsonschema
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(_os.environ["SCHEMA"])), "..", "scripts"))
+import lore_schema as jsonschema  # lore's stdlib validator; nothing to pip install
 with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {
@@ -549,10 +555,11 @@ PY
 }
 
 @test "schema rejects unknown role_id key in roles overlay" {
-  python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os, sys
-import jsonschema
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(_os.environ["SCHEMA"])), "..", "scripts"))
+import lore_schema as jsonschema  # lore's stdlib validator; nothing to pip install
 with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {
@@ -573,10 +580,11 @@ PY
 }
 
 @test "schema rejects retired ceremony_roles even when its former contents were valid" {
-  python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os, sys
-import jsonschema
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(_os.environ["SCHEMA"])), "..", "scripts"))
+import lore_schema as jsonschema  # lore's stdlib validator; nothing to pip install
 with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {
@@ -601,10 +609,11 @@ PY
 }
 
 @test "schema rejects unknown ceremony key in ceremony_roles" {
-  python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os, sys
-import jsonschema
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(_os.environ["SCHEMA"])), "..", "scripts"))
+import lore_schema as jsonschema  # lore's stdlib validator; nothing to pip install
 with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {
@@ -625,10 +634,11 @@ PY
 }
 
 @test "schema rejects unknown role_id inside a ceremony map" {
-  python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os, sys
-import jsonschema
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(_os.environ["SCHEMA"])), "..", "scripts"))
+import lore_schema as jsonschema  # lore's stdlib validator; nothing to pip install
 with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {
@@ -649,10 +659,11 @@ PY
 }
 
 @test "schema rejects empty-string role_value inside a ceremony map" {
-  python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os, sys
-import jsonschema
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(_os.environ["SCHEMA"])), "..", "scripts"))
+import lore_schema as jsonschema  # lore's stdlib validator; nothing to pip install
 with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {
@@ -694,10 +705,11 @@ PY
 }
 
 @test "schema rejects unknown framework key in harnesses" {
-  python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os, sys
-import jsonschema
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(_os.environ["SCHEMA"])), "..", "scripts"))
+import lore_schema as jsonschema  # lore's stdlib validator; nothing to pip install
 with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {

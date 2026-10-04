@@ -29,6 +29,8 @@ Usage:
     capture-similar.py --kdir <store> --entry <path> [--threshold N] [--limit N] [--json]
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os

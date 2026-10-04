@@ -10,6 +10,8 @@ bypasses); this pipeline only dedupes, budgets, and renders what the
 primitives return.
 """
 
+from __future__ import annotations
+
 import datetime
 import importlib.util
 import json

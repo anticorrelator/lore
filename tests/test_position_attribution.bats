@@ -517,6 +517,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "vendor"))  # lore's vendored PyYAML
 import yaml
 original,temporary=map(lambda p:Path(p).resolve(),sys.argv[1:])
 if os.environ.get('POSITION_PREPLAN_FIXTURES'):

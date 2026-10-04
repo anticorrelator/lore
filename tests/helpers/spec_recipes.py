@@ -11,7 +11,8 @@ import subprocess
 import sys
 import time
 
-import yaml
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "vendor"))  # lore's vendored PyYAML
+import yaml  # noqa: E402
 
 from implement_recipes import Fixture, assert_coverage, capture_prepared_launch, digest, inventory
 
