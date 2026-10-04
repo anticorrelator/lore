@@ -859,15 +859,28 @@ func TestCoordinationViewComposesBothLayouts(t *testing.T) {
 	}
 }
 
-func TestCoordinationPaneTitleRollupOmitsEmptyBuckets(t *testing.T) {
+func TestCoordinationPaneTitleCountsOnlyOwnerAsks(t *testing.T) {
 	m := coordinationContractModel(t)
-	if got, want := stripANSI(m.buildPaneConfig().listTitle), "Coordination — ⚠ 2 act now"; got != want {
+	if got, want := stripANSI(m.buildPaneConfig().listTitle), "Coordination"; got != want {
+		t.Fatalf("act-now rows are the coordinator's work, not an owner ask: title = %q, want %q", got, want)
+	}
+	m.coordinationRead.request.Store(1)
+	snapshot := &board.Snapshot{Epoch: "epoch", Generation: 1, Attention: board.Attention{
+		board.ActNow:        {{Bucket: board.ActNow, Arc: "arc-a", StreamID: "s1", Status: "pending"}},
+		board.NeedsJudgment: {}, board.Waiting: {}, board.Reconcile: {},
+	}, OwnerAsks: []board.Row{{Arc: "arc-b", ArcStatus: "active", StreamID: "s2", Status: "blocked-on-input"}}}
+	snapshot.Coverage.State = "ready"
+	m, _ = m.handleCoordinationArcsScanned(coordinationArcsScannedMsg{
+		request: 1, selection: m.coordinationSelection, snapshot: snapshot,
+		arcs: []coordination.Arc{{Slug: "arc-a", Status: coordination.StatusActive}, {Slug: "arc-b", Status: coordination.StatusActive}},
+	})
+	if got, want := stripANSI(m.buildPaneConfig().listTitle), "Coordination — ⚠ 1 waiting on you"; got != want {
 		t.Fatalf("coordination pane title = %q, want %q", got, want)
 	}
 	m.layoutMode = config.LayoutTopBottom
 	m.coordinationPanelCallbacks().resize()
-	if got := stripANSI(m.viewContent()); !strings.Contains(got, "Coordination — ⚠ 2 act now") {
-		t.Fatalf("top-bottom frame did not render the attention rollup title:\n%s", got)
+	if got := stripANSI(m.viewContent()); !strings.Contains(got, "Coordination — ⚠ 1 waiting on you") {
+		t.Fatalf("top-bottom frame did not render the owner-ask title:\n%s", got)
 	}
 }
 

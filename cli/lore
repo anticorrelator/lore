@@ -654,6 +654,8 @@ Usage: lore coordinate <verb> [args...]
 Verbs:
   read      Read the committed operational display; --refresh maintains it,
             --reconcile observes metadata, --rebuild repairs derived state
+  board     Print one arc's stream board as the coordination view draws it:
+            --arc <slug> --width <n> [--json]
   status    Project work, session, retro, and evolve evidence into
             Act now, Needs judgment, Waiting, and Reconcile
   reconcile Freeze and validate immutable per-stream reconciliation evidence
@@ -1026,6 +1028,9 @@ cmd_coordinate() {
       ;;
     read)
       exec "$SCRIPTS_DIR/coordinate-read.sh" "$@"
+      ;;
+    board)
+      exec lore-tui --render-board "$@"
       ;;
     status)
       exec "$SCRIPTS_DIR/coordinate-status.sh" "$@"

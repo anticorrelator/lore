@@ -218,6 +218,25 @@ func TestSnapshotCachedReadsBypassBothHostPools(t *testing.T) {
 	}
 }
 
+func TestSnapshotCarriesOwnerAsksFromStreamRows(t *testing.T) {
+	snapshotFixture(t)
+	store := makeSnapshotStore(t, "a")
+	ledger := "| Stream | Step | Depends on | Tree | Gate | Status | Verdict |\n|---|---|---|---|---|---|---|\n" +
+		"| 1 | ask | — | writer | notify | blocked-on-input | — |\n" +
+		"| 2 | held | — | writer | hold | pending | — |\n" +
+		"| 3 | finished | — | writer | hold | done | full |\n"
+	if err := os.WriteFile(filepath.Join(store, "_work", "_arcs", "a", "coordination.md"), []byte(ledger), 0644); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := LoadSnapshot(context.Background(), store, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.OwnerAsks) != 1 || snapshot.OwnerAsks[0].Arc != "a" || snapshot.OwnerAsks[0].StreamID != "1" {
+		t.Fatalf("owner asks = %+v, want only a/1", snapshot.OwnerAsks)
+	}
+}
+
 func TestSnapshotMalformedEventDoesNotPoisonOtherArcs(t *testing.T) {
 	snapshotFixture(t)
 	store := makeSnapshotStore(t, "a")
