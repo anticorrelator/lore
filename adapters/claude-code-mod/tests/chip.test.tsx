@@ -11,7 +11,7 @@ describe('the band chip', () => {
       const chip = (await ui.find({ key: 'chip' }))?.text ?? ''
       expect(chip).toContain('▣ Alpha arc')
       expect(chip).toContain('● 2 running')
-      expect(chip).toContain('◆ 1 waiting on you')
+      expect(chip).toContain('▲ 1 waiting on you')
       expect((await ui.find({ key: 'toggle' }))?.props.label).toBe('▴')
       await ui.unmount()
     }
@@ -31,7 +31,7 @@ describe('the band chip', () => {
     await start($, seen.clock)
     const ui = await $.ui.mount({ plugin: 'lore', surface: 'terminal', ...BAND, props: { ...BAND.props, bodyColumns: 40 } })
     const chip = (await ui.find({ key: 'chip' }))?.text ?? ''
-    expect(chip).toContain('● 2')
+    expect(chip).toContain('● 2 ▲ 1')
     expect(chip).not.toContain('running')
     expect(chip.length).toBeLessThanOrEqual(40)
   })

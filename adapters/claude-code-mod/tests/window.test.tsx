@@ -33,7 +33,7 @@ describe('the arc window', () => {
       const window = await $.ui.mount({ plugin: 'lore', surface, ...pane('lore-arcs', 30) })
       expect(await window.find({ type: 'Text', text: 'Alpha arc' })).toBeDefined()
       expect((await window.find({ key: 'strip' }))?.text.replace(/\s+/g, '')).toBe('✓●▲●')
-      expect((await window.find({ key: 'counts' }))?.text).toContain('◆ 1 waiting on you')
+      expect((await window.find({ key: 'counts' }))?.text).toContain('▲ 1 waiting on you')
       expect(await window.find({ key: 'streams' })).toBeUndefined()
       await window.unmount()
     }

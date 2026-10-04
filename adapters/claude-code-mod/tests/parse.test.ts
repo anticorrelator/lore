@@ -33,11 +33,17 @@ describe('paging long text', () => {
 })
 
 describe('arc mentions', () => {
-  test('match the ledger path, the arc verbs, and the Opened line', () => {
-    expect(mentions('sed -n 1,20p _work/_arcs/alpha/coordination.md')).toEqual(['alpha'])
-    expect(mentions('lore arc member add beta some-item')).toEqual(['beta'])
-    expect(mentions('lore arc show gamma && lore arc close delta')).toEqual(['gamma', 'delta'])
-    expect(mentions('[arc] Opened: epsilon (Epsilon)')).toEqual(['epsilon'])
-    expect(mentions('lore arc list')).toEqual([])
+  test('a command names an arc by its ledger path or an arc verb', () => {
+    expect(mentions('sed -n 1,20p _work/_arcs/alpha/coordination.md', '')).toEqual(['alpha'])
+    expect(mentions('lore arc member add beta some-item', '')).toEqual(['beta'])
+    expect(mentions('lore arc show gamma && lore arc close delta', '')).toEqual(['gamma', 'delta'])
+    expect(mentions('lore arc list', '')).toEqual([])
+  })
+
+  test("a result names an arc only through arc open's Opened line", () => {
+    expect(mentions('lore arc open --title Epsilon --anchor x', '[arc] Opened: epsilon (Epsilon)')).toEqual(['epsilon'])
+    const listing = JSON.stringify([{ slug: 'alpha', path: '_work/_arcs/alpha' }, { slug: 'beta', path: '_work/_arcs/beta' }])
+    expect(mentions('lore arc list --json', listing)).toEqual([])
+    expect(mentions('cat notes.md', 'see lore arc show alpha')).toEqual([])
   })
 })

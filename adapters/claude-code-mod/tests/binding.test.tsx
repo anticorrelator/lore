@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { BAND, SESSION, SURFACES, bash, pane, start, world } from './world'
+import { ARC_LIST, BAND, SESSION, SURFACES, bash, pane, start, world } from './world'
 
 const ARCS = { command: 'arcs', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } } as never
 
@@ -45,6 +45,25 @@ describe('which arc a session is bound to', () => {
     expect(await chipText(ui)).toBeUndefined()
     await $.tool.call({ tool: 'Bash', command: 'lore arc open --title "Alpha arc" --anchor x' })
     await seen.clock.settle()
+    expect(await chipText(ui)).toContain('Alpha arc')
+  })
+
+  test("a later arc listing's output leaves a resumed session on its earlier arc", async ($, on) => {
+    const listing = JSON.stringify(ARC_LIST.map(arc => ({ ...arc, path: '_work/_arcs/' + arc.slug })))
+    const seen = world(on, { history: [bash('lore arc show alpha'), bash('lore arc list --json', listing)] })
+    await start($, seen.clock)
+    const ui = await $.ui.mount({ plugin: 'lore', surface: 'terminal', ...BAND })
+    expect(await chipText(ui)).toContain('Alpha arc')
+  })
+
+  test("a live arc listing's output leaves the session on its earlier arc", async ($, on) => {
+    const listing = JSON.stringify(ARC_LIST.map(arc => ({ ...arc, path: '_work/_arcs/' + arc.slug })))
+    const seen = world(on, { history: [bash('lore arc show alpha')] })
+    on('tool.call', () => ({ result: { stdout: listing, stderr: '', interrupted: false }, text: listing }) as never)
+    await start($, seen.clock)
+    await $.tool.call({ tool: 'Bash', command: 'lore arc list --json' })
+    await seen.clock.settle()
+    const ui = await $.ui.mount({ plugin: 'lore', surface: 'terminal', ...BAND })
     expect(await chipText(ui)).toContain('Alpha arc')
   })
 

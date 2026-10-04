@@ -112,8 +112,8 @@ export function drawChip(
 ): RenderElement {
   const { Box, Text, Button } = ui
   const { running, waiting } = tally(arc)
-  const long = [` · ● ${running} running`, waiting > 0 ? ` · ◆ ${waiting} waiting on you` : '']
-  const short = [` ● ${running}`, waiting > 0 ? ` ◆ ${waiting}` : '']
+  const long = [` · ● ${running} running`, waiting > 0 ? ` · ▲ ${waiting} waiting on you` : '']
+  const short = [` ● ${running}`, waiting > 0 ? ` ▲ ${waiting}` : '']
   const spare = (parts: string[]) => bodyColumns - 2 - CONTROL_COLUMNS - parts.join('').length
   const parts = spare(long) >= TEXT_MIN ? long : short
   return (
@@ -214,7 +214,7 @@ function counts(ui: ElementTable, arc: LoreArc, isTerminal: boolean): RenderElem
   return (
     <Box key="counts" flexDirection="column" marginTop={1}>
       <Text dimColor>● {running} running</Text>
-      {waiting > 0 ? <Text {...(isTerminal ? { color: 'yellow' } : {})}>◆ {waiting} waiting on you</Text> : null}
+      {waiting > 0 ? <Text {...(isTerminal ? { color: 'yellow' } : {})}>▲ {waiting} waiting on you</Text> : null}
     </Box>
   )
 }

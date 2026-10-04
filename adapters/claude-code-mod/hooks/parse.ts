@@ -218,17 +218,25 @@ export function workItemOf(slug: string, ran: Ran): LorePopout {
   return { title: text(item.title) || slug, source, blocks }
 }
 
-// An arc this session has touched through lore: its ledger path, an arc verb
-// naming it, or `lore arc open`'s own "Opened: <slug>" line.
-const ARC_MENTION =
-  /(?:_work\/_arcs\/|lore arc (?:show|member (?:add|rm)|set|close|archive) |\[arc\] Opened: )([a-z0-9][a-z0-9-]*)/g
+// An arc a Bash command touched through lore: its ledger path, or an arc verb
+// naming it.
+const COMMAND_MENTION = /(?:_work\/_arcs\/|lore arc (?:show|member (?:add|rm)|set|close|archive) )([a-z0-9][a-z0-9-]*)/g
 
-export function mentions(text: string): string[] {
+// The one arc a result names for this session: `lore arc open`'s own line.
+// Other output lists arcs (`lore arc list --json` prints every arc's path), so
+// it binds nothing.
+const OPENED = /\[arc\] Opened: ([a-z0-9][a-z0-9-]*)/g
+
+function slugs(text: string, pattern: RegExp): string[] {
   const found: string[] = []
-  for (const match of text.matchAll(ARC_MENTION)) {
+  for (const match of text.matchAll(pattern)) {
     if (match[1]) found.push(match[1])
   }
   return found
+}
+
+export function mentions(command: string, result: string): string[] {
+  return [...slugs(command, COMMAND_MENTION), ...slugs(result, OPENED)]
 }
 
 export function boundArc(arcs: LoreArc[], seen: string[], pin: string | null): LoreArc | null {

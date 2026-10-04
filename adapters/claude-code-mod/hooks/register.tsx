@@ -241,7 +241,7 @@ export const register: Register = on => {
       for (const use of message.toolUses) {
         if (use.tool !== 'Bash') continue
         const command = typeof use.input['command'] === 'string' ? use.input['command'] : ''
-        seen.push(...mentions(command), ...mentions(use.text ?? ''))
+        seen.push(...mentions(command, use.text ?? ''))
       }
     }
     await remember($, seen)
@@ -262,7 +262,7 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const ran = await next(e)
     if (e.agentId !== undefined || !(await read($, store))) return ran
-    const found = [...mentions(e.command), ...mentions(typeof ran.text === 'string' ? ran.text : '')]
+    const found = mentions(e.command, typeof ran.text === 'string' ? ran.text : '')
     if (found.length === 0) return ran
     await remember($, found)
     detach(poll($))
