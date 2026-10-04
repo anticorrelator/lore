@@ -170,7 +170,8 @@ func TestStatusWordsArePlainAndDefaultsHidden(t *testing.T) {
 		{"blocked ref", "blocked-on:2", "—", "notify", "waiting on 2"},
 		{"pending hold", "pending", "—", "hold", "queued · held for you"},
 		{"running hold", "in-flight", "—", "hold", "running · held for you"},
-		{"blocked input hold", "blocked-on-input", "—", "hold", "waiting on you · held for you"},
+		{"blocked input hold", "blocked-on-input", "—", "hold", "waiting on you"},
+		{"blocked input flag", "blocked-on-input", "—", "flag", "waiting on you"},
 		{"pending flag", "pending", "—", "flag", "queued"},
 		{"running flag", "in-flight", "—", "flag", "running"},
 		{"unknown gate", "pending", "—", "escalate", "queued · escalate"},
@@ -208,6 +209,29 @@ func TestFinishedRowsCarryNoGateWord(t *testing.T) {
 					t.Fatalf("status words = %q, want %q", got, tc.want)
 				}
 			})
+		}
+	}
+}
+
+func TestHeldMatchesTheHeldForYouWords(t *testing.T) {
+	statuses := []string{"done", "dropped", "pending", "in-flight", "blocked-on-input", "blocked-on:x", "future-status"}
+	gates := []string{"", "notify", "flag", "hold", "escalate"}
+	for _, status := range statuses {
+		for _, gate := range gates {
+			r := row("s", "label", nil, status, "writer")
+			r.Gate = gate
+			rendered := RenderRows([]Row{r}, 120, 0)[0].Lines[0]
+			words := rendered.Text[rendered.MetadataAt:]
+			if got := strings.Contains(words, "held for you"); got != Held(r) {
+				t.Errorf("%s/%s: words %q but Held = %v", status, gate, words, Held(r))
+			}
+		}
+	}
+	for _, r := range []Row{
+		{Gate: "hold", Status: "pending"}, {Gate: "hold", Status: "in-flight"}, {Gate: "hold", Status: "blocked-on:x"},
+	} {
+		if !Held(r) {
+			t.Errorf("unfinished hold row %+v must be held", r)
 		}
 	}
 }

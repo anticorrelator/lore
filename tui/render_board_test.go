@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -157,5 +158,32 @@ func TestRenderBoardMatchesTheViewRenderer(t *testing.T) {
 	}
 	if want := strings.Join(board.Render(rows, 57), "\n") + "\n"; stdout != want {
 		t.Fatalf("verb output drifted from board.Render:\n--- got ---\n%s--- want ---\n%s", stdout, want)
+	}
+}
+
+// cli/lore runs lore-tui only when the installed binary carries the render
+// flag's bytes. Were the flag a constant, the comparison in main would compile
+// to integer compares and leave nothing to find, so this builds the real binary
+// and runs the wrapper against it.
+func TestBuiltBinaryPassesTheWrapperProbe(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds lore-tui")
+	}
+	bin := t.TempDir()
+	if out, err := exec.Command("go", "build", "-o", filepath.Join(bin, "lore-tui"), ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(filepath.Join(bin, "lore-tui"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(renderBoardFlag)) {
+		t.Fatalf("built lore-tui does not carry %q; cli/lore would refuse it", renderBoardFlag)
+	}
+	wrapper := exec.Command("bash", filepath.Join("..", "cli", "lore"), "coordinate", "board", "--help")
+	wrapper.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := wrapper.CombinedOutput()
+	if err != nil || !strings.HasPrefix(string(out), "Usage: lore coordinate board") {
+		t.Fatalf("wrapper refused or misran the built binary: %v\n%s", err, out)
 	}
 }
