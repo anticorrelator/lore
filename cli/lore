@@ -91,6 +91,7 @@ Commands:
   trust        Trust-ledger verbs — cheaply confirm an entry's verdict
                (see: lore trust --help)
   resolve      Resolve repo path or [[backlink]] references
+  active       Say whether lore is loaded here for a harness (exit 0 if so, 1 if not)
   prefetch     Prefetch knowledge for agent prompts
   init         Initialize a knowledge store
   init-work    Initialize the work item system
@@ -2228,6 +2229,10 @@ case "$1" in
   retire)
     shift
     exec "$SCRIPTS_DIR/retire-append.sh" "$@"
+    ;;
+  active)
+    shift
+    exec "$SCRIPTS_DIR/active.sh" "$@"
     ;;
   resolve)
     shift
