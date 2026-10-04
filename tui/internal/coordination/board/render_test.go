@@ -166,10 +166,14 @@ func TestStatusWordsArePlainAndDefaultsHidden(t *testing.T) {
 		{"done partial", "done", "partial", "notify", "done · partial"},
 		{"done none", "done", "none", "notify", "done · nothing landed"},
 		{"running", "in-flight", "—", "notify", "running"},
-		{"blocked input", "blocked-on-input", "—", "notify", "needs you"},
+		{"blocked input", "blocked-on-input", "—", "notify", "waiting on you"},
 		{"blocked ref", "blocked-on:2", "—", "notify", "waiting on 2"},
-		{"hold deduplicates", "blocked-on-input", "—", "hold", "needs you"},
-		{"flag", "pending", "—", "flag", "queued · flagged for your review"},
+		{"pending hold", "pending", "—", "hold", "queued · held for you"},
+		{"running hold", "in-flight", "—", "hold", "running · held for you"},
+		{"blocked input hold", "blocked-on-input", "—", "hold", "waiting on you · held for you"},
+		{"pending flag", "pending", "—", "flag", "queued"},
+		{"running flag", "in-flight", "—", "flag", "running"},
+		{"unknown gate", "pending", "—", "escalate", "queued · escalate"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -183,6 +187,28 @@ func TestStatusWordsArePlainAndDefaultsHidden(t *testing.T) {
 				t.Fatalf("read-only default leaked into status words: %q", line)
 			}
 		})
+	}
+}
+
+func TestFinishedRowsCarryNoGateWord(t *testing.T) {
+	cases := []struct {
+		status, verdict, want string
+	}{
+		{"done", "full", "done"},
+		{"done", "partial", "done · partial"},
+		{"dropped", "—", "dropped"},
+	}
+	for _, tc := range cases {
+		for _, gate := range []string{"hold", "flag", "notify", "escalate"} {
+			t.Run(tc.status+"/"+tc.verdict+"/"+gate, func(t *testing.T) {
+				r := row("s", "label", nil, tc.status, "writer")
+				r.Verdict, r.Gate = tc.verdict, gate
+				rendered := RenderRows([]Row{r}, 80, 0)[0].Lines[0]
+				if got := rendered.Text[rendered.MetadataAt:]; got != tc.want {
+					t.Fatalf("status words = %q, want %q", got, tc.want)
+				}
+			})
+		}
 	}
 }
 

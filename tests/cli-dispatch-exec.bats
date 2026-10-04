@@ -171,6 +171,40 @@ teardown() {
   done
 }
 
+@test "coordinate board execs lore-tui's board renderer with its arguments" {
+  local bin="$TEST_ROOT/bin" args_file="$TEST_ROOT/board.args"
+  mkdir -p "$bin"
+  cat > "$bin/lore-tui" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$ARGS_FILE"
+printf '%s\n' "$$" > "$PID_FILE"
+while [[ ! -e "$RELEASE_FILE" ]]; do
+  sleep 0.01
+done
+exit 37
+EOF
+  chmod +x "$bin/lore-tui"
+  : > "$PID_FILE"
+  rm -f "$RELEASE_FILE"
+  HOME="$TEST_HOME" PATH="$bin:$PATH" ARGS_FILE="$args_file" PID_FILE="$PID_FILE" RELEASE_FILE="$RELEASE_FILE" \
+    bash "$TEST_ROUTER" coordinate board --arc some-arc --width 80 --json &
+  ROUTER_PID=$!
+
+  for _ in $(seq 1 200); do
+    [[ -s "$PID_FILE" ]] && break
+    sleep 0.01
+  done
+  [[ -s "$PID_FILE" ]]
+  [[ "$(<"$PID_FILE")" == "$ROUTER_PID" ]]
+  [[ "$(<"$args_file")" == "--render-board --arc some-arc --width 80 --json" ]]
+
+  touch "$RELEASE_FILE"
+  local leaf_status=0
+  wait "$ROUTER_PID" || leaf_status=$?
+  ROUTER_PID=""
+  [[ "$leaf_status" -eq 37 ]]
+}
+
 @test "coordinate --help lists every verb and returns promptly" {
   # The usage heredoc cites sibling verbs in backticks. Were it unquoted, those
   # would be command substitutions and printing the help would run a watcher —
@@ -195,7 +229,7 @@ teardown() {
 
   local output verb
   output="$(<"$help_out")"
-  for verb in status reconcile watch arm disarm worktree pin report spend; do
+  for verb in read board status reconcile watch arm disarm worktree pin report spend; do
     [[ "$output" == *"  $verb "* ]]
   done
 }

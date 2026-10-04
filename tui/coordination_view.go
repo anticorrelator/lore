@@ -225,6 +225,7 @@ func (m model) handleCoordinationArcsScanned(msg coordinationArcsScannedMsg) (mo
 		m.coordinationList.SetCoverage(coverage)
 		m.coordinationDetail.SetCoverage(coverage)
 		m.coordinationList.SetAttention(snapshot.Attention, nil)
+		m.coordinationList.SetOwnerAsks(snapshot.OwnerAsks)
 		m.coordinationList.SetAttentionActivity(snapshot.Activity)
 		if msg.arc != "" && snapshot.Details[msg.arc].Loaded {
 			body := coordinationBodyReadMsg{arc: msg.arc, rows: snapshot.Rows, boardFound: snapshot.Found,

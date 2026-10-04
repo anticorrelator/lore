@@ -440,7 +440,7 @@ func statusWords(row Row, g graph) []string {
 	case row.Status == "pending":
 		words = append(words, "queued")
 	case row.Status == "blocked-on-input":
-		words = append(words, "needs you")
+		words = append(words, "waiting on you")
 	case strings.HasPrefix(row.Status, "blocked-on:"):
 		ref := strings.TrimSpace(strings.TrimPrefix(row.Status, "blocked-on:"))
 		if ref == "" {
@@ -453,14 +453,17 @@ func statusWords(row Row, g graph) []string {
 		words = append(words, row.Status)
 	}
 
-	switch row.Gate {
-	case "", "notify":
-	case "hold":
-		words = appendUnique(words, "needs you")
-	case "flag":
-		words = appendUnique(words, "flagged for your review")
-	default:
-		words = appendUnique(words, row.Gate)
+	// The gate records the ceremony a step was dispatched under, not a live
+	// ask: a finished step's gate is spent, and a flag is reviewed after the
+	// fact through the arc's decision digest.
+	if row.Status != "done" && row.Status != "dropped" {
+		switch row.Gate {
+		case "", "notify", "flag":
+		case "hold":
+			words = appendUnique(words, "held for you")
+		default:
+			words = appendUnique(words, row.Gate)
+		}
 	}
 	for _, dependency := range g.dangling[row.StreamID] {
 		words = append(words, "⚠ unknown step "+dependency)
