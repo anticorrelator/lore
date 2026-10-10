@@ -28,7 +28,7 @@ describe('the arc window', () => {
     await start($, seen.clock)
     await $.command.run(ARCS)
     await seen.clock.settle()
-    expect(seen.opened.map(open => [open.id, open.columns])).toEqual([['lore-arcs', 34]])
+    expect(seen.opened.map(open => [open.id, open.columns])).toEqual([['lore-arcs', 64]])
     for (const surface of SURFACES) {
       const window = await $.ui.mount({ plugin: 'lore', surface, ...pane('lore-arcs', 30) })
       expect(await window.find({ type: 'Text', text: 'Alpha arc' })).toBeDefined()
@@ -40,19 +40,19 @@ describe('the arc window', () => {
     expect(seen.runs.some(run => run.startsWith('coordinate board'))).toBe(false)
   })
 
-  test('□ expands to the rails the board verb draws at the body width, and back', async ($, on) => {
+  test('□ expands in place to rails drawn at the body width rounded down to 8, and back', async ($, on) => {
     const seen = world(on, { history: [bash('lore arc show alpha')] })
     await start($, seen.clock)
     const window = await openExpanded($, seen, 'terminal')
-    expect(seen.opened.map(open => open.columns)).toEqual([34, 96])
-    expect(seen.runs).toContain('coordinate board --arc alpha --width 92 --json')
+    expect(seen.opened.map(open => open.columns)).toEqual([64])
+    expect(seen.runs).toContain('coordinate board --arc alpha --width 88 --json')
     const streams = (await window.find({ key: 'streams' }))?.text ?? ''
     expect(streams).toContain('✓─╮  1  Read the board')
     expect(streams).toContain('waiting on you')
     expect(await window.find({ key: 'stream:2' })).toBeDefined()
     expect(await window.find({ key: 'stream:3' })).toBeUndefined()
     await window.press({ key: 'size' })
-    expect(seen.opened.map(open => open.columns)).toEqual([34, 96, 34])
+    expect(seen.opened.map(open => open.columns)).toEqual([64])
     expect(await window.find({ key: 'streams' })).toBeUndefined()
     expect(await window.find({ key: 'strip' })).toBeDefined()
   })
@@ -114,17 +114,21 @@ describe('the arc window', () => {
   })
 
   for (const surface of SURFACES) {
-    test(`a document opens in a focused pop-out that closes on ${surface}`, async ($, on) => {
+    test(`a document replaces the window's body until back on ${surface}`, async ($, on) => {
       const seen = world(on, { history: [bash('lore arc show alpha')] })
       await start($, seen.clock)
       const window = await openExpanded($, seen, surface)
       await window.press({ key: 'doc:coordination.md' })
-      expect(seen.opened.at(-1)).toMatchObject({ id: 'lore-doc', focus: true, closeOnEscape: true, holdToasts: true })
-      const doc = await $.ui.mount({ plugin: 'lore', surface, ...pane('lore-doc', 96) })
-      expect((await doc.find({ type: 'Markdown' }))?.text).toContain('The steps so far.')
-      expect(await doc.find({ type: 'Text', text: '/store/_work/_arcs/alpha/coordination.md' })).toBeDefined()
-      await doc.press({ key: 'close' })
-      expect(seen.closed.at(-1)).toBe('lore-doc')
+      expect(seen.opened.map(open => open.id)).toEqual(['lore-arcs'])
+      expect((await window.find({ type: 'Markdown' }))?.text).toContain('The steps so far.')
+      expect(await window.find({ type: 'Text', text: '/store/_work/_arcs/alpha/coordination.md' })).toBeDefined()
+      expect(await window.find({ key: 'streams' })).toBeUndefined()
+      await window.press({ key: 'back' })
+      const after = (await window.findAll({ type: 'Markdown' })).map(block => block.text).join('\n')
+      expect(after).not.toContain('The steps so far.')
+      expect(after).toContain('The board reads truthfully.')
+      expect(await window.find({ key: 'streams' })).toBeDefined()
+      expect(seen.closed).toEqual([])
     })
   }
 
@@ -133,8 +137,7 @@ describe('the arc window', () => {
     await start($, seen.clock)
     const window = await openExpanded($, seen, 'terminal')
     await window.press({ key: 'doc:drafts/long.md' })
-    const doc = await $.ui.mount({ plugin: 'lore', surface: 'terminal', ...pane('lore-doc', 96) })
-    const blocks = await doc.findAll({ type: 'Markdown' })
+    const blocks = await window.findAll({ type: 'Markdown' })
     expect(blocks.length).toBe(3)
     for (const block of blocks) expect(block.text.length).toBeLessThanOrEqual(10_000)
     expect(blocks.map(block => block.text).join('\n')).toContain('Line 499')
@@ -146,11 +149,10 @@ describe('the arc window', () => {
     const window = await openExpanded($, seen, 'terminal')
     await window.press({ key: 'stream:2' })
     expect(seen.runs).toContain('work show alpha-two --json')
-    const doc = await $.ui.mount({ plugin: 'lore', surface: 'terminal', ...pane('lore-doc', 96) })
-    const text = (await doc.findAll({ type: 'Markdown' })).map(block => block.text).join('\n')
+    const text = (await window.findAll({ type: 'Markdown' })).map(block => block.text).join('\n')
     expect(text).toContain('Draw it.')
     expect(text).toContain('Drawn once.')
-    expect(await doc.find({ type: 'Text', text: 'Draw the window' })).toBeDefined()
+    expect(await window.find({ type: 'Text', text: 'Draw the window' })).toBeDefined()
   })
 
   test('switch arc shows the picker inside a bound window', async ($, on) => {

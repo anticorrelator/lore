@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { LoreArc, LoreFile, LorePopout, LoreSize } from '../types'
 import type { Actions } from './draw'
 import { drawChip, drawPopout, drawWindow, titleOf } from './draw'
-import type { Ran } from './parse'
+import type { Ran, Snapshot } from './parse'
 import {
   activeStoreOf,
   boardOf,
@@ -21,9 +21,11 @@ import {
 } from './parse'
 
 const WINDOW = 'lore-arcs'
-const DOC = 'lore-doc'
 const POLL_MS = 30_000
-const COLUMNS: Record<LoreSize, number> = { compact: 34, expanded: 96 }
+// One width for the life of the session: resizing the dock reflows the whole
+// conversation, so the window is sized once and the person's own drag wins after.
+const WINDOW_COLUMNS = 64
+let isSized = false
 
 const store = atom({ plugin: 'lore', key: 'store' } as const, null)
 const board = atom({ plugin: 'lore', key: 'board' } as const, null)
@@ -82,21 +84,32 @@ async function poll($: EngineInterface): Promise<void> {
     const isShown =
       (await read($, isOpen)) ||
       (!(await read($, isDismissed)) && ((await read($, pinned)) !== null || (await read($, candidates)).length > 0))
-    if (!isShown) return
-
-    let raw: string | null = null
-    try {
-      const text = await $.fs.read(`${dir}/_coordination/display.json`)
-      raw = typeof text === 'string' ? text : null
-    } catch {
-      raw = null
+    if (!isShown) {
+      // Nothing is drawn, so the board is not refreshed: the file as it stands
+      // is enough to say whether there is an arc to offer /arcs for.
+      if (!isOffered) await offerArcs($, boardOf(await readSnapshot($, dir)).arcs)
+      return
     }
-    let snapshot = snapshotOf(raw)
+
+    let snapshot = await readSnapshot($, dir)
     if (isDue(snapshot, await $.clock.now())) {
       snapshot = refreshedSnapshotOf(await lore($, ['coordinate', 'read', '--refresh', '--json'], 30_000)) ?? snapshot
     }
     const fresh = boardOf(snapshot)
-    if (JSON.stringify(await read($, board)) !== JSON.stringify(fresh)) await update($, board, () => fresh)
+    await offerArcs($, fresh.arcs)
+    const mine = boundArc(fresh.arcs, await read($, candidates), await read($, pinned))
+    const key = JSON.stringify({ slugs: fresh.arcs.map(arc => arc.slug), mine, error: fresh.error })
+    if (key !== lastBoardKey || (await read($, board)) === null) {
+      lastBoardKey = key
+      await update($, board, () => fresh)
+    }
+    if (mine) {
+      const stamp = await ledgerStamp($, dir, mine.slug)
+      if (stamp !== lastLedgerStamp) {
+        lastLedgerStamp = stamp
+        isDetailDirty = true
+      }
+    }
 
     const known = new Set((await read($, titles)).map(title => title.slug))
     if (fresh.arcs.some(arc => !known.has(arc.slug))) {
@@ -107,6 +120,48 @@ async function poll($: EngineInterface): Promise<void> {
   } finally {
     isPolling = false
   }
+}
+
+async function readSnapshot($: EngineInterface, dir: string): Promise<Snapshot | null> {
+  try {
+    const text = await $.fs.read(`${dir}/_coordination/display.json`)
+    return snapshotOf(typeof text === 'string' ? text : null)
+  } catch {
+    return null
+  }
+}
+
+// /arcs is offered once there is an active arc to show, so a lore store with
+// none gains no command. The engine has no way to withdraw one, so it stays.
+let isOffered = false
+
+async function offerArcs($: EngineInterface, arcs: readonly LoreArc[]): Promise<void> {
+  if (isOffered || arcs.length === 0) return
+  isOffered = true
+  await $.command.register({ name: 'arcs', description: "Open or close lore's arc window" })
+}
+
+let lastBoardKey = ''
+let lastLedgerStamp = ''
+let isDetailDirty = false
+
+// The Brief, decisions and file list change when the coordinator writes the
+// ledger or digest, which moves no stream row; their mtimes say when to refetch.
+async function ledgerStamp($: EngineInterface, dir: string, slug: string): Promise<string> {
+  const parts: string[] = []
+  for (const name of ['coordination.md', 'digest.md']) {
+    try {
+      parts.push(String((await $.fs.stat(`${dir}/_work/_arcs/${slug}/${name}`)).mtimeMs))
+    } catch {
+      parts.push('-')
+    }
+  }
+  try {
+    parts.push(String((await $.fs.list(`${dir}/_work/_arcs/${slug}`)).length))
+  } catch {
+    parts.push('-')
+  }
+  return parts.join(':')
 }
 
 async function once(key: string, work: () => Promise<void>): Promise<void> {
@@ -121,6 +176,10 @@ async function once(key: string, work: () => Promise<void>): Promise<void> {
 
 type Drawn = { slug: string; generation: number; width?: number } | null
 
+function railWidth(width: number): number {
+  return Math.max(16, Math.floor(width / 8) * 8)
+}
+
 function isRailsCurrent(arc: LoreArc, generation: number, width: number, drawn: Drawn): boolean {
   return drawn?.slug === arc.slug && drawn.width === width && drawn.generation === generation
 }
@@ -134,7 +193,7 @@ async function sync($: EngineInterface): Promise<void> {
   const shown = await read($, board)
   const arc = await currentArc($)
   if (!shown || !arc || paneWidth <= 0) return
-  const width = paneWidth
+  const width = railWidth(paneWidth)
   const { generation } = shown
   const work: Promise<void>[] = []
   if (!isRailsCurrent(arc, generation, width, await read($, rails))) {
@@ -146,9 +205,10 @@ async function sync($: EngineInterface): Promise<void> {
       }),
     )
   }
-  if (!isDetailCurrent(arc, generation, await read($, detail))) {
+  if (isDetailDirty || !isDetailCurrent(arc, generation, await read($, detail))) {
+    isDetailDirty = false
     work.push(
-      once(`detail ${arc.slug} ${generation}`, async () => {
+      once(`detail ${arc.slug} ${generation} ${lastLedgerStamp}`, async () => {
         const loaded = detailOf(arc.slug, generation, await lore($, ['arc', 'show', arc.slug, '--json'], 20_000))
         await update($, detail, () => loaded)
       }),
@@ -160,7 +220,8 @@ async function sync($: EngineInterface): Promise<void> {
 async function openWindow($: EngineInterface): Promise<void> {
   await update($, isDismissed, () => false)
   await update($, isOpen, () => true)
-  await $.ui.open({ id: WINDOW, title: 'lore', columns: COLUMNS[await read($, size)] })
+  await $.ui.open(isSized ? { id: WINDOW, title: 'lore' } : { id: WINDOW, title: 'lore', columns: WINDOW_COLUMNS })
+  isSized = true
   detach(poll($))
 }
 
@@ -170,14 +231,20 @@ async function closeWindow($: EngineInterface): Promise<void> {
   await $.ui.close({ id: WINDOW })
 }
 
+// The pane, not a saved flag, says whether the window is up: a flag outlives a
+// reload or a close the engine made, and a toggle trusting it closes nothing.
+async function isWindowShown($: EngineInterface): Promise<boolean> {
+  return (await $.ui.panes()).some(pane => pane.id === WINDOW && pane.isShown)
+}
+
 async function toggleWindow($: EngineInterface): Promise<void> {
-  if (await read($, isOpen)) await closeWindow($)
+  if (await isWindowShown($)) await closeWindow($)
   else await openWindow($)
 }
 
-async function popOut($: EngineInterface, title: string, load: () => Promise<LorePopout>): Promise<void> {
-  await update($, popout, () => ({ title, source: '', blocks: [{ kind: 'markdown', text: 'Reading…' }] }))
-  await $.ui.open({ id: DOC, title, focus: true, closeOnEscape: true, holdToasts: true })
+// A document or work item replaces the window's body rather than opening a
+// pane of its own: a second pane adds a tab row and reflows the dock.
+async function popOut($: EngineInterface, load: () => Promise<LorePopout>): Promise<void> {
   const loaded = await load()
   await update($, popout, () => loaded)
 }
@@ -193,7 +260,6 @@ function actionsFor($: EngineInterface): Actions {
     toggleSize: async () => {
       const chosen: LoreSize = (await read($, size)) === 'compact' ? 'expanded' : 'compact'
       await update($, size, () => chosen)
-      await $.ui.open({ id: WINDOW, title: 'lore', columns: COLUMNS[chosen] })
       detach(sync($))
     },
     pick: async picking => {
@@ -214,7 +280,7 @@ function actionsFor($: EngineInterface): Actions {
       const loaded = await read($, detail)
       if (!dir || !loaded) return
       const source = `${dir}/${loaded.path}/${file.path}`
-      await popOut($, file.path, async () => {
+      await popOut($, async () => {
         try {
           const text = await $.fs.read(source)
           return documentOf(file.path, source, typeof text === 'string' ? text : null)
@@ -224,9 +290,11 @@ function actionsFor($: EngineInterface): Actions {
       })
     },
     openWorkItem: async slug => {
-      await popOut($, slug, async () => workItemOf(slug, await lore($, ['work', 'show', slug, '--json'], 30_000)))
+      await popOut($, async () => workItemOf(slug, await lore($, ['work', 'show', slug, '--json'], 30_000)))
     },
-    closePopout: () => $.ui.close({ id: DOC }),
+    closePopout: async () => {
+      await update($, popout, () => null)
+    },
   }
 }
 
@@ -248,7 +316,9 @@ export const register: Register = on => {
     const kept = await $.store.get(await pinKey($))
     if (typeof kept === 'string') await update($, pinned, () => kept)
 
-    await $.command.register({ name: 'arcs', description: "Open or close lore's arc window" })
+    const shown = await isWindowShown($)
+    await update($, isOpen, () => shown)
+    await update($, isDismissed, () => false)
     $.clock.every(POLL_MS, () => detach(poll($)))
     detach(poll($))
     return next(e)
@@ -256,7 +326,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'arcs' }, async $ => {
     await toggleWindow($)
-    return { text: (await read($, isOpen)) ? 'Opened the lore window.' : 'Closed the lore window.' }
+    return { text: (await isWindowShown($)) ? 'Opened the lore window.' : 'Closed the lore window.' }
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
@@ -274,7 +344,6 @@ export const register: Register = on => {
       await update($, isOpen, () => false)
       await update($, isPicking, () => false)
     }
-    if (e.id === DOC) await update($, popout, () => null)
     return next(e)
   })
 
@@ -287,6 +356,8 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: WINDOW }, async ($, e) => {
+    const shownDocument = await read($, popout)
+    if (shownDocument) return drawPopout($.ui.resolve(e), shownDocument, actionsFor($))
     const width = Math.max(10, e.props.bodyColumns - 4)
     paneWidth = width
     const shown = await read($, board)
@@ -300,7 +371,7 @@ export const register: Register = on => {
       arc !== null &&
       !picking &&
       chosen === 'expanded' &&
-      (!isRailsCurrent(arc, shown.generation, width, drawnRails) || !isDetailCurrent(arc, shown.generation, loaded))
+      (!isRailsCurrent(arc, shown.generation, railWidth(width), drawnRails) || !isDetailCurrent(arc, shown.generation, loaded))
     if (isStale) $.clock.after(0, () => detach(sync($)))
     return drawWindow(
       $.ui.resolve(e),
@@ -320,8 +391,4 @@ export const register: Register = on => {
       actionsFor($),
     )
   })
-
-  on('ui.render', { component: 'Pane', requestId: DOC }, async ($, e) =>
-    drawPopout($.ui.resolve(e), await read($, popout), actionsFor($)),
-  )
 }

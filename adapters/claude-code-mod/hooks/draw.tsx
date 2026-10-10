@@ -420,7 +420,7 @@ export function drawPopout(ui: ElementTable, shown: LorePopout | null, actions: 
         <Text bold wrap="truncate-end">
           {shown?.title ?? 'lore'}
         </Text>
-        <Button key="close" label="×" hotkey="x" role="dismiss" onPress={actions.closePopout} />
+        <Button key="back" label="← back" hotkey="b" onPress={actions.closePopout} />
       </Box>
       {shown?.source ? <Text dimColor wrap="truncate-middle">{shown.source}</Text> : null}
       {(shown?.blocks ?? []).map((block, i) =>

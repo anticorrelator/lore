@@ -89,6 +89,7 @@ export type World = {
   opened: PaneOpenArgs[]
   closed: string[]
   store: Map<string, unknown>
+  files: Record<string, string>
 }
 
 function ran(stdout: string, exitCode = 0) {
@@ -105,12 +106,16 @@ export function world(on: On, fixture: Fixture = {}): World {
     opened: [],
     closed: [],
     store: new Map(Object.entries(fixture.store ?? {})),
+    files: {},
   }
   const files: Record<string, string> = {
     [`${STORE}/_coordination/display.json`]: JSON.stringify(snapshot(fixture.nextUpdate)),
     [`${STORE}/_work/_arcs/alpha/coordination.md`]: '# Ledger\n\nThe steps so far.',
     [`${STORE}/_work/_arcs/alpha/drafts/long.md`]: LONG_DOCUMENT,
   }
+
+  seen.files = files
+  const shown = new Set<string>()
 
   on('store.get', (_$, e) => ({ value: seen.store.get(e.key) }))
   on('store.set', (_$, e) => {
@@ -126,12 +131,17 @@ export function world(on: On, fixture: Fixture = {}): World {
   })
   on('ui.open', (_$, e) => {
     seen.opened.push(e)
+    shown.add(e.id)
     return { value: { isPlaced: true } }
   })
   on('ui.close', (_$, e) => {
     seen.closed.push(e.id)
+    shown.delete(e.id)
     return { value: undefined }
   })
+  on('ui.panes', () => ({
+    value: [...shown].map(id => ({ id, title: 'lore', isShown: true, isFocused: false, isPlaced: true })),
+  }))
   on('ui.render', ($, e) => {
     const { Box } = $.ui.resolve(e)
     return <Box key="engine" />

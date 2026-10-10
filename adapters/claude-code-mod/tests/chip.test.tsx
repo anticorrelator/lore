@@ -41,7 +41,7 @@ describe('the band chip', () => {
     await start($, seen.clock)
     const ui = await $.ui.mount({ plugin: 'lore', surface: 'terminal', ...BAND })
     await ui.press({ key: 'toggle' })
-    expect(seen.opened.map(open => [open.id, open.columns])).toEqual([['lore-arcs', 34]])
+    expect(seen.opened.map(open => [open.id, open.columns])).toEqual([['lore-arcs', 64]])
     expect((await ui.find({ key: 'toggle' }))?.props.label).toBe('▾')
     await ui.press({ key: 'toggle' })
     expect(seen.closed).toEqual(['lore-arcs'])

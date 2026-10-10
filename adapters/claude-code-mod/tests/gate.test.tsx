@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { BAND, SURFACES, start, world } from './world'
+import { BAND, STORE, SURFACES, snapshot, start, world } from './world'
 
 describe('the lore-loaded gate', () => {
   test('an inactive store registers nothing and starts no timer', async ($, on) => {
@@ -27,7 +27,23 @@ describe('the lore-loaded gate', () => {
     expect(seen.reads).toEqual([])
   })
 
-  test('an active store registers /arcs and polls the snapshot file', async ($, on) => {
+  test('a store with no active arc offers no /arcs until the board lists one', async ($, on) => {
+    const seen = world(on)
+    const board = `${STORE}/_coordination/display.json`
+    const closed = snapshot()
+    seen.files[board] = JSON.stringify({ ...closed, coordination_arcs: closed.coordination_arcs.map(arc => ({ ...arc, status: 'closed' })) })
+    await start($, seen.clock)
+    expect(seen.commands).toEqual([])
+    expect(seen.reads).toEqual([board])
+    seen.files[board] = JSON.stringify(snapshot())
+    await seen.clock.advance(30_000)
+    expect(seen.commands).toEqual(['arcs'])
+    await seen.clock.advance(30_000)
+    expect(seen.commands).toEqual(['arcs'])
+    expect(seen.runs).toEqual(['active --harness claude-code --json'])
+  })
+
+  test('an active store with an active arc registers /arcs and polls the snapshot file', async ($, on) => {
     const seen = world(on)
     await start($, seen.clock)
     expect(seen.commands).toEqual(['arcs'])
