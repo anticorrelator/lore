@@ -2,9 +2,11 @@
 
 Work items persist in the project's `_work/` directory (path resolved by `lore resolve`). Use `/work` for lifecycle management.
 
-### Default to /work
+### Starting Work
 
-`/work` is the primary way to create and manage work items. It handles persistence, indexing, and cross-referencing automatically.
+Work usually runs through `/coordinate`, which plans it and carries it across sessions. When work comes up that needs a plan or will outlast this session, and no clear task has been proposed for it yet, suggest a coordination session.
+
+### Work Items
 
 **Don't hand-create a work item's managed files** (mkdir the item, Write `_meta.json`, edit the index). Always use `lore work create --title "<name>"` to bring a work item into existence — it handles slug generation, indexing, and metadata consistently. This applies to agents and subagents too: if a task requires creating a work item, invoke the CLI, not the filesystem.
 
@@ -21,17 +23,6 @@ Four kinds of work, read off the work rather than the diff: a *fix* restores spe
 ALL planning work MUST create durable artifacts in `_work/` — whether triggered by `/work`, a harness's builtin plan mode, or inline design discussion. **No ephemeral plans.**
 
 **If you used builtin plan mode:** No machinery reminds you to persist — persistence is your responsibility on every harness. Persist immediately after the user approves the plan via `/work create`.
-
-### Auto-Create Work Items (Low Threshold)
-
-Create a work item proactively when ANY apply:
-- Design discussion with trade-offs or architecture choices
-- Multi-file changes or multi-step implementation
-- Ambiguous scope — goal is clear, path isn't
-- System/meta changes — eat your own dog food
-- Cross-session work — anything that might not finish now
-
-**When in doubt, create it.** A `notes.md` costs nothing and provides cross-session continuity. Add `/spec` later if it grows.
 
 ### Session Continuity
 
