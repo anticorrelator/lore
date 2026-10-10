@@ -173,6 +173,26 @@ func rowsFromProjection(projection statusProjection, arc string) ([]Row, bool, e
 	return rows, found, nil
 }
 
+// ownerAsksFromProjection returns every active-arc stream row whose ledger
+// status is blocked-on-input, the one explicit owner ask a coordinator records.
+// The action buckets omit blocked rows, so this reads coordination_streams.
+func ownerAsksFromProjection(projection statusProjection) ([]Row, error) {
+	if len(projection.CoordinationStreams) == 0 {
+		return nil, fmt.Errorf("decode coordinate status: missing coordination_streams")
+	}
+	var all []Row
+	if err := json.Unmarshal(projection.CoordinationStreams, &all); err != nil {
+		return nil, fmt.Errorf("decode coordinate streams: %w", err)
+	}
+	asks := []Row{}
+	for _, row := range all {
+		if row.ArcStatus == "active" && row.Status == "blocked-on-input" {
+			asks = append(asks, row)
+		}
+	}
+	return asks, nil
+}
+
 func decodeAttention(r io.Reader) (Attention, error) {
 	var projection statusProjection
 	decoder := json.NewDecoder(r)

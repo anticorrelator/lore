@@ -104,7 +104,7 @@ The `/pr-review` family is `full` on every harness because its lens fanout uses 
 Every Lore skill has a working fallback path on every supported harness. The candidates for `unavailable` would be:
 
 - A skill that hard-required `task_completed_hook=full` with no fallback (would force `unavailable` on OpenCode/Codex). Today's `/implement` keeps protocol compliance via the lead-side validator — see [`adapters/agents/README.md`](../adapters/agents/README.md) §"Completion Enforcement Degradation Modes".
-- A skill that hard-required `plugin_runtime=full` (would force `unavailable` on Claude Code and Codex). No such skill exists; the OpenCode plugin (`adapters/opencode/lore-hooks.ts`) is an adapter, not a skill.
+- A skill that hard-required `plugin_runtime=full` (would force `unavailable` on Codex). No such skill exists; the OpenCode plugin (`adapters/opencode/lore-hooks.ts`) and the Claude Code mod (`adapters/claude-code-mod/`) are adapters, not skills.
 - A skill that hard-required `mcp=full` for non-optional behavior (no such skill today).
 
 If the skill-capability manifest reveals a hard requirement that breaks one of the supported harnesses, that skill flips to `unavailable` here and the `/<skill>` SKILL.md gains a "Harness compatibility" section listing supported harnesses.
@@ -128,7 +128,7 @@ The full capability profile lives in [`adapters/capabilities.json`](../adapters/
 | `team_messaging`       | full        | none      | none      |
 | `transcript_provider`  | full        | partial   | partial   |
 | `headless_runner`      | full        | partial   | full      |
-| `plugin_runtime`       | none        | full      | none      |
+| `plugin_runtime`       | full        | full      | none      |
 | `model_routing.shape`  | single      | multi     | single    |
 
 Capability cells in `adapters/capabilities.json` should always be a triple of (`support`, `evidence`, `notes`) — the canonical convention promoted from this work item is documented in `conventions/capability-cells-in-adapters-capabilities-json-sho.md`. Operators editing overrides via `framework.json::capability_overrides` should consult the evidence pointer first; promoting an override past the evidence-supported level is a D8 ceiling violation flagged by `lore framework capability-overrides`.
@@ -139,7 +139,7 @@ Each cell that is not `full` is degraded for a specific reason documented below.
 
 ### Claude Code
 
-Reference baseline. The only `none` cell is `plugin_runtime` — Claude Code hooks are shell/python commands invoked by the harness; there is no in-process plugin runtime, so OpenCode-style TypeScript plugins are not portable. Scripts handle every extension need.
+Reference baseline, with no `none` cell. `plugin_runtime` is `full` (evidence `claude-code-plugin-runtime`): Claude Code runs function-hook plugins (mods) in its own process, and lore ships `adapters/claude-code-mod/`, loaded from `env.CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json`. The mod API is early access and may change between releases. The settings hooks remain shell/python commands.
 
 ### OpenCode
 

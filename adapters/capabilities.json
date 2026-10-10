@@ -323,8 +323,9 @@
           }
         },
         "plugin_runtime": {
-          "support": "none",
-          "notes": "Hooks are shell/python commands invoked by Claude Code; there is no in-process plugin runtime. Scripts handle every extension need."
+          "support": "full",
+          "evidence": "claude-code-plugin-runtime",
+          "notes": "Function-hook plugins (mods): a TypeScript module Claude Code runs in its own process, hooking session start, tool calls, slash commands and drawing (panes, the band above the prompt). Loaded from env.CLAUDE_CODE_PLUGIN_DIRS in ~/.claude/settings.json, which the CLI and the desktop app both read. lore ships adapters/claude-code-mod (the arc window), added there by scripts/claude-code-mod-install.sh. The API is early access and may change between releases without notice; the settings and command hooks remain shell scripts."
         }
       }
     },

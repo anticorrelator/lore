@@ -1,0 +1,7 @@
+{
+  "name": "lore",
+  "version": "0.1.0",
+  "description": "Lore's arc window inside Claude Code: a chip for this session's arc that opens into its streams, Brief, decisions and documents",
+  "author": { "name": "lore" },
+  "types": "./types/index.d.ts"
+}

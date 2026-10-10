@@ -3,5 +3,5 @@
  │ ● │ │ │  w2    worker two                                                                                     running
  │ │ ● │ │  w3    worker three                                                                                   running
  │ │ │ ○ │  w4    worker four                                                                                     queued
- │ │ │ │ ▲  w5    worker five                                                                                  needs you
+ │ │ │ │ ▲  w5    worker five                                                                             waiting on you
  ○─╯─╯─╯─╯  join  assemble + verify                                                            waiting on w2, w3, w4, w5

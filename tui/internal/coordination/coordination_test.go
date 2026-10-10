@@ -163,20 +163,39 @@ func TestListModelAttentionHidesVerdictColumnWhenVisibleRowsAreEmpty(t *testing.
 	}
 }
 
-func TestListModelTitleRollupOmitsEmptyBuckets(t *testing.T) {
+func TestListModelTitleCountsOwnerAsksAndIgnoresActionBuckets(t *testing.T) {
 	m := NewListModel()
 	m.SetAttention(board.Attention{
 		board.ActNow:        {{Bucket: board.ActNow, Arc: "a", StreamID: "s1"}, {Bucket: board.ActNow, Arc: "b", StreamID: "s2"}},
-		board.NeedsJudgment: {},
+		board.NeedsJudgment: {{Bucket: board.NeedsJudgment, Arc: "a", StreamID: "s4"}},
 		board.Waiting:       {{Bucket: board.Waiting, Arc: "c", StreamID: "s3"}},
 		board.Reconcile:     {},
 	}, nil)
-	if got, want := m.Title(), "Coordination — ⚠ 2 act now · 1 waiting"; got != want {
+	if got := m.Title(); got != "Coordination" {
+		t.Fatalf("action buckets alone must not ask the owner: title = %q", got)
+	}
+	m.SetOwnerAsks([]board.Row{
+		{Arc: "a", StreamID: "s5", Status: "blocked-on-input"},
+		{Arc: "c", StreamID: "s6", Status: "blocked-on-input"},
+	})
+	if got, want := m.Title(), "Coordination — ⚠ 2 waiting on you"; got != want {
 		t.Fatalf("title = %q, want %q", got, want)
 	}
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	if got := m.Title(); got != "Attention" {
 		t.Fatalf("swapped title = %q, want Attention", got)
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	m.SetOwnerAsks(nil)
+	if got := m.Title(); got != "Coordination" {
+		t.Fatalf("answered asks must clear the warning: title = %q", got)
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	out := stripANSI(m.View())
+	for _, want := range []string{"Act now (2)", "Needs judgment (1)", "Waiting (1)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("attention listing lost bucket %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -604,7 +623,7 @@ func TestDetailIntegratedBodyOrderAndUnknowns(t *testing.T) {
 	if !(streams >= 0 && streams < digest && digest < brief && brief < ticker) {
 		t.Fatalf("live body must render Streams → Since you left → Brief → Recent activity:\n%s", out)
 	}
-	for _, want := range []string{"flagged for your review", "A decision the owner can scan.", "unknown · unknown · item-b"} {
+	for _, want := range []string{"queued", "A decision the owner can scan.", "unknown · unknown · item-b"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("integrated body missing explicit %q:\n%s", want, out)
 		}
@@ -710,6 +729,54 @@ func normalizeDetailGolden(value string) string {
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n") + "\n"
+}
+
+func TestDetailEmphasizesOnlyRowsHeldForOrWaitingOnTheOwner(t *testing.T) {
+	m := sizedDetail()
+	m.SetArc("arc-a")
+	m.SetBoard([]board.Row{
+		{Arc: "arc-a", StreamID: "a", Label: "finished hold", Gate: "hold", Status: "done", Verdict: "full"},
+		{Arc: "arc-a", StreamID: "b", Label: "dropped hold", Gate: "hold", Status: "dropped"},
+		{Arc: "arc-a", StreamID: "c", Label: "queued hold", Gate: "hold", Status: "pending"},
+		{Arc: "arc-a", StreamID: "d", Label: "running hold", Gate: "hold", Status: "in-flight"},
+		{Arc: "arc-a", StreamID: "e", Label: "queued flag", Gate: "flag", Status: "pending"},
+		{Arc: "arc-a", StreamID: "f", Label: "finished flag", Gate: "flag", Status: "done", Verdict: "full"},
+		{Arc: "arc-a", StreamID: "g", Label: "asks under hold", Gate: "hold", Status: "blocked-on-input"},
+		{Arc: "arc-a", StreamID: "h", Label: "asks under notify", Gate: "notify", Status: "blocked-on-input"},
+		{Arc: "arc-a", StreamID: "i", Label: "asks under flag", Gate: "flag", Status: "blocked-on-input"},
+	}, true, nil)
+	holdOn, _, _ := strings.Cut(holdStyle.Render("x"), "x")
+	flagOn, _, _ := strings.Cut(flagStyle.Render("x"), "x")
+	if holdOn == "" || flagOn == "" {
+		t.Fatal("styles render no escape sequence; this test cannot observe emphasis")
+	}
+	emphasized := func(view, label string) (hold, flag bool) {
+		for _, line := range strings.Split(view, "\n") {
+			if strings.Contains(stripANSI(line), label) {
+				return strings.Contains(line, holdOn), strings.Contains(line, flagOn)
+			}
+		}
+		t.Fatalf("no line for %q:\n%s", label, stripANSI(view))
+		return false, false
+	}
+	view := m.View()
+	for label, wantHold := range map[string]bool{
+		"finished hold": false, "dropped hold": false, "queued hold": true, "running hold": true,
+		"queued flag": false, "finished flag": false,
+		"asks under hold": true, "asks under notify": true, "asks under flag": true,
+	} {
+		hold, flag := emphasized(view, label)
+		if hold != wantHold || flag {
+			t.Errorf("%s: hold emphasis %v (want %v), flag emphasis %v (want false)", label, hold, wantHold, flag)
+		}
+	}
+	m.SetClosed(true)
+	closed := m.View()
+	for _, label := range []string{"queued hold", "asks under notify"} {
+		if hold, _ := emphasized(closed, label); hold {
+			t.Errorf("a closed arc's board must not emphasize %q", label)
+		}
+	}
 }
 
 func TestDetailIntegratedBodyGolden(t *testing.T) {

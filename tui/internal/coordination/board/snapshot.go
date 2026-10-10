@@ -46,6 +46,7 @@ type Snapshot struct {
 	Rows      []Row             `json:"-"`
 	Found     bool              `json:"-"`
 	Attention Attention         `json:"-"`
+	OwnerAsks []Row             `json:"-"`
 }
 
 func readSnapshot(store, arc string) (Snapshot, error) {
@@ -70,6 +71,10 @@ func readSnapshot(store, arc string) (Snapshot, error) {
 		return snapshot, err
 	}
 	snapshot.Attention, err = attentionFromProjection(snapshot.statusProjection)
+	if err != nil {
+		return snapshot, err
+	}
+	snapshot.OwnerAsks, err = ownerAsksFromProjection(snapshot.statusProjection)
 	return snapshot, err
 }
 

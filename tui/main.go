@@ -82,6 +82,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--session-host" {
 		os.Exit(sessionHostMain(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == renderBoardFlag {
+		os.Exit(renderBoardMain(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	// Capture panics to a crash log for debugging.
 	crashLog := filepath.Join(os.TempDir(), "lore-tui-crash.log")
 	defer func() {

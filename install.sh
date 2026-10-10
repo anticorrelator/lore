@@ -937,6 +937,8 @@ case "$PERM_ADAPTER_RECORD" in
     ;;
 esac
 
+if [ "$FRAMEWORK" = "claude-code" ]; then dry bash "$LORE_REPO_DIR/scripts/claude-code-mod-install.sh" enable; fi
+
 # --- 6. Assemble per-harness instruction file ---
 # assemble-instructions.sh dispatches to the right target per
 # resolve_harness_install_path: claude-code → ~/.claude/CLAUDE.md;

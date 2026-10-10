@@ -39,6 +39,12 @@ session end. Normal coding sessions need no lore-specific commands.
 embedded terminals (spawn, drive, triage), knowledge browsing, review-finding
 follow-ups, and the settlement view.
 
+**Arc window** — in Claude Code, a session working on an arc (`/coordinate`)
+shows a one-row summary above the prompt. Press its ▴, or run `/arcs`, to open
+a window with the step graph, the arc's documents, and each step's work item.
+It appears only in projects with a lore store, and only while an arc is
+active. Restart running sessions after installing to load it.
+
 **Driving work** — slash commands in an agent session:
 
 | | |
@@ -60,7 +66,10 @@ follow-ups, and the settlement view.
 
 **Configuration** — the installer persists framework and role→model settings
 to `~/.lore/config/`. `lore config show` prints them; `lore harness
-enable|disable` toggles integration per harness.
+enable|disable` toggles integration per harness. To turn lore off for one
+project in Claude Code, add `{"env": {"LORE_AGENT_DISABLED": "1"}}` to the
+project's `.claude/settings.local.json`, or to `.claude/settings.json` to share
+the setting. That stops lore's hooks and the arc window there.
 
 The wider CLI (`lore search`, `lore work`, …) is used by agents and scripts.
 

@@ -91,6 +91,7 @@ Commands:
   trust        Trust-ledger verbs — cheaply confirm an entry's verdict
                (see: lore trust --help)
   resolve      Resolve repo path or [[backlink]] references
+  active       Say whether lore is loaded here for a harness (exit 0 if so, 1 if not)
   prefetch     Prefetch knowledge for agent prompts
   init         Initialize a knowledge store
   init-work    Initialize the work item system
@@ -654,6 +655,8 @@ Usage: lore coordinate <verb> [args...]
 Verbs:
   read      Read the committed operational display; --refresh maintains it,
             --reconcile observes metadata, --rebuild repairs derived state
+  board     Print one arc's stream board as the coordination view draws it:
+            --arc <slug> --width <n> [--json]
   status    Project work, session, retro, and evolve evidence into
             Act now, Needs judgment, Waiting, and Reconcile
   reconcile Freeze and validate immutable per-stream reconciliation evidence
@@ -1026,6 +1029,21 @@ cmd_coordinate() {
       ;;
     read)
       exec "$SCRIPTS_DIR/coordinate-read.sh" "$@"
+      ;;
+    board)
+      # An older lore-tui ignores --render-board and opens the full-screen TUI,
+      # which hangs a caller with no terminal. Decide from the binary's bytes
+      # instead of running it; the flag is kept there as a variable for this.
+      local tui
+      if ! tui="$(command -v lore-tui)"; then
+        echo "lore coordinate board: lore-tui is not installed — run lore rebuild" >&2
+        return 3
+      fi
+      if ! LC_ALL=C grep -qaF -- '--render-board' "$tui"; then
+        echo "lore coordinate board: lore-tui is older than this command — run lore rebuild" >&2
+        return 3
+      fi
+      exec "$tui" --render-board "$@"
       ;;
     status)
       exec "$SCRIPTS_DIR/coordinate-status.sh" "$@"
@@ -2211,6 +2229,10 @@ case "$1" in
   retire)
     shift
     exec "$SCRIPTS_DIR/retire-append.sh" "$@"
+    ;;
+  active)
+    shift
+    exec "$SCRIPTS_DIR/active.sh" "$@"
     ;;
   resolve)
     shift

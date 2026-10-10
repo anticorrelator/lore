@@ -2,6 +2,7 @@ package board
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,34 @@ func TestDecodeRowsDistinguishesPresentEmptyAndAbsent(t *testing.T) {
 	rows, found, err = decodeRows(strings.NewReader(raw), "absent")
 	if err != nil || found || len(rows) != 0 {
 		t.Fatalf("absent arc = rows:%+v found:%v err:%v", rows, found, err)
+	}
+}
+
+func TestOwnerAsksAreActiveArcStreamsBlockedOnInput(t *testing.T) {
+	var projection statusProjection
+	raw := `{
+  "coordination_arcs": [{"arc":"live","status":"active"},{"arc":"over","status":"closed"}],
+  "coordination_streams": [
+    {"arc":"live","arc_status":"active","stream_id":"a","status":"blocked-on-input","gate":"notify"},
+    {"arc":"live","arc_status":"active","stream_id":"b","status":"pending","gate":"hold"},
+    {"arc":"live","arc_status":"active","stream_id":"c","status":"done","gate":"hold"},
+    {"arc":"live","arc_status":"active","stream_id":"d","status":"blocked-on:a","gate":"notify"},
+    {"arc":"over","arc_status":"closed","stream_id":"e","status":"blocked-on-input","gate":"hold"},
+    {"arc":"live","arc_status":"active","stream_id":"f","status":"blocked-on-input","gate":"hold"}
+  ]
+}`
+	if err := json.Unmarshal([]byte(raw), &projection); err != nil {
+		t.Fatal(err)
+	}
+	asks, err := ownerAsksFromProjection(projection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(asks) != 2 || asks[0].StreamID != "a" || asks[1].StreamID != "f" {
+		t.Fatalf("owner asks = %+v, want live/a and live/f", asks)
+	}
+	if _, err := ownerAsksFromProjection(statusProjection{}); err == nil || !strings.Contains(err.Error(), "missing coordination_streams") {
+		t.Fatalf("missing streams should be explicit, got %v", err)
 	}
 }
 

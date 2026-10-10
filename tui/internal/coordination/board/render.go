@@ -440,7 +440,7 @@ func statusWords(row Row, g graph) []string {
 	case row.Status == "pending":
 		words = append(words, "queued")
 	case row.Status == "blocked-on-input":
-		words = append(words, "needs you")
+		words = append(words, "waiting on you")
 	case strings.HasPrefix(row.Status, "blocked-on:"):
 		ref := strings.TrimSpace(strings.TrimPrefix(row.Status, "blocked-on:"))
 		if ref == "" {
@@ -453,12 +453,11 @@ func statusWords(row Row, g graph) []string {
 		words = append(words, row.Status)
 	}
 
-	switch row.Gate {
-	case "", "notify":
-	case "hold":
-		words = appendUnique(words, "needs you")
-	case "flag":
-		words = appendUnique(words, "flagged for your review")
+	switch {
+	case Held(row):
+		words = append(words, "held for you")
+	case finished(row.Status):
+	case row.Gate == "", row.Gate == "notify", row.Gate == "flag", row.Gate == "hold":
 	default:
 		words = appendUnique(words, row.Gate)
 	}
@@ -473,6 +472,17 @@ func statusWords(row Row, g graph) []string {
 	}
 	return words
 }
+
+// Held reports whether the board shows row as held for the owner. The gate
+// records the ceremony a step was dispatched under, not a live ask: a finished
+// step's gate is spent, a flag is reviewed after the fact through the arc's
+// decision digest, and a step blocked on the owner's input already reads
+// "waiting on you", so one ask carries one phrase.
+func Held(row Row) bool {
+	return row.Gate == "hold" && !finished(row.Status) && row.Status != "blocked-on-input"
+}
+
+func finished(status string) bool { return status == "done" || status == "dropped" }
 
 func appendUnique(values []string, value string) []string {
 	for _, existing := range values {

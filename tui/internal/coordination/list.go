@@ -246,6 +246,7 @@ type ListModel struct {
 	attentionActivity       map[string]string
 	attentionActivityLoaded bool
 	staleExpanded           map[board.AttentionBucket]bool
+	ownerAsks               int
 	width                   int
 	height                  int
 }
@@ -351,26 +352,20 @@ func (m ListModel) AttentionFocused() bool { return m.attentionFocused }
 // either collection's cursor.
 func (m *ListModel) ShowArcs() { m.attentionFocused = false }
 
-// Title is the top pane's title. The default arc-list state carries the sparse
-// attention rollup at zero row cost; the swapped state names its own listing.
+// SetOwnerAsks replaces the active-arc streams waiting on the owner's input.
+func (m *ListModel) SetOwnerAsks(asks []board.Row) { m.ownerAsks = len(asks) }
+
+// Title is the top pane's title. The default arc-list state counts only the
+// streams waiting on the owner; the action buckets are the coordinator's work
+// and stay in the swapped attention listing, which names itself.
 func (m ListModel) Title() string {
 	if m.attentionFocused {
 		return "Attention"
 	}
-	labels := map[board.AttentionBucket]string{
-		board.ActNow: "act now", board.NeedsJudgment: "judgment",
-		board.Waiting: "waiting", board.Reconcile: "reconcile",
-	}
-	var parts []string
-	for _, bucket := range board.AttentionBucketOrder {
-		if n := len(m.attentionData[bucket]); n > 0 {
-			parts = append(parts, fmt.Sprintf("%d %s", n, labels[bucket]))
-		}
-	}
-	if len(parts) == 0 {
+	if m.ownerAsks == 0 {
 		return "Coordination"
 	}
-	return "Coordination — ⚠ " + strings.Join(parts, " · ")
+	return fmt.Sprintf("Coordination — ⚠ %d waiting on you", m.ownerAsks)
 }
 
 // CurrentAttention returns the exact attention identity under its cursor.
