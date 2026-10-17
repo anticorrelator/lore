@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/anticorrelator/lore/tui/internal/config"
@@ -46,9 +47,12 @@ var reconnectFailure = regexp.MustCompile(`(?i)(reconnecting.*(?:timeout|failed)
 
 const ccDuration = `(?:\d+h(?:\s+\d+m)?(?:\s+\d+s)?|\d+m(?:\s+\d+s)?|\d+(?:\.\d+)?s)`
 
-// Claude rotates the Unicode verb; the star, completed duration phrase and
-// optional completion clock distinguish this marker from active ellipsis chrome.
-var ccSettled = regexp.MustCompile(`^✻\s+[\p{L}][\p{L}\p{M}]*\s+for\s+` + ccDuration + `(?:\s+·\s+done\s+(?:[1-9]|1[0-2]):[0-5]\d\s+(?:AM|PM))?$`)
+// Claude rotates both the star glyph and the verb. A completed duration phrase
+// ("for 4s", never an ellipsis) and an optional completion clock in 12- or
+// 24-hour form distinguish this marker from active chrome; a missed settled
+// marker silences the session's needs_input wake, so the clock is not narrowed
+// to one locale's format.
+var ccSettled = regexp.MustCompile(`^[✻✶✽✢]\s+[\p{L}][\p{L}\p{M}]*\s+for\s+` + ccDuration + `(?:\s+·\s+done\s+(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?(?:\s*[AP]M)?)?$`)
 var ccElapsedActivity = regexp.MustCompile(`^[✶✻✽✢✳·*]\s+[\p{L}][\p{L}\p{M}]*(?:…|\.\.\.)\s+` + ccDuration + `$`)
 
 var ocSettled = regexp.MustCompile(`^▣\s+.+ · .+ · \d+(?:\.\d+)?(?:ms|s|m|h|d)(?: \d+(?:s|m|h))?$`)
@@ -284,13 +288,15 @@ func (m model) reconcileSessionObservation(slug string) (model, tea.Cmd) {
 
 var providerFailure = regexp.MustCompile(`(?i)^\s*(?:[!⚠●⎿]\s*)?(?:reconnecting\b|stream disconnected\b|connection (?:lost|failed|error)\b|(?:api|provider|request) error\b|error (?:connecting|during streaming)\b|retrying\.{0,3}\s*\(?\d)`)
 
-// currentTurnRows returns the rows above the composer that follow the latest
-// submitted prompt and settled-turn marker, so an earlier turn's failure is not
-// read as the current turn's.
+// currentTurnRows returns the harness rows above the composer that follow the
+// latest submitted prompt and settled-turn marker, so an earlier turn's failure
+// is not read as the current turn's. Claude tool output is blanked first: a
+// failing command's own error text says nothing about the provider connection.
 func currentTurnRows(framework string, rows []string) []string {
 	composer := len(rows)
 	switch framework {
 	case "claude-code":
+		rows = withoutCCToolOutput(rows)
 		composer = ccComposerRegionStart(rows)
 	case "codex":
 		if footer := cxFooterIndex(rows); footer >= 0 {
@@ -333,6 +339,49 @@ func currentTurnRows(framework string, rows []string) []string {
 		}
 	}
 	return lastRows(rows, 18)
+}
+
+// withoutCCToolOutput blanks Claude tool-result rows: a row led by "⎿" and the
+// rows indented deeper than that glyph beneath it, across blank lines inside the
+// block. A "⎿" row directly under activity chrome is the harness's own status
+// line (tips, retry notices) and is kept. Blanking keeps row indices stable.
+func withoutCCToolOutput(rows []string) []string {
+	out := append([]string(nil), rows...)
+	for i := 0; i < len(rows); i++ {
+		glyph := strings.Index(rows[i], "⎿")
+		if glyph < 0 || strings.TrimSpace(rows[i][:glyph]) != "" {
+			continue
+		}
+		if i > 0 && ccActivityChrome(rows[i-1]) {
+			continue
+		}
+		column := utf8.RuneCountInString(rows[i][:glyph])
+		out[i] = ""
+		last := i
+		for j := i + 1; j < len(rows); j++ {
+			if strings.TrimSpace(rows[j]) == "" {
+				continue
+			}
+			if strings.Contains(rows[j], "⎿") || ccActivityChrome(rows[j]) || leadingSpaces(rows[j]) <= column {
+				break
+			}
+			for k := last + 1; k <= j; k++ {
+				out[k] = ""
+			}
+			last = j
+		}
+		i = last
+	}
+	return out
+}
+
+func ccActivityChrome(row string) bool {
+	trimmed := strings.TrimSpace(row)
+	return activityInterrupt.MatchString(row) || ccActivity.MatchString(trimmed) || ccElapsedActivity.MatchString(trimmed)
+}
+
+func leadingSpaces(row string) int {
+	return utf8.RuneCountInString(row) - utf8.RuneCountInString(strings.TrimLeft(row, " "))
 }
 
 type observationProgress struct {

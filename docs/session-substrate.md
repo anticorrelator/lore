@@ -1194,7 +1194,10 @@ recovery. The CLI's `turn_ended` is null, not a completion assertion.
 
 Provider reconnect/request errors take precedence over generic interrupt chrome
 in observations. A later submitted prompt outside the current composer ends the
-previous turn’s error evidence; held composer input does not. `progress_observed_at` and `progress_age_seconds` describe the
+previous turn’s error evidence; held composer input does not. Claude tool output
+(a `⎿` result row and the deeper-indented rows under it) is never read as
+provider evidence; a `⎿` status line directly under the activity row is the
+harness's own and still is. `progress_observed_at` and `progress_age_seconds` describe the
 last change to meaningful visible output; `observed_at` describes screen capture
 freshness. Animated activity/status rows do not refresh output progress. After
 120 seconds without such progress, `suspected_stall` is advisory only: long tools
@@ -1257,6 +1260,7 @@ The exact faint `Press up to edit queued messages` composer hint is a queue
 placeholder, not an option-select candidate. It permits another send through the
 existing queued-input contract; a typed copy remains a held draft, and genuine
 permission or option menus retain their refusal behavior. Completion markers
-recognize the rotating Unicode verb in `✻ <verb> for <duration>`, including an
-optional `· done <time>` clock. They establish idle only beside an unobstructed
+recognize the rotating star glyph and Unicode verb in `✻ <verb> for <duration>`,
+including an optional `· done <time>` clock in 12- or 24-hour form, with or
+without seconds. They establish idle only beside an unobstructed
 empty composer and do not override current activity or modal evidence.

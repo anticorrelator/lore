@@ -228,3 +228,44 @@ func TestStalledTransitionsSurviveUnknownRepaints(t *testing.T) {
 		}
 	}
 }
+
+func TestClaudeSettledMarkerAcceptsClockAndGlyphVariants(t *testing.T) {
+	for _, marker := range []string{"✻ Worked for 4s · done 13:23", "✻ Worked for 4s · done 1:23:45 PM", "✶ Worked for 4s"} {
+		if got, evidence := classifyActivity("claude-code", work.ScreenSnapshot{Rows: append([]string{marker}, ccComposerRows...)}); got != "idle" {
+			t.Fatalf("%q: %s %+v", marker, got, evidence)
+		}
+	}
+	for _, active := range []string{"✶ Worked… 4s", "✻ Musing… 12s"} {
+		if ccSettled.MatchString(active) {
+			t.Fatalf("active ellipsis form accepted as settled: %q", active)
+		}
+		if got, _ := classifyActivity("claude-code", work.ScreenSnapshot{Rows: append([]string{active}, ccComposerRows...)}); got != "working" {
+			t.Fatalf("%q: %s", active, got)
+		}
+	}
+	if ccSettled.MatchString("✻ Sautéed for 35m 56s · done 25:99 PM") {
+		t.Fatal("invalid clock accepted")
+	}
+}
+
+func TestToolOutputIsNotHarnessFailureUnderWorkingChrome(t *testing.T) {
+	spinner := "✶ Musing… (12s · esc to interrupt)"
+	for name, tool := range map[string][]string{
+		"result-line":       {"⏺ Bash(npm test)", "  ⎿  Error connecting to postgres at localhost:5432"},
+		"continuation-line": {"⏺ Bash(npm test)", "  ⎿  running integration suite", "     Retrying... (2/3)"},
+		"reconnect-wording": {"⏺ Bash(./sync.sh)", "  ⎿  syncing", "     stream disconnected: timeout"},
+	} {
+		rows := append(append(append([]string(nil), tool...), "", spinner, ""), ccComposerRows...)
+		if got, evidence := classifyActivity("claude-code", work.ScreenSnapshot{Rows: rows}); got != "working" {
+			t.Fatalf("%s: tool output read as %s %+v", name, got, evidence)
+		}
+	}
+	banner := append([]string{"⏺ Bash(npm test)", "  ⎿  ok", "", spinner, "  ⎿  API Error (Connection error.) · Retrying in 1 seconds… (attempt 1/10)", ""}, ccComposerRows...)
+	if got, evidence := classifyActivity("claude-code", work.ScreenSnapshot{Rows: banner}); got != "blocked" || evidence.Matcher != "provider-error-v1" {
+		t.Fatalf("harness retry banner under activity chrome: %s %+v", got, evidence)
+	}
+	failed := append([]string{"⏺ Bash(npm test)", "  ⎿  ok", "", spinner, "  ⎿  Reconnecting… failed after idle timeout", ""}, ccComposerRows...)
+	if got, evidence := classifyActivity("claude-code", work.ScreenSnapshot{Rows: failed}); got != "stalled" || evidence.Matcher != "connection-failure-v1" {
+		t.Fatalf("harness reconnect failure under activity chrome: %s %+v", got, evidence)
+	}
+}
