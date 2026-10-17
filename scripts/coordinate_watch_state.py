@@ -144,6 +144,47 @@ def current_snapshot(current):
     return result
 
 
+def semantic_observation(value):
+    token = {k: value.get(k) for k in ('activity', 'generation', 'session_id', 'authority', 'fresh', 'semantic_sequence')}
+    token['matcher'] = (value.get('evidence') or {}).get('matcher')
+    token['block_signature'] = value.get('block_signature')
+    return token
+
+
+def acknowledged_tokens(value):
+    # Accept the old single-observation shape when reading an existing receipt.
+    return value if isinstance(value, list) else [value] if isinstance(value, dict) else []
+
+
+def reconcile_samples(saved, current):
+    states = dict(saved.get('states', {}))
+    meaningful = dict(saved.get('meaningful', {}))
+    pending = dict(saved.get('pending', {}))
+    for row in current:
+        slug, value = row['slug'], row['observation']
+        token = semantic_observation(value)
+        prior = meaningful.get(slug)
+        # Unknown paints remain honest samples but do not erase the last
+        # meaningful state or manufacture another intervention on repaint.
+        if value.get('fresh') and value.get('activity') not in {'unknown', 'starting'}:
+            basis = dict(token)
+            basis.pop('semantic_sequence', None)
+            before = dict(prior or {})
+            before.pop('semantic_sequence', None)
+            if basis != before:
+                token['semantic_sequence'] = (prior or {}).get('semantic_sequence', 0) + 1
+                value['semantic_sequence'] = token['semantic_sequence']
+                pending[slug] = dict(slug=slug, previous=states.get(slug), observation=dict(value))
+            else:
+                value['semantic_sequence'] = prior['semantic_sequence']
+                token['semantic_sequence'] = prior['semantic_sequence']
+            meaningful[slug] = token
+        elif slug not in states or states[slug].get('generation') != token.get('generation') or (not value.get('fresh') and states[slug] != token):
+            pending[slug] = dict(slug=slug, previous=states.get(slug), observation=dict(value))
+        states[slug] = token
+    return dict(saved, states=states, meaningful=meaningful, pending=pending)
+
+
 class Delivery:
     def __init__(self, path):
         self.path = Path(path)
@@ -155,9 +196,18 @@ class Delivery:
     def publish(self, payload, identity, interval):
         with locked(self.lock):
             state = self.state()
+            if payload.get('outcome') == 'current_delta':
+                acknowledged = state.get('acknowledged_observations', {})
+                remaining = [r for r in payload.get('current_delta', [])
+                             if semantic_observation(r['observation']) not in acknowledged_tokens(acknowledged.get(r['slug']))]
+                if not remaining:
+                    return None
+                payload = dict(payload, current_delta=remaining)
             basis = {k: payload.get(k) for k in ('outcome', 'matched', 'pending', 'next_cursor', 'current_delta')}
             if payload.get('outcome') == 'pending_stale':
                 basis = {'outcome': 'pending_stale', 'requests': sorted({str(r['request_id']) for r in payload.get('pending', [])})}
+            if payload.get('outcome') == 'current_delta':
+                basis = {'outcome': 'current_delta', 'delta': [dict(slug=r['slug'], observation=semantic_observation(r['observation'])) for r in payload['current_delta']]}
             key = hashlib.sha256(json.dumps(basis, sort_keys=True).encode()).hexdigest()
             if payload.get('outcome') == 'pending_stale':
                 previous = next((r for r in reversed(state['wakes']) if r['fingerprint'] == key), None)
@@ -237,6 +287,15 @@ def wake_receipt(kdir, wake_id, acknowledge=False):
                 raise ValueError('wake receipt belongs to another owner')
             if acknowledge and not row.get('acknowledged_at'):
                 row['acknowledged_at'] = timestamp()
+                acknowledged = state.setdefault('acknowledged_observations', {})
+                for sample in row['payload'].get('current_delta', []):
+                    value = sample.get('observation', {})
+                    if value.get('fresh') and value.get('activity') not in {'unknown', 'starting'}:
+                        tokens = acknowledged_tokens(acknowledged.get(sample['slug']))
+                        token = semantic_observation(value)
+                        if token not in tokens:
+                            tokens.append(token)
+                        acknowledged[sample['slug']] = tokens
                 atomic(path, state)
             return dict(wake_id=wake_id, payload=delivery.present(row), historical_payload=row['payload'],
                         current_observation_available=False, recipient=row['identity'],
@@ -304,13 +363,9 @@ def sweep(kdir, scripts, path, scope, budget, peek_timeout):
                              observed_at=timestamp(), evidence={'reason': 'previous-session-not-in-live-registry'})
                 current.append({'slug': slug, 'observation': value, 'peek': {'slug': slug, 'observation': value}})
                 unavailable.append({'slug': slug, 'error': 'previous-session-not-in-live-registry'})
-        for row in current:
-            value = row['observation']
-            token = {k: value.get(k) for k in ('activity', 'generation', 'session_id', 'authority', 'fresh')}
-            if previous.get(row['slug']) != token:
-                pending[row['slug']] = {'slug': row['slug'], 'previous': previous.get(row['slug']), 'observation': value}
-            states[row['slug']] = token
-        atomic(path, {'schema_version': 1, 'states': states, 'pending': pending, 'next_index': offset + len(selected), 'observed_at': timestamp()})
+        saved = reconcile_samples(dict(saved, pending=pending), current)
+        pending = saved['pending']
+        atomic(path, dict(saved, schema_version=1, next_index=offset + len(selected), observed_at=timestamp()))
     return dict(observed_at=timestamp(), current=current, delta=list(pending.values()), unavailable=unavailable,
                 complete=not unavailable, budget_seconds=budget)
 
@@ -355,7 +410,7 @@ def compact_wake(payload, budget=COMPACT_LIMIT):
     def observed(value):
         result = fields(value, ('activity', 'authority', 'observed_at', 'session_id', 'session_handle',
                                 'native_session_id', 'generation', 'instance', 'can_accept_input', 'fresh',
-                                'max_age_seconds', 'age_seconds'))
+                                'max_age_seconds', 'age_seconds', 'progress_observed_at', 'progress_age_seconds', 'suspected_stall'))
         if value.get('evidence'):
             result['evidence'] = fields(value['evidence'], ('matcher', 'reason'))
         return result

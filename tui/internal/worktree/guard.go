@@ -310,20 +310,6 @@ func MakePublishable(ctx context.Context, identity Identity) (Identity, ResultAr
 	return next, artifact, nil
 }
 
-// EmptyAtBase checks both committed and uncommitted output, independently of
-// the destination's current HEAD. It never writes the destination.
-func EmptyAtBase(ctx context.Context, identity Identity) (bool, error) {
-	if err := ValidateIdentity(ctx, identity); err != nil {
-		return false, err
-	}
-	head, err := gitString(ctx, identity.CanonicalPath, "rev-parse", "HEAD")
-	if err != nil {
-		return false, err
-	}
-	dirty, err := isDirty(ctx, identity.CanonicalPath)
-	return err == nil && !dirty && head == identity.Captured.HeadOID, err
-}
-
 // Quarantine preserves the current session result as both a Git ref and a
 // binary patch before making the physical worktree cleanup-eligible.
 func Quarantine(ctx context.Context, identity Identity, reason string) (Identity, ResultArtifact, error) {
@@ -616,6 +602,29 @@ func canonicalExisting(path string) (string, error) {
 		return "", fmt.Errorf("resolve canonical path %q: %w", path, err)
 	}
 	return filepath.Clean(resolved), nil
+}
+
+// UnchangedSinceCapture compares session content, including the index, with its
+// allocation snapshot, so uncommitted state inherited at allocation still counts
+// as unchanged. It also requires the retained result to hold the captured tree:
+// a write between that snapshot and this check cannot pass for an unchanged
+// result. Destination movement does not affect this comparison.
+func UnchangedSinceCapture(ctx context.Context, identity Identity, retained ResultArtifact) (bool, error) {
+	if err := ValidateIdentity(ctx, identity); err != nil {
+		return false, err
+	}
+	current, _, _, err := inspectGeneration(ctx, identity.CanonicalPath)
+	if err != nil {
+		return false, err
+	}
+	if !sameContentGeneration(identity.Captured, current) {
+		return false, nil
+	}
+	tree, err := gitString(ctx, identity.CanonicalPath, "rev-parse", "--verify", "--quiet", retained.OID+"^{tree}")
+	if err != nil {
+		return false, fmt.Errorf("read retained result tree: %w", err)
+	}
+	return tree == identity.Captured.WorktreeDigest, nil
 }
 
 func sameContentGeneration(left, right Generation) bool {

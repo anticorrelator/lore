@@ -842,11 +842,17 @@ func TestEnqueueSessionUsesSoleWriterWithFrozenRoute(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), raw, 0644); err != nil {
 		t.Fatal(err)
 	}
+	// An option-bearing route carries a build-vintage floor, and a floor is only
+	// published to a live runtime whose build time meets it, as this TUI's own
+	// registration does.
+	if err := session.WriteInstance(sessionsDir, session.Instance{Name: m.instanceName, PID: os.Getpid(), ProjectDir: m.config.ProjectDir, BuildTime: "2026-09-09T01:27:42Z"}); err != nil {
+		t.Fatal(err)
+	}
 	_, cmd := m.enqueueSession(work.SessionDescriptor{Type: work.SessionSpec, Slug: "demo", SkipConfirm: true})
 	msg := cmd()
 	result, ok := msg.(directEnqueueResultMsg)
 	if !ok || result.err != nil {
-		t.Fatalf("enqueue result=%T %+v", msg, msg)
+		t.Fatalf("enqueue result=%T %+v err=%v", msg, msg, result.err)
 	}
 	rows := session.ScanPending(sessionsDir)
 	if len(rows) != 1 || rows[0].Route == nil {
@@ -854,6 +860,9 @@ func TestEnqueueSessionUsesSoleWriterWithFrozenRoute(t *testing.T) {
 	}
 	if rows[0].Route.Framework != "codex" || rows[0].Route.Model != "gpt-6-astra" || rows[0].Route.Options["effort"] != "high" {
 		t.Fatalf("route = %#v", rows[0].Route)
+	}
+	if rows[0].TargetInstance == nil || *rows[0].TargetInstance != m.instanceName {
+		t.Fatalf("target_instance = %v, want the live runtime that meets the floor", rows[0].TargetInstance)
 	}
 }
 

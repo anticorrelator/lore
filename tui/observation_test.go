@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
@@ -186,7 +187,13 @@ func TestClaudeQueuedComposerIsNotModal(t *testing.T) {
 		}
 	}
 	rows = append(rows, "queued first message", "queued second message", "↑ edit queue")
-	snap := work.ScreenSnapshot{Rows: rows, ANSI: strings.Join(rows, "\n")}
+	ansi := append([]string(nil), rows...)
+	for i, row := range ansi {
+		if row == "❯ Press up to edit queued messages" {
+			ansi[i] = "❯ \x1b[2mPress up to edit queued messages\x1b[22m"
+		}
+	}
+	snap := work.ScreenSnapshot{Rows: rows, ANSI: strings.Join(ansi, "\n")}
 	if ccInteractivePrompt(rows) {
 		t.Fatal("queue classified as modal")
 	}
@@ -201,5 +208,23 @@ func TestReconnectFailureIsStalledWithoutInferringIdle(t *testing.T) {
 	got, evidence := classifyActivity("codex", work.ScreenSnapshot{Rows: rows})
 	if got != "stalled" || !strings.Contains(evidence.Reason, "websocket") {
 		t.Fatalf("%s %+v", got, evidence)
+	}
+}
+
+func TestStalledTransitionsSurviveUnknownRepaints(t *testing.T) {
+	m := runtimeModel(t)
+	m.localSessions["demo"] = liveSession{typ: "implement"}
+	for i, tc := range []struct {
+		activity string
+		event    bool
+	}{
+		{"working", true}, {"stalled", true}, {"unknown", false}, {"stalled", false},
+		{"starting", false}, {"stalled", false}, {"working", true}, {"stalled", true},
+	} {
+		var cmd tea.Cmd
+		m, cmd = m.applySessionObservation("demo", session.Observation{Activity: tc.activity, Generation: "g"}, time.Now())
+		if (cmd != nil) != tc.event {
+			t.Fatalf("step %d %s: event=%v, want %v", i, tc.activity, cmd != nil, tc.event)
+		}
 	}
 }

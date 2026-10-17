@@ -73,7 +73,7 @@ class ManagedRoutes(unittest.TestCase):
             calls.append([str(x) for x in argv])
             return '{}'
         with patch.object(m, 'ensure', return_value={'instance_name': 'instance'}), \
-             patch.object(m, 'ready', return_value={'instance_name': 'instance'}), \
+             patch.object(m, 'ready', return_value={'instance_name': 'instance', 'runtime_capabilities': ['position-preparation-v1']}), \
              patch.object(m, 'run', side_effect=invoke):
             m.enqueue_start(self.kdir, manifest)
         request = next(call for call in calls if call[1].endswith('session-request.sh'))

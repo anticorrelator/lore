@@ -281,7 +281,7 @@ func (h *sessionHostModel) publishReady() error {
 	if err := h.runtime.recoverHostDeliveries(); err != nil {
 		return err
 	}
-	return hostAtomicJSON(h.options.ReadyFile, map[string]any{"schema_version": 1, "host_key": h.options.Key, "instance_name": h.runtime.instanceName, "pid": os.Getpid(), "source_dir": h.options.SourceDir, "knowledge_dir": h.options.KnowledgeDir, "ready": true})
+	return hostAtomicJSON(h.options.ReadyFile, map[string]any{"schema_version": 1, "host_key": h.options.Key, "instance_name": h.runtime.instanceName, "pid": os.Getpid(), "source_dir": h.options.SourceDir, "knowledge_dir": h.options.KnowledgeDir, "ready": true, "runtime_capabilities": session.RuntimeCapabilities()})
 }
 func (h *sessionHostModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
@@ -437,7 +437,7 @@ func (h *sessionHostModel) sessionTick() tea.Cmd {
 	for slug := range m.localSessions {
 		hosted[slug] = true
 	}
-	cmds := []tea.Cmd{m.syncInstanceCmd(), m.queueTickCmd(), scanSendRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanPeekRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanAnswerRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanCloseRequestsCmd(m.sessionsDir, m.instanceName, hosted, sessionIDIndex(m.localSessions), true)}
+	cmds := []tea.Cmd{scanInterruptRequestsCmd(m.sessionsDir, m.instanceName), m.syncInstanceCmd(), m.queueTickCmd(), scanSendRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanPeekRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanAnswerRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanCloseRequestsCmd(m.sessionsDir, m.instanceName, hosted, sessionIDIndex(m.localSessions), true)}
 	var more []tea.Cmd
 	*m, more = m.advanceCloseLadders()
 	cmds = append(cmds, more...)

@@ -280,7 +280,7 @@ read_from() {
 first_match_record() {
   printf '%s' "$1" | jq -c --arg slug "$SLUG" --argjson until "$UNTIL_JSON" \
     --arg request_id "$REQUEST_ID" --argjson request_id_set "$REQUEST_ID_SET" \
-    --argjson work_item_set "$WORK_ITEM_SET" \
+    --argjson work_item_set "$WORK_ITEM_SET" --argjson until_explicit "$UNTIL_EXPLICIT" \
     'def target_matches:
       . == $slug or (
         $work_item_set == 1
@@ -290,6 +290,7 @@ first_match_record() {
     first(.records[] | select(
       (.event.slug | target_matches)
       and (.event.event as $e | $until | index($e))
+      and ($until_explicit == 1 or .event.event != "worktree_quarantined" or .event.reason != "no_changes")
       and ($request_id_set == 0 or .event.event != "closed" or .event.request_id? == $request_id)
     ))' 2>/dev/null || true
 }

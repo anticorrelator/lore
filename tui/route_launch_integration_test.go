@@ -59,8 +59,11 @@ func TestRouteRequestQueueDescriptorLaunchIntegration(t *testing.T) {
 	if err := os.MkdirAll(instances, 0755); err != nil {
 		t.Fatal(err)
 	}
-	instance, _ := json.Marshal(map[string]any{"name": "integration-host", "pid": os.Getpid(), "repo": "fixture", "started": "2026-09-09T00:00:00Z", "initiator_default": "human", "project_dir": source, "sessions": []any{}})
-	if err := os.WriteFile(filepath.Join(instances, "integration-host.json"), instance, 0644); err != nil {
+	// Route options carry a build-vintage floor, and a floor is published only
+	// to a live runtime whose build time meets it; that runtime is the claimer.
+	hostRow := map[string]any{"name": "host", "pid": os.Getpid(), "repo": "fixture", "started": "2026-09-09T00:00:00Z", "initiator_default": "human", "project_dir": source, "build_time": routeAwareVintage, "runtime_capabilities": []string{"position-preparation-v1"}, "sessions": []any{}}
+	instance, _ := json.Marshal(hostRow)
+	if err := os.WriteFile(filepath.Join(instances, "host.json"), instance, 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -186,12 +189,17 @@ func TestRouteRequestQueueDescriptorLaunchIntegration(t *testing.T) {
 		if err := os.WriteFile(manifestPath, raw, 0644); err != nil {
 			t.Fatal(err)
 		}
+		hostRow["host_key"] = manifest["host_key"]
+		instance, _ := json.Marshal(hostRow)
+		if err := os.WriteFile(filepath.Join(instances, "host.json"), instance, 0644); err != nil {
+			t.Fatal(err)
+		}
 		py := `import importlib.util,sys
 from unittest.mock import patch
 spec=importlib.util.spec_from_file_location("session_managed",sys.argv[1])
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 k=m.Path(sys.argv[2]); manifest=m.read(m.Path(sys.argv[3]))
-status={"instance_name":"integration-host"}
+status={"instance_name":"host","runtime_capabilities":["position-preparation-v1"]}
 with patch.object(m,"ensure",return_value=status), patch.object(m,"ready",return_value=status):
     m.enqueue_start(k,manifest)`
 		cmd := exec.Command("python3", "-c", py, filepath.Join(repo, "scripts", "session-managed.py"), kdir, manifestPath)
@@ -251,11 +259,14 @@ func TestDirectTUIEnqueueClaimsAndLaunchesFrozenRoute(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ROUTE_ARGV_RECORD\"\nsleep 1\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
+	if err := session.WriteInstance(sessionsDir, session.Instance{Name: m.instanceName, PID: os.Getpid(), ProjectDir: m.config.ProjectDir, BuildTime: routeAwareVintage}); err != nil {
+		t.Fatal(err)
+	}
 	_, cmd := m.enqueueSession(work.SessionDescriptor{Type: work.SessionSpec, Slug: "direct", SkipConfirm: false})
 	msg := cmd()
 	result, ok := msg.(directEnqueueResultMsg)
 	if !ok || result.err != nil {
-		t.Fatalf("enqueue=%T %+v", msg, msg)
+		t.Fatalf("enqueue=%T %+v err=%v", msg, msg, result.err)
 	}
 	rows := session.ScanPending(sessionsDir)
 	if len(rows) != 1 || rows[0].Route == nil {

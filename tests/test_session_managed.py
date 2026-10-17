@@ -193,7 +193,7 @@ class ManagedSessions(unittest.TestCase):
         self.assertTrue(result['outcome_confirmed'])
 
     def test_ready_runtime_regains_a_missing_supervisor(self):
-        with patch.object(m, 'ready', return_value={'instance_name': 'alive'}), patch.object(m, 'held', return_value=False), patch.object(m, 'binary', return_value=Path('/fake/binary')), patch.object(m.subprocess, 'Popen') as launch:
+        with patch.object(m, 'ready', return_value={'instance_name': 'alive', 'runtime_capabilities': ['position-preparation-v1']}), patch.object(m, 'held', return_value=False), patch.object(m, 'binary', return_value=Path('/fake/binary')), patch.object(m.subprocess, 'Popen') as launch:
             result = m.ensure(self.kdir, 'key', str(self.source), 0)
         self.assertEqual(result['instance_name'], 'alive')
         launch.assert_called_once()

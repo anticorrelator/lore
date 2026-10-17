@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -34,7 +35,7 @@ func activeScreenMatcher(framework string, rows []string) string {
 				return framework + "-interrupt-chrome-v1"
 			}
 		}
-		if framework == "claude-code" && ccActivity.MatchString(strings.TrimSpace(row)) {
+		if framework == "claude-code" && (ccActivity.MatchString(strings.TrimSpace(row)) || ccElapsedActivity.MatchString(strings.TrimSpace(row))) {
 			return "claude-code-thinking-chrome-v1"
 		}
 	}
@@ -43,7 +44,12 @@ func activeScreenMatcher(framework string, rows []string) string {
 
 var reconnectFailure = regexp.MustCompile(`(?i)(reconnecting.*(?:timeout|failed)|idle timeout waiting for websocket|stream disconnected.*(?:timeout|failed))`)
 
-var ccSettled = regexp.MustCompile(`^[✻✶✽✢]\s*[\p{L}]+ for\s*\d+(?:h|m|s)(?:\s+\d+(?:m|s)){0,2}(?:\s*·\s*done .+)?$`)
+const ccDuration = `(?:\d+h(?:\s+\d+m)?(?:\s+\d+s)?|\d+m(?:\s+\d+s)?|\d+(?:\.\d+)?s)`
+
+// Claude rotates the Unicode verb; the star, completed duration phrase and
+// optional completion clock distinguish this marker from active ellipsis chrome.
+var ccSettled = regexp.MustCompile(`^✻\s+[\p{L}][\p{L}\p{M}]*\s+for\s+` + ccDuration + `(?:\s+·\s+done\s+(?:[1-9]|1[0-2]):[0-5]\d\s+(?:AM|PM))?$`)
+var ccElapsedActivity = regexp.MustCompile(`^[✶✻✽✢✳·*]\s+[\p{L}][\p{L}\p{M}]*(?:…|\.\.\.)\s+` + ccDuration + `$`)
 
 var ocSettled = regexp.MustCompile(`^▣\s+.+ · .+ · \d+(?:\.\d+)?(?:ms|s|m|h|d)(?: \d+(?:s|m|h))?$`)
 var cxSettled = regexp.MustCompile(`^─ Worked for \d+(?:h|m|s)(?: \d+(?:m|s)){0,2} (?:• .+ )?─+$`)
@@ -102,6 +108,9 @@ func settledScreenMatcher(framework string, rows []string) string {
 }
 
 func classifyActivity(framework string, snap work.ScreenSnapshot) (string, session.ObservationEvidence) {
+	if framework == "claude-code" {
+		snap = ccComposerPane(snap)
+	}
 	state, known := classifyScreen(framework, snap)
 	evidence := session.ObservationEvidence{Matcher: "unrecognized-screen-v1", Reason: "No supported lifecycle signature; input readiness and output silence do not establish idle."}
 	if !known {
@@ -110,13 +119,22 @@ func classifyActivity(framework string, snap work.ScreenSnapshot) (string, sessi
 	if state.interactive {
 		return "blocked", session.ObservationEvidence{Matcher: state.interactiveReason, Reason: "Interactive prompt owns terminal input."}
 	}
-	if matcher := activeScreenMatcher(framework, snap.Rows); matcher != "" {
-		for _, row := range lastRows(gateRows(snap.Rows), 18) {
+	active := activeScreenMatcher(framework, snap.Rows)
+	turn := currentTurnRows(framework, snap.Rows)
+	if active != "" {
+		for _, row := range gateRows(turn) {
 			if reconnectFailure.MatchString(row) {
 				return "stalled", session.ObservationEvidence{Matcher: "connection-failure-v1", Reason: strings.TrimSpace(row)}
 			}
 		}
-		return "working", session.ObservationEvidence{Matcher: matcher, Reason: "Current activity chrome advertises an interruptible turn."}
+	}
+	for _, row := range turn {
+		if providerFailure.MatchString(strings.TrimSpace(row)) {
+			return "blocked", session.ObservationEvidence{Matcher: "provider-error-v1", Reason: "Provider reports a connection or request failure; interrupt chrome does not establish healthy progress."}
+		}
+	}
+	if active != "" {
+		return "working", session.ObservationEvidence{Matcher: active, Reason: "Current activity chrome advertises an interruptible turn."}
 	}
 	if matcher := settledScreenMatcher(framework, snap.Rows); matcher != "" && state.composer && !state.pending && !state.heldInput {
 		return "idle", session.ObservationEvidence{Matcher: matcher, Reason: "Settled-turn marker is current to the unobstructed composer; this does not establish task completion."}
@@ -171,10 +189,15 @@ func (m model) snapshotObservation(slug string, now time.Time) (session.Observat
 	queues, _ := config.HarnessQueuesMidGeneration(framework)
 	obs.CanAcceptInput, obs.InputBlockedReason = sendReadiness(framework, panel.NeedsInput(), contract, queues, snap)
 	obs.Fresh = true
+	m.observeProgress(slug, &obs, snap, now)
 	obs.Activity, obs.Evidence = classifyActivity(framework, snap)
 	if last := panel.LastOutputTime(); obs.Activity == "working" && !last.IsZero() && now.Sub(last) >= 5*time.Minute {
 		obs.Activity = "stalled"
 		obs.Evidence = session.ObservationEvidence{Matcher: "working-output-silent-v1", Reason: "Working chrome with no terminal output for at least five minutes; inspect before interrupting, a silent tool may still be running."}
+	}
+	if state.numberedModal != nil {
+		encoded, _ := json.Marshal(state.numberedModal)
+		obs.BlockSignature = fmt.Sprintf("%x", sha256.Sum256(encoded))
 	}
 	if obs.Activity != "unknown" {
 		obs.Authority = "screen-signature"
@@ -192,6 +215,9 @@ func (m model) snapshotObservation(slug string, now time.Time) (session.Observat
 }
 
 func (m model) applySessionObservation(slug string, obs session.Observation, now time.Time) (model, tea.Cmd) {
+	if m.observationProgress == nil {
+		m.observationProgress = make(map[string]observationProgress)
+	}
 	ls, tracked := m.localSessions[slug]
 	if !tracked {
 		return m, nil
@@ -203,6 +229,13 @@ func (m model) applySessionObservation(slug string, obs session.Observation, now
 		m.observationSince = make(map[string]time.Time)
 	}
 	previous, seen := m.sessionObservations[slug]
+	if m.meaningfulObservations == nil {
+		m.meaningfulObservations = make(map[string]session.Observation)
+	}
+	meaningful, meaningfulSeen := m.meaningfulObservations[slug]
+	if meaningful.Generation != obs.Generation {
+		meaningfulSeen = false
+	}
 	if !seen || previous.Generation != obs.Generation {
 		m.observationSince[slug] = now
 		seen = false
@@ -214,16 +247,19 @@ func (m model) applySessionObservation(slug string, obs session.Observation, now
 	}
 	m.sessionIdle[slug] = parked
 	m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: slug, Type: ls.typ, NeedsInput: parked})
-	wasParked := seen && (previous.Activity == "idle" || previous.Activity == "blocked")
+	wasParked := meaningfulSeen && (meaningful.Activity == "idle" || meaningful.Activity == "blocked")
 	event := ""
-	if parked && (!wasParked || previous.Activity != obs.Activity) {
+	if parked && (!wasParked || meaningful.Activity != obs.Activity) {
 		event = session.EventNeedsInput
 	}
-	if obs.Activity == "stalled" && (!seen || previous.Activity != "stalled") {
+	if obs.Activity == "stalled" && (!meaningfulSeen || meaningful.Activity != "stalled") {
 		event = session.EventNeedsInput
 	}
-	if obs.Activity == "working" && (!seen || previous.Activity != "working") {
+	if obs.Activity == "working" && (!meaningfulSeen || meaningful.Activity != "working") {
 		event = session.EventResumed
+	}
+	if obs.Activity != "unknown" && obs.Activity != "starting" {
+		m.meaningfulObservations[slug] = obs
 	}
 	if event == "" {
 		return m, nil
@@ -238,7 +274,105 @@ func (m model) reconcileSessionObservation(slug string) (model, tea.Cmd) {
 	if _, ok := m.localSessions[slug]; !ok {
 		return m, nil
 	}
+	if m.observationProgress == nil {
+		m.observationProgress = make(map[string]observationProgress)
+	}
 	now := time.Now()
 	obs, _, _ := m.snapshotObservation(slug, now)
 	return m.applySessionObservation(slug, obs, now)
+}
+
+var providerFailure = regexp.MustCompile(`(?i)^\s*(?:[!⚠●⎿]\s*)?(?:reconnecting\b|stream disconnected\b|connection (?:lost|failed|error)\b|(?:api|provider|request) error\b|error (?:connecting|during streaming)\b|retrying\.{0,3}\s*\(?\d)`)
+
+// currentTurnRows returns the rows above the composer that follow the latest
+// submitted prompt and settled-turn marker, so an earlier turn's failure is not
+// read as the current turn's.
+func currentTurnRows(framework string, rows []string) []string {
+	composer := len(rows)
+	switch framework {
+	case "claude-code":
+		composer = ccComposerRegionStart(rows)
+	case "codex":
+		if footer := cxFooterIndex(rows); footer >= 0 {
+			for i := footer; i >= 0; i-- {
+				if strings.HasPrefix(strings.TrimSpace(rows[i]), cxGlyph) {
+					composer = i
+					break
+				}
+			}
+		}
+	case "opencode":
+		for i := len(rows) - 1; i >= 0; i-- {
+			if strings.Contains(rows[i], "┃") {
+				composer = i
+			} else if composer < len(rows) {
+				break
+			}
+		}
+	}
+	for i := composer - 1; i >= 0; i-- {
+		row := strings.TrimSpace(rows[i])
+		glyph := "❯"
+		if framework == "codex" {
+			glyph = cxGlyph
+		}
+		if framework == "opencode" {
+			glyph = ">"
+		}
+		if strings.HasPrefix(row, glyph+" ") && strings.TrimSpace(strings.TrimPrefix(row, glyph)) != "" {
+			rows = rows[i+1:]
+			break
+		}
+	}
+
+	for i := len(rows) - 1; i >= 0; i-- {
+		row := strings.TrimSpace(rows[i])
+		if ccSettled.MatchString(row) || cxSettled.MatchString(row) || ocSettled.MatchString(row) {
+			rows = rows[i+1:]
+			break
+		}
+	}
+	return lastRows(rows, 18)
+}
+
+type observationProgress struct {
+	generation, digest string
+	at                 time.Time
+}
+
+func (m model) observeProgress(slug string, obs *session.Observation, snap work.ScreenSnapshot, now time.Time) {
+	// Exclude composer and animated activity/status rows. Changed transcript
+	// content is evidence of output progress, never proof a task advanced.
+	rows := snap.Rows
+	if m.sessionHarness(slug) == "claude-code" {
+		rows = ccComposerPane(snap).Rows
+		rows = rows[:ccComposerRegionStart(rows)]
+	}
+	var meaningful []string
+	for _, row := range rows {
+		row = strings.TrimSpace(row)
+		if row == "" || providerFailure.MatchString(row) || activityInterrupt.MatchString(row) || ccActivity.MatchString(row) || ccElapsedActivity.MatchString(row) || strings.HasPrefix(row, "Background task") {
+			continue
+		}
+		meaningful = append(meaningful, row)
+	}
+	if m.observationProgress == nil {
+		return
+	}
+	prior := m.observationProgress[slug]
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(meaningful, "\n"))))
+	if prior.generation != obs.Generation {
+		prior = observationProgress{generation: obs.Generation}
+	}
+	activity, _ := classifyActivity(m.sessionHarness(slug), snap)
+	if activity != "unknown" && len(meaningful) > 0 && digest != prior.digest {
+		prior.digest = digest
+		prior.at = now
+		m.observationProgress[slug] = prior
+	}
+	if !prior.at.IsZero() {
+		obs.ProgressObservedAt = prior.at.UTC().Format(time.RFC3339Nano)
+		obs.ProgressAgeSeconds = now.Sub(prior.at).Seconds()
+		obs.SuspectedStall = obs.ProgressAgeSeconds >= 120
+	}
 }

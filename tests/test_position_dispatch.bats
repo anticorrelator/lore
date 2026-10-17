@@ -53,7 +53,7 @@ if scenario not in ('implement-envelope', 'spec-report-fields'):
     item.mkdir(parents=True)
     (item / '_meta.json').write_text(json.dumps({'title': 'Fixture', 'source_checkout': str(repo)}))
 instances = store / '_sessions/instances'; instances.mkdir(parents=True)
-(instances / 'fixture.json').write_text(json.dumps({'name': 'fixture', 'project_dir': str(repo)}))
+(instances / 'fixture.json').write_text(json.dumps({'name': 'fixture', 'project_dir': str(repo), 'runtime_capabilities': ['position-preparation-v1']}))
 env = {k:v for k,v in os.environ.items() if not k.startswith(('LORE_', 'CLAUDE_'))}
 env.update(HOME=str(home), LORE_DATA_DIR=str(store), LORE_KNOWLEDGE_DIR=str(store), LORE_FRAMEWORK='codex')
 os.environ.update(env)

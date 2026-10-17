@@ -1000,6 +1000,9 @@ if [[ -n "$HOST_KEY" ]]; then
   ROW="$(printf '%s' "$ROW" | jq -c --arg key "$HOST_KEY" '. + {host_key: $key}')"
 fi
 
+# Pin semantic requirements through the target field understood by legacy readers.
+ROW="$(printf '%s' "$ROW" | python3 "$SCRIPT_DIR/session-admission.py" "$INSTANCES_DIR" "$SESSION_INSTANCE_LIVENESS_TTL_SECONDS")" || fail "runtime admission failed; nothing was enqueued"
+
 # Enqueue = tmp-write + atomic rename-in. The tmp name is hidden and lacks the
 # .json suffix, so a concurrent reader globbing *.json never sees a torn row.
 TMP="$(mktemp "$PENDING_DIR/.tmp.${REQUEST_ID}.XXXXXX")"

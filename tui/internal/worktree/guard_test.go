@@ -336,6 +336,46 @@ func checkoutBytes(t *testing.T, root string) map[string]string {
 	return files
 }
 
+// The checkout can look unchanged again by the time it is compared, so the
+// retained result must also hold the captured tree before the session counts as
+// unchanged.
+func TestUnchangedSinceCaptureRequiresRetainedCapturedTree(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	initRepository(t, source)
+	writeFile(t, filepath.Join(source, "tracked.txt"), []byte("generation A\n"))
+	git(t, source, "add", "tracked.txt")
+	git(t, source, "commit", "-m", "generation A")
+	writeFile(t, filepath.Join(source, "inherited.txt"), []byte("uncommitted at allocation\n"))
+
+	identity, err := Create(ctx, source, filepath.Join(root, "session"), "unchanged-check")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	identity, _ = Transition(identity, StateActive)
+	_, retained, err := MakePublishable(ctx, identity)
+	if err != nil {
+		t.Fatalf("MakePublishable: %v", err)
+	}
+	if unchanged, err := UnchangedSinceCapture(ctx, identity, retained); err != nil || !unchanged {
+		t.Fatalf("inherited state reported changed: %v %v", unchanged, err)
+	}
+
+	late := filepath.Join(identity.CanonicalPath, "late.txt")
+	writeFile(t, late, []byte("written before the snapshot\n"))
+	_, snapshot, err := MakePublishable(ctx, identity)
+	if err != nil {
+		t.Fatalf("MakePublishable: %v", err)
+	}
+	if err := os.Remove(late); err != nil {
+		t.Fatal(err)
+	}
+	if unchanged, err := UnchangedSinceCapture(ctx, identity, snapshot); err != nil || unchanged {
+		t.Fatalf("result holding late output reported unchanged: %v %v", unchanged, err)
+	}
+}
+
 func TestTeardownPendingRetainsOwnership(t *testing.T) {
 	identity := completeIdentityForTransition()
 	active, err := Transition(identity, StateActive)

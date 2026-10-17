@@ -134,22 +134,15 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 		m.pendingSend[sr.RequestID] = true
 
 		if sr.Action != "" {
+			// An interrupt is delivered only from interrupt-requests/, whose rows
+			// freeze the owner and launch identity the final screen check needs.
+			// An action row here carries none of it, so it is refused and never
+			// written to the terminal or injected as text.
 			ev := m.sendOutcomeEvent(sr, false, "unsupported-action")
-			ev.Event = "interrupt_refused"
+			ev.Event = session.EventInterruptRefused
 			ev.Links = map[string]string{"generation": sr.Generation}
-			ls := m.localSessions[sr.Slug]
 			if sr.Action == "interrupt" {
-				ev.Reason = "generation-mismatch"
-				if sr.Generation != "" && sr.Generation == observationGeneration(ls) {
-					ev.Reason = "delivery-uncertain"
-					if err := m.hostDeliveryAttempt("send", ev); err != nil {
-						ev.Reason = "error"
-					} else if err := panel.Interrupt(); err != nil {
-						ev.Reason = "error"
-					} else {
-						ev.Event, ev.Reason = "interrupt_sent", "key-delivered"
-					}
-				}
+				ev.Reason = "identity-unavailable"
 			}
 			if m.hostKey != "" {
 				cmds = append(cmds, m.hostDeliveryTerminalCmd("send", ev))

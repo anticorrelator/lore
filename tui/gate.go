@@ -76,6 +76,7 @@ type screenClass struct {
 	availableOptions  []int
 	pending           bool
 	placeholder       bool
+	queued            bool // exact styled queue hint on an otherwise empty composer
 	heldInput         bool
 	numberedModal     *config.NumberedModalSignature
 }
@@ -117,6 +118,9 @@ func (o closeObservation) generating() bool {
 }
 
 func classifyScreen(framework string, snap work.ScreenSnapshot) (screenClass, bool) {
+	if framework == "claude-code" {
+		snap = ccComposerPane(snap)
+	}
 	mm, ok := screenMatchers[framework]
 	if !ok {
 		return screenClass{}, false
@@ -129,6 +133,9 @@ func classifyScreen(framework string, snap work.ScreenSnapshot) (screenClass, bo
 		pending:     mm.pending != nil && mm.pending(rows),
 		placeholder: mm.placeholder != nil && mm.placeholder(rows, ansiRows),
 		heldInput:   mm.heldInput != nil && mm.heldInput(rows, ansiRows),
+	}
+	if framework == "claude-code" && state.composer && !state.interactive && !state.pending && !state.heldInput {
+		state.queued = ccComposerQueued(rows, ansiRows)
 	}
 	if state.interactive {
 		state.interactiveReason = framework + "-interactive"
@@ -360,14 +367,15 @@ func lastRows(rows []string, n int) []string {
 
 // --- claude-code: a '❯' prompt row flanked by two full-width '─' rules. ---
 var (
-	ccRule      = regexp.MustCompile(`─{80,}`)
-	ccPrompt    = regexp.MustCompile(`^\s*[❯>](\s|$)`)
-	ccProceed   = regexp.MustCompile(`(?i)do you want to (proceed|run|allow)`)
-	ccFooter    = regexp.MustCompile(`(?i)esc to cancel|tab to amend|ctrl\+e to explain`)
-	ccSelect    = regexp.MustCompile(`(?i)enter\s+to\s+select|select.*enter|↑|↓|up/down|arrow keys`)
-	ccOption    = regexp.MustCompile(`[❯>]?\s*\d[.)]\s`)
-	ccSelected  = regexp.MustCompile(`^\s*[❯>]\s+\S`)
-	ccPasteChip = regexp.MustCompile(`\[Pasted text #\d+`)
+	ccRule         = regexp.MustCompile(`^\s*─{12,}\s*$`)
+	ccPrompt       = regexp.MustCompile(`^\s*[❯>](\s|$)`)
+	ccProceed      = regexp.MustCompile(`(?i)do you want to (proceed|run|allow)`)
+	ccFooter       = regexp.MustCompile(`(?i)esc to cancel|tab to amend|ctrl\+e to explain`)
+	ccSelect       = regexp.MustCompile(`(?i)enter\s+to\s+select|select.*enter|↑|↓|up/down|arrow keys`)
+	ccOption       = regexp.MustCompile(`[❯>]?\s*\d[.)]\s`)
+	ccSelected     = regexp.MustCompile(`^\s*[❯>]\s+\S`)
+	ccQueuedPrompt = regexp.MustCompile(`^\s*[❯>]\s+Press up to edit queued messages\s*$`)
+	ccPasteChip    = regexp.MustCompile(`\[Pasted text #\d+`)
 )
 
 func ccComposerReady(rows []string) bool {
@@ -377,17 +385,20 @@ func ccComposerReady(rows []string) bool {
 	if ccInteractivePrompt(rows) {
 		return false
 	}
-	rules := 0
-	prompt := false
-	for _, r := range rows {
-		if ccRule.MatchString(r) {
-			rules++
-		}
-		if ccPrompt.MatchString(r) {
-			prompt = true
+	// Require an actual prompt between matching rule boundaries. Rule width
+	// follows the rendered pane, including narrow terminals; a transcript rule
+	// elsewhere does not establish a composer.
+	start := ccComposerRegionStart(rows)
+	for i := start + 1; i+1 < len(rows); i++ {
+		if ccPrompt.MatchString(rows[i]) && ccRule.MatchString(rows[i-1]) {
+			for j := i + 1; j < len(rows); j++ {
+				if ccRule.MatchString(rows[j]) {
+					return len([]rune(strings.TrimSpace(rows[i-1]))) == len([]rune(strings.TrimSpace(rows[j])))
+				}
+			}
 		}
 	}
-	return prompt && rules >= 2
+	return false
 }
 
 func ccInteractivePrompt(rows []string) bool {
@@ -456,7 +467,7 @@ func ccOptionSelectModal(rows []string) bool {
 	selected := false
 	for _, r := range tail {
 		trimmed := strings.TrimSpace(r)
-		if trimmed == "" || ccRule.MatchString(r) || ccSelect.MatchString(r) {
+		if trimmed == "" || ccRule.MatchString(r) || ccSelect.MatchString(r) || ccQueuedPrompt.MatchString(r) {
 			continue
 		}
 		candidates++
@@ -494,10 +505,14 @@ func ccComposerPlaceholder(rows []string, ansiRows []string) bool {
 	return ok && hasText && allFaint
 }
 
+// The queued-message hint is placeholder chrome, not a selected menu option
+// or held draft. Exact text plus faint styling distinguishes a typed copy.
+func ccComposerQueued(rows []string, ansiRows []string) bool {
+	idx := ccPromptLineIndex(rows)
+	return idx >= 0 && ccQueuedPrompt.MatchString(rows[idx]) && ccComposerPlaceholder(rows, ansiRows)
+}
+
 func ccComposerHeldInput(rows []string, ansiRows []string) bool {
-	if ccQueuedComposer(rows) {
-		return false
-	}
 	_, hasText, allFaint, ok := ccPromptSuffixStyle(rows, ansiRows)
 	return ok && hasText && !allFaint
 }
@@ -763,4 +778,42 @@ func ocPermissionModal(rows []string) bool {
 		}
 	}
 	return perm && action
+}
+
+// ccComposerPane recognizes a left composer pane bounded by a consistent
+// vertical divider. Without both rules and prompt at that boundary, retain the
+// original screen and let the normal conservative matcher decide.
+func ccComposerPane(snap work.ScreenSnapshot) work.ScreenSnapshot {
+	for i := 1; i+1 < len(snap.Rows); i++ {
+		line := []rune(snap.Rows[i])
+		for col, ch := range line {
+			if (ch != '│' && ch != '┃') || col < 12 {
+				continue
+			}
+			above, below := []rune(snap.Rows[i-1]), []rune(snap.Rows[i+1])
+			if len(above) <= col || len(below) <= col || above[col] != ch || below[col] != ch {
+				continue
+			}
+			if !ccRule.MatchString(string(above[:col])) || !ccRule.MatchString(string(below[:col])) || !ccPrompt.MatchString(string(line[:col])) {
+				continue
+			}
+			rows := append([]string(nil), snap.Rows...)
+			ansi := splitANSIRows(snap.ANSI)
+			for j, row := range rows {
+				runes := []rune(row)
+				if len(runes) > col && runes[col] == ch {
+					rows[j] = string(runes[:col])
+					if j < len(ansi) {
+						if n := strings.IndexRune(ansi[j], ch); n >= 0 {
+							ansi[j] = ansi[j][:n]
+						}
+					}
+				}
+			}
+			snap.Rows = rows
+			snap.ANSI = strings.Join(ansi, "\n")
+			return snap
+		}
+	}
+	return snap
 }

@@ -386,7 +386,18 @@ journal_boundaries() {
   [ "$status" -eq 0 ]
 }
 
+# Requests that carry a build-vintage floor or a prepared position are published
+# only to a live runtime that satisfies them. This one meets the route-options
+# floor session-request.sh applies and advertises position preparation.
+write_vintage_instance() {
+  write_instance_dir "$1" "$2"
+  local row="$TEST_KDIR/_sessions/instances/$1.json"
+  jq '. + {build_time:"2026-09-09T01:27:42Z", runtime_capabilities:["position-preparation-v1"]}' "$row" > "$row.tmp"
+  mv "$row.tmp" "$row"
+}
+
 @test "request --framework writes the framework field" {
+  write_vintage_instance admission-fixture "$TEST_KDIR"
   # --framework alone would be a half-override against the claude-code route;
   # paired with --model it is a recorded override.
   bash "$REQUEST" --type implement --slug wi --framework codex --model codex-model --min-vintage 2026-07-05T12:00:00Z --anywhere --kdir "$TEST_KDIR"
@@ -458,6 +469,7 @@ journal_boundaries() {
 }
 
 @test "request --prefer-dir stores the physically-resolved directory" {
+  write_vintage_instance admission-fixture "$TEST_KDIR"
   local target; target="$(mkdir -p "$TEST_KDIR/checkout" && cd "$TEST_KDIR/checkout" && pwd -P)"
   bash "$REQUEST" --type implement --slug wi --prefer-dir "$TEST_KDIR/checkout" --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
@@ -466,6 +478,7 @@ journal_boundaries() {
 }
 
 @test "request --prefer-dir collapses a symlink to its physical target" {
+  write_vintage_instance admission-fixture "$TEST_KDIR"
   mkdir -p "$TEST_KDIR/realdir"
   ln -s "$TEST_KDIR/realdir" "$TEST_KDIR/linkdir"
   local physical; physical="$(cd "$TEST_KDIR/realdir" && pwd -P)"
@@ -476,6 +489,7 @@ journal_boundaries() {
 }
 
 @test "request --prefer-cwd captures the physically-resolved working directory" {
+  write_vintage_instance admission-fixture "$TEST_KDIR"
   mkdir -p "$TEST_KDIR/here"
   local physical; physical="$(cd "$TEST_KDIR/here" && pwd -P)"
   ( cd "$TEST_KDIR/here" && bash "$REQUEST" --type chat --prefer-cwd --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR" )
@@ -522,6 +536,7 @@ journal_boundaries() {
 }
 
 @test "each placement stance alone satisfies the requirement" {
+  write_vintage_instance admission-fixture "$TEST_KDIR"
   mkdir -p "$TEST_KDIR/dir"
   write_instance inst-a existing
   bash "$REQUEST" --type chat --target inst-a --kdir "$TEST_KDIR"
@@ -669,7 +684,7 @@ journal_boundaries() {
   mkdir -p "$TEST_KDIR/clone-a"
   local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
   write_work_item declared "$a"
-  write_instance_dir inst-a "$a"
+  write_vintage_instance inst-a "$a"
   bash "$REQUEST" --type implement --slug declared --requested-by coord-1 \
     --min-vintage 2026-07-05T12:00:00Z --anywhere --kdir "$TEST_KDIR"
   run jq -e --arg d "$a" 'select(.event=="requested")
@@ -3501,12 +3516,13 @@ answer_peek_observation() {
   [ -z "$(ls "$TEST_KDIR"/_sessions/close-requests/*.json 2>/dev/null)" ]
 }
 
-@test "interrupt enqueues a generation-bound action without closing" {
+@test "interrupt routes to the identity-fenced verb and refuses an owner without that support" {
   write_instance_session inst-a feature-x first-id
-  run bash "$REPO_DIR/scripts/session-interrupt.sh" feature-x --kdir "$TEST_KDIR" --json
-  [ "$status" -eq 0 ]
-  jq -e '.action=="interrupt" and .generation!="" and .body==""' "$TEST_KDIR"/_sessions/send-requests/*.json
-  [ ! -d "$TEST_KDIR/_sessions/close-requests" ]
+  run bash "$LORE" session interrupt feature-x --kdir "$TEST_KDIR" --json
+  outcome_is 1 "does not support interrupt-current-turn" || return 1
+  [ ! -e "$TEST_KDIR/_sessions/interrupt-requests" ] || return 1
+  [ ! -e "$TEST_KDIR/_sessions/send-requests" ] || return 1
+  [ ! -e "$TEST_KDIR/_sessions/close-requests" ]
 }
 
 # --- request: route resolution -------------------------------------------------
@@ -3541,6 +3557,7 @@ esac
 exec /usr/bin/python3 "$@"
 SH
   chmod +x "$TEST_KDIR/bin/python3"
+  write_vintage_instance admission-fixture "$TEST_KDIR"
   run env PATH="$TEST_KDIR/bin:$PATH" bash "$REQUEST" --type worker --slug x--w1 --anywhere --initiator agent --context "$context" --kdir "$TEST_KDIR" --yes
   [ "$status" -eq 0 ]
   jq -e '.framework=="codex" and .model=="gpt-6-astra" and .route.routing_source.role=="researcher"' "$TEST_KDIR"/_sessions/requests/pending/*.json
@@ -3601,6 +3618,7 @@ SH
 @test "request replays a canonical session route without changing provenance" {
   local route='{"framework":"codex","model":"gpt-5.6-sol","options":{"effort":"high","service_tier":"fast"},"routing_source":{"layer":"routes","role":"worker"}}'
   echo brief > "$TEST_KDIR/brief.md"
+  write_vintage_instance admission-fixture "$TEST_KDIR"
   bash "$REQUEST" --type worker --slug x--w1 --anywhere --initiator agent \
     --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes --session-route "$route"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"

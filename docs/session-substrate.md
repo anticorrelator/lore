@@ -84,6 +84,7 @@ One file per live TUI instance at `instances/<name>.json`.
 | &nbsp;&nbsp;`sessions[].worktree_id` | string \| absent | Coordinated manager manifest identity. Omit only for an unmanaged/legacy session; when present it travels with `execution_dir` and `worktree`. |
 | &nbsp;&nbsp;`sessions[].execution_dir` | string \| absent | Exact child cwd, stamped for ordinary as well as managed sessions. For managed sessions it must also equal the canonical path in the manager row and guard identity. Presence alone does not identify managed placement; `worktree_id` does. |
 | `build_sha` | string \| absent | Build vintage — the short git SHA embedded at build time (`-ldflags`). Absent for `go run`/dev builds and for any binary predating this field. Omit-when-empty. |
+| `runtime_capabilities` | string array \| absent | Semantic request support compiled into the executing runtime. Unknown or malformed metadata cannot satisfy position admission. |
 | `build_time` | string \| absent | Build vintage — the **orderable** quantity: the commit's committer-date (release build) or the binary's mtime (dev build), ISO 8601 UTC. Absent for a binary predating this field. Omit-when-empty. This, not `build_sha`, is what `min_vintage` filtering compares against (a SHA has no read-side ordering). |
 | `project_dir` | string \| absent | The instance's project directory, physically resolved (`filepath.Abs` + `EvalSymlinks`) once at startup. Immutable for the process. Omit-when-empty for a binary predating this field. It is the match key a request's `prefer_project_dir` compares against byte-for-byte (both sides resolve physically, so `/tmp`→`/private/tmp` and worktree symlinks match). Also the match key for hard `required_project_dir` placement when the request declares a `placement_stance`. |
 | `host_key` | string \| absent | Stable source/store host identity for managed runtime generations. Absent for legacy visible TUI owners. |
@@ -99,8 +100,8 @@ idiom). `project_dir` participates in required-directory eligibility and soft-pr
 **Build vintage** stamps a live TUI's build identity onto its row at startup so a
 live-but-outdated instance — registered, claiming, but executing stale semantics —
 becomes a visible column rather than a silent behavioral skew. It is fully
-**additive**: a row with neither field reads as *vintage-unknown* and is **never
-rejected** by `min_vintage` filtering (see [Request queue](#request-queue)).
+**additive** for unrestricted requests: a row with neither field reads as
+*vintage-unknown*. An explicit `min_vintage` requires a valid known timestamp (see [Request queue](#request-queue)).
 `lore session list` renders the vintage column (`build_sha`, falling back to
 `build_time`, else `unknown`).
 
@@ -182,6 +183,17 @@ files. The retained outcome uses `worktree_quarantined` with reason
 `integration_pending: result retained for explicit integration`. This is a normal
 successful result disposition followed by `closed` after observed teardown, or
 `orphaned` during dead-owner recovery. It is not a claim that integration failed.
+
+Automatic teardown records `worktree_no_changes` instead of quarantining when
+HEAD, the index, and file contents still match the captured generation and the
+retained result holds the captured tree. Uncommitted state inherited at
+allocation therefore counts as unchanged. The identity moves to `published`; the
+result ref supplies the cleanup proof, no quarantine ref or patch is written, and
+no composition judgment is required. `worktree_no_changes` is outside the default
+actionable set, so default waits skip it and still deliver the close;
+`--until worktree_no_changes` retrieves it. Source advancement does not change
+this classification, and matching file contents alone cannot hide intervening
+commits.
 
 Retention preserves the result ref and a binary patch before making the physical
 checkout cleanup-eligible. Snapshot commits preserve the session's committed tip
@@ -350,7 +362,7 @@ If it remains unclaimed past its TTL, the claim-side sweep instead moves it to
 | `route` | object | Canonical frozen session route `{framework,model,options,routing_source}`. The sole request writer resolves it before position admission and writes the same object on the request and `requested` event. `--session-route` replays a supplied canonical route without changing provenance. `framework` and `model` are compatibility projections only. |
 | `auto_close` | boolean \| absent | Override for the TUI exit-ladder auto-close gate (see [Close-request queue](#close-request-queue)). Omit-when-empty: absent defers to `initiator` (agent auto-closes, human holds open), `true` forces auto-close, `false` holds open. Carried onto the live session so the ladder can consult it at teardown. |
 | `routing_overrides` | object \| absent | Per-dispatch `{<role>: <model>}` map. Omit-when-empty. The claiming instance exports each entry as `LORE_MODEL_<ROLE>` (role uppercased, `-`→`_`) into the spawned session's PTY, riding the resolver's top-of-precedence env layer — so a coordinator's per-dispatch routing wins over settings policy with no resolver change. Roles are validated against `adapters/roles.json` at enqueue time; settings.json stays untouched durable policy (user directive > coordinator override > settings). |
-| `min_vintage` | string \| absent | Minimum build vintage (ISO 8601 UTC) the claiming instance's `build_time` must meet — the request never targets an instance built earlier. Omit-when-empty. Filtered read-side, mirroring `target_instance` (the only difference is a temporal `>=` vs a string `==`). The `session request --min-vintage` verb accepts a timestamp or a git commit-ish (resolved to its committer-date at enqueue) and stores the timestamp, so the read side never shells out to git. **Additive**: an instance of unknown vintage, or any unparseable timestamp, passes — a claim is refused only on positive evidence the instance is older. |
+| `min_vintage` | string \| absent | Minimum build vintage (ISO 8601 UTC) the claiming instance's `build_time` must meet — the request never targets an instance built earlier. Omit-when-empty. Filtered read-side, mirroring `target_instance` (the only difference is a temporal `>=` vs a string `==`). The `session request --min-vintage` verb accepts a timestamp or a git commit-ish (resolved to its committer-date at enqueue) and stores the timestamp, so the read side never shells out to git. An explicit floor requires a known, parseable timestamp at or above the floor. Enqueue pins a qualifying live instance through `target_instance`, including for legacy readers. |
 | `track` | string \| absent | Spec depth selector (`short`) carried to the session's short-track (`/spec short`). Omit-when-empty: only the non-default `short` is stored (`full` is the default and stays absent), so the field is present only when it changes behavior. Set at enqueue by `session request --track short`, which **refuses the flag on a non-spec request** (`ShortMode` has no effect on implement/chat prompts). Maps to `SessionDescriptor.ShortMode` at spawn. |
 | `model` | string \| absent | Per-dispatch lead-model override — the session lead is the top-level agent, so a model chosen here is lead selection. Omit-when-empty. Composed into the spawn as the harness's universal `--model` flag (the same flag `model_routing.tiers` aliases feed). **Opaque**: validated only for non-emptiness at enqueue, never against a model list — the candidate set is coordinator policy, not schema, so a bad id surfaces as an honest harness launch error. Distinct from `routing_overrides`, which routes *sub-agent* roles via `LORE_MODEL_<ROLE>` env. |
 | `framework` | string \| absent | Per-request launch framework override. Accepted values are `claude-code`, `opencode`, and `codex`. Omit-when-empty: absent defers to the claiming TUI's `tui_launch_framework` setting. Validated at enqueue against the framework registry and carried to spawn so the harness binary, `LORE_FRAMEWORK`, `SessionProcessStartedMsg.Harness`, and live registry `sessions[].harness` agree. |
@@ -393,10 +405,9 @@ active claim until both fields are present.**
 **Targeting** is filtered read-side: an instance only attempts to claim rows whose
 `target_instance` equals its own name or is null. **Vintage** is filtered the same
 way, in the same pass: an instance skips a row whose `min_vintage` its own
-`build_time` demonstrably fails (both present, parseable, and older). An instance
-of unknown vintage never skips on this basis — the filter is additive, so it can
-only ever *narrow* the claim set of a vintage-advertising instance, never enlarge
-or block a legacy one. **Preference** is honored in the same read-side pass as a
+`build_time` cannot satisfy (absent, invalid, or older). The writer also pins
+vintage-constrained requests to a verified live identity, so legacy readers
+that ignore a new field cannot claim them. **Preference** is honored in the same read-side pass as a
 timing window, not a filter: a row carrying `prefer_project_dir` is claimable by a
 matching instance at once and by any other instance only once it has aged past
 `PreferMatchGrace` from `requested_at`. It never removes a row from the claim set
@@ -420,8 +431,8 @@ therefore leaves replayable state; the next live TUI retries the same event id.
 | Terminal state | Trigger | Effect | Journal event |
 |----------------|---------|--------|---------------|
 | **spawned** | spawn succeeds | claimer deletes the claimed file | `spawned` |
-| **returned to pending** | spawn fails (PTY start error, readiness gate) | increment `attempts`, set `last_error`/`last_attempt_at`, rename claimed → pending | `spawn_failed` (with `reason`) |
-| **abandoned** | a claim attempt observes `attempts >= 3` on a pending row | delete the row (journal row is the dead-letter record) | `request_abandoned` (with last `reason`) |
+| **returned to pending** | transient spawn failure | increment `attempts`, set `last_error`/`last_attempt_at`, rename claimed → pending | `spawn_failed` (with `reason`) |
+| **abandoned** | deterministic admission/start refusal, or `attempts >= 3` | deterministic refusals retain the original request in `requests/abandoned/`; exhausted retries use the journal dead-letter | `request_abandoned` (with full `reason`) |
 | **reclaimed** | claimed row whose `claimed_by` is stale/absent in the registry AND `claimed_at` older than 60s | rename claimed → pending, `attempts` unchanged (the claimer died; the request didn't fail) | `request_reclaimed` (`reason: "stale_instance"`) |
 | **incomplete-claim reclaimed** | claimed row missing `claimed_by` or `claimed_at`, claimed-file mtime older than 60s | rename claimed → pending, preserve `attempts`, set `last_error: "incomplete_claim"` | `request_reclaimed` (`reason: "incomplete_claim"`) |
 | **cancelled** | `session close --request` atomically wins pending→cancelling | append deterministic terminal, then delete cancelling row | `request_cancelled` |
@@ -833,9 +844,9 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `orphaned` | TUI | a dead instance's atomic recovery owner found no surviving tmux session; carries `reason=instance-death`, the dead `target_instance`, persisted spawn `request_id` when available, and evidence-bounded `spend` |
 | `step_completed` | hosted `/spec` and `/implement` leads | a durable intra-protocol milestone completed: `/spec` investigation, reviewed design, or plan-ready state; or an `/implement` task accepted, logged, and checked off |
 | `terminus_reached` | `spec-finalize` / `impl-close` | the hosted protocol completed its durable terminal writes; carries actor, slug, session type, and terminal verb in `reason`, but no queue `request_id` |
-| `spawn_failed` | TUI | spawn failed; request returned to pending (carries `reason`) |
+| `spawn_failed` | TUI | spawn failed; transient failures return to pending, deterministic failures are archived (carries full `reason`) |
 | `request_reclaimed` | TUI (any instance) | a stale/incomplete claim was returned to pending (carries `reason`) |
-| `request_abandoned` | TUI | `attempts >= 3`; request dropped, journal row is the dead-letter (carries last `reason`) |
+| `request_abandoned` | TUI | deterministic refusal or `attempts >= 3`; original deterministic failure intent is archived (carries full `reason`) |
 | `request_cancelled` | `session close --request` cancel verb | a pending spawn request was cancelled |
 | `request_expired` | claim-side TUI expiry sweep | an unclaimed request exceeded the configured TTL; deterministic `event_id`, `reason=ttl_elapsed` |
 | `close_requested` | `session close` enqueue verb (`<slug>` / `--self`) | a close request was enqueued for the instance running a slug |
@@ -843,7 +854,13 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `restore_refused` | TUI | a worktree identity, ownership, or publish precondition could not be proven; carries a reason and links to the expected identity/generation, plus observed values when available. It is a worktree outcome, not a close terminal |
 | `worktree_quarantined` | TUI | a session result was preserved under a durable ref/patch after safe publication was refused; carries the result artifact and expected/observed generation links. It is a worktree outcome, not a close terminal |
 | `worktree_published` | TUI | a session result merged into its destination checkout; requires `slug`, carries no reason, and links the destination the merge landed in as `destination_path`. It is a worktree outcome, not a close terminal |
+| `worktree_no_changes` | TUI | automatic teardown found the checkout unchanged since its captured generation; requires `slug`, links the retained result, and writes no quarantine ref or patch. It is a worktree outcome, not a close terminal |
 | `worktree_write_refused` | `guard-session-worktree-writes.sh` | a hosted session's tool call targeted a path outside its session-scoped write allowlist and was blocked before the write; identified by `actor_instance` rather than `slug`, `reason` is `outside-session-allowlist` or `containment-context-missing`, and links carry the attempted target, the declared boundary, and the tool |
+| `interrupt_requested` | `session interrupt` enqueue verb | an interrupt was enqueued for the exact live owner; links carry the frozen owner, native session, launch request, and worktree epoch |
+| `interrupt_attempted` | TUI | the owner durably recorded that it may write Escape; no later replay of the same request is allowed |
+| `interrupt_uncertain` | TUI | Escape was written, or the attempt's outcome could not be proven; the transport cannot confirm that the turn ended |
+| `interrupt_refused` | TUI | nothing was written; `reason` names the failed check (for example `owner-mismatch`, `generation-mismatch`, `modal-owned-input`, `no-current-turn`, `expired-or-invalid-request`, or `identity-unavailable` for an action row on the send queue) |
+| `interrupt_sent` | earlier hosts | accepted so rows from hosts built before the fenced interrupt still validate and read; it meant Escape was written and carries the same uncertainty as `interrupt_uncertain`. Current hosts do not emit it |
 | `send_requested` | `session send` enqueue verb | a send request was enqueued for the instance running a slug |
 | `sent` | TUI | the message was injected AND a later observation confirmed the composer submitted it (verified-outcome; see [Send-request queue](#send-request-queue)) |
 | `send_refused` | TUI | injection was refused, or an injected message never submitted; `reason` names why — gate refusals (`generating`/`modal`/`no-signature`/`no-contract`/`unsafe-payload`/`error`) or the post-inject `unsubmitted` and crash-boundary `delivery-uncertain` |
@@ -853,8 +870,9 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 
 **Queue-lifecycle events** — `requested`, `claimed`, `spawned`, `spawn_failed`,
 `request_reclaimed`, `request_abandoned`, `request_cancelled`, `request_expired`, `close_requested`,
-`close_failed`, `send_requested`, `sent`, `send_refused`, `answer_requested`,
-`answered`, `answer_refused` — each concern a specific
+`close_failed`, `interrupt_requested`, `interrupt_attempted`, `interrupt_sent`,
+`interrupt_refused`, `interrupt_uncertain`, `send_requested`, `sent`, `send_refused`,
+`answer_requested`, `answered`, `answer_refused` — each concern a specific
 request and MUST carry a non-empty `request_id`. The writer enforces this. (`sent`
 and `send_refused` carry it so `session send --wait` can match its outcome by id;
 the three answer events also require a non-empty slug and positive integer
@@ -1148,3 +1166,97 @@ rather than growing this contract.**
 Downstream items build against the schemas and event vocabulary **exactly as fixed
 here**. Changing a row shape or an event name is re-opening the design decision, not
 a silent edit.
+
+
+### Interrupt the current turn
+
+`lore session interrupt HANDLE --json` resolves one fresh live owner and freezes
+its native session, launch request, worktree epoch, process, owner PID and owner
+start identity. The request expires after 15 seconds. The owning runtime must
+advertise `interrupt-current-turn-v1` in `runtime_capabilities`; older owners
+are rejected before enqueueing. Missing identity, replacement owners, unsupported
+harnesses, modal-owned input and screens without current activity are refused.
+The operation never starts a host, closes a session, or escalates to process
+termination.
+
+The runtime persists the attempt outside the terminal event loop, allowing new
+terminal output and lifecycle changes to be processed during journal writes. It
+then reacquires the current session and checks the live terminal immediately before
+sending ESC, with no intervening persistence. This targets
+the turn active when the owner handles the request; it does not identify or
+promise to interrupt an earlier observed turn. `interrupt_requested` records
+intent, `interrupt_attempted` records the durable attempt boundary, and
+`interrupt_refused` or `interrupt_uncertain` records the outcome. An attempt can
+be refused by the final screen/expiry check. A successful ESC write remains
+uncertain because the terminal transport cannot prove that the turn ended.
+Durable delivery records prohibit replay after an ambiguous attempt, including
+recovery. The CLI's `turn_ended` is null, not a completion assertion.
+
+Provider reconnect/request errors take precedence over generic interrupt chrome
+in observations. A later submitted prompt outside the current composer ends the
+previous turn’s error evidence; held composer input does not. `progress_observed_at` and `progress_age_seconds` describe the
+last change to meaningful visible output; `observed_at` describes screen capture
+freshness. Animated activity/status rows do not refresh output progress. After
+120 seconds without such progress, `suspected_stall` is advisory only: long tools
+remain working and no interruption is automatic. Output changes are evidence of
+output, not proof that the task advanced or completed.
+
+Transient unknown screen paints remain visible in current observations while
+preserving the last meaningful session-generation state. Receipt acknowledgment
+remembers semantic observations independently of current samples; unchanged
+repaints do not repeat an acknowledged intervention. New modal signatures,
+meaningful state transitions and new generations remain actionable. Unacknowledged
+wakes retain their original identity for redelivery. A receipt never certifies
+that an action was completed.
+
+Claude composer recognition follows matching rule boundaries around the prompt
+at narrow widths and consistent split-pane dividers. Held text and interactive
+prompts still refuse injection. Synthetic terminal fixtures cover these layouts;
+they do not reconstruct the original reported diff-screen failure, whose terminal
+geometry was not retained. The diff footer alone does not determine readiness.
+
+### Runtime admission and launch dependencies
+
+Instance registry rows and managed-host readiness publish `runtime_capabilities`
+from constants compiled into the executing binary. `position-preparation-v1`
+means the runtime understands prepared position payloads; source checkout contents
+and a newly added request field do not establish legacy runtime support.
+Position request publication selects a compatible live instance, preserves explicit
+target and required-directory constraints, favors a matching preferred directory,
+and pins `target_instance`. If the selected host disappears, the request keeps its
+pin and normal expiry applies; another host cannot silently claim it. A managed
+host missing required support is refused with an instruction to coordinate its
+replacement. Admission never restarts a shared host to gain support.
+
+Before claiming a worker request, the selected runtime checks its executable and
+performs create, write, read and rename operations in its harness state directories.
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and `XDG_DATA_HOME` remain inherited. Position
+compilation selects a Python interpreter that actually imports PyYAML and the
+compiler dependencies, trying `LORE_PYTHON`, the source `.venv`, then PATH entries.
+The full probe is bounded to ten seconds plus process cleanup; queue passes for a
+runtime cannot overlap. Dependencies and state access are rechecked immediately
+before launch to catch changes after admission. These checks establish the probed
+operations, not a guarantee that every later harness operation will succeed.
+
+A deterministic admission refusal archives the original payload with its full
+cause without claiming or incrementing launch attempts. Known transient resource
+or timeout probes leave the request pending and write the full diagnostic to
+`tui-notices.jsonl`; they are inspected again at ordinary queue cadence. A
+post-claim deterministic refusal archives after one failed attempt. Other launch
+failures retain the three-attempt ceiling with a minimum two/four-second backoff.
+Stored request errors and journal reasons retain nested diagnostics independently
+of compact UI messages.
+
+Deploying the position request writer is itself a compatibility transition: an
+already-running binary without `runtime_capabilities` will no longer receive new
+position requests. Coordinate that writer activation with host replacement; no
+historical SHA allowlist or unknown-runtime fallback is implied.
+
+
+The exact faint `Press up to edit queued messages` composer hint is a queue
+placeholder, not an option-select candidate. It permits another send through the
+existing queued-input contract; a typed copy remains a held draft, and genuine
+permission or option menus retain their refusal behavior. Completion markers
+recognize the rotating Unicode verb in `✻ <verb> for <duration>`, including an
+optional `· done <time>` clock. They establish idle only beside an unobstructed
+empty composer and do not override current activity or modal evidence.

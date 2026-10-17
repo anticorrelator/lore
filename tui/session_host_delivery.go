@@ -65,6 +65,11 @@ func (m model) finishHostDelivery(d hostDelivery) error {
 	var err error
 	if d.Kind == "send" {
 		err = session.DeleteSendRequest(m.sessionsDir, d.Event.RequestID)
+	} else if d.Kind == "interrupt" {
+		err = os.Remove(filepath.Join(m.sessionsDir, "interrupt-requests", d.Event.RequestID+".json"))
+		if os.IsNotExist(err) {
+			err = nil
+		}
 	} else if d.Kind == "answer" {
 		err = session.DeleteAnswerRequest(m.sessionsDir, d.Event.RequestID)
 	} else if d.Kind == "close" {
