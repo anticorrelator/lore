@@ -333,8 +333,7 @@ def disposition(kdir, handle):
                 cleanup_confirmed=cleaned,
                 cleanup_retained=retained or None,
                 integrated=outcome == 'worktree_published',
-                composition_judgment_required=(outcome == 'restore_refused' or
-                    (outcome == 'worktree_quarantined' and latest.get('reason') != 'no_changes')),
+                composition_judgment_required=outcome in {'worktree_quarantined', 'restore_refused'},
                 reason=latest.get('reason'))
 
 

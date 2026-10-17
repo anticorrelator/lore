@@ -17,7 +17,6 @@ class NoChanges(unittest.TestCase):
     def test_composition_requires_only_actionable_results(self):
         with tempfile.TemporaryDirectory() as tmp:
             for event, reason, expected in [
-                ('worktree_quarantined', 'no_changes', False),
                 ('worktree_quarantined', 'integration_pending', True),
                 ('worktree_quarantined', '', True),
                 ('restore_refused', 'no_changes', True),
@@ -27,25 +26,6 @@ class NoChanges(unittest.TestCase):
                     result = managed.disposition(Path(tmp), 'demo--w123')
                     self.assertEqual(result['composition_judgment_required'], expected)
                     self.assertFalse(result['integrated'])
-
-    def test_default_wait_skips_no_changes_but_keeps_close_and_explicit_audit(self):
-        for script in ['session-wait.sh', 'coordinate-watch.sh']:
-            source = (ROOT / 'scripts' / script).read_text()
-            function = source.split('first_match_record() {', 1)[1].split('\n}', 1)[0]
-            lib = (ROOT / 'scripts/lib.sh').read_text()
-            predicate = lib.split("SESSION_SCOPE_JQ_PREDICATE='", 1)[1].split("'", 1)[0]
-            for explicit, reason, expected in [(0, 'no_changes', 2), (1, 'no_changes', 1), (0, 'integration_pending', 1), (0, 'no_changes: unknown', 1)]:
-                records = dict(records=[
-                    dict(event=dict(event='worktree_quarantined', reason=reason, slug='demo'), next_cursor=1),
-                    dict(event=dict(event='closed', slug='demo'), next_cursor=2)])
-                command = '''SLUG=demo; REQUEST_ID=''; REQUEST_ID_SET=0; WORK_ITEM_SET=0; DURABLE=0
-UNTIL_JSON='["worktree_quarantined","closed"]'; SCOPE_SLUGS_JSON='[]'; SCOPED=0
-UNTIL_EXPLICIT="$2"
-SESSION_SCOPE_JQ_PREDICATE="$3"
-first_match_record() {''' + function + '\n}\nfirst_match_record "$1"'
-                result = subprocess.run(['bash', '-c', command, 'selector', json.dumps(records), str(explicit), predicate], text=True, capture_output=True, check=True)
-                with self.subTest(script=script, explicit=explicit, reason=reason):
-                    self.assertEqual(json.loads(result.stdout)['next_cursor'], expected)
 
     def test_default_wait_skips_worktree_no_changes_but_explicit_filter_returns_it(self):
         lib = (ROOT / 'scripts/lib.sh').read_text()
@@ -57,14 +37,14 @@ first_match_record() {''' + function + '\n}\nfirst_match_record "$1"'
         for script in ['session-wait.sh', 'coordinate-watch.sh']:
             source = (ROOT / 'scripts' / script).read_text()
             function = source.split('first_match_record() {', 1)[1].split('\n}', 1)[0]
-            for explicit, until, expected in [(0, actionable, 2), (1, ['worktree_no_changes', 'closed'], 1)]:
+            for until, expected in [(actionable, 2), (['worktree_no_changes', 'closed'], 1)]:
                 command = '''SLUG=demo; REQUEST_ID=''; REQUEST_ID_SET=0; WORK_ITEM_SET=0; DURABLE=0
 SCOPE_SLUGS_JSON='[]'; SCOPED=0
-UNTIL_EXPLICIT="$2"; UNTIL_JSON="$3"
-SESSION_SCOPE_JQ_PREDICATE="$4"
+UNTIL_JSON="$2"
+SESSION_SCOPE_JQ_PREDICATE="$3"
 first_match_record() {''' + function + '\n}\nfirst_match_record "$1"'
-                result = subprocess.run(['bash', '-c', command, 'selector', json.dumps(records), str(explicit), json.dumps(until), predicate], text=True, capture_output=True, check=True)
-                with self.subTest(script=script, explicit=explicit):
+                result = subprocess.run(['bash', '-c', command, 'selector', json.dumps(records), json.dumps(until), predicate], text=True, capture_output=True, check=True)
+                with self.subTest(script=script, until=until):
                     self.assertEqual(json.loads(result.stdout)['next_cursor'], expected)
 
 
