@@ -119,10 +119,11 @@ class ManagedSessionIntegration(unittest.TestCase):
             path.chmod(0o755)
         settings = self.home / ".lore/config/settings.json"
         settings.parent.mkdir()
-        settings.write_text(json.dumps({"version": 1, "tui_launch_framework": "claude-code",
+        native = {"claude-code": "fixture-model", "codex": "fixture-model", "opencode": "fixture/fixture-model"}
+        settings.write_text(json.dumps({"version": 2, "tui_launch_framework": "claude-code",
+            "routes": {"default": "claude-code/fixture-model", "worker": "claude-code/fixture-model"},
             "harnesses": {h: {"enabled": True, "args": [], "autonomous_args": [],
-                "roles": {"default": "fixture-model", "worker": "fixture-model"}}
-                for h in ("claude-code", "codex", "opencode")}}))
+                "native_models": {"default": native[h]}} for h in native}}))
         self.log = self.root / "harness.jsonl"
         self.state_dir = self.root / "states"
         self.state_dir.mkdir()
