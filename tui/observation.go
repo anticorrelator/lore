@@ -185,7 +185,7 @@ func (m model) snapshotObservation(slug string, now time.Time) (session.Observat
 		return obs, snap, screenClass{}
 	}
 	snap, err := panel.ScreenState()
-	if err != nil || panel.MirrorError() != "" {
+	if err != nil {
 		return obs, snap, screenClass{}
 	}
 	state, _ := classifyScreen(framework, snap)

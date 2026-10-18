@@ -91,7 +91,7 @@ type interruptConsumedMsg struct {
 func (m model) interruptScreenGate(r interruptRequest) (work.SessionPanelModel, string) {
 	ls, exists := m.localSessions[r.Slug]
 	panel, attached := m.sessionPanels[r.Slug]
-	if !exists || !attached || panel.IsDone() || panel.MirrorError() != "" {
+	if !exists || !attached || panel.IsDone() {
 		return panel, "session-unavailable"
 	}
 	snap, err := panel.ScreenState()
