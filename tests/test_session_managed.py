@@ -194,11 +194,44 @@ class ManagedSessions(unittest.TestCase):
         self.assertTrue(result['outcome_confirmed'])
 
     def test_ready_runtime_regains_a_missing_supervisor(self):
-        with patch.object(m, 'ready', return_value={'instance_name': 'alive', 'runtime_capabilities': ['position-preparation-v1']}), patch.object(m, 'held', return_value=False), patch.object(m, 'binary', return_value=Path('/fake/binary')), patch.object(m.subprocess, 'Popen') as launch:
-            result = m.ensure(self.kdir, 'key', str(self.source), 0)
+        with patch.object(m, 'ready', return_value={'instance_name': 'alive', 'runtime_capabilities': ['position-preparation-v1']}), patch.object(m, 'held', return_value=False), patch.object(m, 'binary', return_value=Path('/fake/binary')) as binary, patch.object(m.RUNTIME, 'sandbox_reason', return_value=''), patch.object(m.subprocess, 'Popen') as launch:
+            result = m.ensure(self.kdir, 0)
         self.assertEqual(result['instance_name'], 'alive')
         launch.assert_called_once()
         self.assertIn('_supervise', launch.call_args.args[0])
+        binary.assert_not_called()
+        served = m.read(self.data / 'session-runtime/served.json')
+        self.assertIn(str(self.kdir.resolve()), served['stores'])
+
+    def test_start_keys_the_manifest_to_the_store_host(self):
+        first = self.start(self.args())
+        manifest = m.read(m.manifest_path(self.kdir, first['handle']))
+        self.assertEqual(manifest['host_key'], m.RUNTIME.store_host_key(self.kdir))
+        self.assertEqual(manifest['source_dir'], str(self.source.resolve()))
+        other = self.kdir / 'other-source'
+        other.mkdir()
+        second = self.start(self.args(workspace=str(other), key='request-b'))
+        self.assertEqual(m.read(m.manifest_path(self.kdir, second['handle']))['host_key'], manifest['host_key'])
+
+    def test_supervisor_replay_uses_the_supervisor_status_without_ensuring(self):
+        manifest = dict(handle='task--w123', request_id='managed-123', host_key='key', source_dir=str(self.source),
+                        work_item='task', state='intent', context='Do it.', route={'framework': 'codex'})
+        status = {'instance_name': 'store-host', 'runtime_capabilities': ['position-preparation-v1']}
+        calls = []
+        with patch.object(m, 'ensure', side_effect=AssertionError('the supervisor never waits on itself')), \
+                patch.object(m, 'ready', return_value=status), \
+                patch.object(m, 'run', side_effect=lambda argv, **kw: calls.append([str(a) for a in argv]) or '{}'):
+            m.enqueue_start(self.kdir, manifest, status)
+        self.assertEqual(manifest['state'], 'enqueued')
+        request = next(c for c in calls if c[1].endswith('session-request.sh'))
+        self.assertEqual(request[request.index('--target') + 1], 'store-host')
+
+    def test_ensure_inside_the_supervisor_never_waits(self):
+        with patch.object(m, 'STORE_ENV', {'PATH': '/bin'}), patch.object(m, 'ready', return_value=None), \
+                patch.object(m.subprocess, 'Popen') as launch:
+            with self.assertRaisesRegex(RuntimeError, 'not ready'):
+                m.ensure(self.kdir, 45)
+        launch.assert_not_called()
 
     def managed_close_from_the_tui(self, *extra):
         manifest = dict(handle='task--w123', host_key='abc', source_dir=str(self.source))

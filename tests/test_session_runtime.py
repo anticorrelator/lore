@@ -100,19 +100,24 @@ class ManagedHostRuntime(unittest.TestCase):
         with patch.dict(os.environ, {'LORE_SESSION_RUNTIME': 'dev'}):
             self.assertEqual(m.host_dir(self.kdir, 'k'), self.kdir / '_sessions/runtimes/dev/hosts/k')
 
-    def test_attach_uses_the_runtime_server(self):
+    def test_attach_uses_the_runtime_server_and_the_supervisor_tmux_tmpdir(self):
         manifest = {'handle': 'task--w1', 'host_key': 'k', 'source_dir': str(self.root)}
         args = SimpleNamespace(verb='attach', timeout=0)
+        data = self.root / 'data'
+        m.atomic(data / 'session-runtimes/dev/supervisor.json', {'pid': 1, 'tmux_tmpdir': str(self.root / 'tmux')})
 
         class Attached(Exception):
             pass
-        with patch.dict(os.environ, {'LORE_SESSION_RUNTIME': 'dev'}), \
+        with patch.dict(os.environ, {'LORE_SESSION_RUNTIME': 'dev', 'LORE_DATA_DIR': str(data),
+                                     'TMUX_TMPDIR': str(self.root / 'elsewhere')}), \
                 patch.object(m, 'inspect', return_value={'state': 'running'}), patch.object(m, 'ensure'), \
                 patch.object(m, 'owner', return_value={'tmux': 'lore-i-task', 'instance_name': 'i'}), \
-                patch.object(m.os, 'execvp', side_effect=Attached) as execvp:
+                patch.object(m.os, 'execvpe', side_effect=Attached) as execvpe:
             with self.assertRaises(Attached):
                 m.operate_attempt(args, self.kdir, manifest)
-        execvp.assert_called_once_with('tmux', ['tmux', '-L', 'lore-tui-dev', 'attach-session', '-t', 'lore-i-task'])
+        program, argv, env = execvpe.call_args.args
+        self.assertEqual((program, argv), ('tmux', ['tmux', '-L', 'lore-tui-dev', 'attach-session', '-t', 'lore-i-task']))
+        self.assertEqual(env['TMUX_TMPDIR'], str(self.root / 'tmux'))
 
     def test_invalid_setting_is_refused_before_any_verb_runs(self):
         with patch.dict(os.environ, {'LORE_SESSION_RUNTIME': 'Not_Valid'}), patch.object(m, 'resolve') as resolve:
@@ -120,40 +125,101 @@ class ManagedHostRuntime(unittest.TestCase):
                 m.main(['inspect', 'task--w1', '--kdir', str(self.kdir)])
         resolve.assert_not_called()
 
-    def supervise(self, environ, returncode):
-        argv = []
+    def supervise_once(self, environ, returncode):
+        """One supervisor pass over a served store, with a host process that exits at once."""
+        launches = []
 
         class Process:
             def __init__(self, args, **kwargs):
-                argv.append(args)
+                launches.append((args, kwargs))
+                self.pid = 4242
                 self.returncode = returncode
 
             def poll(self):
                 return self.returncode
-        out = io.StringIO()
-        with patch.dict(os.environ, environ, clear=True), patch.object(m.subprocess, 'Popen', Process), \
-                patch.object(m, 'ready', return_value=None), patch.object(m.time, 'sleep'), \
-                contextlib.redirect_stdout(out):
-            code = m.supervise(SimpleNamespace(kdir=str(self.kdir), host_key='k', workspace=str(self.root), binary='/host'))
-        return code, argv, out.getvalue()
+        data = self.root / 'data'
+        kdir = self.kdir.resolve()
+        with patch.dict(os.environ, dict(environ, LORE_DATA_DIR=str(data), LORE_SESSION_HOST_BINARY='/bin/sh'),
+                        clear=True), patch.object(m.subprocess, 'Popen', Process), \
+                contextlib.redirect_stdout(io.StringIO()):
+            login = runtime.login_dir()
+            m.atomic(login / 'served.json', {'schema_version': 1, 'stores': {str(kdir): {'wanted_at': m.now()}}})
+            with (login / 'supervisor.lock').open('a+') as stream:
+                supervisor = m.Supervisor(stream)
+                supervisor.tick()
+                supervisor.tick()
+            directory = m.host_dir(kdir, runtime.store_host_key(kdir))
+        return launches, directory, login
 
-    def test_supervisor_names_the_runtime_to_the_host(self):
-        code, argv, _ = self.supervise(without_runtime(), 0)
-        self.assertEqual(code, 0)
-        self.assertNotIn('--runtime', argv[0])
-        self.assertTrue((self.kdir.resolve() / '_sessions/hosts/k/supervisor.json').exists())
-        code, argv, _ = self.supervise(dict(without_runtime(), LORE_SESSION_RUNTIME='dev'), 0)
-        self.assertEqual(code, 0)
-        self.assertEqual(argv[0][-2:], ['--runtime', 'dev'])
-        self.assertEqual(argv[0][argv[0].index('--ready-file') + 1],
-                         str(self.kdir.resolve() / '_sessions/runtimes/dev/hosts/k/ready.json'))
+    def test_supervisor_names_the_store_scope_and_runtime_to_the_host(self):
+        kdir = self.kdir.resolve()
+        launches, directory, login = self.supervise_once(without_runtime(), None)
+        argv, options = launches[0]
+        self.assertEqual(argv[1:6], ['--session-host', '--scope', 'store', '--host-key', runtime.store_host_key(kdir, {})])
+        self.assertNotIn('--runtime', argv)
+        self.assertNotIn('--source-dir', argv)
+        self.assertEqual(argv[argv.index('--kdir') + 1], str(kdir))
+        self.assertEqual(argv[argv.index('--ready-file') + 1], str(kdir / '_sessions/hosts' / runtime.store_host_key(kdir, {}) / 'ready.json'))
+        self.assertEqual(options['cwd'], str(kdir))
+        self.assertTrue((login / 'supervisor.json').exists())
+        self.assertEqual(login, self.root / 'data/session-runtime')
+        launches, directory, login = self.supervise_once(dict(without_runtime(), LORE_SESSION_RUNTIME='dev'), None)
+        argv, _ = launches[0]
+        key = runtime.store_host_key(kdir, {'LORE_SESSION_RUNTIME': 'dev'})
+        self.assertEqual(argv[-2:], ['--runtime', 'dev'])
+        self.assertEqual(argv[argv.index('--host-key') + 1], key)
+        self.assertEqual(argv[argv.index('--ready-file') + 1], str(kdir / '_sessions/runtimes/dev/hosts' / key / 'ready.json'))
+        self.assertEqual(login, self.root / 'data/session-runtimes/dev')
 
-    def test_supervisor_explains_a_host_that_refuses_the_runtime(self):
-        code, argv, out = self.supervise(dict(without_runtime(), LORE_SESSION_RUNTIME='dev'), 2)
-        self.assertEqual(code, 1)
-        self.assertEqual(len(argv), 6)
-        self.assertIn('rejects --runtime', out)
-        self.assertIn('bash install.sh', out)
+    def test_supervisor_explains_a_host_that_refuses_its_arguments(self):
+        launches, directory, _ = self.supervise_once(dict(without_runtime(), LORE_SESSION_RUNTIME='dev'), 2)
+        self.assertEqual(len(launches), 1)
+        error = m.read(directory / 'supervisor-error.json')
+        self.assertEqual(error['exit_code'], 2)
+        self.assertIn('--runtime', error['error'])
+        self.assertIn('bash install.sh', error['error'])
+        self.assertIn('lore rebuild', error['error'])
+
+
+class StoreKeysAndLoginState(unittest.TestCase):
+    def test_store_host_key_carries_the_runtime_name(self):
+        default = runtime.store_host_key('/store', {})
+        self.assertEqual(default, __import__('hashlib').sha256(b'/store').hexdigest()[:24])
+        dev = runtime.store_host_key('/store', {'LORE_SESSION_RUNTIME': 'dev'})
+        self.assertEqual(dev, __import__('hashlib').sha256(b'/store\0runtime\0dev').hexdigest()[:24])
+        self.assertNotEqual(default, dev)
+        self.assertNotEqual(default, runtime.store_host_key('/other', {}))
+        self.assertEqual(len(default), 24)
+        with self.assertRaises(ValueError):
+            runtime.store_host_key('/store', {'LORE_SESSION_RUNTIME': 'Bad'})
+
+    def test_login_dir_is_outside_every_store(self):
+        self.assertEqual(runtime.login_dir({'LORE_DATA_DIR': '/data'}), Path('/data/session-runtime'))
+        self.assertEqual(runtime.login_dir({'LORE_DATA_DIR': '/data', 'LORE_SESSION_RUNTIME': 'dev'}),
+                         Path('/data/session-runtimes/dev'))
+        self.assertEqual(runtime.login_dir({'HOME': '/home/u'}), Path('/home/u/.lore/session-runtime'))
+        self.assertEqual(runtime.login_dir({'HOME': '/home/u', 'LORE_DATA_DIR': ''}), Path('/home/u/.lore/session-runtime'))
+
+    def test_child_environment_scrubs_harness_and_session_identity(self):
+        base = {'PATH': '/bin', 'HOME': '/home/u', 'SSH_AUTH_SOCK': '/s', 'GH_TOKEN': 't', 'HTTPS_PROXY': 'p',
+                'ANTHROPIC_API_KEY': 'k', 'CLAUDECODE': '1', 'CLAUDE_CODE_CHILD_SESSION': '1',
+                'CLAUDE_CODE_ENTRYPOINT': 'cli', 'CLAUDE_CODE_MESSAGING_SOCKET': '/sock', 'CLAUDE_PID': '1',
+                'CLAUDE_AGENT_SDK_VERSION': '1', 'AI_AGENT': 'x', 'CODEX_THREAD_ID': 't', 'CODEX_SANDBOX': 'seatbelt',
+                'OPENCODE_SESSION_ID': 's', 'CLAUDE_CODE_USE_BEDROCK': '1', 'CLAUDE_CODE_OAUTH_TOKEN': 'o',
+                'CODEX_HOME': '/c', 'OPENCODE_CONFIG_DIR': '/o', 'LORE_POSITION_DISPATCH_MANIFEST': 'm',
+                'LORE_SESSION_SLUG': 's', 'LORE_SESSION_HOST_BINARY': '/b', 'LORE_SESSION_HOST_IDLE_TIMEOUT': '5',
+                'LORE_SESSION_RUNTIME': 'dev', 'LORE_FRAMEWORK': 'codex', 'LORE_MODEL_WORKER': 'x',
+                'LORE_WORKTREE_ID': 'w', 'LORE_EXECUTION_DIR': '/e', 'LORE_KNOWLEDGE_DIR': '/first-caller-store',
+                'LORE_DATA_DIR': '/data', 'TMUX': 't', 'TMUX_PANE': '%1', 'TMUX_TMPDIR': '/tmux', 'PWD': '/p',
+                'OLDPWD': '/o', 'SHLVL': '2'}
+        env = runtime.child_environment(base, '/store-b', False)
+        self.assertEqual(sorted(env), sorted([
+            'PATH', 'HOME', 'SSH_AUTH_SOCK', 'GH_TOKEN', 'HTTPS_PROXY', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_USE_BEDROCK',
+            'CLAUDE_CODE_OAUTH_TOKEN', 'CODEX_HOME', 'OPENCODE_CONFIG_DIR', 'LORE_SESSION_HOST_BINARY',
+            'LORE_SESSION_HOST_IDLE_TIMEOUT', 'LORE_SESSION_RUNTIME', 'LORE_DATA_DIR', 'TMUX_TMPDIR']))
+        pinned = runtime.child_environment(base, '/store-a', True)
+        self.assertEqual(pinned['LORE_KNOWLEDGE_DIR'], '/store-a')
+        self.assertEqual(base['LORE_KNOWLEDGE_DIR'], '/first-caller-store')
 
 
 class HostBinaryResolution(unittest.TestCase):
