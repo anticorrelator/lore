@@ -446,7 +446,7 @@ stdin. The script:
 
 | Framework   | Cell | Channel | Native hook → row |
 |-------------|------|---------|-------------------|
-| claude-code | **none** until a real launch shows no startup Settings dialog | `settings-json` (a hooks-only `--settings` payload, each entry `async: true`) | UserPromptSubmit → `resumed` working; Stop → `needs_input` idle; StopFailure → `needs_input` blocked, `links.error`; PermissionRequest → `needs_input` blocked, `links.tool_name`; PreToolUse on `AskUserQuestion\|ExitPlanMode` → `needs_input` blocked; PostToolUse and PostToolUseFailure on the same tools → `resumed` working |
+| claude-code | **partial** on a live check of 2.1.299: no startup Settings dialog, and hooks from `--settings` run; **full** waits on one real turn that journals a hook row | `settings-json` (a hooks-only `--settings` payload, each entry `async: true`) | UserPromptSubmit → `resumed` working; Stop → `needs_input` idle; StopFailure → `needs_input` blocked, `links.error`; PermissionRequest → `needs_input` blocked, `links.tool_name`; PreToolUse on `AskUserQuestion\|ExitPlanMode` → `needs_input` blocked; PostToolUse and PostToolUseFailure on the same tools → `resumed` working |
 | codex       | **none** until a probe shows `-c` hooks run without the startup hook review | `config-override` (candidate) | none declared |
 | opencode    | **none** until a probe shows an environment-selected plugin stays out of child processes | `plugin-env` (candidate) | none declared |
 
