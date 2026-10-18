@@ -1,8 +1,10 @@
 package work
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -125,40 +127,34 @@ func tmuxRGBFeaturePin() []string {
 // and the pane's working directory.
 var tmuxOwnedPaneVars = []string{"TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TMUX", "TMUX_PANE", "SHELL", "PWD"}
 
-// tmuxPaneEnvScript starts the harness from an empty environment: the values tmux
-// gave this pane for its own variables, then the launcher's KEY=VAL list and the
-// harness command passed as arguments. tmux builds a pane's environment from the
-// server's global environment, which is whatever the client that started the
-// shared server had, and -e can add to that but never remove from it. Starting
-// from nothing is the only way the pane gets exactly the launcher's environment.
-// Each step execs, so the pane pid tmux reports is the harness process.
-var tmuxPaneEnvScript = func() string {
-	script := "exec /usr/bin/env -i"
-	for _, name := range tmuxOwnedPaneVars {
-		script += " ${" + name + "+\"" + name + "=$" + name + "\"}"
-	}
-	return script + ` "$@"`
-}()
-
 // tmuxPaneEnv is the complete environment a new pane's harness runs with, as
 // KEY=VAL entries: the process environment plus the session extras
-// (LORE_FRAMEWORK, LORE_SESSION_*), with later entries winning. Variables tmux owns
-// in the pane are left out so tmux's values stand, as they always have, and
-// COLORTERM is replaced with the capability this embedder actually provides.
+// (LORE_FRAMEWORK, LORE_SESSION_*), with later entries winning and each key
+// listed once. Variables tmux owns in the pane are left out so tmux's values
+// stand, as they always have, and COLORTERM is replaced with the capability this
+// embedder actually provides.
 func tmuxPaneEnv(extras []string) []string {
-	var out []string
+	var keys []string
+	values := map[string]string{}
 	add := func(kv string) {
 		key, _, ok := strings.Cut(kv, "=")
 		if !ok || key == "" || key == "COLORTERM" || slices.Contains(tmuxOwnedPaneVars, key) {
 			return
 		}
-		out = append(out, kv)
+		if _, seen := values[key]; !seen {
+			keys = append(keys, key)
+		}
+		values[key] = kv
 	}
 	for _, kv := range os.Environ() {
 		add(kv)
 	}
 	for _, kv := range extras {
 		add(kv)
+	}
+	out := make([]string, 0, len(keys)+1)
+	for _, key := range keys {
+		out = append(out, values[key])
 	}
 	return append(out, "COLORTERM=truecolor")
 }
@@ -167,34 +163,51 @@ func tmuxPaneEnv(extras []string) []string {
 // the harness and returns its pane PID (the harness process, captured via
 // new-session's -P -F so the close ladder can later signal it directly rather than
 // the attach client). env is the per-session extra environment; harnessBin/args is
-// the exact command the direct-PTY path would have run. The new window is pinned
-// at cols x rows (pinTmuxWindowSize) before it is returned; a session that was
-// created but could not be pinned or identified is killed and an error returned.
-func createTmuxSession(name, worktreeDir string, cols, rows int, env []string, harnessBin string, harnessArgs []string) (int, error) {
-	if strings.Contains(harnessBin, "=") {
-		// env(1) would read the path as one more assignment and run the next argument instead.
-		return 0, fmt.Errorf("tmux new-session: harness path %q contains '='", harnessBin)
+// the exact command the direct-PTY path would have run. Both travel in a launch
+// spec written to specDir, which the pane reads and removes (PaneExec); the
+// session is returned once the pane has done so. The new window is pinned at
+// cols x rows (pinTmuxWindowSize) before it is returned; a session that was
+// created but could not be pinned, identified or started is killed, its spec
+// removed, and an error returned.
+func createTmuxSession(name, worktreeDir string, cols, rows int, env []string, harnessBin string, harnessArgs []string, specDir string) (int, error) {
+	exe, err := paneExecutable()
+	if err != nil {
+		return 0, fmt.Errorf("tmux new-session: locate this binary for the pane: %w", err)
 	}
-	args := tmuxSessionArgs(name, worktreeDir, cols, rows, env, harnessBin, harnessArgs)
+	specPath, err := writePaneLaunchSpec(specDir, newPaneLaunchSpec(env, harnessBin, harnessArgs))
+	if err != nil {
+		return 0, fmt.Errorf("tmux new-session: %w", err)
+	}
+	fail := func(err error) (int, error) {
+		killTmuxSession(name)
+		_ = os.Remove(specPath)
+		return 0, err
+	}
+	args := tmuxSessionArgs(name, worktreeDir, cols, rows, []string{exe, PaneExecFlag, specPath})
 
 	cmd := exec.Command(tmuxBinary, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		// No kill here: a failed new-session made nothing, and the name may
 		// belong to another live session ("duplicate session").
+		_ = os.Remove(specPath)
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && len(bytes.TrimSpace(exit.Stderr)) > 0 {
+			return 0, fmt.Errorf("tmux new-session: %w: %s", err, bytes.TrimSpace(exit.Stderr))
+		}
 		return 0, fmt.Errorf("tmux new-session: %w", err)
 	}
 	pid, perr := strconv.Atoi(strings.TrimSpace(string(out)))
 	if perr != nil {
-		killTmuxSession(name)
-		return 0, fmt.Errorf("parse pane pid %q: %w", strings.TrimSpace(string(out)), perr)
+		return fail(fmt.Errorf("parse pane pid %q: %w", strings.TrimSpace(string(out)), perr))
+	}
+	if !waitPaneSpecConsumed(specPath, paneSpecConsumedTimeout) {
+		return fail(fmt.Errorf("tmux new-session: the pane did not read its launch spec %s within %s", specPath, paneSpecConsumedTimeout))
 	}
 	// Its own invocation, not one more command in the new-session chain: tmux
-	// splits a command line at every literal ";" argument, and harness arguments
-	// may contain one.
+	// splits a command line at every argument that ends in ";".
 	if err := pinTmuxWindowSize(name, cols, rows); err != nil {
-		killTmuxSession(name)
-		return 0, err
+		return fail(err)
 	}
 	return pid, nil
 }
@@ -226,16 +239,17 @@ func tmuxWindowPinArgs(name string, cols, rows int) []string {
 		"-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows)}
 }
 
-func tmuxSessionArgs(name, worktreeDir string, cols, rows int, env []string, harnessBin string, harnessArgs []string) []string {
+// tmuxSessionArgs builds the new-session command that pins the server's options
+// and starts paneCommand as the new pane's first process. paneCommand is the
+// short PaneExecFlag form, so the command's size does not grow with the
+// harness argv or environment.
+func tmuxSessionArgs(name, worktreeDir string, cols, rows int, paneCommand []string) []string {
 	args := []string{"-L", config.TmuxServer(), "-f", "/dev/null"}
 	args = append(args, tmuxOptionPins()...)
 	args = append(args, tmuxRGBFeaturePin()...)
 	args = append(args, "new-session", "-d", "-s", name, "-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows), "-c", worktreeDir)
-	args = append(args, "-P", "-F", "#{pane_pid}", "--", "/bin/sh", "-c", tmuxPaneEnvScript, "lore-pane")
-	args = append(args, tmuxPaneEnv(env)...)
-	args = append(args, harnessBin)
-	args = append(args, harnessArgs...)
-	return args
+	args = append(args, "-P", "-F", "#{pane_pid}", "--")
+	return append(args, paneCommand...)
 }
 
 // tmuxAttachCommand builds the `tmux attach-session` client that runs under the

@@ -33,19 +33,34 @@ func TestTmuxLaunchCapabilityContractHarnessMatrix(t *testing.T) {
 	}
 	for _, fixture := range fixtures {
 		t.Run(fixture.framework, func(t *testing.T) {
-			args := tmuxSessionArgs("lore-test-session", "/tmp/session-worktree", 80, 24,
-				[]string{"LORE_FRAMEWORK=" + fixture.framework, "COLORTERM=wrong"},
+			spec := newPaneLaunchSpec([]string{"LORE_FRAMEWORK=" + fixture.framework, "COLORTERM=wrong", "PANE_CONTRACT_CARRIED=override"},
 				fixture.binary, []string{"--fixture"})
-			joined := strings.Join(args, "\x00")
 			for _, stale := range []string{"TERM=operator-term", "COLORTERM=operator-value", "COLORTERM=wrong", "TMUX=stale",
-				"TMUX_PANE=%99", "TERM_PROGRAM=operator-terminal", "SHELL=/operator/shell"} {
-				if strings.Contains(joined, stale) {
-					t.Errorf("tmux args leaked %q", stale)
+				"TMUX_PANE=%99", "TERM_PROGRAM=operator-terminal", "SHELL=/operator/shell", "PANE_CONTRACT_CARRIED=carried"} {
+				if slices.Contains(spec.Env, stale) {
+					t.Errorf("launch spec leaked %q", stale)
 				}
 			}
-			if strings.Count(joined, "COLORTERM=truecolor") != 1 {
-				t.Errorf("tmux args COLORTERM count = %d, want 1", strings.Count(joined, "COLORTERM=truecolor"))
+			for _, want := range []string{"LORE_FRAMEWORK=" + fixture.framework, "PANE_CONTRACT_CARRIED=override", "COLORTERM=truecolor"} {
+				if !slices.Contains(spec.Env, want) {
+					t.Errorf("launch spec lost %q", want)
+				}
 			}
+			keys := map[string]bool{}
+			for _, kv := range spec.Env {
+				key, _, _ := strings.Cut(kv, "=")
+				if keys[key] {
+					t.Errorf("launch spec lists %s twice; the harness would read the first", key)
+				}
+				keys[key] = true
+			}
+			if !slices.Equal(spec.Argv, []string{fixture.binary, "--fixture"}) {
+				t.Errorf("launch spec argv = %v, want the harness command", spec.Argv)
+			}
+
+			pane := []string{"/opt/lore/lore-tui", PaneExecFlag, "/tmp/hosts/key/launch/pane-1.json"}
+			args := tmuxSessionArgs("lore-test-session", "/tmp/session-worktree", 80, 24, pane)
+			joined := strings.Join(args, "\x00")
 			if !strings.Contains(joined, "new-session\x00-d\x00-s\x00lore-test-session\x00-x\x0080\x00-y\x0024\x00-c\x00/tmp/session-worktree") {
 				t.Errorf("tmux args did not pin the pane cwd")
 			}
@@ -55,19 +70,8 @@ func TestTmuxLaunchCapabilityContractHarnessMatrix(t *testing.T) {
 				t.Errorf("tmux args still layer %d -e assignments over the server environment", n)
 			}
 			separator := slices.Index(args, "--")
-			if separator < 0 || len(args) < separator+5 || args[separator+1] != "/bin/sh" || args[separator+2] != "-c" ||
-				!strings.Contains(args[separator+3], "/usr/bin/env -i") {
-				t.Fatalf("pane command does not start from an empty environment: it begins %q", args[max(separator, 0):min(max(separator, 0)+3, len(args))])
-			}
-			command := args[separator+4:]
-			wantTail := []string{fixture.binary, "--fixture"}
-			if !slices.Equal(command[len(command)-len(wantTail):], wantTail) {
-				t.Errorf("pane command tail = %v, want %v", command[len(command)-len(wantTail):], wantTail)
-			}
-			for _, want := range []string{"LORE_FRAMEWORK=" + fixture.framework, "PANE_CONTRACT_CARRIED=carried", "COLORTERM=truecolor"} {
-				if !slices.Contains(command, want) {
-					t.Errorf("pane command lost %q", want)
-				}
+			if separator < 0 || !slices.Equal(args[separator+1:], pane) {
+				t.Fatalf("pane command = %q, want exactly %q", args[max(separator, 0):], pane)
 			}
 		})
 	}
@@ -111,10 +115,14 @@ func TestTmuxPaneEnvironmentIgnoresTheServersStartupEnvironment(t *testing.T) {
 	}
 	envFile, pidFile := filepath.Join(root, "pane.env"), filepath.Join(root, "pane.pid")
 	script := "echo $$ > " + pidFile + "; env > " + envFile + ".tmp; mv " + envFile + ".tmp " + envFile + "; exec sleep 120"
+	launch := filepath.Join(root, "launch")
 	pid, err := createTmuxSession("lore-pane-env-probe", work, 80, 24,
-		[]string{"LORE_FRAMEWORK=claude-code", "LORE_SESSION_SLUG=pane-probe"}, "/bin/sh", []string{"-c", script})
+		[]string{"LORE_FRAMEWORK=claude-code", "LORE_SESSION_SLUG=pane-probe"}, "/bin/sh", []string{"-c", script}, launch)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if specs, _ := filepath.Glob(filepath.Join(launch, "*")); len(specs) != 0 {
+		t.Errorf("launch specs left after the pane started: %v", specs)
 	}
 	var data []byte
 	deadline := time.Now().Add(10 * time.Second)
@@ -186,7 +194,7 @@ func TestTmuxCommandsFollowSessionRuntime(t *testing.T) {
 	t.Setenv(config.SessionRuntimeEnv, "dev")
 	want := []string{"-L", "lore-tui-dev"}
 	for name, args := range map[string][]string{
-		"session": tmuxSessionArgs("s", "/tmp/w", 80, 24, nil, "codex", nil),
+		"session": tmuxSessionArgs("s", "/tmp/w", 80, 24, []string{"/bin/true"}),
 		"attach":  tmuxAttachCommand("s").Args[1:],
 		"pin":     tmuxWindowPinArgs("s", 80, 24),
 		"viewer":  viewerAttachArgs("s", true),

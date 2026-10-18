@@ -12,11 +12,17 @@ import (
 	"time"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
+	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
 const mainRuntimeProbeEnv = "LORE_TUI_TEST_MAIN_RUNTIME"
 
 func TestMain(m *testing.M) {
+	// A tmux pane a test started from this binary, as a host starts one from its
+	// own binary.
+	if len(os.Args) > 1 && os.Args[1] == work.PaneExecFlag {
+		main()
+	}
 	if value, ok := os.LookupEnv(mainRuntimeProbeEnv); ok {
 		os.Setenv(config.SessionRuntimeEnv, value)
 		main()

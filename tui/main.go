@@ -77,6 +77,13 @@ func newModel(cfg config.Config, prefs config.Prefs, startState appState) model 
 }
 
 func main() {
+	// A pane's first process runs with the tmux server's environment, which this
+	// binary's own settings do not describe, so it is dispatched before any of them
+	// is read.
+	if len(os.Args) > 1 && os.Args[1] == work.PaneExecFlag {
+		fmt.Fprintf(os.Stderr, "lore-tui %s: %v\n", work.PaneExecFlag, work.PaneExec(os.Args[2:]))
+		os.Exit(127)
+	}
 	if _, err := config.SessionRuntime(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(2)

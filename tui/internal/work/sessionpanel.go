@@ -1955,7 +1955,7 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 				}
 				extras := append([]string{"LORE_FRAMEWORK=" + activeFramework}, sessionEnv.vars()...)
 				extras = append(extras, positionEnv...)
-				pid, terr := createTmuxSession(name, worktreeDir, width, height, extras, harnessBinary, args)
+				pid, terr := createTmuxSession(name, worktreeDir, width, height, extras, harnessBinary, args, paneLaunchDir(knowledgeDir, sessionEnv.HostKey))
 				if terr != nil {
 					return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("tmux hosting failed for %s: %w", label, terr), Notices: notices}
 				}

@@ -153,7 +153,7 @@ func (f tmuxFixture) startHarness(t *testing.T, name string, cols, rows int) str
 	if err := os.MkdirAll(work, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := createTmuxSession(name, work, cols, rows, nil, f.python, []string{"-I", f.child, log}); err != nil {
+	if _, err := createTmuxSession(name, work, cols, rows, nil, f.python, []string{"-I", f.child, log}, filepath.Join(f.root, "launch")); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, 10*time.Second, "the harness to start", func() bool { return len(paneSizes(log)) > 0 })
