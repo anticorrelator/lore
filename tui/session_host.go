@@ -312,8 +312,20 @@ type hostRuntimeErrorMsg struct{ err error }
 type hostPromotionDoneMsg struct{ err error }
 type hostTickMsg struct{}
 type hostCommandDoneMsg struct{}
-type hostRecoveryDoneMsg struct{ result adoptionScanMsg }
+type hostRecoveryDoneMsg struct {
+	result adoptionScanMsg
+	keys   map[string]bool
+}
 type hostSweepDoneMsg struct{ result sessionWorktreeSweptMsg }
+
+// hostReconcileDoneMsg carries one reconciliation pass: the recovery key set
+// it read and the adoption scan it ran over that set and over dead TUIs.
+type hostReconcileDoneMsg struct {
+	result adoptionScanMsg
+	keys   map[string]bool
+	err    error
+}
+
 type sessionHostModel struct {
 	promoting int
 
@@ -324,6 +336,14 @@ type sessionHostModel struct {
 	idleSince               time.Time
 	lastSweep               time.Time
 	err                     error
+
+	// recoveredKeys are the host keys whose allocation and delivery records
+	// this process has recovered; a key that joins the recovery set later is
+	// recovered on the next reconciliation pass.
+	recoveredKeys map[string]bool
+	// reconciling is set while a reconciliation pass runs, so passes never
+	// overlap.
+	reconciling bool
 	// retainedReported holds the retained-checkout reports already written to
 	// the host log, so a checkout the sweep keeps finding is logged once per
 	// host process rather than on every pass.
@@ -338,16 +358,94 @@ func (h *sessionHostModel) wrap(cmd tea.Cmd) tea.Cmd {
 	h.inflight++
 	return tea.Sequence(cmd, func() tea.Msg { return hostCommandDoneMsg{} })
 }
+
+// Init recovers, in order, the allocation records, the delivery ledger and the
+// dead registry rows of every key in the recovery set, then dead TUI rows of
+// this store's repo, before the host publishes readiness.
 func (h *sessionHostModel) Init() tea.Cmd {
+	m := h.runtime
+	scan := m.adoptionScanner()
 	return h.wrap(func() tea.Msg {
-		if err := h.runtime.recoverHostAllocations(); err != nil {
-			return hostRecoveryDoneMsg{adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Message: err.Error()}}}}
+		failed := func(err error) tea.Msg {
+			return hostRecoveryDoneMsg{result: adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Message: err.Error()}}}}
 		}
-		if err := h.runtime.recoverHostDeliveries(); err != nil {
-			return hostRecoveryDoneMsg{adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Message: err.Error()}}}}
+		keys, err := session.HostRecoveryKeys(m.sessionsDir, m.hostKey)
+		if err != nil {
+			return failed(err)
 		}
-		return hostRecoveryDoneMsg{h.runtime.adoptionScanCmd()().(adoptionScanMsg)}
+		if err := m.recoverHostAllocations(keys); err != nil {
+			return failed(err)
+		}
+		if err := m.recoverHostDeliveries(); err != nil {
+			return failed(err)
+		}
+		return hostRecoveryDoneMsg{result: scan(keys), keys: keys}
 	})
+}
+
+// reconcileCmd is the periodic recovery pass. A key that joined the recovery
+// set since the last pass has its copied allocation and delivery records
+// recovered first, then the adoption scan runs over the whole set and over
+// dead TUI rows. The pass never touches a record this process wrote for a
+// launch or delivery it is still running.
+func (h *sessionHostModel) reconcileCmd() tea.Cmd {
+	m := h.runtime
+	recovered := map[string]bool{}
+	for key := range h.recoveredKeys {
+		recovered[key] = true
+	}
+	scan := m.adoptionScanner()
+	dir, self := m.sessionsDir, m.instanceName
+	claimedBySelf := func(requestID string) bool {
+		req, err := session.ReadClaimed(dir, requestID)
+		return err == nil && req.ClaimedBy != nil && *req.ClaimedBy == self
+	}
+	return func() tea.Msg {
+		keys, err := session.HostRecoveryKeys(m.sessionsDir, m.hostKey)
+		if err != nil {
+			return hostReconcileDoneMsg{err: err}
+		}
+		joined := map[string]bool{}
+		for key := range keys {
+			if !recovered[key] {
+				joined[key] = true
+			}
+		}
+		if len(joined) > 0 {
+			if err := m.recoverHostAllocationsExcept(keys, claimedBySelf); err != nil {
+				return hostReconcileDoneMsg{err: err}
+			}
+			if err := m.recoverHostDeliveriesWhere(func(d hostDelivery) bool { return deliveryMintedBy(d, joined) }); err != nil {
+				return hostReconcileDoneMsg{err: err}
+			}
+		}
+		return hostReconcileDoneMsg{result: scan(keys), keys: keys}
+	}
+}
+
+// deliveryMintedBy reports whether a ledger record was written by a host whose
+// key is in keys. Each record's event id embeds the key of the host that made
+// the attempt, and a migration copies records unchanged.
+func deliveryMintedBy(d hostDelivery, keys map[string]bool) bool {
+	for _, prefix := range []string{"host-delivery-", "host-close-", "host-outcome-"} {
+		if rest, ok := strings.CutPrefix(d.Event.EventID, prefix); ok {
+			key, _, found := strings.Cut(rest, "-")
+			return found && keys[key]
+		}
+	}
+	return false
+}
+
+// logNotices writes adoption notices to the host log one by one; the
+// runtime's flash would keep only the last.
+func logNotices(notices ...[]runtimeNotice) {
+	for _, list := range notices {
+		for _, n := range list {
+			if n.Message != "" {
+				fmt.Fprintln(os.Stderr, "session recovery:", n.Message)
+			}
+		}
+	}
 }
 func hostTick() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return hostTickMsg{} })
@@ -394,6 +492,9 @@ func (h *sessionHostModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return h.fail(fmt.Errorf("recovery: %s", n.Message))
 			}
 		}
+		h.recoveredKeys = v.keys
+		logNotices(v.result.notices, v.result.tuiNotices)
+		v.result.notices, v.result.tuiNotices = nil, nil
 		var cmd tea.Cmd
 		h.runtime, cmd = h.runtime.handleAdoptionScan(v.result)
 		cmds = append(cmds, h.wrap(cmd))
@@ -415,6 +516,23 @@ func (h *sessionHostModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.promoting++
 		next, cmd := h.runtime.Update(msg)
 		h.runtime = next.(model)
+		cmds = append(cmds, h.wrap(cmd))
+	case hostReconcileDoneMsg:
+		h.reconciling = false
+		if v.err != nil {
+			fmt.Fprintln(os.Stderr, "session recovery:", v.err)
+			break
+		}
+		if h.recoveredKeys == nil {
+			h.recoveredKeys = map[string]bool{}
+		}
+		for key := range v.keys {
+			h.recoveredKeys[key] = true
+		}
+		logNotices(v.result.notices, v.result.tuiNotices)
+		v.result.notices, v.result.tuiNotices = nil, nil
+		var cmd tea.Cmd
+		h.runtime, cmd = h.runtime.handleAdoptionScan(v.result)
 		cmds = append(cmds, h.wrap(cmd))
 	case hostRuntimeErrorMsg:
 		return h.fail(v.err)
@@ -574,6 +692,10 @@ func (h *sessionHostModel) sessionTick() tea.Cmd {
 		}
 		if len(m.localSessions) == 0 && len(m.pendingSpawns) == 0 {
 			cmds = append(cmds, m.sweepSessionWorktreesCmd())
+		}
+		if !h.reconciling {
+			h.reconciling = true
+			cmds = append(cmds, h.reconcileCmd())
 		}
 	}
 

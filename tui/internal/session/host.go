@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/anticorrelator/lore/tui/internal/config"
 )
 
 // StoreHostKey is the host key of the session host serving the store at kdir,
@@ -26,10 +28,58 @@ func StoreHostKey(kdir, runtime string) string {
 	return hex.EncodeToString(sum[:])[:24]
 }
 
+// HostRecoveryKeys is the set of host keys whose dead registry rows the store
+// host with key own adopts: own, and, in the default runtime only, every key
+// whose <sessionsDir>/hosts/<K>/migrated.json names own as its destination. A
+// named runtime adopts its own key alone, because a legacy per-checkout key
+// carries no runtime name and may index another runtime's records.
+func HostRecoveryKeys(sessionsDir, own string) (map[string]bool, error) {
+	runtime, err := config.SessionRuntime()
+	if err != nil {
+		return nil, err
+	}
+	keys := map[string]bool{own: true}
+	if runtime != "" {
+		return keys, nil
+	}
+	records, err := filepath.Glob(filepath.Join(sessionsDir, "hosts", "*", "migrated.json"))
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range records {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var record struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+		}
+		if json.Unmarshal(b, &record) == nil && record.To == own && record.From != "" {
+			keys[record.From] = true
+		}
+	}
+	return keys, nil
+}
+
+// adoptableRuntime reports whether a row written in runtime rowRuntime may be
+// adopted by a process in runtime. A row without the field decodes as "", the
+// default runtime, which is the only runtime that may adopt such a row.
+func adoptableRuntime(rowRuntime, runtime string) bool {
+	return rowRuntime == runtime
+}
+
 // ScanHostAdoptable runs only while the caller holds this host's runtime lock.
-// Host identity and exact source placement scope recovery independently of the
-// instance heartbeat TTL. An alive predecessor is never stolen.
-func ScanHostAdoptable(dir, key, source, self string) ([]Instance, error) {
+// A row belongs to the host when its host key is in keys and it was written in
+// this process's runtime; no checkout is compared, since a store host serves
+// every checkout of its store. An alive predecessor is never stolen, and the
+// heartbeat TTL plays no part.
+func ScanHostAdoptable(dir string, keys map[string]bool, self string) ([]Instance, error) {
+	runtime, err := config.SessionRuntime()
+	if err != nil {
+		return nil, err
+	}
+	owned := func(inst Instance) bool { return keys[inst.HostKey] && adoptableRuntime(inst.Runtime, runtime) }
 	claims, err := filepath.Glob(filepath.Join(InstancesDir(dir), "*.json.adopting.*"))
 	if err != nil {
 		return nil, err
@@ -43,7 +93,7 @@ func ScanHostAdoptable(dir, key, source, self string) ([]Instance, error) {
 		if err = json.Unmarshal(b, &inst); err != nil {
 			continue // An unidentifiable row is preserved for diagnosis, never claimed.
 		}
-		if inst.HostKey != key || inst.ProjectDir != source {
+		if !owned(inst) {
 			continue
 		}
 		pid, _ := strconv.Atoi(path[strings.LastIndex(path, ".")+1:])
@@ -68,7 +118,7 @@ func ScanHostAdoptable(dir, key, source, self string) ([]Instance, error) {
 			if err = json.Unmarshal(b, &current); err != nil {
 				return nil, err
 			}
-			if current.HostKey != key || current.ProjectDir != source || pidAlive(current.PID) {
+			if !owned(current) || pidAlive(current.PID) {
 				return nil, fmt.Errorf("recovery claim conflicts with live ownership: %s", path)
 			}
 			// An existing newer snapshot may have closed a session. Never merge
@@ -106,7 +156,7 @@ func ScanHostAdoptable(dir, key, source, self string) ([]Instance, error) {
 		if err = json.Unmarshal(b, &inst); err != nil {
 			continue // No scoped ownership can be established.
 		}
-		if inst.HostKey != key || inst.ProjectDir != source || inst.Name == self || pidAlive(inst.PID) {
+		if !owned(inst) || inst.Name == self || pidAlive(inst.PID) {
 			continue
 		}
 		out = append(out, inst)

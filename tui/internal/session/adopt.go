@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/anticorrelator/lore/tui/internal/config"
 )
 
 // claimSuffix marks an instance row a startup adoption scan has claimed. The
@@ -22,8 +24,15 @@ const claimSuffix = ".adopting"
 // ScanAdoptable discovers ordinary dead owners, including claims whose adopter
 // died. Process death is sufficient even within the heartbeat TTL; a live or
 // permission-inaccessible PID is never taken. Managed manifests stay scoped to
-// their dedicated host. Claims are not restored over a newer registry row.
+// their dedicated host. Claims are not restored over a newer registry row. Only
+// rows written in this process's runtime are returned: instances/ is shared by
+// every runtime, and a row from before runtimes were stamped counts as the
+// default runtime's.
 func ScanAdoptable(sessionsDir, repo, selfName string, now time.Time) []Instance {
+	runtime, err := config.SessionRuntime()
+	if err != nil {
+		return nil
+	}
 	paths, _ := filepath.Glob(filepath.Join(InstancesDir(sessionsDir), "*.json"))
 	claims, _ := filepath.Glob(filepath.Join(InstancesDir(sessionsDir), "*.json.adopting.*"))
 	paths = append(paths, claims...)
@@ -43,7 +52,7 @@ func ScanAdoptable(sessionsDir, repo, selfName string, now time.Time) []Instance
 		if json.Unmarshal(data, &inst) != nil {
 			continue
 		}
-		if inst.Name == selfName || inst.Name == "" || inst.HostKey != "" || inst.Role == "session-host" || inst.Repo != repo || pidAlive(inst.PID) {
+		if inst.Name == selfName || inst.Name == "" || inst.HostKey != "" || inst.Role == "session-host" || inst.Repo != repo || !adoptableRuntime(inst.Runtime, runtime) || pidAlive(inst.PID) {
 			continue
 		}
 		inst.adoptionPath = path

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -727,7 +728,10 @@ type adoptionScanMsg struct {
 	alive         []adoptedSession
 	retained      []adoptedSession
 	notices       []runtimeNotice
-	diagnostics   []session.Diagnostic
+	// tuiNotices are a store host's failures in adopting dead TUI rows. They are
+	// reported but never stop the host, since none concerns its own sessions.
+	tuiNotices  []runtimeNotice
+	diagnostics []session.Diagnostic
 }
 
 func adoptedFromRegistry(deadInstance string, s session.Session) adoptedSession {
@@ -880,72 +884,99 @@ func retireDeadTargetCloseRequests(sessionsDir, script, kdir, actor, deadInstanc
 	return notices, diagnostics
 }
 
-// adoptionScanCmd is the D5 startup recovery pass. It scans the instance registry
-// for dead instances' rows (owner mtime-stale AND pid-dead), atomically claims each
-// by rename, and for every nested session decides re-attach vs. close by tmux
-// liveness. Filter inputs (repo, self name, script paths) are snapshotted at
-// Cmd-build time; the instances directory is read live inside the Cmd — the same
-// build-time-snapshot/run-time-read split the close/queue scanners use. Runs once
-// at startup, never on the poll heartbeat.
+// adoptionScanCmd is the D5 recovery pass. It scans the instance registry for
+// dead instances' rows (pid-dead), atomically claims each by rename, and for
+// every nested session decides re-attach vs. close by tmux liveness. A visible
+// TUI adopts dead TUI rows of its repo, once at startup. A store host adopts
+// the dead rows of its recovery key set and then dead TUI rows of its repo, at
+// startup and on each reconciliation pass. Filter inputs (repo, self name,
+// script paths) are snapshotted at Cmd-build time; the instances directory is
+// read live inside the Cmd — the same build-time-snapshot/run-time-read split
+// the close/queue scanners use.
 func (m model) adoptionScanCmd() tea.Cmd {
+	scan := m.adoptionScanner()
+	return func() tea.Msg { return scan(nil) }
+}
+
+// adoptionScanner snapshots the scan's inputs now and returns the scan itself,
+// which a store host runs over a recovery key set it has already read; given
+// nil keys it reads the set itself.
+func (m model) adoptionScanner() func(keys map[string]bool) adoptionScanMsg {
 	dir := m.sessionsDir
 	repo := m.config.RepoIdentifier
 	self := m.instanceName
 	script, kdir := m.eventScript, m.config.KnowledgeDir
-	destination := m.normalizedProjectDir
-	if destination == "" {
-		destination = m.config.ProjectDir
-	}
-	if m.hostKey != "" {
-		// A store host's rows, and so its predecessors' rows, carry no project dir.
-		destination = ""
-	}
+	host := m.hostKey != ""
+	hostKey := m.hostKey
 	transferred := m.instanceRow()
-	return func() tea.Msg {
+	return func(keys map[string]bool) adoptionScanMsg {
 		var alive []adoptedSession
 		var retained []adoptedSession
-		var notices []runtimeNotice
+		var notices, tuiNotices []runtimeNotice
 		var diagnostics []session.Diagnostic
 		var settledClaims []string
-		candidates := session.ScanAdoptable(dir, repo, self, time.Now())
-		if m.hostKey != "" {
+		var candidates []session.Instance
+		// hostSeen holds the slugs a host-scoped claim must leave alone: sessions
+		// this host already owns or has closed. seen and known serve dead TUI
+		// claims, whose sessions are compared by generation instead.
+		hostSeen := map[string]bool{}
+		if host {
+			if keys == nil {
+				var err error
+				if keys, err = session.HostRecoveryKeys(dir, hostKey); err != nil {
+					return adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Code: "host-recovery", Message: err.Error()}}}
+				}
+			}
 			var err error
-			candidates, err = session.ScanHostAdoptable(dir, m.hostKey, destination, self)
+			candidates, err = session.ScanHostAdoptable(dir, keys, self)
 			if err != nil {
 				return adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Code: "host-recovery", Message: err.Error()}}}
 			}
-		}
-		seen := map[string]bool{}
-		if m.hostKey != "" {
-			var err error
-			seen, err = m.hostClosedSlugs()
+			hostSeen, err = m.hostClosedSlugs()
 			if err != nil {
 				return adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Message: err.Error()}}}
 			}
 		}
-		for _, row := range transferred.Sessions {
-			seen[row.Slug] = true
-		}
+		seen := map[string]bool{}
 		known := map[string]session.Session{}
 		for _, row := range transferred.Sessions {
+			hostSeen[row.Slug] = true
+			seen[row.Slug] = true
 			known[row.Slug] = row
 		}
-		if m.hostKey == "" {
+		if tuiCandidates := session.ScanAdoptable(dir, repo, self, time.Now()); len(tuiCandidates) > 0 {
 			owners, err := session.OwnershipInstances(dir)
 			if err != nil {
-				return adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Code: "adoption-ownership-read", Message: err.Error()}}}
-			}
-			for _, owner := range owners {
-				if owner.Repo != repo || owner.HostKey != "" || owner.Name == self || !session.ProcessAlive(owner.PID) {
-					continue
+				notice := runtimeNotice{Class: operationalFailure, Code: "adoption-ownership-read", Message: err.Error()}
+				if !host {
+					return adoptionScanMsg{notices: []runtimeNotice{notice}}
 				}
-				for _, row := range owner.Sessions {
-					seen[row.Slug] = true
-					known[row.Slug] = row
+				// A store host still recovers its own keys; dead TUIs wait a pass.
+				tuiNotices = append(tuiNotices, notice)
+			} else {
+				for _, owner := range owners {
+					if owner.Repo != repo || owner.HostKey != "" || owner.Name == self || !session.ProcessAlive(owner.PID) {
+						continue
+					}
+					for _, row := range owner.Sessions {
+						seen[row.Slug] = true
+						known[row.Slug] = row
+					}
 				}
+				candidates = append(candidates, tuiCandidates...)
 			}
 		}
+		otherServers := otherRuntimeTmuxServers(kdir)
 		for _, inst := range candidates {
+			hostScoped := inst.HostKey != ""
+			sink := &notices
+			if host && !hostScoped {
+				sink = &tuiNotices
+			}
+			if survivesOnAnotherServer(inst, otherServers) {
+				// That runtime owns the survivor. Neither re-attach nor orphan it.
+				continue
+			}
 			claim, claimPath, err := session.ClaimAdoptable(dir, inst)
 			if err != nil {
 				continue // lost the claim race, or the row vanished
@@ -955,26 +986,23 @@ func (m model) adoptionScanCmd() tea.Cmd {
 			var claimEvents []session.Event
 			preserveClaim := false
 			for _, s := range claim.Sessions {
-				if m.hostKey == "" {
-					if seen[s.Slug] {
-						if session.SameSessionGeneration(known[s.Slug], s) {
-							continue
-						}
-						preserveClaim = true
-						notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "adoption-generation-conflict", Message: "retained conflicting session " + s.Slug + " in " + claimPath})
+				if hostScoped {
+					if hostSeen[s.Slug] {
 						continue
 					}
-					seen[s.Slug] = true
-					known[s.Slug] = s
+				} else if seen[s.Slug] {
+					if session.SameSessionGeneration(known[s.Slug], s) {
+						continue
+					}
+					preserveClaim = true
+					*sink = append(*sink, runtimeNotice{Class: operationalFailure, Code: "adoption-generation-conflict", Message: "retained conflicting session " + s.Slug + " in " + claimPath})
+					continue
 				}
-				if m.hostKey != "" {
-					if seen[s.Slug] {
-						continue
-					}
-					seen[s.Slug] = true
-					if s.SourceDir == "" {
-						s.SourceDir = claim.ProjectDir
-					}
+				hostSeen[s.Slug] = true
+				seen[s.Slug] = true
+				known[s.Slug] = s
+				if host && s.SourceDir == "" {
+					s.SourceDir = claim.ProjectDir
 				}
 
 				if s.Tmux != "" && work.TmuxHasSession(s.Tmux) {
@@ -1047,10 +1075,10 @@ func (m model) adoptionScanCmd() tea.Cmd {
 			if err := session.WriteInstance(dir, transferred); err != nil {
 				transferred.Sessions = transferred.Sessions[:transferStart]
 				if _, releaseErr := session.ReleaseClaim(claimPath); releaseErr != nil {
-					notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "adoption-claim-release", Message: releaseErr.Error()})
+					*sink = append(*sink, runtimeNotice{Class: operationalFailure, Code: "adoption-claim-release", Message: releaseErr.Error()})
 				}
-				notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "adoption-ownership-transfer", Message: compactErr("adoption ownership transfer", err)})
-				return adoptionScanMsg{alive: alive, retained: retained, notices: notices, diagnostics: diagnostics, settledClaims: settledClaims}
+				*sink = append(*sink, runtimeNotice{Class: operationalFailure, Code: "adoption-ownership-transfer", Message: compactErr("adoption ownership transfer", err)})
+				return adoptionScanMsg{alive: alive, retained: retained, notices: notices, tuiNotices: tuiNotices, diagnostics: diagnostics, settledClaims: settledClaims}
 			}
 			alive = append(alive, claimAlive...)
 			retained = append(retained, claimRetained...)
@@ -1058,35 +1086,84 @@ func (m model) adoptionScanCmd() tea.Cmd {
 			for _, ev := range claimEvents {
 				if err := session.AppendEvent(script, kdir, ev); err != nil {
 					settled = false
-					notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "recovery-outcome-append", Message: compactErr("recovery outcome", err)})
+					*sink = append(*sink, runtimeNotice{Class: operationalFailure, Code: "recovery-outcome-append", Message: compactErr("recovery outcome", err)})
 					continue
 				}
 				if ev.Event == session.EventOrphaned {
 					if err := appendOrphanDue(script, kdir, ev); err != nil {
 						settled = false
-						notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "orphaned-due", Message: compactErr("orphaned session", err)})
+						*sink = append(*sink, runtimeNotice{Class: operationalFailure, Code: "orphaned-due", Message: compactErr("orphaned session", err)})
 					}
 				}
 			}
 			if !settled || preserveClaim {
 				if path, err := session.ReleaseClaim(claimPath); err != nil {
-					notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "adoption-claim-release", Message: err.Error()})
+					*sink = append(*sink, runtimeNotice{Class: operationalFailure, Code: "adoption-claim-release", Message: err.Error()})
 				} else {
-					notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "adoption-retained-manifest", Message: "unresolved ownership remains available for recovery at " + path})
+					*sink = append(*sink, runtimeNotice{Class: operationalFailure, Code: "adoption-retained-manifest", Message: "unresolved ownership remains available for recovery at " + path})
 				}
 				continue
 			}
-			var retirementNotices []runtimeNotice
-			var retirementDiagnostics []session.Diagnostic
-			if m.hostKey == "" {
-				retirementNotices, retirementDiagnostics = retireDeadTargetCloseRequests(dir, script, kdir, self, claim.Name)
+			if !hostScoped {
+				// Close requests addressed to the dead TUI can no longer reach it.
+				retirementNotices, retirementDiagnostics := retireDeadTargetCloseRequests(dir, script, kdir, self, claim.Name)
+				*sink = append(*sink, retirementNotices...)
+				diagnostics = append(diagnostics, retirementDiagnostics...)
 			}
-			notices = append(notices, retirementNotices...)
-			diagnostics = append(diagnostics, retirementDiagnostics...)
 			settledClaims = append(settledClaims, claimPath)
 		}
-		return adoptionScanMsg{alive: alive, retained: retained, notices: notices, diagnostics: diagnostics, settledClaims: settledClaims}
+		return adoptionScanMsg{alive: alive, retained: retained, notices: notices, tuiNotices: tuiNotices, diagnostics: diagnostics, settledClaims: settledClaims}
 	}
+}
+
+// sessionRuntimeDirName is a runtime namespace name, as config.SessionRuntime
+// accepts it.
+var sessionRuntimeDirName = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+
+// otherRuntimeTmuxServers names the tmux server of every other runtime that
+// may hold this store's sessions: the default runtime's, and one per runtime
+// with state under <kdir>/_sessions/runtimes.
+func otherRuntimeTmuxServers(kdir string) []string {
+	servers := []string{"lore-tui"}
+	entries, _ := os.ReadDir(filepath.Join(kdir, "_sessions", "runtimes"))
+	for _, entry := range entries {
+		if entry.IsDir() && sessionRuntimeDirName.MatchString(entry.Name()) {
+			servers = append(servers, "lore-tui-"+entry.Name())
+		}
+	}
+	own := config.TmuxServer()
+	var others []string
+	for _, server := range servers {
+		if server != own {
+			others = append(others, server)
+		}
+	}
+	return others
+}
+
+// tmuxAliveOnServer reports whether a session with exactly this name is alive
+// on the named tmux server.
+var tmuxAliveOnServer = func(server, name string) bool {
+	return exec.Command("tmux", "-L", server, "has-session", "-t", "="+name).Run() == nil
+}
+
+// survivesOnAnotherServer reports whether any session of inst that is not
+// alive on this runtime's tmux server is alive on another runtime's. Registry
+// rows are shared by every runtime and older rows carry no runtime, so a
+// session found there belongs to that runtime and is never this process's to
+// re-attach or to journal orphaned.
+func survivesOnAnotherServer(inst session.Instance, servers []string) bool {
+	for _, s := range inst.Sessions {
+		if s.Tmux == "" || work.TmuxHasSession(s.Tmux) {
+			continue
+		}
+		for _, server := range servers {
+			if tmuxAliveOnServer(server, s.Tmux) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Retire recovery checkpoints only from a snapshot built after the event loop
@@ -1166,7 +1243,7 @@ func (m model) handleAdoptionScan(msg adoptionScanMsg) (model, tea.Cmd) {
 		}
 		msg.settledClaims = nil
 	}
-	m = m.routeRuntimeNotices(msg.notices)
+	m = m.routeRuntimeNotices(append(msg.notices, msg.tuiNotices...))
 	diagnosticCmd := appendDiagnosticsCmd(m.sessionsDir, msg.diagnostics)
 	if m.localSessions == nil {
 		m.localSessions = make(map[string]liveSession)

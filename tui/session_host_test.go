@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -173,7 +174,7 @@ func TestHostAllocationIntentPrecedesCreateAndRecoversNoLaunch(t *testing.T) {
 		t.Fatal(err)
 	}
 	// No Prepared or started handler ran: the allocation record alone owns this.
-	if err := m.recoverHostAllocations(); err != nil {
+	if err := m.recoverHostAllocations(map[string]bool{m.hostKey: true}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -388,6 +389,15 @@ func TestHostCloseRetainsUnprovenCheckoutWithSettledReceipt(t *testing.T) {
 }
 
 const storeHostKey = "storekey0123456789abcdef"
+
+// Package tests never query the production tmux server, even read-only: a
+// store host's orphan check otherwise asks every runtime's server.
+func init() {
+	probe := tmuxAliveOnServer
+	tmuxAliveOnServer = func(server, name string) bool {
+		return server != "lore-tui" && probe(server, name)
+	}
+}
 
 // storeHostFixture is a store under a staged LORE_DATA_DIR, two checkouts that
 // resolve to it, and one that resolves to another store. LORE_KNOWLEDGE_DIR is
@@ -798,6 +808,367 @@ func TestStoreHostInstanceNameAvoidsAnotherStoresTmuxSession(t *testing.T) {
 	}
 	if _, err := storeHostInstanceName(sessions, storeHostKey, sequence("amber-otter"), tmuxSessionNames); err == nil {
 		t.Fatal("an exhausted draw produced a name")
+	}
+}
+
+// driveHost runs cmd and feeds every message it yields back through h, the
+// way the event loop would, following batches and sequences in order. It
+// reports whether the host asked to quit. A command that blocks (a terminal
+// poll, a tick) must not reach it.
+func driveHost(t *testing.T, h *sessionHostModel, cmd tea.Cmd) bool {
+	t.Helper()
+	steps := 0
+	var drive func(tea.Cmd) bool
+	drive = func(cmd tea.Cmd) bool {
+		if cmd == nil {
+			return false
+		}
+		if steps++; steps > 500 {
+			t.Fatal("host did not settle")
+		}
+		msg := cmd()
+		if msg == nil {
+			return false
+		}
+		if v := reflect.ValueOf(msg); v.Kind() == reflect.Slice && v.Type().Elem() == reflect.TypeOf(tea.Cmd(nil)) {
+			quit := false
+			for i := 0; i < v.Len(); i++ {
+				quit = drive(v.Index(i).Interface().(tea.Cmd)) || quit
+			}
+			return quit
+		}
+		if _, ok := msg.(tea.QuitMsg); ok {
+			return true
+		}
+		_, next := h.Update(msg)
+		return drive(next)
+	}
+	return drive(cmd)
+}
+
+// servingStoreHost is a store host past startup recovery, as a test drives it.
+func servingStoreHost(m model) *sessionHostModel {
+	return &sessionHostModel{runtime: m, options: hostOptions{Key: m.hostKey, ReadyFile: filepath.Join(m.hostDir(), "ready.json"), Idle: time.Hour},
+		recovered: true, swept: true, ready: true, recoveredKeys: map[string]bool{m.hostKey: true}}
+}
+
+// plantHostRow writes a dead host's registry row listing one session.
+func plantHostRow(t *testing.T, sessionsDir, name, key, slug string) {
+	t.Helper()
+	row := session.Instance{Name: name, PID: deadPID(t), HostKey: key, Role: "session-host", Repo: "example.com/acme/proj", Started: "2026-10-01T00:00:00Z",
+		Sessions: []session.Session{{Slug: slug, Type: "worker", Initiator: "agent", Started: "2026-10-01T00:00:00Z", RequestID: "r-" + slug}}}
+	if err := session.WriteInstance(sessionsDir, row); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeMigrationRecord(t *testing.T, sessionsDir, from, to string) {
+	t.Helper()
+	path := filepath.Join(sessionsDir, "hosts", from, "migrated.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(map[string]any{"schema_version": 1, "from": from, "to": to, "at": "2026-10-18T00:00:00Z"})
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func instanceExists(sessionsDir, name string) bool {
+	_, err := os.Stat(filepath.Join(session.InstancesDir(sessionsDir), name+".json"))
+	return err == nil
+}
+
+// In the default runtime a store host adopts the dead rows of every key that
+// migrated into its own: those migrated before it started, during startup
+// recovery, and one that migrates while it serves, on its next pass, without a
+// restart. A key that migrated elsewhere is left alone, and so is an
+// allocation record of a launch this process is still running.
+func TestStoreHostRecoveryAdoptsMigratedKeysAtStartupAndOnALaterPass(t *testing.T) {
+	t.Setenv(config.SessionRuntimeEnv, "")
+	m, sessionsDir := baseSessionModel(t)
+	m.hostKey = storeHostKey
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	plantHostRow(t, sessionsDir, "old-host-one", "oldkey000000000000000001", "first--w1")
+	plantHostRow(t, sessionsDir, "old-host-two", "oldkey000000000000000002", "second--w1")
+	plantHostRow(t, sessionsDir, "elsewhere", "oldkey000000000000000003", "third--w1")
+	writeMigrationRecord(t, sessionsDir, "oldkey000000000000000001", storeHostKey)
+	writeMigrationRecord(t, sessionsDir, "oldkey000000000000000003", "anotherstorekey000000000")
+
+	h := servingStoreHost(m)
+	h.recovered, h.swept, h.recoveredKeys = false, false, nil
+	if quit := driveHost(t, h, h.Init()); quit || h.err != nil {
+		t.Fatalf("startup recovery stopped the host: %v", h.err)
+	}
+	if _, ok := h.runtime.localSessions["first--w1"]; !ok || instanceExists(sessionsDir, "old-host-one") {
+		t.Fatalf("migrated key not adopted at startup: %+v", h.runtime.localSessions)
+	}
+	if _, ok := h.runtime.localSessions["second--w1"]; ok || !instanceExists(sessionsDir, "old-host-two") {
+		t.Fatal("a key that had not migrated was adopted")
+	}
+	if !h.recoveredKeys["oldkey000000000000000001"] || h.recoveredKeys["oldkey000000000000000002"] {
+		t.Fatalf("recovered keys = %v", h.recoveredKeys)
+	}
+
+	// The second key migrates while the host serves. A launch the host is
+	// still running has an allocation record and a row claimed by this host.
+	writeMigrationRecord(t, sessionsDir, "oldkey000000000000000002", storeHostKey)
+	writeStoreRequest(t, sessionsDir, session.Request{RequestID: "r-inflight", HostKey: storeHostKey, Type: "worker", Slug: strPtr("inflight--w1"), Initiator: "agent"})
+	if won, err := session.ClaimRequest(sessionsDir, "r-inflight"); !won || err != nil {
+		t.Fatalf("claim fixture: %v %v", won, err)
+	}
+	if _, err := session.WriteClaimMetadata(sessionsDir, "r-inflight", h.runtime.instanceName); err != nil {
+		t.Fatal(err)
+	}
+	inflight := h.runtime.hostAllocationPath("r-inflight")
+	if err := hostAtomicJSON(inflight, hostAllocation{RequestID: "r-inflight", Slug: "inflight--w1", Type: "worker", Intent: worktree.AllocationIntent{Path: filepath.Join(sessionsDir, "worktrees", "pending")}}); err != nil {
+		t.Fatal(err)
+	}
+	// The migration copied the old host's ledger, including an uncertain send
+	// it never settled. This host's own unsettled record is an operation still
+	// running and is not the pass's to settle.
+	oldKey := "oldkey000000000000000002"
+	copied := session.Event{EventID: "host-delivery-" + oldKey + "-send-old", Event: session.EventSendRefused, Slug: "second--w1", RequestID: "send-old", Reason: "delivery-uncertain", ActorInstance: session.StrPtr("old-host-two")}
+	if err := hostAtomicJSON(h.runtime.hostDeliveryPath("send-old"), hostDelivery{Kind: "send", Event: copied}); err != nil {
+		t.Fatal(err)
+	}
+	own := session.Event{Event: session.EventSendRefused, Slug: "first--w1", RequestID: "send-own", Reason: "delivery-uncertain", ActorInstance: session.StrPtr(h.runtime.instanceName)}
+	if err := h.runtime.hostDeliveryAttempt("send", own); err != nil {
+		t.Fatal(err)
+	}
+	h.reconciling = true
+	if quit := driveHost(t, h, h.reconcileCmd()); quit || h.err != nil || h.reconciling {
+		t.Fatalf("reconciliation pass: quit=%v err=%v reconciling=%v", quit, h.err, h.reconciling)
+	}
+	if _, ok := h.runtime.localSessions["second--w1"]; !ok || instanceExists(sessionsDir, "old-host-two") {
+		t.Fatalf("key migrated while serving not adopted: %+v", h.runtime.localSessions)
+	}
+	if !h.recoveredKeys["oldkey000000000000000002"] {
+		t.Fatalf("recovered keys = %v", h.recoveredKeys)
+	}
+	if !instanceExists(sessionsDir, "elsewhere") {
+		t.Fatal("a key migrated to another store was adopted")
+	}
+	if _, err := os.Stat(inflight); err != nil {
+		t.Fatalf("the pass settled a launch still in flight: %v", err)
+	}
+	ledger := func(id string) hostDelivery {
+		b, err := os.ReadFile(h.runtime.hostDeliveryPath(id))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var d hostDelivery
+		if err := json.Unmarshal(b, &d); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	if d := ledger("send-old"); !d.Terminal || !d.Committed {
+		t.Fatalf("copied record not replayed: %+v", d)
+	}
+	if d := ledger("send-own"); d.Terminal || d.Committed {
+		t.Fatalf("the pass settled this host's own running delivery: %+v", d)
+	}
+	replayed := 0
+	for _, ev := range readEventRows(t, m.config.KnowledgeDir) {
+		if ev.EventID == copied.EventID {
+			replayed++
+		}
+	}
+	if replayed != 1 {
+		t.Fatalf("copied outcome journaled %d times", replayed)
+	}
+	row := h.runtime.instanceRow()
+	if len(row.Sessions) != 2 {
+		t.Fatalf("host row sessions = %+v", row.Sessions)
+	}
+}
+
+// A named runtime's recovery key set is its own store key alone: legacy keys
+// carry no runtime, so their rows may be production's.
+func TestStoreHostRecoveryNamedRuntimeAdoptsOnlyItsOwnKey(t *testing.T) {
+	m, sessionsDir := baseSessionModel(t)
+	m.hostKey = storeHostKey
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	plantHostRow(t, sessionsDir, "own-predecessor", storeHostKey, "own--w1")
+	plantHostRow(t, sessionsDir, "legacy", "oldkey000000000000000001", "legacy--w1")
+	writeMigrationRecord(t, sessionsDir, "oldkey000000000000000001", storeHostKey)
+	h := servingStoreHost(m)
+	h.recovered, h.swept = false, false
+	if quit := driveHost(t, h, h.Init()); quit || h.err != nil {
+		t.Fatalf("startup recovery stopped the host: %v", h.err)
+	}
+	if _, ok := h.runtime.localSessions["own--w1"]; !ok {
+		t.Fatal("own predecessor not adopted")
+	}
+	if _, ok := h.runtime.localSessions["legacy--w1"]; ok || !instanceExists(sessionsDir, "legacy") || len(h.recoveredKeys) != 1 {
+		t.Fatalf("named runtime adopted a legacy key: keys %v", h.recoveredKeys)
+	}
+}
+
+// A migration copies the old host's allocation records. One whose request a
+// migrated-key row lists was launched, so it is cleared and its checkout left
+// to the session; one nobody launched is quarantined as before.
+func TestStoreHostRecoveryClearsTheCopiedAllocationOfALaunchedMigratedSession(t *testing.T) {
+	t.Setenv(config.SessionRuntimeEnv, "")
+	_, source, _ := closedSessionWorktree(t, "copied-source")
+	m, sessionsDir := baseSessionModel(t)
+	m.hostKey = storeHostKey
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	allocate := func(requestID, epoch string) string {
+		path := filepath.Join(sessionsDir, "worktrees", epoch)
+		if _, err := worktree.CreateOnRef(context.Background(), source, path, epoch, "", m.hostAllocationCheckpoint(requestID, work.SessionDescriptor{Slug: requestID, Type: "worker"})); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	launched := allocate("r-launched", "20261018T010101Z-0000aaaa")
+	orphan := allocate("r-orphan", "20261018T010102Z-0000bbbb")
+	row := session.Instance{Name: "old-host", PID: deadPID(t), HostKey: "oldkey000000000000000001", Role: "session-host", Started: "2026-10-01T00:00:00Z",
+		Sessions: []session.Session{{Slug: "launched--w1", Type: "worker", Initiator: "agent", RequestID: "r-launched"}}}
+	if err := session.WriteInstance(sessionsDir, row); err != nil {
+		t.Fatal(err)
+	}
+	writeMigrationRecord(t, sessionsDir, "oldkey000000000000000001", storeHostKey)
+	keys, err := session.HostRecoveryKeys(sessionsDir, storeHostKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.recoverHostAllocations(keys); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(launched); err != nil {
+		t.Fatalf("a launched session's checkout was quarantined: %v", err)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("an unlaunched allocation survived: %v", err)
+	}
+	if got := readEventTypes(t, m.config.KnowledgeDir); len(got) != 1 || got[0] != session.EventWorktreeQuarantined {
+		t.Fatalf("recovery events = %v", got)
+	}
+	if left, _ := filepath.Glob(filepath.Join(m.hostDir(), "allocations", "*.json")); len(left) != 0 {
+		t.Fatalf("allocation records left: %v", left)
+	}
+}
+
+func writeRawRegistryRow(t *testing.T, sessionsDir, name string, row map[string]any) {
+	t.Helper()
+	row["name"] = name
+	b, _ := json.Marshal(row)
+	if err := os.MkdirAll(session.InstancesDir(sessionsDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(session.InstancesDir(sessionsDir), name+".json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A store host recovers a dead TUI's sessions so that closing a window strands
+// nothing: it adopts the dead TUI's row, takes the TUI's checkout for a session
+// that names none, and retires close requests addressed to the dead TUI. A live
+// TUI is never robbed, and rows of another runtime, or without a runtime in a
+// named one, are left to their own runtime.
+func TestStoreHostRecoveryAdoptsADeadTUIAndRetiresItsCloseRequests(t *testing.T) {
+	m, sessionsDir := baseSessionModel(t)
+	m.hostKey = storeHostKey
+	m.config.RepoIdentifier = "example.com/acme/proj"
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	tuiSession := func(slug string) []session.Session {
+		return []session.Session{{Slug: slug, Type: "worker", Initiator: "agent", Started: "2026-10-01T00:00:00Z", RequestID: "r-" + slug}}
+	}
+	if err := session.WriteInstance(sessionsDir, session.Instance{Name: "dead-tui", PID: deadPID(t), Repo: m.config.RepoIdentifier, ProjectDir: "/checkouts/proj", Started: "2026-10-01T00:00:00Z", Sessions: tuiSession("tui--w1")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.WriteInstance(sessionsDir, session.Instance{Name: "live-tui", PID: os.Getpid(), Repo: m.config.RepoIdentifier, ProjectDir: "/checkouts/proj", Started: "2026-10-01T00:00:00Z", Sessions: tuiSession("live--w1")}); err != nil {
+		t.Fatal(err)
+	}
+	sessions := []map[string]any{{"slug": "foreign--w1", "type": "worker", "initiator": "agent", "started": "2026-10-01T00:00:00Z"}}
+	writeRawRegistryRow(t, sessionsDir, "other-runtime-tui", map[string]any{"pid": deadPID(t), "repo": m.config.RepoIdentifier, "runtime": "elsewhere", "sessions": sessions})
+	writeRawRegistryRow(t, sessionsDir, "unstamped-tui", map[string]any{"pid": deadPID(t), "repo": m.config.RepoIdentifier, "sessions": sessions})
+	closePath := writeCloseRequestFixture(t, sessionsDir, session.CloseRequest{RequestID: "close-dead", Slug: "tui--w1", TargetInstance: "dead-tui", Reason: "coordinator"})
+
+	h := servingStoreHost(m)
+	h.recovered, h.swept = false, false
+	if quit := driveHost(t, h, h.Init()); quit || h.err != nil {
+		t.Fatalf("startup recovery stopped the host: %v", h.err)
+	}
+	adopted, ok := h.runtime.localSessions["tui--w1"]
+	if !ok || adopted.sourceDir != "/checkouts/proj" || adopted.adoptedFrom != "dead-tui" {
+		t.Fatalf("dead TUI session = %+v (present %v)", adopted, ok)
+	}
+	if _, err := os.Stat(closePath); !os.IsNotExist(err) {
+		t.Fatalf("close request to the dead TUI not retired: %v", err)
+	}
+	retired := false
+	for _, ev := range readEventRows(t, m.config.KnowledgeDir) {
+		retired = retired || (ev.Event == session.EventCloseFailed && ev.Reason == closeFailedTargetInstanceDead && ev.TargetInstance != nil && *ev.TargetInstance == "dead-tui")
+	}
+	if !retired {
+		t.Fatal("no close_failed target-instance-dead row")
+	}
+	for _, name := range []string{"live-tui", "other-runtime-tui", "unstamped-tui"} {
+		if !instanceExists(sessionsDir, name) {
+			t.Fatalf("%s was taken", name)
+		}
+	}
+	for _, s := range h.runtime.instanceRow().Sessions {
+		if s.Slug == "tui--w1" && s.SourceDir != "/checkouts/proj" {
+			t.Fatalf("host row names checkout %q for the adopted session", s.SourceDir)
+		}
+	}
+}
+
+// A dead row's session that is gone from this runtime's tmux server but alive
+// on another runtime's server belongs to that runtime. The host neither adopts
+// it nor journals it orphaned. A session alive nowhere is journaled orphaned.
+func TestStoreHostRecoveryNeverOrphansASessionAliveOnAnotherRuntimeServer(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	m, sessionsDir := baseSessionModel(t)
+	m.hostKey = storeHostKey
+	m.config.RepoIdentifier = "example.com/acme/proj"
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	other := os.Getenv(config.SessionRuntimeEnv) + "-b"
+	if err := os.MkdirAll(filepath.Join(sessionsDir, "runtimes", other, "hosts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	survivor := "lore-elsewhere-" + strconv.Itoa(os.Getpid())
+	server := "lore-tui-" + other
+	if out, err := exec.Command("tmux", "-L", server, "-f", "/dev/null", "new-session", "-d", "-s", survivor, "--", "sleep", "300").CombinedOutput(); err != nil {
+		t.Fatalf("tmux: %v: %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-L", server, "kill-server").Run() })
+	tmuxSession := func(slug, tmux string) []session.Session {
+		return []session.Session{{Slug: slug, Type: "worker", Initiator: "agent", Started: "2026-10-01T00:00:00Z", RequestID: "r-" + slug, Tmux: tmux}}
+	}
+	if err := session.WriteInstance(sessionsDir, session.Instance{Name: "dead-a", PID: deadPID(t), Repo: m.config.RepoIdentifier, Started: "2026-10-01T00:00:00Z", Sessions: tmuxSession("alive--w1", survivor)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.WriteInstance(sessionsDir, session.Instance{Name: "dead-b", PID: deadPID(t), Repo: m.config.RepoIdentifier, Started: "2026-10-01T00:00:00Z", Sessions: tmuxSession("gone--w1", "lore-gone-"+strconv.Itoa(os.Getpid()))}); err != nil {
+		t.Fatal(err)
+	}
+	msg := m.adoptionScanCmd()().(adoptionScanMsg)
+	if len(msg.notices) != 0 {
+		t.Fatalf("scan notices: %+v", msg.notices)
+	}
+	if !instanceExists(sessionsDir, "dead-a") {
+		t.Fatal("the row of a session alive on another runtime's server was claimed")
+	}
+	for _, ev := range readEventRows(t, m.config.KnowledgeDir) {
+		if ev.Event == session.EventOrphaned && ev.Slug == "alive--w1" {
+			t.Fatal("a session alive on another runtime's server was journaled orphaned")
+		}
+	}
+	orphaned := false
+	for _, ev := range readEventRows(t, m.config.KnowledgeDir) {
+		orphaned = orphaned || (ev.Event == session.EventOrphaned && ev.Slug == "gone--w1")
+	}
+	if !orphaned {
+		t.Fatal("a session alive nowhere was not journaled orphaned")
+	}
+	if got := otherRuntimeTmuxServers(m.config.KnowledgeDir); !slices.Contains(got, "lore-tui") || !slices.Contains(got, server) || slices.Contains(got, config.TmuxServer()) {
+		t.Fatalf("servers checked = %v", got)
 	}
 }
 
