@@ -140,8 +140,70 @@ def assessed(peek, identity=None):
     return value
 
 
-def classify(row, peek):
+PARK_EVENTS = frozenset({'needs_input', 'modal_blocked'})
+LIFECYCLE_EVIDENCE = ('hook', 'hook_unconfirmed', 'stale_hook_rows', 'truncated')
+
+
+def lifecycle_merged(value):
+    evidence = value.get('evidence') if isinstance(value, dict) else None
+    return isinstance(evidence, dict) and any(key in evidence for key in LIFECYCLE_EVIDENCE)
+
+
+def lifecycle_verdict(kdir, row, position=None, cache=None, reported=None):
+    """Whether a journal park row may raise a wake of its own.
+
+    None means the lifecycle rules do not judge the row: it is not a park, has
+    no slug, is a screen row of another generation, or the journal read hit its
+    bound. Otherwise {'skip': bool, 'reason': ...}: a park that corroborates an
+    earlier one, a superseded park, a hook park of a generation other than the
+    current one, and a park an observation wake already reported raise none.
+    Call it after the row was read, so the journal scan holds the row; position
+    is the row's end offset. reported maps a slug to the event id of the park a
+    current-observation wake reported for it.
+    """
+    slug = row.get('slug')
+    if row.get('event') not in PARK_EVENTS or not slug:
+        return None
+    reducer = lifecycle()
+    if cache is not None and slug in cache:
+        generation, found = cache[slug]
+    else:
+        generation = reducer.current_generation(kdir, slug)
+        found = reducer.edges(kdir, slug, generation)
+        if cache is not None:
+            cache[slug] = (generation, found)
+    links = row.get('links') if isinstance(row.get('links'), dict) else {}
+    hook = links.get('authority') == 'hook-row'
+    if hook and reducer.stale_generation(row, generation):
+        return dict(skip=True, reason='stale-generation', generation=generation)
+    if not hook and generation is not None and links.get('generation') and links['generation'] != generation:
+        return None
+    if found['truncated']:
+        return None
+    if reducer.corroborates(row, found, position):
+        return dict(skip=True, reason='corroborates')
+    if reducer.superseded(row, found, position):
+        return dict(skip=True, reason='superseded')
+    if reported and row.get('event_id') and reported.get(slug) == row['event_id']:
+        return dict(skip=True, reason='reported-by-observation')
+    return dict(skip=False, reason=None, source='hook' if hook else 'screen', generation_known=generation is not None)
+
+
+def annotate_records(kdir, result, observation_path=None):
+    """The reader's result with each park record's lifecycle verdict attached."""
+    reported = (read(observation_path, {}) or {}).get('reported_parks', {}) if observation_path else None
+    cache = {}
+    for record in result.get('records') or []:
+        verdict = lifecycle_verdict(kdir, record.get('event') or {}, record.get('next_cursor'), cache, reported)
+        if verdict is not None:
+            record['lifecycle'] = verdict
+    return result
+
+
+def classify(row, peek, kdir=None):
     links = row.get('links') or {}
+    if kdir is not None and links.get('authority') == 'hook-row' and row.get('slug'):
+        return classify_hook(row, peek or {}, kdir)
     identity = {k: row.get(k) or links.get(k) for k in ('session_id', 'generation')}
     value = observation(peek, identity)
     activity = value.get('activity', 'unknown')
@@ -151,6 +213,44 @@ def classify(row, peek):
                 state='confirmed_park' if confirmed else 'park_unconfirmed',
                 label=('current-' + activity) if value['fresh'] else 'observation-unavailable-stale-or-different-generation',
                 observation=value)
+
+
+def classify_hook(row, peek, kdir):
+    """Classify a hook park from the registry and the journal; the screen is evidence.
+
+    The current generation comes from the live owner's registry row, so a hook
+    park of that generation confirms with no screen read. With the generation
+    unknown it stays advisory.
+    """
+    reducer = lifecycle()
+    slug = row['slug']
+    links = row.get('links') or {}
+    label = 'hook-' + (links.get('hook_event') or 'unknown')
+    identity = {'generation': links.get('generation')}
+    owner = reducer.current_owner(kdir, slug)
+    generation = reducer.current_generation(kdir, slug)
+    observed = peek.get('observation')
+    if isinstance(observed, dict) and lifecycle_merged(observed):
+        value = observation(peek, identity)
+    else:
+        if not isinstance(observed, dict):
+            entry = owner[1] if owner else {}
+            peek = dict(peek, slug=slug, ready=bool(peek.get('ready')), observation=dict(
+                schema_version=1, activity='unknown', authority='none', fresh=False, observed_at=timestamp(),
+                session_id=entry.get('session_id') or slug, session_handle=slug,
+                generation=generation or links.get('generation'), instance=owner[0] if owner else None,
+                max_age_seconds=5, evidence={'matcher': 'screen-not-read-v1', 'reason': 'The screen was not read for this wake.'}))
+        value = observation(peek, identity, kdir)
+    deciding = (value.get('evidence') or {}).get('hook') or {}
+    confirmed = (generation is not None and value.get('fresh') is True and value.get('authority') == 'hook-row'
+                 and value.get('activity') in {'idle', 'blocked'}
+                 and (not row.get('event_id') or deciding.get('event_id') == row['event_id']))
+    if generation is None:
+        label += '-generation-unknown'
+    elif not confirmed:
+        label += '-not-current'
+    return dict(tier='confirmed' if confirmed else 'advisory', authority='hook-row' if confirmed else 'none',
+                state='confirmed_park' if confirmed else 'park_unconfirmed', label=label, observation=value)
 
 
 def belongs(identity):
@@ -310,7 +410,7 @@ class Delivery:
         matched = payload.get('matched') or {}
         if matched.get('event') in {'needs_input', 'modal_blocked'}:
             snapshot = next((v for v in (current or {}).get('current', []) if v.get('slug') == matched.get('slug')), {})
-            current_class = classify(matched, snapshot.get('peek', {}))
+            current_class = classify(matched, snapshot.get('peek', {}), self.path.parent.parent)
             payload['original_classification'] = payload.get('classification')
             payload['classification'] = dict(current_class, historical_event=matched)
             payload['tier'] = current_class['tier']
@@ -425,6 +525,10 @@ def sweep(kdir, scripts, path, scope, budget, peek_timeout):
                 complete=not unavailable, budget_seconds=budget)
 
 
+def basis_of(token):
+    return {k: v for k, v in (token or {}).items() if k != 'semantic_sequence'}
+
+
 def consume_delta(path, payload):
     with locked(Path(path).with_suffix('.lock')):
         saved = read(path, {})
@@ -433,6 +537,30 @@ def consume_delta(path, payload):
         for row in current.get('original_delta', current.get('delta', [])):
             if pending.get(row['slug']) == row:
                 pending.pop(row['slug'])
+        # A park this wake confirmed is what the coordinator now knows of the
+        # session, so a later sample of the same park is not a change to report.
+        matched = payload.get('matched') or {}
+        classified = payload.get('classification') or {}
+        value = classified.get('observation') or (classified.get('peek') or {}).get('observation')
+        slug = matched.get('slug')
+        if (payload.get('outcome') == 'matched' and payload.get('tier') == 'confirmed' and slug
+                and matched.get('event') in PARK_EVENTS and isinstance(value, dict)
+                and value.get('fresh') is True and value.get('activity') in {'idle', 'blocked'}):
+            meaningful = saved.setdefault('meaningful', {})
+            token = semantic_observation(value)
+            prior = meaningful.get(slug) or {}
+            token['semantic_sequence'] = prior.get('semantic_sequence') if basis_of(prior) == basis_of(token) else (prior.get('semantic_sequence') or 0) + 1
+            meaningful[slug] = token
+            saved.setdefault('states', {})[slug] = token
+            if slug in pending and basis_of(semantic_observation(pending[slug].get('observation') or {})) == basis_of(token):
+                pending.pop(slug)
+        if payload.get('outcome') == 'current_delta':
+            reported = saved.setdefault('reported_parks', {})
+            for row in payload.get('current_delta') or []:
+                sample = row.get('observation') or {}
+                hook = (sample.get('evidence') or {}).get('hook') or {}
+                if sample.get('authority') == 'hook-row' and sample.get('activity') in {'idle', 'blocked'} and hook.get('event_id'):
+                    reported[row['slug']] = hook['event_id']
         saved['pending'] = pending
         atomic(path, saved)
 
@@ -493,6 +621,15 @@ def compact_wake(payload, budget=COMPACT_LIMIT):
     sessions = []
     current_confirmation = False
     seen = set()
+    classified = payload.get('classification') or {}
+    recorded = classified.get('observation') or (classified.get('peek') or {}).get('observation')
+    hook_value = None
+    if matched.get('slug') and isinstance(recorded, dict) and recorded.get('authority') == 'hook-row':
+        hook_value = observation({'observation': recorded})
+        if hook_value.get('fresh') and hook_value.get('activity') in {'idle', 'blocked'}:
+            current_confirmation = True
+        else:
+            hook_value = None
     ordered = list(payload.get('current_delta') or []) + list(current.get('current') or [])
     if matched.get('slug'):
         ordered.sort(key=lambda row: row.get('slug') != matched['slug'])
@@ -518,6 +655,9 @@ def compact_wake(payload, budget=COMPACT_LIMIT):
             entry['modal']['options_omitted'] = max(0, len(options) - 4)
             omitted['modal_options'] += max(0, len(options) - 4)
         sessions.append(entry)
+    if hook_value is not None and matched['slug'] not in seen and payload.get('tier') != 'quiet':
+        seen.add(matched['slug'])
+        sessions.insert(0, dict(fields({'slug': matched['slug']}, ('slug',)), observation=observed(hook_value)))
     if result.get('tier') == 'confirmed' and (matched.get('event') in {'needs_input', 'modal_blocked'} or payload.get('outcome') == 'current_delta'):
         if not current_confirmation:
             result['tier'] = 'advisory'
@@ -575,7 +715,7 @@ def peek_summary(peek):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['publish', 'pending', 'cursor', 'classify', 'sweep', 'consume', 'peek', 'peek-text', 'current', 'compact'])
+    parser.add_argument('command', choices=['publish', 'pending', 'cursor', 'classify', 'sweep', 'consume', 'peek', 'peek-text', 'current', 'compact', 'lifecycle-records'])
     parser.add_argument('--path')
     parser.add_argument('--kdir')
     parser.add_argument('--scripts')
@@ -584,6 +724,7 @@ def main():
     parser.add_argument('--interval', type=float, default=600)
     parser.add_argument('--budget', type=float, default=3)
     parser.add_argument('--peek-timeout', type=float, default=3)
+    parser.add_argument('--observation-path')
     args = parser.parse_args()
     if args.command == 'cursor':
         print(json.dumps(Delivery(args.path).state().get('observed_cursor')))
@@ -604,7 +745,9 @@ def main():
             consume_delta(args.path, payload)
             result = True
         elif args.command == 'classify':
-            result = classify(payload['row'], payload['peek'])
+            result = classify(payload['row'], payload['peek'], args.kdir)
+        elif args.command == 'lifecycle-records':
+            result = annotate_records(args.kdir, payload, args.observation_path)
         elif args.command == 'publish':
             result = Delivery(args.path).publish(payload, json.loads(args.identity), args.interval)
         else:

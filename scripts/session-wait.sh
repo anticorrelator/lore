@@ -277,8 +277,17 @@ read_from() {
 # end cursor would consume the rest without ever delivering them, so a caller
 # re-arming from the cursor it was given would never see them. The reader gives
 # each row its own boundary, and that is the one reported.
+#
+# A park row that corroborates a park already reported, a park a newer edge
+# superseded, or a hook park of another generation is no new park, so it is
+# skipped like a row outside the until-set (coordinate_watch_state.py
+# lifecycle-records judges it against the journal after this read).
 first_match_record() {
-  printf '%s' "$1" | jq -c --arg slug "$SLUG" --argjson until "$UNTIL_JSON" \
+  local result="$1"
+  if printf '%s' "$result" | jq -e '[.records[]? | select(.event.event == "needs_input" or .event.event == "modal_blocked")] | length > 0' >/dev/null 2>&1; then
+    result="$(printf '%s' "$result" | python3 "$SCRIPT_DIR/coordinate_watch_state.py" lifecycle-records --kdir "$KNOWLEDGE_DIR")" || result="$1"
+  fi
+  printf '%s' "$result" | jq -c --arg slug "$SLUG" --argjson until "$UNTIL_JSON" \
     --arg request_id "$REQUEST_ID" --argjson request_id_set "$REQUEST_ID_SET" \
     --argjson work_item_set "$WORK_ITEM_SET" \
     'def target_matches:
@@ -288,7 +297,8 @@ first_match_record() {
         and (.[($slug | length) + 3:] | test("^[0-9]+$"))
       );
     first(.records[] | select(
-      (.event.slug | target_matches)
+      (.lifecycle.skip | not)
+      and (.event.slug | target_matches)
       and (.event.event as $e | $until | index($e))
       and ($request_id_set == 0 or .event.event != "closed" or .event.request_id? == $request_id)
     ))' 2>/dev/null || true

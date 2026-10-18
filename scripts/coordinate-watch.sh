@@ -401,8 +401,21 @@ emit_internal_error() {
 # `.records`, the same boundaries `session wait` follows in follow mode; this verb
 # applies the until-set and the scope predicate. Scoping raises the stakes on that
 # discipline: the more rows a read withholds, the more a batch-end cursor loses.
+#
+# A park row first gets the session lifecycle's verdict (coordinate_watch_state.py
+# lifecycle-records): a row that corroborates a park already reported, a park a
+# newer edge superseded, a hook park of another generation, or a park a current
+# observation wake already reported raises no wake of its own. The verdict reads
+# the journal after this read, so it judges each row against what followed it,
+# by edge time. A park the lifecycle cannot judge keeps the journal-order rule:
+# a later resumed, closed, recovered or spawned row for its slug in this read
+# supersedes it.
 first_match_record() {
-  printf '%s' "$1" | jq -c \
+  local result="$1"
+  if printf '%s' "$result" | jq -e '[.records[]? | select(.event.event == "needs_input" or .event.event == "modal_blocked")] | length > 0' >/dev/null 2>&1; then
+    result="$(printf '%s' "$result" | python3 "$WATCH_HELPER" lifecycle-records --kdir "$KNOWLEDGE_DIR" --observation-path "$OBSERVATION_FILE")" || result="$1"
+  fi
+  printf '%s' "$result" | jq -c \
     --argjson until "$UNTIL_JSON" \
     --argjson durable "$DURABLE" \
     --argjson slugs "$SCOPE_SLUGS_JSON" \
@@ -413,8 +426,10 @@ first_match_record() {
       $records[] as $candidate
       | $candidate
       | select((.event.event != "needs_input" and .event.event != "modal_blocked") or
-          ([ $records[] | select(.next_cursor > $candidate.next_cursor and .event.slug == $candidate.event.slug)
-             | select(.event.event == "resumed" or .event.event == "closed" or .event.event == "recovered" or .event.event == "spawned") ] | length == 0))
+          (if .lifecycle then (.lifecycle.skip | not) else
+            ([ $records[] | select(.next_cursor > $candidate.next_cursor and .event.slug == $candidate.event.slug)
+               | select(.event.event == "resumed" or .event.event == "closed" or .event.event == "recovered" or .event.event == "spawned") ] | length == 0)
+           end))
       | select(.event.event as $e | $until | index($e))
       | (.event | scope_state($scoped; $slugs)) as $scope
       | select($scope.matched)
@@ -531,16 +546,24 @@ classify_match() {
   WAKE_AUTHORITY="none"
   WAKE_STATE="park_unconfirmed"
   WAKE_REASON="$(jq -cn --arg r "$row_reason" '$r')"
-  if [[ "$PEEK_TIMEOUT" -eq 0 || -z "$slug" ]]; then
+  # A hook park is the session's own account: the registry names its current
+  # generation, so it can be confirmed when the screen is not read or the peek
+  # fails. Any other park needs a current screen observation.
+  local hook
+  hook="$(printf '%s' "$row" | jq -r '(.links.authority // "") == "hook-row"')"
+  if [[ -z "$slug" ]]; then
     WAKE_LABEL="observation-unavailable"
     return 0
   fi
-  if ! peek_session "$slug"; then
+  if [[ "$PEEK_TIMEOUT" -eq 0 ]]; then
+    WAKE_LABEL="observation-unavailable"
+    [[ "$hook" == "true" ]] || return 0
+  elif ! peek_session "$slug"; then
     WAKE_LABEL="peek-unavailable"
-    return 0
+    [[ "$hook" == "true" ]] || return 0
   fi
   local classified
-  classified="$(jq -cn --argjson row "$row" --argjson peek "$WAKE_PEEK" '{row:$row,peek:$peek}' | python3 "$WATCH_HELPER" classify)"
+  classified="$(jq -cn --argjson row "$row" --argjson peek "$WAKE_PEEK" '{row:$row,peek:($peek // {})}' | python3 "$WATCH_HELPER" classify --kdir "$KNOWLEDGE_DIR")"
   WAKE_TIER="$(printf '%s' "$classified" | jq -r '.tier')"
   WAKE_AUTHORITY="$(printf '%s' "$classified" | jq -r '.authority')"
   WAKE_STATE="$(printf '%s' "$classified" | jq -r '.state')"

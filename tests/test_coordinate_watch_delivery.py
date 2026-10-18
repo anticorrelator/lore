@@ -1,4 +1,5 @@
 import importlib.util
+import itertools
 import json
 import os
 from pathlib import Path
@@ -330,6 +331,196 @@ class ObservationMerge(unittest.TestCase):
         after = m.read(state)
         self.assertEqual(result['current'][0]['observation']['activity'], 'working')
         self.assertEqual((after['states'], after['meaningful'], after['pending']), (before['states'], before['meaningful'], before['pending']))
+
+
+def stamp(second):
+    """A hook's fired_at, six fractional digits, at 10:00:<second> on 2026-10-18."""
+    return '2026-10-18T10:00:{:09.6f}Z'.format(second)
+
+
+class HookParkDelivery(unittest.TestCase):
+    """A session's own hook park wakes once, on its own authority, whatever the screen rows do."""
+
+    SLUG = 'task--w1'
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.kdir = Path(self.temp.name)
+        (self.kdir / '_sessions').mkdir()
+        self.journal_path = self.kdir / '_sessions/events.jsonl'
+        self.journal_path.write_text('')
+        self.serial = 0
+        self.session = {'slug': self.SLUG, 'type': 'worker', 'started': '2026-10-18T09:00:00Z', 'request_id': 'managed-1'}
+        self.registry = self.kdir / '_sessions/instances/host-a.json'
+        self.own(os.getpid())
+        self.generation = m.lifecycle()._session_target().generation(self.session)
+        self.env = dict(os.environ, LORE_KNOWLEDGE_DIR=str(self.kdir))
+        for key in ('LORE_SESSION_INSTANCE', 'LORE_SESSION_SLUG', 'LORE_SESSION_TYPE'):
+            self.env.pop(key, None)
+
+    def own(self, pid):
+        m.atomic(self.registry, {'name': 'host-a', 'pid': pid, 'role': 'session-host', 'sessions': [self.session]})
+
+    def hook(self, hook_event, activity, second, generation=None, **links):
+        values = dict(authority='hook-row', hook_event=hook_event, activity=activity, generation=generation or self.generation,
+                      fired_at=stamp(second), framework='claude-code', spawn_instance='host-a', **links)
+        return dict(event='resumed' if activity == 'working' else 'needs_input', slug=self.SLUG, session_type='worker',
+                    actor_instance='host-a', links=values)
+
+    def screen(self, event, activity, second, block_signature=None):
+        observed = dict(schema_version=1, activity=activity, authority='screen-signature', observed_at=stamp(second),
+                        session_id=self.SLUG, generation=self.generation, instance='host-a', fresh=True, max_age_seconds=5,
+                        evidence={'matcher': 'claude-code-fixture-v1'})
+        if block_signature:
+            observed['block_signature'] = block_signature
+        return dict(event=event, slug=self.SLUG, session_type='worker', actor_instance='host-a',
+                    links=dict(observation=json.dumps(observed), generation=self.generation, observed_at=stamp(second), activity=activity))
+
+    def modal(self):
+        return dict(event='modal_blocked', slug=self.SLUG, session_type='worker', actor_instance='host-a', reason='modal', modal_signature='Which?')
+
+    def append(self, *rows):
+        with self.journal_path.open('a') as stream:
+            for row in rows:
+                self.serial += 1
+                stream.write(json.dumps(dict(row, event_id='e{}'.format(self.serial), ts='2026-10-18T10:00:00Z')) + '\n')
+        return [json.loads(line) for line in self.journal_path.read_text().splitlines()][-len(rows):]
+
+    def watch(self, *args):
+        os.utime(self.registry)
+        result = subprocess.run(['bash', str(ROOT / 'scripts/coordinate-watch.sh'), '--kdir', str(self.kdir),
+                                 '--owner-pid', str(os.getpid()), '--timeout', '0', '--pending-stale', '0',
+                                 '--peek-timeout', '0', '--reconcile-budget', '0', '--json', *args],
+                                env=self.env, text=True, capture_output=True, timeout=60)
+        self.assertIn(result.returncode, (0, 2), result.stderr + result.stdout)
+        return json.loads(result.stdout)
+
+    def wakes(self):
+        path = next((self.kdir / '_coordination').glob('watch-delivery-*.json'), None)
+        return [w for w in (m.read(path, {}) if path else {}).get('wakes', []) if w['payload'].get('tier') != 'quiet']
+
+    def live(self, activity, block_signature=None):
+        value = dict(schema_version=1, activity=activity, authority='none' if activity == 'unknown' else 'screen-signature',
+                     observed_at=m.timestamp(), session_id=self.SLUG, session_handle=self.SLUG, generation=self.generation,
+                     instance='host-a', can_accept_input=activity == 'idle', fresh=True, max_age_seconds=5,
+                     evidence={'matcher': 'screen-unknown-v1' if activity == 'unknown' else 'claude-code-fixture-v1'})
+        if block_signature:
+            value['block_signature'] = block_signature
+        return {'slug': self.SLUG, 'ready': activity == 'idle', 'observation': value}
+
+    def test_a_hook_park_confirms_with_the_peek_disabled_and_through_present_and_compact(self):
+        self.append(self.screen('resumed', 'working', 0), self.hook('StopFailure', 'blocked', 1, error='rate_limit'))
+        wake = self.watch('--durable', '--since', '0')
+        self.assertEqual((wake['outcome'], wake['tier'], wake['authority']), ('matched', 'confirmed', 'hook-row'))
+        self.assertEqual(wake['classification']['label'], 'hook-StopFailure')
+        self.assertEqual(wake['classification']['observation']['evidence']['screen']['matcher'], 'screen-not-read-v1')
+        compact = m.compact_wake(wake)
+        self.assertEqual((compact['tier'], compact['authority']), ('confirmed', 'hook-row'))
+        self.assertEqual(compact['sessions'][0]['observation']['evidence']['reason'], 'hook says blocked since {}; screen unknown'.format(stamp(1)))
+        delivery = m.Delivery(next((self.kdir / '_coordination').glob('watch-delivery-*.json')))
+        state = delivery.state()
+        state['wakes'][0]['last_delivery'] = 0
+        m.atomic(delivery.path, state)
+        replay = delivery.pending({'current': [], 'complete': False})
+        self.assertEqual((replay['wake_id'], replay['tier'], replay['authority']), (wake['wake_id'], 'confirmed', 'hook-row'))
+        self.assertEqual(m.compact_wake(replay)['tier'], 'confirmed')
+        plain = self.watch('--compact')
+        self.assertEqual((plain['wake_id'], plain['tier']), (wake['wake_id'], 'confirmed'))
+
+    def test_sweeps_through_the_real_merge_add_no_pending_delta_for_a_reported_park(self):
+        self.append(self.screen('resumed', 'working', 0))
+        hook, = self.append(self.hook('PreToolUse', 'blocked', 1, tool_name='AskUserQuestion'))
+        state = self.kdir / '_coordination/observation.json'
+        sample = lambda screen: [{'slug': self.SLUG, 'observation': m.observation(screen, kdir=self.kdir)}]
+        first = m.reconcile_samples({}, sample(self.live('unknown')))
+        self.assertEqual(list(first['pending']), [self.SLUG])
+        m.atomic(state, first)
+        m.consume_delta(state, {'outcome': 'current_delta', 'current_delta': [first['pending'][self.SLUG]],
+                                'current_observations': {'delta': [first['pending'][self.SLUG]]}})
+        saved = m.read(state)
+        self.assertEqual(saved['pending'], {})
+        self.assertEqual(saved['reported_parks'], {self.SLUG: hook['event_id']})
+        for screen, rows in ((self.live('working'), ()), (self.live('idle'), ()),
+                             (self.live('blocked', 'sig-x'), (self.screen('needs_input', 'blocked', 2, 'sig-x'), self.modal()))):
+            self.append(*rows)
+            saved = m.reconcile_samples(saved, sample(screen))
+            self.assertEqual(saved['pending'], {})
+        # The watcher reading the hook row after that wake raises nothing new either.
+        records = {'records': [{'event': hook, 'next_cursor': 0}]}
+        verdict = m.annotate_records(self.kdir, records, state)['records'][0]['lifecycle']
+        self.assertEqual(verdict, {'skip': True, 'reason': 'reported-by-observation'})
+
+    def test_a_matched_hook_park_wake_leaves_later_sweeps_of_the_same_park_quiet(self):
+        self.append(self.screen('resumed', 'working', 0))
+        hook, = self.append(self.hook('PreToolUse', 'blocked', 1, tool_name='AskUserQuestion'))
+        state = self.kdir / '_coordination/observation.json'
+        m.atomic(state, {})
+        classified = m.classify(hook, {}, self.kdir)
+        m.consume_delta(state, {'outcome': 'matched', 'tier': classified['tier'], 'matched': hook,
+                                'classification': classified, 'current_observations': {}})
+        saved = m.read(state)
+        for screen in (self.live('unknown'), self.live('idle'), self.live('blocked', 'sig-x')):
+            saved = m.reconcile_samples(saved, [{'slug': self.SLUG, 'observation': m.observation(screen, kdir=self.kdir)}])
+            self.assertEqual(saved['pending'], {})
+        self.append(self.screen('resumed', 'working', 5), self.hook('Stop', 'idle', 9))
+        saved = m.reconcile_samples(saved, [{'slug': self.SLUG, 'observation': m.observation(self.live('idle'), kdir=self.kdir)}])
+        self.assertEqual(list(saved['pending']), [self.SLUG])
+
+    def test_every_arrival_order_of_a_dialogs_rows_with_a_rearm_between_rows_gives_one_durable_wake(self):
+        dialog = {'hook': lambda second: self.hook('PreToolUse', 'blocked', second, tool_name='AskUserQuestion'),
+                  'host': lambda second: self.screen('needs_input', 'blocked', second, 'sig-x'),
+                  'modal': lambda second: self.modal()}
+        for order in itertools.permutations(dialog):
+            with self.subTest(order=order):
+                for path in (self.kdir / '_coordination').glob('*'):
+                    path.unlink()
+                self.journal_path.write_text('')
+                self.append(self.screen('resumed', 'working', 0))
+                delivered = []
+                for arm, name in enumerate(order, start=1):
+                    self.append(dialog[name](arm))
+                    wake = self.watch('--durable', *(['--since', '0'] if arm == 1 else []))
+                    if wake.get('tier') != 'quiet':
+                        delivered.append((wake['wake_id'], wake['matched']['event'], (wake['matched'].get('links') or {}).get('authority')))
+                        m.wake_receipt(self.kdir, wake['wake_id'], acknowledge=True)
+                self.assertEqual(self.watch('--durable')['tier'], 'quiet')
+                self.assertEqual(len(self.wakes()), 1, delivered)
+                self.assertEqual(len({wake_id for wake_id, _, _ in delivered}), 1, delivered)
+                first = dialog[order[0]](1)
+                self.assertEqual(delivered[0][1:], (first['event'], (first.get('links') or {}).get('authority')))
+
+    def test_a_superseded_late_landing_park_raises_no_wake(self):
+        # The screen saw the next turn at :05; the previous turn's Stop, fired at :03, lands after it.
+        self.append(self.hook('Stop', 'idle', 1), self.hook('UserPromptSubmit', 'working', 2),
+                    self.screen('resumed', 'working', 5), self.hook('Stop', 'idle', 3))
+        wake = self.watch('--since', '0')
+        self.assertEqual((wake['outcome'], wake['tier']), ('timeout', 'quiet'))
+        self.assertEqual(self.watch('--since', '0', '--durable')['tier'], 'quiet')
+        self.assertEqual(self.wakes(), [])
+
+    def test_journal_order_and_edge_time_disagreeing_keeps_a_park_a_late_resumed_row_followed(self):
+        # The screen's resumed row for a half-second turn lands after the turn's StopFailure;
+        # the journal-order rule would drop the park, edge time keeps it.
+        self.append(self.hook('UserPromptSubmit', 'working', 1.0))
+        failure, late = self.append(self.hook('StopFailure', 'blocked', 1.5, error='overloaded'), self.screen('resumed', 'working', 1.3))
+        wake = self.watch('--since', '0')
+        self.assertEqual((wake['outcome'], wake['tier'], wake['authority']), ('matched', 'confirmed', 'hook-row'))
+        self.assertEqual(wake['matched']['event_id'], failure['event_id'])
+        records = {'records': [{'event': failure, 'next_cursor': None}, {'event': late, 'next_cursor': None}]}
+        self.assertEqual(m.annotate_records(self.kdir, records)['records'][0]['lifecycle']['skip'], False)
+
+    def test_a_stale_generation_hook_park_raises_no_wake_and_an_unknown_generation_wakes_advisory(self):
+        _, stale = self.append(self.screen('resumed', 'working', 0), self.hook('StopFailure', 'blocked', 1, generation='old/managed-0/1700000000'))
+        self.assertEqual(self.watch('--since', '0')['outcome'], 'timeout')
+        verdict = m.annotate_records(self.kdir, {'records': [{'event': stale, 'next_cursor': None}]})['records'][0]['lifecycle']
+        self.assertEqual((verdict['skip'], verdict['reason']), (True, 'stale-generation'))
+        dead = subprocess.Popen(['true'])
+        dead.wait()
+        self.own(dead.pid)
+        unknown = self.watch('--since', '0')
+        self.assertEqual((unknown['outcome'], unknown['tier'], unknown['authority']), ('matched', 'advisory', 'none'))
+        self.assertEqual(unknown['classification']['label'], 'hook-StopFailure-generation-unknown')
 
 
 class WatchCommands(unittest.TestCase):
