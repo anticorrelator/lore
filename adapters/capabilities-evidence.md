@@ -125,13 +125,23 @@ non-`none` cell points at an id that exists here.
   § Matcher patterns, § Hook handler fields, § Run hooks in the background,
   and the event sections for UserPromptSubmit, PreToolUse (AskUserQuestion,
   ExitPlanMode), PermissionRequest, PostToolUse, PostToolUseFailure, Stop,
-  StopFailure, Notification), plus strings of the installed binary. Read
-  only; no Claude Code session was started.
+  StopFailure, Notification); strings of the installed binary; and a live
+  probe of that binary with the hooks-only `--settings` payload the session
+  host builds.
 - **URL / path:** https://code.claude.com/docs/en/hooks;
-  `~/.local/share/claude/versions/2.1.299`
+  `~/.local/share/claude/versions/2.1.299`; probe record
+  `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/claude-code-2.1.299-settings-hooks/probe.md`
 - **Retrieved:** 2026-10-18
 - **Product / version:** Claude Code 2.1.299 (the docs page names releases
-  up to 2.1.299; the binary is that release)
+  up to 2.1.299; the binary and the probed launch are that release)
+- **Method:** live probe — two launches of the installed binary on a private
+  tmux socket in an empty scratch folder, each with
+  `--dangerously-skip-permissions --model opus --settings <payload>
+  --session-id <uuid>` and no prompt, so no model turn was requested; the
+  docs and binary-string reading above came first.
+- **Transcript:** `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/claude-code-2.1.299-settings-hooks/`
+  (`1-startup.txt`, `2-after-trust.txt`, `3-hooks.txt`, `4-probe2.txt`,
+  `payload.json`, `payload2.json`, and the scripts that produced them)
 - **Claim:** Turn and prompt edges, each with the event lore journals:
   UserPromptSubmit runs when a prompt is submitted, before Claude processes
   it, including turns Claude Code starts on its own (`resumed`); Stop runs
@@ -155,13 +165,26 @@ non-`none` cell points at an id that exists here.
   delivered to Claude on the next turn, so a lifecycle hook must print
   nothing. Hook entries merge across settings levels rather than replacing
   each other, and `--settings` takes inline JSON (the docs' own example is
-  `--settings '{"disableAllHooks": true}'`); the binary labels hooks from
-  that flag "Startup settings (--settings option)" in `/hooks`. Not
-  established by either source: whether a hooks-only `--settings` payload
-  raises the startup Settings Error or Settings Warning dialog. The binary
-  carries that dialog and skips an errored settings file whole, so a real
-  launch decides it; until then the cell is `none`.
-- **Consumed by:** `claude-code.session_lifecycle_hooks` (`support: none`).
+  `--settings '{"disableAllHooks": true}'`); the binary carries the label
+  "Startup settings (--settings option)" for hooks from that flag, though
+  the probe below found `/hooks` does not list them.
+  Live probe, 2026-10-18. Launched with the 7-event hooks-only payload
+  lore-tui builds (`payload.json`), the session showed the folder-trust
+  prompt for its new scratch folder and, once that was answered, drew its
+  composer with no Settings Error or Settings Warning dialog. `/hooks` then
+  read "13 hooks on 5 events", every one `[User]` (PreToolUse 3,
+  SessionStart 7, PreCompact 1, SessionEnd 1, TaskCompleted 1), and listed
+  none of the 7 flag-supplied hooks: in 2.1.299 the menu does not list hooks
+  that come from `--settings`, so an empty `/hooks` listing is not evidence
+  that flag hooks failed to load. A second launch with a `--settings` payload
+  of the same shape (`payload2.json`: one SessionStart group holding a
+  synchronous and an `async: true` command handler, each touching a marker
+  file) created both markers, so hooks from `--settings` load and run beside
+  the person's own, async included. `~/.claude/settings.json` was unchanged
+  by both launches. Not yet established: that a real turn journals a row
+  from this payload's own events (none fires without a turn), which `full`
+  needs.
+- **Consumed by:** `claude-code.session_lifecycle_hooks` (`support: partial`).
 
 ### claude-code-pre-compact-hook
 

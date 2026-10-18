@@ -245,11 +245,16 @@ func TestStartTerminalCmd_SpawnsClaudeBinaryWithDefaultFlags(t *testing.T) {
 	if started.Harness != "claude-code" {
 		t.Errorf("SessionProcessStartedMsg.Harness = %q, want claude-code", started.Harness)
 	}
-	// claude-code routes inline_settings_override through the adapter →
-	// `--settings {}` should be in args. append_system_prompt is gated on
-	// followupMode (off here), so it should NOT appear.
-	if !argsContainPair(started.Cmd.Args, "--settings", "{}") {
-		t.Errorf("Cmd.Args missing `--settings {}` for claude-code: %v", started.Cmd.Args)
+	// claude-code routes inline_settings_override through the adapter, with
+	// the value its session_lifecycle_hooks cell gives: `{}` at none, else the
+	// hooks-only payload. append_system_prompt is gated on followupMode (off
+	// here), so it should NOT appear.
+	settings, err := lifecycleHookSettings("claude-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !argsContainPair(started.Cmd.Args, "--settings", settings) {
+		t.Errorf("Cmd.Args missing `--settings %s` for claude-code: %v", settings, started.Cmd.Args)
 	}
 	if argsContains(started.Cmd.Args, "--append-system-prompt") {
 		t.Errorf("Cmd.Args should NOT contain --append-system-prompt outside followup mode: %v", started.Cmd.Args)
