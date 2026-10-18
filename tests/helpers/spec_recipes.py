@@ -240,10 +240,8 @@ class SpecFixture(Fixture):
 
 
 def source_checkout(f, item):
-    instances = f.store / "_sessions/instances"
-    instances.mkdir(parents=True, exist_ok=True)
-    (instances / "fixture.json").write_text(json.dumps({"name": "fixture", "project_dir": str(f.code)}))
-    f.lore("work", "source-checkout", item.name, "--from-instance", "fixture")
+    # Outside a session the verb declares the checkout it runs in; calls run in f.code.
+    f.lore("work", "source-checkout", item.name)
 
 
 def authored_plan(f, item, *, concrete=False, retrieval="v2"):
@@ -368,11 +366,11 @@ def host_reference(f, context_file, *, framework="codex", root=None):
 
 
 def enqueue(f, context_file, session_route, *, fixed=False):
-    # The declared fixture host remains live while these serial steps execute.
-    (f.store / "_sessions/instances/fixture.json").touch()
+    # The store host standing in for this fixture remains live while these serial steps execute.
+    f.host_registry.touch()
     result = f.recipe("request-session", "enqueue " + ("fixed" if fixed else "ordinary") + " prepared session",
                       SESSION_SLUG="recipes--w1", SESSION_ROUTE=json.dumps(session_route), CONTEXT_FILE=context_file,
-                      TARGET_INSTANCE="", MIN_VINTAGE="", WORKTREE_ID="fixture-worktree" if fixed else "",
+                      MIN_VINTAGE="", WORKTREE_ID="fixture-worktree" if fixed else "",
                       EXECUTION_DIR=str(f.code) if fixed else "")
     queued = json.loads((f.store / json.loads(result.stdout)["path"]).read_text())
     assert queued["framework"] == session_route["framework"] and queued["model"] == session_route["model"]
@@ -388,8 +386,8 @@ def enqueue(f, context_file, session_route, *, fixed=False):
 def refuse_missing_placement(f, context_file):
     original = f.bodies["request-session"]
     lines = original.splitlines(keepends=True)
-    placement = [line for line in lines if b'args+=(--target "$TARGET_INSTANCE")' in line]
-    assert len(placement) == 1 and b'args+=(--anywhere)' in placement[0]
+    placement = [line for line in lines if b"args+=(--anywhere)" in line]
+    assert len(placement) == 1
     changed = original.replace(placement[0], b"")
     script = f.root / "negative-missing-placement.sh"
     script.write_bytes(changed)
@@ -403,7 +401,7 @@ def refuse_missing_placement(f, context_file):
     output = f.root / "negative-missing-placement.output"
     output.write_bytes(result.stdout + result.stderr)
     f.data("negative-missing-placement.json", {"source_sha256": digest(original), "mutated_sha256": digest(changed),
-           "mutation": "Remove the explicit target/anywhere stance from the authored recipe.",
+           "mutation": "Remove the explicit --anywhere stance from the authored recipe.",
            "inputs": declared, "exit_code": result.returncode, "output": str(output)})
 
 

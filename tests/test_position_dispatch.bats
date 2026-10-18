@@ -27,6 +27,7 @@ import runpy
 from pathlib import Path
 import shutil
 import shlex
+import site
 import subprocess
 import sys
 import textwrap
@@ -46,7 +47,10 @@ for name in ('scripts', 'adapters', 'agents', 'docs', 'cli', 'skills'):
 store = home / '.lore'
 (store / 'config').mkdir(parents=True)
 (store / 'scripts').symlink_to(repo / 'scripts')
-settings = {'version': 1, 'harnesses': {'codex': {'roles': {'lead': 'planning-model', 'reviewer': 'review-model', 'worker': 'worker-model', 'researcher': 'research-model', 'advisor': 'advisor-model'}, 'ceremony_roles': {'spec': {'lead': 'spec-model'}}}}}
+settings = {'version': 2, 'tui_launch_framework': 'codex',
+            'routes': {'default': 'codex/default-model', 'lead': 'codex/planning-model', 'reviewer': 'codex/review-model', 'worker': 'codex/worker-model',
+                       'researcher': 'codex/research-model', 'advisor': 'codex/advisor-model', 'ceremony_overlays': {'spec': {'lead': 'codex/spec-model'}}},
+            'harnesses': {'codex': {'args': [], 'native_models': {'default': 'gpt-5.5-high'}}}}
 (store / 'config/settings.json').write_text(json.dumps(settings))
 item = store / '_work/fixture'
 if scenario not in ('implement-envelope', 'spec-report-fields'):
@@ -54,7 +58,8 @@ if scenario not in ('implement-envelope', 'spec-report-fields'):
     (item / '_meta.json').write_text(json.dumps({'title': 'Fixture', 'source_checkout': str(repo)}))
 instances = store / '_sessions/instances'; instances.mkdir(parents=True)
 env = {k:v for k,v in os.environ.items() if not k.startswith(('LORE_', 'CLAUDE_'))}
-env.update(HOME=str(home), LORE_DATA_DIR=str(store), LORE_KNOWLEDGE_DIR=str(store), LORE_FRAMEWORK='codex')
+# HOME moves into the case root; keep the caller's Python user site so PyYAML stays importable.
+env.update(HOME=str(home), PYTHONUSERBASE=site.getuserbase(), LORE_DATA_DIR=str(store), LORE_KNOWLEDGE_DIR=str(store), LORE_FRAMEWORK='codex')
 # The store's session host claims every request, in a checkout of its store. The
 # checkout is a git checkout and the store is pinned, so it belongs to the store;
 # this process stands in for a ready host ('fixture') by holding its runtime lock
