@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -334,8 +335,12 @@ func TmuxSessionNameSlugless(instance string) string {
 //   - status off: no status line synthesising a row that breaks bottom-region
 //     signature anchors.
 //   - remain-on-exit off: a dead pane must not linger and strand done-detection.
-//   - window-size latest: the sole attached client dictates dimensions so pty.Setsize
-//     resize forwarding keeps working.
+//   - window-size latest: for a window with no size of its own, the active client
+//     dictates dimensions so pty.Setsize resize forwarding keeps working. Every
+//     window lore creates or re-attaches gets its own manual size
+//     (pinTmuxWindowSize), which this global option does not override; it still
+//     governs windows created before that pin, and older lore-tui builds keep
+//     re-applying it.
 //
 // Set globally (`set -g`) before new-session so history-limit and default-terminal
 // are in force when the pane spawns; re-applying on an already-running server is an
@@ -411,7 +416,9 @@ func tmuxPaneEnv(extras []string) []string {
 // the harness and returns its pane PID (the harness process, captured via
 // new-session's -P -F so the close ladder can later signal it directly rather than
 // the attach client). env is the per-session extra environment; harnessBin/args is
-// the exact command the direct-PTY path would have run.
+// the exact command the direct-PTY path would have run. The new window is pinned
+// at cols x rows (pinTmuxWindowSize) before it is returned; a session that was
+// created but could not be pinned or identified is killed and an error returned.
 func createTmuxSession(name, worktreeDir string, cols, rows int, env []string, harnessBin string, harnessArgs []string) (int, error) {
 	if strings.Contains(harnessBin, "=") {
 		// env(1) would read the path as one more assignment and run the next argument instead.
@@ -422,13 +429,50 @@ func createTmuxSession(name, worktreeDir string, cols, rows int, env []string, h
 	cmd := exec.Command(tmuxBinary, args...)
 	out, err := cmd.Output()
 	if err != nil {
+		// No kill here: a failed new-session made nothing, and the name may
+		// belong to another live session ("duplicate session").
 		return 0, fmt.Errorf("tmux new-session: %w", err)
 	}
 	pid, perr := strconv.Atoi(strings.TrimSpace(string(out)))
 	if perr != nil {
+		killTmuxSession(name)
 		return 0, fmt.Errorf("parse pane pid %q: %w", strings.TrimSpace(string(out)), perr)
 	}
+	// Its own invocation, not one more command in the new-session chain: tmux
+	// splits a command line at every literal ";" argument, and harness arguments
+	// may contain one.
+	if err := pinTmuxWindowSize(name, cols, rows); err != nil {
+		killTmuxSession(name)
+		return 0, err
+	}
 	return pid, nil
+}
+
+// pinTmuxWindowSize resizes the session's window to cols x rows with
+// resize-window, which also sets that window's own window-size option to
+// manual. From then on no attach client changes the window's size, whatever its
+// own size, flags or activity, and neither does a later `set -g window-size
+// latest` from another lore-tui, so the harness keeps one size however many
+// viewers attach. The global window-size latest pin stays for windows created
+// before this pin existed. The size is the caller's: the session's creator and
+// whoever re-attaches it pass the size their own client and screen reader use.
+func pinTmuxWindowSize(name string, cols, rows int) error {
+	if cols < 1 || rows < 1 {
+		return fmt.Errorf("tmux resize-window %s: invalid size %dx%d", name, cols, rows)
+	}
+	out, err := exec.Command(tmuxBinary, tmuxWindowPinArgs(name, cols, rows)...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("tmux resize-window %s to %dx%d: %w: %s", name, cols, rows, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// tmuxWindowPinArgs targets the session's current window by exact session name
+// ("=name:"), so a pin never lands on another session whose name the target
+// merely prefixes.
+func tmuxWindowPinArgs(name string, cols, rows int) []string {
+	return []string{"-L", config.TmuxServer(), "resize-window", "-t", "=" + name + ":",
+		"-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows)}
 }
 
 func tmuxSessionArgs(name, worktreeDir string, cols, rows int, env []string, harnessBin string, harnessArgs []string) []string {
@@ -455,10 +499,12 @@ func tmuxAttachCommand(name string) *exec.Cmd {
 }
 
 // killTmuxSession tears down a tmux session on the dedicated server. Best-effort:
-// used to reclaim a just-created detached session whose attach client failed to
-// start, so it is not left orphaned with no client and no registry row.
+// used to reclaim a just-created detached session that could not be pinned or
+// whose attach client failed to start, so it is not left orphaned with no client
+// and no registry row. The exact-name target matters when the session has
+// already died: a plain target would then match a longer live name by prefix.
 func killTmuxSession(name string) {
-	_ = exec.Command(tmuxBinary, "-L", config.TmuxServer(), "kill-session", "-t", name).Run()
+	_ = exec.Command(tmuxBinary, "-L", config.TmuxServer(), "kill-session", "-t", "="+name).Run()
 }
 
 // TmuxHasSession reports whether the named tmux session is still alive on the
@@ -520,8 +566,16 @@ func captureTmuxPaneHistory(name string) ([]string, error) {
 	if name == "" {
 		return nil, fmt.Errorf("capture tmux history: empty session name")
 	}
-	out, err := exec.Command(tmuxBinary, "-L", config.TmuxServer(),
-		"capture-pane", "-p", "-e", "-S", "-", "-t", name).Output()
+	return captureTmuxPaneHistoryOn(nil, name)
+}
+
+// captureTmuxPaneHistoryOn is captureTmuxPaneHistory against a target under the
+// given environment; a nil env is this process's own.
+func captureTmuxPaneHistoryOn(env []string, target string) ([]string, error) {
+	cmd := exec.Command(tmuxBinary, "-L", config.TmuxServer(),
+		"capture-pane", "-p", "-e", "-S", "-", "-t", target)
+	cmd.Env = env
+	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("tmux capture-pane: %w", err)
 	}
@@ -531,4 +585,78 @@ func captureTmuxPaneHistory(name string) ([]string, error) {
 		lines = lines[:len(lines)-1]
 	}
 	return lines, nil
+}
+
+// viewerTerm is the terminal a viewer's tmux client is told it runs in: the
+// panel's emulator understands xterm-256color, and tmux refuses to attach a
+// client whose TERM it has no usable terminfo for.
+const viewerTerm = "xterm-256color"
+
+// viewerTmuxEnv is the environment of every tmux command a viewer runs. A viewer
+// is a separate process from the store host that owns the session, so it finds
+// the host's tmux server under the TMUX_TMPDIR the login's supervisor recorded,
+// not its own (config.SupervisorTmuxTmpdir); with no record it keeps its own.
+func viewerTmuxEnv() []string {
+	dir, recorded := config.SupervisorTmuxTmpdir()
+	var env []string
+	for _, kv := range os.Environ() {
+		key, _, _ := strings.Cut(kv, "=")
+		if key == "TERM" || (recorded && key == "TMUX_TMPDIR") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env, "TERM="+viewerTerm)
+	if recorded && dir != "" {
+		env = append(env, "TMUX_TMPDIR="+dir)
+	}
+	return env
+}
+
+// ViewerSessionAlive reports whether the named session is live on the store
+// hosts' tmux server, found the way a viewer finds it.
+func ViewerSessionAlive(name string) bool {
+	return tmuxSessionAliveOn(viewerTmuxEnv(), name)
+}
+
+func tmuxSessionAliveOn(env []string, name string) bool {
+	if name == "" {
+		return false
+	}
+	cmd := exec.Command(tmuxBinary, "-L", config.TmuxServer(), "has-session", "-t", "="+name)
+	cmd.Env = env
+	return cmd.Run() == nil
+}
+
+var tmuxVersionNumber = regexp.MustCompile(`(\d+)\.(\d+)`)
+
+// tmuxHasClientFlags reports whether a `tmux -V` line names a tmux whose
+// attach-session takes -f client flags, which arrived in 3.2. A line with no
+// version number, such as a build from master, is taken to be current.
+func tmuxHasClientFlags(version string) bool {
+	m := tmuxVersionNumber.FindStringSubmatch(version)
+	if m == nil {
+		return true
+	}
+	major, _ := strconv.Atoi(m[1])
+	minor, _ := strconv.Atoi(m[2])
+	return major > 3 || (major == 3 && minor >= 2)
+}
+
+func tmuxVersionOn(env []string) string {
+	cmd := exec.Command(tmuxBinary, "-V")
+	cmd.Env = env
+	out, _ := cmd.Output()
+	return strings.TrimSpace(string(out))
+}
+
+// viewerAttachArgs is a viewer's read-write client. ignore-size keeps the client
+// out of the window's size for windows that predate the per-window pin; on a
+// pinned window no client affects the size either way.
+func viewerAttachArgs(name string, ignoreSize bool) []string {
+	args := []string{"-L", config.TmuxServer(), "attach-session"}
+	if ignoreSize {
+		args = append(args, "-f", "ignore-size")
+	}
+	return append(args, "-t", "="+name)
 }

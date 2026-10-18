@@ -322,6 +322,8 @@ func TestTmuxCommandsFollowSessionRuntime(t *testing.T) {
 		"key":      tmuxMirrorKeyArgs("s", "Enter"),
 		"detach":   tmuxMirrorDetachArgs("s"),
 		"attach":   tmuxAttachCommand("s").Args[1:],
+		"pin":      tmuxWindowPinArgs("s", 80, 24),
+		"viewer":   viewerAttachArgs("s", true),
 	} {
 		if !slices.Equal(args[:2], want) {
 			t.Errorf("%s args = %v, want server %v", name, args, want)
@@ -335,19 +337,23 @@ func TestTmuxCommandsFollowSessionRuntime(t *testing.T) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX_LOG", logPath)
+	t.Setenv("LORE_DATA_DIR", t.TempDir())
 	TmuxHasSession("s")
 	_, _ = TmuxPanePID("s")
 	_, _ = TmuxPaneCWD("s")
 	_, _ = captureTmuxPaneHistory("s")
 	_, _ = CaptureTmuxHistory("s", 10, 100)
 	killTmuxSession("s")
+	_ = pinTmuxWindowSize("s", 80, 24)
+	ViewerSessionAlive("s")
+	_, _ = captureTmuxPaneHistoryOn(viewerTmuxEnv(), "=s:")
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 6 {
-		t.Fatalf("tmux calls = %q, want 6", lines)
+	if len(lines) != 9 {
+		t.Fatalf("tmux calls = %q, want 9", lines)
 	}
 	for _, line := range lines {
 		if !strings.HasPrefix(line, "-L lore-tui-dev ") {
