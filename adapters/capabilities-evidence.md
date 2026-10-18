@@ -75,13 +75,26 @@ non-`none` cell points at an id that exists here.
 
 ### claude-code-stop-hook
 
-- **Source:** Anthropic — Claude Code Hooks reference
-- **URL / path:** https://code.claude.com/docs/en/hooks
-- **Retrieved:** 2026-05-03
-- **Product / version:** Claude Code, unversioned
+- **Source:** Anthropic — Claude Code Hooks reference (§ Stop, § StopFailure),
+  plus the hook event table in the strings of the installed binary.
+- **URL / path:** https://code.claude.com/docs/en/hooks;
+  `~/.local/share/claude/versions/2.1.299`
+- **Retrieved:** 2026-10-18
+- **Product / version:** Claude Code 2.1.299 (the docs page names releases
+  up to 2.1.299; the binary is that release)
 - **Claim:** `Stop` (and `SubagentStop`, `StopFailure`) hooks are
   documented turn-cadence events; Stop accepts JSON-stdout
-  `{"decision":"block","reason":"..."}` for fine-grained control.
+  `{"decision":"block","reason":"..."}` for fine-grained control. Stop
+  "runs when the main Claude Code agent has finished responding. Does not
+  run if the stoppage occurred due to a user interrupt. API errors fire
+  StopFailure instead." StopFailure "runs instead of Stop when the turn
+  ends due to an API error"; it receives `error` (the matcher field),
+  optional `error_details` and `last_assistant_message`, and Claude Code
+  ignores its output and exit code. The binary's table reads "Fires
+  instead of Stop when an API error (rate limit, auth failure, etc.) ended
+  the turn. Fire-and-forget — hook output and exit codes are ignored."
+  A turn-end signal keyed on Stop alone therefore misses every turn that
+  ends on an API error.
 - **Consumed by:** `claude-code.capabilities.stop_hook`.
 
 ### claude-code-turn-boundary-rewake
@@ -105,6 +118,50 @@ non-`none` cell points at an id that exists here.
   notification fires for it — so a self-perpetuating watcher chain is
   not an alternative on this harness.
 - **Consumed by:** `claude-code.capabilities.turn_boundary_rewake`.
+
+### claude-code-session-lifecycle-hooks
+
+- **Source:** Anthropic — Claude Code Hooks reference (§ Configuration,
+  § Matcher patterns, § Hook handler fields, § Run hooks in the background,
+  and the event sections for UserPromptSubmit, PreToolUse (AskUserQuestion,
+  ExitPlanMode), PermissionRequest, PostToolUse, PostToolUseFailure, Stop,
+  StopFailure, Notification), plus strings of the installed binary. Read
+  only; no Claude Code session was started.
+- **URL / path:** https://code.claude.com/docs/en/hooks;
+  `~/.local/share/claude/versions/2.1.299`
+- **Retrieved:** 2026-10-18
+- **Product / version:** Claude Code 2.1.299 (the docs page names releases
+  up to 2.1.299; the binary is that release)
+- **Claim:** Turn and prompt edges, each with the event lore journals:
+  UserPromptSubmit runs when a prompt is submitted, before Claude processes
+  it, including turns Claude Code starts on its own (`resumed`); Stop runs
+  when the main agent has finished responding and not on a user interrupt
+  (`needs_input` idle); StopFailure runs instead of Stop when the turn ends
+  on an API error, with `error` naming its type (`needs_input` blocked);
+  PermissionRequest runs when Claude Code is about to ask for permission to
+  use a tool, while Notification `permission_prompt` waits about six seconds
+  (`needs_input` blocked); PreToolUse matches AskUserQuestion and
+  ExitPlanMode, which require user interaction (`needs_input` blocked);
+  PostToolUse runs after a tool succeeds and PostToolUseFailure after one
+  that started fails, but not when a running tool is cancelled (`resumed`).
+  Tool events carry `tool_name`; every payload carries `hook_event_name`.
+  Shape: settings `hooks` maps an event name to matcher groups
+  `{matcher?, hooks: [handler]}`; a command handler is `{type: "command",
+  command, async?}`; a matcher of letters, digits, `_`, `-`, spaces, `,` and
+  `|` is an exact list of tool names; a matcher on an event without matcher
+  support is ignored. `async: true` runs the command in the background
+  without blocking; async hooks cannot block or control Claude, Claude Code
+  does not enforce `timeout` on them, and JSON the command prints is
+  delivered to Claude on the next turn, so a lifecycle hook must print
+  nothing. Hook entries merge across settings levels rather than replacing
+  each other, and `--settings` takes inline JSON (the docs' own example is
+  `--settings '{"disableAllHooks": true}'`); the binary labels hooks from
+  that flag "Startup settings (--settings option)" in `/hooks`. Not
+  established by either source: whether a hooks-only `--settings` payload
+  raises the startup Settings Error or Settings Warning dialog. The binary
+  carries that dialog and skips an errored settings file whole, so a real
+  launch decides it; until then the cell is `none`.
+- **Consumed by:** `claude-code.session_lifecycle_hooks` (`support: none`).
 
 ### claude-code-pre-compact-hook
 
@@ -838,6 +895,15 @@ T70 / `lore doctor` can distinguish a gap from a missing-evidence error.
   invoked from `config.toml`; no in-process plugin runtime. (The
   changelog mentions `0.128.0` "plugin workflows" via marketplace, but
   that is plugin distribution, not an in-process event-bus runtime.)
+- **`codex.session_lifecycle_hooks` = none and
+  `opencode.session_lifecycle_hooks` = none.** Neither cell cites an
+  evidence row, and neither declares events. Codex 0.162.1 reviews new or
+  changed hooks at startup, with "Session flags" among the reviewed
+  sources, so a `-c` hook could hold an unattended session at launch or not
+  run. OpenCode 2.0.25 has no session-scoped plugin flag, and its
+  environment channels reach child processes. Each cell is raised only from
+  a live probe's own evidence row; the cells' notes name the intended
+  mapping and what the probe must show.
 - **`opencode.team_messaging` = none and `codex.team_messaging` = none.**
   Neither harness exposes a TeamCreate / SendMessage primitive. Skills
   that require inter-agent messaging (`/spec`, `/implement` team mode)
@@ -891,6 +957,7 @@ matches the union of all `evidence:` fields in capabilities.json.
 - claude-code-session-start-hook
 - claude-code-stop-hook
 - claude-code-turn-boundary-rewake
+- claude-code-session-lifecycle-hooks
 - claude-code-pre-compact-hook
 - claude-code-tool-hooks
 - claude-code-permission-hooks

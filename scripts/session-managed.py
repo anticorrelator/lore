@@ -1408,7 +1408,7 @@ def reconcile_operations(kdir, key):
                     data = read(response)
                     if data is not None:
                         from coordinate_watch_state import observation
-                        data['observation'] = observation(data)
+                        data['observation'] = observation(data, kdir=kdir)
                         receipt(kdir, manifest, saved['request_id'], operation, 'observed', response=data)
                         continue
                 else:
@@ -1493,12 +1493,26 @@ def operate_attempt(args, kdir, manifest):
         path = kdir / '_sessions/managed' / (manifest['handle'] + '.wait.json')
         with lock(path.with_suffix('.lock')):
             seen = set(read(path, {}).get('seen', []))
+            # A park row that corroborates a park already reported, a superseded
+            # park, or a hook park of another generation is no new park; it is
+            # recorded as seen and never returned.
+            from coordinate_watch_state import lifecycle_verdict
+            skipped = set()
             while True:
                 history = events(kdir, manifest['handle'])
                 wanted = set((args.until or 'terminus_reached,needs_input,modal_blocked,closed,request_expired,request_cancelled,request_abandoned,orphaned,close_failed').split(','))
-                matches = [r for r in history if r.get('event') in wanted and r.get('event_id') not in seen]
+                cache = {}
+                matches = []
+                for r in history:
+                    if r.get('event') not in wanted or r.get('event_id') in seen or r.get('event_id') in skipped:
+                        continue
+                    if (lifecycle_verdict(kdir, r, cache=cache) or {}).get('skip') and r.get('event_id'):
+                        skipped.add(r['event_id'])
+                        continue
+                    matches.append(r)
                 if matches:
                     seen.update(r.get('event_id') for r in matches)
+                    seen.update(skipped)
                     atomic(path, {'seen': list(seen)})
                     return {'handle': manifest['handle'], 'events': matches, 'outcome': 'observed', 'outcome_confirmed': True}
                 if time.monotonic() >= deadline:
@@ -1535,7 +1549,7 @@ def operate_attempt(args, kdir, manifest):
             data = read(response)
             if data is not None:
                 from coordinate_watch_state import observation
-                data['observation'] = observation(data)
+                data['observation'] = observation(data, kdir=kdir)
                 if args.summary:
                     data = {key: value for key, value in data.items() if key not in {'rows', 'ansi', 'history', 'screen'}}
                     data['summary'] = True

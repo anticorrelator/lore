@@ -862,8 +862,8 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `requested` | enqueue writer (item 2 verb / TUI human path) | a request was enqueued; `target_instance` copied from the request, `actor_instance` null unless a TUI created it |
 | `claimed` | TUI | an instance won the claim rename and wrote claim metadata |
 | `spawned` | TUI | the session process started; claimed file deleted |
-| `needs_input` | TUI | a running session is waiting on input |
-| `resumed` | TUI | a session resumed after idle/input |
+| `needs_input` | TUI; a hosted session's lifecycle hook | a running session is waiting on input. The host journals it from the screen; a session lore hosts also journals it from its own harness hook, as a [hook row](#hook-rows) |
+| `resumed` | TUI; a hosted session's lifecycle hook | a session resumed after idle/input, from the screen or, as a [hook row](#hook-rows), from the session's own harness hook |
 | `modal_blocked` | TUI | the shared readiness classifier observed a running session enter a harness modal; carries `reason=modal` and the observed `modal_signature`, emits once per observed entry, and carries no `request_id` |
 | `recovered` | TUI | a restarted/replacement instance adopted a still-running tmux-hosted session from a dead instance's registry row; `reason` names the predecessor (`adopted from <dead-instance>`). Session-transition class — no `request_id` |
 | `closed` | TUI | a session ended (carries `spend`: token counts where the harness exposes them, else duration-only) |
@@ -928,6 +928,42 @@ top-level `request_id`. Its deterministic event id incorporates the live
 registry's persisted spawn request identity, so exact replay is idempotent without
 conflating completion with a queue lifecycle.
 
+#### Hook rows
+
+A hook row is a hosted session's own account of a turn edge: the harness ran
+one of the hooks the host installed at launch, and
+`scripts/session-lifecycle-hook.sh` turned it into a `needs_input` or `resumed`
+row. It reuses those two events so every reader of them reads it unchanged, and
+it is told apart from the host's screen edge for the same transition by one key,
+`links.authority = "hook-row"`. Which native hook writes which row is declared
+per framework in `adapters/capabilities.json` under `session_lifecycle_hooks`;
+a hook the framework does not declare writes nothing.
+
+The writer admits exactly one shape for it:
+
+- `links.authority` is valid only on `needs_input` and `resumed`, and only as
+  `hook-row`. Screen rows carry no authority link.
+- `slug`, `session_type`, and `actor_instance` are required. `actor_instance`
+  names the live instance whose registry row lists the slug with the row's
+  generation, so a session adopted by a later host reports under its current
+  owner; the instance it was launched under rides along in `links.spawn_instance`.
+- `links.hook_event` (the harness's event name), `links.activity`,
+  `links.generation` (the launch's generation, as the host computes it for its
+  observations), `links.fired_at` (UTC ISO 8601, taken when the hook started),
+  `links.framework`, and `links.spawn_instance` are required. Payload-derived
+  links such as `links.error` (the API error type that ended a turn) and
+  `links.tool_name` appear when the payload carries them.
+- Every link is a single-line, non-empty string of at most 256 characters.
+- `links.activity` is `idle` or `blocked` on `needs_input` and `working` on
+  `resumed`.
+- `request_id` and `links.observation` are refused: a hook row is neither a
+  queue-lifecycle event nor a screen observation.
+
+The host installs the hook as async, so it never holds a turn, and the script
+itself prints nothing, always exits 0, and stops itself after five seconds. A
+failure writes no row and appends one line to `_sessions/hooks.log` in the
+session's store, so the host's screen edges remain the account of that session.
+
 **Emitter ownership** (per the settled design): the TUI owns session transitions
 and TUI-driven queue lifecycle; the enqueue writer owns `requested`; the
 `session close` verb owns `close_requested` (its enqueue forms) and
@@ -936,7 +972,9 @@ and TUI-driven queue lifecycle; the enqueue writer owns `requested`; the
 `send_requested` (its enqueue), while the TUI owns the `sent` / `send_refused`
 outcomes it decides at consume; the `session answer` verb owns `answer_requested`,
 while the TUI owns `answered` / `answer_refused`; hosted `/spec` and `/implement` leads own
-`step_completed`, while their terminal verbs own `terminus_reached`. The
+`step_completed`, while their terminal verbs own `terminus_reached`; a hosted
+session's lifecycle hook owns the hook-row form of `needs_input` and `resumed`,
+beside the host's screen edges for the same events. The
 claim-side TUI heartbeat hosts `session-request-expire.sh`; that helper owns the
 pending→expiring transition and emits `request_expired` through the same sole
 journal writer. Peek has no

@@ -235,7 +235,7 @@ RESPONSE_FILE="$SESSIONS_DIR/peek-responses/${REQUEST_ID}.json"
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
 while :; do
   if [[ -f "$RESPONSE_FILE" ]]; then
-    RESP="$(cat "$RESPONSE_FILE" | python3 "$SCRIPT_DIR/coordinate_watch_state.py" peek)"
+    RESP="$(cat "$RESPONSE_FILE" | python3 "$SCRIPT_DIR/coordinate_watch_state.py" peek --kdir "$KNOWLEDGE_DIR")"
     rm -f "$RESPONSE_FILE"
     if [[ $SUMMARY -eq 1 ]]; then RESP="$(printf '%s' "$RESP" | jq 'del(.rows,.ansi,.history,.screen) | .summary=true')"; fi
     if [[ $HISTORY_LINES -ne 0 || -n "$BEFORE" || $MAX_BYTES -ne 0 ]]; then

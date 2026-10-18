@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/anticorrelator/lore/tests/fixtures/claude-code-hooks-settings.schema.json",
+  "title": "Claude Code settings payload holding only hooks",
+  "description": "The shape of a hooks-only Claude Code settings object, the payload a session host passes to `claude --settings <json>`. Transcribed from the Claude Code hooks reference (https://code.claude.com/docs/en/hooks, retrieved 2026-10-18, naming releases up to 2.1.299): § Configuration (three levels of nesting: hook event, matcher group, hook handler), § Matcher patterns (the event table and the `matcher` field on the group), § Hook handler fields and § Command hook fields (`type`, `command`, `async`), and § Run hooks in the background. It is written from the documentation, not from lore's payload builder, so a payload that fails it is a payload Claude Code may reject or misread; a mismatch between this file and the documentation is reported, not patched to fit a builder. Validators read only the keywords used here: type, const, enum, required, properties, additionalProperties, propertyNames, items, minItems, minLength, minProperties, $ref into $defs.",
+  "$comment": "Deliberately narrower than the documentation in three places. The root holds only `hooks`: any other key would ride the same settings source and could shadow the person's own settings. Handlers are command handlers only. A command handler carries only `type`, `command` and `async`; the other documented command-hook fields are excluded because each changes what a lifecycle hook may do: `asyncRewake` keeps the hook timeout armed and wakes the model on exit 2, `statusMessage` draws a spinner near the composer the screen fallback reads, `timeout` is not enforced on async hooks, and `if`, `args`, `shell` and `onFailure` change when or how the command runs.",
+  "type": "object",
+  "required": ["hooks"],
+  "additionalProperties": false,
+  "properties": {
+    "hooks": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "Maps a hook event name to its matcher groups. Event names are the documented set (hooks reference, § Hook lifecycle and § Matcher patterns).",
+      "propertyNames": {
+        "enum": [
+          "SessionStart",
+          "Setup",
+          "UserPromptSubmit",
+          "UserPromptExpansion",
+          "PreToolUse",
+          "PermissionRequest",
+          "PermissionDenied",
+          "PostToolUse",
+          "PostToolUseFailure",
+          "PostToolBatch",
+          "Notification",
+          "MessageDisplay",
+          "SubagentStart",
+          "SubagentStop",
+          "TaskCreated",
+          "TaskCompleted",
+          "Stop",
+          "StopFailure",
+          "TeammateIdle",
+          "InstructionsLoaded",
+          "ConfigChange",
+          "CwdChanged",
+          "DirectoryAdded",
+          "FileChanged",
+          "WorktreeCreate",
+          "WorktreeRemove",
+          "PreCompact",
+          "PostCompact",
+          "PreModelSwitch",
+          "PostModelSwitch",
+          "Elicitation",
+          "ElicitationResult",
+          "SessionEnd"
+        ]
+      },
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 1,
+        "items": {"$ref": "#/$defs/matcher_group"}
+      }
+    }
+  },
+  "$defs": {
+    "matcher_group": {
+      "type": "object",
+      "description": "One matcher group: an optional `matcher` filtering when the group fires, and the handlers that run when it matches. The matcher sits on the group, never on a handler. For tool events it is tested against the tool name; a value of only letters, digits, `_`, `-`, spaces, `,` and `|` is an exact list of names, and anything else is an unanchored JavaScript regular expression. Omitted, empty or `*` matches every occurrence; on an event without matcher support (UserPromptSubmit, Stop, PostToolBatch and others) the field is ignored.",
+      "required": ["hooks"],
+      "additionalProperties": false,
+      "properties": {
+        "matcher": {"type": "string"},
+        "hooks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/command_handler"}
+        }
+      }
+    },
+    "command_handler": {
+      "type": "object",
+      "description": "A command hook handler. `command` is a shell command run with `sh -c` on macOS and Linux, receiving the event's JSON on stdin. `async: true` runs it in the background without blocking; an async hook cannot block or control Claude, Claude Code does not enforce a timeout on it, and JSON it prints is delivered to Claude on the next turn.",
+      "required": ["type", "command"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "command"},
+        "command": {"type": "string", "minLength": 1},
+        "async": {"type": "boolean"}
+      }
+    }
+  }
+}

@@ -16,6 +16,12 @@
 #     evidence ids consumed by capabilities.json (no orphans, no gaps).
 #   - Every framework's `model_routing.shape` is one of: single | multi,
 #     and carries an evidence pointer.
+#   - Every framework's `session_lifecycle_hooks` block is typed, its events
+#     map onto needs_input/resumed with a consistent activity, and its cell
+#     follows D8: a `full` cell cites a versioned evidence row retrieved within
+#     90 days of the capabilities file's last commit (never the wall clock),
+#     `partial`/`fallback` may cite older rows, and a `none` cell's notes name
+#     the premise that blocks it.
 #
 # Style: bats requires `bats-core`. If `bats` is not on PATH, run with the
 # fallback bash driver below the bats blocks (mirrors the test_*.sh
@@ -92,6 +98,9 @@ for fw_id, fw in data.get("frameworks", {}).items():
     st = fw.get("spend_telemetry") or {}
     if st.get("evidence"):
         ids.add(st["evidence"])
+    lh = fw.get("session_lifecycle_hooks") or {}
+    if lh.get("evidence"):
+        ids.add(lh["evidence"])
     for cap_name, cell in (fw.get("capabilities") or {}).items():
         if cell.get("evidence"):
             ids.add(cell["evidence"])
@@ -104,6 +113,175 @@ for fw_id, fw in data.get("frameworks", {}).items():
 for cid in sorted(ids):
     print(cid)
 PYEOF
+}
+
+lifecycle_hooks_shape() {
+  # lifecycle_hooks_shape <capabilities.json> — every framework declares a typed
+  # session_lifecycle_hooks block whose events map onto the two hook-row events.
+  python3 - "$1" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+levels = set(d["support_levels"].keys())
+CHANNELS = {"settings-json", "config-override", "plugin-env"}
+ACTIVITY = {"needs_input": {"idle", "blocked"}, "resumed": {"working"}}
+RESERVED_LINKS = {"authority", "hook_event", "activity", "generation", "fired_at",
+                  "framework", "spawn_instance", "observation", "work_item"}
+def text(v):
+    return isinstance(v, str) and v.strip() != ""
+bad = []
+for fw_id, fw in d["frameworks"].items():
+    where = f"{fw_id}.session_lifecycle_hooks"
+    cell = fw.get("session_lifecycle_hooks")
+    if not isinstance(cell, dict):
+        bad.append(f"{fw_id}: missing session_lifecycle_hooks block"); continue
+    extra = set(cell) - {"support", "evidence", "channel", "events", "notes"}
+    if extra:
+        bad.append(f"{where} has undeclared keys {sorted(extra)}")
+    support = cell.get("support")
+    if support not in levels:
+        bad.append(f"{where}.support={support!r} outside the closed set")
+    if cell.get("channel") not in CHANNELS:
+        bad.append(f"{where}.channel={cell.get('channel')!r} outside {sorted(CHANNELS)}")
+    if "evidence" in cell and not text(cell["evidence"]):
+        bad.append(f"{where}.evidence must be a non-empty id when present")
+    if support != "none" and not text(cell.get("evidence")):
+        bad.append(f"{where} is {support!r} without an evidence pointer")
+    if not isinstance(cell.get("notes"), str):
+        bad.append(f"{where}.notes is not a string")
+    events = cell.get("events")
+    if not isinstance(events, list):
+        bad.append(f"{where}.events is not a list"); continue
+    if support != "none" and not events:
+        bad.append(f"{where} is {support!r} but declares no events")
+    seen = set()
+    for i, e in enumerate(events):
+        at = f"{where}.events[{i}]"
+        if not isinstance(e, dict):
+            bad.append(f"{at} is not an object"); continue
+        extra = set(e) - {"hook_event", "matcher", "event", "activity", "payload_links"}
+        if extra:
+            bad.append(f"{at} has undeclared keys {sorted(extra)}")
+        if not text(e.get("hook_event")):
+            bad.append(f"{at}.hook_event missing")
+        if "matcher" in e and not text(e["matcher"]):
+            bad.append(f"{at}.matcher must be a non-empty string when present")
+        event = e.get("event")
+        if event not in ACTIVITY:
+            bad.append(f"{at}.event={event!r} is not needs_input or resumed")
+        elif e.get("activity") not in ACTIVITY[event]:
+            bad.append(f"{at}.activity={e.get('activity')!r} does not fit {event} ({sorted(ACTIVITY[event])})")
+        links = e.get("payload_links", {})
+        if not isinstance(links, dict):
+            bad.append(f"{at}.payload_links is not an object")
+        else:
+            for link, field in links.items():
+                if not text(link) or not text(field):
+                    bad.append(f"{at}.payload_links maps {link!r} to {field!r}; both must be non-empty strings")
+                elif link in RESERVED_LINKS:
+                    bad.append(f"{at}.payload_links would overwrite the hook row's own link {link!r}")
+        key = (e.get("hook_event"), e.get("matcher"))
+        if key in seen:
+            bad.append(f"{at} repeats hook_event/matcher {key}")
+        seen.add(key)
+if bad:
+    for b in bad: print(b)
+    sys.exit(1)
+PYEOF
+}
+
+lifecycle_hooks_d8() {
+  # lifecycle_hooks_d8 <capabilities.json> <capabilities-evidence.md> <YYYY-MM-DD>
+  # D8 for session_lifecycle_hooks cells, judged against the supplied reference
+  # date rather than today: full needs a versioned row retrieved no more than 90
+  # days before it; partial and fallback need a row of any age; none needs notes.
+  python3 - "$1" "$2" "$3" <<'PYEOF'
+import datetime, json, re, sys
+caps, evid, ref = sys.argv[1], sys.argv[2], sys.argv[3]
+ref_date = datetime.date.fromisoformat(ref[:10])
+d = json.load(open(caps))
+body = open(evid).read().partition("## _index")[0]
+rows = {m.group(1): m.group(2) for m in
+        re.finditer(r"(?ms)^### ([a-z0-9-]+)[ \t]*\n(.*?)(?=^### |^## |\Z)", body)}
+def fields(row):
+    out, current = {}, None
+    for line in row.splitlines():
+        m = re.match(r"^- \*\*(.+?):\*\*\s*(.*)$", line)
+        if m:
+            current = m.group(1)
+            out[current] = m.group(2)
+        elif current and line.startswith("  "):
+            out[current] += " " + line.strip()
+        else:
+            current = None
+    return out
+bad = []
+for fw_id, fw in d["frameworks"].items():
+    cell = fw.get("session_lifecycle_hooks")
+    if not isinstance(cell, dict):
+        continue
+    where = f"{fw_id}.session_lifecycle_hooks"
+    support, ev = cell.get("support"), cell.get("evidence")
+    if support == "none":
+        if not (isinstance(cell.get("notes"), str) and cell["notes"].strip()):
+            bad.append(f"{where} is none but its notes do not name the premise that blocks it")
+        continue
+    if ev not in rows:
+        bad.append(f"{where} is {support} but cites no evidence row in the evidence file ({ev!r})")
+        continue
+    if support != "full":
+        continue
+    row = fields(rows[ev])
+    dates = re.findall(r"\d{4}-\d{2}-\d{2}", row.get("Retrieved", ""))
+    if not dates:
+        bad.append(f"{where} is full but evidence row {ev} is undated")
+        continue
+    latest = max(datetime.date.fromisoformat(x) for x in dates)
+    age = (ref_date - latest).days
+    if age > 90:
+        bad.append(f"{where} is full but evidence row {ev} was retrieved {latest}, {age} days before {ref_date}; D8 allows full only within 90 days")
+    version = row.get("Product / version", "")
+    if "unversioned" in version.lower() or not re.search(r"\d+\.\d+", version):
+        bad.append(f"{where} is full but evidence row {ev} names no product version")
+if bad:
+    for b in bad: print(b)
+    sys.exit(1)
+PYEOF
+}
+
+contains() {
+  # contains <haystack> <needle>. A failing [[ ]] does not fail a test under
+  # bash 3.2, so substring checks go through a function that returns 1.
+  case "$1" in *"$2"*) return 0 ;; esac
+  printf 'expected to find: %s\nin: %s\n' "$2" "$1"
+  return 1
+}
+
+capabilities_commit_date() {
+  # The committer date of the latest commit touching adapters/capabilities.json,
+  # or HEAD's when no commit touches it; empty outside a git checkout.
+  local stamp
+  stamp=$(git -C "$REPO_DIR" log -1 --format=%cI -- adapters/capabilities.json 2>/dev/null || true)
+  [ -n "$stamp" ] || stamp=$(git -C "$REPO_DIR" log -1 --format=%cI HEAD 2>/dev/null || true)
+  printf '%s' "${stamp:0:10}"
+}
+
+lifecycle_fixture() {
+  # lifecycle_fixture <dir> <support> <evidence id or ""> <notes> <retrieved> <version>
+  # One-framework registry plus a one-row evidence file for exercising the D8 check.
+  local dir="$1" support="$2" ev="$3" notes="$4" retrieved="$5" version="$6"
+  mkdir -p "$dir"
+  python3 - "$dir/capabilities.json" "$support" "$ev" "$notes" <<'PYEOF'
+import json, sys
+path, support, ev, notes = sys.argv[1:]
+cell = {"support": support, "channel": "settings-json", "notes": notes,
+        "events": [{"hook_event": "Stop", "event": "needs_input", "activity": "idle"}]}
+if ev:
+    cell["evidence"] = ev
+json.dump({"support_levels": {"full": "", "partial": "", "fallback": "", "none": ""},
+           "frameworks": {"fixture": {"session_lifecycle_hooks": cell}}}, open(path, "w"))
+PYEOF
+  printf '# Evidence\n\n### fixture-lifecycle\n\n- **Source:** fixture\n- **Retrieved:** %s\n- **Product / version:** %s\n- **Claim:** fixture\n\n## _index\n\n- fixture-lifecycle\n' \
+    "$retrieved" "$version" > "$dir/evidence.md"
 }
 
 # ============================================================
@@ -194,14 +372,14 @@ if bad:
 }
 
 @test "every framework declares all known capabilities (no partial profiles)" {
-  # model_routing, interaction, and spend_telemetry live at the framework root
-  # (siblings to capabilities) rather than inside the per-framework capabilities
-  # map because their shapes are not full|partial|fallback|none. Validated
-  # separately in the model_routing, interaction, and spend_telemetry tests.
+  # model_routing, interaction, spend_telemetry, and session_lifecycle_hooks
+  # live at the framework root (siblings to capabilities) rather than inside the
+  # per-framework capabilities map because their shapes are not a plain
+  # support cell. Validated separately in their own tests.
   run python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
-declared = set(d["capabilities"].keys()) - {"model_routing", "interaction", "spend_telemetry"}
+declared = set(d["capabilities"].keys()) - {"model_routing", "interaction", "spend_telemetry", "session_lifecycle_hooks"}
 bad = []
 for fw_id, fw in d["frameworks"].items():
     have = set((fw.get("capabilities") or {}).keys())
@@ -378,6 +556,70 @@ if bad:
     sys.exit(1)
 ' "$CAPS"
   [ "$status" -eq 0 ]
+}
+
+@test "every framework's session_lifecycle_hooks block is typed and maps onto hook-row events" {
+  run lifecycle_hooks_shape "$CAPS"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "session_lifecycle_hooks cells follow D8 against the capabilities file's last commit date" {
+  ref=$(capabilities_commit_date)
+  [ -n "$ref" ] || skip "no git history to date adapters/capabilities.json against"
+  run lifecycle_hooks_d8 "$CAPS" "$EVID" "$ref"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "D8 check: a full lifecycle cell needs a versioned row at most 90 days older than the reference date" {
+  dir="$BATS_TEST_TMPDIR/d8"
+  lifecycle_fixture "$dir/fresh" full fixture-lifecycle "" 2026-10-18 "Claude Code 2.1.299"
+  run lifecycle_hooks_d8 "$dir/fresh/capabilities.json" "$dir/fresh/evidence.md" 2026-10-18
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  lifecycle_fixture "$dir/edge" full fixture-lifecycle "" 2026-07-20 "Claude Code 2.1.299"
+  run lifecycle_hooks_d8 "$dir/edge/capabilities.json" "$dir/edge/evidence.md" 2026-10-18
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  lifecycle_fixture "$dir/stale" full fixture-lifecycle "" 2026-07-19 "Claude Code 2.1.299"
+  run lifecycle_hooks_d8 "$dir/stale/capabilities.json" "$dir/stale/evidence.md" 2026-10-18
+  [ "$status" -eq 1 ]
+  contains "$output" "91 days before 2026-10-18"
+  lifecycle_fixture "$dir/unversioned" full fixture-lifecycle "" 2026-10-18 "Claude Code, unversioned"
+  run lifecycle_hooks_d8 "$dir/unversioned/capabilities.json" "$dir/unversioned/evidence.md" 2026-10-18
+  [ "$status" -eq 1 ]
+  contains "$output" "names no product version"
+}
+
+@test "D8 check: the verdict follows the reference date, not the day it runs" {
+  dir="$BATS_TEST_TMPDIR/d8-clock"
+  lifecycle_fixture "$dir" full fixture-lifecycle "" 2026-10-18 "Claude Code 2.1.299"
+  run lifecycle_hooks_d8 "$dir/capabilities.json" "$dir/evidence.md" 2027-01-16
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run lifecycle_hooks_d8 "$dir/capabilities.json" "$dir/evidence.md" 2027-01-17
+  [ "$status" -eq 1 ]
+}
+
+@test "D8 check: partial and fallback lifecycle cells may cite older rows, but must cite one" {
+  dir="$BATS_TEST_TMPDIR/d8-partial"
+  lifecycle_fixture "$dir/partial" partial fixture-lifecycle "" 2026-05-03 "Claude Code, unversioned"
+  run lifecycle_hooks_d8 "$dir/partial/capabilities.json" "$dir/partial/evidence.md" 2026-10-18
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  lifecycle_fixture "$dir/fallback" fallback fixture-lifecycle "" 2025-01-01 "unversioned"
+  run lifecycle_hooks_d8 "$dir/fallback/capabilities.json" "$dir/fallback/evidence.md" 2026-10-18
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  lifecycle_fixture "$dir/missing" partial no-such-row "" 2026-10-18 "Claude Code 2.1.299"
+  run lifecycle_hooks_d8 "$dir/missing/capabilities.json" "$dir/missing/evidence.md" 2026-10-18
+  [ "$status" -eq 1 ]
+  contains "$output" "cites no evidence row"
+}
+
+@test "D8 check: a none lifecycle cell must name the premise that blocks it" {
+  dir="$BATS_TEST_TMPDIR/d8-none"
+  lifecycle_fixture "$dir/named" none "" "Blocked on a live probe of the channel." 2026-10-18 "x 1.0"
+  run lifecycle_hooks_d8 "$dir/named/capabilities.json" "$dir/named/evidence.md" 2026-10-18
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  lifecycle_fixture "$dir/silent" none "" "  " 2026-10-18 "x 1.0"
+  run lifecycle_hooks_d8 "$dir/silent/capabilities.json" "$dir/silent/evidence.md" 2026-10-18
+  [ "$status" -eq 1 ]
+  contains "$output" "notes do not name the premise"
 }
 
 @test "turn_boundary_rewake is declared and directs callers away from framework-name branching" {

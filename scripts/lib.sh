@@ -1567,7 +1567,7 @@ SESSION_PARK_SHAPED_EVENTS="needs_input modal_blocked"
 # Version of the signature set session_park_classify accepts. It travels in the
 # consumer's output so a matcher-contract change surfaces there instead of
 # silently reclassifying parks. Bump it whenever the accepted set below changes.
-SESSION_PARK_SIGNATURE_VERSION=4
+SESSION_PARK_SIGNATURE_VERSION=5
 
 session_park_classify() {
   local trigger="$1" activity="$2" fresh="$3"

@@ -2680,6 +2680,363 @@ PY
   [ -z "$(ls "$TEST_KDIR"/_sessions/peek-requests/ 2>/dev/null)" ]
 }
 
+# --- Peek and the session's own lifecycle hook rows -------------------------
+# A hosted session's hooks journal needs_input/resumed rows marked
+# links.authority=hook-row. Peek merges them with the screen through
+# scripts/session_lifecycle.py, against the generation the live owner's registry
+# row records, so the owner here is a live process: this test's own.
+
+# json_has <jq filter> — the last `run` printed JSON for which the filter holds.
+json_has() {
+  if ! printf '%s' "$output" | jq -e "$1" >/dev/null 2>&1; then
+    echo "expected JSON output to satisfy: $1" >&2
+    echo "output: $output" >&2
+    return 1
+  fi
+}
+
+# same_json <file-a> <file-b> — the two files hold equal JSON.
+same_json() {
+  if ! jq -n --slurpfile a "$1" --slurpfile b "$2" -e '$a == $b' >/dev/null; then
+    echo "expected equal JSON:" >&2
+    cat "$1" "$2" >&2
+    return 1
+  fi
+}
+
+# Print the generation scripts/session_target.py computes for slug's row in the
+# registry file.
+session_generation() {
+  python3 - "$REPO_DIR/scripts" "$1" "$2" <<'PYEOF'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from session_target import generation
+row = json.load(open(sys.argv[2]))
+print(next(generation(s) for s in row["sessions"] if s["slug"] == sys.argv[3]))
+PYEOF
+}
+
+# write_live_session <instance> <slug> — a registry row owned by this test's
+# process that lists one worker session; prints the session's generation.
+write_live_session() {
+  local path="$TEST_KDIR/_sessions/instances/$1.json"
+  mkdir -p "$TEST_KDIR/_sessions/instances"
+  jq -n --arg name "$1" --arg slug "$2" --argjson pid "$$" \
+    '{name:$name, pid:$pid, role:"session-host", sessions:[{slug:$slug, type:"worker", started:"2026-10-18T09:00:00Z", request_id:"managed-1"}]}' \
+    > "$path"
+  session_generation "$path" "$2"
+}
+
+# append_hook_park <slug> <generation> — journal a StopFailure hook row through
+# the sole writer.
+append_hook_park() {
+  local row
+  row="$(jq -cn --arg slug "$1" --arg gen "$2" \
+    '{event:"needs_input", slug:$slug, session_type:"worker", actor_instance:"inst-a",
+      links:{authority:"hook-row", hook_event:"StopFailure", activity:"blocked", generation:$gen,
+             fired_at:"2026-10-18T10:00:01.000000Z", framework:"claude-code", spawn_instance:"inst-a", error:"rate_limit"}}')"
+  bash "$APPEND" --kdir "$TEST_KDIR" --row "$row" >/dev/null
+}
+
+# seed_peek_response <slug> <generation> <activity> — answer the first peek
+# request as the owning host would, with a screen observation of that activity
+# captured now. A copy of the response is kept at $TEST_KDIR/peek-response.json.
+seed_peek_response() {
+  local rid at authority=screen-signature matcher=claude-code-worked-for-v1
+  rid="$(wait_request_id peek-requests)" || return 1
+  at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [ "$3" = unknown ]; then authority=none; matcher=screen-unknown-v1; fi
+  mkdir -p "$TEST_KDIR/_sessions/peek-responses"
+  jq -n --arg rid "$rid" --arg slug "$1" --arg gen "$2" --arg activity "$3" --arg at "$at" \
+    --arg authority "$authority" --arg matcher "$matcher" \
+    '{request_id:$rid, slug:$slug, captured_at:$at, ready:($activity == "idle"),
+      blocked_reason:(if $activity == "idle" then "" else "no-signature" end),
+      rows:["⎿  API Error: Request rejected (rate limited)", "> "],
+      observation:{schema_version:1, activity:$activity, authority:$authority, observed_at:$at,
+                   session_id:$slug, session_handle:$slug, generation:$gen, instance:"inst-a",
+                   max_age_seconds:5, fresh:true, can_accept_input:($activity == "idle"),
+                   evidence:{matcher:$matcher, reason:"fixture screen"}}}' > "$TEST_KDIR/peek-response.json"
+  cp "$TEST_KDIR/peek-response.json" "$TEST_KDIR/_sessions/peek-responses/.$rid.tmp"
+  mv "$TEST_KDIR/_sessions/peek-responses/.$rid.tmp" "$TEST_KDIR/_sessions/peek-responses/$rid.json"
+}
+
+@test "peek merges hook park into an unknown screen (raw, json)" {
+  local gen
+  gen="$(write_live_session inst-a feature-x)"
+  append_hook_park feature-x "$gen"
+  ( seed_peek_response feature-x "$gen" unknown ) &
+  run bash "$PEEK" feature-x --json --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  outcome_is 0
+  json_has '.observation.activity == "blocked" and .observation.authority == "hook-row" and .observation.fresh == true'
+  json_has '.observation.evidence.screen.activity == "unknown" and .observation.evidence.screen.matcher == "screen-unknown-v1"'
+  json_has '.observation.evidence.hook.hook_event == "StopFailure" and .observation.evidence.hook.error == "rate_limit"'
+  json_has '.ready == false and .observation.can_accept_input == false'
+}
+
+@test "peek merges hook park into an unknown screen (raw, text says what each source saw)" {
+  local gen
+  gen="$(write_live_session inst-a feature-x)"
+  append_hook_park feature-x "$gen"
+  ( seed_peek_response feature-x "$gen" unknown ) &
+  run bash "$PEEK" feature-x --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  outcome_is 0 "activity=blocked authority=hook-row fresh=True" \
+    "[session] hook says blocked since 2026-10-18T10:00:01.000000Z; screen unknown" "ready=false"
+}
+
+@test "peek merges hook park into an unknown screen (managed)" {
+  local handle=task--w1 registry gen responder
+  fake_store_host
+  registry="$TEST_KDIR/_sessions/instances/store-host.json"
+  jq --arg slug "$handle" '.sessions = [{slug:$slug, type:"worker", started:"2026-10-18T09:00:00Z", request_id:"managed-1"}]' \
+    "$registry" > "$registry.tmp"
+  mv "$registry.tmp" "$registry"
+  gen="$(session_generation "$registry" "$handle")"
+  mkdir -p "$TEST_KDIR/_sessions/managed"
+  jq -n --arg handle "$handle" --arg key "$STORE_KEY" --arg source "$TEST_KDIR" \
+    '{schema_version:1, handle:$handle, host_key:$key, state:"enqueued", work_item:"task", source_dir:$source}' \
+    > "$TEST_KDIR/_sessions/managed/$handle.json"
+  append_hook_park "$handle" "$gen"
+  ( seed_peek_response "$handle" "$gen" unknown ) &
+  responder=$!
+  run python3 "$MANAGED" peek "$handle" --json --timeout 10 --kdir "$TEST_KDIR"
+  # fake_store_host is a child of this test too, so wait only for the responder.
+  wait "$responder"
+  outcome_is 0
+  json_has '.outcome == "observed" and .response.observation.activity == "blocked" and .response.observation.authority == "hook-row"'
+  json_has '.response.observation.evidence.screen.activity == "unknown" and .response.observation.evidence.hook.fired_at == "2026-10-18T10:00:01.000000Z"'
+}
+
+@test "peek merges hook rows only: a session without them reads exactly as before" {
+  local gen other
+  gen="$(write_live_session inst-a feature-x)"
+  other="$(write_live_session inst-b feature-y)"
+  append_hook_park feature-y "$other"
+  bash "$APPEND" --kdir "$TEST_KDIR" --row "$(jq -cn --arg gen "$gen" '{event:"resumed", slug:"feature-x", session_type:"worker", actor_instance:"inst-a", links:{activity:"working", generation:$gen, observed_at:"2026-10-18T10:00:00.5Z"}}')" >/dev/null
+  ( seed_peek_response feature-x "$gen" idle ) &
+  run bash "$PEEK" feature-x --json --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  outcome_is 0
+  json_has '.observation.activity == "idle" and .observation.authority == "screen-signature"'
+  printf '%s' "$output" | jq '.observation | del(.age_seconds)' > "$TEST_KDIR/merged.json"
+  python3 "$REPO_DIR/scripts/coordinate_watch_state.py" peek < "$TEST_KDIR/peek-response.json" \
+    | jq '.observation | del(.age_seconds)' > "$TEST_KDIR/plain.json"
+  same_json "$TEST_KDIR/merged.json" "$TEST_KDIR/plain.json"
+}
+
+# --- Watch and wait on the session's own hook parks ---------------------------
+# A park reported twice is one park: the watcher, raw wait and managed wait skip
+# a park row that corroborates one already reported, a superseded park, and a
+# hook park of another generation (scripts/coordinate_watch_state.py
+# lifecycle_verdict). These cases use the helpers above for live registry rows.
+
+DIALOG_ORDERS="hook,host,modal hook,modal,host host,hook,modal host,modal,hook modal,hook,host modal,host,hook"
+
+# lifecycle_row <hook|host|modal|resumed|stop> <second> <slug> <generation> —
+# one journal row stamped 10:00:<second>: a question dialog's hook needs_input,
+# host needs_input or host modal_blocked; the screen's resumed; a hook Stop.
+lifecycle_row() {
+  local at; at="$(printf '2026-10-18T10:00:%02d.000000Z' "$2")"
+  case "$1" in
+    hook) jq -cn --arg slug "$3" --arg gen "$4" --arg at "$at" \
+      '{event:"needs_input", slug:$slug, session_type:"worker", actor_instance:"inst-a",
+        links:{authority:"hook-row", hook_event:"PreToolUse", activity:"blocked", generation:$gen, fired_at:$at,
+               framework:"claude-code", spawn_instance:"inst-a", tool_name:"AskUserQuestion"}}' ;;
+    stop) jq -cn --arg slug "$3" --arg gen "$4" --arg at "$at" \
+      '{event:"needs_input", slug:$slug, session_type:"worker", actor_instance:"inst-a",
+        links:{authority:"hook-row", hook_event:"Stop", activity:"idle", generation:$gen, fired_at:$at,
+               framework:"claude-code", spawn_instance:"inst-a"}}' ;;
+    host) jq -cn --arg slug "$3" --arg gen "$4" --arg at "$at" \
+      '{event:"needs_input", slug:$slug, session_type:"worker", actor_instance:"inst-a",
+        links:{activity:"blocked", generation:$gen, observed_at:$at, session_id:$slug}}' ;;
+    resumed) jq -cn --arg slug "$3" --arg gen "$4" --arg at "$at" \
+      '{event:"resumed", slug:$slug, session_type:"worker", actor_instance:"inst-a",
+        links:{activity:"working", generation:$gen, observed_at:$at, session_id:$slug}}' ;;
+    modal) jq -cn --arg slug "$3" \
+      '{event:"modal_blocked", slug:$slug, session_type:"worker", actor_instance:"inst-a", reason:"modal", modal_signature:"Which option?"}' ;;
+  esac
+}
+
+# append_lifecycle_row <kind> <second> <slug> <generation> — through the sole writer.
+append_lifecycle_row() {
+  bash "$APPEND" --kdir "$TEST_KDIR" --row "$(lifecycle_row "$@")" >/dev/null
+}
+
+journal_end() {
+  wc -c < "$TEST_KDIR/_sessions/events.jsonl" | tr -d '[:space:]'
+}
+
+# watch_durable [args...] — one durable watcher arm owned by this test, peek and
+# sweep disabled; prints the wake JSON.
+watch_durable() {
+  bash "$WATCH" --durable --owner-pid $$ --timeout 0 --pending-stale 0 --peek-timeout 0 --reconcile-budget 0 \
+    --json --kdir "$TEST_KDIR" "$@" 2>/dev/null || true
+}
+
+# ack_wake <wake-id> — acknowledge a durable wake as its owner would.
+ack_wake() {
+  python3 - "$REPO_DIR/scripts" "$TEST_KDIR" "$1" <<'PYEOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("watch_state", sys.argv[1] + "/coordinate_watch_state.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+m.wake_receipt(sys.argv[2], sys.argv[3], acknowledge=True)
+PYEOF
+}
+
+# durable_wakes — distinct non-quiet wake records in this store's delivery file.
+durable_wakes() {
+  cat "$TEST_KDIR"/_coordination/watch-delivery-*.json 2>/dev/null | jq -s '[.[].wakes[]? | select(.payload.tier != "quiet")] | length'
+}
+
+# equals <want> <got> <what> — the two values are equal.
+equals() {
+  if [ "$1" != "$2" ]; then
+    echo "expected $3 to be '$1', got '$2'" >&2
+    return 1
+  fi
+}
+
+@test "watch hook park wakes confirmed on hook-row authority with the peek disabled" {
+  local gen out
+  gen="$(write_live_session inst-a feature-x)"
+  append_lifecycle_row resumed 0 feature-x "$gen"
+  append_hook_park feature-x "$gen"
+  out="$(bash "$WATCH" --since 0 --timeout 0 --pending-stale 0 --peek-timeout 0 --json --kdir "$TEST_KDIR" 2>/dev/null || true)"
+  output="$out"
+  json_has '.outcome == "matched" and .tier == "confirmed" and .authority == "hook-row"'
+  json_has '.classification.state == "confirmed_park" and .classification.label == "hook-StopFailure" and .signature_version == 5'
+  json_has '.classification.peek.observation.evidence.reason == "hook says blocked since 2026-10-18T10:00:01.000000Z; screen unknown"'
+}
+
+@test "watch hook park: the persisted cursor is the end of the row handled, and corroborating rows are skipped" {
+  local gen start hook_end out
+  gen="$(write_live_session inst-a feature-x)"
+  append_lifecycle_row resumed 0 feature-x "$gen"
+  start="$(journal_end)"
+  append_lifecycle_row hook 1 feature-x "$gen"
+  hook_end="$(journal_end)"
+  append_lifecycle_row host 2 feature-x "$gen"
+  append_lifecycle_row modal 3 feature-x "$gen"
+  out="$(bash "$WATCH" --since "$start" --timeout 0 --pending-stale 0 --peek-timeout 0 --json --kdir "$TEST_KDIR" 2>/dev/null || true)"
+  output="$out"
+  json_has '.outcome == "matched" and (.matched.links.authority == "hook-row") and .tier == "confirmed"'
+  equals "$hook_end" "$(printf '%s' "$out" | jq -r '.next_cursor')" "the matched wake's cursor"
+  equals "$hook_end" "$(watch_cursor)" "the persisted cursor"
+  out="$(bash "$WATCH" --timeout 0 --pending-stale 0 --peek-timeout 0 --json --kdir "$TEST_KDIR" 2>/dev/null || true)"
+  output="$out"
+  json_has '.outcome == "timeout"'
+  equals "$(journal_end)" "$(watch_cursor)" "the cursor after the skipped rows"
+}
+
+@test "watch hook park: a superseded late-landing Stop row raises no wake; a stale-generation hook park raises none either" {
+  local gen out
+  gen="$(write_live_session inst-a feature-x)"
+  append_lifecycle_row resumed 5 feature-x "$gen"
+  append_lifecycle_row stop 3 feature-x "$gen"
+  append_hook_park feature-x "old-launch/managed-0/1700000000"
+  out="$(bash "$WATCH" --since 0 --timeout 0 --pending-stale 0 --peek-timeout 0 --json --kdir "$TEST_KDIR" 2>/dev/null || true)"
+  output="$out"
+  json_has '.outcome == "timeout" and .tier == "quiet"'
+}
+
+@test "wait hook park: raw wait skips a superseded late-landing Stop row and returns the next park" {
+  local gen
+  gen="$(write_live_session inst-a feature-x)"
+  append_lifecycle_row resumed 5 feature-x "$gen"
+  append_lifecycle_row stop 3 feature-x "$gen"
+  append_lifecycle_row stop 9 feature-x "$gen"
+  run bash "$WAIT" feature-x --since 0 --timeout 0 --json --kdir "$TEST_KDIR"
+  outcome_is 0
+  json_has '.outcome == "matched" and .matched.links.fired_at == "2026-10-18T10:00:09.000000Z"'
+}
+
+@test "corroboration: every arrival order of a dialog's three rows, re-armed between rows, gives the watcher one durable wake" {
+  local order gen rows kind second out id wakes
+  gen="$(write_live_session inst-a feature-x)"
+  for order in $DIALOG_ORDERS; do
+    rm -rf "$TEST_KDIR/_coordination"
+    : > "$TEST_KDIR/_sessions/events.jsonl"
+    touch "$TEST_KDIR/_sessions/instances/inst-a.json"
+    append_lifecycle_row resumed 0 feature-x "$gen"
+    second=0
+    for kind in $(printf '%s' "$order" | tr ',' ' '); do
+      second=$((second + 1))
+      append_lifecycle_row "$kind" "$second" feature-x "$gen"
+      if [ "$second" -eq 1 ]; then out="$(watch_durable --since 0)"; else out="$(watch_durable)"; fi
+      id="$(printf '%s' "$out" | jq -r 'select(.tier != "quiet") | .wake_id // empty')"
+      if [ -n "$id" ]; then ack_wake "$id"; fi
+    done
+    out="$(watch_durable)"
+    equals quiet "$(printf '%s' "$out" | jq -r '.tier')" "the final re-arm for order $order"
+    equals 1 "$(durable_wakes)" "distinct durable wakes for order $order"
+  done
+}
+
+@test "corroboration: every arrival order of a dialog's three rows, re-armed between rows, returns raw wait once and its re-arm times out" {
+  local order gen kind second cursor matched outcome out
+  gen="$(write_live_session inst-a feature-x)"
+  for order in $DIALOG_ORDERS; do
+    : > "$TEST_KDIR/_sessions/events.jsonl"
+    append_lifecycle_row resumed 0 feature-x "$gen"
+    cursor="$(journal_end)"
+    matched=0
+    second=0
+    for kind in $(printf '%s' "$order" | tr ',' ' '); do
+      second=$((second + 1))
+      append_lifecycle_row "$kind" "$second" feature-x "$gen"
+      out="$(bash "$WAIT" feature-x --since "$cursor" --timeout 0 --json --kdir "$TEST_KDIR" 2>/dev/null || true)"
+      outcome="$(printf '%s' "$out" | jq -r '.outcome')"
+      if [ "$outcome" = matched ]; then matched=$((matched + 1)); fi
+      cursor="$(printf '%s' "$out" | jq -r '.next_cursor')"
+    done
+    out="$(bash "$WAIT" feature-x --since "$cursor" --timeout 0 --json --kdir "$TEST_KDIR" 2>/dev/null || true)"
+    equals timeout "$(printf '%s' "$out" | jq -r '.outcome')" "the re-arm after order $order"
+    equals 1 "$matched" "raw wait matches for order $order"
+  done
+}
+
+@test "corroboration: every arrival order of a dialog's three rows gives managed wait events holding exactly one park row" {
+  local registry order index=0 handle gen kind second out parks total
+  fake_store_host
+  registry="$TEST_KDIR/_sessions/instances/store-host.json"
+  jq '.sessions = [range(1; 7) | {slug: ("task--w" + tostring), type: "worker", started: "2026-10-18T09:00:00Z", request_id: ("managed-" + tostring)}]' \
+    "$registry" > "$registry.tmp"
+  mv "$registry.tmp" "$registry"
+  mkdir -p "$TEST_KDIR/_sessions/managed"
+  for order in $DIALOG_ORDERS; do
+    index=$((index + 1))
+    handle="task--w$index"
+    gen="$(session_generation "$registry" "$handle")"
+    jq -n --arg handle "$handle" --arg key "$STORE_KEY" --arg source "$TEST_KDIR" \
+      '{schema_version:1, handle:$handle, host_key:$key, state:"enqueued", work_item:"task", source_dir:$source}' \
+      > "$TEST_KDIR/_sessions/managed/$handle.json"
+    append_lifecycle_row resumed 0 "$handle" "$gen"
+    total=0
+    second=0
+    for kind in $(printf '%s' "$order" | tr ',' ' '); do
+      second=$((second + 1))
+      append_lifecycle_row "$kind" "$second" "$handle" "$gen"
+      out="$(python3 "$MANAGED" wait "$handle" --json --timeout 1 --kdir "$TEST_KDIR" 2>/dev/null || true)"
+      parks="$(printf '%s' "$out" | jq '[.events[]? | select(.event == "needs_input" or .event == "modal_blocked")] | length')"
+      total=$((total + parks))
+    done
+    equals 1 "$total" "park rows managed wait returned for order $order"
+  done
+  # All three rows landing before one wait still give one park row.
+  handle=task--w1
+  gen="$(session_generation "$registry" "$handle")"
+  append_lifecycle_row resumed 10 "$handle" "$gen"
+  append_lifecycle_row host 11 "$handle" "$gen"
+  append_lifecycle_row hook 12 "$handle" "$gen"
+  append_lifecycle_row modal 13 "$handle" "$gen"
+  out="$(python3 "$MANAGED" wait "$handle" --json --timeout 1 --kdir "$TEST_KDIR" 2>/dev/null || true)"
+  output="$out"
+  json_has '[.events[] | select(.event == "needs_input" or .event == "modal_blocked")] | length == 1'
+  json_has '.events[0].event == "needs_input" and (.events[0].links.authority // "") == ""'
+}
+
 # =====================================================================
 # session wait
 # =====================================================================
@@ -2772,14 +3129,15 @@ coordinate_event_vocab() {
   : > "$TEST_KDIR/_sessions/events.jsonl"
   # Both rows are on disk before the wait starts, so one read carries both and
   # one-shot delivers only the first. The cursor it hands back is the caller's
-  # only way back to the second row.
-  echo '{"event":"needs_input","slug":"feature-x","reason":"prompt"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  # only way back to the second row. (A park would not do here: the session's
+  # closed row ends it, so the wait skips it.)
+  echo '{"event":"worktree_quarantined","slug":"feature-x","reason":"dirty-tree"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
   echo '{"event":"closed","request_id":"r1","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
 
   local out code nc
   out="$(bash "$WAIT" feature-x --since 0 --timeout 5 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
   [ "$code" -eq 0 ]
-  [ "$(printf '%s\n' "$out" | jq -rs 'map(select(has("event")).event) | join(",")')" = "needs_input" ]
+  [ "$(printf '%s\n' "$out" | jq -rs 'map(select(has("event")).event) | join(",")')" = "worktree_quarantined" ]
   nc="$(printf '%s\n' "$out" | jq -rs 'map(select(has("next_cursor")).next_cursor)[0]')"
 
   # Re-arming from the emitted cursor must land on the row the first wait did
@@ -2794,10 +3152,20 @@ coordinate_event_vocab() {
   [ "$status" -eq 2 ]
 }
 
-@test "wait: the one-shot match cursor is the matched row's boundary, not the read's end" {
+@test "wait: a park its session's closed row already ended is skipped and the closed row is delivered" {
   write_instance inst-a feature-x
   : > "$TEST_KDIR/_sessions/events.jsonl"
   echo '{"event":"needs_input","slug":"feature-x","reason":"prompt"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  echo '{"event":"closed","request_id":"r1","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  run bash "$WAIT" feature-x --since 0 --timeout 5 --json --kdir "$TEST_KDIR"
+  outcome_is 0
+  json_has '.matched.event == "closed" and .next_cursor == '"$(wc -c < "$TEST_KDIR/_sessions/events.jsonl" | tr -d '[:space:]')"
+}
+
+@test "wait: the one-shot match cursor is the matched row's boundary, not the read's end" {
+  write_instance inst-a feature-x
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  echo '{"event":"worktree_quarantined","slug":"feature-x","reason":"dirty-tree"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
   echo '{"event":"closed","request_id":"r1","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
   local first_row_end total
   first_row_end="$(head -1 "$TEST_KDIR/_sessions/events.jsonl" | wc -c | tr -d '[:space:]')"
@@ -2813,7 +3181,7 @@ coordinate_event_vocab() {
   # --json reports the same boundary as the plain cursor row.
   out="$(bash "$WAIT" feature-x --since 0 --timeout 5 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
   [ "$code" -eq 0 ]
-  echo "$out" | jq -e --argjson nc "$first_row_end" '.matched.event=="needs_input" and .next_cursor==$nc'
+  echo "$out" | jq -e --argjson nc "$first_row_end" '.matched.event=="worktree_quarantined" and .next_cursor==$nc'
 }
 
 @test "wait: the default until-set also wakes on close_failed" {
@@ -3605,7 +3973,7 @@ watch_json() {
   echo '{"event":"needs_input","slug":"feature-x","reason":"awaiting-review"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
   local out; out="$(watch_json --since 0 --peek-timeout 1 --timeout 0)"
   echo "$out" | jq -e '.tier=="advisory" and .authority=="none" and .classification.reason=="awaiting-review"'
-  echo "$out" | jq -e '.classification.state=="park_unconfirmed" and .signature_version==4'
+  echo "$out" | jq -e '.classification.state=="park_unconfirmed" and .signature_version==5'
 }
 
 @test "watch: unavailable observation remains an explicit advisory" {
