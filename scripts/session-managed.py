@@ -33,6 +33,12 @@ CRASH_BUDGET = 6
 HELD_ELSEWHERE_RETRY_SECONDS = 1
 SELF_CHECK_SECONDS = 60
 ENSURE_REFRESH_SECONDS = 1
+STALE_INTENT_SECONDS = 24 * 60 * 60
+EXPIRY_LOCK_WAIT_SECONDS = 5
+EXPIRY_LOCK_RECLAIM_SECONDS = 60
+MIGRATED_LEDGERS = ('deliveries', 'allocations', 'cleanup')
+MANIFEST_HANDLE = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9._-]*--w[0-9]+')
+REPORTED_SKIPS = set()
 
 # While the supervisor works on one store, the environment that store's
 # subprocesses run with; None everywhere else.
@@ -494,9 +500,179 @@ def ensure(kdir, timeout=45):
         time.sleep(.1)
 
 
+class MigrationDeferred(Exception):
+    """An old key cannot be migrated on this pass; a later pass tries again."""
+
+
+@contextlib.contextmanager
+def expiry_sweep_lock(kdir):
+    """The request expiry sweep's mkdir lock, which it reclaims after 60 seconds."""
+    path = Path(kdir) / '_sessions/requests/.expiry-sweep.lock'
+    deadline = time.monotonic() + EXPIRY_LOCK_WAIT_SECONDS
+    while True:
+        try:
+            os.mkdir(path)
+            break
+        except FileExistsError:
+            try:
+                age = time.time() - path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if age > EXPIRY_LOCK_RECLAIM_SECONDS:
+                with contextlib.suppress(OSError):
+                    os.rmdir(path)
+                continue
+            if time.monotonic() >= deadline:
+                raise MigrationDeferred('the request expiry sweep holds its lock')
+            time.sleep(.05)
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            os.rmdir(path)
+
+
+def copy_ledgers(source, target):
+    """Copy each ledger record the target lacks, byte for byte, by temp file and rename."""
+    copied = 0
+    for kind in MIGRATED_LEDGERS:
+        for path in sorted((source / kind).glob('*.json')):
+            destination = target / kind / path.name
+            if path.name.startswith('.') or not path.is_file() or destination.exists():
+                continue
+            atomic(destination, path.read_bytes())
+            copied += 1
+    return copied
+
+
+def abandon_stale_intent(kdir, path, manifest):
+    """Retire a start intent too old to spawn: journal it, then mark the manifest."""
+    reason = 'stale-intent-at-migration'
+    append(kdir, dict(event_id='request-abandoned-' + hashlib.sha256(manifest['request_id'].encode()).hexdigest()[:32],
+                      event='request_abandoned', request_id=manifest['request_id'], slug=manifest['handle'],
+                      reason=reason))
+    if manifest.get('state') != 'request_abandoned':
+        manifest.update(state='request_abandoned', abandoned_at=now(), error=(
+            f'this start intent, created {manifest.get("created_at") or "at an unknown time"}, was more than '
+            f'{STALE_INTENT_SECONDS // 3600} hours old when its host key moved to the store host, so it was abandoned '
+            f'({reason}) rather than started; start it again with a new --key if it is still wanted'))
+        atomic(path, manifest)
+
+
+def migrate_manifests(kdir, old, store):
+    """Rewrite the old key's manifests to the store key; return the request ids of abandoned intents."""
+    abandoned, rewritten = set(), 0
+    for path in sorted((Path(kdir) / '_sessions/managed').glob('*.json')):
+        if not MANIFEST_HANDLE.fullmatch(path.stem) or read_quiet(path, {}).get('host_key') != old:
+            continue
+        try:
+            with lock(path.with_suffix('.lock'), False):
+                manifest = read_quiet(path, {})
+                if manifest.get('host_key') != old or manifest.get('handle') != path.stem:
+                    continue
+                created = instant(manifest.get('created_at'))
+                stale = created is None or time.time() - created > STALE_INTENT_SECONDS
+                if manifest.get('state') == 'request_abandoned' or (
+                        manifest.get('state') in {'intent', 'enqueueing'} and stale):
+                    abandon_stale_intent(kdir, path, manifest)
+                    abandoned.add(manifest['request_id'])
+                    continue
+                manifest['host_key'] = store
+                atomic(path, manifest)
+                rewritten += 1
+        except BlockingIOError:
+            raise MigrationDeferred(f'managed session {path.stem} is busy') from None
+    return abandoned, rewritten
+
+
+def migrate_request_rows(kdir, old, store, abandoned):
+    requests = Path(kdir) / '_sessions/requests'
+    if not (requests / 'pending').is_dir() and not (requests / 'claimed').is_dir():
+        return 0
+    rewritten = 0
+    with expiry_sweep_lock(kdir):
+        for state in ('pending', 'claimed'):
+            for path in sorted((requests / state).glob('*.json')):
+                row = read_quiet(path)
+                if row is None or row.get('host_key') != old or row.get('request_id') in abandoned:
+                    continue
+                row['host_key'] = store
+                atomic(path, row)
+                rewritten += 1
+    return rewritten
+
+
+def migrate_key(kdir, old, store):
+    """Move one old per-checkout key onto the store key, or say why not on this pass."""
+    directory = Path(kdir) / '_sessions/hosts' / old
+    if (directory / 'migrated.json').exists():
+        return None, None
+    elsewhere = sorted(str(p) for p in (Path(kdir) / '_sessions/runtimes').glob(f'*/hosts/{old}') if p.is_dir())
+    if elsewhere:
+        return None, ('it also exists under a named runtime (' + ', '.join(elsewhere)
+                      + '), so its records may belong to that runtime')
+    try:
+        with lock(directory / 'runtime.lock', False), lock(directory / 'supervisor.lock', False):
+            copied = copy_ledgers(directory, Path(kdir) / '_sessions/hosts' / store)
+            abandoned, manifests = migrate_manifests(kdir, old, store)
+            rows = migrate_request_rows(kdir, old, store, abandoned)
+            atomic(directory / 'migrated.json', dict(schema_version=1, **{'from': old}, to=store, at=now()))
+    except BlockingIOError:
+        return None, 'its host or supervisor from before store-scoped hosting is still running'
+    except MigrationDeferred as deferred:
+        return None, f'{deferred}; a later pass retries'
+    return dict(key=old, ledger_records=copied, manifests=manifests, request_rows=rows,
+                abandoned=sorted(abandoned)), None
+
+
 def prepare_store(kdir):
-    """Runs before each launch of a store's host and on each supervisor pass over the store."""
-    return None
+    """Move the records of per-checkout hosts from before store scope onto the store key.
+
+    Runs before each launch of a store's host and on each supervisor pass. Only
+    the default runtime migrates: old keys carry no runtime name, while the
+    manifests, queue and registry they index are shared by every runtime.
+    """
+    kdir = Path(kdir).resolve()
+    summary = dict(migrated=[], skipped={})
+    hosts = kdir / '_sessions/hosts'
+    if RUNTIME.runtime_name() or not hosts.is_dir():
+        return summary
+    store = RUNTIME.store_host_key(kdir)
+    for old in sorted(p.name for p in hosts.iterdir() if p.is_dir() and p.name != store):
+        try:
+            done, skipped = migrate_key(kdir, old, store)
+        except (OSError, ValueError, RuntimeError, KeyError) as error:
+            done, skipped = None, f'migration failed ({type(error).__name__}: {error}); a later pass retries'
+        if done:
+            summary['migrated'].append(done)
+            log(f'{kdir}: migrated host key {old} to {store}: {done["ledger_records"]} ledger records, '
+                f'{done["manifests"]} manifests, {done["request_rows"]} queued requests'
+                + (f', {len(done["abandoned"])} stale start intents abandoned' if done['abandoned'] else ''))
+        elif skipped:
+            summary['skipped'][old] = skipped
+            if (str(kdir), old, skipped) not in REPORTED_SKIPS:
+                REPORTED_SKIPS.add((str(kdir), old, skipped))
+                log(f'{kdir}: not migrating host key {old}: {skipped}')
+    return summary
+
+
+def serving_host(kdir, manifest):
+    """The ready host that serves a manifest's key: the store host, or a host
+    from before store scope that is still live and ready for its checkout."""
+    key = manifest.get('host_key')
+    if not key:
+        return None
+    if key == RUNTIME.store_host_key(kdir):
+        return ready(kdir, key)
+    return ready(kdir, key, manifest.get('source_dir'))
+
+
+def current_manifest(kdir, manifest):
+    """The manifest as it is on disk now, since a migration may have moved its key."""
+    try:
+        return read_quiet(manifest_path(kdir, manifest['handle']), None) or manifest
+    except RuntimeError:
+        return manifest
 
 
 def repo_identifier(kdir):
@@ -993,13 +1169,13 @@ def self_check():
 
 
 def manifest_path(kdir, handle):
-    if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._-]*--w[0-9]+', handle):
+    if not MANIFEST_HANDLE.fullmatch(handle):
         raise RuntimeError('invalid managed session handle')
     return kdir / '_sessions/managed' / (handle + '.json')
 
 
 def owner(kdir, manifest):
-    status = ready(kdir, manifest['host_key'])
+    status = serving_host(kdir, current_manifest(kdir, manifest))
     if not status:
         return None
     instance = read(kdir / '_sessions/instances' / (status['instance_name'] + '.json'), {})
@@ -1095,12 +1271,13 @@ def enqueue_start(kdir, manifest, status=None):
     existing = existing or any(row.get('request_id') == rid for row in events(kdir))
     existing = existing or any(p.name.startswith(rid) for p in (kdir / '_sessions/requests').rglob('*') if p.is_file())
     if not existing:
-        status = status or ensure(kdir)
+        if status is None:
+            ensure(kdir)
         with lock(host_dir(kdir, key) / 'ensure.lock'):
-            current = ready(kdir, key)
+            current = serving_host(kdir, manifest)
             if not current:
                 raise RuntimeError('host withdrew readiness; retry the same start key')
-            require_capabilities(current)
+            status = require_capabilities(current)
             with lock(kdir / '_sessions/source-locks' / (manifest['work_item'] + '.lock')):
                 meta_path = kdir / '_work' / manifest['work_item'] / '_meta.json'
                 meta = read(meta_path, {})
@@ -1194,6 +1371,7 @@ def publish_operation(kdir, manifest, operation, row):
     """Publish persisted intent only when durable evidence proves no input attempt."""
     rid = row['request_id']
     with lock(kdir / '_sessions/operation-locks' / (rid + '.lock')):
+        manifest = current_manifest(kdir, manifest)
         ledger = host_dir(kdir, manifest['host_key']) / 'deliveries' / (rid + '.json')
         queue = kdir / '_sessions' / (operation + '-requests') / (rid + '.json')
         if ledger.exists() or queue.exists():
@@ -1455,7 +1633,7 @@ def main(argv=None):
             raise RuntimeError('unknown managed session handle')
         if args.verb == '_source-owner':
             status = ensure(kdir)
-            print(status['instance_name'])
+            print((serving_host(kdir, current_manifest(kdir, manifest)) or status)['instance_name'])
             return 0
         result = operate(args, kdir, manifest)
     if args.json or args.verb == 'inspect':
