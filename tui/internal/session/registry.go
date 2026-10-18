@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
 
@@ -93,7 +94,21 @@ type Instance struct {
 	// pre-feature binary carries neither and renders as unknown downstream.
 	ProjectDir string `json:"project_dir,omitempty"`
 	Framework  string `json:"framework,omitempty"`
+
+	// Scope is ScopeStore on a session host that serves every checkout of its
+	// store. Such a row has no ProjectDir; each of its sessions names its own
+	// checkout in SourceDir. Empty on a visible TUI's row.
+	Scope string `json:"scope,omitempty"`
+
+	// Runtime is the session runtime namespace of the process that wrote the
+	// row: the LORE_SESSION_RUNTIME name, "" for the default runtime. WriteInstance
+	// stamps it on every write, so a row without the field was written by a
+	// binary that predates runtime namespaces.
+	Runtime string `json:"runtime"`
 }
+
+// ScopeStore is the Scope of a session host that serves a whole store.
+const ScopeStore = "store"
 
 // InstancesDir is the registry directory under a _sessions/ root.
 func InstancesDir(sessionsDir string) string {
@@ -114,6 +129,11 @@ var ErrStaleInstance = errors.New("stale instance snapshot")
 var instanceWriteMu sync.Mutex
 
 func WriteInstance(sessionsDir string, inst Instance) error {
+	runtime, err := config.SessionRuntime()
+	if err != nil {
+		return err
+	}
+	inst.Runtime = runtime
 	instanceWriteMu.Lock()
 	defer instanceWriteMu.Unlock()
 	dir := InstancesDir(sessionsDir)

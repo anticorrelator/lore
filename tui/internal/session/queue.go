@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -278,6 +279,15 @@ func (r Request) PlacementStanceValue() string {
 		return ""
 	}
 	return *r.PlacementStance
+}
+
+// Checkout is the source checkout the row names: its required_project_dir, else
+// its prefer_project_dir, else "". A store host seeds the session from it.
+func (r Request) Checkout() string {
+	if dir := r.RequiredProjectDirValue(); dir != "" {
+		return dir
+	}
+	return r.PreferProjectDirValue()
 }
 
 // HasPlacementStance reports whether the row carries a placement stance at all,
@@ -569,6 +579,31 @@ func QueueTickForHost(sessionsDir, myName, myVintage, myProjectDir, hostKey stri
 
 // QueueTickForHostAdmission checks the executing host before acquiring a claim.
 func QueueTickForHostAdmission(sessionsDir, myName, myVintage, myProjectDir, hostKey string, liveInstances map[string]bool, hasPlanDoc func(string) bool, slugLive func(string) bool, now time.Time, reclaimAfter time.Duration, admit func(Request) error) (QueueTickResult, error) {
+	return queueTick(sessionsDir, myName, myVintage, myProjectDir, hostKey, false, liveInstances, hasPlanDoc, slugLive, now, reclaimAfter, admit)
+}
+
+// QueueTickForStoreHost is the queue pass of a host that serves every checkout
+// of one store. It claims only rows carrying its key. The host has no project
+// dir of its own, so a row's checkout is never compared with one: before the
+// claim, scope refuses a row whose checkout does not belong to the store or that
+// names none, and the prefer_project_dir grace is skipped because no other
+// claimant can take a row carrying this key. admit runs after that check.
+func QueueTickForStoreHost(sessionsDir, myName, myVintage, hostKey string, scope StoreScope, liveInstances map[string]bool, hasPlanDoc func(string) bool, slugLive func(string) bool, now time.Time, reclaimAfter time.Duration, admit func(Request) error) (QueueTickResult, error) {
+	if hostKey == "" {
+		return QueueTickResult{}, errors.New("a store host claims only rows carrying its host key, and has none")
+	}
+	return queueTick(sessionsDir, myName, myVintage, "", hostKey, true, liveInstances, hasPlanDoc, slugLive, now, reclaimAfter, func(req Request) error {
+		if _, err := scope.Checkout(req); err != nil {
+			return err
+		}
+		if admit == nil {
+			return nil
+		}
+		return admit(req)
+	})
+}
+
+func queueTick(sessionsDir, myName, myVintage, myProjectDir, hostKey string, storeScope bool, liveInstances map[string]bool, hasPlanDoc func(string) bool, slugLive func(string) bool, now time.Time, reclaimAfter time.Duration, admit func(Request) error) (QueueTickResult, error) {
 	var res QueueTickResult
 	var err error
 	res.Abandoned, err = recoverRejectedPending(sessionsDir)
@@ -609,7 +644,7 @@ func QueueTickForHostAdmission(sessionsDir, myName, myVintage, myProjectDir, hos
 		if hostKey != "" {
 			req.TargetInstance = StrPtr(myName)
 		}
-		if !claimableBy(req, myName, myVintage, myProjectDir, now) {
+		if !claimable(req, myName, myVintage, myProjectDir, storeScope, now) {
 			continue
 		}
 		if req.Attempts >= MaxAttempts {
@@ -681,6 +716,13 @@ func QueueTickForHostAdmission(sessionsDir, myName, myVintage, myProjectDir, hos
 // temporal comparison, the requirement string equality, and the preference a
 // timing window — all read-side, no writer, no per-instance attempt state.
 func claimableBy(req Request, myName, myVintage, myProjectDir string, now time.Time) bool {
+	return claimable(req, myName, myVintage, myProjectDir, false, now)
+}
+
+// claimable is claimableBy for either kind of claimant. A store host has no
+// project dir to hold a row's placement against; its admission check decides
+// whether the row's checkout belongs to the store instead.
+func claimable(req Request, myName, myVintage, myProjectDir string, storeScope bool, now time.Time) bool {
 	for _, required := range req.RequiredRuntimeCapabilities {
 		supported := false
 		for _, capability := range RuntimeCapabilities() {
@@ -704,7 +746,7 @@ func claimableBy(req Request, myName, myVintage, myProjectDir string, now time.T
 	if !vintageOK(req.MinVintageValue(), myVintage) {
 		return false
 	}
-	if !requiredDirOK(req, myProjectDir) {
+	if !storeScope && !requiredDirOK(req, myProjectDir) {
 		return false
 	}
 	if req.Attempts > 0 && req.LastAttemptAt != nil {
@@ -715,7 +757,86 @@ func claimableBy(req Request, myName, myVintage, myProjectDir string, now time.T
 			}
 		}
 	}
-	return preferMatchOK(req, myProjectDir, now)
+	return storeScope || preferMatchOK(req, myProjectDir, now)
+}
+
+// StoreScope is what a store host needs to decide whether a row's checkout
+// belongs to its store.
+type StoreScope struct {
+	// KnowledgeDir is the store directory, physically resolved.
+	KnowledgeDir string
+	// Pinned is set when the host was started with LORE_KNOWLEDGE_DIR naming
+	// this store. resolve-repo.sh answers that pin for every directory, so a
+	// pinned store skips the resolution check.
+	Pinned bool
+	// Resolver is the path of resolve-repo.sh.
+	Resolver string
+}
+
+// retryableAdmission marks an admission failure caused by the host rather than
+// the row, so the row stays pending instead of being archived.
+type retryableAdmission struct{ error }
+
+func (retryableAdmission) Retryable() bool { return true }
+
+func (e retryableAdmission) Unwrap() error { return e.error }
+
+// Checkout returns the physically resolved checkout req names, or an error
+// saying why it does not belong to this store. A checkout belongs to the store
+// when it is the top level of an existing git checkout, lies outside the store
+// directory (so in neither _sessions/worktrees nor _coordination/worktrees),
+// and resolve-repo.sh, run without LORE_KNOWLEDGE_DIR, resolves it to this
+// store; a pinned store skips that last clause. A failure to run git or the
+// resolver at all is the host's fault and is retryable; every other failure is
+// a refusal of the row.
+func (s StoreScope) Checkout(req Request) (string, error) {
+	named := req.Checkout()
+	if named == "" {
+		return "", errors.New("the request names no checkout of this store (no required_project_dir or prefer_project_dir)")
+	}
+	if !filepath.IsAbs(named) {
+		return "", fmt.Errorf("checkout %q is not an absolute path", named)
+	}
+	dir := config.NormalizeProjectDir(named)
+	if st, err := os.Stat(dir); err != nil {
+		return "", fmt.Errorf("checkout %q does not exist", named)
+	} else if !st.IsDir() {
+		return "", fmt.Errorf("checkout %q is not a directory", named)
+	}
+	store := config.NormalizeProjectDir(s.KnowledgeDir)
+	if dir == store || strings.HasPrefix(dir, store+string(filepath.Separator)) {
+		return "", fmt.Errorf("checkout %q lies inside knowledge store %s", named, store)
+	}
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return "", fmt.Errorf("checkout %q is not a git checkout", named)
+	}
+	if err != nil {
+		return "", retryableAdmission{fmt.Errorf("inspect checkout %q: %w", named, err)}
+	}
+	if top := config.NormalizeProjectDir(strings.TrimSpace(string(out))); top != dir {
+		return "", fmt.Errorf("checkout %q is not the top level of its git checkout (%s is)", named, top)
+	}
+	if s.Pinned {
+		return dir, nil
+	}
+	cmd := exec.Command("bash", s.Resolver, dir)
+	cmd.Dir = dir
+	cmd.Env = []string{}
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "LORE_KNOWLEDGE_DIR=") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	out, err = cmd.Output()
+	if err != nil {
+		return "", retryableAdmission{fmt.Errorf("resolve the knowledge store of checkout %q: %w", named, err)}
+	}
+	if resolved := config.NormalizeProjectDir(strings.TrimSpace(string(out))); resolved != store {
+		return "", fmt.Errorf("checkout %q belongs to knowledge store %s, not %s", named, resolved, store)
+	}
+	return dir, nil
 }
 
 // requiredDirOK reports whether an instance whose normalized project dir is

@@ -102,6 +102,12 @@ func (m model) finishHostDelivery(d hostDelivery) error {
 	return hostAtomicJSON(m.hostDeliveryPath(id), d)
 }
 func (m model) recoverHostDeliveries() error {
+	return m.recoverHostDeliveriesWhere(nil)
+}
+
+// recoverHostDeliveriesWhere replays the ledger records keep accepts, or every
+// record when keep is nil.
+func (m model) recoverHostDeliveriesWhere(keep func(hostDelivery) bool) error {
 	paths, err := filepath.Glob(filepath.Join(m.hostDir(), "deliveries", "*.json"))
 	if err != nil {
 		return err
@@ -115,6 +121,9 @@ func (m model) recoverHostDeliveries() error {
 		var d hostDelivery
 		if err = json.Unmarshal(b, &d); err != nil {
 			return err
+		}
+		if keep != nil && !keep(d) {
+			continue
 		}
 		rows = append(rows, d)
 	}

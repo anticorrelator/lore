@@ -326,3 +326,59 @@ func TestRetiredInstanceCannotBeResurrectedByLateWriteOrHeartbeat(t *testing.T) 
 		t.Fatalf("new generation refused: %v", err)
 	}
 }
+
+func TestWriteInstanceStampsWriterRuntimeAndStoreScope(t *testing.T) {
+	dir := t.TempDir()
+	raw := func(name string) map[string]json.RawMessage {
+		t.Helper()
+		b, err := os.ReadFile(instancePath(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(b, &fields); err != nil {
+			t.Fatal(err)
+		}
+		return fields
+	}
+
+	t.Setenv("LORE_SESSION_RUNTIME", "dev")
+	host := Instance{Name: "host", PID: 1, Repo: "r", Started: "2026-10-18T00:00:00Z", HostKey: "key", Role: "session-host",
+		Scope: ScopeStore, Runtime: "spoofed", Sessions: []Session{{Slug: "a", Type: "worker", Initiator: "agent", SourceDir: "/work/one"}}}
+	if err := WriteInstance(dir, host); err != nil {
+		t.Fatal(err)
+	}
+	fields := raw("host")
+	if string(fields["runtime"]) != `"dev"` || string(fields["scope"]) != `"store"` {
+		t.Fatalf("host row runtime=%s scope=%s", fields["runtime"], fields["scope"])
+	}
+	if _, ok := fields["project_dir"]; ok {
+		t.Fatalf("store-scope row carries project_dir: %s", fields["project_dir"])
+	}
+	if got := ListInstances(dir); len(got) != 1 || got[0].Runtime != "dev" || got[0].Sessions[0].SourceDir != "/work/one" {
+		t.Fatalf("decoded host row = %+v", got)
+	}
+
+	// The default runtime is stamped as an explicit empty name, so a stamped row
+	// stays distinguishable from one written before the field existed.
+	t.Setenv("LORE_SESSION_RUNTIME", "")
+	tui := Instance{Name: "tui", PID: 2, Repo: "r", Started: "2026-10-18T00:00:00Z", ProjectDir: "/work/one", Runtime: "dev"}
+	if err := WriteInstance(dir, tui); err != nil {
+		t.Fatal(err)
+	}
+	fields = raw("tui")
+	if runtime, ok := fields["runtime"]; !ok || string(runtime) != `""` {
+		t.Fatalf("default-runtime row runtime = %s (present %v)", runtime, ok)
+	}
+	if _, ok := fields["scope"]; ok {
+		t.Fatalf("visible TUI row carries scope: %s", fields["scope"])
+	}
+
+	t.Setenv("LORE_SESSION_RUNTIME", "Not_Valid")
+	if err := WriteInstance(dir, Instance{Name: "refused", PID: 3}); err == nil {
+		t.Fatal("a row was written under an invalid runtime name")
+	}
+	if _, err := os.Stat(instancePath(dir, "refused")); !os.IsNotExist(err) {
+		t.Fatalf("refused row reached disk: %v", err)
+	}
+}
