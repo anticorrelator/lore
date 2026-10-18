@@ -260,7 +260,8 @@ class OneSupervisorManyStores(LoginCase):
                       CLAUDE_CODE_MESSAGING_SOCKET='/sock', CLAUDE_PID='1', CODEX_THREAD_ID='t',
                       OPENCODE_SESSION_ID='o', AI_AGENT='claude', LORE_POSITION_DISPATCH_MANIFEST='m',
                       LORE_SESSION_SLUG='item--w1', LORE_FRAMEWORK='codex', CLAUDE_CODE_USE_BEDROCK='1',
-                      SSH_AUTH_SOCK='/agent', LORE_KNOWLEDGE_DIR=str(a), TMUX='x', TMUX_PANE='%1')
+                      SSH_AUTH_SOCK='/agent', LORE_KNOWLEDGE_DIR=str(a), TMUX='x', TMUX_PANE='%1',
+                      BAGGAGE='b', TRACEPARENT='00-a-b-01', USE_STAGING_OAUTH='1')
         with patch.dict(os.environ, caller):
             status_a = self.ensure(a)
         status_b = self.ensure(b)

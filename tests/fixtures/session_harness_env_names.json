@@ -204,6 +204,7 @@
   "scrubbed": [
     "AGENT",
     "AI_AGENT",
+    "BAGGAGE",
     "CLAUDECODE",
     "CLAUDE_AGENT_SDK_MCP_NO_PREFIX",
     "CLAUDE_AGENT_SDK_VERSION",
@@ -255,12 +256,13 @@
     "OPENCODE_TERMINAL",
     "PAGER",
     "PWD",
-    "SHLVL"
+    "SHLVL",
+    "USE_LOCAL_OAUTH",
+    "USE_STAGING_OAUTH"
   ],
   "kept": [
     "ANTHROPIC_BASE_URL",
     "API_TIMEOUT_MS",
-    "BAGGAGE",
     "CLAUDE_PREVIEW_CLASSIFIER_FLOOR",
     "COLORTERM",
     "COMMAND_MODE",
@@ -289,8 +291,6 @@
     "TERM",
     "TMPDIR",
     "USER",
-    "USE_LOCAL_OAUTH",
-    "USE_STAGING_OAUTH",
     "XPC_FLAGS",
     "XPC_SERVICE_NAME",
     "_",

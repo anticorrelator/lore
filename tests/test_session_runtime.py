@@ -211,12 +211,14 @@ class StoreKeysAndLoginState(unittest.TestCase):
                 'LORE_SESSION_RUNTIME': 'dev', 'LORE_FRAMEWORK': 'codex', 'LORE_MODEL_WORKER': 'x',
                 'LORE_WORKTREE_ID': 'w', 'LORE_EXECUTION_DIR': '/e', 'LORE_KNOWLEDGE_DIR': '/first-caller-store',
                 'LORE_DATA_DIR': '/data', 'TMUX': 't', 'TMUX_PANE': '%1', 'TMUX_TMPDIR': '/tmux', 'PWD': '/p',
-                'OLDPWD': '/o', 'SHLVL': '2'}
+                'OLDPWD': '/o', 'SHLVL': '2', 'BAGGAGE': 'b', 'TRACEPARENT': '00-a-b-01', 'TRACESTATE': 's',
+                'USE_STAGING_OAUTH': '1', 'USE_LOCAL_OAUTH': '1', 'ANTHROPIC_BASE_URL': 'https://gateway'}
         env = runtime.child_environment(base, '/store-b', False)
         self.assertEqual(sorted(env), sorted([
             'PATH', 'HOME', 'SSH_AUTH_SOCK', 'GH_TOKEN', 'HTTPS_PROXY', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_USE_BEDROCK',
             'CLAUDE_CODE_OAUTH_TOKEN', 'CODEX_HOME', 'OPENCODE_CONFIG_DIR', 'LORE_SESSION_HOST_BINARY',
-            'LORE_SESSION_HOST_IDLE_TIMEOUT', 'LORE_SESSION_RUNTIME', 'LORE_DATA_DIR', 'TMUX_TMPDIR']))
+            'LORE_SESSION_HOST_IDLE_TIMEOUT', 'LORE_SESSION_RUNTIME', 'LORE_DATA_DIR', 'TMUX_TMPDIR',
+            'ANTHROPIC_BASE_URL']))
         pinned = runtime.child_environment(base, '/store-a', True)
         self.assertEqual(pinned['LORE_KNOWLEDGE_DIR'], '/store-a')
         self.assertEqual(base['LORE_KNOWLEDGE_DIR'], '/first-caller-store')

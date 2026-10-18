@@ -83,6 +83,11 @@ SCRUB_NAMES = frozenset({
     'AI_AGENT', 'AGENT', 'OPENCODE',
     # Codex sets these for the commands its tools run.
     'NO_COLOR', 'PAGER', 'GIT_PAGER', 'GH_PAGER',
+    # The starting app's trace context, which would attach every session's
+    # telemetry to that app's trace.
+    'BAGGAGE', 'TRACEPARENT', 'TRACESTATE',
+    # Internal flags the Claude desktop app sets for its own embedded sessions.
+    'USE_STAGING_OAUTH', 'USE_LOCAL_OAUTH',
     # Lore's per-session variables outside the families above.
     'LORE_FRAMEWORK', 'LORE_WORKTREE_ID', 'LORE_EXECUTION_DIR',
     # Set per store by child_environment, never carried from one store to another.
