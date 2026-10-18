@@ -9,22 +9,26 @@ import (
 	"time"
 )
 
-func TestAdmissionUnknownCapabilityAndRetryDelay(t *testing.T) {
+func TestQueueUnknownCapabilityAndRetryDelay(t *testing.T) {
+	q := newHostQueue(t)
 	now := time.Now().UTC()
-	req := Request{RequiredRuntimeCapabilities: []string{"unsupported-future-payload"}}
-	if claimableBy(req, "me", "", "", now) {
+	live := map[string]bool{"me": true}
+	q.plant(t, Request{RequestID: "future", Type: "worker", Slug: strp("item--w1"), Initiator: "agent", RequiredRuntimeCapabilities: []string{"unsupported-future-payload"}})
+	if res := q.tick(t, "me", "", live, noPlan, nil, now); res.Claimed != nil {
 		t.Fatal("unknown payload claimed")
 	}
-	req.RequiredRuntimeCapabilities = RuntimeCapabilities()
-	if !claimableBy(req, "me", "", "", now) {
+	q.dir = t.TempDir()
+	q.plant(t, Request{RequestID: "known", Type: "worker", Slug: strp("item--w2"), Initiator: "agent", RequiredRuntimeCapabilities: RuntimeCapabilities()})
+	if res := q.tick(t, "me", "", live, noPlan, nil, now); res.Claimed == nil {
 		t.Fatal("supported payload refused")
 	}
 	at := now.Format(time.RFC3339)
-	req.Attempts, req.LastAttemptAt = 1, &at
-	if claimableBy(req, "me", "", "", now) {
+	q.dir = t.TempDir()
+	q.plant(t, Request{RequestID: "retry", Type: "worker", Slug: strp("item--w3"), Initiator: "agent", Attempts: 1, LastAttemptAt: &at})
+	if res := q.tick(t, "me", "", live, noPlan, nil, now); res.Claimed != nil {
 		t.Fatal("identical immediate retry")
 	}
-	if !claimableBy(req, "me", "", "", now.Add(3*time.Second)) {
+	if res := q.tick(t, "me", "", live, noPlan, nil, now.Add(3*time.Second)); res.Claimed == nil {
 		t.Fatal("transient retry never eligible")
 	}
 	for _, value := range []string{"", "bad", "2020-01-01T00:00:00Z"} {
@@ -34,19 +38,19 @@ func TestAdmissionUnknownCapabilityAndRetryDelay(t *testing.T) {
 	}
 }
 
-func TestAdmissionRefusalNeverClaimsAndRetainsIntent(t *testing.T) {
-	dir := t.TempDir()
-	req := Request{RequestID: "request-1", Type: "worker", Slug: StrPtr("task--w1"), TargetInstance: StrPtr("me"), ExtraContext: json.RawMessage(`{"position_preparation":{"nested":"original intent"}}`)}
-	plantPending(t, dir, req)
+func TestQueueAdmissionRefusalNeverClaimsAndRetainsIntent(t *testing.T) {
+	q := newHostQueue(t)
+	req := q.row(Request{RequestID: "request-1", Type: "worker", Slug: StrPtr("task--w1"), TargetInstance: StrPtr("old-window"), ExtraContext: json.RawMessage(`{"position_preparation":{"nested":"original intent"}}`)})
+	plantPending(t, q.dir, req)
 	reason := "python /full/path/python3: nested missing yaml and denied /full/state/path"
-	result, err := QueueTickForHostAdmission(dir, "me", "", "", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter, func(Request) error { return fmt.Errorf("%s", reason) })
+	result, err := QueueTickForStoreHost(q.dir, "me", "", q.key, q.scope, map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter, func(Request) error { return fmt.Errorf("%s", reason) })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Claimed != nil || len(ScanPending(dir)) != 0 || len(result.Abandoned) != 1 {
+	if result.Claimed != nil || len(ScanPending(q.dir)) != 0 || len(result.Abandoned) != 1 {
 		t.Fatalf("refusal claimed or remained pending: %+v", result)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "requests", "abandoned", "request-1.json"))
+	data, err := os.ReadFile(filepath.Join(q.dir, "requests", "abandoned", "request-1.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,10 +61,13 @@ func TestAdmissionRefusalNeverClaimsAndRetainsIntent(t *testing.T) {
 	if archived.Attempts != 0 || archived.ClaimedBy != nil || string(archived.ExtraContext) != string(req.ExtraContext) || archived.LastError == nil || *archived.LastError != "host admission: "+reason {
 		t.Fatalf("intent/diagnostic lost: %+v", archived)
 	}
+	if archived.TargetValue() != "old-window" {
+		t.Fatalf("archive rewrote the row's target_instance to %q", archived.TargetValue())
+	}
 	if result.Abandoned[0].Slug != "task--w1" {
 		t.Fatal("refusal cannot join managed handle")
 	}
-	second, err := QueueTickForHostAdmission(dir, "me", "", "", "", nil, noPlan, nil, time.Now(), ReclaimAfter, func(Request) error { t.Fatal("deterministic probe repeated"); return nil })
+	second, err := QueueTickForStoreHost(q.dir, "me", "", q.key, q.scope, nil, noPlan, nil, time.Now(), ReclaimAfter, func(Request) error { t.Fatal("deterministic probe repeated"); return nil })
 	if err != nil || second.Claimed != nil {
 		t.Fatalf("second tick: %+v %v", second, err)
 	}
@@ -70,33 +77,36 @@ type temporaryAdmission struct{}
 
 func (temporaryAdmission) Error() string   { return "temporary probe resource exhaustion" }
 func (temporaryAdmission) Retryable() bool { return true }
-func TestTransientAdmissionPreservesPending(t *testing.T) {
-	dir := t.TempDir()
-	plantPending(t, dir, Request{RequestID: "transient", Type: "worker"})
-	result, err := QueueTickForHostAdmission(dir, "me", "", "", "", nil, noPlan, nil, time.Now(), ReclaimAfter, func(Request) error { return temporaryAdmission{} })
-	if err != nil || result.Claimed != nil || len(ScanPending(dir)) != 1 || len(result.Abandoned) != 0 || len(result.Diagnostics) != 1 {
+func TestQueueTransientAdmissionPreservesPending(t *testing.T) {
+	q := newHostQueue(t)
+	q.plant(t, Request{RequestID: "transient", Type: "worker"})
+	result, err := QueueTickForStoreHost(q.dir, "me", "", q.key, q.scope, nil, noPlan, nil, time.Now(), ReclaimAfter, func(Request) error { return temporaryAdmission{} })
+	if err != nil || result.Claimed != nil || len(ScanPending(q.dir)) != 1 || len(result.Abandoned) != 0 || len(result.Diagnostics) != 1 {
 		t.Fatalf("temporary probe discarded intent or claimed: %+v %v", result, err)
 	}
 }
 
-func TestAdmissionRetryMinimumWithFractionalTimestamp(t *testing.T) {
+func TestQueueRetryMinimumWithFractionalTimestamp(t *testing.T) {
+	q := newHostQueue(t)
 	at := time.Date(2026, 9, 5, 12, 0, 0, 999999999, time.UTC)
 	stamp := at.Format(time.RFC3339Nano)
 	for _, attempts := range []int{1, 2} {
-		req := Request{Attempts: attempts, LastAttemptAt: &stamp}
+		q.dir = t.TempDir()
+		q.plant(t, Request{RequestID: "retry", Type: "spec", Slug: strp("s"), Initiator: "agent", Attempts: attempts, LastAttemptAt: &stamp})
 		delay := time.Duration(1<<attempts) * time.Second
-		if claimableBy(req, "me", "", "", at.Add(delay-time.Nanosecond)) {
+		if res := q.tick(t, "me", "", nil, noPlan, nil, at.Add(delay-time.Nanosecond)); res.Claimed != nil {
 			t.Fatalf("attempt %d admitted before minimum delay", attempts)
 		}
-		if !claimableBy(req, "me", "", "", at.Add(delay)) {
+		if res := q.tick(t, "me", "", nil, noPlan, nil, at.Add(delay)); res.Claimed == nil {
 			t.Fatalf("attempt %d refused at minimum delay", attempts)
 		}
 	}
 }
 
-func TestAdmissionArchiveFailureRemainsRecoverable(t *testing.T) {
-	dir := t.TempDir()
-	req := Request{RequestID: "refused", Type: "worker", Framework: strp("claude-code"), Model: strp("fixture-model"), ExtraContext: json.RawMessage(`{"nested":"original"}`)}
+func TestQueueAdmissionArchiveFailureRemainsRecoverable(t *testing.T) {
+	q := newHostQueue(t)
+	dir := q.dir
+	req := q.row(Request{RequestID: "refused", Type: "worker", Framework: strp("claude-code"), Model: strp("fixture-model"), ExtraContext: json.RawMessage(`{"nested":"original"}`)})
 	plantPending(t, dir, req)
 	reason := "full nested refusal\npermission denied: /state/path"
 	req.LastError = &reason
@@ -129,7 +139,7 @@ func TestAdmissionArchiveFailureRemainsRecoverable(t *testing.T) {
 	if err := os.Remove(dest); err != nil {
 		t.Fatal(err)
 	}
-	res, err := QueueTickForHostAdmission(dir, "me", "", "", "", nil, noPlan, nil, time.Now(), ReclaimAfter, func(Request) error { t.Fatal("reprobed reserved refusal"); return nil })
+	res, err := QueueTickForStoreHost(dir, "me", "", q.key, q.scope, nil, noPlan, nil, time.Now(), ReclaimAfter, func(Request) error { t.Fatal("reprobed reserved refusal"); return nil })
 	if err != nil || res.Claimed != nil || len(res.Abandoned) != 1 || res.Abandoned[0].Reason != reason {
 		t.Fatalf("recovery result=%+v err=%v", res, err)
 	}

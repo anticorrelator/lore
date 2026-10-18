@@ -86,7 +86,7 @@ One file per live TUI instance at `instances/<name>.json`.
 | `build_sha` | string \| absent | Build vintage — the short git SHA embedded at build time (`-ldflags`). Absent for `go run`/dev builds and for any binary predating this field. Omit-when-empty. |
 | `runtime_capabilities` | string array \| absent | Semantic request support compiled into the executing runtime. Unknown or malformed metadata cannot satisfy position admission. |
 | `build_time` | string \| absent | Build vintage — the **orderable** quantity: the commit's committer-date (release build) or the binary's mtime (dev build), ISO 8601 UTC. Absent for a binary predating this field. Omit-when-empty. This, not `build_sha`, is what `min_vintage` filtering compares against (a SHA has no read-side ordering). |
-| `project_dir` | string \| absent | The instance's project directory, physically resolved (`filepath.Abs` + `EvalSymlinks`) once at startup. Immutable for the process. Omit-when-empty for a binary predating this field. It is the match key a request's `prefer_project_dir` compares against byte-for-byte (both sides resolve physically, so `/tmp`→`/private/tmp` and worktree symlinks match). Also the match key for hard `required_project_dir` placement when the request declares a `placement_stance`. |
+| `project_dir` | string \| absent | The instance's project directory, physically resolved (`filepath.Abs` + `EvalSymlinks`) once at startup. Immutable for the process. Omit-when-empty for a binary predating this field. No claim compares a request against it: a store host's row carries none, and the store host claims every row keyed to it whose checkout belongs to its store. |
 | `host_key` | string \| absent | Stable source/store host identity for managed runtime generations. Absent for legacy visible TUI owners, which claim no request the current writer enqueues: every such row carries the store host's key. |
 | `role` | string \| absent | `session-host` marks on-demand managed ownership, excluded from legacy TUI adoption. |
 | `framework` | string \| absent | The launch framework the TUI resolves for untargeted spawns (`tui_launch_framework` → `ResolveTUILaunchFramework`), refreshed on every full-row write plus an explicit rewrite when the setting is committed. Omit-when-empty for a binary predating this field or when resolution errors. Not a claim filter — framework selection stays the request's `framework` field; this only surfaces the value a coordinator's routing read needs. |
@@ -95,7 +95,7 @@ One file per live TUI instance at `instances/<name>.json`.
 one-list-read routing tuple (target, framework, model-compat, worktree). Both are
 fully **additive**: a row written by a binary predating them carries neither, and
 `lore session list` renders each absent field as `unknown` (the vintage-fallback
-idiom). `project_dir` participates in required-directory eligibility and soft-preference delay; `framework` reports the launch preference and is not a claim filter.
+idiom). Neither is a claim filter: `project_dir` reports where an older visible TUI ran, and `framework` reports the launch preference.
 
 **Build vintage** stamps a live TUI's build identity onto its row at startup so a
 live-but-outdated instance — registered, claiming, but executing stale semantics —
@@ -363,21 +363,22 @@ If it remains unclaimed past its TTL, the claim-side sweep instead moves it to
 | `route` | object | Canonical frozen session route `{framework,model,options,routing_source}`. The sole request writer resolves it before position admission and writes the same object on the request and `requested` event. `--session-route` replays a supplied canonical route without changing provenance. `framework` and `model` are compatibility projections only. |
 | `auto_close` | boolean \| absent | Override for the TUI exit-ladder auto-close gate (see [Close-request queue](#close-request-queue)). Omit-when-empty: absent defers to `initiator` (agent auto-closes, human holds open), `true` forces auto-close, `false` holds open. Carried onto the live session so the ladder can consult it at teardown. |
 | `routing_overrides` | object \| absent | Per-dispatch `{<role>: <model>}` map. Omit-when-empty. The claiming instance exports each entry as `LORE_MODEL_<ROLE>` (role uppercased, `-`→`_`) into the spawned session's PTY, riding the resolver's top-of-precedence env layer — so a coordinator's per-dispatch routing wins over settings policy with no resolver change. Roles are validated against `adapters/roles.json` at enqueue time; settings.json stays untouched durable policy (user directive > coordinator override > settings). |
-| `min_vintage` | string \| absent | Minimum build vintage (ISO 8601 UTC) the claiming instance's `build_time` must meet — the request never targets an instance built earlier. Omit-when-empty. Filtered read-side, mirroring `target_instance` (the only difference is a temporal `>=` vs a string `==`). The `session request --min-vintage` verb accepts a timestamp or a git commit-ish (resolved to its committer-date at enqueue) and stores the timestamp, so the read side never shells out to git. An explicit floor requires a known, parseable timestamp at or above the floor. Enqueue refuses the row unless the live store host meets the floor. |
+| `min_vintage` | string \| absent | Minimum build vintage (ISO 8601 UTC) the claiming store host's `build_time` must meet; a host built earlier leaves the row pending. Omit-when-empty. Filtered read-side at claim. The `session request --min-vintage` verb accepts a timestamp or a git commit-ish (resolved to its committer-date at enqueue) and stores the timestamp, so the read side never shells out to git. An explicit floor requires a known, parseable timestamp at or above the floor. Enqueue refuses the row unless the live store host meets the floor. |
 | `track` | string \| absent | Spec depth selector (`short`) carried to the session's short-track (`/spec short`). Omit-when-empty: only the non-default `short` is stored (`full` is the default and stays absent), so the field is present only when it changes behavior. Set at enqueue by `session request --track short`, which **refuses the flag on a non-spec request** (`ShortMode` has no effect on implement/chat prompts). Maps to `SessionDescriptor.ShortMode` at spawn. |
 | `model` | string \| absent | Per-dispatch lead-model override — the session lead is the top-level agent, so a model chosen here is lead selection. Omit-when-empty. Composed into the spawn as the harness's universal `--model` flag (the same flag `model_routing.tiers` aliases feed). **Opaque**: validated only for non-emptiness at enqueue, never against a model list — the candidate set is coordinator policy, not schema, so a bad id surfaces as an honest harness launch error. Distinct from `routing_overrides`, which routes *sub-agent* roles via `LORE_MODEL_<ROLE>` env. |
 | `framework` | string \| absent | Per-request launch framework override. Accepted values are `claude-code`, `opencode`, and `codex`. Omit-when-empty: absent defers to the claiming TUI's `tui_launch_framework` setting. Validated at enqueue against the framework registry and carried to spawn so the harness binary, `LORE_FRAMEWORK`, `SessionProcessStartedMsg.Harness`, and live registry `sessions[].harness` agree. |
 | `skip_confirm` | boolean \| absent | Session autonomy override. Omit-when-empty: absent defers to the queue-spawn default (**autonomous** — a claimed request historically runs without confirmation gates), `true` (`--yes`/`--no-confirm`) forces autonomous, `false` (`--confirm`) forces **gated** so every confirmation gate becomes a coordinator send window. Maps to `SessionDescriptor.SkipConfirm` at spawn. |
-| `prefer_project_dir` | string \| absent | **Soft** routing preference: a physically-resolved project directory (`session request --prefer-dir <path>` / `--prefer-cwd`, resolved and refused at enqueue when it does not exist). Omit-when-empty. Unlike the hard `target_instance`/`min_vintage` filters, this only *delays* other claimants — the `prefer_` name carries the softness. An instance whose `project_dir` equals it claims immediately; any other instance may claim only after `PreferMatchGrace` (15s, three poll ticks) measured from `requested_at`. **Additive**: absence, an unparseable `requested_at`, or a pre-feature instance (which advertises no `project_dir`) never blocks a claim — the preference only ever adds bounded latency, so a matching instance need not exist. A row reclaimed past its grace is claimable by any instance (the preference had its shot on first dispatch). |
+| `prefer_project_dir` | string \| absent | The checkout the caller named (`session request --prefer-dir <path>` / `--prefer-cwd`), physically resolved and refused at enqueue unless it is an existing checkout of this store. Omit-when-empty. The session is seeded from it when the row carries no `required_project_dir`, the checkout its work item declares. It never delays a claim. |
 | `worktree_identity` | object \| absent | Complete versioned [session worktree identity](#session-worktree-identity-and-lifecycle), carried unchanged from request to launch. Omit-when-empty only for legacy or TUI-created requests whose claimant allocates the identity before spawn; a hosted process never starts without a complete identity in `captured` state. |
 | `worktree_id` | string \| absent | Manager manifest identity for a coordinated writer. Travels with `execution_dir` and `worktree_identity` as one tuple. The allocation verb owns the registry and validates the tuple it hands back; the enqueue writer transports it unchanged, and the claiming TUI re-checks guard identity immediately before spawn. |
-| `execution_dir` | string \| absent | Absolute, canonical manager-resolved child cwd. Hard placement, unlike `prefer_project_dir`; the claiming TUI refuses any row/guard/path mismatch before spawn. |
+| `execution_dir` | string \| absent | Absolute, canonical manager-resolved child cwd; the claiming TUI refuses any row/guard/path mismatch before spawn. |
 
-Because `framework` is additive, old TUI decoders ignore it. When a
-`--framework` request must not be claimed by a TUI build that predates this
-field, `--min-vintage <feature-sha>` filters claimers known to be older. Unknown
-vintage passes, and timestamps do not establish feature inclusion across branches;
-this is a compatibility hint, not a protocol-version guarantee. Prove framework
+Because `framework` is additive, old decoders ignore it. When a
+`--framework` request must not be claimed by a store host built before this
+field, `--min-vintage <feature-sha>` keeps older hosts from claiming it; a host of
+unknown vintage cannot satisfy the floor. Timestamps do not establish feature
+inclusion across branches, so this is a compatibility hint, not a
+protocol-version guarantee. Prove framework
 identity at spawn time through the child
 environment, `SessionProcessStartedMsg.Harness`, or the live registry row; codex
 `closed` spend rows may remain duration-only and are not the routing proof.
@@ -409,17 +410,24 @@ it lives entirely at the queue layer. The winner then rewrites the claimed file
 (tmp+rename) adding `claimed_by` and `claimed_at`. **A claimed file is not a valid
 active claim until both fields are present.**
 
-**Targeting** is filtered read-side: an instance only attempts to claim rows whose
-`target_instance` equals its own name or is null. **Vintage** is filtered the same
-way, in the same pass: an instance skips a row whose `min_vintage` its own
-`build_time` cannot satisfy (absent, invalid, or older). The writer also refuses a
-vintage-constrained request unless the live store host meets it; the row's host
-key keeps readers that predate store-scoped hosting from claiming it. **Preference** is honored in the same read-side pass as a
-timing window, not a filter: a row carrying `prefer_project_dir` is claimable by a
-matching instance at once and by any other instance only once it has aged past
-`PreferMatchGrace` from `requested_at`. It never removes a row from the claim set
-permanently — an unmatched preference just defers the row 15s — so the atomic
-rename stays the sole claim arbiter in both the in-window and past-window regimes.
+**The claim rule** is the host key: the store host attempts only rows whose
+`host_key` is its own, whatever instance a row from an older writer names in
+`target_instance`; nothing else claims a keyed row. In the same read-side pass
+it skips a row whose `required_runtime_capabilities` its build lacks, whose
+`min_vintage` its own `build_time` cannot satisfy (absent, invalid, or older),
+whose option-bearing `route` needs a vintage it does not know, or whose retry
+backoff has not elapsed. An `implement` row waits for its work item's plan doc,
+and a row whose slug already has a live session on the host waits for that
+session to end ([Worker sessions](#worker-sessions) covers how both treat a
+worker's derived slug). Before the claim it refuses a row whose checkout
+(`required_project_dir`, else `prefer_project_dir`) is not a checkout of its
+store, or that names none, and archives it with `request_abandoned`; a failure to
+inspect the checkout is the host's and leaves the row pending. The writer also
+refuses a vintage-constrained request unless the live store host meets it; the
+row's host key keeps readers that predate store-scoped hosting from claiming it.
+A host and its successor across a restart hold the same key, so the atomic rename
+still arbitrates between them, and the successor reclaims a claim whose claimer
+is a dead predecessor without waiting out the reclaim window.
 
 ### Request lifecycle (terminal states)
 
