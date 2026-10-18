@@ -82,7 +82,10 @@ def epoch(value):
     try:
         return dt.datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
     except (ValueError, AttributeError, TypeError):
-        return None
+        # Python 3.9 parses only three or six fractional digits, and the host's
+        # RFC3339Nano stamps drop trailing zeros, so read the stamp directly.
+        micros = lifecycle().edge_time(value)
+        return micros / 1e6 if micros is not None else None
 
 
 FRESH_AUTHORITIES = frozenset({'runtime', 'screen-signature', 'hook-row'})

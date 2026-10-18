@@ -219,6 +219,15 @@ class WatchDelivery(unittest.TestCase):
         self.assertEqual(first['delta'][0]['observation']['activity'], 'idle')
         self.assertEqual(third['delta'], [])
 
+    def test_host_stamps_with_trimmed_fractions_are_aged_on_every_python(self):
+        # The host writes RFC3339Nano, which drops trailing zeros from the fraction.
+        now = int(time.time())
+        whole = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(now))
+        for digits in ('1', '12345', '123456', '12345678', '123456789'):
+            self.assertAlmostEqual(m.epoch(whole + '.' + digits + 'Z'), now + float('0.' + digits), places=5)
+        self.assertTrue(m.observation(peek(observed_at=whole + '.12345Z'))['fresh'])
+        self.assertIsNone(m.epoch('not a time'))
+
     def test_fresh_unknown_capture_is_not_mislabeled_stale(self):
         value = m.observation(peek('unknown', authority='none'))
         self.assertTrue(value['fresh'])
