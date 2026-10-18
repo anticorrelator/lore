@@ -42,7 +42,8 @@
 #                         there.
 #   --owner-tmux <name>   tmux session name of the owner (same handle format as
 #                         `lore coordinate worktree allocate`).
-#   --tmux-server <name>  tmux server socket for --owner-tmux (default: lore-tui).
+#   --tmux-server <name>  tmux server socket for --owner-tmux (default: lore-tui,
+#                         or lore-tui-<name> under LORE_SESSION_RUNTIME=<name>).
 #   --arc <slug>          Scope wakes to an arc's declared members (repeatable).
 #                         The arc must have a record in the store being armed
 #                         from; see "A scope is checked before it is armed".
@@ -206,7 +207,7 @@ HOOK_COMMAND_PATH="~/.lore/scripts/coordinate-arm.sh"
 MODE="arm"
 OWNER_PID=""
 OWNER_TMUX=""
-TMUX_SERVER="lore-tui"
+TMUX_SERVER="$(lore_tmux_server)"
 ARCS=()
 WINDOW=600
 HOOK_TIMEOUT=660

@@ -6,9 +6,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/anticorrelator/lore/tui/internal/config"
 )
 
 func TestCaptureTmuxHistoryBoundedAndClientless(t *testing.T) {
+	t.Setenv(config.SessionRuntimeEnv, "")
 	dir := t.TempDir()
 	log := filepath.Join(dir, "args")
 	fixture := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HISTORY_TEST_ARGS\"\ni=0\nwhile [ $i -lt 1000 ]; do printf '\\033[31mrow-%04d 界\\033[0m\\n' \"$i\"; i=$((i+1)); done\n"

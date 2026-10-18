@@ -21,6 +21,7 @@ tests runnable in a minimal environment.
 """
 
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -29,6 +30,7 @@ import subprocess
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 try:  # live-probe deps only; pure tests must import this module without them
     import pyte
@@ -364,7 +366,17 @@ def wait_idle(child, oracle, stable_secs=2.0, timeout=45.0, poll=0.3):
 #   window-size latest    the sole attached client dictates dimensions so resize
 #                         forwarding keeps working
 # --------------------------------------------------------------------------- #
-TMUX_SOCKET = "lore-tui"
+def _probe_tmux_server():
+    path = Path(__file__).resolve().parents[3] / "scripts" / "session_runtime.py"
+    spec = importlib.util.spec_from_file_location("session_runtime", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.tmux_server({module.ENV: os.environ.get(module.ENV) or "probe"})
+
+
+# Probes pin the production server's options on a runtime of their own, so a
+# probe run never creates or kills sessions on the server live sessions use.
+TMUX_SOCKET = _probe_tmux_server()
 
 
 def tmux_available():

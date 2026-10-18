@@ -79,6 +79,10 @@ func newModel(cfg config.Config, prefs config.Prefs, startState appState) model 
 }
 
 func main() {
+	if _, err := config.SessionRuntime(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(2)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--session-host" {
 		os.Exit(sessionHostMain(os.Args[2:]))
 	}

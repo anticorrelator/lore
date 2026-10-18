@@ -15,6 +15,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
 	"github.com/anticorrelator/lore/tui/internal/worktree"
@@ -66,11 +67,11 @@ func TestAdoptionScanRefusesWrongPaneCWDAndPreservesMarkers(t *testing.T) {
 	}
 
 	name := "lore-test-refuse-" + strconv.Itoa(os.Getpid())
-	if out, err := exec.Command("tmux", "-L", "lore-tui", "-f", "/dev/null",
+	if out, err := exec.Command("tmux", "-L", config.TmuxServer(), "-f", "/dev/null",
 		"new-session", "-d", "-s", name, "-c", sourceDir, "--", "sleep", "300").CombinedOutput(); err != nil {
 		t.Fatalf("create wrong-cwd survivor: %v (%s)", err, out)
 	}
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", "lore-tui", "kill-session", "-t", name).Run() })
+	t.Cleanup(func() { _ = exec.Command("tmux", "-L", config.TmuxServer(), "kill-session", "-t", name).Run() })
 	plantCorpse(t, sessionsDir, "dead-inst", "my-repo", deadPID(t), []session.Session{{
 		Slug: "demo", Type: "implement", Initiator: "agent", Started: "2026-07-21T00:00:00Z",
 		Tmux: name, RequestID: "spawn-1", Worktree: &identity,
@@ -439,11 +440,11 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 	// Stand up a real survivor session on the dedicated server (unique name so the
 	// test never disturbs a live TUI's sessions).
 	name := "lore-test-adopt-" + strconv.Itoa(os.Getpid())
-	if out, err := exec.Command("tmux", "-L", "lore-tui", "-f", "/dev/null",
+	if out, err := exec.Command("tmux", "-L", config.TmuxServer(), "-f", "/dev/null",
 		"new-session", "-d", "-s", name, "-c", identity.CanonicalPath, "--", "sleep", "300").CombinedOutput(); err != nil {
 		t.Fatalf("create survivor session: %v (%s)", err, out)
 	}
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", "lore-tui", "kill-session", "-t", name).Run() })
+	t.Cleanup(func() { _ = exec.Command("tmux", "-L", config.TmuxServer(), "kill-session", "-t", name).Run() })
 
 	plantCorpse(t, sessionsDir, "dead-inst", "my-repo", deadPID(t), []session.Session{
 		// ExecutionDir is stamped on every real registry row at spawn (the child

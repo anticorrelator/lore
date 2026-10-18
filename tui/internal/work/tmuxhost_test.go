@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/anticorrelator/lore/tui/internal/config"
 )
 
 func TestTmuxLaunchCapabilityContractHarnessMatrix(t *testing.T) {
@@ -79,6 +81,7 @@ func TestTmuxCapabilityPinsPreserveExistingOptions(t *testing.T) {
 }
 
 func TestTmuxMirrorOpenArgsKeepStateCaptureAndPipeAtomic(t *testing.T) {
+	t.Setenv(config.SessionRuntimeEnv, "")
 	got := tmuxMirrorOpenArgs("lore-remote", "/tmp/lore-tui-mirror-ab12/stream")
 	want := []string{
 		"-L", "lore-tui",
@@ -109,6 +112,7 @@ func TestParseTmuxMirrorOpenOutputSeparatesStateAndDisplayRows(t *testing.T) {
 }
 
 func TestTmuxMirrorWriteAndDetachArgs(t *testing.T) {
+	t.Setenv(config.SessionRuntimeEnv, "")
 	text := "Enter literal text with spaces"
 	if got := tmuxMirrorLiteralArgs("remote", text); !slices.Equal(got, []string{"-L", "lore-tui", "send-keys", "-t", "remote", "-l", text}) {
 		t.Errorf("literal args = %#v", got)
@@ -160,6 +164,7 @@ printf '2 1 10 3 0 7\nseed-one\nseed-two\nseed-three\n'
 }
 
 func TestOpenTmuxMirrorDetachesOwnedPipeWhenStateParsingFails(t *testing.T) {
+	t.Setenv(config.SessionRuntimeEnv, "")
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "tmux.log")
 	fake := filepath.Join(dir, "tmux")
@@ -201,5 +206,50 @@ esac
 	}
 	if lines[1] != "-L lore-tui pipe-pane -t remote" {
 		t.Fatalf("failed open cleanup = %q, want no-command detach", lines[1])
+	}
+}
+
+func TestTmuxCommandsFollowSessionRuntime(t *testing.T) {
+	t.Setenv(config.SessionRuntimeEnv, "dev")
+	want := []string{"-L", "lore-tui-dev"}
+	for name, args := range map[string][]string{
+		"session":  tmuxSessionArgs("s", "/tmp/w", 80, 24, nil, "codex", nil),
+		"open":     tmuxMirrorOpenArgs("s", "/tmp/f"),
+		"geometry": tmuxMirrorGeometryArgs("s"),
+		"literal":  tmuxMirrorLiteralArgs("s", "x"),
+		"key":      tmuxMirrorKeyArgs("s", "Enter"),
+		"detach":   tmuxMirrorDetachArgs("s"),
+		"attach":   tmuxAttachCommand("s").Args[1:],
+	} {
+		if !slices.Equal(args[:2], want) {
+			t.Errorf("%s args = %v, want server %v", name, args, want)
+		}
+	}
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "tmux.log")
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TMUX_LOG\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX_LOG", logPath)
+	TmuxHasSession("s")
+	_, _ = TmuxPanePID("s")
+	_, _ = TmuxPaneCWD("s")
+	_, _ = captureTmuxPaneHistory("s")
+	_, _ = CaptureTmuxHistory("s", 10, 100)
+	killTmuxSession("s")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 6 {
+		t.Fatalf("tmux calls = %q, want 6", lines)
+	}
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "-L lore-tui-dev ") {
+			t.Errorf("tmux call left the runtime's server: %q", line)
+		}
 	}
 }

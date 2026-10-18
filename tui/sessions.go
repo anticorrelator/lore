@@ -760,7 +760,7 @@ func validateAdoptionIdentity(kdir string, s session.Session) error {
 			return fmt.Errorf("managed worktree lifecycle %q cannot host a surviving process", placement.State)
 		}
 		if placement.Owner.Kind != "session" || placement.Owner.PID != s.PID ||
-			placement.Owner.TmuxName != s.Tmux || placement.Owner.TmuxServer != "lore-tui" {
+			placement.Owner.TmuxName != s.Tmux || placement.Owner.TmuxServer != config.TmuxServer() {
 			return fmt.Errorf("managed worktree owner does not match persisted session pid/tmux identity")
 		}
 	}

@@ -27,7 +27,7 @@ type hostDelivery struct {
 }
 
 func (m model) hostDeliveryPath(id string) string {
-	return filepath.Join(m.sessionsDir, "hosts", m.hostKey, "deliveries", id+".json")
+	return filepath.Join(m.hostDir(), "deliveries", id+".json")
 }
 func (m model) hostDeliveryAttempt(kind string, ev session.Event) error {
 	if m.hostKey == "" {
@@ -102,7 +102,7 @@ func (m model) finishHostDelivery(d hostDelivery) error {
 	return hostAtomicJSON(m.hostDeliveryPath(id), d)
 }
 func (m model) recoverHostDeliveries() error {
-	paths, err := filepath.Glob(filepath.Join(m.sessionsDir, "hosts", m.hostKey, "deliveries", "*.json"))
+	paths, err := filepath.Glob(filepath.Join(m.hostDir(), "deliveries", "*.json"))
 	if err != nil {
 		return err
 	}
@@ -146,7 +146,7 @@ func (m model) recoverHostDeliveries() error {
 	}
 	for _, d := range rows {
 		if d.Kind == "close" && d.Cleanup != nil {
-			receiptPath := filepath.Join(m.sessionsDir, "hosts", m.hostKey, "cleanup", d.Event.Slug+".json")
+			receiptPath := filepath.Join(m.hostDir(), "cleanup", d.Event.Slug+".json")
 			if b, err := os.ReadFile(receiptPath); err == nil {
 				var receipt struct {
 					Epoch   string                `json:"epoch"`
@@ -188,7 +188,7 @@ func (m model) writeHostCleanupReceipt(slug, epoch string, proof worktree.Cleanu
 	if retained != nil {
 		receipt["retained"] = retained.Error()
 	}
-	return hostAtomicJSON(filepath.Join(m.sessionsDir, "hosts", m.hostKey, "cleanup", slug+".json"), receipt)
+	return hostAtomicJSON(filepath.Join(m.hostDir(), "cleanup", slug+".json"), receipt)
 }
 
 func (m model) hostWorktreeOutcome(outcome session.Event, epoch string, completion ...hostDelivery) (tea.Cmd, error) {
@@ -206,7 +206,7 @@ func (m model) hostWorktreeOutcome(outcome session.Event, epoch string, completi
 
 func (m model) hostClosedSlugs() (map[string]bool, error) {
 	out := map[string]bool{}
-	paths, err := filepath.Glob(filepath.Join(m.sessionsDir, "hosts", m.hostKey, "deliveries", "*.json"))
+	paths, err := filepath.Glob(filepath.Join(m.hostDir(), "deliveries", "*.json"))
 	if err != nil {
 		return nil, err
 	}

@@ -58,7 +58,8 @@ Options:
   --owner-pid <pid>  The long-lived harness process that owns the seat, when arc
                      open cannot identify it from this process's ancestry.
   --owner-tmux <n>   tmux session name of the owner, as the same handle.
-  --tmux-server <n>  tmux server socket for --owner-tmux (default: lore-tui).
+  --tmux-server <n>  tmux server socket for --owner-tmux (default: lore-tui, or
+                     lore-tui-<name> under LORE_SESSION_RUNTIME=<name>).
   --json             Emit the new record as JSON.
   --kdir <path>      Override the resolved knowledge dir (testing).
   --help, -h         Show this help.

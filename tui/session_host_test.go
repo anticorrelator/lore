@@ -33,7 +33,7 @@ func TestHostRuntimeLockAndIdleIntentBarrier(t *testing.T) {
 	}
 	m, sessionsDir := baseSessionModel(t)
 	m.hostKey = "key"
-	ready := filepath.Join(sessionsDir, "hosts", "key", "ready.json")
+	ready := filepath.Join(m.hostDir(), "ready.json")
 	if err := hostAtomicJSON(ready, map[string]bool{"ready": true}); err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestHostOutcomeBeforeCloseSurvivesCrashBeforeCommands(t *testing.T) {
 	if _, err := os.Stat(identity.CanonicalPath); !os.IsNotExist(err) {
 		t.Fatalf("recovery left checkout: %v", err)
 	}
-	proof := filepath.Join(m.sessionsDir, "hosts", m.hostKey, "cleanup", "demo.json")
+	proof := filepath.Join(m.hostDir(), "cleanup", "demo.json")
 	if _, err := os.Stat(proof); err != nil {
 		t.Fatal("cleanup receipt missing", err)
 	}
@@ -351,7 +351,7 @@ func TestHostStartupSweepRetainsUnprovenCheckoutAndComesUp(t *testing.T) {
 // why the checkout stayed, instead of failing and retrying the refusal on every
 // restart.
 func TestHostCloseRetainsUnprovenCheckoutWithSettledReceipt(t *testing.T) {
-	m, sessionsDir := baseSessionModel(t)
+	m, _ := baseSessionModel(t)
 	m.hostKey = "key"
 	h := &sessionHostModel{runtime: m, options: hostOptions{Key: "key"}}
 	refusal := fmt.Errorf("%w: content at /tmp/demo is not reachable from any preserved ref", worktree.ErrContentUnproven)
@@ -359,7 +359,7 @@ func TestHostCloseRetainsUnprovenCheckoutWithSettledReceipt(t *testing.T) {
 	if h.err != nil {
 		t.Fatalf("host failed on a retained close: %v", h.err)
 	}
-	b, err := os.ReadFile(filepath.Join(sessionsDir, "hosts", "key", "cleanup", "demo--w1.json"))
+	b, err := os.ReadFile(filepath.Join(m.hostDir(), "cleanup", "demo--w1.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

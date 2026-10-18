@@ -22,6 +22,18 @@ EVENT_CACHE = {}
 TERMINAL = {'closed', 'request_cancelled', 'request_expired', 'request_abandoned', 'orphaned'}
 
 
+def sibling_module(name):
+    spec = importlib.util.spec_from_file_location(name, SCRIPTS / (name + '.py'))
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f'{name} helper is unavailable')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+RUNTIME = sibling_module('session_runtime')
+
+
 def route_module():
     spec = importlib.util.spec_from_file_location('route_config', SCRIPTS / 'route_config.py')
     if spec is None or spec.loader is None:
@@ -161,7 +173,7 @@ def append(kdir, row):
 
 
 def host_dir(kdir, key):
-    return kdir / '_sessions/hosts' / key
+    return RUNTIME.hosts_dir(kdir) / key
 
 
 def ready(kdir, key, source):
@@ -182,20 +194,34 @@ def ready(kdir, key, source):
     return data
 
 
-def binary(kdir):
-    override = os.environ.get('LORE_SESSION_HOST_BINARY')
-    if override:
-        path = Path(override).resolve(strict=True)
-        if not os.access(path, os.X_OK):
-            raise RuntimeError(f'host binary is not executable: {path}')
-        return path
+def installed_binary():
+    return Path.home() / '.local/bin/lore-tui'
+
+
+def checkout_identity(repo):
+    """The build identity install.sh stamps: HEAD's short SHA and committer date in UTC."""
+    try:
+        sha = run(['git', '-C', repo, 'rev-parse', '--short', 'HEAD'])
+    except (RuntimeError, OSError):
+        sha = ''
+    try:
+        when = run(['git', '-C', repo, 'show', '-s', '--date=format-local:%Y-%m-%dT%H:%M:%SZ', '--format=%cd', 'HEAD'],
+                   env=dict(os.environ, TZ='UTC'))
+    except (RuntimeError, OSError):
+        when = ''
+    return sha, when
+
+
+def checkout_binary(kdir):
     tui = SCRIPTS.parent / 'tui'
+    sha, when = checkout_identity(SCRIPTS.parent)
     fingerprint = hashlib.sha256()
     for path in sorted(tui.rglob('*')):
         if path.is_file() and (path.suffix in {'.go', '.mod', '.sum', '.a', '.h'} or path.name == 'pkg-config-shim.sh'):
             stat = path.stat()
             fingerprint.update(f'{path}:{stat.st_mtime_ns}:{stat.st_size}'.encode())
     fingerprint.update(os.environ.get('LORE_TUI_BUILD_TAGS', '').encode())
+    fingerprint.update(f'\0{sha}\0{when}'.encode())
     output = kdir / '_sessions/bin' / ('lore-session-host-' + fingerprint.hexdigest()[:24])
     with lock(output.parent / 'build.lock'):
         if not output.exists():
@@ -203,10 +229,26 @@ def binary(kdir):
             args = ['go', 'build']
             if env.get('LORE_TUI_BUILD_TAGS'):
                 args += ['-tags', env['LORE_TUI_BUILD_TAGS']]
+            args += ['-ldflags', f'-X main.buildSHA={sha} -X main.buildTime={when}']
             args += ['-o', str(output) + '.tmp', '.']
             run(args, cwd=tui, env=env)
             os.replace(str(output) + '.tmp', output)
     return output
+
+
+def binary(kdir):
+    override = os.environ.get('LORE_SESSION_HOST_BINARY')
+    if override:
+        path = Path(override).resolve(strict=True)
+        if not os.access(path, os.X_OK):
+            raise RuntimeError(f'host binary is not executable: {path}')
+        return path
+    installed = installed_binary()
+    if installed.is_file() and os.access(installed, os.X_OK):
+        return installed
+    print(f'session: hosting with a checkout build of {SCRIPTS.parent / "tui"} '
+          f'(no installed lore-tui at {installed}); `bash install.sh` installs one', file=sys.stderr)
+    return checkout_binary(kdir)
 
 
 def capabilities(status):
@@ -253,13 +295,18 @@ def supervise(args):
     try:
         with lock(directory / 'supervisor.lock', False):
             atomic(directory / 'supervisor.json', {'pid': os.getpid(), 'host_key': args.host_key, 'started_at': now()})
+            namespace = RUNTIME.runtime_name()
+            # A binary from before runtime namespaces rejects --runtime and exits,
+            # so a namespaced start never falls through to the production server.
+            runtime_args = ['--runtime', namespace] if namespace else []
             for attempt in range(6):
                 while held(directory / 'runtime.lock'):
                     time.sleep(.2)
                 process = subprocess.Popen([args.binary, '--session-host', '--host-key', args.host_key,
                                          '--kdir', str(kdir), '--source-dir', args.workspace,
                                          '--ready-file', str(directory / 'ready.json'),
-                                         '--idle-timeout', os.environ.get('LORE_SESSION_HOST_IDLE_TIMEOUT', '30')],
+                                         '--idle-timeout', os.environ.get('LORE_SESSION_HOST_IDLE_TIMEOUT', '30'),
+                                         *runtime_args],
                                         stdin=subprocess.DEVNULL)
                 while process.poll() is None:
                     if ready(kdir, args.host_key, args.workspace):
@@ -280,6 +327,10 @@ def supervise(args):
                     time.sleep(.2)
                 if process.returncode == 0:
                     return 0
+                if process.returncode == 2 and namespace:
+                    print(f'host {args.binary} refused its arguments in runtime {namespace!r}; a binary older than '
+                          'runtime namespaces rejects --runtime: run `bash install.sh` or set LORE_SESSION_HOST_BINARY',
+                          flush=True)
                 time.sleep(min(2 ** attempt * .2, 5))
             atomic(directory / 'supervisor-error.json', {'at': now(), 'error': 'host restart budget exhausted'})
             return 1
@@ -601,7 +652,7 @@ def operate_attempt(args, kdir, manifest):
     if args.verb == 'attach':
         if not live.get('tmux'):
             raise RuntimeError('session has no surviving tmux terminal to attach')
-        os.execvp('tmux', ['tmux', '-L', 'lore-tui', 'attach-session', '-t', live['tmux']])
+        os.execvp('tmux', ['tmux', '-L', RUNTIME.tmux_server(), 'attach-session', '-t', live['tmux']])
     if args.verb == 'wait':
         path = kdir / '_sessions/managed' / (manifest['handle'] + '.wait.json')
         with lock(path.with_suffix('.lock')):
@@ -675,6 +726,7 @@ def operate_attempt(args, kdir, manifest):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    RUNTIME.runtime_name()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('verb', choices=['start', 'inspect', 'attach', 'send', 'answer', 'peek', 'close', 'wait', '_supervise', '_source-owner'])
     parser.add_argument('handle', nargs='?')

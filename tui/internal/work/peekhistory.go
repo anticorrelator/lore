@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/anticorrelator/lore/tui/internal/config"
 )
 
 type HistoryCapture struct {
@@ -97,7 +99,7 @@ func CaptureTmuxHistory(name string, maxRows, maxBytes int) (HistoryCapture, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, tmuxBinary, "-L", tmuxServerLabel, "capture-pane", "-p", "-e", "-S", "-", "-t", name)
+	cmd := exec.CommandContext(ctx, tmuxBinary, "-L", config.TmuxServer(), "capture-pane", "-p", "-e", "-S", "-", "-t", name)
 	output := historyTailWriter{limit: maxBytes}
 	cmd.Stdout = &output
 	if err := cmd.Run(); err != nil {

@@ -22,7 +22,7 @@ type hostAllocation struct {
 }
 
 func (m model) hostAllocationPath(id string) string {
-	return filepath.Join(m.sessionsDir, "hosts", m.hostKey, "allocations", id+".json")
+	return filepath.Join(m.hostDir(), "allocations", id+".json")
 }
 func (m model) clearHostAllocation(id string) error {
 	err := os.Remove(m.hostAllocationPath(id))
@@ -40,7 +40,7 @@ func (m model) hostAllocationCheckpoint(id string, d work.SessionDescriptor) fun
 	}
 }
 func (m model) recoverHostAllocations() error {
-	paths, err := filepath.Glob(filepath.Join(m.sessionsDir, "hosts", m.hostKey, "allocations", "*.json"))
+	paths, err := filepath.Glob(filepath.Join(m.hostDir(), "allocations", "*.json"))
 	if err != nil {
 		return err
 	}

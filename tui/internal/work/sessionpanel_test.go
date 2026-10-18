@@ -9,6 +9,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/anticorrelator/lore/tui/internal/config"
 )
 
 func openedMirrorForTest(t *testing.T, state TmuxMirrorPaneState, rows []string) SessionPanelModel {
@@ -105,6 +107,7 @@ func TestMirrorSemanticKeyClasses(t *testing.T) {
 }
 
 func TestMirrorCleanupDetachesOnlyOwnedPipe(t *testing.T) {
+	t.Setenv(config.SessionRuntimeEnv, "")
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "tmux.log")
 	fake := filepath.Join(dir, "tmux")

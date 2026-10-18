@@ -20,8 +20,8 @@ import (
 )
 
 type hostOptions struct {
-	Key, KnowledgeDir, SourceDir, ReadyFile string
-	Idle                                    time.Duration
+	Key, KnowledgeDir, SourceDir, ReadyFile, Runtime string
+	Idle                                             time.Duration
 }
 
 func sessionHostRole(key string) string {
@@ -101,6 +101,9 @@ func canonicalHostDir(path string) (string, error) {
 	}
 	return p, nil
 }
+func (m model) hostDir() string {
+	return filepath.Join(config.SessionHostsDir(m.sessionsDir), m.hostKey)
+}
 func sessionHostMain(args []string) int {
 	fs := flag.NewFlagSet("session-host", flag.ContinueOnError)
 	var o hostOptions
@@ -110,11 +113,16 @@ func sessionHostMain(args []string) int {
 	fs.StringVar(&o.SourceDir, "source-dir", "", "canonical source checkout")
 	fs.StringVar(&o.ReadyFile, "ready-file", "", "ready metadata")
 	fs.Float64Var(&idle, "idle-timeout", 60, "idle timeout in seconds")
+	fs.StringVar(&o.Runtime, "runtime", "", "session runtime namespace; must match "+config.SessionRuntimeEnv)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() != 0 || o.Key == "" || strings.ContainsAny(o.Key, "/\\") || o.SourceDir == "" || o.KnowledgeDir == "" || !filepath.IsAbs(o.ReadyFile) || idle < 0 {
 		fmt.Fprintln(os.Stderr, "invalid session host arguments")
+		return 2
+	}
+	if namespace, _ := config.SessionRuntime(); o.Runtime != namespace {
+		fmt.Fprintf(os.Stderr, "session host --runtime %q does not match %s=%q\n", o.Runtime, config.SessionRuntimeEnv, namespace)
 		return 2
 	}
 	var err error

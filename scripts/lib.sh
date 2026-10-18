@@ -1499,6 +1499,25 @@ print(hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16])
 PYEOF
 }
 
+# --- Session runtime namespace ---
+
+# lore_tmux_server
+# Prints lore-tui, or lore-tui-<name> when LORE_SESSION_RUNTIME=<name>. An
+# invalid name fails instead of falling back, since the fallback is the
+# production server the namespace exists to stay off.
+lore_tmux_server() {
+  local name="${LORE_SESSION_RUNTIME:-}"
+  if [[ -z "$name" ]]; then
+    printf '%s\n' lore-tui
+    return 0
+  fi
+  if [[ ${#name} -gt 32 || -n "${name//[abcdefghijklmnopqrstuvwxyz0123456789-]/}" ]]; then
+    echo "LORE_SESSION_RUNTIME='$name' is not a valid runtime name (want [a-z0-9-]{1,32})" >&2
+    return 1
+  fi
+  printf 'lore-tui-%s\n' "$name"
+}
+
 # --- Owner liveness for a watcher ---
 
 # session_owner_alive <pid> <tmux_name> [tmux_server]
@@ -1516,12 +1535,13 @@ PYEOF
 # the journal during teardown, so pair a not-alive answer with a grace period and
 # one final authoritative read before acting on it.
 session_owner_alive() {
-  local pid="${1:-}" tmux_name="${2:-}" tmux_server="${3:-lore-tui}"
+  local pid="${1:-}" tmux_name="${2:-}" tmux_server="${3:-}"
   if [[ "$pid" =~ ^[0-9]+$ ]] && [[ "$pid" -gt 0 ]]; then
     kill -0 "$pid" 2>/dev/null && return 0
   fi
   if [[ -n "$tmux_name" ]] && command -v tmux >/dev/null 2>&1; then
-    tmux -L "${tmux_server:-lore-tui}" has-session -t "$tmux_name" >/dev/null 2>&1 && return 0
+    [[ -n "$tmux_server" ]] || tmux_server="$(lore_tmux_server)" || return 1
+    tmux -L "$tmux_server" has-session -t "$tmux_name" >/dev/null 2>&1 && return 0
   fi
   return 1
 }

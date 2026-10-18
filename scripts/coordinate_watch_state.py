@@ -4,6 +4,7 @@ import contextlib
 import datetime as dt
 import fcntl
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -14,6 +15,13 @@ import sys
 import tempfile
 import time
 import uuid
+
+
+def tmux_server():
+    spec = importlib.util.spec_from_file_location('session_runtime', Path(__file__).resolve().parent / 'session_runtime.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.tmux_server()
 
 
 def read(path, default=None):
@@ -108,7 +116,8 @@ def belongs(identity):
     if kind == 'pid':
         targets = {int(value)}
     elif kind == 'tmux':
-        result = subprocess.run(['tmux', '-L', identity.get('tmux_server', 'lore-tui'), 'list-panes', '-t', value, '-F', '#{pane_pid}'], capture_output=True, text=True, timeout=3)
+        server = identity['tmux_server'] if 'tmux_server' in identity else tmux_server()
+        result = subprocess.run(['tmux', '-L', server, 'list-panes', '-t', value, '-F', '#{pane_pid}'], capture_output=True, text=True, timeout=3)
         if result.returncode:
             return False
         targets = {int(p) for p in result.stdout.split() if p.isdigit()}

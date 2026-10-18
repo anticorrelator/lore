@@ -14,17 +14,13 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/anticorrelator/lore/tui/internal/config"
 )
 
 // tmuxBinary is resolved from PATH by exec at spawn time; TmuxAvailable's LookPath
 // probe is what gates every use, so a bare name is safe here.
 const tmuxBinary = "tmux"
-
-// tmuxServerLabel is the dedicated tmux server socket lore sessions live on
-// (`tmux -L lore-tui`), isolated from the user's default server so no user
-// tmux.conf option can invalidate the screen-state contract the injection/peek
-// stack was probed against.
-const tmuxServerLabel = "lore-tui"
 
 // tmuxHistoryLimit is the modest per-pane scrollback lore pins. Scrollback across
 // recovery is an accepted loss (reattach redraws the visible screen only), so this
@@ -54,7 +50,7 @@ type tmuxMirrorTransport struct {
 
 func tmuxMirrorOpenArgs(name, fifo string) []string {
 	return []string{
-		"-L", tmuxServerLabel,
+		"-L", config.TmuxServer(),
 		"display-message", "-p", "-t", name, tmuxMirrorStateFormat, ";",
 		"capture-pane", "-p", "-e", "-S", "-", "-t", name, ";",
 		"pipe-pane", "-O", "-t", name, "cat > " + fifo,
@@ -62,19 +58,19 @@ func tmuxMirrorOpenArgs(name, fifo string) []string {
 }
 
 func tmuxMirrorGeometryArgs(name string) []string {
-	return []string{"-L", tmuxServerLabel, "display-message", "-p", "-t", name, "#{pane_width} #{pane_height}"}
+	return []string{"-L", config.TmuxServer(), "display-message", "-p", "-t", name, "#{pane_width} #{pane_height}"}
 }
 
 func tmuxMirrorLiteralArgs(name, text string) []string {
-	return []string{"-L", tmuxServerLabel, "send-keys", "-t", name, "-l", text}
+	return []string{"-L", config.TmuxServer(), "send-keys", "-t", name, "-l", text}
 }
 
 func tmuxMirrorKeyArgs(name, key string) []string {
-	return []string{"-L", tmuxServerLabel, "send-keys", "-t", name, key}
+	return []string{"-L", config.TmuxServer(), "send-keys", "-t", name, key}
 }
 
 func tmuxMirrorDetachArgs(name string) []string {
-	return []string{"-L", tmuxServerLabel, "pipe-pane", "-t", name}
+	return []string{"-L", config.TmuxServer(), "pipe-pane", "-t", name}
 }
 
 func parseTmuxMirrorOpenOutput(out []byte) (TmuxMirrorPaneState, []string, error) {
@@ -418,7 +414,7 @@ func createTmuxSession(name, worktreeDir string, cols, rows int, env []string, h
 }
 
 func tmuxSessionArgs(name, worktreeDir string, cols, rows int, env []string, harnessBin string, harnessArgs []string) []string {
-	args := []string{"-L", tmuxServerLabel, "-f", "/dev/null"}
+	args := []string{"-L", config.TmuxServer(), "-f", "/dev/null"}
 	args = append(args, tmuxOptionPins()...)
 	args = append(args, tmuxRGBFeaturePin()...)
 	args = append(args, "new-session", "-d", "-s", name, "-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows), "-c", worktreeDir)
@@ -434,7 +430,7 @@ func tmuxSessionArgs(name, worktreeDir string, cols, rows int, env []string, har
 // process detaches the client and leaves the pane (harness) running — that is the
 // D8 quit-detach mechanism, not a session kill.
 func tmuxAttachCommand(name string) *exec.Cmd {
-	cmd := exec.Command(tmuxBinary, "-L", tmuxServerLabel, "attach-session", "-t", name)
+	cmd := exec.Command(tmuxBinary, "-L", config.TmuxServer(), "attach-session", "-t", name)
 	cmd.Env = os.Environ()
 	return cmd
 }
@@ -443,7 +439,7 @@ func tmuxAttachCommand(name string) *exec.Cmd {
 // used to reclaim a just-created detached session whose attach client failed to
 // start, so it is not left orphaned with no client and no registry row.
 func killTmuxSession(name string) {
-	_ = exec.Command(tmuxBinary, "-L", tmuxServerLabel, "kill-session", "-t", name).Run()
+	_ = exec.Command(tmuxBinary, "-L", config.TmuxServer(), "kill-session", "-t", name).Run()
 }
 
 // TmuxHasSession reports whether the named tmux session is still alive on the
@@ -453,14 +449,14 @@ func TmuxHasSession(name string) bool {
 	if name == "" {
 		return false
 	}
-	return exec.Command(tmuxBinary, "-L", tmuxServerLabel, "has-session", "-t", name).Run() == nil
+	return exec.Command(tmuxBinary, "-L", config.TmuxServer(), "has-session", "-t", name).Run() == nil
 }
 
 // tmuxPanePID re-queries the pane PID of a live session — used on adoption, where
 // the original spawn's captured pane PID died with the crashed TUI's memory but the
 // tmux session (and its harness) survived.
 func tmuxPanePID(name string) (int, error) {
-	out, err := exec.Command(tmuxBinary, "-L", tmuxServerLabel,
+	out, err := exec.Command(tmuxBinary, "-L", config.TmuxServer(),
 		"list-panes", "-t", name, "-F", "#{pane_pid}").Output()
 	if err != nil {
 		return 0, fmt.Errorf("tmux list-panes: %w", err)
@@ -484,7 +480,7 @@ func TmuxPanePID(name string) (int, error) { return tmuxPanePID(name) }
 // Recovery uses it to prove the surviving process still occupies its persisted
 // worktree before transferring ownership to a new TUI instance.
 func TmuxPaneCWD(name string) (string, error) {
-	out, err := exec.Command(tmuxBinary, "-L", tmuxServerLabel,
+	out, err := exec.Command(tmuxBinary, "-L", config.TmuxServer(),
 		"list-panes", "-t", name, "-F", "#{pane_current_path}").Output()
 	if err != nil {
 		return "", fmt.Errorf("tmux list-panes cwd: %w", err)
@@ -505,7 +501,7 @@ func captureTmuxPaneHistory(name string) ([]string, error) {
 	if name == "" {
 		return nil, fmt.Errorf("capture tmux history: empty session name")
 	}
-	out, err := exec.Command(tmuxBinary, "-L", tmuxServerLabel,
+	out, err := exec.Command(tmuxBinary, "-L", config.TmuxServer(),
 		"capture-pane", "-p", "-e", "-S", "-", "-t", name).Output()
 	if err != nil {
 		return nil, fmt.Errorf("tmux capture-pane: %w", err)

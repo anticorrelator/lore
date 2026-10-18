@@ -53,6 +53,22 @@ admits one runtime owner. Readiness is published only after recovery completes.
 The supervisor retries runtime failure with bounded backoff; a drained host exits
 after its idle timeout. No globally installed service is required.
 
+The host runs the first of these that exists:
+
+1. `LORE_SESSION_HOST_BINARY`, when set.
+2. The installed `~/.local/bin/lore-tui`, which `install.sh` builds and stamps
+   with the checkout's commit and commit time.
+3. A build of the lore checkout's `tui/` sources, cached under
+   `_sessions/bin/` and stamped the same way. The verb that starts the host
+   prints one line on stderr saying so; `bash install.sh` installs a binary and
+   ends the fallback. This build takes whatever is in the checkout, uncommitted
+   edits included.
+
+A running host keeps the binary it started with until it exits. The scripts
+always come from the checkout, so after pulling, they can be newer than the
+installed binary until `install.sh` runs again. A host that lacks a capability a
+request needs is refused at admission rather than handed the request.
+
 Registry rows with `role: "session-host"` and `host_key` belong to this lifecycle.
 Managed requests carry the host key so a new generation can resolve ownership.
 A normal TUI does not adopt these rows. Recovery is source-scoped and checks dead
@@ -60,6 +76,27 @@ process ownership without waiting for heartbeat expiry, including abandoned
 adoption claims. With tmux, a surviving interactive harness is adopted rather
 than relaunched. Without tmux, host death cannot preserve that process; the
 outcome must expose the loss. A transcript restart is not live-process recovery.
+
+## Runtime namespaces
+
+`LORE_SESSION_RUNTIME=<name>` (lowercase letters, digits and `-`, at most 32
+characters) runs a separate session runtime. Its tmux server is
+`lore-tui-<name>` rather than `lore-tui`, and its host state (supervisor, ready
+file, locks, host log, delivery and cleanup records) lives under
+`_sessions/runtimes/<name>/hosts/` rather than `_sessions/hosts/`. A host in a
+namespace therefore never shares a lock, supervisor or tmux server with the
+production runtime, and `lore session attach`, the coordinator watcher, and a
+visible `lore-tui` started with the same setting all use that namespace's
+server. Sessions a namespaced host launches inherit the setting. When the
+setting is unset or empty, everything runs exactly as before. An invalid name
+is refused rather than falling back to the production server.
+
+A namespace separates hosts, not knowledge stores: a namespaced host still reads
+the request queue, journal and instance registry of the store it runs against,
+so it can pick up requests meant for the production host. Run a development or
+test namespace against a scratch store (`LORE_KNOWLEDGE_DIR` pointing at a
+throwaway directory, as `tests/test_session_manager_integration.py` does), not
+against a store a production host serves.
 
 ## Delivery and observation
 
@@ -97,7 +134,8 @@ guards apply equally to visible and headless hosts.
 
 ## Durable storage and compatibility
 
-Under `_sessions/`, `hosts/<key>/` holds runtime readiness and supervisor state,
+Under `_sessions/`, `hosts/<key>/` holds runtime readiness and supervisor state
+(`runtimes/<name>/hosts/<key>/` in a namespace),
 `managed/<handle>.json` holds durable start intent, `start-keys.json` indexes keyed
 starts, and `receipts/<handle>/<request-id>.json` retains operation outcomes.
 Runtime delivery attempts are persisted before input. Mutable facade indexes are

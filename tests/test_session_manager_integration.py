@@ -1,9 +1,13 @@
 """Real host/CLI acceptance with fake coding tools; no model inference.
 
 Run with LORE_SESSION_HOST_BINARY pointing at the built session-host binary.
-Each test owns an isolated HOME, knowledge store, Git repository and tmux socket.
+Each test owns an isolated HOME, knowledge store, Git repository and tmux socket,
+and runs in the session runtime named by LORE_SESSION_RUNTIME (default: a
+per-process test runtime), so it never shares a tmux server or host state with
+the production runtime.
 """
 import concurrent.futures
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -15,6 +19,9 @@ import time
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
+_spec = importlib.util.spec_from_file_location("session_runtime", REPO / "scripts/session_runtime.py")
+session_runtime = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(session_runtime)
 FAKE_HARNESS = r'''#!/usr/bin/env python3
 import json, os, select, sys, time, tty
 from pathlib import Path
@@ -123,10 +130,14 @@ class ManagedSessionIntegration(unittest.TestCase):
             LORE_KNOWLEDGE_DIR=str(self.kdir), TMUX_TMPDIR=str(self.tmux_dir),
             PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
             LORE_FAKE_HARNESS_LOG=str(self.log), LORE_FAKE_STATE_DIR=str(self.state_dir),
-            LORE_SESSION_HOST_IDLE_TIMEOUT="2")
+            LORE_SESSION_HOST_IDLE_TIMEOUT="2",
+            LORE_SESSION_RUNTIME=os.environ.get("LORE_SESSION_RUNTIME") or "itest-" + str(os.getpid()))
         for key in list(self.env):
-            if key.startswith("LORE_SESSION_") and key not in ("LORE_SESSION_HOST_BINARY", "LORE_SESSION_HOST_IDLE_TIMEOUT"):
+            if key.startswith("LORE_SESSION_") and key not in (
+                    "LORE_SESSION_HOST_BINARY", "LORE_SESSION_HOST_IDLE_TIMEOUT", "LORE_SESSION_RUNTIME"):
                 del self.env[key]
+        self.tmux_server = session_runtime.tmux_server(self.env)
+        self.hosts = session_runtime.hosts_dir(self.kdir, self.env)
         self.env.pop("TMUX", None)
         self.run_command(["git", "init", "-b", "main"], self.source)
         self.run_command(["git", "config", "user.name", "Fixture"], self.source)
@@ -193,13 +204,13 @@ class ManagedSessionIntegration(unittest.TestCase):
                 pass
         # Stop only process IDs recorded inside this test's private store.
         for name in ("supervisor.json", "ready.json"):
-            for record in (self.kdir / "_sessions/hosts").glob("*/" + name):
+            for record in self.hosts.glob("*/" + name):
                 try:
                     os.kill(json.loads(record.read_text())["pid"], signal.SIGTERM)
                 except (FileNotFoundError, ProcessLookupError, KeyError):
                     pass
         # This socket namespace belongs only to this test, never the user's server.
-        subprocess.run(["tmux", "-L", "lore-tui", "kill-server"], env=self.env,
+        subprocess.run(["tmux", "-L", self.tmux_server, "kill-server"], env=self.env,
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # Allow a drained host/supervisor to exit before removing its state.
         time.sleep(3)
@@ -225,11 +236,23 @@ class ManagedSessionIntegration(unittest.TestCase):
         for record in started:
             self.assertFalse(Path(record["cwd"]).exists(), "close returned before worktree cleanup")
         self.assertEqual((self.source / "seed").read_text(), "unchanged\n")
-        self.until(lambda: not list((self.kdir / "_sessions/hosts").glob("*/ready.json")), timeout=20)
+        self.until(lambda: not list(self.hosts.glob("*/ready.json")), timeout=20)
         for value in starts:
             _, state = self.session("inspect", value["handle"])
             self.assertTrue(state["disposition"]["cleanup_confirmed"])
             self.assertEqual(state["state"], "closed")
+
+    def test_host_keeps_to_its_runtime(self):
+        handle = self.start("codex", "runtime")["handle"]
+        self.until(lambda: any(e["event"] == "started" for e in self.events()))
+        self.assertTrue(list(self.hosts.glob("*/ready.json")))
+        self.assertFalse((self.kdir / "_sessions/hosts").exists())
+        listed = self.run_command(["tmux", "-L", self.tmux_server, "list-sessions", "-F", "#{session_name}"])
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertTrue(listed.stdout.strip())
+        production = self.run_command(["tmux", "-L", "lore-tui", "list-sessions"])
+        self.assertNotEqual(production.returncode, 0, production.stdout)
+        self.session("close", handle)
 
     def test_peek_separates_input_activity_and_modal_evidence(self):
         for framework in ("claude-code", "codex", "opencode"):

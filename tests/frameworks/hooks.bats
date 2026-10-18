@@ -403,6 +403,20 @@ assert "--window 600" in cmd, cmd
 '
 }
 
+@test "coordinate arm defaults the owner's tmux server to the session runtime's" {
+  set_framework claude-code
+  LORE_SESSION_RUNTIME=dev run bash "$ARM_SH" --owner-tmux test-seat --render --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c '
+import json, sys
+cmd = json.load(sys.stdin)["hook_entry"]["hooks"][0]["command"]
+assert "--tmux-server lore-tui-dev " in cmd, cmd
+'
+  LORE_SESSION_RUNTIME=Not_Valid run bash "$ARM_SH" --owner-tmux test-seat --render --kdir "$TEST_KDIR" --json
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"LORE_SESSION_RUNTIME"* ]]
+}
+
 @test "coordinate arm installs into the named settings file and re-arms in place" {
   set_framework claude-code
   settings="$TEST_LORE_DATA_DIR/seat-settings.json"
