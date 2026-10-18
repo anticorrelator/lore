@@ -12,9 +12,9 @@
 #   Declares source_checkout — the checkout a session for this item must run in.
 #   This is the field's only writer, and it takes no path from the caller: the value
 #   comes from either the calling session's provenance or an explicitly named live
-#   instance's registry row, is resolved physically, and must match a live instance's
-#   project directory before it is written. Everything downstream treats the
-#   declaration as authoritative and never re-validates it.
+#   instance's registry row, is resolved physically, and must be a checkout of this
+#   store, which the store's session host serves, before it is written. Everything
+#   downstream treats the declaration as authoritative and never re-validates it.
 
 set -euo pipefail
 
@@ -339,28 +339,15 @@ Its instance predates checkout provenance; restart the instance and re-run."
 Restore that checkout, or re-run from a session in the clone this item should build in."
   fi
 
-  # Validate against the live registry before writing — the same preflight every
-  # other declared placement field gets. A declaration no live host would claim
-  # requests for is authoritative and unclaimable, and nothing downstream
-  # re-validates it. The store's session host claims requests carrying its key and
-  # a visible lore-tui claims unkeyed ones, so either serving the checkout counts.
-  STORE_HOST_KEY="$(store_host_key_for "$KNOWLEDGE_DIR")" || seed_fail "could not compute this store's session host key"
-  STORE_PLACEMENT="$(live_placement "$INSTANCES_DIR" "$STORE_HOST_KEY" "$SOURCE_CHECKOUT")" \
-    || seed_fail "could not read the live instance registry at $INSTANCES_DIR"
-  TUI_PLACEMENT="$(live_placement "$INSTANCES_DIR" "" "$SOURCE_CHECKOUT")" \
-    || seed_fail "could not read the live instance registry at $INSTANCES_DIR"
-  if ! printf '%s' "$STORE_PLACEMENT" | jq -e '.served' >/dev/null \
-      && ! printf '%s' "$TUI_PLACEMENT" | jq -e '.served' >/dev/null; then
-    LIVE_HOSTS="$( { printf '%s' "$STORE_PLACEMENT"; printf '%s' "$TUI_PLACEMENT"; } | jq -rs '[.[].servers[]] | .[] | "  " + .')"
-    WHY="$(printf '%s' "$STORE_PLACEMENT" | jq -r '.store_checkout_error // empty')"
-    [[ -z "$WHY" ]] || WHY="The store's session host serves only checkouts of this store, and $WHY.
-"
-    [[ -n "$LIVE_HOSTS" ]] || LIVE_HOSTS="  (none)"
-    STORE_HOST_DIR="$(store_host_dir_for "$KNOWLEDGE_DIR" 2>/dev/null || true)"
-    seed_fail "no live host would claim requests for '$SOURCE_CHECKOUT'.
-Live hosts (live window ${SESSION_INSTANCE_LIVENESS_TTL_SECONDS}s):
-$LIVE_HOSTS
-${WHY}Requests naming a checkout go to the store's session host, which 'lore session start' and 'lore session request' start when needed; its diagnostics are $STORE_HOST_DIR/host.log and $STORE_HOST_DIR/supervisor-error.json. Open lore-tui in that checkout instead, or re-run from a checkout of this store."
+  # Validate before writing: the declaration is authoritative and nothing
+  # downstream re-validates it. The store's session host claims every request and
+  # serves every checkout of its store, and 'lore session request' starts it when
+  # needed, so membership is the whole test; a declaration made while no host runs
+  # is still claimable.
+  if ! MEMBERSHIP_WHY="$(store_checkout_of "$KNOWLEDGE_DIR" "$SOURCE_CHECKOUT" 2>&1 >/dev/null)"; then
+    seed_fail "'$SOURCE_CHECKOUT' is not a checkout of this store: $MEMBERSHIP_WHY.
+The store's session host runs this item's sessions only in a checkout of this store,
+so declare one of those."
   fi
 fi
 

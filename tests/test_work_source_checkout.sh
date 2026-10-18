@@ -26,8 +26,7 @@ cp "$REPO_DIR/adapters/settings.template.json" "$TEST_HOME/.lore/config/settings
 
 # Every lore call runs in its own session runtime with a host binary that refuses
 # the store-host arguments, recorded as such, so ensure() fails at once instead of
-# starting a supervisor: a request then falls back to the live lore-tui serving
-# its checkout, as it does before 'bash install.sh' has rebuilt lore-tui.
+# starting a supervisor, as it does before 'bash install.sh' has rebuilt lore-tui.
 STUB_HOST="$TEST_HOME/bin/lore-tui-old"
 mkdir -p "$TEST_HOME/bin"
 printf '#!/bin/sh\nexit 2\n' > "$STUB_HOST"
@@ -59,6 +58,9 @@ PYEOF
 }
 session_runtime refuse "$KDIR" "$STUB_HOST"
 STORE_KEY="$(session_runtime key "$KDIR")"
+# The store is pinned, as a host started with LORE_KNOWLEDGE_DIR naming a scratch
+# store is, so a git checkout outside it belongs to it without resolution.
+session_runtime pin "$KDIR"
 
 assert_contains() {
   local label="$1" haystack="$2" needle="$3"
@@ -121,8 +123,9 @@ capture_failure() {
   set -e
 }
 
-mkdir -p "$KDIR/checkouts/live"
-LIVE_CHECKOUT="$(cd "$KDIR/checkouts/live" && pwd -P)"
+mkdir -p "$CHECKOUTS/live"
+git -C "$CHECKOUTS/live" init -q
+LIVE_CHECKOUT="$(cd "$CHECKOUTS/live" && pwd -P)"
 write_instance live-seat "$LIVE_CHECKOUT"
 
 # --- Happy path: no hosted-session environment is required ------------------
@@ -134,14 +137,14 @@ assert_contains "happy: command reports the source_checkout write" \
 assert_eq "happy: stores the named live instance's physical checkout" \
   "$(meta_checkout happy)" "$LIVE_CHECKOUT"
 
-REQUEST_OUTPUT=$(run_lore session request --type worker --slug happy--w9 \
-  --prefer-dir "$LIVE_CHECKOUT" --context probe --initiator agent 2>&1)
-assert_contains "happy: declared item permits the worker request" "$REQUEST_OUTPUT" \
-  "[session] Enqueued worker request"
-assert_contains "happy: a store host that cannot start leaves the row to the live lore-tui" "$REQUEST_OUTPUT" \
-  "store's session host is unavailable"
-assert_eq "happy: the fallback row carries no host key" \
-  "$(python3 -c 'import json,sys,glob; print([json.load(open(p)).get("host_key", "") for p in glob.glob(sys.argv[1] + "/*.json")])' "$KDIR/_sessions/requests/pending")" "['']"
+capture_failure session request --type worker --slug happy--w9 \
+  --prefer-dir "$LIVE_CHECKOUT" --context probe --initiator agent
+assert_eq "happy: a store host that cannot start refuses the request" "$CAPTURED_STATUS" "1"
+assert_contains "happy: the refusal leads with its repair" "$CAPTURED_OUTPUT" \
+  "Error: store host did not start; fix the error below, retry"
+assert_contains "happy: the refusal names the rebuild" "$CAPTURED_OUTPUT" "lore rebuild"
+assert_eq "happy: a live lore-tui no longer takes the row instead" \
+  "$(find "$KDIR/_sessions/requests/pending" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')" "0"
 
 # --- Explicit instance takes precedence over session provenance -------------
 
@@ -228,7 +231,6 @@ STORE_CHECKOUT="$CHECKOUTS/store-checkout"
 mkdir -p "$STORE_CHECKOUT"
 git -C "$STORE_CHECKOUT" init -q
 STORE_CHECKOUT="$(cd "$STORE_CHECKOUT" && pwd -P)"
-session_runtime pin "$KDIR"
 write_store_host() {
   printf '%s\n' "{\"name\":\"store-host\",\"pid\":$$,\"role\":\"session-host\",\"scope\":\"store\",\"host_key\":\"$STORE_KEY\",\"runtime\":\"$RUNTIME_NAME\",\"sessions\":$1}" \
     > "$KDIR/_sessions/instances/store-host.json"

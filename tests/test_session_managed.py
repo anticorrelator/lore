@@ -1,5 +1,10 @@
+import contextlib
 import importlib.util
+import io
+import json
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -302,6 +307,91 @@ class ManagedSessions(unittest.TestCase):
             self.assertTrue(m.held(self.kdir / 'lock'))
         self.assertFalse(m.held(self.kdir / 'lock'))
 
+
+
+class RequestRefusalTest(unittest.TestCase):
+    """lore session request refuses, with nothing enqueued, a request that names no
+    checkout (before ensuring anything) and one whose store host cannot be ensured;
+    under --json a refusal's only stdout is one JSON object carrying the whole text."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.kdir = self.root / 'store'
+        self.checkout = self.root / 'checkout'
+        self.checkout.mkdir()
+        (self.kdir / '_sessions').mkdir(parents=True)
+        self.data = self.root / 'data'
+        (self.data / 'config').mkdir(parents=True)
+        shutil.copy(ROOT / 'adapters/settings.template.json', self.data / 'config/settings.json')
+        env = {k: v for k, v in os.environ.items()
+               if k not in {'LORE_KNOWLEDGE_DIR', 'LORE_SESSION_RUNTIME'} and not k.startswith('LORE_SESSION_')}
+        env.update(LORE_DATA_DIR=str(self.data), LORE_SESSION_RUNTIME='request-refusal')
+        patcher = patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.diagnostics = m.host_dir(self.kdir, m.RUNTIME.store_host_key(self.kdir))
+
+    def request(self, *argv):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = m.request([*argv, '--kdir', str(self.kdir)])
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_a_request_that_names_no_checkout_is_refused_by_the_writer_before_any_ensure(self):
+        result = subprocess.run([sys.executable, str(ROOT / 'scripts/session-managed.py'), 'request', '--type', 'chat',
+                                 '--anywhere', '--kdir', str(self.kdir), '--json'], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(len(result.stdout.splitlines()), 1, result.stdout)
+        refusal = json.loads(result.stdout)
+        self.assertEqual(list(refusal), ['error'])
+        self.assertTrue(refusal['error'].startswith('request names no checkout; pass --prefer-dir <checkout>\n'))
+        self.assertFalse((m.RUNTIME.login_dir() / 'served.json').exists(), 'nothing may ensure a host for it')
+        self.assertFalse((self.kdir / '_sessions/requests').exists())
+
+    def test_ensure_failure_refuses_with_the_error_and_the_host_diagnostics(self):
+        with patch.object(m, 'ensure', side_effect=RuntimeError('the supervisor could not start')), \
+                patch.object(m.subprocess, 'call') as writer:
+            code, out, err = self.request('--type', 'chat', '--prefer-dir', str(self.checkout), '--json')
+        writer.assert_not_called()
+        self.assertEqual(code, 1)
+        self.assertEqual(err, '')
+        refusal = json.loads(out)
+        self.assertEqual(list(refusal), ['error'])
+        text = refusal['error']
+        lead = text.split('\n', 1)[0]
+        self.assertEqual(lead, 'store host did not start; fix the error below, retry')
+        self.assertLessEqual(len(lead.encode('ascii')), 55)
+        self.assertIn('the supervisor could not start', text)
+        self.assertIn(str(self.diagnostics / 'host.log'), text)
+        self.assertIn(str(self.diagnostics / 'supervisor-error.json'), text)
+        self.assertIn('Nothing was enqueued', text)
+
+        with patch.object(m, 'ensure', side_effect=RuntimeError('the supervisor could not start')):
+            code, out, err = self.request('--type', 'chat', '--prefer-dir', str(self.checkout))
+        self.assertEqual((code, out), (1, ''))
+        self.assertTrue(err.startswith('Error: store host did not start; fix the error below, retry\n'), err)
+
+    def test_a_host_that_keeps_withdrawing_is_a_refusal_not_a_fallback(self):
+        with patch.object(m, 'ensure', return_value={'instance_name': 'store-host'}), \
+                patch.object(m, 'ready', return_value=None), patch.object(m.subprocess, 'call') as writer:
+            code, out, _ = self.request('--type', 'chat', '--prefer-dir', str(self.checkout), '--json')
+        writer.assert_not_called()
+        self.assertEqual(code, 1)
+        self.assertTrue(json.loads(out)['error'].startswith('store host kept withdrawing; retry lore session request\n'))
+
+    def test_a_ready_host_gets_the_row_under_its_ensure_lock_with_its_key(self):
+        key = m.RUNTIME.store_host_key(self.kdir)
+        with patch.object(m, 'ensure', return_value={'instance_name': 'store-host'}), \
+                patch.object(m, 'ready', return_value={'instance_name': 'store-host'}), \
+                patch.object(m.subprocess, 'call', return_value=0) as writer:
+            code, _, _ = self.request('--type', 'chat', '--prefer-dir', str(self.checkout), '--json')
+        self.assertEqual(code, 0)
+        argv = writer.call_args.args[0]
+        self.assertTrue(argv[1].endswith('session-request.sh'))
+        self.assertEqual(argv[argv.index('--host-key') + 1], key)
+        self.assertNotIn('--store-host-unavailable', argv)
 
 if __name__ == '__main__':
     unittest.main()

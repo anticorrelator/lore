@@ -501,15 +501,14 @@ resolve_physical_dir() {
 
 # live_placement <instances-dir> <host-key> <dir> [ttl-seconds]
 # The one placement check every enqueue-side reader shares. It prints JSON naming
-# the live registry rows that would claim a request carrying <host-key> (empty for
-# an unkeyed request, which only an unkeyed visible lore-tui claims), whether one
-# of them serves <dir>, and why <dir> is not a checkout of this store when that is
-# the reason. A row serves <dir> when it runs in exactly that checkout, or when it
-# is the store's session host (scope "store") and <dir> belongs to the store: the
-# top level of a git checkout outside the store directory that resolve-repo.sh,
-# run without LORE_KNOWLEDGE_DIR, resolves to this store (skipped when the store
-# host is pinned to the store). Counting only rows that can claim is what makes
-# "served" mean "will be claimed". <dir> may be empty to list the claimants.
+# the live store session host holding <host-key> (scope "store"), the one process
+# that claims a row carrying that key, whether it serves <dir>, and why <dir> is
+# not a checkout of this store when that is the reason. The store host serves
+# <dir> when <dir> belongs to the store: the top level of a git checkout outside
+# the store directory that resolve-repo.sh, run without LORE_KNOWLEDGE_DIR,
+# resolves to this store (skipped when the store host is pinned to the store).
+# Counting only the host that can claim is what makes "served" mean "will be
+# claimed". <dir> may be empty to list the claimant.
 live_placement() {
   python3 "$LORE_LIB_DIR/session-admission.py" placement "$1" "$2" "$3" \
     "${4:-$SESSION_INSTANCE_LIVENESS_TTL_SECONDS}"

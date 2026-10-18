@@ -1564,7 +1564,7 @@ REQUEST_VALUE_FLAGS = frozenset({
     '--type', '--slug', '--target', '--initiator', '--auto-close', '--requested-by', '--context', '--packet',
     '--position', '--route', '--session-route', '--min-vintage', '--track', '--model', '--framework',
     '--routing-source', '--worktree-identity', '--worktree-id', '--execution-dir', '--prefer-dir', '--request-id',
-    '--host-key', '--kdir', '--store-host-unavailable'})
+    '--host-key', '--kdir'})
 LEGACY_ENSURE_SECONDS = 10
 INSTANCE_LIVENESS_SECONDS = 30
 
@@ -1583,11 +1583,10 @@ def request_options(argv):
 
 
 def request_names_checkout(kdir, options):
-    """Whether the writer will place this request in a checkout: a work item that
-    declares an existing one, or an explicit preference. A targeted request names
-    an instance instead and keeps its unkeyed path."""
-    if '--target' in options:
-        return False
+    """Whether the writer would place this request in a checkout: a work item that
+    declares an existing one, or, when its work item declares none, an explicit
+    --prefer-dir or --prefer-cwd. This mirrors the writer's own derivation, so a
+    request it would refuse for naming no checkout never starts a host."""
     slug = options.get('--slug') or ''
     if slug:
         worker = re.fullmatch(r'(.+)--w[0-9]+', slug)
@@ -1599,34 +1598,52 @@ def request_names_checkout(kdir, options):
     return '--prefer-dir' in options or '--prefer-cwd' in options
 
 
+def refuse_request(argv, text):
+    """A refusal of lore session request: under --json its only stdout is one JSON
+    object carrying the whole text, otherwise the text goes to stderr."""
+    if '--json' in argv:
+        print(json.dumps({'error': text}))
+    else:
+        print('Error: ' + text, file=sys.stderr)
+    return 1
+
+
 def request(argv):
-    """lore session request: send a request that names a checkout to the store's
-    session host, ensured first, with the writer run under the host's ensure.lock
-    so the host cannot withdraw before the row lands. Any other request keeps the
-    unkeyed path a visible lore-tui claims."""
+    """lore session request: ensure the store's session host, then run the writer
+    under the host's ensure.lock, so the host cannot withdraw before the row lands.
+    A request the writer refuses whatever the host's state (one that names no
+    checkout, or a malformed one) goes straight to the writer and starts nothing."""
     writer = ['bash', str(SCRIPTS / 'session-request.sh')]
     options = request_options(argv)
-    if options.keys() & {'-h', '--help', '--host-key', '--request-id', '--store-host-unavailable'}:
+    if options.keys() & {'-h', '--help', '--host-key', '--request-id'}:
         os.execv('/bin/bash', [*writer, *argv])
     try:
         kdir = Path(options['--kdir']).resolve() if options.get('--kdir') else resolve()
     except RuntimeError:
         os.execv('/bin/bash', [*writer, *argv])
-    if not request_names_checkout(kdir, options):
+    if '--target' in options or not request_names_checkout(kdir, options):
         os.execv('/bin/bash', [*writer, *argv])
     argv = [*argv, '--kdir', str(kdir)]
     key = RUNTIME.store_host_key(kdir)
-    unavailable = 'the store host withdrew its readiness each time the request was about to be written'
+    directory = host_dir(kdir, key)
+    diagnostics = f'{directory / "host.log"} and {directory / "supervisor-error.json"}'
     for _ in range(3):
         try:
             ensure(kdir)
         except (RuntimeError, OSError) as error:
-            unavailable = str(error)
-            break
-        with lock(host_dir(kdir, key) / 'ensure.lock'):
+            return refuse_request(argv, (
+                'store host did not start; fix the error below, retry\n'
+                f'This store\'s session host claims every request, and it could not be started or '
+                f'reached:\n  {error}\nIts diagnostics are {diagnostics}. When the installed lore-tui '
+                'is older than these scripts, run lore rebuild (or bash install.sh) first. '
+                'Nothing was enqueued.'))
+        with lock(directory / 'ensure.lock'):
             if ready(kdir, key):
                 return subprocess.call([*writer, *argv, '--host-key', key])
-    return subprocess.call([*writer, *argv, '--store-host-unavailable', unavailable])
+    return refuse_request(argv, (
+        'store host kept withdrawing; retry lore session request\n'
+        'This store\'s session host withdrew its readiness each time the request was about to '
+        f'be written, three times. Its diagnostics are {diagnostics}. Nothing was enqueued.'))
 
 
 def live_owner(kdir, handle):

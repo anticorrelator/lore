@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Publish requests only to runtimes that can interpret their payload, and answer
-which live runtimes would claim a request for a checkout.
+"""Publish requests only when the store's session host can interpret their payload,
+and answer whether that live host would claim a request for a checkout.
 
   session-admission.py <instances-dir> <ttl>          admit the row on stdin
   session-admission.py placement <instances-dir> <host-key> <dir> [<ttl>]
@@ -104,32 +104,26 @@ class Membership:
         return self.result
 
 
-def serves(row, directory, membership):
-    """Whether a live registry row serves a checkout: it runs in exactly that
-    checkout, or it is the store host and the checkout belongs to the store."""
-    if row.get('scope') == 'store':
-        return membership.check()[0] is not None
-    project_dir = row.get('project_dir')
-    return bool(project_dir) and os.path.realpath(project_dir) == os.path.realpath(directory)
+def store_hosts(instances, host_key, ttl, now):
+    """The live store-scope rows holding host_key: the store's session host, the
+    one process that claims a row carrying that key."""
+    if not host_key:
+        return
+    for row in live_rows(instances, ttl, now):
+        if row.get('scope') == 'store' and row.get('host_key') == host_key:
+            yield row
 
 
 def placement(instances, host_key, directory, ttl=30, clock=None):
-    """The live rows that would claim a request keyed host_key ('' for an unkeyed
-    request, which only an unkeyed TUI claims) and whether one serves directory."""
+    """Whether the live store host holding host_key would claim a request for
+    directory: it serves every checkout that belongs to its store."""
     now = time.time() if clock is None else clock
     kdir = Path(instances).resolve().parent.parent
     membership = Membership(kdir, directory)
     served_by, servers = [], []
-    for row in live_rows(instances, ttl, now):
-        if row.get('host_key', '') != host_key:
-            continue
-        if row.get('scope') == 'store':
-            servers.append(f"{row['name']}: the store's session host, for every checkout of this store")
-        elif row.get('project_dir'):
-            servers.append(f"{row['name']}: {row['project_dir']}")
-        else:
-            continue
-        if directory and serves(row, directory, membership):
+    for row in store_hosts(instances, host_key, ttl, now):
+        servers.append(f"{row['name']}: the store's session host, for every checkout of this store")
+        if directory and membership.check()[0] is not None:
             served_by.append(row['name'])
     error = membership.result[1] if membership.result else None
     return dict(served=bool(served_by), served_by=served_by, servers=servers, store_checkout_error=error)
@@ -144,15 +138,20 @@ def admit(row, instances, ttl=30, clock=None):
     now = time.time() if clock is None else clock
     required = row.get('required_project_dir')
     membership = Membership(Path(instances).resolve().parent.parent, required)
+    needs = POSITION_CAPABILITY if position else 'a known build vintage >= ' + str(floor)
+    hosts = list(store_hosts(instances, row.get('host_key'), ttl, now))
+    if not hosts:
+        raise RuntimeError(
+            'no live store host: run lore session ensure, then retry\n'
+            f'This request needs {needs} from the store\'s session host, and no live host holds '
+            'its key. Nothing was enqueued.')
+    if required and membership.check()[0] is None:
+        raise RuntimeError(
+            'declared checkout is not in this store: re-declare it\n'
+            f'The store\'s session host cannot serve {required}: {membership.check()[1]}. From inside a '
+            'checkout of this store, run lore work source-checkout <slug>. Nothing was enqueued.')
     candidates = []
-    for host in live_rows(instances, ttl, now):
-        name = host['name']
-        if row.get('target_instance') and row['target_instance'] != name:
-            continue
-        if host.get('host_key', '') != row.get('host_key', ''):
-            continue
-        if required and not serves(host, required, membership):
-            continue
+    for host in hosts:
         capabilities = host.get('runtime_capabilities', [])
         if position and (not isinstance(capabilities, list) or not all(isinstance(v, str) for v in capabilities)
                          or POSITION_CAPABILITY not in capabilities):
@@ -161,17 +160,13 @@ def admit(row, instances, ttl=30, clock=None):
             continue
         candidates.append(host)
     if not candidates:
-        needs = POSITION_CAPABILITY if position else 'known build vintage >= ' + str(floor)
-        placement_name = row.get('target_instance') or required or 'requested placement'
-        raise RuntimeError(f'no live compatible runtime for {placement_name}: requires {needs}; start a compatible host in that placement and retry; nothing was enqueued')
-    prefer = row.get('prefer_project_dir')
-    candidates.sort(key=lambda h: (h.get('project_dir') != prefer if prefer else False, h['name']))
-    # A keyed row is claimed only by the host holding that key, so a store host
-    # needs no name pin; pinning one would strand the row if the host restarts
-    # under a new instance name before claiming. Legacy readers ignore new fields
-    # but already honor the name pin, so every other row keeps it.
-    if not (candidates[0].get('scope') == 'store' and row.get('host_key')):
-        row['target_instance'] = candidates[0]['name']
+        raise RuntimeError(
+            'store host is too old: run lore rebuild, then retry\n'
+            f'This request needs {needs}, and the live store host ({hosts[0]["name"]}) does not '
+            'provide it. After lore rebuild (or bash install.sh) installs a current lore-tui, the '
+            'supervisor restarts the host on it. Nothing was enqueued.')
+    # A keyed row is claimed only by the host holding that key, so it needs no
+    # name pin, which would strand it when the host restarts under a new name.
     if position:
         row['required_runtime_capabilities'] = [POSITION_CAPABILITY]
     return row
@@ -197,5 +192,7 @@ def main(argv):
 if __name__ == '__main__':
     try:
         sys.exit(main(sys.argv[1:]))
-    except (RuntimeError, ValueError, OSError, IndexError) as error:
+    except RuntimeError as error:
+        sys.exit(str(error))
+    except (ValueError, OSError, IndexError) as error:
         sys.exit('session admission: ' + str(error))
