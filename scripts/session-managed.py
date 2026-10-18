@@ -1646,6 +1646,29 @@ def request(argv):
         f'be written, three times. Its diagnostics are {diagnostics}. Nothing was enqueued.'))
 
 
+def ensure_verb(argv):
+    """lore session ensure: bring up this store's session host and print its status."""
+    parser = argparse.ArgumentParser(prog='lore session ensure', description=(
+        "Start this store's session host if it is not running, and print its status as JSON. "
+        "A failure exits 1 with the reason; under --json the reason is a JSON object on stdout."))
+    parser.add_argument('--kdir', help='the knowledge store (default: the one this directory resolves to)')
+    parser.add_argument('--if-work', action='store_true', help=(
+        'only when the host has work: requests keyed to it, unsent managed starts, or a dead '
+        'registry row whose sessions it would adopt; otherwise print {"ensured": false}'))
+    parser.add_argument('--json', action='store_true', help='report a failure as a JSON object on stdout')
+    args = parser.parse_args(argv)
+    kdir = Path(args.kdir).resolve() if args.kdir else resolve()
+    # The supervisor's own predicate, so a caller never starts a host the
+    # supervisor would let idle straight back out.
+    if args.if_work and not store_work(kdir):
+        print(json.dumps({'ensured': False}))
+        return 0
+    status = ensure(kdir)
+    print(json.dumps({'ensured': True, 'instance_name': status.get('instance_name'),
+                      'host_key': status.get('host_key'), 'scope': status.get('scope')}))
+    return 0
+
+
 def live_owner(kdir, handle):
     """The live registry row that lists a session, by name."""
     slug = 'chat-' + handle[len('chat:'):] if handle.startswith('chat:') else handle
@@ -1690,6 +1713,8 @@ def main(argv=None):
     RUNTIME.runtime_name()
     if argv[:1] == ['request']:
         return request(argv[1:])
+    if argv[:1] == ['ensure']:
+        return ensure_verb(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('verb', choices=['start', 'inspect', 'attach', 'send', 'answer', 'peek', 'close', 'wait',
                                          '_supervise', '_self-check', '_source-owner'])

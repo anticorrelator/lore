@@ -309,6 +309,95 @@ class ManagedSessions(unittest.TestCase):
 
 
 
+class EnsureVerbTest(unittest.TestCase):
+    """lore session ensure brings up the store's session host and prints its status;
+    with --if-work it does so only when the supervisor's own store_work finds work."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.data = self.root / 'data'
+        self.kdir = self.data / 'repos/github.com/acme/widget'
+        (self.kdir / '_sessions/instances').mkdir(parents=True)
+        env = {k: v for k, v in os.environ.items() if k != 'LORE_KNOWLEDGE_DIR' and not k.startswith('LORE_SESSION_')}
+        env.update(LORE_DATA_DIR=str(self.data), LORE_SESSION_RUNTIME='ensure-verb')
+        patcher = patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.key = m.RUNTIME.store_host_key(self.kdir)
+
+    def main(self, *argv):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = m.main(['ensure', *argv, '--kdir', str(self.kdir)])
+        return code, stdout.getvalue()
+
+    def dead_row(self, name, **fields):
+        row = dict(name=name, pid=2 ** 22 + 7, repo=m.repo_identifier(self.kdir), runtime=m.RUNTIME.runtime_name(),
+                   project_dir=str(self.root), sessions=[{'slug': 'old', 'type': 'chat', 'tmux': 'lore-' + name + '-old'}])
+        row.update(fields)
+        (self.kdir / '_sessions/instances' / (name + '.json')).write_text(json.dumps(row))
+
+    def test_ensure_prints_the_ready_host_status(self):
+        status = dict(instance_name='store-host', host_key=self.key, scope='store', pid=1, ready=True)
+        with patch.object(m, 'ensure', return_value=status) as ensure:
+            code, out = self.main()
+        ensure.assert_called_once_with(self.kdir)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out), {'ensured': True, 'instance_name': 'store-host', 'host_key': self.key,
+                                           'scope': 'store'})
+
+    def test_if_work_ensures_nothing_when_the_host_has_no_work(self):
+        self.dead_row('other-runtime', runtime='someone-else')
+        self.dead_row('other-repo', repo='elsewhere/thing')
+        self.dead_row('host-row', role='session-host')
+        live = dict(name='live', pid=os.getpid(), repo=m.repo_identifier(self.kdir), runtime=m.RUNTIME.runtime_name(),
+                    sessions=[{'slug': 'running'}])
+        (self.kdir / '_sessions/instances/live.json').write_text(json.dumps(live))
+        (self.kdir / '_sessions/requests/pending').mkdir(parents=True)
+        (self.kdir / '_sessions/requests/pending/r1.json').write_text(json.dumps({'host_key': 'another-runtime-key'}))
+        with patch.object(m, 'ensure', side_effect=AssertionError('nothing should start a host')):
+            code, out = self.main('--if-work')
+        self.assertEqual((code, json.loads(out)), (0, {'ensured': False}))
+
+    def test_if_work_ensures_for_a_dead_window_row_and_for_queued_work(self):
+        status = dict(instance_name='store-host', host_key=self.key, scope='store')
+        self.dead_row('old-window')
+        with patch.object(m, 'ensure', return_value=status) as ensure:
+            code, out = self.main('--if-work', '--json')
+        ensure.assert_called_once_with(self.kdir)
+        self.assertEqual((code, json.loads(out)['ensured']), (0, True))
+        (self.kdir / '_sessions/instances/old-window.json').unlink()
+        (self.kdir / '_sessions/requests/pending').mkdir(parents=True)
+        (self.kdir / '_sessions/requests/pending/r1.json').write_text(json.dumps({'host_key': self.key}))
+        with patch.object(m, 'ensure', return_value=status) as ensure:
+            self.assertEqual(self.main('--if-work')[0], 0)
+        ensure.assert_called_once()
+
+    def test_ensure_refuses_inside_a_sandbox_as_ensure_does(self):
+        with patch.object(m.RUNTIME, 'sandbox_reason', return_value='a test sandbox'), \
+                patch.object(m.subprocess, 'Popen') as launch:
+            with self.assertRaisesRegex(RuntimeError, 'refusing to start the session supervisor from inside a sandbox'):
+                self.main()
+        launch.assert_not_called()
+
+    def test_a_failed_ensure_exits_1_with_the_error(self):
+        stub = self.root / 'lore-tui-old'
+        stub.write_text('#!/bin/sh\nexit 2\n')
+        stub.chmod(0o755)
+        m.atomic(m.host_dir(self.kdir, self.key) / 'supervisor-error.json', dict(
+            schema_version=1, at=m.now(), store=str(self.kdir), host_key=self.key, exit_code=2, binary=str(stub),
+            binary_identity=m.file_identity(stub), error='test host binary refuses the store-host arguments'))
+        env = dict(os.environ, LORE_SESSION_HOST_BINARY=str(stub))
+        argv = [sys.executable, str(ROOT / 'scripts/session-managed.py'), 'ensure', '--kdir', str(self.kdir)]
+        result = subprocess.run([*argv, '--json'], text=True, capture_output=True, env=env)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('lore rebuild', json.loads(result.stdout)['error'])
+        result = subprocess.run(argv, text=True, capture_output=True, env=env)
+        self.assertEqual((result.returncode, result.stdout), (1, ''))
+        self.assertIn('cannot start', result.stderr)
+
 class RequestRefusalTest(unittest.TestCase):
     """lore session request refuses, with nothing enqueued, a request that names no
     checkout (before ensuring anything) and one whose store host cannot be ensured;

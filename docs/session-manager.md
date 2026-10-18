@@ -67,6 +67,18 @@ a host or work for 60 seconds (`LORE_SESSION_SUPERVISOR_QUIET_SECONDS`). Its exi
 decision and `ensure`'s registration take the same lock, so a request that
 arrives as it exits either keeps it running or starts a new one.
 
+`lore session ensure [--kdir <store>] [--if-work] [--json]` runs `ensure` on its
+own and prints the host's status as a JSON object (`ensured`, `instance_name`,
+`host_key`, `scope`). It is the repair a writer refusal names when no store host
+is live. With `--if-work` it starts the host only when the supervisor's own work
+predicate finds something the host would act on (requests keyed to it, unsent
+managed starts, or a dead registry row of this runtime and repo whose sessions it
+would adopt) and otherwise prints `{"ensured": false}`, so a lore-tui that sees
+sessions listed only by a dead registry row can bring their host back without
+starting one that would idle straight out. A failure exits 1 with the reason,
+which `--json` prints as a JSON object on stdout; inside a sandbox it refuses
+as `ensure` does.
+
 A store host's key is a hash of the store's resolved path and the runtime name.
 Requests and managed starts carry that key, so only that store's host in that
 runtime claims them. Its readiness file and registry row say `scope: "store"`

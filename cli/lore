@@ -714,8 +714,12 @@ Managed handles also use send, answer, peek, wait, and close below. These resolv
 current ownership and await outcomes; close includes cleanup disposition.
 
 Raw substrate and shared verbs:
-  request   Enqueue a session spawn request into requests/pending/; one that
-            names a checkout goes to the store's session host, started if needed
+  request   Enqueue a session spawn request into requests/pending/ for the
+            store's session host, started if needed; every request names the
+            checkout it runs in
+  ensure    Start the store's session host if it is not running and print its
+            status as JSON; --if-work starts it only when it has work (queued
+            requests, unsent starts, or sessions to adopt)
   list      Render live instances plus the pending/claimed/close-request queues
   events    Read the events.jsonl journal from an opaque byte-offset cursor
   close     Request teardown of a live session (<slug> | --self), or cancel a
@@ -1105,6 +1109,9 @@ cmd_session() {
       ;;
     request)
       exec python3 "$SCRIPTS_DIR/session-managed.py" request "$@"
+      ;;
+    ensure)
+      exec python3 "$SCRIPTS_DIR/session-managed.py" ensure "$@"
       ;;
     list)
       exec "$SCRIPTS_DIR/session-list.sh" "$@"
