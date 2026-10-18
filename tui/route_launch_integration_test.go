@@ -276,7 +276,7 @@ func TestWindowLaunchClaimsAndLaunchesFrozenRoute(t *testing.T) {
 	if l := m.launches["direct"]; l.requestID != rows[0].RequestID {
 		t.Fatalf("the window follows request %q, the writer enqueued %q", l.requestID, rows[0].RequestID)
 	}
-	claimed, err := session.QueueTickForStoreHost(f.sessions, "store-host", routeAwareVintage, hostKey, session.StoreScope{KnowledgeDir: f.kdir, Pinned: true}, map[string]bool{"store-host": true}, func(string) bool { return true }, nil, time.Now().Add(20*time.Second), session.ReclaimAfter, nil)
+	claimed, err := session.QueueTickForStoreHost(f.sessions, "store-host", routeAwareVintage, hostKey, session.StoreScope{KnowledgeDir: f.kdir, Pinned: true}, map[string]bool{"store-host": true}, func(string) bool { return true }, nil, time.Now(), session.ReclaimAfter, nil)
 	if err != nil || claimed.Claimed == nil {
 		t.Fatalf("claim=%#v err=%v", claimed.Claimed, err)
 	}

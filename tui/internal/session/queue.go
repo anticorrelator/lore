@@ -26,14 +26,6 @@ const ReclaimAfter = 60 * time.Second
 // is abandoned rather than claimed again; the journal row is its dead-letter.
 const MaxAttempts = 3
 
-// PreferMatchGrace is how long a pending row carrying prefer_project_dir stays
-// claimable only by an instance whose normalized project dir matches it, keyed
-// on requested_at. After the window every instance may claim it. Three 5s poll
-// ticks: one tick guarantees every live matching instance saw the row, two more
-// absorb a lost race and tick jitter. Well under ReclaimAfter, so a row that no
-// matching instance ever claims still dispatches with bounded added latency.
-const PreferMatchGrace = 15 * time.Second
-
 // Reclaim reason strings carried on request_reclaimed journal rows.
 const (
 	ReasonStaleInstance   = "stale_instance"
@@ -41,9 +33,9 @@ const (
 )
 
 // Placement stance tokens name the strongest placement axis the enqueuing writer
-// put on a request row, in descending precedence: a row carrying both a required
-// dir and a target instance is StanceRequiredDir. The token is descriptive — the
-// claim filter keys on its presence, never on its value (see requiredDirOK).
+// put on a request row, in descending precedence. The current writer writes only
+// StanceRequiredDir and StancePreferredDir; rows from an older writer may carry
+// the others. The token is descriptive: the claim pass never reads it.
 const (
 	StanceRequiredDir  = "required_dir"
 	StanceTargeted     = "targeted"
@@ -84,12 +76,10 @@ type Request struct {
 	RoutingOverrides map[string]string `json:"routing_overrides,omitempty"`
 
 	// MinVintage is an optional minimum build vintage (ISO 8601 UTC timestamp) the
-	// claiming instance must meet: a request never targets an instance whose
-	// BuildTime is older. Filtered read-side, mirroring TargetInstance — the only
-	// difference is the comparison (temporal >= vs string ==). Absent
-	// (omit-when-empty) imposes no requirement; an instance of unknown vintage
-	// cannot satisfy an explicit floor. Pointer so
-	// absent stays distinct from an explicit value.
+	// claiming host must meet: a host whose BuildTime is older leaves the row
+	// pending. Filtered read-side at claim. Absent (omit-when-empty) imposes no
+	// requirement; a host of unknown vintage cannot satisfy an explicit floor.
+	// Pointer so absent stays distinct from an explicit value.
 	MinVintage                  *string  `json:"min_vintage,omitempty"`
 	RequiredRuntimeCapabilities []string `json:"required_runtime_capabilities,omitempty"`
 
@@ -122,36 +112,27 @@ type Request struct {
 	// coordinated writer. They are optional only for rolling compatibility and
 	// must be consumed all-or-nothing: WorktreeID names the manager registry row,
 	// while ExecutionDir is the exact child cwd validated against that row and
-	// WorktreeIdentity. PreferProjectDir remains claim timing only.
+	// WorktreeIdentity. Neither selects the source checkout; Checkout does.
 	WorktreeID   *string `json:"worktree_id,omitempty"`
 	ExecutionDir *string `json:"execution_dir,omitempty"`
 
-	// PreferProjectDir is a soft routing preference: a physically-resolved project
-	// directory an instance is preferred to claim from. Unlike TargetInstance and
-	// MinVintage (hard read-side filters), this only delays other instances — the
-	// prefer_ name carries the softness. An instance whose normalized project dir
-	// equals it claims immediately; any other instance may claim only after
-	// PreferMatchGrace measured from requested_at (see claimableBy). Absent
-	// (omit-when-empty) leaves claim timing unchanged. Pointer so absent stays
-	// distinct from an explicit value.
+	// PreferProjectDir is the physically-resolved checkout the caller named with
+	// --prefer-dir or --prefer-cwd. The session is seeded from it when the row
+	// carries no RequiredProjectDir (see Checkout). Absent (omit-when-empty) when
+	// the caller named none. Pointer so absent stays distinct from an explicit
+	// value.
 	PreferProjectDir *string `json:"prefer_project_dir,omitempty"`
 
-	// RequiredProjectDir is a hard placement filter: the physically-resolved
-	// project directory this session must be seeded from. An instance whose
-	// normalized project dir does not equal it may never claim the row — unlike
-	// PreferProjectDir, which only delays. It is enforced only on a row that also
-	// carries PlacementStance; see requiredDirOK. Absent (omit-when-empty) leaves
-	// claim eligibility unchanged. Pointer so absent stays distinct from an
-	// explicit value.
+	// RequiredProjectDir is the physically-resolved checkout the row's work item
+	// declares. It wins over PreferProjectDir in Checkout. Absent
+	// (omit-when-empty) when the row names no declared checkout. Pointer so absent
+	// stays distinct from an explicit value.
 	RequiredProjectDir *string `json:"required_project_dir,omitempty"`
 
-	// PlacementStance names the strongest placement axis on this row —
-	// StanceRequiredDir, StanceTargeted, StancePreferredDir or StanceAny. Its
-	// presence is what arms RequiredProjectDir: a row without it was enqueued
-	// before either field existed, and is claimed under the older rules. The value
-	// is carried for the journal, so a recorded request states its stance instead
-	// of leaving the absence of other fields to imply it. Pointer so absent stays
-	// distinct from an explicit value.
+	// PlacementStance names the strongest placement axis on this row (see the
+	// Stance tokens). It is carried for the journal, so a recorded request states
+	// its stance instead of leaving the absence of other fields to imply it.
+	// Pointer so absent stays distinct from an explicit value.
 	PlacementStance *string `json:"placement_stance,omitempty"`
 
 	// RequiredTargetRef is the branch the declared source checkout was on when the
@@ -201,7 +182,8 @@ func (r Request) SessionSlug() string {
 	return "chat-" + strings.ToLower(suffix)
 }
 
-// TargetValue returns the target instance or "" for "any instance".
+// TargetValue returns the instance the row was addressed to, or "" when it
+// names none.
 func (r Request) TargetValue() string {
 	if r.TargetInstance == nil {
 		return ""
@@ -288,13 +270,6 @@ func (r Request) Checkout() string {
 		return dir
 	}
 	return r.PreferProjectDirValue()
-}
-
-// HasPlacementStance reports whether the row carries a placement stance at all,
-// including an explicit empty one. This is the pre-feature discriminator: a row
-// without a stance was written before the placement fields existed.
-func (r Request) HasPlacementStance() bool {
-	return r.PlacementStance != nil
 }
 
 // RequiredTargetRefValue returns the required source branch or "" when absent.
@@ -516,8 +491,8 @@ func AbandonPending(sessionsDir, id string) error {
 	return err
 }
 
-// TransitionEvent names one durable queue transition QueueTick performed, so the
-// caller can emit the matching journal row after the fact.
+// TransitionEvent names one durable queue transition QueueTickForStoreHost
+// performed, so the caller can emit the matching journal row after the fact.
 type TransitionEvent struct {
 	Slug        string
 	SessionType string
@@ -526,9 +501,9 @@ type TransitionEvent struct {
 	Reason      string // reclaim/abandon reason; "" when not applicable
 }
 
-// QueueTickResult reports every durable change one QueueTick made. The caller
-// journals Reclaimed/Abandoned, then journals `claimed` and spawns from Claimed
-// when it is non-nil.
+// QueueTickResult reports every durable change one QueueTickForStoreHost pass
+// made. The caller journals Reclaimed/Abandoned, then journals `claimed` and
+// spawns from Claimed when it is non-nil.
 type QueueTickResult struct {
 	Reclaimed   []TransitionEvent
 	Abandoned   []TransitionEvent
@@ -536,75 +511,39 @@ type QueueTickResult struct {
 	Diagnostics []Diagnostic
 }
 
-// QueueTick performs one queue maintenance pass against the substrate at
-// sessionsDir on behalf of instance myName:
+// QueueTickForStoreHost performs one queue pass for the store host myName, which
+// holds hostKey and serves every checkout of one store. It reads only rows
+// carrying hostKey, and claims such a row whatever instance it names:
 //
 //  1. Reclaim sweep: claimed rows whose claim never completed (missing
-//     claimed_by/claimed_at, file older than reclaimAfter) or whose claimer is
-//     no longer live (claimed_at older than reclaimAfter) are returned to
-//     pending.
-//  2. Claim/abandon: pending rows are filtered by targeting (target == myName or
-//     any) and by the implement→hasPlanDoc gate; a row that has already reached
-//     MaxAttempts is abandoned instead of claimed. The first eligible row is
-//     claimed by atomic rename and its claim metadata is written.
+//     claimed_by/claimed_at, file older than reclaimAfter), whose claimer is no
+//     longer live (claimed_at older than reclaimAfter), or whose claimer is a
+//     dead predecessor of this host are returned to pending.
+//  2. Claim/abandon: a pending row is skipped while it needs a runtime
+//     capability this build lacks, a vintage this host does not meet, or a
+//     retry backoff that has not elapsed. A row that has reached MaxAttempts is
+//     abandoned instead of claimed. An implement row waits for its plan doc, and
+//     a row whose slug is already live here waits for it to free. Before the
+//     claim, scope refuses a row whose checkout does not belong to the store or
+//     that names none, and admit runs after that check; a refusal archives the
+//     row, unless it is retryable, which leaves the row pending. The first
+//     eligible row is claimed by atomic rename and its claim metadata is written.
 //
 // Every step's durable state change completes before it is reported, so the
 // caller's journal append (which follows) can never precede the state it
 // records. liveInstances is the set of instance names with fresh registry
 // files; hasPlanDoc reports whether a slug has a plan doc (implement gate);
 // slugLive reports whether a slug already has a live/in-flight session on this
-// instance (the eviction guard: claiming such a row would silently replace a
+// host (the eviction guard: claiming such a row would silently replace a
 // running session, so the request is left pending until the slug frees). A nil
-// slugLive imposes no such gate. myVintage is this instance's build vintage
-// (BuildTime, ISO 8601 UTC), used to filter out requests whose min_vintage this
-// instance does not meet; "" means vintage-unknown, which cannot satisfy an explicit floor.
-// myProjectDir is this instance's normalized (physically-resolved) project dir,
-// used to honor a row's prefer_project_dir grace window and to enforce its
-// required_project_dir; "" behaves as an unknown dir that matches nothing (a
-// preferring row defers past its grace, a requiring row is never claimed).
-func QueueTick(
-	sessionsDir, myName, myVintage, myProjectDir string,
-	liveInstances map[string]bool,
-	hasPlanDoc func(slug string) bool,
-	slugLive func(slug string) bool,
-	now time.Time,
-	reclaimAfter time.Duration,
-) (QueueTickResult, error) {
-	return QueueTickForHost(sessionsDir, myName, myVintage, myProjectDir, "", liveInstances, hasPlanDoc, slugLive, now, reclaimAfter)
-}
-
-func QueueTickForHost(sessionsDir, myName, myVintage, myProjectDir, hostKey string, liveInstances map[string]bool, hasPlanDoc func(string) bool, slugLive func(string) bool, now time.Time, reclaimAfter time.Duration) (QueueTickResult, error) {
-	return QueueTickForHostAdmission(sessionsDir, myName, myVintage, myProjectDir, hostKey, liveInstances, hasPlanDoc, slugLive, now, reclaimAfter, nil)
-}
-
-// QueueTickForHostAdmission checks the executing host before acquiring a claim.
-func QueueTickForHostAdmission(sessionsDir, myName, myVintage, myProjectDir, hostKey string, liveInstances map[string]bool, hasPlanDoc func(string) bool, slugLive func(string) bool, now time.Time, reclaimAfter time.Duration, admit func(Request) error) (QueueTickResult, error) {
-	return queueTick(sessionsDir, myName, myVintage, myProjectDir, hostKey, false, liveInstances, hasPlanDoc, slugLive, now, reclaimAfter, admit)
-}
-
-// QueueTickForStoreHost is the queue pass of a host that serves every checkout
-// of one store. It claims only rows carrying its key. The host has no project
-// dir of its own, so a row's checkout is never compared with one: before the
-// claim, scope refuses a row whose checkout does not belong to the store or that
-// names none, and the prefer_project_dir grace is skipped because no other
-// claimant can take a row carrying this key. admit runs after that check.
+// slugLive imposes no such gate. myVintage is this host's build vintage
+// (BuildTime, ISO 8601 UTC); "" means vintage-unknown, which cannot satisfy an
+// explicit floor.
 func QueueTickForStoreHost(sessionsDir, myName, myVintage, hostKey string, scope StoreScope, liveInstances map[string]bool, hasPlanDoc func(string) bool, slugLive func(string) bool, now time.Time, reclaimAfter time.Duration, admit func(Request) error) (QueueTickResult, error) {
-	if hostKey == "" {
-		return QueueTickResult{}, errors.New("a store host claims only rows carrying its host key, and has none")
-	}
-	return queueTick(sessionsDir, myName, myVintage, "", hostKey, true, liveInstances, hasPlanDoc, slugLive, now, reclaimAfter, func(req Request) error {
-		if _, err := scope.Checkout(req); err != nil {
-			return err
-		}
-		if admit == nil {
-			return nil
-		}
-		return admit(req)
-	})
-}
-
-func queueTick(sessionsDir, myName, myVintage, myProjectDir, hostKey string, storeScope bool, liveInstances map[string]bool, hasPlanDoc func(string) bool, slugLive func(string) bool, now time.Time, reclaimAfter time.Duration, admit func(Request) error) (QueueTickResult, error) {
 	var res QueueTickResult
+	if hostKey == "" {
+		return res, errors.New("a store host claims only rows carrying its host key, and has none")
+	}
 	var err error
 	res.Abandoned, err = recoverRejectedPending(sessionsDir)
 	if err != nil {
@@ -618,7 +557,7 @@ func queueTick(sessionsDir, myName, myVintage, myProjectDir, hostKey string, sto
 			continue
 		}
 		reason, reclaim := reclaimReason(row, liveInstances, now, reclaimAfter)
-		if hostKey != "" && row.Request.ClaimedBy != nil && *row.Request.ClaimedBy != myName && !liveInstances[*row.Request.ClaimedBy] {
+		if row.Request.ClaimedBy != nil && *row.Request.ClaimedBy != myName && !liveInstances[*row.Request.ClaimedBy] {
 			reason, reclaim = "host-predecessor-dead", true
 		}
 		if !reclaim {
@@ -641,10 +580,7 @@ func queueTick(sessionsDir, myName, myVintage, myProjectDir, hostKey string, sto
 		if req.HostKey != hostKey {
 			continue
 		}
-		if hostKey != "" {
-			req.TargetInstance = StrPtr(myName)
-		}
-		if !claimable(req, myName, myVintage, myProjectDir, storeScope, now) {
+		if !claimable(req, myVintage, now) {
 			continue
 		}
 		if req.Attempts >= MaxAttempts {
@@ -671,24 +607,26 @@ func queueTick(sessionsDir, myName, myVintage, myProjectDir, hostKey string, sto
 			continue // eviction guard: a session for this slug is already live here;
 			// claiming would silently replace it, so leave the row pending until it frees
 		}
-		if admit != nil {
-			if err := admit(req); err != nil {
-				reason := "host admission: " + err.Error()
-				var temporary interface{ Retryable() bool }
-				if errors.As(err, &temporary) && temporary.Retryable() {
-					res.Diagnostics = append(res.Diagnostics, Diagnostic{Source: "session-admission", Path: pendingPath(sessionsDir, req.RequestID), Message: reason})
-					continue
-				}
-				req.LastError = &reason
-				won, archiveErr := ArchiveRejectedPending(sessionsDir, req)
-				if archiveErr != nil {
-					return res, archiveErr
-				}
-				if won {
-					res.Abandoned = append(res.Abandoned, TransitionEvent{RequestID: req.RequestID, Reason: reason, Slug: req.SessionSlug(), SessionType: req.Type, Initiator: req.Initiator})
-				}
+		_, refusal := scope.Checkout(req)
+		if refusal == nil && admit != nil {
+			refusal = admit(req)
+		}
+		if refusal != nil {
+			reason := "host admission: " + refusal.Error()
+			var temporary interface{ Retryable() bool }
+			if errors.As(refusal, &temporary) && temporary.Retryable() {
+				res.Diagnostics = append(res.Diagnostics, Diagnostic{Source: "session-admission", Path: pendingPath(sessionsDir, req.RequestID), Message: reason})
 				continue
 			}
+			req.LastError = &reason
+			won, archiveErr := ArchiveRejectedPending(sessionsDir, req)
+			if archiveErr != nil {
+				return res, archiveErr
+			}
+			if won {
+				res.Abandoned = append(res.Abandoned, TransitionEvent{RequestID: req.RequestID, Reason: reason, Slug: req.SessionSlug(), SessionType: req.Type, Initiator: req.Initiator})
+			}
+			continue
 		}
 		won, err := ClaimRequest(sessionsDir, req.RequestID)
 		if err != nil {
@@ -708,21 +646,11 @@ func queueTick(sessionsDir, myName, myVintage, myProjectDir, hostKey string, sto
 	return res, nil
 }
 
-// claimableBy reports whether an instance may attempt this pending row: a row is
-// claimable when its target is this instance or unset (any) AND this instance's
-// vintage satisfies any min_vintage requirement AND this instance's project dir
-// satisfies any required_project_dir AND the row's prefer_project_dir grace does
-// not currently defer this instance. Targeting is string equality, vintage a
-// temporal comparison, the requirement string equality, and the preference a
-// timing window — all read-side, no writer, no per-instance attempt state.
-func claimableBy(req Request, myName, myVintage, myProjectDir string, now time.Time) bool {
-	return claimable(req, myName, myVintage, myProjectDir, false, now)
-}
-
-// claimable is claimableBy for either kind of claimant. A store host has no
-// project dir to hold a row's placement against; its admission check decides
-// whether the row's checkout belongs to the store instead.
-func claimable(req Request, myName, myVintage, myProjectDir string, storeScope bool, now time.Time) bool {
+// claimable reports whether a host of build vintage myVintage may attempt this
+// pending row at time now: the build supports every runtime capability the row
+// requires, an option-bearing route meets a known vintage, the host satisfies
+// any min_vintage floor, and a retried row has waited out its backoff.
+func claimable(req Request, myVintage string, now time.Time) bool {
 	for _, required := range req.RequiredRuntimeCapabilities {
 		supported := false
 		for _, capability := range RuntimeCapabilities() {
@@ -734,19 +662,12 @@ func claimable(req Request, myName, myVintage, myProjectDir string, storeScope b
 			return false
 		}
 	}
-	target := req.TargetValue()
-	if target != "" && target != myName {
-		return false
-	}
 	if req.Route != nil && len(req.Route.Options) > 0 {
 		if _, err := time.Parse("2006-01-02T15:04:05Z", myVintage); err != nil {
 			return false
 		}
 	}
 	if !vintageOK(req.MinVintageValue(), myVintage) {
-		return false
-	}
-	if !storeScope && !requiredDirOK(req, myProjectDir) {
 		return false
 	}
 	if req.Attempts > 0 && req.LastAttemptAt != nil {
@@ -757,7 +678,7 @@ func claimable(req Request, myName, myVintage, myProjectDir string, storeScope b
 			}
 		}
 	}
-	return storeScope || preferMatchOK(req, myProjectDir, now)
+	return true
 }
 
 // StoreScope is what a store host needs to decide whether a row's checkout
@@ -837,46 +758,6 @@ func (s StoreScope) Checkout(req Request) (string, error) {
 		return "", fmt.Errorf("checkout %q belongs to knowledge store %s, not %s", named, resolved, store)
 	}
 	return dir, nil
-}
-
-// requiredDirOK reports whether an instance whose normalized project dir is
-// myProjectDir may claim a row carrying required_project_dir. The requirement is
-// enforced only on a row that also carries a placement stance: a row without one
-// was enqueued before either field existed, and keeping it on the old rules is
-// what stops an upgrade from stranding every request already in flight.
-//
-// Unlike the prefer_project_dir window this never expires, so a row no instance
-// matches stays pending rather than dispatching to some other checkout. Nothing
-// here reports that outcome — a greedy per-instance claim loop has no point at
-// which "every instance declined" is observable — so a requirement no live
-// instance can serve is refused at enqueue instead.
-func requiredDirOK(req Request, myProjectDir string) bool {
-	required := req.RequiredProjectDirValue()
-	if required == "" || !req.HasPlacementStance() {
-		return true
-	}
-	return required == myProjectDir
-}
-
-// preferMatchOK reports whether an instance whose normalized project dir is
-// myProjectDir may claim a pending row at time now. A row with no
-// prefer_project_dir, or one whose preference equals this instance's dir, is
-// claimable immediately. Otherwise the instance must wait out PreferMatchGrace
-// measured from requested_at, giving a matching instance first refusal. An
-// unparseable requested_at also passes immediately — the additive-degradation
-// posture: the preference only ever delays a claim, never blocks one outright,
-// so an old binary that never sets myProjectDir still dispatches every row
-// (matching rows after the grace, everything else at once).
-func preferMatchOK(req Request, myProjectDir string, now time.Time) bool {
-	prefer := req.PreferProjectDirValue()
-	if prefer == "" || prefer == myProjectDir {
-		return true
-	}
-	requestedAt, ok := parseVintage(req.RequestedAt)
-	if !ok {
-		return true
-	}
-	return now.Sub(requestedAt) > PreferMatchGrace
 }
 
 // vintageOK requires known, parseable runtime evidence when a floor is present.
