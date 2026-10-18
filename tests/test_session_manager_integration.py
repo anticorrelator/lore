@@ -604,6 +604,12 @@ class ManagedSessionIntegration(RuntimeFixture, unittest.TestCase):
         (self.state_dir / handle).write_text("settled")
         peek = self.peek_activity(handle, "idle")
         self.assertEqual(peek["observation"]["activity"], "idle", peek)
+        # A peek computes its observation on demand, while the host journals the
+        # settle from its own observation tick, so the event can land after a
+        # cursor taken now and the watch would report it as a match.
+        journal = self.kdir / "_sessions/events.jsonl"
+        self.until(lambda: any(json.loads(line).get("event") == "needs_input" and json.loads(line).get("slug") == handle
+                               for line in journal.read_text().splitlines() if line))
         cursor = self.run_command([str(REPO / "cli/lore"), "session", "events", "--cursor-only"]).stdout.strip()
         args = [str(REPO / "cli/lore"), "coordinate", "watch", "--compact", "--owner-pid", str(os.getpid()),
                 "--timeout", "1", "--pending-stale", "0", "--json"]
