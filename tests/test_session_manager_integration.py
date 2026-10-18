@@ -755,9 +755,14 @@ class LoginRuntimeIntegration(RuntimeFixture, unittest.TestCase):
         return slug
 
     def declare_checkout(self, kdir, item, checkout):
-        status = self.ensure_host(kdir)
-        result = self.lore("work", "source-checkout", item, "--from-instance", status["instance_name"],
-                           "--json", cwd=checkout)
+        # The host withdraws two idle seconds after it is ready, which can fall
+        # before the declaration reads its registry row; ensure() brings it back.
+        for _ in range(3):
+            status = self.ensure_host(kdir)
+            result = self.lore("work", "source-checkout", item, "--from-instance", status["instance_name"],
+                               "--json", cwd=checkout)
+            if result.returncode == 0:
+                break
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(read_json(kdir / "_work" / item / "_meta.json")["source_checkout"], str(checkout))
 
