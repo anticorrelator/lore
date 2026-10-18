@@ -256,6 +256,34 @@ EOF
   board_refuses_without_running "$bin" "lore-tui is not installed — run lore rebuild"
 }
 
+@test "rebuild stamps the build identity install.sh stamps" {
+  local bin="$TEST_ROOT/go-bin" args_file="$TEST_ROOT/go.args"
+  mkdir -p "$bin"
+  cat > "$bin/go" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  env) [[ "$2" == GOOS ]] && echo darwin || echo arm64 ;;
+  build)
+    printf '%s\n' "$@" > "$GO_ARGS"
+    while [[ $# -gt 0 ]]; do
+      if [[ "$1" == -o ]]; then mkdir -p "$(dirname "$2")"; : > "$2"; fi
+      shift
+    done
+    ;;
+esac
+EOF
+  chmod +x "$bin/go"
+  HOME="$TEST_HOME" PATH="$bin:$PATH" GO_ARGS="$args_file" run bash "$LORE" rebuild
+  [ "$status" -eq 0 ]
+  local sha when
+  sha="$(git -C "$REPO_DIR" rev-parse --short HEAD)"
+  when="$(TZ=UTC git -C "$REPO_DIR" show -s --date=format-local:'%Y-%m-%dT%H:%M:%SZ' --format='%cd' HEAD)"
+  [[ -n "$sha" && -n "$when" ]]
+  grep -qxF -- "-ldflags" "$args_file"
+  grep -qxF -- "-X main.buildSHA=$sha -X main.buildTime=$when" "$args_file"
+  [[ -e "$TEST_HOME/.local/bin/lore-tui" ]]
+}
+
 @test "coordinate --help lists every verb and returns promptly" {
   # The usage heredoc cites sibling verbs in backticks. Were it unquoted, those
   # would be command substitutions and printing the help would run a watcher —

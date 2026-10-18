@@ -2496,14 +2496,19 @@ case "$1" in
       echo "Error: $_ghostty_missing" >&2
       exit 1
     fi
+    # The same build identity install.sh stamps, so a rebuilt binary reports
+    # its commit time to the build-time floors session admission checks.
+    BUILD_SHA="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+    BUILD_TIME="$(TZ=UTC git -C "$REPO_DIR" show -s --date=format-local:'%Y-%m-%dT%H:%M:%SZ' --format='%cd' HEAD 2>/dev/null || true)"
+    TUI_LDFLAGS="-X main.buildSHA=$BUILD_SHA -X main.buildTime=$BUILD_TIME"
     if [[ -n "$TUI_BUILD_TAGS" ]]; then
-      echo "Building lore-tui (-tags $TUI_BUILD_TAGS)..."
+      echo "Building lore-tui (-tags $TUI_BUILD_TAGS, build ${BUILD_SHA:-dev})..."
     else
-      echo "Building lore-tui..."
+      echo "Building lore-tui (build ${BUILD_SHA:-dev})..."
     fi
     (cd "$TUI_DIR" && CGO_ENABLED=1 \
       PKG_CONFIG="$(tui_ghostty_pkg_config_shim "$TUI_DIR")" \
-      go build ${TUI_BUILD_TAGS:+-tags "$TUI_BUILD_TAGS"} -o "$HOME/.local/bin/lore-tui" .)
+      go build ${TUI_BUILD_TAGS:+-tags "$TUI_BUILD_TAGS"} -ldflags "$TUI_LDFLAGS" -o "$HOME/.local/bin/lore-tui" .)
     echo "Installed: ~/.local/bin/lore-tui"
     ;;
   *)
