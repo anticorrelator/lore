@@ -2,7 +2,9 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -788,5 +790,235 @@ func TestReadRowRejectsUnknownCanonicalRouteFieldAndBadProjection(t *testing.T) 
 		if _, diagnostic, ok := readRow(path, "test"); ok || diagnostic == nil {
 			t.Fatalf("%s malformed row accepted", name)
 		}
+	}
+}
+
+// storeFixture is a knowledge store under a staged LORE_DATA_DIR together with
+// two checkouts that resolve to it and one that resolves to another store.
+type storeFixture struct {
+	store, one, two, foreign string
+	scope                    StoreScope
+}
+
+func newStoreFixture(t *testing.T) storeFixture {
+	t.Helper()
+	stageRouteScripts(t)
+	t.Setenv("LORE_KNOWLEDGE_DIR", "")
+	os.Unsetenv("LORE_KNOWLEDGE_DIR")
+	data := os.Getenv("LORE_DATA_DIR")
+	store := filepath.Join(data, "repos", "example.com", "acme", "proj")
+	if err := os.MkdirAll(store, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	f := storeFixture{
+		store:   store,
+		one:     gitCheckout(t, filepath.Join(root, "one", "proj"), "https://example.com/acme/proj.git"),
+		two:     gitCheckout(t, filepath.Join(root, "two", "proj-clone"), "git@example.com:acme/proj.git"),
+		foreign: gitCheckout(t, filepath.Join(root, "other", "thing"), "https://example.com/acme/thing.git"),
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.scope = StoreScope{KnowledgeDir: store, Resolver: filepath.Join(wd, "..", "..", "..", "scripts", "resolve-repo.sh")}
+	return f
+}
+
+func gitCheckout(t *testing.T, dir, remote string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"init", "-q", "-b", "main"}, {"remote", "add", "origin", remote}} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	return dir
+}
+
+func writeRequest(t *testing.T, dir string, req Request) {
+	t.Helper()
+	req.Framework, req.Model = strp("claude-code"), strp("fixture-model")
+	if err := WritePending(dir, req); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStoreScopeCheckoutFollowsTheStoreDefinition(t *testing.T) {
+	f := newStoreFixture(t)
+	sub := filepath.Join(f.one, "sub")
+	plain := filepath.Join(t.TempDir(), "plain")
+	link := filepath.Join(t.TempDir(), "link")
+	for _, dir := range []string{sub, plain} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(f.one, link); err != nil {
+		t.Fatal(err)
+	}
+	sessionTree := gitCheckout(t, filepath.Join(f.store, "_sessions", "worktrees", "epoch"), "https://example.com/acme/proj.git")
+	coordinationTree := gitCheckout(t, filepath.Join(f.store, "_coordination", "worktrees", "trees", "wt"), "https://example.com/acme/proj.git")
+	required := func(dir string) Request {
+		return Request{RequiredProjectDir: strp(dir), PlacementStance: strp(StanceRequiredDir)}
+	}
+	normalized := config.NormalizeProjectDir
+
+	for name, tc := range map[string]struct {
+		req     Request
+		pinned  bool
+		want    string
+		refusal string
+	}{
+		"required checkout":        {req: required(f.one), want: normalized(f.one)},
+		"preferred second clone":   {req: Request{PreferProjectDir: strp(f.two)}, want: normalized(f.two)},
+		"required wins":            {req: Request{RequiredProjectDir: strp(f.two), PreferProjectDir: strp(f.foreign)}, want: normalized(f.two)},
+		"checkout through symlink": {req: required(link), want: normalized(f.one)},
+		"foreign checkout":         {req: required(f.foreign), refusal: "belongs to knowledge store"},
+		"names no checkout":        {req: Request{PlacementStance: strp(StanceAny)}, refusal: "names no checkout"},
+		"missing checkout":         {req: required(filepath.Join(t.TempDir(), "gone")), refusal: "does not exist"},
+		"relative checkout":        {req: required("proj"), refusal: "not an absolute path"},
+		"subdirectory":             {req: required(sub), refusal: "not the top level"},
+		"not a git checkout":       {req: required(plain), refusal: "not a git checkout"},
+		"session worktree":         {req: required(sessionTree), refusal: "lies inside knowledge store"},
+		"coordination worktree":    {req: required(coordinationTree), refusal: "lies inside knowledge store"},
+		"pinned foreign checkout":  {req: required(f.foreign), pinned: true, want: normalized(f.foreign)},
+		"pinned session worktree":  {req: required(sessionTree), pinned: true, refusal: "lies inside knowledge store"},
+		"pinned subdirectory":      {req: required(sub), pinned: true, refusal: "not the top level"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			scope := f.scope
+			scope.Pinned = tc.pinned
+			got, err := scope.Checkout(tc.req)
+			if tc.refusal != "" {
+				var temporary interface{ Retryable() bool }
+				if err == nil || !strings.Contains(err.Error(), tc.refusal) || errors.As(err, &temporary) {
+					t.Fatalf("Checkout = %q, %v; want a refusal naming %q", got, err, tc.refusal)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("Checkout = %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+
+	// The resolution runs without LORE_KNOWLEDGE_DIR, which would otherwise
+	// answer every directory with whatever store it names.
+	t.Setenv("LORE_KNOWLEDGE_DIR", f.store)
+	if _, err := f.scope.Checkout(required(f.foreign)); err == nil {
+		t.Fatal("a LORE_KNOWLEDGE_DIR naming the store admitted a foreign checkout")
+	}
+	t.Setenv("LORE_KNOWLEDGE_DIR", filepath.Join(t.TempDir(), "elsewhere"))
+	if got, err := f.scope.Checkout(required(f.one)); err != nil || got != normalized(f.one) {
+		t.Fatalf("a LORE_KNOWLEDGE_DIR naming another store refused the store's checkout: %q %v", got, err)
+	}
+
+	// A resolver that cannot run is the host's failure, not the row's.
+	broken := f.scope
+	broken.Resolver = filepath.Join(t.TempDir(), "missing-resolve-repo.sh")
+	_, err := broken.Checkout(required(f.one))
+	var temporary interface{ Retryable() bool }
+	if !errors.As(err, &temporary) || !temporary.Retryable() {
+		t.Fatalf("resolver failure = %v, want a retryable admission error", err)
+	}
+}
+
+func TestQueueTickForStoreHostClaimsKeyedRowsAcrossCheckouts(t *testing.T) {
+	f := newStoreFixture(t)
+	dir := t.TempDir()
+	const key = "storekey0123456789abcdef"
+	now := time.Now().UTC()
+	requested := now.Format("2006-01-02T15:04:05Z")
+	writeRequest(t, dir, Request{RequestID: "r1", HostKey: key, Type: "spec", Slug: strp("alpha"), Initiator: "agent", RequestedAt: requested,
+		RequiredProjectDir: strp(f.one), PlacementStance: strp(StanceRequiredDir)})
+	// A fresh preference is not deferred: no other claimant can take a keyed row.
+	writeRequest(t, dir, Request{RequestID: "r2", HostKey: key, Type: "spec", Slug: strp("beta"), Initiator: "agent", RequestedAt: requested,
+		PreferProjectDir: strp(f.two), PlacementStance: strp(StancePreferredDir)})
+	writeRequest(t, dir, Request{RequestID: "r3", Type: "spec", Slug: strp("gamma"), Initiator: "agent", RequestedAt: requested,
+		RequiredProjectDir: strp(f.one), PlacementStance: strp(StanceRequiredDir)})
+	writeRequest(t, dir, Request{RequestID: "r4", HostKey: "anotherstorekey000000000", Type: "spec", Slug: strp("delta"), Initiator: "agent", RequestedAt: requested,
+		RequiredProjectDir: strp(f.one), PlacementStance: strp(StanceRequiredDir)})
+
+	live := map[string]bool{"host": true}
+	var claimed []Request
+	for tick := 0; tick < 4; tick++ {
+		res, err := QueueTickForStoreHost(dir, "host", "", key, f.scope, live, noPlan, nil, now, ReclaimAfter, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Abandoned) != 0 {
+			t.Fatalf("tick %d abandoned %+v", tick, res.Abandoned)
+		}
+		if res.Claimed != nil {
+			claimed = append(claimed, *res.Claimed)
+		}
+	}
+	if len(claimed) != 2 || claimed[0].RequestID != "r1" || claimed[1].RequestID != "r2" {
+		t.Fatalf("claimed %+v, want r1 then r2", claimed)
+	}
+	if claimed[0].Checkout() != f.one || claimed[1].Checkout() != f.two {
+		t.Fatalf("claimed rows lost their checkouts: %q %q", claimed[0].Checkout(), claimed[1].Checkout())
+	}
+	pending := map[string]bool{}
+	for _, req := range ScanPending(dir) {
+		pending[req.RequestID] = true
+	}
+	if len(pending) != 2 || !pending["r3"] || !pending["r4"] {
+		t.Fatalf("store host touched rows outside its key: pending %v", pending)
+	}
+	if _, err := QueueTickForStoreHost(dir, "host", "", "", f.scope, live, noPlan, nil, now, ReclaimAfter, nil); err == nil {
+		t.Fatal("a store host without a key was allowed to claim")
+	}
+}
+
+func TestQueueTickForStoreHostArchivesRowsNamingNoCheckoutOfItsStore(t *testing.T) {
+	f := newStoreFixture(t)
+	dir := t.TempDir()
+	const key = "storekey0123456789abcdef"
+	now := time.Now().UTC()
+	writeRequest(t, dir, Request{RequestID: "foreign", HostKey: key, Type: "worker", Slug: strp("item--w1"), Initiator: "agent",
+		RequiredProjectDir: strp(f.foreign), PlacementStance: strp(StanceRequiredDir)})
+	writeRequest(t, dir, Request{RequestID: "none", HostKey: key, Type: "chat", Slug: strp("chat-1"), Initiator: "agent", PlacementStance: strp(StanceAny)})
+	admitted := 0
+	res, err := QueueTickForStoreHost(dir, "host", "", key, f.scope, map[string]bool{"host": true}, noPlan, nil, now, ReclaimAfter, func(Request) error {
+		admitted++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Claimed != nil || admitted != 0 {
+		t.Fatalf("refused rows reached the claim: claimed %+v, admitted %d", res.Claimed, admitted)
+	}
+	reasons := map[string]string{}
+	for _, ev := range res.Abandoned {
+		reasons[ev.RequestID] = ev.Reason
+	}
+	if !strings.Contains(reasons["foreign"], "belongs to knowledge store") || !strings.Contains(reasons["none"], "names no checkout") {
+		t.Fatalf("abandon reasons %v", reasons)
+	}
+	for id := range reasons {
+		if _, err := os.Stat(filepath.Join(dir, "requests", "abandoned", id+".json")); err != nil {
+			t.Fatalf("refused row %s not archived: %v", id, err)
+		}
+	}
+	if rows := ScanPending(dir); len(rows) != 0 {
+		t.Fatalf("refused rows left pending: %+v", rows)
+	}
+
+	// A host that cannot run its resolver keeps the row for a later pass.
+	broken := f.scope
+	broken.Resolver = filepath.Join(t.TempDir(), "missing-resolve-repo.sh")
+	writeRequest(t, dir, Request{RequestID: "later", HostKey: key, Type: "spec", Slug: strp("later"), Initiator: "agent",
+		RequiredProjectDir: strp(f.one), PlacementStance: strp(StanceRequiredDir)})
+	res, err = QueueTickForStoreHost(dir, "host", "", key, broken, map[string]bool{"host": true}, noPlan, nil, now, ReclaimAfter, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Claimed != nil || len(res.Abandoned) != 0 || len(res.Diagnostics) == 0 || len(ScanPending(dir)) != 1 {
+		t.Fatalf("resolver failure was not retryable: %+v", res)
 	}
 }
