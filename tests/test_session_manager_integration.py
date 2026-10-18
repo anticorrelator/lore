@@ -1255,37 +1255,67 @@ class LoginRuntimeIntegration(RuntimeFixture, unittest.TestCase):
         self.assertIn("received: after-swap", "\n".join(peek["response"]["rows"]))
         self.assertEqual(len([e for e in self.events() if e["event"] == "started"]), 1)
 
+    def leave_to_an_old_window(self, kdir, checkout, slug, window_pid):
+        """Hand a store-hosted session to a lore-tui window from before store hosting.
+
+        The store host and the login supervisor are killed, and the host's registry
+        row is rewritten into the row such a window writes while it hosts the
+        session: its own name and pid (window_pid), unkeyed, with no role or scope,
+        naming its checkout in project_dir, stamped with this runtime, and listing
+        the session. The session is the host's real one, so adoption's checks of its
+        worktree identity, pane pid and pane cwd meet what an old window's session has."""
+        ready = self.wait_ready(kdir)
+        instances = kdir / "_sessions/instances"
+        # Until the host retires its launch checkpoint, that keyed row would let a new
+        # host recover the session as its own instead of adopting the window's.
+        self.until(lambda: any(s.get("slug") == slug for s in
+                               (read_json(instances / (ready["instance_name"] + ".json")) or {}).get("sessions", []))
+                   and not list(instances.glob("spawn-*.json"))
+                   and any(e.get("event") == "spawned" and e.get("slug") == slug for e in self.journal(kdir)),
+                   30, "the store host never finished launching the session")
+        supervisor = self.supervisor_pid()
+        os.kill(supervisor, signal.SIGSTOP)
+        try:
+            os.kill(ready["pid"], signal.SIGKILL)
+            self.until(lambda: not lock_held(self.host_dir(kdir) / "runtime.lock"), 30, "the store host was not killed")
+        finally:
+            os.kill(supervisor, signal.SIGKILL)
+        self.until(lambda: not lock_held(self.login() / "supervisor.lock"), 10, "the supervisor was not killed")
+        row = read_json(instances / (ready["instance_name"] + ".json"))
+        (instances / (ready["instance_name"] + ".json")).unlink()
+        for name in ("host_key", "role", "scope"):
+            row.pop(name)
+        row.update(name="quiet-heron", pid=window_pid, project_dir=str(checkout), runtime=self.runtime)
+        (instances / "quiet-heron.json").write_text(json.dumps(row))
+        return row
+
     def test_store_host_adopts_a_dead_tui_session(self):
-        """A real lore-tui claims an unkeyed chat request and dies; with no command from anyone, the
-        supervisor counts its rows as work and the store host adopts the session."""
+        """A lore-tui window from before store hosting runs a session and dies; with no command
+        from anyone, the supervisor counts the window's dead row as work and the store host
+        adopts the session."""
         kdir = self.make_store("alpha")
         checkout = self.make_checkout("alpha", "alpha-one")
-        self.create_item(kdir, checkout, "Tui Fixture")
+        _, request = self.lore_json("session", "request", "--type", "chat", "--initiator", "human",
+                                    "--prefer-dir", str(checkout), "--context", "hello", cwd=checkout)
+        slug = request["slug"]
+        record = self.started(slug)
+        window = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], env=self.env,
+                                  stdin=subprocess.DEVNULL)
+        self.extra_pids.append(window.pid)
+        self.addCleanup(lambda: (window.kill(), window.wait()))
+        tui = self.leave_to_an_old_window(kdir, checkout, slug, window.pid)
+        self.assertEqual((tui["runtime"], tui["project_dir"], tui["repo"]),
+                         (self.runtime, str(checkout), "example.test/alpha"))
+
+        # While the window runs, its row is not work: a fresh host finds nothing to do and withdraws.
         first = self.ensure_host(kdir)
         supervisor = self.supervisor_pid()
         self.wait_withdrawn(kdir, first["pid"])
+        self.assertFalse([e for e in self.journal(kdir) if e.get("event") == "recovered"])
+        self.assertEqual(read_json(kdir / "_sessions/instances/quiet-heron.json")["pid"], window.pid)
 
-        tui_env = {k: v for k, v in self.env.items()
-                   if not k.startswith(("CLAUDE", "CODEX_", "OPENCODE_")) and k not in ("AI_AGENT", "CLAUDECODE")}
-        server = session_runtime.tmux_server(self.env)
-        launch = ["tmux", "-L", server, "new-session", "-d", "-s", "visible-tui", "-x", "200", "-y", "50",
-                  "-c", str(checkout)]
-        for name, value in tui_env.items():
-            launch += ["-e", f"{name}={value}"]
-        result = subprocess.run([*launch, str(self.binary)], env=tui_env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        tui = self.until(lambda: next((r for r in map(read_json, (kdir / "_sessions/instances").glob("*.json"))
-                                       if r and not r.get("host_key") and alive(r.get("pid"))), None),
-                         30, "the visible TUI never registered")
-        self.assertEqual((tui["runtime"], tui["project_dir"]), (self.runtime, str(checkout)))
-        _, request = self.lore_json("session", "request", "--type", "chat", "--anywhere", "--context", "hello",
-                                    cwd=checkout)
-        self.assertNotIn("host_key", request)
-        slug = request["slug"]
-        record = self.started(slug)
-        self.assertEqual(record["instance"], tui["name"])
-
-        os.kill(tui["pid"], signal.SIGKILL)
+        window.kill()
+        window.wait()
         adopted = self.until(lambda: next((e for e in self.journal(kdir) if e.get("event") == "recovered"
                                            and e.get("slug") == slug), None), 60,
                              "the store host never adopted the dead TUI's session")
