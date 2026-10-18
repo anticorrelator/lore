@@ -9,8 +9,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/anticorrelator/lore/tui/internal/config"
 )
 
 // PaneExecFlag makes lore-tui the first process of a tmux pane:
@@ -43,25 +41,57 @@ var paneExecutable = os.Executable
 // its spec before it treats the pane as never started.
 const paneSpecConsumedTimeout = 10 * time.Second
 
-// paneLaunchDir is where a launcher writes its panes' launch specs: the
-// launch directory of its host's state directory, which only that host writes.
-// A launcher with no host key uses a directory under the system temp dir.
-func paneLaunchDir(knowledgeDir, hostKey string) string {
+// paneSpecStaleAfter is the age past which no launch can still be waiting for
+// a spec, so a host may remove it.
+const paneSpecStaleAfter = paneSpecConsumedTimeout + time.Minute
+
+// paneLaunchDir is where a host writes its panes' launch specs:
+// <temp dir>/lore-pane-launch/<host key>. A spec holds the session's whole
+// environment, credentials included, so it lives outside the knowledge store,
+// which is a git repository. A launcher with no host key uses "unkeyed", which
+// no 24-hex host key can be.
+func paneLaunchDir(hostKey string) string {
 	if hostKey == "" {
-		return filepath.Join(os.TempDir(), "lore-pane-launch")
+		hostKey = "unkeyed"
 	}
-	return filepath.Join(config.SessionHostsDir(filepath.Join(knowledgeDir, "_sessions")), hostKey, "launch")
+	return filepath.Join(os.TempDir(), "lore-pane-launch", hostKey)
+}
+
+// privateDir makes path a directory only this user can enter: it creates it
+// with mode 0700, or checks that an existing one is a real directory (not a
+// symlink) owned by this user and narrows its mode to 0700.
+func privateDir(path string) error {
+	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", path)
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("%s is not owned by this user", path)
+	}
+	if info.Mode().Perm() != 0o700 {
+		return os.Chmod(path, 0o700)
+	}
+	return nil
 }
 
 // writePaneLaunchSpec writes spec to a new file in dir, readable only by this
-// user, and returns its path.
+// user, and returns its path. dir and its parent are made private directories
+// first.
 func writePaneLaunchSpec(dir string, spec paneLaunchSpec) (string, error) {
 	b, err := json.Marshal(spec)
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("pane launch spec directory: %w", err)
+	for _, d := range []string{filepath.Dir(dir), dir} {
+		if err := privateDir(d); err != nil {
+			return "", fmt.Errorf("pane launch spec directory: %w", err)
+		}
 	}
 	f, err := os.CreateTemp(dir, "pane-*.json")
 	if err != nil {
@@ -76,6 +106,45 @@ func writePaneLaunchSpec(dir string, spec paneLaunchSpec) (string, error) {
 		return "", fmt.Errorf("pane launch spec: %w", err)
 	}
 	return f.Name(), nil
+}
+
+// SweepStalePaneLaunchSpecs removes the launch specs in the host's launch
+// directory that no launch can still be waiting for (older than
+// paneSpecStaleAfter at now). A host that dies between writing a spec and its
+// pane reading it leaves one behind; the next host for its key runs this at
+// start. A missing directory is nothing to sweep, and one that is not this
+// user's directory is left alone and reported.
+func SweepStalePaneLaunchSpecs(hostKey string, now time.Time) error {
+	dir := paneLaunchDir(hostKey)
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); !info.IsDir() || !ok || int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("%s is not this user's launch directory", dir)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, "pane-") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() || now.Sub(info.ModTime()) <= paneSpecStaleAfter {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // waitPaneSpecConsumed reports whether the pane removed its spec, which it does

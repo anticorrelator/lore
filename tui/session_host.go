@@ -175,6 +175,12 @@ func sessionHostMain(args []string) int {
 		return 1
 	}
 	defer os.Remove(o.ReadyFile)
+	// A launch spec holds a session's whole environment. One a dead predecessor
+	// wrote and its pane never read would otherwise stay on disk; under the
+	// runtime lock, no other host of this key is launching.
+	if err = work.SweepStalePaneLaunchSpecs(o.Key, time.Now()); err != nil {
+		fmt.Fprintln(os.Stderr, "session host: stale launch specs:", err)
+	}
 	// The runtime owns a virtual terminal even when its supervisor has none.
 	if err = os.Setenv("TERM", "xterm-256color"); err != nil {
 		fmt.Fprintln(os.Stderr, err)

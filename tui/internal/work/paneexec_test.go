@@ -167,3 +167,107 @@ func TestPaneExecResolvesABareHarnessOnTheSpecsPath(t *testing.T) {
 		t.Errorf("envValue = %q, want the last entry", got)
 	}
 }
+
+// A launch spec holds the session's whole environment, so it never lands in the
+// knowledge store, which is a git repository.
+func TestPaneLaunchDirIsUnderTheTempDirNotTheStore(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	data := t.TempDir()
+	t.Setenv("LORE_DATA_DIR", data)
+	key := "0123456789abcdef01234567"
+	if got, want := paneLaunchDir(key), filepath.Join(tmp, "lore-pane-launch", key); got != want {
+		t.Errorf("paneLaunchDir = %q, want %q", got, want)
+	}
+	if got := paneLaunchDir(""); got != filepath.Join(tmp, "lore-pane-launch", "unkeyed") {
+		t.Errorf("unkeyed launch dir = %q", got)
+	}
+	for _, dir := range []string{paneLaunchDir(key), paneLaunchDir("")} {
+		if strings.HasPrefix(dir, data) || strings.Contains(dir, "_sessions") {
+			t.Errorf("launch dir %q is inside a knowledge store", dir)
+		}
+	}
+}
+
+// The launch directory and its parent are 0700, an existing wider one is
+// narrowed, each spec is 0600, and a symlinked launch directory is refused.
+func TestPaneLaunchSpecDirectoriesArePrivate(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	base := filepath.Join(tmp, "lore-pane-launch")
+	if err := os.Mkdir(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir := paneLaunchDir("0123456789abcdef01234567")
+	path, err := writePaneLaunchSpec(dir, paneLaunchSpec{Env: []string{"SECRET=1"}, Argv: []string{"/bin/true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{base, dir} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o700 {
+			t.Errorf("%s mode = %v, want 0700", p, info.Mode().Perm())
+		}
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 || filepath.Dir(path) != dir {
+		t.Errorf("spec %s: mode %v, %v", path, info.Mode().Perm(), err)
+	}
+
+	elsewhere := t.TempDir()
+	link := paneLaunchDir("fedcba9876543210fedcba98")
+	if err := os.Symlink(elsewhere, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writePaneLaunchSpec(link, paneLaunchSpec{Argv: []string{"/bin/true"}}); err == nil {
+		t.Error("a symlinked launch directory was accepted")
+	}
+	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
+		t.Errorf("a spec was written through the symlink: %v", entries)
+	}
+}
+
+// A spec no launch can still be waiting for is removed; a fresh one, and
+// anything that is not a spec, is kept.
+func TestSweepStalePaneLaunchSpecsRemovesOnlyStaleOnes(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	key := "0123456789abcdef01234567"
+	if err := SweepStalePaneLaunchSpecs(key, time.Now()); err != nil {
+		t.Fatalf("sweeping a missing launch dir: %v", err)
+	}
+	dir := paneLaunchDir(key)
+	stale, err := writePaneLaunchSpec(dir, paneLaunchSpec{Argv: []string{"/bin/true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := writePaneLaunchSpec(dir, paneLaunchSpec{Argv: []string{"/bin/true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(other, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-paneSpecStaleAfter - time.Minute)
+	for _, p := range []string{stale, other} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := SweepStalePaneLaunchSpecs(key, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale spec survived the sweep: %v", err)
+	}
+	for _, p := range []string{fresh, other} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("sweep removed %s: %v", p, err)
+		}
+	}
+}

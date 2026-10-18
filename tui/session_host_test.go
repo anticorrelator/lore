@@ -633,6 +633,67 @@ func TestStoreHostPublishesStoreReadyAndRegistryRowThenWithdrawsIdle(t *testing.
 	}
 }
 
+// A launch spec holds a session's whole environment. One a dead host wrote and
+// its pane never read is removed when the next host for its key starts, and a
+// fresh one is left for the launch that may still be reading it.
+func TestStoreHostSweepsStaleLaunchSpecsAtStart(t *testing.T) {
+	f := newStoreHostFixture(t)
+	runtime := os.Getenv(config.SessionRuntimeEnv)
+	storeHostKey := session.StoreHostKey(config.NormalizeProjectDir(f.store), runtime)
+	tmp := t.TempDir()
+	launch := filepath.Join(tmp, "lore-pane-launch", storeHostKey)
+	if err := os.MkdirAll(launch, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale, fresh := filepath.Join(launch, "pane-stale.json"), filepath.Join(launch, "pane-fresh.json")
+	for _, p := range []string{stale, fresh} {
+		if err := os.WriteFile(p, []byte(`{"env":["SECRET=1"],"argv":["/bin/true"]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	ready := filepath.Join(config.SessionHostsDir(filepath.Join(f.store, "_sessions")), storeHostKey, "ready.json")
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "--session-host", "--scope", "store", "--host-key", storeHostKey,
+		"--kdir", f.store, "--ready-file", ready, "--idle-timeout", "1", "--runtime", runtime)
+	cmd.Env = append(os.Environ(), mainRuntimeProbeEnv+"="+runtime, "TMPDIR="+tmp)
+	var output bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &output, &output
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		select {
+		case err := <-exited:
+			t.Fatalf("host exited before publishing ready: %v\n%s", err, output.String())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("a stale launch spec survived host start: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("host start removed a fresh launch spec: %v", err)
+	}
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("idle withdrawal exit: %v\n%s", err, output.String())
+		}
+	case <-ctx.Done():
+		t.Fatalf("host never withdrew idle\n%s", output.String())
+	}
+}
+
 func TestStoreHostSeedsEachSessionFromItsRowsCheckout(t *testing.T) {
 	f := newStoreHostFixture(t)
 	m := storeHostModel(t, f.store)
