@@ -67,6 +67,18 @@ a host or work for 60 seconds (`LORE_SESSION_SUPERVISOR_QUIET_SECONDS`). Its exi
 decision and `ensure`'s registration take the same lock, so a request that
 arrives as it exits either keeps it running or starts a new one.
 
+`lore session ensure [--kdir <store>] [--if-work] [--json]` runs `ensure` on its
+own and prints the host's status as a JSON object (`ensured`, `instance_name`,
+`host_key`, `scope`). It is the repair a writer refusal names when no store host
+is live. With `--if-work` it starts the host only when the supervisor's own work
+predicate finds something the host would act on (requests keyed to it, unsent
+managed starts, or a dead registry row of this runtime and repo whose sessions it
+would adopt) and otherwise prints `{"ensured": false}`, so a lore-tui that sees
+sessions listed only by a dead registry row can bring their host back without
+starting one that would idle straight out. A failure exits 1 with the reason,
+which `--json` prints as a JSON object on stdout; inside a sandbox it refuses
+as `ensure` does.
+
 A store host's key is a hash of the store's resolved path and the runtime name.
 Requests and managed starts carry that key, so only that store's host in that
 runtime claims them. Its readiness file and registry row say `scope: "store"`
@@ -158,8 +170,8 @@ is refused rather than falling back to the production server.
 
 A namespace separates hosts, not knowledge stores: a namespaced host still reads
 the request queue, journal and instance registry of the store it runs against.
-Its store host claims only requests carrying its own key, but a visible TUI in
-the namespace can still pick up unkeyed requests meant for production. Run a development or
+Its store host claims only requests carrying its own key, and every request
+carries the key of the store host in the runtime that wrote it. Run a development or
 test namespace against a scratch store (`LORE_KNOWLEDGE_DIR` pointing at a
 throwaway directory, as `tests/test_session_manager_integration.py` does), not
 against a store a production host serves.
@@ -245,36 +257,58 @@ sessions of migrated keys on its next pass, without a restart.
 
 ## Raw requests
 
-`lore session request` sends a request that names a checkout to the store's
-session host. A request names a checkout when its work item declares one or it
-passes `--prefer-dir` or `--prefer-cwd`. The command ensures the host first,
-then writes the row with the store host's key while holding the host's
-`ensure.lock`, so the host cannot withdraw before the row lands. Any other
-request, including one with `--target`, is written without a key, for a visible
-lore-tui to claim.
+The writer, `scripts/session-request.sh`, stamps this store's session host key on
+every row itself, whoever calls it, so the store's host is the one process that
+claims any request. `lore session request` ensures that host first, then runs the
+writer while holding the host's `ensure.lock`, so the host cannot withdraw before
+the row lands. A lore-tui built before store-scoped hosting runs the writer
+directly; its launches run in the store host when that host is up and are refused
+otherwise.
 
-If the store host cannot be started or reached, the row is written without a key
-only when a live lore-tui serves its checkout and will claim it. Otherwise the
-request is refused. The refusal gives the reason, the host's `host.log` and
-`supervisor-error.json`, and the repair; when the installed lore-tui is older
-than the scripts, the repair is `lore rebuild` or `bash install.sh`.
+Every request names the checkout it runs in: the source checkout its work item
+declares, or, when the item declares none, `--prefer-dir` or `--prefer-cwd`. The
+store host has no checkout of its own, so a request that names none is refused
+before anything is enqueued or started.
 
-Placement checks count only hosts that would claim the row. The writer's
-checkout preflight, its `--target` check, runtime admission and source-checkout
-seeding all ask the same question: does a live registry row carrying the
-request's host key serve this checkout? A row serves a checkout when it runs in
-exactly that checkout. The store host (`scope: "store"`) serves any checkout
-that belongs to its store. That is the top level of a git checkout outside the
-store directory that `resolve-repo.sh`, run without `LORE_KNOWLEDGE_DIR`,
-resolves to the store. When the store host was started with
-`LORE_KNOWLEDGE_DIR` naming its store, the resolution step is skipped. The
-store host applies the same rule when it claims. An unkeyed request matches only
-an unkeyed lore-tui.
+Placement asks one question: does this store's live session host (a registry row
+with `scope: "store"` and the store's key, inside the 30-second liveness window)
+serve the checkout? It serves every checkout that belongs to its store. That is
+the top level of a git checkout outside the store directory that
+`resolve-repo.sh`, run without `LORE_KNOWLEDGE_DIR`, resolves to the store. When
+the store host was started with `LORE_KNOWLEDGE_DIR` naming its store, the
+resolution step is skipped. The writer's preflight, runtime admission and
+source-checkout seeding apply this rule, and the store host applies it again when
+it claims.
 
-`lore work source-checkout <item> --from-instance <store host>` declares the
-checkout the command runs in, which must belong to the store. Inside a session,
-seeding reads the session row's own `source_dir` before falling back to its host's
-project directory.
+A refusal leads with its reason and its repair within its first 55 bytes, because
+a lore-tui built before store-scoped hosting shows only the first 61 bytes of a
+writer refusal; the lines after the lead give the detail. Nothing is enqueued.
+Under `--json` a refusal exits 1, and its only output on stdout is one JSON object
+whose `error` field holds the whole text.
+
+| Lead | Cause |
+|------|-------|
+| `request names no checkout; pass --prefer-dir <checkout>` | No declared checkout and no `--prefer-dir`/`--prefer-cwd`. |
+| `no checkout declared: run lore work source-checkout <item>` | The request's work item declares no source checkout. |
+| `declared checkout gone: run lore work source-checkout <item>` | The declared directory no longer exists. |
+| `declared checkout is not in this store: re-declare it` | The declared directory is not a checkout of this store. |
+| `--prefer-dir is not a checkout of this store; name one` | The preference is not a checkout of this store (`--prefer-cwd` likewise). |
+| `no live store host: run lore session ensure, then retry` | A direct writer call found no live store host. |
+| `store host did not start; fix the error below, retry` | `lore session request` could not ensure the host. The text carries the error and the host's `host.log` and `supervisor-error.json`; when the installed lore-tui is older than the scripts, the repair is `lore rebuild` or `bash install.sh`. |
+| `store host is too old: run lore rebuild, then retry` | The live store host lacks a capability or build vintage the request needs. |
+| `--target is not accepted; drop it and name a checkout` | The store host claims every request, so no request names an instance. |
+| `--host-key is not this store's key; omit --host-key` | The caller passed another store's or runtime's key. |
+| `host key is not this store's; retry lore session start` | A managed start names a key from before store-scoped hosting. |
+
+`lore work source-checkout <item>` run outside a session (when
+`LORE_SESSION_INSTANCE`, `LORE_SESSION_SLUG` and `LORE_SESSION_TYPE` are not all
+set) declares the git checkout the command runs in, its top level even from a
+subdirectory. `--from-instance <store host>` does the same, and `--from-instance`
+naming another live instance declares that instance's project directory. Inside a
+session, seeding reads the session row's own `source_dir` before falling back to
+its host's project directory. A declaration is accepted when it names a checkout
+of this store, whether or not a host is running, because `lore session request`
+starts the host.
 
 `send`, `answer`, `peek`, `close` and `wait` on a session without a managed
 manifest first bring up the store host when no live host lists the session, for
@@ -282,8 +316,9 @@ at most 10 seconds, since the host may be about to adopt or claim it. They then
 run as before, so their existing errors are what the caller sees when nothing
 serves the session.
 
-Raw `lore session request`, instance targeting, and unmanaged session verbs remain
-available. Their lower-level placement and cursor contracts are documented in
+Raw `lore session request` and unmanaged session verbs remain available. A request
+names a checkout; `--target`, which named an instance, is refused. Their
+lower-level placement and cursor contracts are documented in
 [session-substrate.md](session-substrate.md). They are compatibility and explicit
 control surfaces; ordinary managed dispatch does not require those administrative
 steps. Native harness server APIs remain a possible backend change, separate from

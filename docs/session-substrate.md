@@ -87,7 +87,7 @@ One file per live TUI instance at `instances/<name>.json`.
 | `runtime_capabilities` | string array \| absent | Semantic request support compiled into the executing runtime. Unknown or malformed metadata cannot satisfy position admission. |
 | `build_time` | string \| absent | Build vintage — the **orderable** quantity: the commit's committer-date (release build) or the binary's mtime (dev build), ISO 8601 UTC. Absent for a binary predating this field. Omit-when-empty. This, not `build_sha`, is what `min_vintage` filtering compares against (a SHA has no read-side ordering). |
 | `project_dir` | string \| absent | The instance's project directory, physically resolved (`filepath.Abs` + `EvalSymlinks`) once at startup. Immutable for the process. Omit-when-empty for a binary predating this field. It is the match key a request's `prefer_project_dir` compares against byte-for-byte (both sides resolve physically, so `/tmp`→`/private/tmp` and worktree symlinks match). Also the match key for hard `required_project_dir` placement when the request declares a `placement_stance`. |
-| `host_key` | string \| absent | Stable source/store host identity for managed runtime generations. Absent for legacy visible TUI owners. |
+| `host_key` | string \| absent | Stable source/store host identity for managed runtime generations. Absent for legacy visible TUI owners, which claim no request the current writer enqueues: every such row carries the store host's key. |
 | `role` | string \| absent | `session-host` marks on-demand managed ownership, excluded from legacy TUI adoption. |
 | `framework` | string \| absent | The launch framework the TUI resolves for untargeted spawns (`tui_launch_framework` → `ResolveTUILaunchFramework`), refreshed on every full-row write plus an explicit rewrite when the setting is committed. Omit-when-empty for a binary predating this field or when resolution errors. Not a claim filter — framework selection stays the request's `framework` field; this only surfaces the value a coordinator's routing read needs. |
 
@@ -351,7 +351,8 @@ If it remains unclaimed past its TTL, the claim-side sweep instead moves it to
 | `request_id` | string | Unique id; also the filename stem. |
 | `type` | string | Enum `spec\|implement\|chat\|worker`. |
 | `slug` | string \| null | Session identity. An unscoped chat receives `chat-<request-suffix>` at enqueue; an explicitly scoped chat/spec/implement keeps its work-item slug. Null remains valid for a slugless spec and for legacy chat rows. **Required for `worker`**: a worker's slug is the derived `<work-item-slug>--w<n>` that is its session identity (see [Worker sessions](#worker-sessions)). |
-| `target_instance` | string \| null | Instance name the request is addressed to, or null for "any instance". |
+| `target_instance` | string \| null | Always null from the current writer, which refuses `--target`. A row from an older writer may name the instance it was addressed to. |
+| `host_key` | string \| absent | Key of this store's session host in the writer's runtime. The writer stamps it on every row itself, whoever calls it, so the store host is the only claimant. Absent only on rows from an older writer. |
 | `initiator` | string | Enum `agent\|human`. |
 | `requested_by` | string | Who enqueued it (instance name, agent id, or human). |
 | `requested_at` | string | ISO 8601 UTC timestamp of enqueue. |
@@ -362,7 +363,7 @@ If it remains unclaimed past its TTL, the claim-side sweep instead moves it to
 | `route` | object | Canonical frozen session route `{framework,model,options,routing_source}`. The sole request writer resolves it before position admission and writes the same object on the request and `requested` event. `--session-route` replays a supplied canonical route without changing provenance. `framework` and `model` are compatibility projections only. |
 | `auto_close` | boolean \| absent | Override for the TUI exit-ladder auto-close gate (see [Close-request queue](#close-request-queue)). Omit-when-empty: absent defers to `initiator` (agent auto-closes, human holds open), `true` forces auto-close, `false` holds open. Carried onto the live session so the ladder can consult it at teardown. |
 | `routing_overrides` | object \| absent | Per-dispatch `{<role>: <model>}` map. Omit-when-empty. The claiming instance exports each entry as `LORE_MODEL_<ROLE>` (role uppercased, `-`→`_`) into the spawned session's PTY, riding the resolver's top-of-precedence env layer — so a coordinator's per-dispatch routing wins over settings policy with no resolver change. Roles are validated against `adapters/roles.json` at enqueue time; settings.json stays untouched durable policy (user directive > coordinator override > settings). |
-| `min_vintage` | string \| absent | Minimum build vintage (ISO 8601 UTC) the claiming instance's `build_time` must meet — the request never targets an instance built earlier. Omit-when-empty. Filtered read-side, mirroring `target_instance` (the only difference is a temporal `>=` vs a string `==`). The `session request --min-vintage` verb accepts a timestamp or a git commit-ish (resolved to its committer-date at enqueue) and stores the timestamp, so the read side never shells out to git. An explicit floor requires a known, parseable timestamp at or above the floor. Enqueue pins a qualifying live instance through `target_instance`, including for legacy readers. |
+| `min_vintage` | string \| absent | Minimum build vintage (ISO 8601 UTC) the claiming instance's `build_time` must meet — the request never targets an instance built earlier. Omit-when-empty. Filtered read-side, mirroring `target_instance` (the only difference is a temporal `>=` vs a string `==`). The `session request --min-vintage` verb accepts a timestamp or a git commit-ish (resolved to its committer-date at enqueue) and stores the timestamp, so the read side never shells out to git. An explicit floor requires a known, parseable timestamp at or above the floor. Enqueue refuses the row unless the live store host meets the floor. |
 | `track` | string \| absent | Spec depth selector (`short`) carried to the session's short-track (`/spec short`). Omit-when-empty: only the non-default `short` is stored (`full` is the default and stays absent), so the field is present only when it changes behavior. Set at enqueue by `session request --track short`, which **refuses the flag on a non-spec request** (`ShortMode` has no effect on implement/chat prompts). Maps to `SessionDescriptor.ShortMode` at spawn. |
 | `model` | string \| absent | Per-dispatch lead-model override — the session lead is the top-level agent, so a model chosen here is lead selection. Omit-when-empty. Composed into the spawn as the harness's universal `--model` flag (the same flag `model_routing.tiers` aliases feed). **Opaque**: validated only for non-emptiness at enqueue, never against a model list — the candidate set is coordinator policy, not schema, so a bad id surfaces as an honest harness launch error. Distinct from `routing_overrides`, which routes *sub-agent* roles via `LORE_MODEL_<ROLE>` env. |
 | `framework` | string \| absent | Per-request launch framework override. Accepted values are `claude-code`, `opencode`, and `codex`. Omit-when-empty: absent defers to the claiming TUI's `tui_launch_framework` setting. Validated at enqueue against the framework registry and carried to spawn so the harness binary, `LORE_FRAMEWORK`, `SessionProcessStartedMsg.Harness`, and live registry `sessions[].harness` agree. |
@@ -391,10 +392,16 @@ A **claimed** file additionally carries:
 **Enqueue** = write a tmp file + rename into `requests/pending/<request_id>.json`
 (atomic; readers never see a torn request row).
 
-An enqueue carrying `--target` first joins the name against the registry using
-the same 30s mtime liveness window as `coordinate pin --preflight`. A missing or
-stale row is refused with its age and the re-pin/`--anywhere` choices; the writer
-never silently weakens hard placement into an untargeted request.
+Before the row is durable, the writer refuses a request that names no checkout
+(its work item declares none and it passes neither `--prefer-dir` nor
+`--prefer-cwd`), and one whose checkout this store's live session host would not
+serve, because it is not a checkout of the store or no store host is live. Each
+refusal leads with its repair; [session-manager.md](session-manager.md#raw-requests)
+lists them.
+
+An enqueue carrying `--target` is refused before anything else is checked: this
+store's session host claims every request, so a request names the checkout it
+runs in, never an instance.
 
 **Claim** = `os.Rename(pending/X, claimed/X)`. Rename on one filesystem is atomic,
 so exactly one racing instance succeeds — this is the sole at-most-once guard, and
@@ -405,9 +412,9 @@ active claim until both fields are present.**
 **Targeting** is filtered read-side: an instance only attempts to claim rows whose
 `target_instance` equals its own name or is null. **Vintage** is filtered the same
 way, in the same pass: an instance skips a row whose `min_vintage` its own
-`build_time` cannot satisfy (absent, invalid, or older). The writer also pins
-vintage-constrained requests to a verified live identity, so legacy readers
-that ignore a new field cannot claim them. **Preference** is honored in the same read-side pass as a
+`build_time` cannot satisfy (absent, invalid, or older). The writer also refuses a
+vintage-constrained request unless the live store host meets it; the row's host
+key keeps readers that predate store-scoped hosting from claiming it. **Preference** is honored in the same read-side pass as a
 timing window, not a filter: a row carrying `prefer_project_dir` is claimable by a
 matching instance at once and by any other instance only once it has aged past
 `PreferMatchGrace` from `requested_at`. It never removes a row from the claim set
@@ -1017,7 +1024,7 @@ reads full snapshots.
 | Surface | Sole writer | Written by | Landed in |
 |---------|-------------|-----------|-----------|
 | `instances/<name>.json` | the owning TUI instance (its own file) | tmp + `os.Rename`, `os.Chtimes` heartbeat | Phase 2 (TUI) |
-| `requests/pending/<id>.json` | the enqueuer | item 2 `request` verb; TUI human path | item 2 / Phase 2 |
+| `requests/pending/<id>.json` | `scripts/session-request.sh` | run by `lore session request`, managed starts, and lore-tui launches; stamps the store host key on every row | item 2 / Phase 2 |
 | `requests/claimed/<id>.json` | the claiming TUI instance | `os.Rename` claim + tmp+rename metadata | Phase 2 (TUI) |
 | `requests/expiring/<id>.json` | `scripts/session-request-expire.sh`, serialized across live TUI heartbeats | atomic rename from pending; delete only after deterministic terminal append | request expiry |
 | `requests/cancelling/<id>.json` | `scripts/session-close.sh --request` | atomic rename from pending; delete only after deterministic terminal append | request cancel |
@@ -1224,12 +1231,12 @@ Instance registry rows and managed-host readiness publish `runtime_capabilities`
 from constants compiled into the executing binary. `position-preparation-v1`
 means the runtime understands prepared position payloads; source checkout contents
 and a newly added request field do not establish legacy runtime support.
-Position request publication selects a compatible live instance, preserves explicit
-target and required-directory constraints, favors a matching preferred directory,
-and pins `target_instance`. If the selected host disappears, the request keeps its
-pin and normal expiry applies; another host cannot silently claim it. A managed
-host missing required support is refused with an instruction to coordinate its
-replacement. Admission never restarts a shared host to gain support.
+Position request publication requires this store's live session host to support
+the request and to serve its required directory. The row's host key is the fence:
+no instance name is pinned, so a host that restarts under a new name still claims
+it, and no other host can. A managed host missing required support is refused with
+an instruction to coordinate its replacement. Admission never restarts a shared
+host to gain support.
 
 Before claiming a worker request, the selected runtime checks its executable and
 performs create, write, read and rename operations in its harness state directories.

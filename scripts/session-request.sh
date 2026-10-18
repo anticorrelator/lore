@@ -3,7 +3,7 @@
 #
 # Usage:
 #   lore session request --type <spec|implement|chat|worker> \
-#     (--target <i> | --prefer-dir <p> | --prefer-cwd | --anywhere) [options]
+#     (--prefer-dir <p> | --prefer-cwd | --anywhere) [options]
 #
 # Options:
 #   --type <t>         Required. Session type: spec | implement | chat | worker.
@@ -13,11 +13,9 @@
 #                      a worker's slug is the derived <work-item-slug>--w<n> that is
 #                      its session identity, and the suffix is what the journal,
 #                      scoped watches, and the TUI parse to find the work item.
-#   --target <name>    Placement stance: address the request to one instance (the
-#                      named live instance alone may claim). A missing/stale
-#                      registry row is refused; re-pin or use --anywhere rather
-#                      than parking a request at a dead target. Every request MUST carry
-#                      exactly one placement stance — --target, --prefer-dir,
+#   --target <name>    Refused. This store's session host claims every request, so
+#                      a request names a checkout, never an instance. Every request
+#                      MUST carry exactly one placement stance — --prefer-dir,
 #                      --prefer-cwd, or --anywhere; a stanceless request is refused.
 #   --initiator <i>    Who initiated the request: agent | human (default: human).
 #   --auto-close <b>   Override the TUI exit-ladder auto-close gate: true | false.
@@ -43,12 +41,12 @@
 #                      Child overrides are exported as LORE_MODEL_<ROLE> by the host,
 #                      riding the resolver's top-precedence env layer. role MUST be in the
 #                      adapters/roles.json closed set (unknown roles are refused).
-#   --min-vintage <v>  Minimum build vintage the claiming instance must meet: a
-#                      request never targets an instance whose build is older. Value
-#                      is an ISO-8601 UTC timestamp (2026-07-05T12:00:00Z) OR a git
-#                      commit-ish resolved to its committer-date here at enqueue time.
-#                      Filtered read-side like --target; an instance of unknown
-#                      vintage is never rejected (additive degradation).
+#   --min-vintage <v>  Minimum build vintage the claiming store host must meet.
+#                      Value is an ISO-8601 UTC timestamp (2026-07-05T12:00:00Z) OR
+#                      a git commit-ish resolved to its committer-date here at
+#                      enqueue time. Refused at enqueue unless the live store host
+#                      has a known build vintage at or above it, and filtered again
+#                      when the host claims.
 #   --track <t>        Spec depth selector: short | full. Valid ONLY with --type
 #                      spec (rejected otherwise). `short` maps to the session's
 #                      short-track (/spec short); `full` is the default and stores
@@ -89,12 +87,12 @@
 #                      claiming TUI re-checks guard identity before spawn.
 #   --execution-dir <p> Manager-resolved child working directory. This is hard
 #                      placement, unlike the claim-timing-only --prefer-dir.
-#   --prefer-dir <p>   Soft project-dir preference stored as prefer_project_dir: an
-#                      instance whose project dir matches claims immediately; any
-#                      other defers ~15s before it may claim. Resolved physically at
-#                      write time (refused when it names no existing directory).
-#                      Mutually exclusive with --prefer-cwd. Pair with --min-vintage
-#                      when an old claiming TUI must not ignore this additive field.
+#   --prefer-dir <p>   The checkout the session runs in, stored as prefer_project_dir,
+#                      for a request whose work item declares none (a declaration
+#                      always wins). It must be the top level of a git checkout of
+#                      this store. Resolved physically at write time (refused when
+#                      it names no existing directory). Mutually exclusive with
+#                      --prefer-cwd.
 #   --prefer-cwd       Like --prefer-dir but names the checkout the calling session
 #                      was carved from — the common "route to my own checkout" case.
 #                      Inside a session that is the source checkout recorded on the
@@ -103,9 +101,9 @@
 #                      instance's project directory and so can never match one.
 #                      Outside a session it is $PWD. Refused when a session cannot
 #                      name its own checkout. Mutually exclusive with --prefer-dir.
-#   --anywhere         Placement stance: any live instance may claim immediately.
-#                      Writes no queue field — the explicit form of what an
-#                      unstated placement used to mean, made deliberate.
+#   --anywhere         Placement stance: add no placement of your own. Writes no
+#                      queue field, so the request runs in the checkout its work
+#                      item declares; one that declares none is refused.
 #   --yes              Run autonomously: skip the session's confirmation gates
 #                      (alias --no-confirm). This is the default for queue-spawned
 #                      sessions, so omitting all three leaves it on.
@@ -113,32 +111,34 @@
 #                      coordinator send window). Sets skip_confirm=false.
 #   --kdir <path>      Knowledge-store override (test isolation).
 #   --json             Emit a JSON result object instead of a human line.
-#   --host-key <key>   The store session host's key, stamped only on a row that
-#                      names a checkout (a declared work item or a preference).
-#                      'lore session request' passes it after ensuring that host;
-#                      without --request-id no other key is accepted.
-#   --store-host-unavailable <why>
-#                      Set by 'lore session request' when it could not ensure the
-#                      store host: the row stays unkeyed and is written only when
-#                      a live lore-tui will claim it, else refused naming <why>.
+#   --host-key <key>   Optional. This store's session host key in this runtime, which
+#                      the writer stamps on every row itself; any other key is
+#                      refused, a managed start's included.
+#
+# One claimant: every row carries the store session host's key, so the store's host
+# is the only process that claims it, whoever calls this writer. That host serves
+# every checkout of its store and has none of its own, so every request names the
+# checkout it runs in, and one that names none is refused here rather than left to
+# wait out its TTL.
 #
 # Derived placement (no flag): a request naming a work-item slug takes its hard
 # placement from that item's declared source checkout, resolved physically here and
-# stored as required_project_dir — only an instance whose project directory equals
-# it may claim, however long the row waits. A slug naming no tracked work item
-# derives nothing. Three refusals, each with its own repair:
-#   the item declares nothing        -> run `lore work source-checkout <slug>`
+# stored as required_project_dir. Without a declaration, --prefer-dir/--prefer-cwd
+# names the checkout. A slug naming no tracked work item derives nothing. The
+# refusals, each leading with its repair:
+#   no checkout named                -> pass --prefer-dir <checkout>
+#   the item declares nothing        -> run `lore work source-checkout <slug>` there
 #   the declaration names no dir     -> re-declare it from the right checkout
-#   no live instance serves that dir -> start or re-point an instance there
+#   not a checkout of this store     -> name or declare one that is
+#   no live store host               -> run `lore session ensure`, then retry
 #
 # placement_stance records which axis actually governs and is always written, with
-# the strongest axis in force winning (required_dir > targeted > preferred_dir):
+# the strongest axis in force winning (required_dir > preferred_dir):
 #   required_dir   the work item's declaration governs (hard directory filter)
-#   targeted       --target governs (hard instance filter)
-#   preferred_dir  --prefer-dir/--prefer-cwd governs (claim-timing only)
-#   any            nothing constrains placement
+#   preferred_dir  --prefer-dir/--prefer-cwd governs
 # A row without the token was written before the field existed and keeps the older,
-# filterless semantics: an absent token is never a stance.
+# filterless semantics: an absent token is never a stance. Rows from an older writer
+# may also carry `targeted` or `any`; this writer writes neither.
 #
 # required_target_ref carries the branch the dispatching session's worktree was
 # created against, when there is a session to read it from. It never selects a
@@ -165,7 +165,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 TYPE=""
 SLUG=""
-TARGET=""
+TARGET_PROVIDED=0
 INITIATOR="human"
 AUTO_CLOSE=""
 REQUESTED_BY=""
@@ -177,7 +177,6 @@ KDIR_OVERRIDE=""
 JSON_MODE=0
 MANAGED_REQUEST_ID=""
 HOST_KEY=""
-STORE_HOST_UNAVAILABLE=""
 ROUTE_SPECS=()
 SESSION_ROUTE=""
 SESSION_ROUTE_PROVIDED=0
@@ -203,7 +202,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --type) TYPE="$2"; shift 2 ;;
     --slug) SLUG="$2"; shift 2 ;;
-    --target) TARGET="$2"; shift 2 ;;
+    --target) TARGET_PROVIDED=1; shift 2 ;;
     --initiator) INITIATOR="$2"; shift 2 ;;
     --auto-close) AUTO_CLOSE="$2"; shift 2 ;;
     --requested-by) REQUESTED_BY="$2"; shift 2 ;;
@@ -227,13 +226,12 @@ while [[ $# -gt 0 ]]; do
     --confirm) SKIP_CONFIRM="false"; shift ;;
     --request-id) MANAGED_REQUEST_ID="$2"; shift 2 ;;
     --host-key) HOST_KEY="$2"; shift 2 ;;
-    --store-host-unavailable) STORE_HOST_UNAVAILABLE="$2"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
     -h|--help) awk 'NR > 1 { if ($0 !~ /^#/) exit; print }' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--target <name> | --prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=framework/model>]... [--session-route <qualified-route|object>] [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id> --framework <claude-code|codex|opencode>] [--routing-source <override|role-route>] [--worktree-identity <json|file>] [--worktree-id <id> --execution-dir <path>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=framework/model>]... [--session-route <qualified-route|object>] [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id> --framework <claude-code|codex|opencode>] [--routing-source <override|role-route>] [--worktree-identity <json|file>] [--worktree-id <id> --execution-dir <path>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -248,6 +246,13 @@ fail() {
 }
 
 command -v jq &>/dev/null || fail "jq is required but not found on PATH"
+
+if [[ $TARGET_PROVIDED -eq 1 ]]; then
+  fail "--target is not accepted; drop it and name a checkout
+This store's session host claims every request, so a request names the checkout it runs
+in (--prefer-dir, --prefer-cwd, or a work item that declares one) rather than an
+instance. Nothing was enqueued."
+fi
 
 # The checkout the calling session belongs to, for --prefer-cwd. A session's
 # working directory is a detached worktree under the knowledge store, which is no
@@ -536,18 +541,17 @@ fi
 # naming the field; the reader never re-validates. --prefer-dir and --prefer-cwd
 # name the same field and are mutually exclusive.
 # Placement stance is a required declaration: every request states where it may
-# run — --target (hard pin), --prefer-dir/--prefer-cwd (soft preference), or
-# --anywhere (the deliberate opt-out). --anywhere satisfies this check and writes
-# NO queue field: the row is byte-identical to the old untargeted form, so old
-# claiming TUIs are unaffected. Why an error and not a default: the soft-preference
+# run — --prefer-dir/--prefer-cwd (the checkout to run in), or --anywhere (no
+# placement of the caller's own; the work item's declaration places it).
+# --anywhere satisfies this check and writes NO queue field. Why an error and not a default: the soft-preference
 # mechanism shipped 2026-07-13, yet 0 of 110 historical claims carried
 # prefer_project_dir — placement was silently unstated, and a missing declaration
 # must be an error, never a routed-to-anywhere default.
-if [[ $ANYWHERE_PROVIDED -eq 1 ]] && [[ -n "$TARGET" || $PREFER_DIR_PROVIDED -eq 1 || $PREFER_CWD_PROVIDED -eq 1 ]]; then
-  fail "--anywhere contradicts an explicit placement (--target, --prefer-dir, or --prefer-cwd); pass exactly one stance"
+if [[ $ANYWHERE_PROVIDED -eq 1 ]] && [[ $PREFER_DIR_PROVIDED -eq 1 || $PREFER_CWD_PROVIDED -eq 1 ]]; then
+  fail "--anywhere contradicts an explicit placement (--prefer-dir or --prefer-cwd); pass exactly one stance"
 fi
-if [[ $ANYWHERE_PROVIDED -eq 0 && -z "$TARGET" && $PREFER_DIR_PROVIDED -eq 0 && $PREFER_CWD_PROVIDED -eq 0 ]]; then
-  fail "missing placement stance: pass exactly one of --target <instance>, --prefer-dir <path>, --prefer-cwd, or --anywhere"
+if [[ $ANYWHERE_PROVIDED -eq 0 && $PREFER_DIR_PROVIDED -eq 0 && $PREFER_CWD_PROVIDED -eq 0 ]]; then
+  fail "missing placement stance: pass exactly one of --prefer-dir <path>, --prefer-cwd, or --anywhere"
 fi
 
 PREFER_PROJECT_DIR_JSON=""
@@ -662,10 +666,10 @@ if [[ "$TYPE" == "worker" && $POSITION_PROVIDED -eq 0 ]] && ! printf '%s' "$EXTR
   fi
 fi
 
-# Nullable target becomes explicit JSON null when unset. Slug is resolved after
-# REQUEST_ID is minted below because unscoped chats derive their identity from it.
+# target_instance stays an explicit JSON null, the shape every reader decodes; no
+# request names an instance. Slug is resolved after REQUEST_ID is minted below
+# because unscoped chats derive their identity from it.
 TARGET_JSON="null"
-[[ -n "$TARGET" ]] && TARGET_JSON="$(jq -n --arg t "$TARGET" '$t')"
 
 # --- Resolve knowledge directory ---
 if [[ -n "$KDIR_OVERRIDE" ]]; then
@@ -675,31 +679,31 @@ else
 fi
 [[ -d "$KNOWLEDGE_DIR" ]] || fail "knowledge store not found at: $KNOWLEDGE_DIR"
 
-# A managed start names its own host key beside its request id. Without a request
-# id the only key a row may carry is this store's session host key in this
-# runtime, which 'lore session request' supplies after ensuring that host.
+# Every row carries this store's session host key in this runtime, stamped here
+# rather than taken from the caller, so a caller that knows nothing of the store
+# host (a lore-tui from before store-scoped hosting runs this script directly)
+# still writes a row that host claims. A caller may pass the key, and a managed
+# start must, but only this one.
+STORE_HOST_KEY="$(store_host_key_for "$KNOWLEDGE_DIR")" || fail "could not compute this store's session host key"
 if [[ -n "$MANAGED_REQUEST_ID" ]]; then
   [[ "$MANAGED_REQUEST_ID" =~ ^managed-[a-f0-9]{32}$ && "$HOST_KEY" =~ ^[a-f0-9]{24}$ ]] || fail "managed request identity requires valid --request-id and --host-key"
-elif [[ -n "$HOST_KEY" ]]; then
-  EXPECTED_HOST_KEY="$(store_host_key_for "$KNOWLEDGE_DIR")" || fail "could not compute this store's session host key"
-  [[ "$HOST_KEY" == "$EXPECTED_HOST_KEY" ]] || fail "invalid --host-key '$HOST_KEY': without --request-id a request may carry only this store's session host key in this runtime ($EXPECTED_HOST_KEY); 'lore session request' supplies it"
+  [[ "$HOST_KEY" == "$STORE_HOST_KEY" ]] || fail "host key is not this store's; retry lore session start
+Managed request $MANAGED_REQUEST_ID carries host key $HOST_KEY, but this store's session
+host in this runtime holds $STORE_HOST_KEY. Its manifest still names a host from before
+store-scoped hosting; once that host stops, the supervisor moves the manifest to the
+store key, and 'lore session start' with the same --key enqueues it. Nothing was enqueued."
+elif [[ -n "$HOST_KEY" && "$HOST_KEY" != "$STORE_HOST_KEY" ]]; then
+  fail "--host-key is not this store's key; omit --host-key
+This writer stamps this store's session host key in this runtime ($STORE_HOST_KEY) on every
+row itself, so --host-key is optional and may only repeat that key; '$HOST_KEY' is a
+different key. Nothing was enqueued."
 fi
-[[ -z "$STORE_HOST_UNAVAILABLE" || -z "$HOST_KEY" ]] || fail "--store-host-unavailable describes a request the store's session host could not take, so it cannot also carry --host-key"
 
 # Where the store host's own diagnostics live, for the refusals below.
 store_host_diagnostics() {
   local dir
   dir="$(store_host_dir_for "$KNOWLEDGE_DIR" 2>/dev/null || true)"
   printf '%s/host.log and %s/supervisor-error.json' "$dir" "$dir"
-}
-
-# 'lore session request' writes an unkeyed row when it could not ensure the store
-# host only if a live lore-tui will claim it; otherwise nothing is enqueued.
-refuse_without_store_host() {
-  fail "refusing to enqueue: this request names checkout '$1', so it goes to the store's session host, and that host could not be started or reached:
-  $STORE_HOST_UNAVAILABLE
-No live lore-tui serves that checkout to take the request instead, so nothing was enqueued.
-The store host's diagnostics are $(store_host_diagnostics). Fix the cause and retry; when the installed lore-tui is older than these scripts, run 'lore rebuild' (or 'bash install.sh') first. Opening lore-tui in that checkout also lets the request through."
 }
 
 if [[ -n "$PACKET_ID" && $POSITION_PROVIDED -eq 0 ]]; then
@@ -731,41 +735,32 @@ if [[ $PREFER_CWD_PROVIDED -eq 1 ]]; then
   else
     case $? in
       1) PREFER_DIR="$PWD" ;;
-      2) fail "refusing --prefer-cwd: no registry row for session instance '${LORE_SESSION_INSTANCE:-}'.
-This session cannot name its own checkout, and its working directory is a session
-worktree that matches no instance. Pass --prefer-dir <checkout>, or --anywhere." ;;
-      *) fail "refusing --prefer-cwd: the registry row for '${LORE_SESSION_INSTANCE:-}' records
-no source checkout for this session. Pass --prefer-dir <checkout>, or --anywhere." ;;
+      2) fail "--prefer-cwd finds no session row; pass --prefer-dir
+There is no registry row for session instance '${LORE_SESSION_INSTANCE:-}', so this session
+cannot name its own checkout, and its working directory is a session worktree, which is
+no checkout. Pass --prefer-dir <checkout>. Nothing was enqueued." ;;
+      *) fail "--prefer-cwd finds no checkout; pass --prefer-dir <dir>
+The registry row for '${LORE_SESSION_INSTANCE:-}' records no source checkout for this
+session. Pass --prefer-dir <checkout>. Nothing was enqueued." ;;
     esac
   fi
   PREFER_DIR_PROVIDED=1
 fi
+PREFER_FLAG="--prefer-dir"
+[[ $PREFER_CWD_PROVIDED -eq 0 ]] || PREFER_FLAG="--prefer-cwd"
 if [[ $PREFER_DIR_PROVIDED -eq 1 ]]; then
   [[ -n "$PREFER_DIR" ]] || fail "empty --prefer-dir (a directory path is required when --prefer-dir is given)"
   PREFER_RESOLVED="$(resolve_physical_dir "$PREFER_DIR" || true)"
-  [[ -n "$PREFER_RESOLVED" ]] || fail "invalid --prefer-dir: '$PREFER_DIR' (prefer_project_dir must resolve to an existing directory)"
+  [[ -n "$PREFER_RESOLVED" ]] || fail "$PREFER_FLAG names no existing directory; fix the path
+'$PREFER_DIR' does not resolve to an existing directory, and prefer_project_dir must.
+Nothing was enqueued."
   PREFER_PROJECT_DIR_JSON="$(jq -n --arg d "$PREFER_RESOLVED" '$d')"
-fi
-
-# A hard target is useful only while its registry row is live. Reuse the pin
-# preflight's shared mtime-TTL rule: silently rewriting this to --anywhere would
-# change placement stance, while accepting it would create a request no live
-# instance can claim. Soft/anywhere stances remain deliberately untouched.
-if [[ -n "$TARGET" ]]; then
-  if ! TARGET_AGE="$(session_instance_age_seconds "$INSTANCES_DIR" "$TARGET")"; then
-    fail "refusing --target '$TARGET': its registry row is absent (age unavailable; live window ${SESSION_INSTANCE_LIVENESS_TTL_SECONDS}s).
-Re-pin the project to a live instance and retry, or choose --anywhere explicitly."
-  fi
-  if (( TARGET_AGE > SESSION_INSTANCE_LIVENESS_TTL_SECONDS )); then
-    fail "refusing --target '$TARGET': its registry row is ${TARGET_AGE}s old (live window ${SESSION_INSTANCE_LIVENESS_TTL_SECONDS}s).
-Re-pin the project to a live instance and retry, or choose --anywhere explicitly."
-  fi
 fi
 
 # --- Derive hard placement from the work item's declared source checkout ---
 # Placement is not a flag here: a request that names a work item takes its checkout
-# from the item, and each of the three ways that can fail gets its own repair. A
-# slug naming no tracked work item derives nothing — an unscoped chat and an ad-hoc
+# from the item, and each of the ways that can fail gets its own repair. A slug
+# naming no tracked work item derives nothing — an unscoped chat and an ad-hoc
 # slug have no declaration to read.
 REQUIRED_PROJECT_DIR_JSON=""
 REQUIRED_RESOLVED=""
@@ -786,95 +781,68 @@ if [[ -n "$SLUG" ]]; then
   done
 fi
 
-# A row that names a checkout (a declared work item or an explicit preference)
-# carries the store host's key when the caller supplied it; every other row stays
-# unkeyed, for a visible lore-tui to claim.
-ROW_HOST_KEY=""
-if [[ -n "$HOST_KEY" ]] && [[ -n "$MANAGED_REQUEST_ID" || -n "$WORK_META" || -n "${PREFER_RESOLVED:-}" ]]; then
-  ROW_HOST_KEY="$HOST_KEY"
-fi
-
 if [[ -n "$WORK_META" ]]; then
   DECLARED_CHECKOUT="$(jq -r '.source_checkout // empty' "$WORK_META" 2>/dev/null || true)"
   if [[ -z "$DECLARED_CHECKOUT" ]]; then
-    fail "refusing --slug '$SLUG': work item '$WORK_ITEM_SLUG' declares no source checkout, so
-this request cannot say which clone it belongs in. Seed the declaration with:
-  lore work source-checkout $WORK_ITEM_SLUG --from-instance <live-instance-name>
-Choose the instance with 'lore session list', or omit --from-instance and run the
-command from a session hosted in the checkout this work belongs to."
+    fail "no checkout declared: run lore work source-checkout $WORK_ITEM_SLUG
+Work item '$WORK_ITEM_SLUG' declares no source checkout, so this request cannot say which
+clone it runs in. From inside the checkout this work belongs in, run:
+  lore work source-checkout $WORK_ITEM_SLUG
+then send the request again. Nothing was enqueued."
   fi
   REQUIRED_RESOLVED="$(resolve_physical_dir "$DECLARED_CHECKOUT" || true)"
   if [[ -z "$REQUIRED_RESOLVED" ]]; then
-    fail "refusing --slug '$SLUG': work item '$WORK_ITEM_SLUG' declares source checkout
-'$DECLARED_CHECKOUT', which is not an existing directory. The clone was moved or
-removed. Re-declare it with:
-  lore work source-checkout $WORK_ITEM_SLUG"
+    fail "declared checkout gone: run lore work source-checkout $WORK_ITEM_SLUG
+Work item '$WORK_ITEM_SLUG' declares source checkout '$DECLARED_CHECKOUT', which is not an
+existing directory. The clone was moved or removed. Re-declare it with:
+  lore work source-checkout $WORK_ITEM_SLUG
+Nothing was enqueued."
   fi
-
-  # An unsatisfiable hard filter has to be refused here, before the row is durable.
-  # Each instance's claim loop can only decline for itself and nothing aggregates
-  # "every instance declined", so a row no instance can claim is never reported as
-  # unclaimable — it waits out the request TTL. Only live rows that would claim
-  # this row count: the store host for a row carrying its key, a visible lore-tui
-  # for an unkeyed one. A pinned target narrows the check to that instance.
-  PLACEMENT="$(live_placement "$INSTANCES_DIR" "$ROW_HOST_KEY" "$REQUIRED_RESOLVED")" \
-    || fail "could not read the live instance registry at $INSTANCES_DIR; nothing was enqueued"
-  LIVE_CHECKOUTS="$(printf '%s' "$PLACEMENT" | jq -r '.servers[] | "  " + .')"
-  if [[ -n "$LIVE_CHECKOUTS" ]]; then
-    LIVE_CHECKOUTS="$LIVE_CHECKOUTS
-"
-  else
-    LIVE_CHECKOUTS="  (no live instance that would claim this request serves a checkout in this store)
-"
-  fi
-
-  if [[ -n "$TARGET" ]]; then
-    if ! printf '%s' "$PLACEMENT" | jq -e --arg t "$TARGET" '.served_by | index($t) != null' >/dev/null; then
-      fail "refusing --target '$TARGET' for --slug '$SLUG': work item '$WORK_ITEM_SLUG' belongs to
-'$REQUIRED_RESOLVED', which that instance does not serve for this request. Live checkouts:
-${LIVE_CHECKOUTS}Target an instance that serves that checkout, or drop --target and let the
-declaration place the request."
-    fi
-  elif ! printf '%s' "$PLACEMENT" | jq -e '.served' >/dev/null; then
-    [[ -z "$STORE_HOST_UNAVAILABLE" ]] || refuse_without_store_host "$REQUIRED_RESOLVED"
-    if [[ -n "$ROW_HOST_KEY" ]]; then
-      WHY="$(printf '%s' "$PLACEMENT" | jq -r '.store_checkout_error // "no live session host holds this key"')"
-      fail "refusing --slug '$SLUG': work item '$WORK_ITEM_SLUG' belongs to '$REQUIRED_RESOLVED',
-and no live instance serves that checkout for the store's session host: $WHY.
-Live hosts for this request:
-${LIVE_CHECKOUTS}Re-declare the item with a checkout of this store:
-  lore work source-checkout $WORK_ITEM_SLUG"
-    fi
-    fail "refusing --slug '$SLUG': work item '$WORK_ITEM_SLUG' belongs to '$REQUIRED_RESOLVED',
-and no live instance serves that checkout for an unkeyed request. Live checkouts:
-${LIVE_CHECKOUTS}Send it with 'lore session request', which starts the store's session host and routes
-the request to it (its diagnostics: $(store_host_diagnostics)), or re-declare the item with:
-  lore work source-checkout $WORK_ITEM_SLUG"
-  fi
-
   REQUIRED_PROJECT_DIR_JSON="$(jq -n --arg d "$REQUIRED_RESOLVED" '$d')"
 fi
 
-# A preference alone is soft for a visible lore-tui, but the store host claims only
-# checkouts of its store, so a keyed row's preference must be one. A request the
-# store host could not take is written unkeyed only when a live lore-tui will
-# claim it: one serving its checkout, or any live one for a row naming none.
-if [[ -z "$REQUIRED_RESOLVED" && -n "${PREFER_RESOLVED:-}" && ( -n "$ROW_HOST_KEY" || -n "$STORE_HOST_UNAVAILABLE" ) ]]; then
-  PLACEMENT="$(live_placement "$INSTANCES_DIR" "$ROW_HOST_KEY" "$PREFER_RESOLVED")" \
-    || fail "could not read the live instance registry at $INSTANCES_DIR; nothing was enqueued"
-  if ! printf '%s' "$PLACEMENT" | jq -e '.served' >/dev/null; then
-    [[ -z "$STORE_HOST_UNAVAILABLE" ]] || refuse_without_store_host "$PREFER_RESOLVED"
-    WHY="$(printf '%s' "$PLACEMENT" | jq -r '.store_checkout_error // "no live session host holds this key"')"
-    fail "refusing --prefer-dir '$PREFER_DIR': the store's session host serves only checkouts of this store, and $WHY.
-Name a checkout of this store, or pass --anywhere."
+# The store host has no checkout of its own, so a row that names none could never
+# be placed. Refusing it here tells the caller now, instead of leaving a row that
+# waits out its TTL.
+CHECKOUT="${REQUIRED_RESOLVED:-${PREFER_RESOLVED:-}}"
+if [[ -z "$CHECKOUT" ]]; then
+  fail "request names no checkout; pass --prefer-dir <checkout>
+This store's session host runs every request in a checkout the request names, and this
+one names none: it names no work item that declares a checkout, and passes neither
+--prefer-dir nor --prefer-cwd. Pass --prefer-dir <checkout>, run with --prefer-cwd from
+inside the checkout, or name a work item that declares one (lore work source-checkout
+<slug>). Nothing was enqueued."
+fi
+
+# An unplaceable row has to be refused here, before it is durable: the claim loop
+# can only decline for itself, so a row it cannot claim is never reported as
+# unclaimable and waits out the request TTL. The one claimant is this store's live
+# session host, which serves a checkout when it belongs to the store.
+PLACEMENT="$(live_placement "$INSTANCES_DIR" "$STORE_HOST_KEY" "$CHECKOUT")" \
+  || fail "could not read the live instance registry at $INSTANCES_DIR; nothing was enqueued"
+if ! printf '%s' "$PLACEMENT" | jq -e '.served' >/dev/null; then
+  WHY="$(printf '%s' "$PLACEMENT" | jq -r '.store_checkout_error // empty')"
+  if [[ -z "$WHY" ]]; then
+    # No live store host checked the checkout, so check it here: starting a host
+    # cannot help a request whose checkout it would refuse.
+    WHY="$(store_checkout_of "$KNOWLEDGE_DIR" "$CHECKOUT" 2>&1 >/dev/null)" && WHY=""
   fi
-fi
-if [[ -n "$STORE_HOST_UNAVAILABLE" && -z "$REQUIRED_RESOLVED" && -z "${PREFER_RESOLVED:-}" ]]; then
-  live_placement "$INSTANCES_DIR" "" "" | jq -e '.servers | length > 0' >/dev/null \
-    || refuse_without_store_host "(none named)"
-fi
-if [[ -n "$STORE_HOST_UNAVAILABLE" ]]; then
-  echo "[session] the store's session host is unavailable ($STORE_HOST_UNAVAILABLE); this request is left for the live lore-tui that serves it" >&2
+  if [[ -n "$WHY" && -n "$REQUIRED_RESOLVED" ]]; then
+    fail "declared checkout is not in this store: re-declare it
+Work item '$WORK_ITEM_SLUG' declares '$REQUIRED_RESOLVED', which this store's session host
+cannot serve: $WHY. From inside a checkout of this store, re-declare it with:
+  lore work source-checkout $WORK_ITEM_SLUG
+Nothing was enqueued."
+  fi
+  if [[ -n "$WHY" ]]; then
+    fail "$PREFER_FLAG is not a checkout of this store; name one
+'$PREFER_RESOLVED' cannot be served by this store's session host: $WHY. Name the top
+level of a git checkout of this store. Nothing was enqueued."
+  fi
+  fail "no live store host: run lore session ensure, then retry
+This store's session host claims every request, and none is running. 'lore session
+ensure' starts it, and 'lore session request' starts it and enqueues in one step. Its
+diagnostics are $(store_host_diagnostics). Nothing was enqueued."
 fi
 
 # placement_stance names the axis that actually governs, so no reader has to infer
@@ -884,19 +852,15 @@ fi
 # item's".
 if [[ -n "$REQUIRED_PROJECT_DIR_JSON" ]]; then
   PLACEMENT_STANCE="required_dir"
-elif [[ -n "$TARGET" ]]; then
-  PLACEMENT_STANCE="targeted"
-elif [[ $PREFER_DIR_PROVIDED -eq 1 ]]; then
-  PLACEMENT_STANCE="preferred_dir"
 else
-  PLACEMENT_STANCE="any"
+  PLACEMENT_STANCE="preferred_dir"
 fi
 # The claim side gates the hard filter on the token being present, so a token
 # outside the closed set would let a declaring row through unfiltered. No shared
 # enum helper exists; the set is checked here, where it is written.
 case "$PLACEMENT_STANCE" in
-  required_dir|targeted|preferred_dir|any) ;;
-  *) fail "internal error: placement_stance '$PLACEMENT_STANCE' is outside the closed set (required_dir, targeted, preferred_dir, any)" ;;
+  required_dir|preferred_dir) ;;
+  *) fail "internal error: placement_stance '$PLACEMENT_STANCE' is outside the closed set this writer writes (required_dir, preferred_dir)" ;;
 esac
 
 # The declared branch is verification-only: it travels to the claiming side, which
@@ -1069,12 +1033,18 @@ if [[ -n "$SKIP_CONFIRM_JSON" ]]; then
   ROW="$(printf '%s' "$ROW" | jq -c --argjson sc "$SKIP_CONFIRM_JSON" '. + {skip_confirm: $sc}')"
 fi
 
-if [[ -n "$ROW_HOST_KEY" ]]; then
-  ROW="$(printf '%s' "$ROW" | jq -c --arg key "$ROW_HOST_KEY" '. + {host_key: $key}')"
-fi
+ROW="$(printf '%s' "$ROW" | jq -c --arg key "$STORE_HOST_KEY" '. + {host_key: $key}')"
 
-# Pin semantic requirements through the target field understood by legacy readers.
-ROW="$(printf '%s' "$ROW" | python3 "$SCRIPT_DIR/session-admission.py" "$INSTANCES_DIR" "$SESSION_INSTANCE_LIVENESS_TTL_SECONDS")" || fail "runtime admission failed; nothing was enqueued"
+# A row that needs a runtime capability or a build floor is published only when the
+# live store host meets it; admission's refusal is the whole message.
+ADMISSION_ERR="$(mktemp "${TMPDIR:-/tmp}/session-admission.XXXXXX")"
+if ! ADMITTED="$(printf '%s' "$ROW" | python3 "$SCRIPT_DIR/session-admission.py" "$INSTANCES_DIR" "$SESSION_INSTANCE_LIVENESS_TTL_SECONDS" 2>"$ADMISSION_ERR")"; then
+  WHY="$(cat "$ADMISSION_ERR")"
+  rm -f "$ADMISSION_ERR"
+  fail "${WHY:-runtime admission failed; nothing was enqueued}"
+fi
+rm -f "$ADMISSION_ERR"
+ROW="$ADMITTED"
 
 # Enqueue = tmp-write + atomic rename-in. The tmp name is hidden and lacks the
 # .json suffix, so a concurrent reader globbing *.json never sees a torn row.
@@ -1143,10 +1113,9 @@ if [[ $JSON_MODE -eq 1 ]]; then
     --arg path "$RELPATH" \
     --arg placement_stance "$PLACEMENT_STANCE" \
     --arg required_dir "$REQUIRED_RESOLVED" \
-    --arg host_key "$ROW_HOST_KEY" \
+    --arg host_key "$STORE_HOST_KEY" \
     '{request_id: $request_id, type: $type, slug: $slug, target_instance: $target, path: $path,
-      placement_stance: $placement_stance, enqueued: true}
-     + (if $host_key != "" then {host_key: $host_key} else {} end)
+      placement_stance: $placement_stance, host_key: $host_key, enqueued: true}
      + (if $required_dir != "" then {required_project_dir: $required_dir} else {} end)
      + (if $worktree_id != "" then {worktree_id: $worktree_id, execution_dir: $execution_dir} else {} end)')"
   json_output "$RESULT"

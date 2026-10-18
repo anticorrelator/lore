@@ -14,8 +14,25 @@ setup() {
   cp "$REPO_DIR/adapters/settings.template.json" "$LORE_DATA_DIR/config/settings.json"
   jq -cn --arg checkout "$REPO_DIR" '{schema_version:1,slug:"demo",title:"Demo",status:"active",source_checkout:$checkout}' > "$TEST_ROOT/kdir/_work/demo/_meta.json"
   printf '{}\n' > "$TEST_ROOT/kdir/_work/demo/tasks.json"
+  # The store's session host claims every row: a live store-scoped registry row
+  # under this store's key, built late enough for every floor below, with the store pinned
+  # so the checkout belongs to it without resolution.
   mkdir -p "$TEST_ROOT/kdir/_sessions/instances"
-  jq -cn --arg checkout "$REPO_DIR" '{name:"route-fixture-host",pid:4242,repo:"lore",started:"2026-09-09T00:00:00Z",initiator_default:"human",project_dir:$checkout,sessions:[]}' > "$TEST_ROOT/kdir/_sessions/instances/route-fixture-host.json"
+  python3 - "$REPO_DIR/scripts" "$TEST_ROOT/kdir" <<'PY'
+import importlib.util, json, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("session_runtime", sys.argv[1] + "/session_runtime.py")
+runtime = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runtime)
+kdir = Path(sys.argv[2]).resolve()
+login = runtime.login_dir()
+login.mkdir(parents=True, exist_ok=True)
+(login / "served.json").write_text(json.dumps({"schema_version": 1, "stores": {str(kdir): {"pin_knowledge_dir": True}}}))
+(kdir / "_sessions/instances/route-fixture-host.json").write_text(json.dumps(dict(
+    name="route-fixture-host", pid=4242, role="session-host", scope="store", host_key=runtime.store_host_key(kdir),
+    runtime=runtime.runtime_name(), started="2026-09-09T00:00:00Z", sessions=[],
+    runtime_capabilities=["position-preparation-v1"], build_time="2027-01-01T00:00:00Z")))
+PY
 }
 
 teardown() { rm -rf "${TEST_ROOT:?}"; }
