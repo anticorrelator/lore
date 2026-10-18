@@ -24,6 +24,7 @@ import (
 	libghostty "go.mitchellh.com/libghostty"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
+	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/style"
 	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
@@ -1945,6 +1946,7 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 					name = TmuxSessionNameSlugless(sessionEnv.Instance)
 					label = "slugless session (" + name + ")"
 				}
+				sessionEnv.generation = session.Generation(sessionID, sessionEnv.RequestID, name, sessionEnv.Started)
 				if sessionEnv.Prepared != nil {
 					prepared := d
 					prepared.Worktree = &identity
@@ -1980,6 +1982,9 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 				if err := sessionEnv.Prepared(prepared, activeFramework, sessionID, "", 0); err != nil {
 					return StreamErrorMsg{Slug: slug, Err: err}
 				}
+			}
+			if sessionEnv.Instance != "" {
+				sessionEnv.generation = session.Generation(sessionID, sessionEnv.RequestID, "", sessionEnv.Started)
 			}
 			cmd = exec.Command(harnessBinary, args...)
 			cmd.Dir = worktreeDir

@@ -1,0 +1,50 @@
+{
+  "description": "A session generation computed from a registry session row. tui/internal/session Generation(session_id, request_id, tmux, started) and scripts/session_target.py generation(row) must both produce `generation` for every vector; an empty `started` is a row with no start time. Registry rows store `started` to the second (YYYY-MM-DDTHH:MM:SSZ); the fractional vector pins that a launch time with sub-second precision names the same generation as its registry form.",
+  "vectors": [
+    {
+      "name": "launch with a harness session id",
+      "row": {"session_id": "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b", "request_id": "20261018T070405Z-9f8e7d6c", "tmux": "lore-brisk-heron-0a1b2c-demo--w1", "started": "2026-10-18T07:04:05Z"},
+      "generation": "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b/20261018T070405Z-9f8e7d6c/1792307045"
+    },
+    {
+      "name": "launch whose harness takes no session id",
+      "row": {"session_id": "", "request_id": "20261018T070405Z-9f8e7d6c", "tmux": "lore-brisk-heron-0a1b2c-demo--w1", "started": "2026-10-18T07:04:05Z"},
+      "generation": "20261018T070405Z-9f8e7d6c/20261018T070405Z-9f8e7d6c/1792307045"
+    },
+    {
+      "name": "launch with neither a session id nor a request id",
+      "row": {"session_id": "", "request_id": "", "tmux": "lore-brisk-heron-0a1b2c-demo--w1", "started": "2026-10-18T07:04:05Z"},
+      "generation": "lore-brisk-heron-0a1b2c-demo--w1//1792307045"
+    },
+    {
+      "name": "launch with only a start time",
+      "row": {"session_id": "", "request_id": "", "tmux": "", "started": "2026-07-06T00:00:00Z"},
+      "generation": "//1783296000"
+    },
+    {
+      "name": "start time with sub-second precision",
+      "row": {"session_id": "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b", "request_id": "20261018T070405Z-9f8e7d6c", "tmux": "lore-brisk-heron-0a1b2c-demo--w1", "started": "2026-10-18T07:04:05.999999Z"},
+      "generation": "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b/20261018T070405Z-9f8e7d6c/1792307045"
+    },
+    {
+      "name": "no start time, harness session id",
+      "row": {"session_id": "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b", "request_id": "20261018T070405Z-9f8e7d6c", "tmux": "lore-brisk-heron-0a1b2c-demo--w1", "started": ""},
+      "generation": "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b"
+    },
+    {
+      "name": "no start time, request id only",
+      "row": {"session_id": "", "request_id": "20261018T070405Z-9f8e7d6c", "tmux": "", "started": ""},
+      "generation": "20261018T070405Z-9f8e7d6c"
+    },
+    {
+      "name": "no start time, tmux name only",
+      "row": {"session_id": "", "request_id": "", "tmux": "lore-brisk-heron-0a1b2c-demo--w1", "started": ""},
+      "generation": "lore-brisk-heron-0a1b2c-demo--w1"
+    },
+    {
+      "name": "nothing recorded",
+      "row": {"session_id": "", "request_id": "", "tmux": "", "started": ""},
+      "generation": ""
+    }
+  ]
+}

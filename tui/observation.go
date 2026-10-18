@@ -147,17 +147,7 @@ func classifyActivity(framework string, snap work.ScreenSnapshot) (string, sessi
 }
 
 func observationGeneration(ls liveSession) string {
-	identity := ls.sessionID
-	if identity == "" {
-		identity = ls.requestID
-	}
-	if identity == "" {
-		identity = ls.tmuxName
-	}
-	if !ls.started.IsZero() {
-		return fmt.Sprintf("%s/%s/%d", identity, ls.requestID, ls.started.Unix())
-	}
-	return identity
+	return session.Generation(ls.sessionID, ls.requestID, ls.tmuxName, ls.started)
 }
 
 func (m model) snapshotObservation(slug string, now time.Time) (session.Observation, work.ScreenSnapshot, screenClass) {

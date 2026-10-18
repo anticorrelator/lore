@@ -7,6 +7,7 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
@@ -110,8 +111,16 @@ type SessionEnv struct {
 	Instance     string // LORE_SESSION_INSTANCE
 	Slug         string // LORE_SESSION_SLUG
 	Type         string // LORE_SESSION_TYPE: spec|implement|chat
+	generation   string // LORE_SESSION_GENERATION, set by StartTerminalCmd
 	WorktreeID   string // LORE_WORKTREE_ID for coordinated writers
 	ExecutionDir string // LORE_EXECUTION_DIR, identical to the validated child cwd
+
+	// RequestID and Started are the launch's request and start time. With the
+	// session id and tmux name StartTerminalCmd assigns, they make the
+	// session's generation (session.Generation), which the host derives again
+	// from its registry row; Started must be the time the registry row records.
+	RequestID string
+	Started   time.Time
 
 	// WorktreeRoot is the session's own checkout — the containment boundary the
 	// write fence classifies against — and StoreRoot is the resolved knowledge
@@ -153,6 +162,9 @@ func (s SessionEnv) vars() []string {
 	}
 	if s.Type != "" {
 		out = append(out, "LORE_SESSION_TYPE="+s.Type)
+	}
+	if s.generation != "" {
+		out = append(out, "LORE_SESSION_GENERATION="+s.generation)
 	}
 	if s.WorktreeID != "" {
 		out = append(out, "LORE_WORKTREE_ID="+s.WorktreeID)

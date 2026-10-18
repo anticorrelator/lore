@@ -1554,19 +1554,20 @@ func (m model) spawnSessionOnRef(d work.SessionDescriptor, requestID, requiredRe
 	if m.pendingSpawns == nil {
 		m.pendingSpawns = make(map[string]liveSession)
 	}
+	started := time.Now()
 	m.pendingSpawns[slug] = liveSession{
 		checkpointID: requestID,
 		typ:          sessionType(d.Type),
 		initiator:    d.Initiator,
 		requestID:    requestID,
-		started:      time.Now(),
+		started:      started,
 		autoClose:    d.AutoClose,
 		worktreeID:   d.WorktreeID,
 		executionDir: d.ExecutionDir, sourceDir: sourceDir,
 	}
 	env := work.SessionEnv{Instance: m.instanceName, Slug: slug, Type: sessionType(d.Type),
 		WorktreeID: d.WorktreeID, ExecutionDir: d.ExecutionDir, SourceDir: sourceDir, HostKey: m.hostKey, RoutingOverrides: d.RoutingOverrides,
-		Prepared: m.hostSpawnCheckpoint(requestID)}
+		RequestID: requestID, Started: started, Prepared: m.hostSpawnCheckpoint(requestID)}
 	if d.Worktree == nil {
 		epoch := session.NewRequestID()
 		worktreePath := filepath.Join(m.config.KnowledgeDir, "_sessions", "worktrees", epoch)
