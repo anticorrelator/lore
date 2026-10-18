@@ -265,13 +265,17 @@ func renderTabIndicator(activeTab appState, workCount, followupCount, sessionsCo
 	return line
 }
 
-// tabIdentity renders the instance chrome shown right-aligned in the tab row as
-// "<repo> · <name>", or "" when no instance identity is resolved (e.g. outside a
-// repo). repo recedes; the instance name reads one tier brighter so it stays the
-// memorable token an agent would target.
+// tabIdentity renders the chrome shown right-aligned in the tab row: the repo
+// whose store the window views, or "<repo> · <name>" for a process with an
+// instance identity. A window has none — it hosts no session — and "" is
+// returned outside a repo. repo recedes; an instance name reads one tier
+// brighter so it stays the memorable token an agent would target.
 func (m model) tabIdentity() string {
 	if m.instanceName == "" {
-		return ""
+		if m.sessionsDir == "" || m.config.RepoIdentifier == "" {
+			return ""
+		}
+		return tabKeyS.Render(m.config.RepoIdentifier)
 	}
 	if m.config.RepoIdentifier == "" {
 		return tabInactiveS.Render(m.instanceName)

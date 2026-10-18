@@ -13,93 +13,15 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
 
-// openSessionMirror replaces any other remote mirror and focuses the selected
-// tmux pane. Re-entering the same row reuses its generation.
-func (m model) openSessionMirror(rowID, tmuxName string) (model, tea.Cmd) {
-	if rowID == "" || tmuxName == "" {
-		return m, nil
-	}
-	if m.sessionMirrorActive && m.sessionMirrorRowID == rowID && m.sessionMirrorPanel.TmuxName() == tmuxName {
-		m.focusedPanel = panelRight
-		m.terminalMode = true
-		m.setPreferDetail(rowID, false)
-		return m, nil
-	}
-	if m.sessionMirrorActive {
-		m.closeSessionMirror()
-	}
-	if m.sessionMirrorGeneration == 0 {
-		m.sessionMirrorGeneration = 1
-	}
-	panel := work.NewMirrorSessionPanelModel(rowID, tmuxName, m.sessionMirrorGeneration)
-	if pair, ok := work.NewTerminalColorPair(m.terminalForeground, m.terminalBackground); ok {
-		panel = panel.WithTerminalColorPair(pair)
-	}
-	panel, _ = panel.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth() - 2, Height: m.detailPanelHeight()})
-	m.sessionMirrorPanel = panel
-	m.sessionMirrorRowID = rowID
-	m.sessionMirrorActive = true
-	m.focusedPanel = panelRight
-	m.terminalMode = true
-	m.setPreferDetail(rowID, false)
-	return m, panel.Init()
-}
-
-// closeSessionMirror releases only the root-owned mirror. A generation-bumped
-// tombstone remains available to reject and dispose late open results.
-func (m *model) closeSessionMirror() {
-	if !m.sessionMirrorActive {
-		return
-	}
-	panel := m.sessionMirrorPanel.Cleanup()
-	if panel.MirrorGeneration() > m.sessionMirrorGeneration {
-		m.sessionMirrorGeneration = panel.MirrorGeneration()
-	}
-	m.sessionMirrorGeneration++
-	tombstone := work.NewMirrorSessionPanelModel(panel.Slug(), panel.TmuxName(), m.sessionMirrorGeneration)
-	m.sessionMirrorPanel = tombstone
-	m.sessionMirrorRowID = ""
-	m.sessionMirrorActive = false
-	m.terminalMode = false
-}
-
-// handleSessionMirrorMessage routes generation-scoped mirror traffic to the
-// root slot, never through owned-session lifecycle or journal handlers.
-func (m model) handleSessionMirrorMessage(msg tea.Msg) (model, tea.Cmd) {
-	if !m.sessionMirrorPanel.IsMirror() {
-		return m, nil
-	}
-	sm, cmd := m.sessionMirrorPanel.Update(msg)
-	m.sessionMirrorPanel = sm
-	if generation := sm.MirrorGeneration(); generation > m.sessionMirrorGeneration {
-		m.sessionMirrorGeneration = generation
-	}
-	return m, cmd
-}
-
-// updateCurrentSessionsPanel forwards focused input to either the selected
-// owned session or the explicitly drilled remote mirror.
+// updateCurrentSessionsPanel forwards focused input to the panel open for the
+// selected sessions row.
 func (m *model) updateCurrentSessionsPanel(msg tea.Msg) tea.Cmd {
 	row, ok := m.sessionsList.CurrentSession()
-	if !ok {
+	if !ok || row.InFlight {
 		m.terminalMode = false
 		return nil
 	}
-	if !row.Local {
-		if !m.sessionMirrorActive || row.RowID != m.sessionMirrorRowID {
-			m.terminalMode = false
-			return nil
-		}
-		sm, cmd := m.sessionMirrorPanel.Update(msg)
-		m.sessionMirrorPanel = sm
-		if generation := sm.MirrorGeneration(); generation > m.sessionMirrorGeneration {
-			m.sessionMirrorGeneration = generation
-		}
-		return cmd
-	}
-	if panel, ok := m.sessionPanels[row.PanelKey]; ok {
-		sm, cmd := panel.Update(msg)
-		m.sessionPanels[row.PanelKey] = sm
+	if cmd, ok := m.updatePanel(row.PanelKey, msg); ok {
 		return cmd
 	}
 	m.terminalMode = false
@@ -239,13 +161,10 @@ func (m model) endLocalSessionFailed(slug, closeRequestID, reason string) (model
 }
 
 func (m model) handleSpecRequest(msg work.SpecRequestMsg) (model, tea.Cmd) {
-	// 's' on a work item: attach if a session already exists, else show the
-	// confirmation modal before launching the spec subprocess.
-	if m.hasSessionPanel(msg.Slug) {
-		m.terminalMode = true
-		m.setPreferDetail(msg.Slug, false)
-		m.focusedPanel = panelRight
-		return m, nil
+	// 's' on a work item: show its session when one is live, else show the
+	// confirmation modal before launching spec.
+	if next, cmd, ok := m.viewItemSession(msg.Slug); ok {
+		return next, cmd
 	}
 	ta := newModalTextarea()
 	focusCmd := ta.Focus()
@@ -264,10 +183,9 @@ func (m model) handleSpecRequest(msg work.SpecRequestMsg) (model, tea.Cmd) {
 }
 
 func (m model) handleChatRequest(msg work.ChatRequestMsg) (model, tea.Cmd) {
-	// 'c' on a work item: attach if a session exists, else open a chat confirm.
-	if m.hasSessionPanel(msg.Slug) {
-		m.focusedPanel = panelRight
-		return m, nil
+	// 'c' on a work item: show its session when one is live, else open a chat confirm.
+	if next, cmd, ok := m.viewItemSession(msg.Slug); ok {
+		return next, cmd
 	}
 	ta := newModalTextarea()
 	focusCmd := ta.Focus()
@@ -284,15 +202,12 @@ func (m model) handleChatRequest(msg work.ChatRequestMsg) (model, tea.Cmd) {
 }
 
 func (m model) handleImplementRequest(msg work.ImplementRequestMsg) (model, tea.Cmd) {
-	// 'i' on a work item: attach if a session exists; otherwise gate on
+	// 'i' on a work item: show its session when one is live; otherwise gate on
 	// readiness before opening the confirm modal. /implement consumes tasks.json,
 	// so the human gate is stricter than the spec launch — an item with no tasks
 	// (or an archived one) has nothing to implement.
-	if m.hasSessionPanel(msg.Slug) {
-		m.terminalMode = true
-		m.setPreferDetail(msg.Slug, false)
-		m.focusedPanel = panelRight
-		return m, nil
+	if next, cmd, ok := m.viewItemSession(msg.Slug); ok {
+		return next, cmd
 	}
 	item, ok := m.workItemBySlug(msg.Slug)
 	if !ok || !item.HasTasks || item.Status == "archived" {
@@ -314,10 +229,10 @@ func (m model) handleImplementRequest(msg work.ImplementRequestMsg) (model, tea.
 }
 
 func (m model) handleFollowupChatRequest(msg followup.FollowupChatRequestMsg) (model, tea.Cmd) {
-	// 'c' on a follow-up item: open a chat session about the follow-up.
-	if m.hasSessionPanel(msg.ID) {
-		m.focusedPanel = panelRight
-		return m, nil
+	// 'c' on a follow-up item: show its chat when one is live, else open a
+	// chat session about the follow-up.
+	if next, cmd, ok := m.viewItemSession(msg.ID); ok {
+		return next, cmd
 	}
 	// Title/Source may be empty when the message originates from LensFindingsModel
 	// (which only knows the followup ID). Fill from the currently loaded detail.
@@ -657,11 +572,6 @@ func (m model) handleTerminalDetach(_ work.TerminalDetachMsg) (model, tea.Cmd) {
 }
 
 func (m model) handleTerminalTerminate(msg work.TerminalTerminateMsg) (model, tea.Cmd) {
-	if m.sessionMirrorActive && msg.Slug == m.sessionMirrorPanel.Slug() {
-		m.closeSessionMirror()
-		m.focusedPanel = panelLeft
-		return m, nil
-	}
 	// User killed the subprocess (Ctrl+\\) — cleanup and remove the panel.
 	// Reload list in case spec wrote files before being killed.
 	slug := msg.Slug

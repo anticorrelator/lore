@@ -23,7 +23,10 @@ func TestRouteRequestQueueDescriptorLaunchIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := initRouteLaunchRepo(t)
-	kdir := t.TempDir()
+	kdir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	data := t.TempDir()
 	bin := t.TempDir()
 	t.Setenv("LORE_DATA_DIR", data)
@@ -55,17 +58,12 @@ func TestRouteRequestQueueDescriptorLaunchIntegration(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(item, "plan.md"), []byte("# Plan\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	instances := filepath.Join(kdir, "_sessions", "instances")
-	if err := os.MkdirAll(instances, 0755); err != nil {
-		t.Fatal(err)
-	}
 	// Route options carry a build-vintage floor, and a floor is published only
-	// to a live runtime whose build time meets it; that runtime is the claimer.
-	hostRow := map[string]any{"name": "host", "pid": os.Getpid(), "repo": "fixture", "started": "2026-09-09T00:00:00Z", "initiator_default": "human", "project_dir": source, "build_time": routeAwareVintage, "runtime_capabilities": []string{"position-preparation-v1"}, "sessions": []any{}}
-	instance, _ := json.Marshal(hostRow)
-	if err := os.WriteFile(filepath.Join(instances, "host.json"), instance, 0644); err != nil {
-		t.Fatal(err)
-	}
+	// when the store's live session host meets it; that host is the claimer.
+	hostKey := serveStoreForWriter(t, kdir, routeAwareVintage)
+	sessionsDir := filepath.Join(kdir, "_sessions")
+	scope := session.StoreScope{KnowledgeDir: kdir, Pinned: true}
+	live := map[string]bool{"store-host": true}
 
 	for _, tc := range []struct {
 		typ, slug, initiator, wantArg, model string
@@ -105,11 +103,14 @@ func TestRouteRequestQueueDescriptorLaunchIntegration(t *testing.T) {
 				t.Fatalf("request: %v: %s", err, out)
 			}
 
-			rows := session.ScanPending(filepath.Join(kdir, "_sessions"))
+			rows := session.ScanPending(sessionsDir)
 			if len(rows) != 1 || rows[0].Route == nil {
 				t.Fatalf("pending=%#v", rows)
 			}
 			req := rows[0]
+			if req.HostKey != hostKey {
+				t.Fatalf("host_key=%q, want the store host's %q", req.HostKey, hostKey)
+			}
 			if req.MinVintageValue() != routeAwareVintage {
 				t.Fatalf("floor=%q", req.MinVintageValue())
 			}
@@ -129,11 +130,11 @@ func TestRouteRequestQueueDescriptorLaunchIntegration(t *testing.T) {
 				t.Fatalf("event route=%s row route=%s", event.Route, routeJSON)
 			}
 
-			old, err := session.QueueTick(filepath.Join(kdir, "_sessions"), "host", "2026-09-09T01:27:41Z", source, map[string]bool{"host": true}, func(string) bool { return true }, nil, time.Now(), session.ReclaimAfter)
+			old, err := session.QueueTickForStoreHost(sessionsDir, "store-host", "2026-09-09T01:27:41Z", hostKey, scope, live, func(string) bool { return true }, nil, time.Now(), session.ReclaimAfter, nil)
 			if err != nil || old.Claimed != nil {
 				t.Fatalf("old host claim=%#v err=%v", old.Claimed, err)
 			}
-			claimed, err := session.QueueTick(filepath.Join(kdir, "_sessions"), "host", routeAwareVintage, source, map[string]bool{"host": true}, func(string) bool { return true }, nil, time.Now(), session.ReclaimAfter)
+			claimed, err := session.QueueTickForStoreHost(sessionsDir, "store-host", routeAwareVintage, hostKey, scope, live, func(string) bool { return true }, nil, time.Now(), session.ReclaimAfter, nil)
 			if err != nil || claimed.Claimed == nil {
 				t.Fatalf("new host claim=%#v err=%v", claimed.Claimed, err)
 			}
@@ -181,7 +182,7 @@ func TestRouteRequestQueueDescriptorLaunchIntegration(t *testing.T) {
 		}
 		manifest := map[string]any{
 			"handle": "demo--w3", "request_id": "managed-0123456789abcdef0123456789abcdef",
-			"host_key": "1234567890abcdef12345678", "work_item": "demo", "source_dir": source,
+			"host_key": hostKey, "work_item": "demo", "source_dir": source,
 			"route": frozen, "framework": "codex", "model": "gpt-5.6-sol",
 			"routing_source": frozen["routing_source"], "context": "retry integration", "state": "intent",
 		}
@@ -189,17 +190,12 @@ func TestRouteRequestQueueDescriptorLaunchIntegration(t *testing.T) {
 		if err := os.WriteFile(manifestPath, raw, 0644); err != nil {
 			t.Fatal(err)
 		}
-		hostRow["host_key"] = manifest["host_key"]
-		instance, _ := json.Marshal(hostRow)
-		if err := os.WriteFile(filepath.Join(instances, "host.json"), instance, 0644); err != nil {
-			t.Fatal(err)
-		}
 		py := `import importlib.util,sys
 from unittest.mock import patch
 spec=importlib.util.spec_from_file_location("session_managed",sys.argv[1])
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 k=m.Path(sys.argv[2]); manifest=m.read(m.Path(sys.argv[3]))
-status={"instance_name":"host","runtime_capabilities":["position-preparation-v1"]}
+status={"instance_name":"store-host","runtime_capabilities":["position-preparation-v1"]}
 with patch.object(m,"ensure",return_value=status), patch.object(m,"ready",return_value=status):
     m.enqueue_start(k,manifest)`
 		cmd := exec.Command("python3", "-c", py, filepath.Join(repo, "scripts", "session-managed.py"), kdir, manifestPath)
@@ -215,7 +211,7 @@ with patch.object(m,"ensure",return_value=status), patch.object(m,"ready",return
 		if err != nil || decodeErr != nil || persistedManifest.State != "enqueued" {
 			t.Fatalf("manifest=%s err=%v", persisted, err)
 		}
-		claimed, err := session.QueueTickForHost(filepath.Join(kdir, "_sessions"), "host", routeAwareVintage, source, "1234567890abcdef12345678", map[string]bool{"host": true}, func(string) bool { return true }, nil, time.Now(), session.ReclaimAfter)
+		claimed, err := session.QueueTickForStoreHost(sessionsDir, "store-host", routeAwareVintage, hostKey, scope, live, func(string) bool { return true }, nil, time.Now(), session.ReclaimAfter, nil)
 		if err != nil || claimed.Claimed == nil {
 			t.Fatalf("managed claim=%#v err=%v", claimed.Claimed, err)
 		}

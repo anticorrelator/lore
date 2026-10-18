@@ -3,7 +3,7 @@ package main
 // Contract tests for the terminal-mode interaction contract: global keys
 // resolve by focus (not by whether a session merely exists), the manual
 // ctrl+t view choice survives navigation, Esc-Esc detaches focus only,
-// ctrl+c quits from the list and terminates/discards only with the terminal
+// ctrl+c quits from the list and closes/discards only with the terminal
 // focused, and lore scrollback lives on the shift-modified scroll keys while
 // plain scroll keys reach the PTY. Tests drive the real Update path and are
 // named by the hint text they pin (see keymap.go test refs).
@@ -21,12 +21,17 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
-// activeUnfocusedModel: stateWork, spec panel on item-1, cursor on item-1,
+// viewerOn is a viewer panel on the store host's session for key.
+func viewerOn(key string) sessionViewer {
+	return sessionViewer{panel: work.NewViewerSessionPanelModel(key, "lore-store-host-"+key), slug: key, title: key}
+}
+
+// activeUnfocusedModel: stateWork, a viewer on item-1, cursor on item-1,
 // terminalMode true, focus on the left list — the state the app lands in
-// after launching a spec from the confirm modal (sessionLaunchedFromModal).
+// once a spec launched from the confirm modal has spawned.
 func activeUnfocusedModel() model {
 	m := workContractModel()
-	m.setSessionPanel("item-1", work.NewSessionPanelModel("item-1"))
+	m.viewers = map[string]sessionViewer{"item-1": viewerOn("item-1")}
 	m.terminalMode = true
 	m.focusedPanel = panelLeft
 	return m
@@ -250,7 +255,7 @@ func TestCtrlTChoicePersistsAcrossNavigation(t *testing.T) {
 // to list" hint: detach moves focus only; the right panel keeps the terminal.
 func TestTerminalDetachKeepsTerminalView(t *testing.T) {
 	m := workContractModel()
-	m.setSessionPanel("item-1", work.NewSessionPanelModel("item-1"))
+	m.viewers = map[string]sessionViewer{"item-1": viewerOn("item-1")}
 	m.terminalMode = true
 	m.focusedPanel = panelRight
 	nm, _ := updateModel(t, m, work.TerminalDetachMsg{Slug: "item-1"})
@@ -313,7 +318,7 @@ func followupActiveUnfocusedModel(t *testing.T) model {
 	m := followupContractModel()
 	m.width = 120
 	m.height = 40
-	m.setSessionPanel("fu-1", work.NewSessionPanelModel("fu-1"))
+	m.viewers = map[string]sessionViewer{"fu-1": viewerOn("fu-1")}
 	m.terminalMode = true
 	m.focusedPanel = panelLeft
 	return m

@@ -21,6 +21,7 @@ import (
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/session"
+	"github.com/anticorrelator/lore/tui/internal/sessionview"
 	"github.com/anticorrelator/lore/tui/internal/work"
 	"github.com/anticorrelator/lore/tui/internal/worktree"
 )
@@ -1406,33 +1407,46 @@ func emitWorktreeRefusedCmd(dir, script, kdir, requestID, reason, actor string) 
 
 // --- handlers ---
 
-// handleSessionSnapshot turns a registry snapshot into external-session badging
-// for the list and detail views. Sessions on this instance are local and never
-// badged as external.
+// handleSessionSnapshot badges the work list from a registry snapshot.
 func (m model) handleSessionSnapshot(msg sessionSnapshotMsg) (model, tea.Cmd) {
-	external := make(map[string]work.ExternalSession)
-	for _, inst := range msg.instances {
-		if inst.Name == m.instanceName {
-			continue
-		}
+	return m.badgeSessions(msg.instances), nil
+}
+
+// badgeSessions badges every work item a live session runs on with that
+// session's type and needs-input state. A badge describes the session; every
+// session runs in the store's background host, so none is drawn as another
+// window's. A window writes nothing under _sessions/, so read diagnostics are
+// left to the store host, which reads the same rows.
+func (m model) badgeSessions(instances []session.Instance) model {
+	live := make(map[string]work.SessionStatusMsg)
+	for _, inst := range instances {
 		for _, s := range inst.Sessions {
-			external[s.Slug] = work.ExternalSession{
-				Instance:  inst.Name,
-				Type:      s.Type,
-				Initiator: s.Initiator,
+			if s.Slug == "" {
+				continue
+			}
+			status := live[s.Slug]
+			status.Slug = s.Slug
+			if status.Type == "" {
+				status.Type = sessionType(s.Type)
+			}
+			status.NeedsInput = status.NeedsInput || m.sessionActivity[sessionview.ActivityKey{Instance: inst.Name, Slug: s.Slug}].NeedsInput
+			live[s.Slug] = status
+		}
+	}
+	for slug := range m.badgedSessions {
+		if _, ok := live[slug]; !ok {
+			if _, owned := m.sessionPanels[slug]; !owned {
+				m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: slug, Done: true})
 			}
 		}
 	}
-	m.list, _ = m.list.Update(work.ExternalSessionMsg{Sessions: external})
-	currentSlug := m.list.CurrentSlug()
-	if es, ok := external[currentSlug]; ok {
-		m.detail, _ = m.detail.Update(work.DetailExternalSessionMsg{
-			Active: true, Instance: es.Instance, Type: es.Type, Initiator: es.Initiator,
-		})
-	} else {
-		m.detail, _ = m.detail.Update(work.DetailExternalSessionMsg{Active: false})
+	for _, status := range live {
+		m.list, _ = m.list.Update(status)
 	}
-	return m, appendDiagnosticsCmd(m.sessionsDir, msg.diagnostics)
+	m.badgedSessions = live
+	m.list, _ = m.list.Update(work.ExternalSessionMsg{})
+	m.detail, _ = m.detail.Update(work.DetailExternalSessionMsg{Active: false})
+	return m
 }
 
 // handleQueueTickResult journals every durable queue transition and spawns the

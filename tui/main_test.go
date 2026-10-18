@@ -2896,13 +2896,16 @@ func TestArchiveOpensConfirmModal(t *testing.T) {
 }
 
 // TestTerminalModeStatusBarKeybindContract verifies the terminal-mode hint
-// set: "ctrl+t detail · Esc back to list (forwarded) · Ctrl+c terminate".
+// set: "ctrl+t detail · Esc back to list (forwarded) · Ctrl+c close".
 func TestTerminalModeStatusBarKeybindContract(t *testing.T) {
 	terminalModel := func() model {
 		m := workContractModel()
 		m.focusedPanel = panelRight
 		m.terminalMode = true
-		m.setSessionPanel("item-1", work.NewSessionPanelModel("item-1"))
+		m.viewers = map[string]sessionViewer{"item-1": {
+			panel: work.NewViewerSessionPanelModel("item-1", "lore-store-host-item-1"),
+			slug:  "item-1", sessionID: "sid-1", title: "item-1",
+		}}
 		return m
 	}
 	t.Run("ctrl+t (detail)", func(t *testing.T) {
@@ -2911,44 +2914,37 @@ func TestTerminalModeStatusBarKeybindContract(t *testing.T) {
 			t.Error("ctrl+t should switch back to detail view")
 		}
 	})
-	t.Run("Ctrl+c (terminate)", func(t *testing.T) {
+	t.Run("Ctrl+c (close)", func(t *testing.T) {
 		m := terminalModel()
 		hints := stripANSI(strings.Join(m.statusBarHints(kmTerminal), " · "))
-		if !strings.Contains(hints, "Ctrl+c terminate") {
-			t.Errorf("status bar does not advertise terminate: %s", hints)
+		if !strings.Contains(hints, "Ctrl+c close") {
+			t.Errorf("status bar does not advertise close: %s", hints)
 		}
-		_, cmd := updateModel(t, m, press('c', tea.ModCtrl))
-		if cmd == nil {
-			t.Fatal("ctrl+c should dispatch a terminate command")
+		nm, cmd := updateModel(t, m, press('c', tea.ModCtrl))
+		if cmd != nil {
+			t.Fatal("ctrl+c should ask before closing, not act")
 		}
-		msg := cmd()
-		tm, ok := msg.(work.TerminalTerminateMsg)
-		if !ok {
-			t.Fatalf("ctrl+c produced %T, want work.TerminalTerminateMsg", msg)
+		if nm.confirmAction != "close_session" || nm.confirmSlug != "item-1" || nm.confirmSessionID != "sid-1" {
+			t.Fatalf("ctrl+c opened action=%q slug=%q session=%q, want the x close confirmation", nm.confirmAction, nm.confirmSlug, nm.confirmSessionID)
 		}
-		if tm.Slug != "item-1" {
-			t.Errorf("terminate slug = %q, want item-1", tm.Slug)
+		if _, ok := nm.viewers["item-1"]; !ok {
+			t.Error("asking to close must leave the viewer open")
 		}
 	})
 	t.Run("Ctrl+c (discard)", func(t *testing.T) {
 		m := terminalModel()
-		panel := m.sessionPanels["item-1"]
-		panel, _ = panel.Update(work.StreamCompleteMsg{Slug: "item-1"})
-		m.sessionPanels["item-1"] = panel
+		v := m.viewers["item-1"]
+		v.panel, _ = v.panel.Update(work.ViewerEndedMsg{Slug: "item-1", TmuxName: v.panel.TmuxName(), Generation: v.panel.ViewerGeneration(), Reason: work.ViewerSessionEnded})
+		m.viewers["item-1"] = v
 		hints := stripANSI(strings.Join(m.statusBarHints(kmTerminal), " · "))
 		if !strings.Contains(hints, "Ctrl+c discard") {
 			t.Errorf("status bar does not advertise discard on a done panel: %s", hints)
 		}
 		nm, cmd := updateModel(t, m, press('c', tea.ModCtrl))
-		if cmd == nil {
-			t.Fatal("ctrl+c should dispatch the discard command")
+		if cmd != nil || nm.confirmAction != "" {
+			t.Fatalf("discarding a finished viewer should neither ask nor run anything: cmd=%v action=%q", cmd != nil, nm.confirmAction)
 		}
-		msg := cmd()
-		if _, ok := msg.(work.TerminalTerminateMsg); !ok {
-			t.Fatalf("ctrl+c produced %T, want work.TerminalTerminateMsg", msg)
-		}
-		nm, _ = updateModel(t, nm, msg)
-		if nm.hasSessionPanel("item-1") {
+		if nm.hasSessionPanel("item-1") || nm.terminalMode {
 			t.Error("discard should drop the finished panel and its scrollback")
 		}
 	})

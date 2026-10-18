@@ -6,14 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/coordination"
 	"github.com/anticorrelator/lore/tui/internal/followup"
-	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
@@ -123,35 +121,8 @@ func main() {
 	m := newModel(cfg, prefs, startState)
 	m.coordinationList.SetArcs(startupArcs, startupSkipped)
 
-	// Resolve this instance's session-substrate identity. A generated word-pair
-	// name is collision-checked against live instances; an explicit
-	// LORE_TUI_INSTANCE override that is empty, path-like, or reserved after
-	// normalization is a fatal startup error (fail loudly on a bad override).
-	if cfg.KnowledgeDir != "" {
-		sessionsDir := filepath.Join(cfg.KnowledgeDir, "_sessions")
-		name, nameErr := session.GenerateName(sessionsDir, os.Getenv("LORE_TUI_INSTANCE"))
-		if nameErr != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", nameErr)
-			os.Exit(1)
-		}
-		m.instanceName = name
-		m.sessionsDir = sessionsDir
-		m.eventScript = filepath.Join(os.Getenv("HOME"), ".lore/scripts/session-event-append.sh")
-		m.expiryScript = filepath.Join(os.Getenv("HOME"), ".lore/scripts/session-request-expire.sh")
-		m.spendScript = filepath.Join(os.Getenv("HOME"), ".lore/scripts/session-spend.sh")
-		m.instanceStartedISO = time.Now().UTC().Format("2006-01-02T15:04:05Z")
-		m.buildSHA, m.buildTime = resolveBuildIdentity()
-		m.normalizedProjectDir = config.NormalizeProjectDir(cfg.ProjectDir)
-
-		// D3 host-capability gate: probe tmux once at startup. When absent or
-		// opted out, sessions degrade to the direct-PTY path (TUI-lifetime-bound,
-		// no crash recovery), announced once via the house degradation pattern.
-		var tmuxDetail string
-		m.tmuxEnabled, tmuxDetail = work.TmuxAvailable()
-		if !m.tmuxEnabled {
-			fmt.Fprintf(os.Stderr, "[lore] degraded: tmux hosting off (%s); sessions are TUI-lifetime-bound and will not survive crash/restart\n", tmuxDetail)
-		}
-	}
+	m = m.viewStore(cfg.KnowledgeDir, work.TmuxAvailable)
+	m.normalizedProjectDir = config.NormalizeProjectDir(cfg.ProjectDir)
 
 	// Best-effort settings panel initialization. A nil panel disables the
 	// configurator open key but does not block startup — the modal is a

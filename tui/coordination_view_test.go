@@ -341,20 +341,30 @@ func TestCoordinationDetailKeybindContract(t *testing.T) {
 func TestCoordinationSessionDrillUsesSessionsTerminalHost(t *testing.T) {
 	m := coordinationContractModel(t)
 	m.focusedPanel = panelRight
-	remote := sessionview.SessionRow{
-		RowID: "remote", Slug: "item-a", Display: "item-a", Instance: "other",
-		Tmux: "lore-other-item-a",
+	hosted := sessionview.SessionRow{
+		RowID: "host|item-a|sid", PanelKey: "item-a", Slug: "item-a", Display: "item-a", Instance: "store-host",
+		Local: true, Tmux: "lore-store-host-item-a",
 	}
-	m.coordinationDetail.SetSessions([]sessionview.SessionRow{remote})
-	m.sessionsList.SetSessions([]sessionview.SessionRow{remote})
+	m.coordinationDetail.SetSessions([]sessionview.SessionRow{hosted})
+	m.sessionsList.SetSessions([]sessionview.SessionRow{hosted})
 
 	_, cmd := updateModel(t, m, press(tea.KeyEnter))
 	if cmd == nil {
-		t.Fatal("explicit coordination drill should select the remote session")
+		t.Fatal("explicit coordination drill should select the session")
 	}
-	nm, _ := updateModel(t, m, cmd())
-	if nm.state != stateSessions || !nm.returnToCoordination || !nm.sessionMirrorActive {
-		t.Fatalf("remote drill must use the sessions mirror owner: state=%v return=%v mirror=%v", nm.state, nm.returnToCoordination, nm.sessionMirrorActive)
+	nm, attach := updateModel(t, m, cmd())
+	viewer, ok := nm.viewers["item-a"]
+	if nm.state != stateSessions || !nm.returnToCoordination || !ok {
+		t.Fatalf("drill must open a viewer in the sessions workspace: state=%v return=%v viewer=%v", nm.state, nm.returnToCoordination, ok)
+	}
+	if !viewer.panel.IsViewer() || viewer.panel.TmuxName() != "lore-store-host-item-a" || attach == nil {
+		t.Fatalf("drill opened viewer=%v tmux=%q attach=%v", viewer.panel.IsViewer(), viewer.panel.TmuxName(), attach != nil)
+	}
+	if _, owned := nm.sessionPanels["item-a"]; owned {
+		t.Fatal("a viewer must stay out of the owned-session panel map")
+	}
+	if panel, ok := nm.currentSessionsPanel(); !ok || !panel.IsViewer() || !nm.terminalMode {
+		t.Fatalf("sessions workspace should show the viewer: ok=%v terminal=%v", ok, nm.terminalMode)
 	}
 	cb := nm.coordinationPanelCallbacks()
 	if cb.currentSlug() != "" {
