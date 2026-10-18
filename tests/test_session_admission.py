@@ -22,7 +22,7 @@ class Admission(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.instances = self.root / '_sessions/instances'
         self.instances.mkdir(parents=True)
 
@@ -89,7 +89,7 @@ class Admission(unittest.TestCase):
     def test_managed_old_host_refused_without_binary_or_restart(self):
         with patch.object(m, 'ready', return_value={'instance_name': 'old'}), patch.object(m, 'binary') as binary, patch.object(m.subprocess, 'Popen') as spawn:
             with self.assertRaisesRegex(RuntimeError, 'coordinate host replacement'):
-                m.ensure(self.root, 'key', '/source', timeout=0)
+                m.ensure(self.root, timeout=0)
         binary.assert_not_called()
         spawn.assert_not_called()
 
