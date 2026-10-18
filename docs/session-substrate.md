@@ -351,7 +351,7 @@ If it remains unclaimed past its TTL, the claim-side sweep instead moves it to
 | `request_id` | string | Unique id; also the filename stem. |
 | `type` | string | Enum `spec\|implement\|chat\|worker`. |
 | `slug` | string \| null | Session identity. An unscoped chat receives `chat-<request-suffix>` at enqueue; an explicitly scoped chat/spec/implement keeps its work-item slug. Null remains valid for a slugless spec and for legacy chat rows. **Required for `worker`**: a worker's slug is the derived `<work-item-slug>--w<n>` that is its session identity (see [Worker sessions](#worker-sessions)). |
-| `target_instance` | string \| null | Instance name the request is addressed to, or null for "any instance". |
+| `target_instance` | string \| null | Always null from the current writer, which refuses `--target`. A row from an older writer may name the instance it was addressed to. |
 | `host_key` | string \| absent | Key of this store's session host in the writer's runtime. The writer stamps it on every row itself, whoever calls it, so the store host is the only claimant. Absent only on rows from an older writer. |
 | `initiator` | string | Enum `agent\|human`. |
 | `requested_by` | string | Who enqueued it (instance name, agent id, or human). |
@@ -399,10 +399,9 @@ serve, because it is not a checkout of the store or no store host is live. Each
 refusal leads with its repair; [session-manager.md](session-manager.md#raw-requests)
 lists them.
 
-An enqueue carrying `--target` first joins the name against the registry using
-the same 30s mtime liveness window as `coordinate pin --preflight`. A missing or
-stale row is refused with its age and the re-pin/`--anywhere` choices; the writer
-never silently weakens hard placement into an untargeted request.
+An enqueue carrying `--target` is refused before anything else is checked: this
+store's session host claims every request, so a request names the checkout it
+runs in, never an instance.
 
 **Claim** = `os.Rename(pending/X, claimed/X)`. Rename on one filesystem is atomic,
 so exactly one racing instance succeeds — this is the sole at-most-once guard, and

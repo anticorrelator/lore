@@ -1295,11 +1295,11 @@ def enqueue_start(kdir, manifest, status=None):
             atomic(context_path, {'dispatch_guidance': manifest['context']})
             manifest['state'] = 'enqueueing'
             atomic(path, manifest)
-            # A store host claims every row carrying its key, so its rows need no name
-            # pin, which would strand them if the host restarted under a new name.
-            placement = ['--anywhere'] if status.get('scope') == 'store' else ['--target', status['instance_name']]
+            # The row carries the store host's key, so the host that holds it claims
+            # the row under whatever name it has after a restart; the item's
+            # declaration places it.
             run(['bash', SCRIPTS / 'session-request.sh', '--type', 'worker', '--slug', manifest['handle'],
-                 *placement, '--session-route', json.dumps(manifest['route'], separators=(',', ':')),
+                 '--anywhere', '--session-route', json.dumps(manifest['route'], separators=(',', ':')),
                  '--context', context_path, '--initiator', 'agent', '--auto-close', 'true', '--yes', '--kdir', kdir,
                  '--request-id', rid, '--host-key', key, '--json',
                  *(['--packet', manifest['packet']] if manifest.get('packet') else [])], cwd=source)
@@ -1621,6 +1621,7 @@ def request(argv):
         kdir = Path(options['--kdir']).resolve() if options.get('--kdir') else resolve()
     except RuntimeError:
         os.execv('/bin/bash', [*writer, *argv])
+    # The writer refuses both of these whatever the host's state.
     if '--target' in options or not request_names_checkout(kdir, options):
         os.execv('/bin/bash', [*writer, *argv])
     argv = [*argv, '--kdir', str(kdir)]

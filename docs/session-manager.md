@@ -296,6 +296,7 @@ whose `error` field holds the whole text.
 | `no live store host: run lore session ensure, then retry` | A direct writer call found no live store host. |
 | `store host did not start; fix the error below, retry` | `lore session request` could not ensure the host. The text carries the error and the host's `host.log` and `supervisor-error.json`; when the installed lore-tui is older than the scripts, the repair is `lore rebuild` or `bash install.sh`. |
 | `store host is too old: run lore rebuild, then retry` | The live store host lacks a capability or build vintage the request needs. |
+| `--target is not accepted; drop it and name a checkout` | The store host claims every request, so no request names an instance. |
 | `--host-key is not this store's key; omit --host-key` | The caller passed another store's or runtime's key. |
 | `host key is not this store's; retry lore session start` | A managed start names a key from before store-scoped hosting. |
 
@@ -315,8 +316,9 @@ at most 10 seconds, since the host may be about to adopt or claim it. They then
 run as before, so their existing errors are what the caller sees when nothing
 serves the session.
 
-Raw `lore session request`, instance targeting, and unmanaged session verbs remain
-available. Their lower-level placement and cursor contracts are documented in
+Raw `lore session request` and unmanaged session verbs remain available. A request
+names a checkout; `--target`, which named an instance, is refused. Their
+lower-level placement and cursor contracts are documented in
 [session-substrate.md](session-substrate.md). They are compatibility and explicit
 control surfaces; ordinary managed dispatch does not require those administrative
 steps. Native harness server APIs remain a possible backend change, separate from

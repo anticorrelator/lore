@@ -229,7 +229,8 @@ class ManagedSessions(unittest.TestCase):
             m.enqueue_start(self.kdir, manifest, status)
         self.assertEqual(manifest['state'], 'enqueued')
         request = next(c for c in calls if c[1].endswith('session-request.sh'))
-        self.assertEqual(request[request.index('--target') + 1], 'store-host')
+        self.assertIn('--anywhere', request)
+        self.assertNotIn('--target', request)
 
     def test_ensure_inside_the_supervisor_never_waits(self):
         with patch.object(m, 'STORE_ENV', {'PATH': '/bin'}), patch.object(m, 'ready', return_value=None), \
@@ -438,6 +439,14 @@ class RequestRefusalTest(unittest.TestCase):
         self.assertTrue(refusal['error'].startswith('request names no checkout; pass --prefer-dir <checkout>\n'))
         self.assertFalse((m.RUNTIME.login_dir() / 'served.json').exists(), 'nothing may ensure a host for it')
         self.assertFalse((self.kdir / '_sessions/requests').exists())
+
+    def test_a_target_is_refused_by_the_writer_before_any_ensure(self):
+        result = subprocess.run([sys.executable, str(ROOT / 'scripts/session-managed.py'), 'request', '--type', 'chat',
+                                 '--target', 'some-window', '--prefer-dir', str(self.checkout), '--kdir', str(self.kdir),
+                                 '--json'], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(json.loads(result.stdout)['error'].startswith('--target is not accepted; drop it and name a checkout\n'))
+        self.assertFalse((m.RUNTIME.login_dir() / 'served.json').exists(), 'nothing may ensure a host for it')
 
     def test_ensure_failure_refuses_with_the_error_and_the_host_diagnostics(self):
         with patch.object(m, 'ensure', side_effect=RuntimeError('the supervisor could not start')), \

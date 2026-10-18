@@ -3,7 +3,7 @@
 #
 # Usage:
 #   lore session request --type <spec|implement|chat|worker> \
-#     (--target <i> | --prefer-dir <p> | --prefer-cwd | --anywhere) [options]
+#     (--prefer-dir <p> | --prefer-cwd | --anywhere) [options]
 #
 # Options:
 #   --type <t>         Required. Session type: spec | implement | chat | worker.
@@ -13,11 +13,9 @@
 #                      a worker's slug is the derived <work-item-slug>--w<n> that is
 #                      its session identity, and the suffix is what the journal,
 #                      scoped watches, and the TUI parse to find the work item.
-#   --target <name>    Placement stance: address the request to one instance (the
-#                      named live instance alone may claim). A missing/stale
-#                      registry row is refused; re-pin or use --anywhere rather
-#                      than parking a request at a dead target. Every request MUST carry
-#                      exactly one placement stance — --target, --prefer-dir,
+#   --target <name>    Refused. This store's session host claims every request, so
+#                      a request names a checkout, never an instance. Every request
+#                      MUST carry exactly one placement stance — --prefer-dir,
 #                      --prefer-cwd, or --anywhere; a stanceless request is refused.
 #   --initiator <i>    Who initiated the request: agent | human (default: human).
 #   --auto-close <b>   Override the TUI exit-ladder auto-close gate: true | false.
@@ -43,12 +41,12 @@
 #                      Child overrides are exported as LORE_MODEL_<ROLE> by the host,
 #                      riding the resolver's top-precedence env layer. role MUST be in the
 #                      adapters/roles.json closed set (unknown roles are refused).
-#   --min-vintage <v>  Minimum build vintage the claiming instance must meet: a
-#                      request never targets an instance whose build is older. Value
-#                      is an ISO-8601 UTC timestamp (2026-07-05T12:00:00Z) OR a git
-#                      commit-ish resolved to its committer-date here at enqueue time.
-#                      Filtered read-side like --target; an instance of unknown
-#                      vintage is never rejected (additive degradation).
+#   --min-vintage <v>  Minimum build vintage the claiming store host must meet.
+#                      Value is an ISO-8601 UTC timestamp (2026-07-05T12:00:00Z) OR
+#                      a git commit-ish resolved to its committer-date here at
+#                      enqueue time. Refused at enqueue unless the live store host
+#                      has a known build vintage at or above it, and filtered again
+#                      when the host claims.
 #   --track <t>        Spec depth selector: short | full. Valid ONLY with --type
 #                      spec (rejected otherwise). `short` maps to the session's
 #                      short-track (/spec short); `full` is the default and stores
@@ -135,13 +133,12 @@
 #   no live store host               -> run `lore session ensure`, then retry
 #
 # placement_stance records which axis actually governs and is always written, with
-# the strongest axis in force winning (required_dir > targeted > preferred_dir):
+# the strongest axis in force winning (required_dir > preferred_dir):
 #   required_dir   the work item's declaration governs (hard directory filter)
-#   targeted       --target governs (hard instance filter)
-#   preferred_dir  --prefer-dir/--prefer-cwd governs (claim-timing only)
-#   any            nothing constrains placement
+#   preferred_dir  --prefer-dir/--prefer-cwd governs
 # A row without the token was written before the field existed and keeps the older,
-# filterless semantics: an absent token is never a stance.
+# filterless semantics: an absent token is never a stance. Rows from an older writer
+# may also carry `targeted` or `any`; this writer writes neither.
 #
 # required_target_ref carries the branch the dispatching session's worktree was
 # created against, when there is a session to read it from. It never selects a
@@ -168,7 +165,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 TYPE=""
 SLUG=""
-TARGET=""
+TARGET_PROVIDED=0
 INITIATOR="human"
 AUTO_CLOSE=""
 REQUESTED_BY=""
@@ -205,7 +202,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --type) TYPE="$2"; shift 2 ;;
     --slug) SLUG="$2"; shift 2 ;;
-    --target) TARGET="$2"; shift 2 ;;
+    --target) TARGET_PROVIDED=1; shift 2 ;;
     --initiator) INITIATOR="$2"; shift 2 ;;
     --auto-close) AUTO_CLOSE="$2"; shift 2 ;;
     --requested-by) REQUESTED_BY="$2"; shift 2 ;;
@@ -234,7 +231,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) awk 'NR > 1 { if ($0 !~ /^#/) exit; print }' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--target <name> | --prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=framework/model>]... [--session-route <qualified-route|object>] [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id> --framework <claude-code|codex|opencode>] [--routing-source <override|role-route>] [--worktree-identity <json|file>] [--worktree-id <id> --execution-dir <path>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-request.sh --type <spec|implement|chat|worker> (--prefer-dir <path> | --prefer-cwd | --anywhere) [--slug <s>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=framework/model>]... [--session-route <qualified-route|object>] [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id> --framework <claude-code|codex|opencode>] [--routing-source <override|role-route>] [--worktree-identity <json|file>] [--worktree-id <id> --execution-dir <path>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -249,6 +246,13 @@ fail() {
 }
 
 command -v jq &>/dev/null || fail "jq is required but not found on PATH"
+
+if [[ $TARGET_PROVIDED -eq 1 ]]; then
+  fail "--target is not accepted; drop it and name a checkout
+This store's session host claims every request, so a request names the checkout it runs
+in (--prefer-dir, --prefer-cwd, or a work item that declares one) rather than an
+instance. Nothing was enqueued."
+fi
 
 # The checkout the calling session belongs to, for --prefer-cwd. A session's
 # working directory is a detached worktree under the knowledge store, which is no
@@ -537,18 +541,17 @@ fi
 # naming the field; the reader never re-validates. --prefer-dir and --prefer-cwd
 # name the same field and are mutually exclusive.
 # Placement stance is a required declaration: every request states where it may
-# run — --target (hard pin), --prefer-dir/--prefer-cwd (soft preference), or
-# --anywhere (the deliberate opt-out). --anywhere satisfies this check and writes
-# NO queue field: the row is byte-identical to the old untargeted form, so old
-# claiming TUIs are unaffected. Why an error and not a default: the soft-preference
+# run — --prefer-dir/--prefer-cwd (the checkout to run in), or --anywhere (no
+# placement of the caller's own; the work item's declaration places it).
+# --anywhere satisfies this check and writes NO queue field. Why an error and not a default: the soft-preference
 # mechanism shipped 2026-07-13, yet 0 of 110 historical claims carried
 # prefer_project_dir — placement was silently unstated, and a missing declaration
 # must be an error, never a routed-to-anywhere default.
-if [[ $ANYWHERE_PROVIDED -eq 1 ]] && [[ -n "$TARGET" || $PREFER_DIR_PROVIDED -eq 1 || $PREFER_CWD_PROVIDED -eq 1 ]]; then
-  fail "--anywhere contradicts an explicit placement (--target, --prefer-dir, or --prefer-cwd); pass exactly one stance"
+if [[ $ANYWHERE_PROVIDED -eq 1 ]] && [[ $PREFER_DIR_PROVIDED -eq 1 || $PREFER_CWD_PROVIDED -eq 1 ]]; then
+  fail "--anywhere contradicts an explicit placement (--prefer-dir or --prefer-cwd); pass exactly one stance"
 fi
-if [[ $ANYWHERE_PROVIDED -eq 0 && -z "$TARGET" && $PREFER_DIR_PROVIDED -eq 0 && $PREFER_CWD_PROVIDED -eq 0 ]]; then
-  fail "missing placement stance: pass exactly one of --target <instance>, --prefer-dir <path>, --prefer-cwd, or --anywhere"
+if [[ $ANYWHERE_PROVIDED -eq 0 && $PREFER_DIR_PROVIDED -eq 0 && $PREFER_CWD_PROVIDED -eq 0 ]]; then
+  fail "missing placement stance: pass exactly one of --prefer-dir <path>, --prefer-cwd, or --anywhere"
 fi
 
 PREFER_PROJECT_DIR_JSON=""
@@ -663,10 +666,10 @@ if [[ "$TYPE" == "worker" && $POSITION_PROVIDED -eq 0 ]] && ! printf '%s' "$EXTR
   fi
 fi
 
-# Nullable target becomes explicit JSON null when unset. Slug is resolved after
-# REQUEST_ID is minted below because unscoped chats derive their identity from it.
+# target_instance stays an explicit JSON null, the shape every reader decodes; no
+# request names an instance. Slug is resolved after REQUEST_ID is minted below
+# because unscoped chats derive their identity from it.
 TARGET_JSON="null"
-[[ -n "$TARGET" ]] && TARGET_JSON="$(jq -n --arg t "$TARGET" '$t')"
 
 # --- Resolve knowledge directory ---
 if [[ -n "$KDIR_OVERRIDE" ]]; then
@@ -752,21 +755,6 @@ if [[ $PREFER_DIR_PROVIDED -eq 1 ]]; then
 '$PREFER_DIR' does not resolve to an existing directory, and prefer_project_dir must.
 Nothing was enqueued."
   PREFER_PROJECT_DIR_JSON="$(jq -n --arg d "$PREFER_RESOLVED" '$d')"
-fi
-
-# A hard target is useful only while its registry row is live. Reuse the pin
-# preflight's shared mtime-TTL rule: silently rewriting this to --anywhere would
-# change placement stance, while accepting it would create a request no live
-# instance can claim. Soft/anywhere stances remain deliberately untouched.
-if [[ -n "$TARGET" ]]; then
-  if ! TARGET_AGE="$(session_instance_age_seconds "$INSTANCES_DIR" "$TARGET")"; then
-    fail "refusing --target '$TARGET': its registry row is absent (age unavailable; live window ${SESSION_INSTANCE_LIVENESS_TTL_SECONDS}s).
-Re-pin the project to a live instance and retry, or choose --anywhere explicitly."
-  fi
-  if (( TARGET_AGE > SESSION_INSTANCE_LIVENESS_TTL_SECONDS )); then
-    fail "refusing --target '$TARGET': its registry row is ${TARGET_AGE}s old (live window ${SESSION_INSTANCE_LIVENESS_TTL_SECONDS}s).
-Re-pin the project to a live instance and retry, or choose --anywhere explicitly."
-  fi
 fi
 
 # --- Derive hard placement from the work item's declared source checkout ---
@@ -857,11 +845,6 @@ ensure' starts it, and 'lore session request' starts it and enqueues in one step
 diagnostics are $(store_host_diagnostics). Nothing was enqueued."
 fi
 
-if [[ -n "$TARGET" ]] && ! printf '%s' "$PLACEMENT" | jq -e --arg t "$TARGET" '.served_by | index($t) != null' >/dev/null; then
-  fail "refusing --target '$TARGET': this store's session host claims every request, and
-'$TARGET' is not that host. Drop --target and let the checkout place the request."
-fi
-
 # placement_stance names the axis that actually governs, so no reader has to infer
 # a stance from which fields happen to be absent. The declaration outranks the
 # caller's flags: it is the narrowest hard filter and it is derived rather than
@@ -869,19 +852,15 @@ fi
 # item's".
 if [[ -n "$REQUIRED_PROJECT_DIR_JSON" ]]; then
   PLACEMENT_STANCE="required_dir"
-elif [[ -n "$TARGET" ]]; then
-  PLACEMENT_STANCE="targeted"
-elif [[ $PREFER_DIR_PROVIDED -eq 1 ]]; then
-  PLACEMENT_STANCE="preferred_dir"
 else
-  PLACEMENT_STANCE="any"
+  PLACEMENT_STANCE="preferred_dir"
 fi
 # The claim side gates the hard filter on the token being present, so a token
 # outside the closed set would let a declaring row through unfiltered. No shared
 # enum helper exists; the set is checked here, where it is written.
 case "$PLACEMENT_STANCE" in
-  required_dir|targeted|preferred_dir|any) ;;
-  *) fail "internal error: placement_stance '$PLACEMENT_STANCE' is outside the closed set (required_dir, targeted, preferred_dir, any)" ;;
+  required_dir|preferred_dir) ;;
+  *) fail "internal error: placement_stance '$PLACEMENT_STANCE' is outside the closed set this writer writes (required_dir, preferred_dir)" ;;
 esac
 
 # The declared branch is verification-only: it travels to the claiming side, which

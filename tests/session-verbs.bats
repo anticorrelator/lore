@@ -435,28 +435,27 @@ journal_boundaries() {
     "$TEST_KDIR/_sessions/events.jsonl" >/dev/null
 }
 
-@test "request refuses a missing or stale hard target and accepts only the store host" {
+@test "request refuses --target before anything else, with nothing enqueued and no host started" {
   serve_store
-  run bash "$REQUEST" --type chat --target gone --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"registry row is absent"* ]]
-  [[ "$output" == *"age unavailable"* ]]
-
-  write_instance stale-inst existing
-  touch -t 202601010000 "$TEST_KDIR/_sessions/instances/stale-inst.json"
-  run bash "$REQUEST" --type chat --target stale-inst --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"registry row is "*"s old"* ]]
-  [[ "$output" == *"live window 30s"* ]]
-
   write_instance live-inst existing
-  run bash "$REQUEST" --type chat --target live-inst --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"'live-inst' is not that host"* ]]
+  local target
+  for target in live-inst store-host gone; do
+    run bash "$REQUEST" --type chat --target "$target" --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
+    outcome_is 1 "--target is not accepted; drop it and name a checkout" "Nothing was enqueued" || return 1
+  done
+  run bash "$REQUEST" --type chat --target live-inst --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 1 ] || return 1
+  echo "$output" | jq -e 'keys == ["error"] and (.error | startswith("--target is not accepted"))' >/dev/null || return 1
+  [ ! -e "$TEST_KDIR/_sessions/requests" ] || return 1
 
-  run bash "$REQUEST" --type chat --target store-host --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR" --json
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.enqueued==true and .target_instance=="store-host"'
+  rm "$TEST_KDIR/_sessions/instances/store-host.json"
+  refuse_store_host
+  local served="$LORE_DATA_DIR/session-runtimes/bats-session-verbs/served.json"
+  rm -f "$served"
+  run python3 "$MANAGED" request --type chat --target live-inst --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 1 ] || return 1
+  echo "$output" | jq -e '.error | startswith("--target is not accepted")' >/dev/null || return 1
+  [ ! -e "$served" ] && [ ! -e "$TEST_KDIR/_sessions/requests" ]
 }
 
 @test "request without --type refuses and creates no pending dir" {
@@ -678,25 +677,20 @@ journal_boundaries() {
   outcome_is 0
 }
 
-@test "request without a placement stance refuses naming all four options" {
+@test "request without a placement stance refuses naming all three options" {
   run bash "$REQUEST" --type worker --slug "impl-foo--w1" --context hi --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"placement stance"* ]]
-  [[ "$output" == *"--target"* ]]
-  [[ "$output" == *"--prefer-dir"* ]]
-  [[ "$output" == *"--prefer-cwd"* ]]
-  [[ "$output" == *"--anywhere"* ]]
+  outcome_is 1 "placement stance" "--prefer-dir" "--prefer-cwd" "--anywhere" || return 1
+  out_lacks "--target" || return 1
   [ ! -e "$TEST_KDIR/_sessions/requests" ]
 }
 
 @test "each placement stance alone satisfies the requirement" {
   serve_store
   write_work_item wi "$CHECKOUT"
-  bash "$REQUEST" --type chat --slug wi --target store-host --kdir "$TEST_KDIR"
   bash "$REQUEST" --type chat --prefer-dir "$CHECKOUT" --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR"
   ( cd "$CHECKOUT" && bash "$REQUEST" --type chat --prefer-cwd --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR" )
   bash "$REQUEST" --type chat --slug wi --anywhere --kdir "$TEST_KDIR"
-  [ "$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json | wc -l | tr -d ' ')" -eq 4 ]
+  [ "$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json | wc -l | tr -d ' ')" -eq 3 ]
 }
 
 @test "request --anywhere adds no placement of its own to the item's declaration" {
@@ -709,7 +703,7 @@ journal_boundaries() {
 }
 
 @test "request refuses --anywhere combined with an explicit placement" {
-  run bash "$REQUEST" --type spec --slug wi --anywhere --target inst-a --kdir "$TEST_KDIR"
+  run bash "$REQUEST" --type spec --slug wi --anywhere --prefer-dir "$TEST_KDIR" --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
   [[ "$output" == *"--anywhere contradicts"* ]]
   run bash "$REQUEST" --type spec --slug wi --anywhere --prefer-cwd --kdir "$TEST_KDIR"
@@ -791,6 +785,8 @@ journal_boundaries() {
   run bash "$REQUEST" --type chat --prefer-dir "$CHECKOUT" --request-id managed-0123456789abcdef0123456789abcdef \
     --host-key aaaaaaaaaaaaaaaaaaaaaaaa --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ] && lead_names "not this store's" "retry lore session start" || return 1
+  run bash "$REQUEST" --type chat --target store-host --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ] && lead_names "--target is not accepted" "drop it" || return 1
 
   # Under --json the refusal is one JSON object on stdout carrying the whole text.
   run bash -c 'bash "$1" --type chat --anywhere --kdir "$2" --json 2>/dev/null' _ "$REQUEST" "$TEST_KDIR"
@@ -871,17 +867,17 @@ journal_boundaries() {
   outcome_is 0
 }
 
-@test "a store host target is checked against store membership" {
+@test "a managed start to the store host is checked against store membership" {
   local clone; clone="$(make_checkout clone-a)"
   mkdir -p "$TEST_KDIR/plain-dir"
   write_work_item managed "$clone"
   write_work_item unmanaged "$(cd "$TEST_KDIR/plain-dir" && pwd -P)"
   fake_store_host
   local rid="managed-0123456789abcdef0123456789abcdef"
-  run bash "$REQUEST" --type implement --slug managed --target store-host --request-id "$rid" \
+  run bash "$REQUEST" --type implement --slug managed --anywhere --request-id "$rid" \
     --host-key "$STORE_KEY" --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
-  run bash "$REQUEST" --type implement --slug unmanaged --target store-host \
+  run bash "$REQUEST" --type implement --slug unmanaged --anywhere \
     --request-id "managed-fedcba9876543210fedcba9876543210" --host-key "$STORE_KEY" --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
   [[ "$output" == *"declared checkout is not in this store: re-declare it"* ]]
@@ -1009,19 +1005,6 @@ PYEOF
   [ "$status" -eq 0 ]
 }
 
-@test "request refuses a target other than the store host" {
-  serve_store
-  write_work_item declared "$CHECKOUT"
-  write_instance_dir inst-b "$CHECKOUT"
-  run bash "$REQUEST" --type implement --slug declared --target inst-b --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"'inst-b' is not that host"* ]]
-  [ ! -e "$TEST_KDIR/_sessions/requests" ]
-
-  run bash "$REQUEST" --type implement --slug declared --target store-host --kdir "$TEST_KDIR"
-  [ "$status" -eq 0 ]
-}
-
 @test "request derives nothing for a slug that names no tracked work item" {
   serve_store
   bash "$REQUEST" --type spec --slug not-an-item --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
@@ -1033,7 +1016,6 @@ PYEOF
 @test "every request carries a placement_stance token naming the governing axis" {
   serve_store
   write_work_item declared "$CHECKOUT"
-  bash "$REQUEST" --type chat --target store-host --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR" --json | jq -e '.placement_stance == "targeted"'
   bash "$REQUEST" --type chat --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR" --json | jq -e '.placement_stance == "preferred_dir"'
   bash "$REQUEST" --type chat --slug declared --anywhere --kdir "$TEST_KDIR" --json | jq -e '.placement_stance == "required_dir"'
 }
