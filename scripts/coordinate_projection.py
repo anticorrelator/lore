@@ -9,7 +9,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import signal
 import sqlite3
+import subprocess
 import sys
 import time
 import uuid
@@ -24,6 +27,12 @@ UPDATE_SECONDS = 5
 RECONCILE_SECONDS = 30
 META_BATCH = 128
 SELECTION_BATCH = 8
+ARCHIVE_BATCH = 2
+ARCHIVE_TIMEOUT = 4
+ARCHIVE_RETRY_SECONDS = 3600
+ARCHIVE_SCRIPT = Path(__file__).resolve().parent / 'arc-archive.sh'
+RFC3339 = re.compile(r'(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})')
+DATE_ONLY = re.compile(r'\d{4}-\d{2}-\d{2}')
 
 
 def stamp():
@@ -151,14 +160,149 @@ def reconcile(db, store, counts):
         put(db, 'reconcile_due', time.time() + RECONCILE_SECONDS)
         put(db, 'sweep', None)
         if get(db, 'archive_dirty', True):
-            catalog = [listing(row['name'], json.loads(row['meta'])) for row in db.execute("SELECT name,meta FROM arcs WHERE status='archived' ORDER BY name")]
-            identity = hashlib.sha256(json.dumps(catalog, sort_keys=True).encode()).hexdigest()
-            put(db, 'archive_catalog', {'store': str(store), 'identity': identity, 'arcs': catalog})
-            put(db, 'archive_identity', identity)
-            put(db, 'archive_pending', True)
-            put(db, 'archive_dirty', False)
+            refresh_archive_catalog(db, store)
     else:
         put(db, 'sweep', sweep)
+
+
+def refresh_archive_catalog(db, store):
+    catalog = [listing(row['name'], json.loads(row['meta'])) for row in db.execute("SELECT name,meta FROM arcs WHERE status='archived' ORDER BY name")]
+    identity = hashlib.sha256(json.dumps(catalog, sort_keys=True).encode()).hexdigest()
+    put(db, 'archive_catalog', {'store': str(store), 'identity': identity, 'arcs': catalog})
+    put(db, 'archive_identity', identity)
+    put(db, 'archive_pending', True)
+    put(db, 'archive_dirty', False)
+
+
+def declared_instant(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        match = RFC3339.fullmatch(value)
+        if match:
+            year, month, day, hour, minute, second = (int(part) for part in match.groups()[:6])
+            zone = match.group(8)
+            if zone == 'Z':
+                tz = dt.timezone.utc
+            else:
+                offset = dt.timedelta(hours=int(zone[1:3]), minutes=int(zone[4:6]))
+                tz = dt.timezone(-offset if zone[0] == '-' else offset)
+            parsed = dt.datetime(year, month, day, hour, minute, second, tzinfo=tz)
+            return parsed.timestamp() + float(match.group(7) or 0)
+        if DATE_ONLY.fullmatch(value):
+            return dt.datetime.strptime(value, '%Y-%m-%d').replace(tzinfo=dt.timezone.utc).timestamp()
+    except (ValueError, OverflowError):
+        pass
+    return None
+
+
+def archivable(meta, now):
+    """True for a closed arc whose latest declared instant is readable and older than a week.
+
+    The latest instant is closed_at when the record carries one, else opened. A week
+    ends at local midnight six days back, the boundary the arc list draws its Older
+    header at. A live arc is never archivable at any age, and neither is an arc whose
+    instant cannot be read: archiving writes the record, and an unreadable date is not
+    evidence of age.
+    """
+    if not isinstance(meta, dict) or meta.get('status') != 'closed':
+        return False
+    if any(meta.get(field) is not None and not isinstance(meta[field], str) for field in ('opened', 'closed_at')):
+        return False
+    instant = declared_instant(meta.get('closed_at') or meta.get('opened') or '')
+    if instant is None:
+        return False
+    today = dt.datetime.fromtimestamp(now).date()
+    return instant < dt.datetime.combine(today - dt.timedelta(days=6), dt.time()).timestamp()
+
+
+def read_metadata(path):
+    try:
+        with path.open('rb') as stream:
+            st = os.fstat(stream.fileno())
+            data = stream.read()
+    except OSError:
+        return None, None
+    sig = [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+    try:
+        return json.loads(data), sig
+    except ValueError:
+        return None, sig
+
+
+def run_archive(store, name):
+    try:
+        proc = subprocess.Popen(['bash', str(ARCHIVE_SCRIPT), name, '--kdir', str(store)],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, start_new_session=True)
+    except OSError as exc:
+        return None, str(exc)
+    try:
+        _, err = proc.communicate(timeout=ARCHIVE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # The script's own children inherit the stderr pipe; killing only bash
+        # would leave communicate() waiting on them.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        return None, f'timed out after {ARCHIVE_TIMEOUT}s'
+    lines = [line for line in err.decode('utf-8', 'replace').splitlines() if line.strip()]
+    return proc.returncode, (lines[-1] if lines else '')[:300]
+
+
+def still_refused(entry, sig, now):
+    if not entry or entry['fingerprint'] != sig:
+        return False
+    return entry.get('retry_after') is None or now < entry['retry_after']
+
+
+def archive_aged(db, store, now):
+    """Archive up to ARCHIVE_BATCH closed arcs that have aged past a week.
+
+    Candidates come from the cached metadata; each one's _meta.json is read again
+    immediately before arc-archive.sh runs, so a stale cache can nominate an arc but
+    never archive it. A refusal is remembered with the metadata fingerprint it was
+    refused at and is not retried until _meta.json changes. A run that gave no answer
+    (timed out or could not start) is not a refusal, so it is retried after
+    ARCHIVE_RETRY_SECONDS even when the metadata is unchanged.
+    """
+    closed = {row['name']: json.loads(row['meta']) for row in db.execute("SELECT name,meta FROM arcs WHERE status='closed'")}
+    previous = get(db, 'archive_refusals', {})
+    refusals = {name: entry for name, entry in previous.items() if name in closed}
+    candidates = sorted((declared_instant(meta.get('closed_at') or meta.get('opened')), name)
+                        for name, meta in closed.items() if archivable(meta, now))
+    examined, archived = [], []
+    for _, name in candidates:
+        if len(examined) >= ARCHIVE_BATCH:
+            break
+        path = store / ARC_ROOT / name / '_meta.json'
+        refused = refusals.get(name)
+        if still_refused(refused, fingerprint(path), now):
+            continue
+        examined.append(name)
+        meta, sig = read_metadata(path)
+        if not archivable(meta, now) or still_refused(refused, sig, now):
+            continue
+        # arc-write-meta offers no transition out of closed except archived, so an
+        # arc read as closed here cannot have become live by the time the script runs.
+        code, detail = run_archive(store, name)
+        if code == 0:
+            refusals.pop(name, None)
+            archived.append(name)
+        else:
+            refusals[name] = {'fingerprint': sig, 'exit': code, 'error': detail, 'at': stamp()}
+            if code is None:
+                refusals[name]['retry_after'] = now + ARCHIVE_RETRY_SECONDS
+    if refusals != previous:
+        put(db, 'archive_refusals', refusals)
+    unused = {'source_opens': 0, 'source_bytes': 0}
+    for name in examined:
+        if (store / ARC_ROOT / name).is_dir():
+            arc_metadata(db, store, name, unused)
+    if examined and not get(db, 'sweep') and get(db, 'archive_dirty', True):
+        refresh_archive_catalog(db, store)
+    db.commit()
+    return archived
 
 
 def request_selection(store, selected):
@@ -441,6 +585,8 @@ def maintenance(store, selected='', force=False, rebuild=False, budget=BATCH_BYT
             put(db, 'work_counts', {key: total[key] + count for key, count in counts.items()})
             put(db, 'last_work', counts)
             db.commit()
+            if full_update:
+                archive_aged(db, store, now)
             if get(db, 'archive_pending') and get(db, 'archive_catalog') is not None:
                 publish(store, get(db, 'archive_catalog'), 'display-archive.json')
                 put(db, 'archive_pending', False)
@@ -552,6 +698,7 @@ def snapshot(store, selected='', ceiling=None):
                 'next_update': get(db, 'update_due', 0), 'details': details,
                 'archive_identity': get(db, 'archive_identity', ''),
                 'archive_state': 'loading' if get(db, 'archive_pending') else 'ready',
+                'archive_refusals': get(db, 'archive_refusals', {}),
                 'observed_at': get(db, 'observed_at'), 'arcs': listings, 'skipped': skipped,
                 'coordination_arcs': arcs, 'coordination_streams': reduction.streams,
                 'buckets': reduction.buckets, 'activity': activity,

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import concurrent.futures
 import contextlib
+import datetime as dt
 import fcntl
 import json
 import os
@@ -31,11 +32,14 @@ class ProjectionTests(unittest.TestCase):
         (self.data / 'config/settings.json').write_text('{"version":1,"coordination":{"max_concurrency":2}}')
         self.env = {**os.environ, 'LORE_DATA_DIR': str(self.data), 'COORDINATION_MAX_CONCURRENCY': '2'}
 
-    def arc(self, name='a', members=None, status='active', rows=None):
+    def arc(self, name='a', members=None, status='active', rows=None, opened=None, closed_at=None):
         home = self.store / p.ARC_ROOT / name
         home.mkdir(parents=True, exist_ok=True)
-        (home / '_meta.json').write_text(json.dumps({'slug': name, 'title': name, 'status': status,
-                                                    'members': members or [], 'opened': '2026-01-01T00:00:00Z'}))
+        meta = {'schema_version': 1, 'slug': name, 'title': name, 'status': status,
+                'members': members or [], 'opened': p.stamp() if opened is None else opened}
+        if closed_at is not None:
+            meta['closed_at'] = closed_at
+        (home / '_meta.json').write_text(json.dumps(meta))
         if rows is not None:
             (home / 'coordination.md').write_text(LEDGER + rows)
         return home
@@ -341,6 +345,156 @@ class ProjectionTests(unittest.TestCase):
         with self.assertRaises(sqlite3.OperationalError): p.maintenance(self.store,force=True)
         child.kill(); child.wait(); child.stdout.close(); child.stdin.close()
         self.assertEqual(len(self.refresh('')['arcs']),20)
+
+    def days_ago(self, days):
+        return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat().replace('+00:00', 'Z')
+
+    def status_of(self, name):
+        return json.loads((self.store / p.ARC_ROOT / name / '_meta.json').read_text())['status']
+
+    def archive_log(self, refuse=''):
+        log = Path(self.tmp.name) / 'archive.log'
+        script = Path(self.tmp.name) / 'arc-archive.sh'
+        script.write_text('printf "%s\\n" "$1" >> ' + str(log) + '\n'
+                          'case "$1" in ' + (refuse or '__none__') + ') echo "[arc] Error: refused $1" >&2; exit 1 ;; esac\n'
+                          'exec bash ' + str(ROOT / 'scripts/arc-archive.sh') + ' "$@"\n')
+        patcher = patch.object(p, 'ARCHIVE_SCRIPT', script)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return lambda: log.read_text().split() if log.exists() else []
+
+    def test_archivable_matches_the_arc_list_week(self):
+        now = dt.datetime(2026, 7, 29, 9, 0).timestamp()
+        local = lambda *parts: dt.datetime(*parts).astimezone().isoformat()
+        closed = lambda **fields: {'status': 'closed', 'opened': local(2026, 7, 29, 8, 0), **fields}
+        cases = [
+            ('closed three weeks back', closed(closed_at=local(2026, 7, 8, 9, 0)), True),
+            ('closed a moment past the boundary', closed(closed_at=local(2026, 7, 22, 23, 59)), True),
+            ('closed six days back', closed(closed_at=local(2026, 7, 23, 0, 0)), False),
+            ('closed this morning', closed(closed_at=local(2026, 7, 29, 7, 0)), False),
+            ('closed long ago, date only', closed(closed_at='2026-06-01'), True),
+            ('closed long ago, fractional seconds', closed(closed_at='2026-06-01T00:00:00.123456789Z'), True),
+            ('no close falls back to an old open', {'status': 'closed', 'opened': '2026-06-01T00:00:00Z'}, True),
+            ('no declared instant', {'status': 'closed'}, False),
+            ('unreadable close never falls back to the open', {'status': 'closed', 'opened': '2026-01-01T00:00:00Z', 'closed_at': 'whenever'}, False),
+            ('a zoneless time is not readable', closed(closed_at='2026-06-01T00:00:00'), False),
+            ('a non-string close is not readable', closed(closed_at=20260601), False),
+            ('live past the week', {'status': 'active', 'opened': '2026-01-01T00:00:00Z'}, False),
+            ('already archived', {'status': 'archived', 'closed_at': '2026-01-01T00:00:00Z'}, False),
+        ]
+        for name, meta, want in cases:
+            self.assertEqual(p.archivable(meta, now), want, name)
+
+    def test_refresh_archives_aged_closed_arcs_only(self):
+        self.arc(rows='')
+        self.arc('aged', status='closed', opened=self.days_ago(1), closed_at=self.days_ago(30), rows='')
+        self.arc('fresh', status='closed', opened=self.days_ago(40), closed_at=self.days_ago(1), rows='')
+        self.arc('stale-live', status='active', opened=self.days_ago(400), rows='')
+        self.arc('dateless', status='closed', opened='', rows='')
+        self.arc('unreadable', status='closed', opened=self.days_ago(400), closed_at='whenever', rows='')
+        calls = self.archive_log()
+        result = subprocess.run([sys.executable, str(ROOT/'scripts/coordinate_projection.py'), '--kdir', str(self.store), '--refresh', '--json'],
+                                env=self.env, text=True, capture_output=True, check=True)
+        snap = json.loads(result.stdout)
+        self.assertEqual(self.status_of('aged'), 'archived')
+        for name, status in (('fresh', 'closed'), ('stale-live', 'active'), ('dateless', 'closed'), ('unreadable', 'closed')):
+            self.assertEqual(self.status_of(name), status, name)
+        self.assertNotIn('aged', [a['Slug'] for a in snap['arcs']])
+        catalog = json.loads((self.store/'_coordination/display-archive.json').read_text())
+        self.assertEqual([a['Slug'] for a in catalog['arcs']], ['aged'])
+        self.assertEqual(snap['archive_identity'], catalog['identity'])
+        self.assertEqual(snap['archive_refusals'], {})
+        for _ in range(3):
+            self.refresh('')
+        self.assertEqual(calls(), [])
+
+    def test_stale_cache_never_archives_a_live_arc(self):
+        self.arc('live', status='active', opened=self.days_ago(400), rows='')
+        self.refresh('')
+        calls = self.archive_log()
+        db = p.connect(self.store/'_coordination/display.sqlite3', True)
+        stale = {'slug': 'live', 'status': 'closed', 'opened': self.days_ago(400), 'closed_at': self.days_ago(300)}
+        db.execute("UPDATE arcs SET status='closed', meta=? WHERE name='live'", (json.dumps(stale),))
+        db.commit()
+        self.assertEqual(p.archive_aged(db, self.store, time.time()), [])
+        db.close()
+        self.assertEqual(calls(), [])
+        self.assertEqual(self.status_of('live'), 'active')
+
+    def test_archive_is_bounded_per_pass_and_drains(self):
+        for i in range(5):
+            self.arc(f'aged-{i}', status='closed', closed_at=self.days_ago(30 - i), rows='')
+        calls = self.archive_log()
+        passes = []
+        for _ in range(4):
+            self.refresh('')
+            passes.append(len(calls()))
+        self.assertEqual(passes, [p.ARCHIVE_BATCH, 2 * p.ARCHIVE_BATCH, 5, 5])
+        self.assertEqual(calls(), [f'aged-{i}' for i in range(5)])
+        self.assertTrue(all(self.status_of(f'aged-{i}') == 'archived' for i in range(5)))
+
+    def test_lease_holder_alone_archives(self):
+        self.arc('aged', status='closed', closed_at=self.days_ago(30), rows='')
+        self.refresh('')
+        self.arc('later', status='closed', closed_at=self.days_ago(30), rows='')
+        calls = self.archive_log()
+        with (self.store/'_coordination/display.lock').open('a+b') as lease:
+            fcntl.flock(lease, fcntl.LOCK_EX)
+            self.assertFalse(p.maintenance(self.store, force=True))
+        self.assertEqual(calls(), [])
+        self.assertEqual(self.status_of('later'), 'closed')
+
+    def test_refusal_is_remembered_until_metadata_changes(self):
+        self.arc('stuck', status='closed', closed_at=self.days_ago(60), rows='')
+        for i in range(2):
+            self.arc(f'aged-{i}', status='closed', closed_at=self.days_ago(30), rows='')
+        calls = self.archive_log(refuse='stuck')
+        snap = self.refresh('')
+        self.assertEqual(calls(), ['stuck', 'aged-0'])
+        refusal = snap['archive_refusals']['stuck']
+        self.assertEqual((refusal['exit'], refusal['error']), (1, '[arc] Error: refused stuck'))
+        self.assertEqual(refusal['fingerprint'], p.fingerprint(self.store/p.ARC_ROOT/'stuck/_meta.json'))
+        snap = self.refresh('')
+        self.assertEqual(calls(), ['stuck', 'aged-0', 'aged-1'])
+        for _ in range(3):
+            snap = self.refresh('')
+        self.assertEqual(calls(), ['stuck', 'aged-0', 'aged-1'])
+        self.assertEqual(self.status_of('stuck'), 'closed')
+        self.assertIn('stuck', [a['Slug'] for a in snap['arcs']])
+        meta = self.store/p.ARC_ROOT/'stuck/_meta.json'
+        replacement = meta.with_suffix('.new')
+        replacement.write_bytes(meta.read_bytes())
+        replacement.replace(meta)
+        self.refresh('')
+        self.assertEqual(calls(), ['stuck', 'aged-0', 'aged-1', 'stuck'])
+        self.assertEqual(self.status_of('stuck'), 'closed')
+        self.archive_log()
+        snap = self.refresh('')
+        self.assertEqual(self.status_of('stuck'), 'closed')
+        meta.write_text(meta.read_text())
+        snap = self.refresh('')
+        self.assertEqual(self.status_of('stuck'), 'archived')
+        self.assertEqual(snap['archive_refusals'], {})
+
+    def test_hung_archive_is_killed_and_remembered(self):
+        self.arc('hung', status='closed', closed_at=self.days_ago(30), rows='')
+        log = Path(self.tmp.name) / 'hang.log'
+        script = Path(self.tmp.name) / 'hang.sh'
+        script.write_text('echo "$1" >> ' + str(log) + '\nsleep 60 &\nwait\n')
+        with patch.object(p, 'ARCHIVE_SCRIPT', script), patch.object(p, 'ARCHIVE_TIMEOUT', 0.5):
+            started = time.monotonic()
+            snap = self.refresh('')
+            self.assertLess(time.monotonic() - started, 5)
+        refusal = snap['archive_refusals']['hung']
+        self.assertEqual(refusal['exit'], None)
+        self.assertIn('timed out', refusal['error'])
+        self.assertEqual(self.status_of('hung'), 'closed')
+        with patch.object(p, 'ARCHIVE_SCRIPT', script), patch.object(p, 'ARCHIVE_TIMEOUT', 0.5):
+            self.refresh('')
+        self.assertEqual(log.read_text().split(), ['hung'])
+        with patch.object(time, 'time', lambda: refusal['retry_after'] + 1):
+            self.refresh('')
+        self.assertEqual(self.status_of('hung'), 'archived')
 
 
 if __name__ == '__main__':
