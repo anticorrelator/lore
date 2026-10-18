@@ -192,10 +192,6 @@ func readArcLedgerCmd(workDir, arc string) tea.Cmd {
 // slug) and re-syncs the detail when the selection identity changed — the
 // cursor diff, not the raw index, drives detail sync. A same-identity scan
 // still refreshes the joins, so membership edits land without a reselect.
-//
-// The same scan feeds the archive sweep, which rides the poll heartbeat from
-// every application state so the tab count and the store agree whether or not
-// the coordination tab is focused.
 func (m model) handleCoordinationArcsScanned(msg coordinationArcsScannedMsg) (model, tea.Cmd) {
 	if msg.request != 0 {
 		if m.coordinationRead != nil && msg.request < m.coordinationRead.request.Load() {
@@ -270,7 +266,7 @@ func (m model) handleCoordinationArcsScanned(msg coordinationArcsScannedMsg) (mo
 	if m.state == stateSessions {
 		m.loadSessionsDetail(m.sessionsList.CurrentKey())
 	}
-	cmds := []tea.Cmd{m.startArcSweep(msg.arcs)}
+	var cmds []tea.Cmd
 	if m.coordinationList.ShowArchived() {
 		cmds = append(cmds, m.loadCoordinationArchiveCmd())
 	}
@@ -297,58 +293,6 @@ func (m model) handleCoordinationArcsScanned(msg coordinationArcsScannedMsg) (mo
 func (m model) handleCoordinationAttentionRead(msg coordinationAttentionReadMsg) (model, tea.Cmd) {
 	m.coordinationList.SetAttention(msg.attention, msg.err)
 	return m, nil
-}
-
-// arcSweepSet returns the slugs this scan makes eligible for archiving: closed
-// arcs more than a week past their latest declared instant that have not
-// already been submitted this session.
-//
-// Two exclusions carry the binding constraints. A live arc is never eligible at
-// any age — an arc still open past a week is exactly what the view exists to
-// keep visible. An arc whose record declares no readable instant is never
-// eligible either: archiving writes to the record, and an unreadable date is
-// not evidence that the arc is old.
-func (m model) arcSweepSet(arcs []coordination.Arc, now time.Time) []string {
-	var slugs []string
-	for _, a := range arcs {
-		if a.Status != coordination.StatusClosed || !a.AgedOutAt(now) {
-			continue
-		}
-		if m.arcSwept[a.Slug] {
-			continue
-		}
-		slugs = append(slugs, a.Slug)
-	}
-	return slugs
-}
-
-// startArcSweep dispatches the archive for this scan's eligible arcs, returning
-// nil when there is nothing to do. The write runs inside the returned command,
-// off the update goroutine, and reports back as arcArchiveFinishedMsg.
-//
-// One sweep runs at a time and each slug is submitted at most once per session.
-// The heartbeat rescans every few seconds while an arc stays closed until its
-// archive lands, so an unguarded sweep would respawn the same subprocess on
-// every tick. A slug whose archive failed stays in the submitted set: a refusal
-// from `lore arc archive` is usually structural, so retrying it each tick would
-// turn one readable error into an endless loop. The arc stays listed as closed,
-// and the next launch retries it.
-func (m *model) startArcSweep(arcs []coordination.Arc) tea.Cmd {
-	if m.arcSweepInFlight {
-		return nil
-	}
-	slugs := m.arcSweepSet(arcs, time.Now())
-	if len(slugs) == 0 {
-		return nil
-	}
-	if m.arcSwept == nil {
-		m.arcSwept = make(map[string]bool, len(slugs))
-	}
-	for _, slug := range slugs {
-		m.arcSwept[slug] = true
-	}
-	m.arcSweepInFlight = true
-	return runArcArchiveVerified(m.config.WorkDir, slugs)
 }
 
 // handleCoordinationLedgerRead pushes a ledger read into the detail, dropping

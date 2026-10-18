@@ -598,138 +598,25 @@ func TestLateLedgerAppendNeverFlipsClosure(t *testing.T) {
 	}
 }
 
-// The sweep archives exactly the closed arcs whose record shows them more than
-// a week past their latest declared instant. A live arc of the same age is never
-// eligible, and neither is a closed arc whose instant cannot be read — archiving
-// writes to the record, and an unreadable date is not evidence of age.
-func TestArcSweepSelectsAgedClosedArcsOnly(t *testing.T) {
-	now := time.Date(2026, 7, 29, 9, 0, 0, 0, time.Local)
-	ago := func(days int) string { return now.AddDate(0, 0, -days).Format(time.RFC3339) }
-	arcs := []coordination.Arc{
-		{Slug: "stale-done", Status: coordination.StatusClosed, Opened: ago(30), ClosedAt: ago(9)},
-		{Slug: "stale-live", Status: coordination.StatusActive, Opened: ago(9)},
-		{Slug: "fresh-done", Status: coordination.StatusClosed, Opened: ago(9), ClosedAt: ago(1)},
-		{Slug: "dateless-done", Status: coordination.StatusClosed},
-		{Slug: "unreadable-done", Status: coordination.StatusClosed, ClosedAt: "whenever"},
-		{Slug: "already-archived", Status: coordination.StatusArchived, ClosedAt: ago(30)},
-	}
-
-	m := minimalModel(stateCoordination, nil, nil)
-	got := m.arcSweepSet(arcs, now)
-	if len(got) != 1 || got[0] != "stale-done" {
-		t.Errorf("only a closed arc with a readable instant past the week is swept, got %v", got)
-	}
-}
-
-// The sweep rides the arc-store scan, which runs on the poll heartbeat from
-// every application state — so an aged closed arc archives whether or not the
-// coordination tab is the one in front of the coordinator.
-func TestArcSweepRidesTheScanFromAnyState(t *testing.T) {
+// Archiving aged closed arcs belongs to the projection's maintenance, which
+// runs whether or not a TUI is open. A scan holding an arc closed long ago
+// therefore issues nothing from a view that has nothing else to load.
+func TestCoordinationScanDoesNotArchiveArcs(t *testing.T) {
 	ago := func(days int) string { return time.Now().AddDate(0, 0, -days).Format(time.RFC3339) }
 	scan := coordinationArcsScannedMsg{arcs: []coordination.Arc{
 		{Slug: "stale-done", Status: coordination.StatusClosed, Opened: ago(30), ClosedAt: ago(9)},
 		{Slug: "stale-live", Status: coordination.StatusActive, Opened: ago(9)},
 	}}
 
-	for _, state := range []appState{stateWork, stateCoordination} {
-		m := minimalModel(state, nil, nil)
-		m.width, m.height = 120, 40
-		nm, cmd := updateModel(t, m, scan)
-		if !nm.arcSweepInFlight {
-			t.Errorf("state %v: the scan should have dispatched the sweep", state)
-		}
-		if !nm.arcSwept["stale-done"] {
-			t.Errorf("state %v: the aged closed arc should have been submitted", state)
-		}
-		if nm.arcSwept["stale-live"] {
-			t.Errorf("state %v: a live arc is never submitted, whatever its age", state)
-		}
-		if cmd == nil {
-			t.Errorf("state %v: the sweep should ride out with the scan's commands", state)
-		}
+	m := minimalModel(stateWork, nil, nil)
+	m.width, m.height = 120, 40
+	nm, cmd := updateModel(t, m, scan)
+	if cmd != nil {
+		t.Errorf("a scan from the work view should issue no command, got %T", cmd())
 	}
-}
-
-// One sweep runs at a time and each slug is submitted once. The heartbeat
-// rescans while an arc stays closed until its archive lands, so without both
-// guards a single aged arc would respawn the subprocess on every tick.
-func TestArcSweepSubmitsEachSlugOnce(t *testing.T) {
-	now := time.Date(2026, 7, 29, 9, 0, 0, 0, time.Local)
-	arcs := []coordination.Arc{{
-		Slug:     "stale-done",
-		Status:   coordination.StatusClosed,
-		Opened:   now.AddDate(0, 0, -30).Format(time.RFC3339),
-		ClosedAt: now.AddDate(0, 0, -9).Format(time.RFC3339),
-	}}
-
-	m := minimalModel(stateCoordination, nil, nil)
-	if cmd := m.startArcSweep(arcs); cmd == nil {
-		t.Fatal("the first scan holding an aged closed arc should dispatch a sweep")
+	if _, ok := nm.coordinationList.ArcBySlug("stale-done"); !ok {
+		t.Error("the aged closed arc stays listed until the store says it is archived")
 	}
-	if !m.arcSweepInFlight || !m.arcSwept["stale-done"] {
-		t.Fatal("dispatching a sweep must mark it in flight and record the submitted slug")
-	}
-	if cmd := m.startArcSweep(arcs); cmd != nil {
-		t.Error("a second scan while a sweep is in flight must not dispatch another")
-	}
-
-	m.arcSweepInFlight = false
-	if cmd := m.startArcSweep(arcs); cmd != nil {
-		t.Error("a slug already submitted this session must not be submitted again")
-	}
-	if got := m.arcSweepSet(arcs, now); len(got) != 0 {
-		t.Errorf("a submitted slug leaves the eligible set, got %v", got)
-	}
-}
-
-// The sweep was never asked for, so it reports through channels that clear on
-// the next key press and never holds the coordinator up. A failure names the
-// arcs; a clean run counts them. Either outcome releases the in-flight guard so
-// the next scan can pick up what this one did not cover.
-func TestArcSweepReportsThroughTransientChannels(t *testing.T) {
-	t.Run("a clean sweep counts the arcs it archived", func(t *testing.T) {
-		m := minimalModel(stateCoordination, nil, nil)
-		m.arcSweepInFlight = true
-		nm, cmd := updateModel(t, m, arcArchiveFinishedMsg{Archived: []string{"one", "two"}})
-		if cmd != nil {
-			t.Error("the sweep must not quit or block on its own result")
-		}
-		if nm.arcSweepInFlight {
-			t.Error("a finished sweep must release the guard")
-		}
-		if !strings.Contains(nm.statusNotice, "2 arcs") {
-			t.Errorf("a clean sweep should count what it archived, got %q", nm.statusNotice)
-		}
-		if nm.flashErr != "" {
-			t.Errorf("a clean sweep raises no error, got %q", nm.flashErr)
-		}
-	})
-
-	t.Run("one archived arc reads as one arc", func(t *testing.T) {
-		m := minimalModel(stateCoordination, nil, nil)
-		nm, _ := updateModel(t, m, arcArchiveFinishedMsg{Archived: []string{"one"}})
-		if !strings.Contains(nm.statusNotice, "1 arc ") {
-			t.Errorf("a single arc should not read as a plural, got %q", nm.statusNotice)
-		}
-	})
-
-	t.Run("a failure names the arcs that did not archive", func(t *testing.T) {
-		m := minimalModel(stateCoordination, nil, nil)
-		m.arcSweepInFlight = true
-		nm, cmd := updateModel(t, m, arcArchiveFinishedMsg{
-			Failed: []string{"stubborn"},
-			Err:    fmt.Errorf("still open"),
-		})
-		if cmd != nil {
-			t.Error("a failed sweep must not quit")
-		}
-		if nm.arcSweepInFlight {
-			t.Error("a failed sweep must still release the guard")
-		}
-		if !strings.Contains(nm.flashErr, "stubborn") {
-			t.Errorf("the failure should name the arc, got %q", nm.flashErr)
-		}
-	})
 }
 
 // Quitting is immediate. Closed arcs no longer hold the quit open on an offer:

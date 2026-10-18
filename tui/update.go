@@ -1353,22 +1353,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case sessionsRefreshedMsg:
 		return m.handleSessionsRefreshed(msg)
 
-	case arcArchiveFinishedMsg:
-		// One sweep at a time; releasing the guard here lets the next scan
-		// submit whatever this one did not cover. Both outcomes report through
-		// channels that clear on the next key press — the sweep was never asked
-		// for, so it must not hold the coordinator up.
-		m.arcSweepInFlight = false
-		if len(msg.Failed) > 0 {
-			m.flashErr = fmt.Sprintf("arc archive failed for %s: %v", strings.Join(msg.Failed, ", "), msg.Err)
-			return m, nil
-		}
-		if len(msg.Archived) > 0 {
-			m.statusNotice = fmt.Sprintf("archived %s closed over a week ago",
-				pluralize(len(msg.Archived), "arc", "arcs"))
-		}
-		return m, nil
-
 	case coordinationArchiveLoadedMsg:
 		return m.handleCoordinationArchiveLoaded(msg)
 

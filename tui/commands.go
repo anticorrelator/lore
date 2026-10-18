@@ -13,7 +13,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/anticorrelator/lore/tui/internal/coordination"
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/gh"
 	"github.com/anticorrelator/lore/tui/internal/search"
@@ -151,37 +150,6 @@ func runArchive(slug string, unarchive bool) tea.Cmd {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		err := cmd.Run()
 		return work.ArchiveFinishedMsg{Err: err}
-	}
-}
-
-// arcArchiveFinishedMsg reports the outcome of one archive run. Archived names
-// the arcs whose record now says archived, Failed the ones whose archive did
-// not land. One run can produce both.
-type arcArchiveFinishedMsg struct {
-	Archived []string
-	Failed   []string
-	Err      error
-}
-
-// runArcArchive archives the given arcs. It shells out to `lore arc archive`
-// per slug because that verb owns the record's validation, transition checks,
-// and atomic write — the TUI reads _meta.json and never writes it. A failing
-// slug does not stop the run: the rest still archive, and the outcome comes
-// back as a message so both halves can be shown.
-func runArcArchive(slugs []string) tea.Cmd {
-	return func() tea.Msg {
-		msg := arcArchiveFinishedMsg{}
-		for _, slug := range slugs {
-			cmd := exec.Command("lore", "arc", "archive", slug)
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			if err := cmd.Run(); err != nil {
-				msg.Failed = append(msg.Failed, slug)
-				msg.Err = err
-				continue
-			}
-			msg.Archived = append(msg.Archived, slug)
-		}
-		return msg
 	}
 }
 
@@ -362,36 +330,4 @@ func runPopupSearch(query string) tea.Msg {
 		}
 	}
 	return popupSearchResultMsg{items: items, query: query}
-}
-
-// Cached age nominates a candidate; the canonical metadata must still declare
-// an old closed arc immediately before the archival command is issued.
-func runArcArchiveVerified(workDir string, slugs []string) tea.Cmd {
-	return func() tea.Msg {
-		msg := arcArchiveFinishedMsg{}
-		for _, slug := range slugs {
-			data, err := os.ReadFile(filepath.Join(coordination.ArcDir(workDir, slug), "_meta.json"))
-			var rec struct {
-				Status   string `json:"status"`
-				Opened   string `json:"opened"`
-				ClosedAt string `json:"closed_at"`
-			}
-			if err != nil || json.Unmarshal(data, &rec) != nil {
-				continue
-			}
-			arc := coordination.Arc{Status: rec.Status, Opened: rec.Opened, ClosedAt: rec.ClosedAt}
-			if arc.Status != coordination.StatusClosed || !arc.AgedOutAt(time.Now()) {
-				continue
-			}
-			cmd := exec.Command("lore", "arc", "archive", slug, "--kdir", filepath.Dir(workDir))
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			if err := cmd.Run(); err != nil {
-				msg.Failed = append(msg.Failed, slug)
-				msg.Err = err
-			} else {
-				msg.Archived = append(msg.Archived, slug)
-			}
-		}
-		return msg
-	}
 }

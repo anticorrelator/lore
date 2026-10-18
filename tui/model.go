@@ -205,13 +205,6 @@ type model struct {
 	// either identity becomes stale.
 	coordinationJump        *coordination.AttentionSelectedMsg
 	coordinationTargetIssue string
-	// arcSweepInFlight and arcSwept guard the automatic archiving of closed
-	// arcs that have aged past a week. The sweep rides the arc-store scan, so
-	// without them a single aged arc would be resubmitted on every poll tick
-	// until its archive landed. A slug enters arcSwept when it is submitted and
-	// stays there whether or not the archive succeeded.
-	arcSweepInFlight bool
-	arcSwept         map[string]bool
 	// returnToCoordination is the one-shot return target set by a coordination
 	// stream drill-in (work detail or sessions workspace). While set,
 	// the landing surface's back seam re-enters the coordination view instead of
