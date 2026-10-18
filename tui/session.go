@@ -160,11 +160,24 @@ func (m model) endLocalSessionFailed(slug, closeRequestID, reason string) (model
 	return m, cmds
 }
 
+// launchPending reports, with a flash, that slug already has a launch from
+// this window waiting to spawn.
+func (m model) launchPending(slug string) (model, bool) {
+	if _, ok := m.launches[slug]; !ok {
+		return m, false
+	}
+	m.flashErr = fmt.Sprintf("%s is already starting in the background host", slug)
+	return m, true
+}
+
 func (m model) handleSpecRequest(msg work.SpecRequestMsg) (model, tea.Cmd) {
 	// 's' on a work item: show its session when one is live, else show the
-	// confirmation modal before launching spec.
+	// confirmation modal before launching spec in the background host.
 	if next, cmd, ok := m.viewItemSession(msg.Slug); ok {
 		return next, cmd
+	}
+	if next, pending := m.launchPending(msg.Slug); pending {
+		return next, nil
 	}
 	ta := newModalTextarea()
 	focusCmd := ta.Focus()
@@ -187,6 +200,9 @@ func (m model) handleChatRequest(msg work.ChatRequestMsg) (model, tea.Cmd) {
 	if next, cmd, ok := m.viewItemSession(msg.Slug); ok {
 		return next, cmd
 	}
+	if next, pending := m.launchPending(msg.Slug); pending {
+		return next, nil
+	}
 	ta := newModalTextarea()
 	focusCmd := ta.Focus()
 	m.sessionConfirmInput = ta
@@ -208,6 +224,9 @@ func (m model) handleImplementRequest(msg work.ImplementRequestMsg) (model, tea.
 	// (or an archived one) has nothing to implement.
 	if next, cmd, ok := m.viewItemSession(msg.Slug); ok {
 		return next, cmd
+	}
+	if next, pending := m.launchPending(msg.Slug); pending {
+		return next, nil
 	}
 	item, ok := m.workItemBySlug(msg.Slug)
 	if !ok || !item.HasTasks || item.Status == "archived" {
@@ -233,6 +252,9 @@ func (m model) handleFollowupChatRequest(msg followup.FollowupChatRequestMsg) (m
 	// chat session about the follow-up.
 	if next, cmd, ok := m.viewItemSession(msg.ID); ok {
 		return next, cmd
+	}
+	if next, pending := m.launchPending(msg.ID); pending {
+		return next, nil
 	}
 	// Title/Source may be empty when the message originates from LensFindingsModel
 	// (which only knows the followup ID). Fill from the currently loaded detail.

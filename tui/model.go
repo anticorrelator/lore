@@ -250,6 +250,14 @@ type model struct {
 	terminalForeground color.Color
 	terminalBackground color.Color
 
+	// launches are this window's launches still waiting to spawn, keyed by
+	// slug; launchTickArmed is set while their fast refresh is scheduled.
+	// requestEvents remembers recent request outcomes from the journal, and
+	// refusals queues the refusal modals, the first of which is showing.
+	launches        map[string]pendingLaunch
+	launchTickArmed bool
+	requestEvents   []session.Event
+	refusals        []refusalNotice
 	// noTmuxReason is why tmux is unavailable to this window, or "" when it is
 	// available: without it a window lists sessions but cannot show them.
 	noTmuxReason string
@@ -937,9 +945,13 @@ func (m model) buildPaneConfig() paneConfig {
 		filterAnnot, filterAnnotW := annotFollowupFilter.render(filterSel)
 
 		sessionPanel, hasSessionPanel := m.currentFollowupPanel()
+		detailView := m.followupDetail.View()
+		if !hasSessionPanel {
+			detailView = m.withLaunchStatus(m.followupDetail.CurrentID(), detailView)
+		}
 		return paneConfig{
 			listView:           m.followupList.View(),
-			detailView:         m.followupDetail.View(),
+			detailView:         detailView,
 			sessionPanel:       sessionPanel,
 			hasSessionPanel:    hasSessionPanel,
 			listTitle:          listTitle,
@@ -981,9 +993,13 @@ func (m model) buildPaneConfig() paneConfig {
 		}
 
 		sessionPanel, hasSessionPanel := m.currentSessionPanel()
+		detailView := m.detail.View()
+		if !hasSessionPanel {
+			detailView = m.withLaunchStatus(m.list.CurrentSlug(), detailView)
+		}
 		return paneConfig{
 			listView:           m.list.View(),
-			detailView:         m.detail.View(),
+			detailView:         detailView,
 			sessionPanel:       sessionPanel,
 			hasSessionPanel:    hasSessionPanel,
 			listTitle:          listTitle,

@@ -1609,57 +1609,6 @@ func (m model) spawnSession(d work.SessionDescriptor, requestID string) (model, 
 	return m.spawnSessionOnRef(d, requestID, "", m.normalizedProjectDir)
 }
 
-type directEnqueueResultMsg struct {
-	descriptor work.SessionDescriptor
-	err        error
-}
-
-// enqueueSession sends direct TUI creation through the sole request writer.
-func (m model) enqueueSession(d work.SessionDescriptor) (model, tea.Cmd) {
-	projectDir, knowledgeDir := m.normalizedProjectDir, m.config.KnowledgeDir
-	return m, func() tea.Msg {
-		repo, err := config.LoreRepoDir()
-		if err != nil {
-			return directEnqueueResultMsg{descriptor: d, err: err}
-		}
-		role, ceremony := "default", ""
-		switch d.Type {
-		case work.SessionSpec:
-			role, ceremony = "lead", "spec"
-		case work.SessionImplement:
-			role, ceremony = "lead", "implement"
-		}
-		route, err := config.ResolveCanonicalRoute(role, ceremony, nil)
-		if err != nil {
-			return directEnqueueResultMsg{descriptor: d, err: err}
-		}
-		rawRoute, err := json.Marshal(route)
-		if err != nil {
-			return directEnqueueResultMsg{descriptor: d, err: err}
-		}
-		args := []string{filepath.Join(repo, "scripts", "session-request.sh"), "--type", string(d.Type), "--initiator", "human", "--prefer-dir", projectDir, "--session-route", string(rawRoute), "--kdir", knowledgeDir}
-		if d.Slug != "" {
-			args = append(args, "--slug", d.Slug)
-		}
-		if d.ExtraContext != "" {
-			args = append(args, "--context", d.ExtraContext)
-		}
-		if d.Type == work.SessionSpec && d.ShortMode {
-			args = append(args, "--track", "short")
-		}
-		if d.SkipConfirm {
-			args = append(args, "--yes")
-		} else {
-			args = append(args, "--confirm")
-		}
-		out, err := exec.Command("bash", args...).CombinedOutput()
-		if err != nil {
-			err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
-		}
-		return directEnqueueResultMsg{descriptor: d, err: err}
-	}
-}
-
 // spawnSessionOnRef is spawnSession with a required source branch, carried from
 // a claimed request's required_target_ref, and the source checkout the session
 // is seeded from. The branch only reaches worktree allocation, so it has no

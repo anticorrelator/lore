@@ -188,6 +188,18 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		return m, nil
 	}
 
+	// Refusal modal: a launch or close that did not happen, shown in full over
+	// everything else. Esc dismisses it, Enter takes its offer when it has one,
+	// and every other key is swallowed.
+	if m.refusalActive() {
+		if km, ok := msg.(tea.KeyPressMsg); ok {
+			return m.handleRefusalKey(km)
+		}
+		if _, ok := msg.(tea.PasteMsg); ok {
+			return m, nil
+		}
+	}
+
 	// Help modal: intercept all keys; Esc or ? closes it, scroll keys move
 	// the help viewport, everything else is swallowed.
 	if m.showHelp {
@@ -307,12 +319,13 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 			switch km.String() {
 			case "enter":
-				// Enter stamps the textarea into the descriptor and hands it to
-				// the shared spawn path — the descriptor is the only mode carrier.
+				// Enter stamps the textarea into the descriptor and sends it to
+				// the store's background host — the descriptor is the only mode
+				// carrier.
 				d := m.sessionConfirmDescriptor
 				d.ExtraContext = strings.TrimSpace(m.sessionConfirmInput.Value())
 				m.sessionConfirmActive = false
-				return m.enqueueSession(d)
+				return m.launchSession(d)
 			case "esc", "ctrl+c":
 				m.sessionConfirmActive = false
 				return m, nil
@@ -655,15 +668,14 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		}
 		return m, nil
 
-	case directEnqueueResultMsg:
-		if msg.err != nil {
-			m.flashErr = compactErr("enqueue session", msg.err)
-			return m, nil
-		}
-		// The queue owns session creation. A tick may already have claimed and
-		// spawned this row before writer completion arrives, so success must not
-		// replace panel or live-session state.
-		return m, nil
+	case launchRequestedMsg:
+		return m.handleLaunchRequested(msg)
+
+	case launchRefreshTickMsg:
+		return m.handleLaunchRefreshTick()
+
+	case checkoutDeclaredMsg:
+		return m.handleCheckoutDeclared(msg)
 
 	case hostRevivalDueMsg:
 		return m.startHostRevival()

@@ -3,6 +3,7 @@ package main
 import (
 	"os/exec"
 	"regexp"
+	"strings"
 	"syscall"
 
 	tea "charm.land/bubbletea/v2"
@@ -38,10 +39,11 @@ type sessionsRefreshedMsg struct {
 	diagnostics   []session.Diagnostic
 }
 
-// sessionCloseRequestedMsg reports the outcome of enqueuing a close request via
-// the existing producer (lore session close).
+// sessionCloseRequestedMsg reports the outcome of `lore session close`, with
+// what it printed when it failed.
 type sessionCloseRequestedMsg struct {
-	err error
+	err    error
+	output string
 }
 
 // sessionsRefreshCmd reads the three sessions substrates off the UI thread and
@@ -81,13 +83,15 @@ func (m model) handleSessionsRefreshed(msg sessionsRefreshedMsg) (model, tea.Cmd
 	m.sessionsNeedsInput = m.sessionsList.NeedsInputCount()
 	m.syncCoordinationSessions()
 	m = m.badgeSessions(msg.instances)
+	m = m.rememberRequestEvents(msg.events)
+	m, cmd := m.followLaunches(msg.instances)
 
 	if m.state == stateSessions {
 		m.loadSessionsDetail(m.sessionsList.CurrentKey())
 	}
 	// A window writes nothing under _sessions/, so read diagnostics are left to
 	// the store host, which reads the same rows.
-	return m, nil
+	return m, cmd
 }
 
 // buildSessionRows assembles the three-substrate union into list rows: the
@@ -254,11 +258,11 @@ func (m model) openSessionCloseConfirmFor(row sessionview.SessionRow) (model, te
 	return m, nil
 }
 
-// runSessionClose enqueues a close request through the existing producer (lore
-// session close), which resolves the owning instance, writes the close-request
-// row, and journals close_requested — the same path the CLI uses, so this pass
-// adds no new writer. A slugged session is addressed by slug; a slugless one by
-// --session <id>. The owning instance's poll consumes the row and tears down.
+// runSessionClose closes a session through `lore session close`, which asks the
+// host running it to end it: the host's close ladder, receipts and worktree
+// handling all apply, and nothing here writes the request itself. A slugged
+// session is addressed by slug; a slugless one by --session <id>. A managed
+// close can wait for its host, so this runs off the UI thread.
 func runSessionClose(slug, sessionID, requestedBy string) tea.Cmd {
 	return func() tea.Msg {
 		args := []string{"session", "close"}
@@ -273,16 +277,21 @@ func runSessionClose(slug, sessionID, requestedBy string) tea.Cmd {
 		}
 		cmd := exec.Command("lore", args...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		err := cmd.Run()
-		return sessionCloseRequestedMsg{err: err}
+		out, err := cmd.CombinedOutput()
+		return sessionCloseRequestedMsg{err: err, output: strings.TrimSpace(string(out))}
 	}
 }
 
-// handleSessionCloseRequested surfaces a failed enqueue and refreshes the view so
-// the close-pending badge appears once the journal records close_requested.
+// handleSessionCloseRequested shows a failed close in full and refreshes the
+// view so the close-pending badge appears once the journal records
+// close_requested.
 func (m model) handleSessionCloseRequested(msg sessionCloseRequestedMsg) (model, tea.Cmd) {
 	if msg.err != nil {
-		m.flashErr = compactErr("session close", msg.err)
+		text := strings.TrimPrefix(msg.output, "Error: ")
+		if text == "" {
+			text = msg.err.Error()
+		}
+		m.refusals = append(m.refusals, refusalNotice{title: "Close failed", text: "lore session close did not close the session:\n\n" + text})
 		return m, nil
 	}
 	return m, m.sessionsRefreshCmd()

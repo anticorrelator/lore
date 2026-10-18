@@ -122,7 +122,6 @@ func main() {
 	m.coordinationList.SetArcs(startupArcs, startupSkipped)
 
 	m = m.viewStore(cfg.KnowledgeDir, work.TmuxAvailable)
-	m.normalizedProjectDir = config.NormalizeProjectDir(cfg.ProjectDir)
 
 	// Best-effort settings panel initialization. A nil panel disables the
 	// configurator open key but does not block startup — the modal is a

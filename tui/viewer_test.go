@@ -279,9 +279,9 @@ func serveStoreForWriter(t *testing.T, kdir, buildTime string) string {
 }
 
 // settle runs cmds and every command their results return, feeding each
-// message through Update, until only timers are left. Poll ticks are timers
-// here: a test drives polls itself. A revival check still in flight is waited
-// for, however slow.
+// message through Update, until only timers are left. Poll and launch ticks
+// are timers here: a test drives polls itself. A revival check or launch
+// request still in flight is waited for, however slow.
 func settle(t *testing.T, m model, cmds ...tea.Cmd) model {
 	t.Helper()
 	results := make(chan tea.Msg, 4096)
@@ -319,7 +319,7 @@ func settle(t *testing.T, m model, cmds ...tea.Cmd) model {
 				continue
 			}
 			switch msg.(type) {
-			case indexPollTickMsg, tea.QuitMsg:
+			case indexPollTickMsg, launchRefreshTickMsg, tea.QuitMsg:
 				continue
 			}
 			next, cmd := updateModel(t, m, msg)
@@ -340,7 +340,20 @@ func settle(t *testing.T, m model, cmds ...tea.Cmd) model {
 
 // windowBusy reports whether a command a test asserts on is still running.
 func windowBusy(m model) bool {
-	return m.hostRevivalBusy
+	if m.hostRevivalBusy {
+		return true
+	}
+	for _, l := range m.launches {
+		if l.requestID == "" {
+			return true
+		}
+	}
+	for _, r := range m.refusals {
+		if r.declaring {
+			return true
+		}
+	}
+	return false
 }
 
 // snapshotTree records every path under root with its content hash, mode and
@@ -463,6 +476,32 @@ func TestTUIHostsNothingUnderItsStore(t *testing.T) {
 	}
 }
 
+func TestTUIHostsNothingRegistersNoInstanceOnLaunchOrClose(t *testing.T) {
+	f := newWindowFixture(t)
+	f.storeHost(t, map[string]any{"slug": "item-two", "type": "spec", "initiator": "agent", "started": "2026-10-18T00:00:00Z", "tmux": "lore-store-host-item-two", "session_id": "sid-two"})
+	f.respond(t, 0, 0, `{"request_id":"req-launch","enqueued":true}`, "")
+	m := f.window(t)
+	m = settle(t, m, m.sessionsRefreshCmd())
+	before := snapshotTree(t, f.sessions)
+
+	m, _ = updateModel(t, m, work.SpecRequestMsg{Slug: "demo"})
+	m, cmd := updateModel(t, m, press(tea.KeyEnter))
+	m = settle(t, m, cmd)
+	m.sessionsList.SetCursorByID("store-host|item-two|sid-two")
+	m.state = stateSessions
+	m, _ = updateModel(t, m, press('x'))
+	_, cmd = updateModel(t, m, press('y'))
+	settle(t, m, cmd)
+
+	assertTreeUnchanged(t, before, snapshotTree(t, f.sessions))
+	if n := len(f.calls(t, "session", "request")); n != 1 {
+		t.Errorf("launch ran lore session request %d times", n)
+	}
+	if n := len(f.calls(t, "session", "close")); n != 1 {
+		t.Errorf("close ran lore session close %d times", n)
+	}
+}
+
 func TestViewerTUIRevivesTheStoreHostAtMostOnceAMinute(t *testing.T) {
 	poll := func(t *testing.T, m model) model {
 		t.Helper()
@@ -516,6 +555,120 @@ func TestViewerTUIRevivesTheStoreHostAtMostOnceAMinute(t *testing.T) {
 			t.Fatalf("failed ensure notice = %q", m.statusNotice)
 		}
 	})
+}
+
+// launchFixture opens the spec confirm for demo and presses Enter.
+func launchFromModal(t *testing.T, m model, slug string) (model, tea.Cmd) {
+	t.Helper()
+	m, _ = updateModel(t, m, work.SpecRequestMsg{Slug: slug})
+	if !m.sessionConfirmActive {
+		t.Fatal("s did not open the confirm modal")
+	}
+	return updateModel(t, m, press(tea.KeyEnter))
+}
+
+func TestViewerTUILaunchRunsSessionRequestAndOpensTheViewerOnSpawned(t *testing.T) {
+	f := newWindowFixture(t)
+	f.storeHost(t)
+	f.respond(t, 0, 0, `{"request_id":"req-1","type":"spec","slug":"demo","enqueued":true,"host_key":"k"}`, "")
+	m := f.window(t)
+
+	m, cmd := launchFromModal(t, m, "demo")
+	if _, pending := m.launches["demo"]; !pending {
+		t.Fatal("Enter did not record a pending launch")
+	}
+	m = settle(t, m, cmd)
+
+	calls := f.calls(t, "session", "request")
+	if len(calls) != 1 {
+		t.Fatalf("lore session request ran %d times", len(calls))
+	}
+	args := calls[0].args
+	if calls[0].dir != f.checkout {
+		t.Errorf("request ran in %s, want the checkout's top level %s", calls[0].dir, f.checkout)
+	}
+	flag := func(name string) string {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == name {
+				return args[i+1]
+			}
+		}
+		return ""
+	}
+	if flag("--type") != "spec" || flag("--initiator") != "human" || flag("--prefer-dir") != f.checkout || flag("--slug") != "demo" || flag("--kdir") != f.kdir {
+		t.Fatalf("request argv = %q", args)
+	}
+	var route map[string]any
+	if err := json.Unmarshal([]byte(flag("--session-route")), &route); err != nil || route["framework"] == nil {
+		t.Fatalf("--session-route %q is not a frozen route: %v", flag("--session-route"), err)
+	}
+	if !slicesContain(args, "--json") || !slicesContain(args, "--yes") || flag("--track") != "short" {
+		t.Fatalf("request argv = %q", args)
+	}
+	if l := m.launches["demo"]; l.requestID != "req-1" {
+		t.Fatalf("pending launch = %#v", l)
+	}
+	if m.flashErr != "" || m.refusalActive() {
+		t.Fatalf("a sent launch flashed %q or refused", m.flashErr)
+	}
+	if out := stripANSI(m.viewContent()); !strings.Contains(out, "Starting spec for demo in the background host") {
+		t.Fatalf("the item's panel does not say it is starting:\n%s", out)
+	}
+	if m.hasSessionPanel("demo") {
+		t.Fatal("a viewer opened before the session spawned")
+	}
+
+	f.storeHost(t, map[string]any{"slug": "demo", "type": "spec", "initiator": "human", "started": "2026-10-18T00:00:00Z", "request_id": "req-1", "session_id": "sid-1", "tmux": "lore-store-host-demo"})
+	f.appendEvent(t, map[string]any{"event_id": "ev-spawned", "event": "spawned", "slug": "demo", "request_id": "req-1", "actor_instance": "store-host"})
+	m, attach := refresh(t, m)
+	v, ok := m.viewers["demo"]
+	if !ok || !v.panel.IsViewer() || v.panel.TmuxName() != "lore-store-host-demo" {
+		t.Fatalf("spawned did not open a viewer on the host's pane: %#v ok=%v", v.panel.TmuxName(), ok)
+	}
+	if attach == nil {
+		t.Fatal("opening the viewer returned no attach command")
+	}
+	if _, owned := m.sessionPanels["demo"]; owned {
+		t.Fatal("the viewer landed in the owned-session panel map")
+	}
+	if !m.terminalMode || m.focusedPanel != panelLeft {
+		t.Fatalf("a launch from the work list shows its terminal with the list focused: terminal=%v focus=%v", m.terminalMode, m.focusedPanel)
+	}
+	if _, pending := m.launches["demo"]; pending {
+		t.Fatal("the launch is still pending after it spawned")
+	}
+}
+
+func slicesContain(values []string, want string) bool {
+	for _, v := range values {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestViewerTUISpawnFailedShowsTheRetry(t *testing.T) {
+	f := newWindowFixture(t)
+	f.storeHost(t)
+	f.respond(t, 0, 0, `{"request_id":"req-retry","enqueued":true}`, "")
+	m := f.window(t)
+	m, cmd := launchFromModal(t, m, "demo")
+	m = settle(t, m, cmd)
+
+	f.appendEvent(t, map[string]any{"event_id": "ev-f1", "event": "spawn_failed", "slug": "demo", "request_id": "req-retry", "reason": "spawn: create session worktree: disk full"})
+	m, _ = refresh(t, m)
+	m, _ = refresh(t, m)
+	if l := m.launches["demo"]; l.attempts != 1 || l.lastReason != "spawn: create session worktree: disk full" {
+		t.Fatalf("pending launch after one failure = %#v", l)
+	}
+	out := stripANSI(m.viewContent())
+	if !strings.Contains(out, "Attempt 1 failed: spawn: create session worktree: disk full") || !strings.Contains(out, "retrying") {
+		t.Fatalf("panel does not show the retry:\n%s", out)
+	}
+	if m.refusalActive() {
+		t.Fatal("a retried failure opened a refusal")
+	}
 }
 
 // viewerWindow is a window showing a live viewer on demo with its terminal focused.
@@ -595,6 +748,20 @@ func TestViewerTUICtrlCAndXCloseThroughTheHost(t *testing.T) {
 		if len(calls) != 1 || strings.Join(calls[0].args, " ") != "session close --session abcdef0123456789 --reason human --requested-by lore-tui" {
 			t.Fatalf("close calls = %#v", calls)
 		}
+	})
+	t.Run("a refused close is shown in full", func(t *testing.T) {
+		f := newWindowFixture(t)
+		reason := "Error: no live host lists session demo; it may have ended already. Run lore session list to see where it runs, then retry the close."
+		f.stubFile(t, "close.out", reason)
+		f.stubFile(t, "close.code", "1")
+		m := viewerWindow(t, f)
+		m, _ = updateModel(t, m, press('c', tea.ModCtrl))
+		m, cmd := updateModel(t, m, press('y'))
+		m = settle(t, m, cmd)
+		if !m.refusalActive() || m.refusals[0].title != "Close failed" {
+			t.Fatalf("a refused close showed no modal: flash=%q", m.flashErr)
+		}
+		assertShowsInFull(t, m.viewContent(), strings.TrimPrefix(reason, "Error: "))
 	})
 }
 
@@ -873,4 +1040,184 @@ func TestViewerTUISessionsScrollbackRoutesToTheViewer(t *testing.T) {
 	if !ok || !strings.Contains(stripANSI(panel.View()), "-- scrollback (") {
 		t.Fatal("the viewer's scrollback did not reach the sessions view")
 	}
+}
+
+// assertShowsInFull checks that every word of text appears, in order, in the
+// rendered view.
+func assertShowsInFull(t *testing.T, view, text string) {
+	t.Helper()
+	clean := stripANSI(view)
+	for _, r := range []string{"│", "╭", "╮", "╰", "╯", "─"} {
+		clean = strings.ReplaceAll(clean, r, " ")
+	}
+	got := strings.Join(strings.Fields(clean), " ")
+	want := strings.Join(strings.Fields(text), " ")
+	if !strings.Contains(got, want) {
+		t.Fatalf("view does not show the whole text\nwant: %s\nview:\n%s", want, clean)
+	}
+}
+
+const noCheckoutRefusal = `no checkout declared: run lore work source-checkout demo
+Work item 'demo' declares no source checkout, so this request cannot say which
+clone it runs in. From inside the checkout this work belongs in, run:
+  lore work source-checkout demo
+then send the request again. Nothing was enqueued.`
+
+func TestLaunchRefusalFromTheWriterRendersInFull(t *testing.T) {
+	f := newWindowFixture(t)
+	refusal := "--prefer-dir is not a checkout of this store; name one\n'/work/other-clone' cannot be served by this store's session host: /work/other-clone belongs to knowledge store /stores/other, not /stores/this. Name the top level of a git checkout of this store. Nothing was enqueued."
+	raw, _ := json.Marshal(map[string]string{"error": refusal})
+	f.respond(t, 0, 1, string(raw), "")
+	m := f.window(t)
+	m, cmd := launchFromModal(t, m, "demo")
+	m = settle(t, m, cmd)
+	if !m.refusalActive() || m.refusals[0].offer {
+		t.Fatalf("refusal modal: active=%v", m.refusalActive())
+	}
+	if m.flashErr != "" {
+		t.Fatalf("the refusal went to the flash: %q", m.flashErr)
+	}
+	if _, pending := m.launches["demo"]; pending || m.hasSessionPanel("demo") {
+		t.Fatal("a refused launch left a pending launch or a panel")
+	}
+	assertShowsInFull(t, m.viewContent(), refusal)
+	t.Run("Esc (dismiss)", func(t *testing.T) {
+		nm, cmd := updateModel(t, m, press(tea.KeyEscape))
+		if nm.refusalActive() || cmd != nil {
+			t.Fatal("Esc did not dismiss the refusal")
+		}
+	})
+	t.Run("other keys are swallowed", func(t *testing.T) {
+		nm, cmd := updateModel(t, m, press('q'))
+		if !nm.refusalActive() || isQuitCmd(cmd) {
+			t.Fatal("a key other than Esc acted behind the refusal")
+		}
+	})
+}
+
+func TestLaunchRefusalWithoutJSONShowsWhatTheCommandPrinted(t *testing.T) {
+	f := newWindowFixture(t)
+	f.respond(t, 0, 2, "", "Error: lore: unknown session verb 'request'; run lore rebuild, then retry this launch from the window.\n")
+	m := f.window(t)
+	m, cmd := launchFromModal(t, m, "demo")
+	m = settle(t, m, cmd)
+	if !m.refusalActive() {
+		t.Fatal("no refusal")
+	}
+	assertShowsInFull(t, m.viewContent(), "lore: unknown session verb 'request'; run lore rebuild, then retry this launch from the window.")
+}
+
+func TestLaunchRefusalJournaledAfterClaimRendersInFull(t *testing.T) {
+	cases := []struct {
+		event, title, reason, want string
+	}{
+		{"restore_refused", "Launch refused", "worktree refused: the source checkout " + "is on branch feature/x, and this request requires main; switch the checkout to main or re-declare it, then launch again", ""},
+		{"request_abandoned", "Launch abandoned", "attempts exhausted (3): spawn: harness exited before its first screen: codex: unknown model gpt-6-astra", ""},
+		{"request_expired", "Launch expired", "", "It waited past its time limit without the background host claiming it."},
+		{"request_cancelled", "Launch cancelled", "cancelled by lore session cancel from a coordinator, who said: superseded by the reviewed plan revision", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.event, func(t *testing.T) {
+			f := newWindowFixture(t)
+			f.storeHost(t)
+			f.respond(t, 0, 0, `{"request_id":"req-j","enqueued":true}`, "")
+			m := f.window(t)
+			m, cmd := launchFromModal(t, m, "demo")
+			m = settle(t, m, cmd)
+			f.appendEvent(t, map[string]any{"event_id": "ev-" + tc.event, "event": tc.event, "slug": "demo", "request_id": "req-j", "reason": tc.reason})
+			m, _ = refresh(t, m)
+			if !m.refusalActive() || m.refusals[0].title != tc.title {
+				t.Fatalf("refusal = %#v", m.refusals)
+			}
+			if _, pending := m.launches["demo"]; pending {
+				t.Fatal("a refused launch is still pending")
+			}
+			want := tc.reason
+			if want == "" {
+				want = tc.want
+			}
+			assertShowsInFull(t, m.viewContent(), want)
+			m, _ = refresh(t, m)
+			if len(m.refusals) != 1 {
+				t.Fatalf("the refusal showed %d times", len(m.refusals))
+			}
+		})
+	}
+	t.Run("an outcome read before the request id arrived", func(t *testing.T) {
+		f := newWindowFixture(t)
+		f.storeHost(t)
+		m := f.window(t)
+		m, _ = updateModel(t, m, work.SpecRequestMsg{Slug: "demo"})
+		m, _ = updateModel(t, m, press(tea.KeyEnter))
+		f.appendEvent(t, map[string]any{"event_id": "ev-early", "event": "restore_refused", "slug": "demo", "request_id": "req-early", "reason": "checkout is not in this store"})
+		m, _ = refresh(t, m)
+		m, _ = updateModel(t, m, launchRequestedMsg{descriptor: m.launches["demo"].descriptor, checkout: f.checkout, requestID: "req-early"})
+		m, _ = refresh(t, m)
+		if !m.refusalActive() {
+			t.Fatal("an outcome journaled before the request id arrived was lost")
+		}
+	})
+}
+
+func TestLaunchRefusalNoCheckoutOffersToDeclareTheWindowsCheckout(t *testing.T) {
+	f := newWindowFixture(t)
+	raw, _ := json.Marshal(map[string]string{"error": noCheckoutRefusal})
+	f.respond(t, 1, 1, string(raw), "")
+	f.respond(t, 2, 0, `{"request_id":"req-after-declare","enqueued":true}`, "")
+	t.Setenv("LORE_SESSION_INSTANCE", "some-session")
+	t.Setenv("LORE_SESSION_SLUG", "other-item")
+	t.Setenv("LORE_SESSION_TYPE", "chat")
+	m := f.window(t)
+	m, cmd := launchFromModal(t, m, "demo")
+	m = settle(t, m, cmd)
+	if !m.refusalActive() || !m.refusals[0].offer || m.refusals[0].checkout != f.checkout {
+		t.Fatalf("no offer: %#v", m.refusals)
+	}
+	out := m.viewContent()
+	assertShowsInFull(t, out, noCheckoutRefusal)
+	assertShowsInFull(t, out, "Enter declares this window's checkout,")
+	assertShowsInFull(t, out, "as the checkout of demo (lore work source-checkout demo), then launches again.")
+
+	t.Run("Esc (dismiss)", func(t *testing.T) {
+		nm, cmd := updateModel(t, m, press(tea.KeyEscape))
+		if nm.refusalActive() || cmd != nil {
+			t.Fatal("Esc did not dismiss the offer")
+		}
+	})
+	t.Run("Enter (declare and launch)", func(t *testing.T) {
+		nm, cmd := updateModel(t, m, press(tea.KeyEnter))
+		if cmd == nil || !nm.refusals[0].declaring {
+			t.Fatal("Enter did not start the declaration")
+		}
+		nm = settle(t, nm, cmd)
+		declares := f.calls(t, "work", "source-checkout")
+		if len(declares) != 1 || strings.Join(declares[0].args, " ") != "work source-checkout demo" {
+			t.Fatalf("declare calls = %#v", declares)
+		}
+		if declares[0].dir != f.checkout {
+			t.Errorf("declared in %s, want the window's checkout %s", declares[0].dir, f.checkout)
+		}
+		if declares[0].identity != "unset,unset,unset" {
+			t.Errorf("declaration ran with session identity %s", declares[0].identity)
+		}
+		if nm.refusalActive() {
+			t.Fatalf("the modal stayed after a successful declaration: %#v", nm.refusals)
+		}
+		if n := len(f.calls(t, "session", "request")); n != 2 {
+			t.Fatalf("the launch did not run again: %d requests", n)
+		}
+		if l, ok := nm.launches["demo"]; !ok || l.requestID != "req-after-declare" {
+			t.Fatalf("relaunch = %#v", nm.launches)
+		}
+	})
+	t.Run("a failed declaration is shown in full", func(t *testing.T) {
+		f.stubFile(t, "declare.out", "Error: /elsewhere is not a checkout of this store: it belongs to knowledge store /other. Run this from a checkout of this store.")
+		f.stubFile(t, "declare.code", "1")
+		nm, cmd := updateModel(t, m, press(tea.KeyEnter))
+		nm = settle(t, nm, cmd)
+		if !nm.refusalActive() || nm.refusals[0].title != "Checkout not declared" || nm.refusals[0].offer {
+			t.Fatalf("declaration failure = %#v", nm.refusals)
+		}
+		assertShowsInFull(t, nm.viewContent(), "it belongs to knowledge store /other. Run this from a checkout of this store.")
+	})
 }

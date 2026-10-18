@@ -71,7 +71,7 @@ func (m model) embeddedTerminalCursor() *tea.Cursor {
 	if !m.terminalMode || m.err != nil || m.state == stateNoRepo || m.state == stateOnboarding ||
 		m.state == stateKnowledge || m.popupActive ||
 		m.sessionConfirmActive || m.aiInputActive || m.assignActive || m.confirmAction != "" ||
-		m.showHelp || (m.settingsActive && m.settingsPanel != nil) {
+		m.showHelp || (m.settingsActive && m.settingsPanel != nil) || m.refusalActive() {
 		return nil
 	}
 
@@ -162,6 +162,9 @@ func (m model) viewContent() string {
 		}
 	}
 
+	if m.refusalActive() {
+		return m.renderRefusalModal()
+	}
 	if m.popupActive {
 		return lipgloss.Place(m.width, m.height-1, lipgloss.Center, lipgloss.Center, m.popup.View())
 	}

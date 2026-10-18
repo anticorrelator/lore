@@ -19,7 +19,6 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/coordination/board"
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
-	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
 	"github.com/anticorrelator/lore/tui/internal/work"
 	"github.com/anticorrelator/lore/tui/internal/worktree"
@@ -271,17 +270,34 @@ func press(code rune, mods ...tea.KeyMod) tea.KeyPressMsg {
 	return k
 }
 
-func prepareConfirmEnqueue(t *testing.T, m model) model {
+// prepareConfirmLaunch points a confirm-modal model at a window fixture whose
+// stub lore accepts every launch.
+func prepareConfirmLaunch(t *testing.T, m model) (model, *windowFixture) {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "adapters", "settings.template.json"))
-	if err != nil {
-		t.Fatal(err)
+	f := newWindowFixture(t)
+	f.respond(t, 0, 0, `{"request_id":"req-confirm","enqueued":true}`, "")
+	m.config.KnowledgeDir, m.config.WorkDir, m.config.ProjectDir = f.kdir, filepath.Join(f.kdir, "_work"), f.checkout
+	m = m.viewStore(f.kdir, func() (bool, string) { return true, "" })
+	return m, f
+}
+
+// assertLaunchedThroughTheHost checks that Enter sent exactly one `lore session
+// request` of type typ and left panel creation to the spawn.
+func assertLaunchedThroughTheHost(t *testing.T, f *windowFixture, nm model, slug, typ string) {
+	t.Helper()
+	if nm.flashErr != "" || nm.refusalActive() {
+		t.Fatalf("launch failed: flash=%q refusals=%#v", nm.flashErr, nm.refusals)
 	}
-	setupFakeLoreData(t, string(raw))
-	kdir := t.TempDir()
-	m.config.KnowledgeDir, m.config.ProjectDir, m.normalizedProjectDir = kdir, kdir, kdir
-	m.sessionsDir = filepath.Join(kdir, "_sessions")
-	return m
+	if nm.hasSessionPanel(slug) {
+		t.Error("a sent launch must leave panel creation to the spawn")
+	}
+	calls := f.calls(t, "session", "request", "--type", typ)
+	if len(calls) != 1 {
+		t.Fatalf("lore session request --type %s ran %d times: %#v", typ, len(calls), f.calls(t))
+	}
+	if l, ok := nm.launches[slug]; !ok || l.requestID != "req-confirm" {
+		t.Fatalf("pending launch = %#v", nm.launches)
+	}
 }
 
 // TestSpecConfirmModalKeybindContract verifies the keybinds displayed in
@@ -306,26 +322,16 @@ func TestSpecConfirmModalKeybindContract(t *testing.T) {
 		}
 	})
 	t.Run("Enter (launch)", func(t *testing.T) {
-		m := prepareConfirmEnqueue(t, specConfirmModel())
+		m, f := prepareConfirmLaunch(t, specConfirmModel())
 		nm, cmd := updateModel(t, m, press(tea.KeyEnter))
 		if nm.sessionConfirmActive {
 			t.Error("modal should close on Enter")
 		}
 		if cmd == nil {
-			t.Fatal("Enter should dispatch the enqueue command")
+			t.Fatal("Enter should dispatch the launch command")
 		}
-		result := cmd()
-		nm, _ = updateModel(t, nm, result)
-		if nm.flashErr != "" {
-			t.Fatalf("enqueue failed: %s", nm.flashErr)
-		}
-		if nm.hasSessionPanel("test-item") {
-			t.Error("enqueue completion must leave panel creation to queue claim")
-		}
-		rows := session.ScanPending(nm.sessionsDir)
-		if len(rows) != 1 || rows[0].Route == nil {
-			t.Fatalf("pending route = %#v", rows)
-		}
+		nm = settle(t, nm, cmd)
+		assertLaunchedThroughTheHost(t, f, nm, "test-item", "spec")
 	})
 	t.Run("Esc (cancel)", func(t *testing.T) {
 		m := specConfirmModel()
@@ -448,25 +454,16 @@ func TestImplementConfirmModalKeybindContract(t *testing.T) {
 		}
 	})
 	t.Run("Enter (launch implement)", func(t *testing.T) {
-		m := prepareConfirmEnqueue(t, implementModel())
+		m, f := prepareConfirmLaunch(t, implementModel())
 		nm, cmd := updateModel(t, m, press(tea.KeyEnter))
 		if nm.sessionConfirmActive {
 			t.Error("Enter should close the implement modal")
 		}
 		if cmd == nil {
-			t.Fatal("Enter should dispatch the enqueue command")
+			t.Fatal("Enter should dispatch the launch command")
 		}
-		nm, _ = updateModel(t, nm, cmd())
-		if nm.flashErr != "" {
-			t.Fatalf("enqueue failed: %s", nm.flashErr)
-		}
-		if nm.hasSessionPanel("impl-1") {
-			t.Error("enqueue completion must leave panel creation to queue claim")
-		}
-		rows := session.ScanPending(nm.sessionsDir)
-		if len(rows) != 1 || rows[0].Route == nil {
-			t.Fatalf("pending route = %#v", rows)
-		}
+		nm = settle(t, nm, cmd)
+		assertLaunchedThroughTheHost(t, f, nm, "impl-1", "implement")
 	})
 }
 

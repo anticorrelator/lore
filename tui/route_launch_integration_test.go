@@ -236,14 +236,17 @@ with patch.object(m,"ensure",return_value=status), patch.object(m,"ready",return
 	})
 }
 
-func TestDirectTUIEnqueueClaimsAndLaunchesFrozenRoute(t *testing.T) {
-	stageMainRouteScripts(t)
-	m, sessionsDir := baseSessionModel(t)
-	m.normalizedProjectDir = m.config.ProjectDir
-	data := os.Getenv("LORE_DATA_DIR")
-	if err := os.MkdirAll(filepath.Join(data, "config"), 0755); err != nil {
+// TestWindowLaunchClaimsAndLaunchesFrozenRoute runs a window's launch through
+// the real request writer (the stub lore hands `session request` to it), claims
+// the row as the store host does, and launches it with the route the window froze.
+func TestWindowLaunchClaimsAndLaunchesFrozenRoute(t *testing.T) {
+	f := newWindowFixture(t)
+	repo, err := filepath.Abs("..")
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("STUB_LORE_WRITER", filepath.Join(repo, "scripts", "session-request.sh"))
+	data := os.Getenv("LORE_DATA_DIR")
 	settings := `{"version":2,"tui_launch_framework":"codex","capability_overrides":{},"routes":{"default":"codex/gpt-6-astra-high","lead":{"framework":"codex","model":"gpt-6-astra","effort":"high"}},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"opus"}},"codex":{"args":["--human-direct"],"native_models":{"default":"gpt-5.5-high"}},"opencode":{"args":[],"native_models":{"default":"anthropic/opus"}}}}`
 	if err := os.WriteFile(filepath.Join(data, "config", "settings.json"), []byte(settings), 0644); err != nil {
 		t.Fatal(err)
@@ -255,25 +258,29 @@ func TestDirectTUIEnqueueClaimsAndLaunchesFrozenRoute(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ROUTE_ARGV_RECORD\"\nsleep 1\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := session.WriteInstance(sessionsDir, session.Instance{Name: m.instanceName, PID: os.Getpid(), ProjectDir: m.config.ProjectDir, BuildTime: routeAwareVintage}); err != nil {
-		t.Fatal(err)
+	hostKey := serveStoreForWriter(t, f.kdir, routeAwareVintage)
+
+	m := f.window(t)
+	m, cmd := m.launchSession(work.SessionDescriptor{Type: work.SessionSpec, Slug: "direct", Initiator: "human", SkipConfirm: false})
+	m = settle(t, m, cmd)
+	if m.refusalActive() {
+		t.Fatalf("the writer refused the window's launch: %s", m.refusals[0].text)
 	}
-	_, cmd := m.enqueueSession(work.SessionDescriptor{Type: work.SessionSpec, Slug: "direct", SkipConfirm: false})
-	msg := cmd()
-	result, ok := msg.(directEnqueueResultMsg)
-	if !ok || result.err != nil {
-		t.Fatalf("enqueue=%T %+v err=%v", msg, msg, result.err)
-	}
-	rows := session.ScanPending(sessionsDir)
+	rows := session.ScanPending(f.sessions)
 	if len(rows) != 1 || rows[0].Route == nil {
 		t.Fatalf("pending=%#v", rows)
 	}
-	claimed, err := session.QueueTick(sessionsDir, "me", routeAwareVintage, m.config.ProjectDir, map[string]bool{"me": true}, func(string) bool { return true }, nil, time.Now().Add(20*time.Second), session.ReclaimAfter)
+	if rows[0].HostKey != hostKey || rows[0].TargetInstance != nil || rows[0].PreferProjectDir == nil || *rows[0].PreferProjectDir != f.checkout {
+		t.Fatalf("row host_key=%q target=%v prefer=%v, want the store key, no target and the window's checkout %s", rows[0].HostKey, rows[0].TargetInstance, rows[0].PreferProjectDir, f.checkout)
+	}
+	if l := m.launches["direct"]; l.requestID != rows[0].RequestID {
+		t.Fatalf("the window follows request %q, the writer enqueued %q", l.requestID, rows[0].RequestID)
+	}
+	claimed, err := session.QueueTickForStoreHost(f.sessions, "store-host", routeAwareVintage, hostKey, session.StoreScope{KnowledgeDir: f.kdir, Pinned: true}, map[string]bool{"store-host": true}, func(string) bool { return true }, nil, time.Now().Add(20*time.Second), session.ReclaimAfter, nil)
 	if err != nil || claimed.Claimed == nil {
 		t.Fatalf("claim=%#v err=%v", claimed.Claimed, err)
 	}
-	source := initRouteLaunchRepo(t)
-	identity, err := worktree.Create(context.Background(), source, filepath.Join(t.TempDir(), "session"), "20260909T030000Z-abcdef14")
+	identity, err := worktree.Create(context.Background(), f.checkout, filepath.Join(t.TempDir(), "session"), "20260909T030000Z-abcdef14")
 	if err != nil {
 		t.Fatal(err)
 	}
