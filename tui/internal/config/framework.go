@@ -310,6 +310,7 @@ type capabilitiesProfile struct {
 	ModelRouting   modelRouting       `json:"model_routing"`
 	Interaction    interactionProfile `json:"interaction"`
 	SpendTelemetry spendTelemetry     `json:"spend_telemetry"`
+	LifecycleHooks lifecycleHooks     `json:"session_lifecycle_hooks"`
 }
 
 // interactionProfile is the per-framework probed PTY interaction contract from
@@ -395,6 +396,52 @@ type spendTelemetry struct {
 	Binding  string   `json:"binding"`
 	Fields   []string `json:"fields"`
 	Notes    string   `json:"notes"`
+}
+
+// lifecycleHooks is a framework's session_lifecycle_hooks cell: the native
+// hooks a session the host launches runs to journal its own turn edges, and the
+// channel the host installs them through.
+type lifecycleHooks struct {
+	Support  string          `json:"support"`
+	Evidence string          `json:"evidence"`
+	Channel  string          `json:"channel"`
+	Events   []LifecycleHook `json:"events"`
+	Notes    string          `json:"notes"`
+}
+
+// LifecycleHook maps one native hook (HookEvent, narrowed to the tools Matcher
+// names when it is set) to the journal row scripts/session-lifecycle-hook.sh
+// writes for it.
+type LifecycleHook struct {
+	HookEvent    string            `json:"hook_event"`
+	Matcher      string            `json:"matcher"`
+	Event        string            `json:"event"`
+	Activity     string            `json:"activity"`
+	PayloadLinks map[string]string `json:"payload_links"`
+}
+
+// HarnessLifecycleHooks returns a framework's declared session lifecycle hooks
+// and the channel that installs them, from adapters/capabilities.json
+// `.frameworks[<id>].session_lifecycle_hooks`, and whether the host installs
+// them: only a support level above `none` does. A framework with no block, or
+// with support `none`, empty or outside the closed level set, returns its
+// declared events with install false, so a caller can build and check the
+// payload without installing it. Errors only on an empty framework or an
+// unreadable capabilities.json.
+func HarnessLifecycleHooks(framework string) (channel string, hooks []LifecycleHook, install bool, err error) {
+	if framework == "" {
+		return "", nil, false, fmt.Errorf("harness_lifecycle_hooks requires a framework")
+	}
+	caps, err := loadCapabilitiesFile()
+	if err != nil {
+		return "", nil, false, err
+	}
+	cell := caps.Frameworks[framework].LifecycleHooks
+	switch cell.Support {
+	case "full", "partial", "fallback":
+		install = true
+	}
+	return cell.Channel, cell.Events, install, nil
 }
 
 // LoadModelRoutingTiers returns the ordered model_routing.tiers alias list

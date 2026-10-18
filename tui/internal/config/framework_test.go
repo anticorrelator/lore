@@ -1354,3 +1354,113 @@ func TestValidateRoutingSettingsRejectsMalformedSuccessEnvelope(t *testing.T) {
 		})
 	}
 }
+
+// The reader decodes each framework's session_lifecycle_hooks cell as the
+// capabilities file declares it, and installs only a cell above none.
+func TestHarnessLifecycleHooksReadsTheDeclaredCells(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", nil)
+	repo, err := LoreRepoDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(repo, "adapters", "capabilities.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw struct {
+		Frameworks map[string]struct {
+			Cell struct {
+				Support string            `json:"support"`
+				Channel string            `json:"channel"`
+				Events  []json.RawMessage `json:"events"`
+			} `json:"session_lifecycle_hooks"`
+		} `json:"frameworks"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, framework := range []string{"claude-code", "codex", "opencode"} {
+		cell := raw.Frameworks[framework].Cell
+		channel, hooks, install, err := HarnessLifecycleHooks(framework)
+		if err != nil {
+			t.Fatalf("%s: %v", framework, err)
+		}
+		wantInstall := cell.Support == "full" || cell.Support == "partial" || cell.Support == "fallback"
+		if channel != cell.Channel || install != wantInstall || len(hooks) != len(cell.Events) {
+			t.Errorf("%s = (%q, %d hooks, install %v), want (%q, %d hooks, install %v)", framework, channel, len(hooks), install, cell.Channel, len(cell.Events), wantInstall)
+		}
+	}
+
+	_, hooks, _, err := HarnessLifecycleHooks("claude-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byEvent := map[string]LifecycleHook{}
+	for _, hook := range hooks {
+		byEvent[hook.HookEvent] = hook
+	}
+	for event, want := range map[string]LifecycleHook{
+		"UserPromptSubmit": {HookEvent: "UserPromptSubmit", Event: "resumed", Activity: "working"},
+		"Stop":             {HookEvent: "Stop", Event: "needs_input", Activity: "idle"},
+		"StopFailure":      {HookEvent: "StopFailure", Event: "needs_input", Activity: "blocked", PayloadLinks: map[string]string{"error": "error"}},
+		"PreToolUse":       {HookEvent: "PreToolUse", Matcher: "AskUserQuestion|ExitPlanMode", Event: "needs_input", Activity: "blocked", PayloadLinks: map[string]string{"tool_name": "tool_name"}},
+	} {
+		got := byEvent[event]
+		if got.HookEvent != want.HookEvent || got.Matcher != want.Matcher || got.Event != want.Event || got.Activity != want.Activity || !equalLinks(got.PayloadLinks, want.PayloadLinks) {
+			t.Errorf("claude-code %s = %+v, want %+v", event, got, want)
+		}
+	}
+
+	if channel, hooks, install, err := HarnessLifecycleHooks("bogus"); err != nil || channel != "" || len(hooks) != 0 || install {
+		t.Errorf("unknown framework = (%q, %v, %v, %v), want nothing to install", channel, hooks, install, err)
+	}
+	if _, _, _, err := HarnessLifecycleHooks(""); err == nil {
+		t.Error("an empty framework was accepted")
+	}
+}
+
+func equalLinks(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func TestHarnessLifecycleHooksInstallsOnlyAboveNone(t *testing.T) {
+	root := t.TempDir()
+	scripts := filepath.Join(root, "scripts")
+	if err := os.MkdirAll(filepath.Join(root, "adapters"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(scripts, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	if err := os.Symlink(scripts, filepath.Join(dataDir, "scripts")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LORE_DATA_DIR", dataDir)
+	for support, want := range map[string]bool{"full": true, "partial": true, "fallback": true, "none": false, "": false, "unverified": false} {
+		caps := map[string]any{"frameworks": map[string]any{
+			"claude-code": map[string]any{"session_lifecycle_hooks": map[string]any{"support": support, "channel": "settings-json",
+				"events": []any{map[string]any{"hook_event": "Stop", "event": "needs_input", "activity": "idle"}}}},
+			"no-cell": map[string]any{"binary": "x"},
+		}}
+		data, _ := json.Marshal(caps)
+		if err := os.WriteFile(filepath.Join(root, "adapters", "capabilities.json"), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		channel, hooks, install, err := HarnessLifecycleHooks("claude-code")
+		if err != nil || install != want || channel != "settings-json" || len(hooks) != 1 || hooks[0].HookEvent != "Stop" {
+			t.Errorf("support %q = (%q, %+v, install %v, %v), want install %v", support, channel, hooks, install, err, want)
+		}
+		if _, hooks, install, err := HarnessLifecycleHooks("no-cell"); err != nil || install || len(hooks) != 0 {
+			t.Errorf("a framework without the block = (%v, install %v, %v)", hooks, install, err)
+		}
+	}
+}

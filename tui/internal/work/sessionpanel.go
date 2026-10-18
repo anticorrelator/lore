@@ -1664,6 +1664,72 @@ func leadSeatForSessionType(t string) (role, ceremony string) {
 	}
 }
 
+// lifecycleHookSettings is the inline settings value a launch of framework
+// passes: `{}`, unless the framework's session_lifecycle_hooks cell is above
+// `none` and installs through these settings, in which case it is an object
+// holding only `hooks`. No other key rides along, so the payload cannot shadow
+// any of the person's own settings.
+func lifecycleHookSettings(framework string) (string, error) {
+	channel, hooks, install, err := config.HarnessLifecycleHooks(framework)
+	if err != nil {
+		return "", err
+	}
+	if !install || channel != "settings-json" || len(hooks) == 0 {
+		return `{}`, nil
+	}
+	repo, err := config.LoreRepoDir()
+	if err != nil {
+		return "", err
+	}
+	return lifecycleHooksPayload(hooks, filepath.Join(repo, "scripts", "session-lifecycle-hook.sh"), framework)
+}
+
+type settingsHookGroup struct {
+	Matcher string                `json:"matcher,omitempty"`
+	Hooks   []settingsHookHandler `json:"hooks"`
+}
+
+type settingsHookHandler struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+	Async   bool   `json:"async"`
+}
+
+// lifecycleHooksPayload groups the declared hooks by hook event and matcher,
+// one async command handler per group, each running script for framework.
+func lifecycleHooksPayload(hooks []config.LifecycleHook, script, framework string) (string, error) {
+	command := lifecycleHookCommand(script, framework)
+	groups := map[string][]settingsHookGroup{}
+	seen := map[[2]string]bool{}
+	for _, hook := range hooks {
+		key := [2]string{hook.HookEvent, hook.Matcher}
+		if hook.HookEvent == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		groups[hook.HookEvent] = append(groups[hook.HookEvent], settingsHookGroup{Matcher: hook.Matcher,
+			Hooks: []settingsHookHandler{{Type: "command", Command: command, Async: true}}})
+	}
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(map[string]any{"hooks": groups}); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(buf.String(), "\n"), nil
+}
+
+// lifecycleHookCommand exits 0 with no output even when the script is missing
+// or cannot run, so the harness has no hook failure to report near the composer
+// the screen observation reads.
+func lifecycleHookCommand(script, framework string) string {
+	return shellQuote(script) + " " + shellQuote(framework) + " 2>/dev/null; exit 0"
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 type positionLaunch struct {
 	Payload    string            `json:"payload"`
 	Reference  map[string]string `json:"reference"`
@@ -1887,7 +1953,11 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve inline_settings_override flag: %w", err)}
 		}
 		if settingsSupported {
-			args = append(args, settingsFlag, `{}`)
+			settings, err := lifecycleHookSettings(activeFramework)
+			if err != nil {
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve session_lifecycle_hooks: %w", err)}
+			}
+			args = append(args, settingsFlag, settings)
 		} else {
 			notices = append(notices, OperatorNotice{
 				Code:    "inline-settings-unsupported",
