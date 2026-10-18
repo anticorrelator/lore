@@ -212,10 +212,10 @@ Registry snapshots carry a revision for both ordinary and managed hosts. An olde
 revision, a conflicting equal revision, or a write from a retired owner is
 refused, so asynchronously completed spawn and close writes cannot erase newer
 membership or recreate a removed owner. Launch checkpoints survive until the
-complete owning registry snapshot is durable. Ordinary tmux launches, including requestless UI launches, use the same
-provisional checkpoint as dedicated hosts, scoped as `session-spawn`. A unique
-launch token binds checkpoint cleanup to that attempt, independently of the
-request ID or display slug.
+complete owning registry snapshot is durable. Every launch writes a provisional
+checkpoint row with role `session-host-spawn`, named from the host and the
+launch's request ID, so checkpoint cleanup is bound to that attempt rather than
+to the display slug.
 
 Recovery chooses newer full owners before provisional launch records. It compares
 session generations using request, transcript, process, and worktree identity;
@@ -530,7 +530,7 @@ teardown.
 |-------|------|-------|
 | `request_id` | string | Unique id; also the filename stem. |
 | `slug` | string \| null | Work-item slug whose session is to close, or null. |
-| `target_instance` | string | Instance name that runs the slug and must act. |
+| `target_instance` | string | Instance name that runs the slug. The store host acts on any row for a session it runs, whatever instance the row names; its send, answer and peek scans do the same. |
 | `reason` | string | Enum `protocol_terminus\|coordinator\|human` — who/what asked for the close. |
 | `requested_by` | string | Who enqueued it (instance name, agent id, or human). |
 | `requested_at` | string | ISO 8601 UTC timestamp of enqueue. |
@@ -545,13 +545,19 @@ self-addresses. Both are argument-resolution fronts over one physical enqueue
 path. Enqueue emits a `close_requested` journal event; the owning instance's later
 `closed` emission records completion.
 
-**Consume** = the owning instance deletes the file after it begins teardown.
-Because there is only ever one eligible actor, delete-on-consume keeps the
-sole-writer-per-file invariant trivially true.
+**Consume** = the owning store host records the request on the session's
+recovery manifest before it acts, and deletes the file when the `closed`
+delivery that answers it commits. A request whose close fails stays queued, and
+the host consumes it again on a later pass. A matched row whose `session_id`
+resolves to no session the host runs is deleted at once, and one that names
+another generation of the session is answered with `close_failed`
+(`generation-mismatch`) and deleted. Because there is only ever one eligible
+actor, delete-on-consume keeps the sole-writer-per-file invariant trivially
+true.
 
 **Close authority: explicit is full-discretion, protocol-terminus is gated.**
-Consuming a close-request always deletes the row (the durable ack; `close_requested`
-already recorded intent); what the TUI does next branches on the request's `reason`.
+What the host does with a consumed close-request (`close_requested` already
+recorded intent) branches on the request's `reason`.
 An **explicit close** — `reason` `human` (the `session close` CLI default) or
 `coordinator` — **always acts**, regardless of initiator or session state: an idle
 session runs the exit ladder directly, while a still-**generating** session gets a
@@ -740,8 +746,10 @@ ready signature — it journals `sent`. When the composer is still holding the u
 payload, it replays the harness `submit_sequence` **once** (a bare submit, no
 re-paste, mirroring the manual recovery), then re-observes. If the payload is still
 unsubmitted at a bounded deadline, it journals `send_refused` with the post-inject
-reason `unsubmitted` — a truthful refusal, since no message was delivered. Every
-gate-passing send ends in exactly one terminal (`sent` or `send_refused`).
+reason `unsubmitted` — a truthful refusal, since no message was delivered. When the
+composer cannot be classified by the deadline, or the session's panel is gone, the
+outcome is unknown and the reason is `delivery-uncertain`. Every gate-passing send
+ends in exactly one terminal (`sent` or `send_refused`).
 
 `lore session send --wait` polls the journal for its request id's `sent` /
 `send_refused` and maps the outcome to an exit code (0 sent, 3 refused — including
@@ -766,7 +774,8 @@ classifier used by send, peek, close, and modal observation. It refuses before
 writing when the screen is not interactive (`not-modal`), the expectation is no
 longer visible (`expect-mismatch`), the selected or requested numbered row is not
 proven (`option-unavailable`), the harness has no interaction contract
-(`no-contract`), or screen/PTY access fails (`error`). Numbered options are kept
+(`no-contract`), or the screen cannot be read or the attempt cannot be recorded
+(`error`). Numbered options are kept
 in rendered row order, so navigation is the target row index minus the selected
 row index, not arithmetic on displayed numbers. The only PTY payload is one
 canonical sequence containing the required `Up` (`ESC[A`) or `Down` (`ESC[B`)
@@ -775,8 +784,10 @@ policy.
 
 A gate-passing request is deleted immediately and retained only as an in-memory
 verification record. A later snapshot that no longer contains the expectation
-emits `answered`; a vanished panel or bounded confirmation timeout emits
-`answer_refused` with `reason=unconfirmed`. The keys are never replayed. Thus a
+emits `answered`; a bounded confirmation timeout over a readable screen emits
+`answer_refused` with `reason=unconfirmed`. A vanished panel, a screen that cannot
+be read at that timeout, or a key write that fails after the attempt was recorded
+emits `reason=delivery-uncertain`. The keys are never replayed. Thus a
 successful write syscall alone is not an `answered` outcome, and every request
 that reaches a terminal has exactly one of `answered` or `answer_refused`.
 `lore session answer --wait` matches that terminal by request id (exit 0 for
