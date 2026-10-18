@@ -22,6 +22,8 @@ REPO = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location("session_runtime", REPO / "scripts/session_runtime.py")
 session_runtime = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(session_runtime)
+# opencode routes name a provider/model; the other harnesses take a bare model.
+MODELS = {"claude-code": "fixture-model", "codex": "fixture-model", "opencode": "fixture/fixture-model"}
 FAKE_HARNESS = r'''#!/usr/bin/env python3
 import json, os, select, sys, time, tty
 from pathlib import Path
@@ -119,11 +121,10 @@ class ManagedSessionIntegration(unittest.TestCase):
             path.chmod(0o755)
         settings = self.home / ".lore/config/settings.json"
         settings.parent.mkdir()
-        native = {"claude-code": "fixture-model", "codex": "fixture-model", "opencode": "fixture/fixture-model"}
         settings.write_text(json.dumps({"version": 2, "tui_launch_framework": "claude-code",
             "routes": {"default": "claude-code/fixture-model", "worker": "claude-code/fixture-model"},
             "harnesses": {h: {"enabled": True, "args": [], "autonomous_args": [],
-                "native_models": {"default": native[h]}} for h in native}}))
+                "native_models": {"default": MODELS[h]}} for h in MODELS}}))
         self.log = self.root / "harness.jsonl"
         self.state_dir = self.root / "states"
         self.state_dir.mkdir()
@@ -191,7 +192,7 @@ class ManagedSessionIntegration(unittest.TestCase):
 
     def start(self, framework="codex", key="fixture"):
         _, value = self.session("start", self.item, "--workspace", str(self.source),
-            "--framework", framework, "--model", "fixture-model", "--context", str(self.context), "--key", key)
+            "--framework", framework, "--model", MODELS[framework], "--context", str(self.context), "--key", key)
         handle = value["handle"]
         if handle not in self.handles:
             self.handles.append(handle)
@@ -225,7 +226,7 @@ class ManagedSessionIntegration(unittest.TestCase):
         self.assertEqual({row["framework"] for row in started}, {"claude-code", "codex", "opencode"})
         self.assertEqual(len({row["instance"] for row in started}), 1)
         for record in started:
-            self.assertIn("fixture-model", record["argv"])
+            self.assertIn(MODELS[record["framework"]], record["argv"])
             self.assertNotEqual(record["cwd"], str(self.source))
             self.assertTrue((Path(record["cwd"]) / "seed").exists())
         for value in starts:
