@@ -676,10 +676,6 @@ Verbs:
             deadline, so expect one last wake
   worktree  Allocate, bind, renew, transition, clean, sweep, or inspect a
             manager-owned stream worktree
-  pin       Set, clear, or read a project's sticky dispatch pin (sole writer
-            of the _coordination.json sidecar). --preflight turns the read into
-            a dispatch gate: the live instance on stdout, exit 3 on a dead pin,
-            exit 4 when none is set
   report    Land a returned worker report at the path assigned to it. Body on
             stdin, --report-id <id> decides the filename; validates the
             schema-v1 identity header, writes once, and refuses an existing
@@ -1067,9 +1063,6 @@ cmd_coordinate() {
       ;;
     worktree)
       exec "$SCRIPTS_DIR/coordinate-worktree.sh" "$@"
-      ;;
-    pin)
-      exec "$SCRIPTS_DIR/coordinate-pin.sh" "$@"
       ;;
     report)
       exec "$SCRIPTS_DIR/coordinate-report.sh" "$@"

@@ -460,8 +460,7 @@ get_mtime() {
 # --- Session substrate timing contracts ---
 # Keep the shell enqueue/preflight paths on the same registry liveness window as
 # tui/internal/session/registry.go's session.LivenessTTL.  Callers ask this
-# shared helper instead of growing another mtime interpretation beside the pin
-# preflight.
+# shared helper instead of growing another mtime interpretation.
 SESSION_INSTANCE_LIVENESS_TTL_SECONDS=30
 
 # session_instance_age_seconds <instances-dir> <instance>

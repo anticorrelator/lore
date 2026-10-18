@@ -308,9 +308,16 @@ EOF
 
   local output verb
   output="$(<"$help_out")"
-  for verb in read board status reconcile watch arm disarm worktree pin report spend; do
+  for verb in read board status reconcile watch arm disarm worktree report spend; do
     [[ "$output" == *"  $verb "* ]]
   done
+  [[ "$output" != *"  pin "* ]]
+}
+
+@test "coordinate pin is no longer a verb" {
+  run bash "$LORE" coordinate pin myproject --preflight
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"unknown coordinate verb 'pin'"* ]]
 }
 
 @test "session wait execs the leaf before a mid-wait router edit" {
