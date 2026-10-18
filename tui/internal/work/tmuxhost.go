@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -362,35 +363,48 @@ func tmuxRGBFeaturePin() []string {
 	return []string{"set", "-as", "terminal-features", ",*:RGB", ";"}
 }
 
-// tmuxPaneEnv builds the `-e KEY=VAL` argument pairs for a new pane's environment.
-// It carries the process base env plus the session extras (LORE_FRAMEWORK,
-// LORE_SESSION_*) explicitly rather than relying on tmux server-env inheritance:
-// the server is shared across every lore TUI on the host, so an inherited pane env
-// would be whichever instance happened to start the server. TERM and the
-// tmux-owned TMUX/TMUX_PANE vars are dropped so default-terminal wins and tmux's
-// own nesting markers are not shadowed by a stale value. COLORTERM is replaced
-// with the capability this embedder actually provides.
+// tmuxOwnedPaneVars are the variables tmux itself sets in every pane, overriding
+// whatever the launching client passes: the terminal type from default-terminal,
+// the terminal program and its version, tmux's nesting markers, the default shell,
+// and the pane's working directory.
+var tmuxOwnedPaneVars = []string{"TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TMUX", "TMUX_PANE", "SHELL", "PWD"}
+
+// tmuxPaneEnvScript starts the harness from an empty environment: the values tmux
+// gave this pane for its own variables, then the launcher's KEY=VAL list and the
+// harness command passed as arguments. tmux builds a pane's environment from the
+// server's global environment, which is whatever the client that started the
+// shared server had, and -e can add to that but never remove from it. Starting
+// from nothing is the only way the pane gets exactly the launcher's environment.
+// Each step execs, so the pane pid tmux reports is the harness process.
+var tmuxPaneEnvScript = func() string {
+	script := "exec /usr/bin/env -i"
+	for _, name := range tmuxOwnedPaneVars {
+		script += " ${" + name + "+\"" + name + "=$" + name + "\"}"
+	}
+	return script + ` "$@"`
+}()
+
+// tmuxPaneEnv is the complete environment a new pane's harness runs with, as
+// KEY=VAL entries: the process environment plus the session extras
+// (LORE_FRAMEWORK, LORE_SESSION_*), with later entries winning. Variables tmux owns
+// in the pane are left out so tmux's values stand, as they always have, and
+// COLORTERM is replaced with the capability this embedder actually provides.
 func tmuxPaneEnv(extras []string) []string {
 	var out []string
+	add := func(kv string) {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok || key == "" || key == "COLORTERM" || slices.Contains(tmuxOwnedPaneVars, key) {
+			return
+		}
+		out = append(out, kv)
+	}
 	for _, kv := range os.Environ() {
-		key := kv
-		if i := strings.IndexByte(kv, '='); i >= 0 {
-			key = kv[:i]
-		}
-		switch key {
-		case "TERM", "COLORTERM", "TMUX", "TMUX_PANE":
-			continue
-		}
-		out = append(out, "-e", kv)
+		add(kv)
 	}
 	for _, kv := range extras {
-		if strings.HasPrefix(kv, "COLORTERM=") {
-			continue
-		}
-		out = append(out, "-e", kv)
+		add(kv)
 	}
-	out = append(out, "-e", "COLORTERM=truecolor")
-	return out
+	return append(out, "COLORTERM=truecolor")
 }
 
 // createTmuxSession creates the detached, option-pinned tmux session that hosts
@@ -399,6 +413,10 @@ func tmuxPaneEnv(extras []string) []string {
 // the attach client). env is the per-session extra environment; harnessBin/args is
 // the exact command the direct-PTY path would have run.
 func createTmuxSession(name, worktreeDir string, cols, rows int, env []string, harnessBin string, harnessArgs []string) (int, error) {
+	if strings.Contains(harnessBin, "=") {
+		// env(1) would read the path as one more assignment and run the next argument instead.
+		return 0, fmt.Errorf("tmux new-session: harness path %q contains '='", harnessBin)
+	}
 	args := tmuxSessionArgs(name, worktreeDir, cols, rows, env, harnessBin, harnessArgs)
 
 	cmd := exec.Command(tmuxBinary, args...)
@@ -418,8 +436,9 @@ func tmuxSessionArgs(name, worktreeDir string, cols, rows int, env []string, har
 	args = append(args, tmuxOptionPins()...)
 	args = append(args, tmuxRGBFeaturePin()...)
 	args = append(args, "new-session", "-d", "-s", name, "-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows), "-c", worktreeDir)
+	args = append(args, "-P", "-F", "#{pane_pid}", "--", "/bin/sh", "-c", tmuxPaneEnvScript, "lore-pane")
 	args = append(args, tmuxPaneEnv(env)...)
-	args = append(args, "-P", "-F", "#{pane_pid}", "--", harnessBin)
+	args = append(args, harnessBin)
 	args = append(args, harnessArgs...)
 	return args
 }
