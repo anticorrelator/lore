@@ -186,7 +186,8 @@
         "plugin_runtime",
         "model_routing",
         "interaction",
-        "spend_telemetry"
+        "spend_telemetry",
+        "session_lifecycle_hooks"
       ],
       "description": "Closed capability registry. MUST stay in lockstep with adapters/capabilities.json `capabilities` map — drift is caught by tests/frameworks/settings_schema_keyset_parity.bats."
     },
@@ -372,6 +373,9 @@
           "$ref": "#/$defs/support_level"
         },
         "spend_telemetry": {
+          "$ref": "#/$defs/support_level"
+        },
+        "session_lifecycle_hooks": {
           "$ref": "#/$defs/support_level"
         }
       }
