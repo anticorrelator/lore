@@ -392,30 +392,26 @@ func TestListModelSectionHeadersRuleToThePanelEdge(t *testing.T) {
 	}
 }
 
-// The sweep predicate is stricter than the bucket, because its callers write to
-// the record: an arc whose instant cannot be read has not been shown to be old,
-// even though it still sorts and buckets under Older.
-func TestArcAgedOutAtRequiresAReadableInstant(t *testing.T) {
+// The week boundary the Older header and the ctrl+a fold are drawn from. An
+// instant that cannot be read still sorts and buckets under Older.
+func TestArcBucketAtPlacesTheWeekBoundary(t *testing.T) {
 	now := time.Date(2026, 7, 29, 9, 0, 0, 0, time.Local)
 	cases := []struct {
 		name string
 		arc  Arc
-		want bool
+		want Bucket
 	}{
-		{"closed three weeks back", Arc{ClosedAt: iso(now.AddDate(0, 0, -21))}, true},
-		{"closed a moment past the boundary", Arc{ClosedAt: iso(time.Date(2026, 7, 22, 23, 59, 0, 0, time.Local))}, true},
-		{"closed six days back", Arc{ClosedAt: iso(time.Date(2026, 7, 23, 0, 0, 0, 0, time.Local))}, false},
-		{"closed this morning", Arc{ClosedAt: iso(now.Add(-2 * time.Hour))}, false},
-		{"no declared instant", Arc{}, false},
-		{"unparseable instant", Arc{ClosedAt: "whenever"}, false},
+		{"closed three weeks back", Arc{ClosedAt: iso(now.AddDate(0, 0, -21))}, BucketOlder},
+		{"closed a moment past the boundary", Arc{ClosedAt: iso(time.Date(2026, 7, 22, 23, 59, 0, 0, time.Local))}, BucketOlder},
+		{"closed six days back", Arc{ClosedAt: iso(time.Date(2026, 7, 23, 0, 0, 0, 0, time.Local))}, BucketThisWeek},
+		{"closed this morning", Arc{ClosedAt: iso(now.Add(-2 * time.Hour))}, BucketToday},
+		{"no declared instant", Arc{}, BucketOlder},
+		{"unparseable instant", Arc{ClosedAt: "whenever"}, BucketOlder},
 	}
 	for _, c := range cases {
-		if got := c.arc.AgedOutAt(now); got != c.want {
-			t.Errorf("%s: AgedOutAt=%v want %v", c.name, got, c.want)
+		if got := c.arc.BucketAt(now); got != c.want {
+			t.Errorf("%s: BucketAt=%v want %v", c.name, got, c.want)
 		}
-	}
-	if got := (Arc{ClosedAt: "whenever"}).BucketAt(now); got != BucketOlder {
-		t.Errorf("an unreadable instant must still bucket as older, got %v", got)
 	}
 }
 
