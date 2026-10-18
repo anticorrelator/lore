@@ -1352,6 +1352,34 @@ class LoginRuntimeIntegration(RuntimeFixture, unittest.TestCase):
         self.assertIn(f"TMUX_TMPDIR here is {self.root / 'other-tmux'}, but the session supervisor started with "
                       f"{self.tmux_dir}", warned.stderr)
 
+    def test_session_panes_ignore_the_tmux_servers_startup_environment(self):
+        """Visible TUIs and store hosts share the runtime's tmux server, and tmux gives
+        each new pane the environment of whichever client started that server."""
+        alpha, beta = self.make_store("alpha"), self.make_store("beta")
+        checkout = self.make_checkout("alpha", "alpha-one")
+        item = self.create_item(alpha, checkout, "Pane Fixture")
+        self.env = {k: v for k, v in self.env.items() if k not in ("LORE_KNOWLEDGE_DIR", "CLAUDE_CODE_CHILD_SESSION")}
+        server = session_runtime.tmux_server(self.env)
+        socket = self.tmux_dir / f"tmux-{os.getuid()}" / server
+        self.assertFalse(self.supervisors_running())
+        self.assertFalse((alpha / "_sessions").exists())
+        first_client = dict(self.env, LORE_KNOWLEDGE_DIR=str(beta), CLAUDE_CODE_CHILD_SESSION="1")
+        started = subprocess.run(["tmux", "-L", server, "new-session", "-d", "-s", "first-client", "sleep", "600"],
+                                 env=first_client, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(started.returncode, 0, started.stderr)
+        shown = subprocess.run(["tmux", "-S", str(socket), "show-environment", "-g", "LORE_KNOWLEDGE_DIR"],
+                               env=self.env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(shown.stdout.strip(), f"LORE_KNOWLEDGE_DIR={beta}")
+
+        handle = self.start(alpha, item, checkout, "pane")
+        record = self.started(handle)
+        self.assertNotIn("CLAUDE_CODE_CHILD_SESSION", set(record["env"]))
+        self.assertIsNone(record["values"]["LORE_KNOWLEDGE_DIR"], "the server's startup environment reached the session")
+        self.assertEqual(record["values"]["LORE_SESSION_STORE_ROOT"], str(alpha))
+        self.assertTrue(record["values"]["TMUX"].startswith(str(socket) + ","), record)
+        self.send(checkout, handle, "pane-reachable", managed=True)
+        self.assertEqual([m["pid"] for m in self.messages("pane-reachable")], [record["pid"]])
+
 
 if __name__ == "__main__":
     unittest.main()

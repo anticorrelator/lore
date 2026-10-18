@@ -3,8 +3,10 @@ package work
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +19,9 @@ func TestTmuxLaunchCapabilityContractHarnessMatrix(t *testing.T) {
 	t.Setenv("COLORTERM", "operator-value")
 	t.Setenv("TMUX", "stale")
 	t.Setenv("TMUX_PANE", "%99")
+	t.Setenv("TERM_PROGRAM", "operator-terminal")
+	t.Setenv("SHELL", "/operator/shell")
+	t.Setenv("PANE_CONTRACT_CARRIED", "carried")
 
 	fixtures := []struct {
 		framework string
@@ -32,25 +37,122 @@ func TestTmuxLaunchCapabilityContractHarnessMatrix(t *testing.T) {
 				[]string{"LORE_FRAMEWORK=" + fixture.framework, "COLORTERM=wrong"},
 				fixture.binary, []string{"--fixture"})
 			joined := strings.Join(args, "\x00")
-			for _, stale := range []string{"TERM=operator-term", "COLORTERM=operator-value", "COLORTERM=wrong", "TMUX=stale", "TMUX_PANE=%99"} {
+			for _, stale := range []string{"TERM=operator-term", "COLORTERM=operator-value", "COLORTERM=wrong", "TMUX=stale",
+				"TMUX_PANE=%99", "TERM_PROGRAM=operator-terminal", "SHELL=/operator/shell"} {
 				if strings.Contains(joined, stale) {
-					t.Errorf("tmux args leaked %q: %v", stale, args)
+					t.Errorf("tmux args leaked %q", stale)
 				}
 			}
 			if strings.Count(joined, "COLORTERM=truecolor") != 1 {
-				t.Errorf("tmux args COLORTERM count = %d, want 1: %v", strings.Count(joined, "COLORTERM=truecolor"), args)
-			}
-			if !strings.Contains(joined, "LORE_FRAMEWORK="+fixture.framework) {
-				t.Errorf("tmux args lost framework identity: %v", args)
+				t.Errorf("tmux args COLORTERM count = %d, want 1", strings.Count(joined, "COLORTERM=truecolor"))
 			}
 			if !strings.Contains(joined, "new-session\x00-d\x00-s\x00lore-test-session\x00-x\x0080\x00-y\x0024\x00-c\x00/tmp/session-worktree") {
-				t.Errorf("tmux args did not pin the pane cwd: %v", args)
+				t.Errorf("tmux args did not pin the pane cwd")
 			}
-			wantTail := []string{"--", fixture.binary, "--fixture"}
-			if !slices.Equal(args[len(args)-len(wantTail):], wantTail) {
-				t.Errorf("tmux command tail = %v, want %v", args[len(args)-len(wantTail):], wantTail)
+			// The pane's environment is set by its command, not by -e assignments
+			// layered over whatever the tmux server started with.
+			if n := strings.Count(joined, "\x00-e\x00"); n > 0 {
+				t.Errorf("tmux args still layer %d -e assignments over the server environment", n)
+			}
+			separator := slices.Index(args, "--")
+			if separator < 0 || len(args) < separator+5 || args[separator+1] != "/bin/sh" || args[separator+2] != "-c" ||
+				!strings.Contains(args[separator+3], "/usr/bin/env -i") {
+				t.Fatalf("pane command does not start from an empty environment: it begins %q", args[max(separator, 0):min(max(separator, 0)+3, len(args))])
+			}
+			command := args[separator+4:]
+			wantTail := []string{fixture.binary, "--fixture"}
+			if !slices.Equal(command[len(command)-len(wantTail):], wantTail) {
+				t.Errorf("pane command tail = %v, want %v", command[len(command)-len(wantTail):], wantTail)
+			}
+			for _, want := range []string{"LORE_FRAMEWORK=" + fixture.framework, "PANE_CONTRACT_CARRIED=carried", "COLORTERM=truecolor"} {
+				if !slices.Contains(command, want) {
+					t.Errorf("pane command lost %q", want)
+				}
 			}
 		})
+	}
+}
+
+// A store host and a visible TUI share their runtime's tmux server, and tmux
+// gives every new pane the environment of whichever client started that server.
+// The pane must still get exactly the environment its launcher intends.
+func TestTmuxPaneEnvironmentIgnoresTheServersStartupEnvironment(t *testing.T) {
+	if _, err := exec.LookPath(tmuxBinary); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	// Short and private: a macOS socket path must fit 104 bytes.
+	root, err := os.MkdirTemp("/tmp", "lore-pane-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
+	if root, err = filepath.EvalSymlinks(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMUX_TMPDIR", root)
+	t.Setenv(config.SessionRuntimeEnv, fmt.Sprintf("panetest-%d", os.Getpid()))
+	socket := filepath.Join(root, fmt.Sprintf("tmux-%d", os.Getuid()), config.TmuxServer())
+	t.Cleanup(func() { _ = exec.Command(tmuxBinary, "-S", socket, "kill-server").Run() })
+	for _, name := range []string{"LORE_KNOWLEDGE_DIR", "CLAUDE_CODE_CHILD_SESSION", "SERVER_STARTUP_ONLY"} {
+		t.Setenv(name, "")
+		os.Unsetenv(name)
+	}
+	t.Setenv("PANE_FIXTURE_CARRIED", "carried")
+
+	first := exec.Command(tmuxBinary, "-L", config.TmuxServer(), "-f", "/dev/null", "new-session", "-d", "-s", "first-client", "sleep", "120")
+	first.Env = append(os.Environ(), "LORE_KNOWLEDGE_DIR=/other/store", "CLAUDE_CODE_CHILD_SESSION=1", "SERVER_STARTUP_ONLY=leaked")
+	if out, err := first.CombinedOutput(); err != nil {
+		t.Fatalf("start the server from another client: %v: %s", err, out)
+	}
+
+	work := filepath.Join(root, "worktree")
+	if err := os.Mkdir(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	envFile, pidFile := filepath.Join(root, "pane.env"), filepath.Join(root, "pane.pid")
+	script := "echo $$ > " + pidFile + "; env > " + envFile + ".tmp; mv " + envFile + ".tmp " + envFile + "; exec sleep 120"
+	pid, err := createTmuxSession("lore-pane-env-probe", work, 80, 24,
+		[]string{"LORE_FRAMEWORK=claude-code", "LORE_SESSION_SLUG=pane-probe"}, "/bin/sh", []string{"-c", script})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data []byte
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if data, err = os.ReadFile(envFile); err == nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("the pane never wrote its environment: %v", err)
+	}
+	env := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if key, value, ok := strings.Cut(line, "="); ok {
+			env[key] = value
+		}
+	}
+	for _, name := range []string{"LORE_KNOWLEDGE_DIR", "CLAUDE_CODE_CHILD_SESSION", "SERVER_STARTUP_ONLY"} {
+		if value, ok := env[name]; ok {
+			t.Errorf("pane inherited %s=%s from the client that started the server", name, value)
+		}
+	}
+	for name, want := range map[string]string{"PANE_FIXTURE_CARRIED": "carried", "LORE_FRAMEWORK": "claude-code",
+		"LORE_SESSION_SLUG": "pane-probe", "TERM": "tmux-256color", "COLORTERM": "truecolor", "PWD": work} {
+		if env[name] != want {
+			t.Errorf("pane %s = %q, want %q", name, env[name], want)
+		}
+	}
+	if !strings.HasPrefix(env["TMUX"], socket+",") || !strings.HasPrefix(env["TMUX_PANE"], "%") {
+		t.Errorf("pane lost tmux's own markers: TMUX=%q TMUX_PANE=%q", env["TMUX"], env["TMUX_PANE"])
+	}
+	written, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(written)) != strconv.Itoa(pid) {
+		t.Errorf("harness pid %s is not the pane pid %d that close and adoption signal", strings.TrimSpace(string(written)), pid)
 	}
 }
 
