@@ -1408,7 +1408,7 @@ def reconcile_operations(kdir, key):
                     data = read(response)
                     if data is not None:
                         from coordinate_watch_state import observation
-                        data['observation'] = observation(data)
+                        data['observation'] = observation(data, kdir=kdir)
                         receipt(kdir, manifest, saved['request_id'], operation, 'observed', response=data)
                         continue
                 else:
@@ -1535,7 +1535,7 @@ def operate_attempt(args, kdir, manifest):
             data = read(response)
             if data is not None:
                 from coordinate_watch_state import observation
-                data['observation'] = observation(data)
+                data['observation'] = observation(data, kdir=kdir)
                 if args.summary:
                     data = {key: value for key, value in data.items() if key not in {'rows', 'ansi', 'history', 'screen'}}
                     data['summary'] = True

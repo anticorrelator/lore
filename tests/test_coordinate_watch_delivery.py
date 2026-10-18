@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -255,6 +256,71 @@ class WatchDelivery(unittest.TestCase):
         self.assertFalse(result['complete'])
         self.assertEqual(result['current'], [])
         self.assertEqual(result['unavailable'][0]['slug'], 'task')
+
+
+class ObservationMerge(unittest.TestCase):
+    """observation() merges a session's own lifecycle hook rows when given the store."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.kdir = Path(self.temp.name)
+        session = {'slug': 'task--w1', 'type': 'worker', 'started': '2026-10-18T09:00:00Z', 'request_id': 'managed-1'}
+        m.atomic(self.kdir / '_sessions/instances/instance-a.json', {'name': 'instance-a', 'pid': os.getpid(), 'sessions': [session]})
+        self.generation = m.lifecycle()._session_target().generation(session)
+        self.hook = {'event': 'needs_input', 'slug': 'task--w1', 'session_type': 'worker', 'actor_instance': 'instance-a', 'event_id': 'hook-1',
+                     'links': {'authority': 'hook-row', 'hook_event': 'StopFailure', 'activity': 'blocked', 'generation': self.generation,
+                               'fired_at': '2026-10-18T10:00:01.000000Z', 'framework': 'claude-code', 'spawn_instance': 'instance-a', 'error': 'rate_limit'}}
+        (self.kdir / '_sessions/events.jsonl').write_text(json.dumps(self.hook) + '\n')
+
+    def unknown(self):
+        return peek('unknown', authority='none', generation=self.generation, session_handle='task--w1', evidence={'matcher': 'screen-unknown-v1'})
+
+    def test_hook_row_authority_is_fresh_without_the_store(self):
+        merged = m.observation(self.unknown(), kdir=self.kdir)
+        again = m.observation(dict(self.unknown(), observation=merged))
+        self.assertTrue(again['fresh'])
+        self.assertEqual((again['activity'], again['authority']), ('blocked', 'hook-row'))
+        self.assertFalse(m.observation(peek('blocked', authority='hook-rows'))['fresh'])
+
+    def test_peek_command_merges_only_when_given_the_store(self):
+        argv = [sys.executable, str(ROOT / 'scripts/coordinate_watch_state.py'), 'peek']
+        merged = subprocess.run(argv + ['--kdir', str(self.kdir)], input=json.dumps(self.unknown()), capture_output=True, text=True, check=True)
+        plain = subprocess.run(argv, input=json.dumps(self.unknown()), capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(merged.stdout)['observation']['authority'], 'hook-row')
+        self.assertEqual(json.loads(plain.stdout)['observation']['activity'], 'unknown')
+
+    def test_classify_and_compact_read_a_merged_hook_park(self):
+        merged = dict(self.unknown(), observation=m.observation(self.unknown(), kdir=self.kdir))
+        result = m.classify(self.hook, merged)
+        self.assertEqual((result['tier'], result['authority']), ('confirmed', 'hook-row'))
+        wake = {'wake_id': 'wake-' + 'a' * 32, 'outcome': 'matched', 'tier': 'confirmed', 'authority': 'hook-row', 'matched': self.hook,
+                'current_observations': {'current': [{'slug': 'task--w1', 'peek': merged}], 'complete': True}}
+        compact = m.compact_wake(wake)
+        self.assertEqual(compact['tier'], 'confirmed')
+        self.assertEqual(compact['sessions'][0]['observation']['evidence']['reason'],
+                         'hook says blocked since 2026-10-18T10:00:01.000000Z; screen unknown')
+
+    def test_an_unreadable_journal_leaves_the_screen_standing_as_a_bounded_read(self):
+        with patch.object(m.lifecycle(), 'open', side_effect=PermissionError(13, 'Permission denied'), create=True):
+            value = m.observation(self.unknown(), kdir=self.kdir)
+        self.assertEqual((value['activity'], value['authority']), ('unknown', 'none'))
+        self.assertTrue(value['evidence']['truncated'])
+        self.assertIn('could not be read', value['evidence']['journal_scan']['reason'])
+
+    def test_sweep_keeps_the_previous_state_when_a_lifecycle_read_was_truncated(self):
+        state = self.kdir / '_coordination/watch-observation.json'
+        held = peek('idle', generation=self.generation)
+        capped = peek('working', generation=self.generation)
+        capped['observation']['evidence'] = {'matcher': 'fixture', 'truncated': True}
+        with patch.object(m.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(held), '')):
+            m.sweep(self.kdir, ROOT / 'scripts', state, ['task'], 8, 10)
+        before = m.read(state)
+        with patch.object(m.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(capped), '')):
+            result = m.sweep(self.kdir, ROOT / 'scripts', state, ['task'], 8, 10)
+        after = m.read(state)
+        self.assertEqual(result['current'][0]['observation']['activity'], 'working')
+        self.assertEqual((after['states'], after['meaningful'], after['pending']), (before['states'], before['meaningful'], before['pending']))
 
 
 class WatchCommands(unittest.TestCase):

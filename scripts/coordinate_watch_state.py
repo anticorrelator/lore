@@ -24,6 +24,19 @@ def tmux_server():
     return module.tmux_server()
 
 
+_LIFECYCLE = None
+
+
+def lifecycle():
+    global _LIFECYCLE
+    if _LIFECYCLE is None:
+        spec = importlib.util.spec_from_file_location('session_lifecycle', Path(__file__).resolve().parent / 'session_lifecycle.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _LIFECYCLE = module
+    return _LIFECYCLE
+
+
 def read(path, default=None):
     try:
         return json.loads(Path(path).read_text())
@@ -72,7 +85,33 @@ def epoch(value):
         return None
 
 
-def observation(peek, identity=None):
+FRESH_AUTHORITIES = frozenset({'runtime', 'screen-signature', 'hook-row'})
+
+
+def observation(peek, identity=None, kdir=None):
+    """The current observation in peek, judged fresh or not.
+
+    Given the store, the session's own lifecycle hook rows are merged first
+    (scripts/session_lifecycle.py); without it, an observation that was already
+    merged is judged by the same rules.
+    """
+    value = assessed(peek, identity)
+    slug = (peek.get('observation') or {}).get('session_handle') or peek.get('slug')
+    if kdir is None or not slug:
+        return value
+    reducer = lifecycle()
+    try:
+        merged = reducer.merge(value, reducer.edges(kdir, slug, reducer.current_generation(kdir, slug)))
+    except OSError as error:
+        evidence = dict(value['evidence']) if isinstance(value.get('evidence'), dict) else {}
+        evidence.update(truncated=True, journal_scan={'reason': 'the session journal could not be read: {}'.format(error)})
+        return dict(value, evidence=evidence)
+    if merged is value:
+        return value
+    return assessed(dict(peek, observation=merged), identity)
+
+
+def assessed(peek, identity=None):
     value = dict(peek.get('observation') or {})
     at = epoch(value.get('observed_at'))
     age = time.time() - at if at is not None else None
@@ -80,7 +119,7 @@ def observation(peek, identity=None):
     fresh = (value.get('schema_version') == 1 and value.get('fresh') is True
              and isinstance(limit, (int, float)) and 0 < limit <= 30
              and age is not None and -.5 <= age <= limit
-             and (value.get('authority') in {'runtime', 'screen-signature'} or value.get('authority') == 'none' and value.get('activity') == 'unknown')
+             and (value.get('authority') in FRESH_AUTHORITIES or value.get('authority') == 'none' and value.get('activity') == 'unknown')
              and bool(value.get('session_id')) and bool(value.get('generation')))
     if identity:
         if identity.get('slug') and (value.get('session_handle') or peek.get('slug')) != identity['slug']:
@@ -171,6 +210,10 @@ def reconcile_samples(saved, current):
     pending = dict(saved.get('pending', {}))
     for row in current:
         slug, value = row['slug'], row['observation']
+        # A lifecycle read that hit its scan bound cannot say where the current
+        # state began, so it neither changes nor records this session's state.
+        if (value.get('evidence') or {}).get('truncated'):
+            continue
         token = semantic_observation(value)
         prior = meaningful.get(slug)
         # Unknown paints remain honest samples but do not erase the last
@@ -514,6 +557,13 @@ def peek_summary(peek):
     value = observation(peek)
     lines = ["[session] activity={} authority={} fresh={} age_seconds={} observed_at={} session={} generation={} instance={}".format(value.get('activity', 'unknown'), value.get('authority', 'none'), value['fresh'], value['age_seconds'], value.get('observed_at'), value.get('session_id'), value.get('generation'), value.get('instance')),
              "[session] input_eligible={} framework={} evidence={}".format(peek.get('ready', False), peek.get('framework', 'unknown'), json.dumps(value.get('evidence', {})))]
+    evidence = value.get('evidence') if isinstance(value.get('evidence'), dict) else {}
+    hook = evidence.get('hook')
+    if isinstance(hook, dict):
+        screen = (evidence.get('screen') or {}).get('activity') or 'unknown'
+        lines.insert(1, '[session] hook says {} since {}; screen {}'.format(hook.get('activity'), hook.get('fired_at'), screen))
+    if evidence.get('truncated'):
+        lines.insert(1, '[session] lifecycle journal scan reached its bound before it found where the current state began; showing the screen, and watchers keep their previous state for this session')
     for field in ('screen', 'modal'):
         if peek.get(field):
             lines.append('[session] ' + field + '=' + json.dumps(peek[field]))
@@ -546,7 +596,7 @@ def main():
         elif args.command == 'current':
             result = current_snapshot(payload)
         elif args.command == 'peek':
-            result = dict(payload, observation=observation(payload))
+            result = dict(payload, observation=observation(payload, kdir=args.kdir))
         elif args.command == 'consume':
             consume_delta(args.path, payload)
             result = True

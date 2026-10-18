@@ -2597,6 +2597,151 @@ PY
   [ -z "$(ls "$TEST_KDIR"/_sessions/peek-requests/ 2>/dev/null)" ]
 }
 
+# --- Peek and the session's own lifecycle hook rows -------------------------
+# A hosted session's hooks journal needs_input/resumed rows marked
+# links.authority=hook-row. Peek merges them with the screen through
+# scripts/session_lifecycle.py, against the generation the live owner's registry
+# row records, so the owner here is a live process: this test's own.
+
+# json_has <jq filter> — the last `run` printed JSON for which the filter holds.
+json_has() {
+  if ! printf '%s' "$output" | jq -e "$1" >/dev/null 2>&1; then
+    echo "expected JSON output to satisfy: $1" >&2
+    echo "output: $output" >&2
+    return 1
+  fi
+}
+
+# same_json <file-a> <file-b> — the two files hold equal JSON.
+same_json() {
+  if ! jq -n --slurpfile a "$1" --slurpfile b "$2" -e '$a == $b' >/dev/null; then
+    echo "expected equal JSON:" >&2
+    cat "$1" "$2" >&2
+    return 1
+  fi
+}
+
+# Print the generation scripts/session_target.py computes for slug's row in the
+# registry file.
+session_generation() {
+  python3 - "$REPO_DIR/scripts" "$1" "$2" <<'PYEOF'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from session_target import generation
+row = json.load(open(sys.argv[2]))
+print(next(generation(s) for s in row["sessions"] if s["slug"] == sys.argv[3]))
+PYEOF
+}
+
+# write_live_session <instance> <slug> — a registry row owned by this test's
+# process that lists one worker session; prints the session's generation.
+write_live_session() {
+  local path="$TEST_KDIR/_sessions/instances/$1.json"
+  mkdir -p "$TEST_KDIR/_sessions/instances"
+  jq -n --arg name "$1" --arg slug "$2" --argjson pid "$$" \
+    '{name:$name, pid:$pid, role:"session-host", sessions:[{slug:$slug, type:"worker", started:"2026-10-18T09:00:00Z", request_id:"managed-1"}]}' \
+    > "$path"
+  session_generation "$path" "$2"
+}
+
+# append_hook_park <slug> <generation> — journal a StopFailure hook row through
+# the sole writer.
+append_hook_park() {
+  local row
+  row="$(jq -cn --arg slug "$1" --arg gen "$2" \
+    '{event:"needs_input", slug:$slug, session_type:"worker", actor_instance:"inst-a",
+      links:{authority:"hook-row", hook_event:"StopFailure", activity:"blocked", generation:$gen,
+             fired_at:"2026-10-18T10:00:01.000000Z", framework:"claude-code", spawn_instance:"inst-a", error:"rate_limit"}}')"
+  bash "$APPEND" --kdir "$TEST_KDIR" --row "$row" >/dev/null
+}
+
+# seed_peek_response <slug> <generation> <activity> — answer the first peek
+# request as the owning host would, with a screen observation of that activity
+# captured now. A copy of the response is kept at $TEST_KDIR/peek-response.json.
+seed_peek_response() {
+  local rid at authority=screen-signature matcher=claude-code-worked-for-v1
+  rid="$(wait_request_id peek-requests)" || return 1
+  at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [ "$3" = unknown ]; then authority=none; matcher=screen-unknown-v1; fi
+  mkdir -p "$TEST_KDIR/_sessions/peek-responses"
+  jq -n --arg rid "$rid" --arg slug "$1" --arg gen "$2" --arg activity "$3" --arg at "$at" \
+    --arg authority "$authority" --arg matcher "$matcher" \
+    '{request_id:$rid, slug:$slug, captured_at:$at, ready:($activity == "idle"),
+      blocked_reason:(if $activity == "idle" then "" else "no-signature" end),
+      rows:["⎿  API Error: Request rejected (rate limited)", "> "],
+      observation:{schema_version:1, activity:$activity, authority:$authority, observed_at:$at,
+                   session_id:$slug, session_handle:$slug, generation:$gen, instance:"inst-a",
+                   max_age_seconds:5, fresh:true, can_accept_input:($activity == "idle"),
+                   evidence:{matcher:$matcher, reason:"fixture screen"}}}' > "$TEST_KDIR/peek-response.json"
+  cp "$TEST_KDIR/peek-response.json" "$TEST_KDIR/_sessions/peek-responses/.$rid.tmp"
+  mv "$TEST_KDIR/_sessions/peek-responses/.$rid.tmp" "$TEST_KDIR/_sessions/peek-responses/$rid.json"
+}
+
+@test "peek merges hook park into an unknown screen (raw, json)" {
+  local gen
+  gen="$(write_live_session inst-a feature-x)"
+  append_hook_park feature-x "$gen"
+  ( seed_peek_response feature-x "$gen" unknown ) &
+  run bash "$PEEK" feature-x --json --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  outcome_is 0
+  json_has '.observation.activity == "blocked" and .observation.authority == "hook-row" and .observation.fresh == true'
+  json_has '.observation.evidence.screen.activity == "unknown" and .observation.evidence.screen.matcher == "screen-unknown-v1"'
+  json_has '.observation.evidence.hook.hook_event == "StopFailure" and .observation.evidence.hook.error == "rate_limit"'
+  json_has '.ready == false and .observation.can_accept_input == false'
+}
+
+@test "peek merges hook park into an unknown screen (raw, text says what each source saw)" {
+  local gen
+  gen="$(write_live_session inst-a feature-x)"
+  append_hook_park feature-x "$gen"
+  ( seed_peek_response feature-x "$gen" unknown ) &
+  run bash "$PEEK" feature-x --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  outcome_is 0 "activity=blocked authority=hook-row fresh=True" \
+    "[session] hook says blocked since 2026-10-18T10:00:01.000000Z; screen unknown" "ready=false"
+}
+
+@test "peek merges hook park into an unknown screen (managed)" {
+  local handle=task--w1 registry gen responder
+  fake_store_host
+  registry="$TEST_KDIR/_sessions/instances/store-host.json"
+  jq --arg slug "$handle" '.sessions = [{slug:$slug, type:"worker", started:"2026-10-18T09:00:00Z", request_id:"managed-1"}]' \
+    "$registry" > "$registry.tmp"
+  mv "$registry.tmp" "$registry"
+  gen="$(session_generation "$registry" "$handle")"
+  mkdir -p "$TEST_KDIR/_sessions/managed"
+  jq -n --arg handle "$handle" --arg key "$STORE_KEY" --arg source "$TEST_KDIR" \
+    '{schema_version:1, handle:$handle, host_key:$key, state:"enqueued", work_item:"task", source_dir:$source}' \
+    > "$TEST_KDIR/_sessions/managed/$handle.json"
+  append_hook_park "$handle" "$gen"
+  ( seed_peek_response "$handle" "$gen" unknown ) &
+  responder=$!
+  run python3 "$MANAGED" peek "$handle" --json --timeout 10 --kdir "$TEST_KDIR"
+  # fake_store_host is a child of this test too, so wait only for the responder.
+  wait "$responder"
+  outcome_is 0
+  json_has '.outcome == "observed" and .response.observation.activity == "blocked" and .response.observation.authority == "hook-row"'
+  json_has '.response.observation.evidence.screen.activity == "unknown" and .response.observation.evidence.hook.fired_at == "2026-10-18T10:00:01.000000Z"'
+}
+
+@test "peek merges hook rows only: a session without them reads exactly as before" {
+  local gen other
+  gen="$(write_live_session inst-a feature-x)"
+  other="$(write_live_session inst-b feature-y)"
+  append_hook_park feature-y "$other"
+  bash "$APPEND" --kdir "$TEST_KDIR" --row "$(jq -cn --arg gen "$gen" '{event:"resumed", slug:"feature-x", session_type:"worker", actor_instance:"inst-a", links:{activity:"working", generation:$gen, observed_at:"2026-10-18T10:00:00.5Z"}}')" >/dev/null
+  ( seed_peek_response feature-x "$gen" idle ) &
+  run bash "$PEEK" feature-x --json --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  outcome_is 0
+  json_has '.observation.activity == "idle" and .observation.authority == "screen-signature"'
+  printf '%s' "$output" | jq '.observation | del(.age_seconds)' > "$TEST_KDIR/merged.json"
+  python3 "$REPO_DIR/scripts/coordinate_watch_state.py" peek < "$TEST_KDIR/peek-response.json" \
+    | jq '.observation | del(.age_seconds)' > "$TEST_KDIR/plain.json"
+  same_json "$TEST_KDIR/merged.json" "$TEST_KDIR/plain.json"
+}
+
 # =====================================================================
 # session wait
 # =====================================================================

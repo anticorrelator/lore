@@ -14,11 +14,30 @@ Managed JSON puts the snapshot under `response`; raw session peek returns it dir
 | unknown | The available evidence does not establish a lifecycle state. |
 | exited | The runtime observed process exit. |
 
-The observation includes its authority, capture time, session generation, owning instance, freshness bound, and matcher evidence. A host restart changes the instance; adopting the same surviving worker preserves its generation. Unknown or unavailable observations include the reason. Output silence, screen animation, and a visible composer alone cannot establish that a worker needs attention.
+The observation includes its authority, capture time, session generation, owning instance, freshness bound, and matcher evidence. Authority is `screen-signature` when the screen decided, `runtime` for process exit and startup settling, `hook-row` when the session's own lifecycle hook decided (below), and `none` when nothing did. A host restart changes the instance; adopting the same surviving worker preserves its generation. Unknown or unavailable observations include the reason. Output silence, screen animation, and a visible composer alone cannot establish that a worker needs attention.
 
 Peek returns the screen rows, framework, screen geometry, and recognized modal details. Use `--raw` for ANSI styling. The screen is the current terminal viewport, not the entire transcript. Its extent is explicit so a short screen is not mistaken for a complete response. When the result depends on work outside that screen, read the worker's saved artifact. A successful peek observes state; it never submits terminal input.
 
 For a blocked session, read the modal title and options. When `modal.answerable` is true, choose the intended response and use `lore session answer` with an expectation copied from that observation. Otherwise use the harness's supported interaction; visible option labels do not imply numbered-answer support. The answer verb rechecks its own input boundary. An old peek is evidence of what was seen then, not permission to answer a changed dialog.
+
+## The session's own account
+
+A session lore hosts can report its own turn edges. Its harness's lifecycle hooks journal `needs_input` when a turn ends, fails on an API error, or stops at a prompt, and `resumed` when a turn starts or a prompt is answered; these rows carry `links.authority = hook-row`. The host keeps journaling the screen's edges as before. Raw and managed peek merge the two for the session's current generation, which comes from the live owner's registry row, never from a peek; the watcher and wake receipts read peek's merged observation. A session with no hook rows reads exactly as it did before.
+
+How the merge decides:
+
+- Process exit always stands.
+- The newest edge decides. When it is a hook row, the hook's activity stands with authority `hook-row` and a matcher naming the hook, such as `claude-code-hook-stop-failure-v1`. When it is the screen's, the screen stands: a hook was missed or failed, and the screen fallback carries on.
+- An unknown or starting screen never overrides a hook edge. Beside a hook park the activity is the hook's; beside a hook working edge it stays the screen's unknown. Either way `evidence.reason` reads `hook says <activity> since <fired_at>; screen unknown`, and peek's text output prints the same line.
+- A known screen that differs from a newer hook edge is recorded under `evidence.disagreement`, with its activity and matcher, and is not acted on as a second event.
+- One park reported twice is one park. A park row joins the current park when nothing ended it in between (a `resumed`, interrupt or `closed` row) and it comes from the other source, or it is the host's `modal_blocked` beside the host's blocked `needs_input`. It is listed under `evidence.corroborated_by` and changes nothing else: the park keeps the authority, matcher and `block_signature` of the row that started it for as long as it lasts, so a dialog drawn after its hook fired does not read as a new state.
+- A row whose own time (`links.fired_at`, `links.observed_at`) is older than an edge already journaled landed late. It is kept as evidence and decides nothing.
+- `lore session interrupt` ends the current hook edge; after it the screen decides until a newer edge arrives. An Escape typed into an attached terminal leaves no row, so a hook park holds until the session's next edge.
+- A hook row from another generation of the slug is evidence only, under `evidence.stale_hook_rows`. While no live owner lists the session, as during a host restart, hook rows decide nothing and appear under `evidence.hook_unconfirmed`.
+
+`ready` and `can_accept_input` always come from the screen: a hook says what the turn did, not whether the composer can take input. `evidence.hook` and `evidence.screen` show what each source reported.
+
+The merge reads the shared journal backward for the one session, stopping where its current state began. When that point lies further back than the read's bound, peek shows the screen's observation with `evidence.truncated`, and the watcher keeps the state it last recorded for the session rather than treat the partial read as a change.
 
 ## Bounded reads
 
