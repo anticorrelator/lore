@@ -405,6 +405,56 @@ correct settings/permissions block per harness; depends on T25 landing first. |
   framework-name conditional pattern Phase 1 D1 forbids; use the
   capability lookup instead.
 
+## Session Lifecycle Hooks (Hosted Sessions Only)
+
+Separate from the nine lifecycle events above, a session lore hosts reports its
+own turn edges through hooks the host adds to that one launch. They go through
+the launch's own arguments (or pane environment), through the channel the
+framework's `session_lifecycle_hooks` cell in
+[`adapters/capabilities.json`](../capabilities.json) names, and never into a
+harness's configuration files: nothing is written under `~/.claude`,
+`~/.codex`, `~/.config/opencode`, or a project's `.claude/`. A session started
+outside lore runs none of them. The host installs a framework's hooks only when
+that cell is above `none`, and passes exactly its usual launch arguments
+otherwise.
+
+Every installed hook runs one shared script,
+`scripts/session-lifecycle-hook.sh <framework>`, with the harness payload on
+stdin. The script:
+
+- maps the payload's `hook_event_name` (and, for an entry with a `matcher`, its
+  `tool_name`) to the event entry the cell declares, and writes one
+  `needs_input` or `resumed` row marked `links.authority = hook-row` through
+  `scripts/session-event-append.sh`. A hook the cell does not declare writes
+  nothing. The row shape is in
+  [`docs/session-substrate.md` § Hook rows](../../docs/session-substrate.md#hook-rows);
+- takes the session's identity from `LORE_SESSION_SLUG`, `LORE_SESSION_TYPE`,
+  `LORE_SESSION_GENERATION`, `LORE_SESSION_STORE_ROOT` and
+  `LORE_SESSION_INSTANCE`, and the framework from its argument, never from
+  `framework.json`;
+- names the live instance whose registry row lists this slug and generation as
+  `actor_instance`, falling back to `LORE_SESSION_INSTANCE`, so rows from a
+  session adopted after a host restart name its current owner;
+- prints nothing on any path, always exits 0, and stops itself after five
+  seconds, including when the journal writer hangs or stdin never closes.
+  Async hooks get no harness timeout, and on Claude Code a hook's output is
+  handed to the model on its next turn;
+- does nothing when `LORE_AGENT_DISABLED=1`, or when the slug, generation, or
+  store root is unset;
+- on failure writes no row and appends one line to `_sessions/hooks.log` in the
+  session's store. The host's screen observation keeps reporting the session.
+
+| Framework   | Cell | Channel | Native hook → row |
+|-------------|------|---------|-------------------|
+| claude-code | **none** until a real launch shows no startup Settings dialog | `settings-json` (a hooks-only `--settings` payload, each entry `async: true`) | UserPromptSubmit → `resumed` working; Stop → `needs_input` idle; StopFailure → `needs_input` blocked, `links.error`; PermissionRequest → `needs_input` blocked, `links.tool_name`; PreToolUse on `AskUserQuestion\|ExitPlanMode` → `needs_input` blocked; PostToolUse and PostToolUseFailure on the same tools → `resumed` working |
+| codex       | **none** until a probe shows `-c` hooks run without the startup hook review | `config-override` (candidate) | none declared |
+| opencode    | **none** until a probe shows an environment-selected plugin stays out of child processes | `plugin-env` (candidate) | none declared |
+
+The cell's `events` list is the source of truth for the mapping; this table is
+its reading at the time of writing. `tests/fixtures/claude-code-hooks-settings.schema.json`
+holds the hooks-only Claude settings shape, transcribed from the hooks
+reference, that a launch payload must match.
+
 ## Hook Pitfalls (Read Before Wiring)
 
 The Claude-Code-specific hook signaling protocol footguns are

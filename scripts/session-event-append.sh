@@ -78,6 +78,15 @@
 #   links.close_requests is optional and valid only on closed. Its value MUST be
 #   a string encoding a non-empty JSON array of distinct, non-empty strings. The
 #   writer validates but never derives it; absence declares no recovery links.
+#   links.authority marks a hook row: a hosted session's own lifecycle hook
+#   reporting a turn edge (scripts/session-lifecycle-hook.sh). It is valid only
+#   on needs_input and resumed, and only as authority=hook-row. A hook row
+#   requires non-empty slug, session_type, and actor_instance; links.hook_event,
+#   links.activity, links.generation, links.fired_at (UTC ISO 8601),
+#   links.framework, and links.spawn_instance; every link a single-line
+#   non-empty string of at most 256 characters; and activity idle or blocked on
+#   needs_input, working on resumed. It forbids request_id and
+#   links.observation, which belong to queue rows and screen rows.
 #
 # Exit codes: 0 success; 1 validation error / refused. No child processes are
 # spawned, so no child exit code is propagated.
@@ -316,6 +325,53 @@ fi
 if printf '%s' "$ROW" | jq -e 'has("links")' >/dev/null 2>&1; then
   if ! printf '%s' "$ROW" | jq -e '.links | type == "object"' >/dev/null 2>&1; then
     fail "invalid field: links (must be a JSON object)"
+  fi
+fi
+
+# --- A hook row is a hosted session's own account of one turn edge ---
+# links.authority=hook-row is the only key a reader tests to tell it from the
+# host's screen edge, so the writer admits exactly one shape for it.
+if printf '%s' "$ROW" | jq -e '(.links // {}) | has("authority")' >/dev/null 2>&1; then
+  HOOK_ROW_ERROR=$(printf '%s' "$ROW" | jq -r --arg event "$EVENT" '
+    def present($v): ($v | type) == "string" and ($v | length) > 0;
+    [
+      (if ($event | IN("needs_input", "resumed")) | not then
+         "invalid field: links.authority (allowed only on needs_input and resumed, where it marks a hook row)"
+       else empty end),
+      (if .links.authority != "hook-row" then
+         "invalid field: links.authority (must be hook-row; a screen row carries no authority link)"
+       else empty end),
+      (["slug", "session_type", "actor_instance"][] as $f
+       | if present(.[$f]) | not then
+           "missing required field: \($f) (required on a hook row)"
+         else empty end),
+      (if has("request_id") then
+         "invalid field: request_id (a hook row is not a queue-lifecycle event)"
+       else empty end),
+      (if .links | has("observation") then
+         "invalid field: links.observation (a hook row carries no screen observation)"
+       else empty end),
+      (.links | to_entries[]
+       | select((.value | type) != "string" or (.value | length) == 0
+                or (.value | length) > 256 or (.value | test("[[:cntrl:]]")))
+       | "invalid field: links.\(.key) (hook row links must be single-line non-empty strings of at most 256 characters)"),
+      (["hook_event", "activity", "generation", "fired_at", "framework", "spawn_instance"][] as $f
+       | if present(.links[$f]) | not then
+           "missing required field: links.\($f) (required on a hook row)"
+         else empty end),
+      (if present(.links.fired_at)
+          and (.links.fired_at | test("^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]{1,9})?Z$") | not) then
+         "invalid field: links.fired_at (must be a UTC ISO 8601 timestamp such as 2026-10-18T10:00:00.123456Z)"
+       else empty end),
+      (if $event == "needs_input" and present(.links.activity) and (.links.activity | IN("idle", "blocked") | not) then
+         "invalid field: links.activity (a hook needs_input row reports idle or blocked)"
+       elif $event == "resumed" and present(.links.activity) and .links.activity != "working" then
+         "invalid field: links.activity (a hook resumed row reports working)"
+       else empty end)
+    ] | first // ""
+  ' 2>/dev/null) || HOOK_ROW_ERROR="invalid field: links (the hook row could not be checked)"
+  if [[ -n "$HOOK_ROW_ERROR" ]]; then
+    fail "$HOOK_ROW_ERROR"
   fi
 fi
 
