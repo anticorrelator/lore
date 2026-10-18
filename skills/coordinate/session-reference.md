@@ -34,13 +34,15 @@ Starts or recovers a source-scoped host without a human TUI, seeds a missing sou
 
 Two habits the verbs do not carry for you. The guidance floor rides every managed brief; for harness-native spawns render it with `lore dispatch guidance` and prepend its complete stdout before every launch and retry — some harnesses repair a floorless launch silently, others refuse it. Parallelism runs through sessions and subagents, not stacked Skill calls.
 
-## Request targeting and placement
+## Request placement
 
-Placement lives on the work item and dispatch derives it. An item declares its `source_checkout` (`lore work source-checkout <slug>` seeds it from the dispatching session's provenance and validates it against the live instance registry). A slugged `lore session request` writes it as `required_project_dir`: a hard filter, claimable only by an instance whose project directory equals it. Every way the declaration can fail refuses at enqueue with its own repair — no declaration (seed it), a path that does not exist (fix it), a checkout no live instance serves (start one there) — and a fourth refuses at claim: `required_target_ref`, the branch captured at enqueue, contradicts what the claimant has checked out. The ref verifies; the directory routes.
+The store's session host claims every request in the store, and `lore session request` starts it when none is running. Each request runs in one checkout of that store:
+- A slugged request runs in its item's `source_checkout`. Seed it with `lore work source-checkout <slug>` from inside that checkout.
+- A slugless request names its checkout with `--prefer-dir <path>` or `--prefer-cwd`. Inside a session, `--prefer-cwd` means the session's source checkout, not its worktree.
 
-A slugless request declares exactly one stance — `--target <instance>` (the only pin), `--prefer-dir <path>` or `--prefer-cwd` (soft: a match claims at once, others wait a 15s grace, then anyone), or `--anywhere` (deliberate: any instance, including one whose harness rejects your model). `--min-vintage` is a floor, not a pin — it refuses only on positive evidence of an older build. Targeting pins the instance, not the framework: `--framework` selects the harness independently, and every `--model` travels with its framework. Inside a session `--prefer-cwd` resolves the session's recorded source checkout, never its worktree path. The `requested` row carries `placement_stance` (`required_dir` | `targeted` | `preferred_dir` | `any`); the request file is deleted on every terminal path, so the journal is the record.
+A refusal names its repair; read it before retrying. The request file is deleted on every terminal path, so the journal's `requested` row is the record.
 
-Seat-owned trees (below) cannot host worker sessions — do not pass their identity tuple to `request`. Hosted workers receive a session-owned worktree from the claiming host.
+Seat-owned trees (below) cannot host worker sessions. Hosted workers get a session-owned worktree from the store host.
 
 ## Worktree lifecycle and refusal
 
