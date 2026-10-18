@@ -3,13 +3,16 @@
 
 import argparse
 import copy
+import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import signal
+import site
 import subprocess
 import sys
 import tempfile
@@ -211,16 +214,20 @@ class Fixture:
         common = {"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TMP", "TEMP", "TZ",
                   "SYSTEMROOT", "COMSPEC", "PATHEXT"}
         self.env = {k: v for k, v in os.environ.items() if k in common}
-        self.env.update(HOME=str(self.home), LORE_DATA_DIR=str(self.root / "data"),
+        # HOME moves into the case root, so the interpreter's user site would move
+        # with it; keep the caller's so PyYAML stays importable in every subprocess.
+        self.env.update(HOME=str(self.home), PYTHONUSERBASE=site.getuserbase(), LORE_DATA_DIR=str(self.root / "data"),
                         LORE_KNOWLEDGE_DIR=str(self.store), LORE_FRAMEWORK="codex",
                         XDG_CONFIG_HOME=str(self.root / "config"), XDG_DATA_HOME=str(self.root / "data"),
                         XDG_CACHE_HOME=str(self.root / "cache"),
                         PATH=str(self.repo / "cli") + os.pathsep + self.env["PATH"])
         self.env = isolated_go_environment(self.repo, self.root, self.env)
         (self.root / "data/config").mkdir(parents=True)
-        (self.root / "data/config/settings.json").write_text(json.dumps({"version": 1,
-            "coordination": {"max_concurrency": 2}, "harnesses": {"codex": {"roles": {
-                role: "gpt-6-astra" for role in ("lead", "worker", "advisor", "reviewer", "researcher", "default")}}}}))
+        roles = ("lead", "worker", "worker-mechanical", "worker-judgment-dense", "researcher", "reviewer", "advisor", "default")
+        (self.root / "data/config/settings.json").write_text(json.dumps({
+            "version": 2, "tui_launch_framework": "codex", "routes": {role: "codex/gpt-6-astra" for role in roles},
+            "harnesses": {"codex": {"args": [], "native_models": {"default": "gpt-6-astra"}}},
+            "coordination": {"max_concurrency": 2}}))
         (self.home / ".lore").mkdir()
         (self.home / ".lore/scripts").symlink_to(self.repo / "scripts")
         self.call(["git", "init", "-q"])
@@ -231,7 +238,40 @@ class Fixture:
         self.call(["git", "add", "tracked", ".gitignore"])
         self.call(["git", "commit", "-qm", "Initial fixture source"])
         self.lore("init", "--force")
+        self.stand_in_store_host()
         self.sequence = 0
+
+    def stand_in_store_host(self):
+        """Make this process the store's ready session host, the one claimant of
+        every request. It holds the host's runtime lock and the login's supervisor
+        lock and publishes the host's readiness and registry row, so
+        `lore session request` finds the host ensured and the writer places rows on
+        it. The store is pinned, so the fixture checkout belongs to it."""
+        spec = importlib.util.spec_from_file_location("session_runtime", self.repo / "scripts/session_runtime.py")
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        self.host_key = runtime.store_host_key(self.store, self.env)
+        host_state = runtime.hosts_dir(self.store, self.env) / self.host_key
+        login = runtime.login_dir(self.env)
+        host_state.mkdir(parents=True, exist_ok=True)
+        login.mkdir(parents=True, exist_ok=True)
+        self.held_locks = [open(host_state / "runtime.lock", "a+"), open(login / "supervisor.lock", "a+")]
+        for stream in self.held_locks:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+        (login / "served.json").write_text(json.dumps(
+            {"schema_version": 1, "stores": {str(self.store): {"pin_knowledge_dir": True}}}))
+        capabilities = ["position-preparation-v1"]
+        instances = self.store / "_sessions/instances"
+        instances.mkdir(parents=True, exist_ok=True)
+        self.host_registry = instances / "store-host.json"
+        self.host_registry.write_text(json.dumps({
+            "name": "store-host", "pid": os.getpid(), "role": "session-host", "scope": "store",
+            "host_key": self.host_key, "runtime_capabilities": capabilities,
+            "build_time": "2027-01-01T00:00:00Z", "sessions": []}))
+        (host_state / "ready.json").write_text(json.dumps({
+            "schema_version": 2, "ready": True, "scope": "store", "host_key": self.host_key,
+            "instance_name": "store-host", "pid": os.getpid(), "knowledge_dir": str(self.store),
+            "runtime_capabilities": capabilities}))
 
     def data(self, name, value):
         path = self.root / name
@@ -244,10 +284,8 @@ class Fixture:
         item = self.store / "_work" / slug
         assert (item / "_meta.json").is_file()
         assert item.is_relative_to(self.root)
-        hosts = self.store / "_sessions/instances"
-        hosts.mkdir(parents=True, exist_ok=True)
-        (hosts / "fixture.json").write_text(json.dumps({"name": "fixture", "project_dir": str(self.code)}))
-        self.lore("work", "source-checkout", slug, "--from-instance", "fixture")
+        # Outside a session the verb declares the checkout it runs in; calls run in self.code.
+        self.lore("work", "source-checkout", slug)
         return item
 
     def write_plan(self, item, *, consultation=False):
@@ -447,13 +485,13 @@ def exercise_recipes(repo, root, source):
              TEAM_NAME="", LEAD_NAME="fixture-seat", PLACEMENT_NOTE="Use the assigned temporary root.",
              TIER2_EXTRACT_FILE="", REQUIRED_BINDINGS="task_id revision_id packet_id packet_pointer",
              NATIVE_MODEL="gpt-6-astra-high", AGENTS_SCOPE="", ROUTE="native",
-             WORKER_MODEL="gpt-6-astra", TARGET_INSTANCE="", MIN_VINTAGE="", WORKTREE_ID="", EXECUTION_DIR="",
+             WORKER_MODEL="gpt-6-astra", MIN_VINTAGE="", WORKTREE_ID="", EXECUTION_DIR="",
              TRANSCRIPT_FILE="", WOVEN_NORMS="", PROVIDER_STATUS="", SPAWNED_ADVISORS="")
 
     def run(name, scenario="published recipe", expected=0, interrupt_criterion=False, **updates):
         v.update(updates)
         if name == "request-session":
-            (f.store / "_sessions/instances/fixture.json").touch()
+            f.host_registry.touch()
         inputs = {key: v[key] for key in f.rows[name]["inputs"]}
         return f.run(name, inputs, scenario, expected, interrupt_criterion=interrupt_criterion)
 
@@ -524,7 +562,10 @@ def exercise_recipes(repo, root, source):
     assert obj(run("work-show"))["slug"] == "recipes"
     run("gate-anchor", VERDICT="aligned", FIT="Both tasks preserve recorded history.", GAP="", SCOPE_DELTA="")
     assert b"framework=codex" in run("probe-operations").stdout
-    assert b"gpt-6-astra" in run("resolve-role-model").stdout
+    worker_model = run("resolve-role-model").stdout.decode().strip()
+    assert "gpt-6-astra" in worker_model
+    # A session request carries the resolved route as framework/model shorthand.
+    v["SESSION_ROUTE"] = v["TARGET_FRAMEWORK"] + "/" + worker_model
     first = opened("initial task normalization")
     b = prepare("native-first")
     assert b["assignment"] == next(e for e in first["manifest"] if e.get("local_id") == "task-1")["description"]
@@ -576,7 +617,7 @@ def exercise_recipes(repo, root, source):
     # This mutation is executed at admission, rather than inferred from prose.
     mutation = root / "missing-placement.md"
     body = f.bodies["request-session"]
-    stance = b'if [[ -n "$TARGET_INSTANCE" ]]; then args+=(--target "$TARGET_INSTANCE"); else args+=(--anywhere); fi\n'
+    stance = b"args+=(--anywhere)\n"
     assert stance in body
     mutation.write_bytes(source.read_bytes().replace(body, body.replace(stance, b"")))
     negative = Fixture(repo, root / "placement-negative", mutation)
@@ -591,10 +632,10 @@ def exercise_recipes(repo, root, source):
     fixed_ref = bind("fixed root binding", NATIVE_MODEL="")
     context_path = f.data("fixed-context.json", {"dispatch_guidance": Path(fixed_ref["payload_path"]).read_text(), "position_dispatch": fixed_ref})
     run("request-session", "seat-owned fixed session route is refused before enqueue", expected=1, CONTEXT_FILE=context_path, SESSION_SLUG="recipes--w2",
-        TARGET_INSTANCE="fixture", WORKTREE_ID="fixed-fixture", EXECUTION_DIR=f.code)
+        WORKTREE_ID="fixed-fixture", EXECUTION_DIR=f.code)
     fixed_collected = obj(run("session-reference", "fixed independent reference"))
     assert fixed_collected["reference"] == fixed_ref
-    v.update(WORKTREE_ID="", EXECUTION_DIR="", TARGET_INSTANCE="")
+    v.update(WORKTREE_ID="", EXECUTION_DIR="")
 
     opened("Claude native readiness")
     prepare("claude-native", framework="claude-code")

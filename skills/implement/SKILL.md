@@ -347,14 +347,14 @@ print(json.dumps(context))
 PY
 ```
 
-Manager-owned seat trees cannot host worker sessions. Use ordinary placement and the pending preparation above; the claiming host allocates the worker checkout. A worker request also requires the item to declare its source checkout, so the host knows which clone the session belongs in; a session-hosted seat seeds it once with `lore work source-checkout <slug>` from its own provenance, and the request is refused with that remedy until it exists. Enqueue with exactly one placement stance (`TARGET_INSTANCE` names one live instance, otherwise any instance may claim), and without `--position` or `--packet`, which would select generic preparation or add a second packet line instead of preserving the admitted composition:
+Manager-owned seat trees cannot host worker sessions. Use ordinary placement and the pending preparation above; the store's session host, the one process that claims requests, allocates the worker checkout. A worker request also requires the item to declare its source checkout, so the host knows which clone of this store the session belongs in; a session-hosted seat seeds it once with `lore work source-checkout <slug>` from its own provenance (outside a session, run it from inside that checkout), and the request is refused with that remedy until it exists. `lore session request` starts the host when none is running; when it cannot, the refusal carries the error and the path of the host's log. Enqueue with `--anywhere`, the stance that adds no placement beside the item's declaration, and without `--position` or `--packet`, which would select generic preparation or add a second packet line instead of preserving the admitted composition:
 
-**Recipe inputs:** SESSION_SLUG, SESSION_ROUTE, CONTEXT_FILE, TARGET_INSTANCE, MIN_VINTAGE, WORKTREE_ID, EXECUTION_DIR.
+**Recipe inputs:** SESSION_SLUG, SESSION_ROUTE, CONTEXT_FILE, MIN_VINTAGE, WORKTREE_ID, EXECUTION_DIR.
 <!-- implement-recipe: request-session -->
 ```bash
 args=(--type worker --slug "$SESSION_SLUG" --session-route "$SESSION_ROUTE"
       --context "$CONTEXT_FILE" --initiator agent --json)
-if [[ -n "$TARGET_INSTANCE" ]]; then args+=(--target "$TARGET_INSTANCE"); else args+=(--anywhere); fi
+args+=(--anywhere)
 [[ -n "$MIN_VINTAGE" ]] && args+=(--min-vintage "$MIN_VINTAGE")
 [[ -z "$WORKTREE_ID" && -z "$EXECUTION_DIR" ]] || { echo "Worker sessions require ordinary placement; manager trees are for native subagents." >&2; exit 1; }
 lore session request "${args[@]}"

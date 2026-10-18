@@ -93,22 +93,22 @@ ENQUEUE_RC=$?
 ```
 
 - `--type worker` selects the worker session arm; `--slug "$DERIVED_SLUG"` is required for this type (the derived slug is the session identity, so there is no null-slug worker request).
-- `--anywhere` is the placement stance, and the parser refuses a request that states none (`missing placement stance`), because an unstated placement used to be silently routed to any instance and the writer now wants that said out loud. It means "this caller adds no placement of its own"; it does not mean "ignore the item's". The hard filter still comes from the work item in the next bullet, is derived rather than passed, and outranks the stance: the row records `placement_stance: required_dir` when the item declares a checkout, and `--anywhere` writes no queue field of its own. The other stances name an instance or a preferred directory, which this dispatch has no reason to do; a preferred directory the item does not declare would be a second, softer placement beside the item's hard one.
+- `--anywhere` is the placement stance, and the parser refuses a request that states none (`missing placement stance`), because an unstated placement used to be silently routed to any instance and the writer now wants that said out loud. It means "this caller adds no placement of its own"; it does not mean "ignore the item's". The hard filter still comes from the work item in the next bullet, is derived rather than passed, and outranks the stance: the row records `placement_stance: required_dir` when the item declares a checkout, and `--anywhere` writes no queue field of its own. The other stances name a preferred directory, which this dispatch has no reason to do; a preferred directory the item does not declare would be a second, softer placement beside the item's hard one.
 - Both forms pass the canonical `--session-route`. Admission validates that route and, for the compiled form, validates the pending preparation or fixed reference before anything is published. New worker sessions use ordinary placement with a pending preparation. Manager-owned seat trees are for directly dispatched subagents and cannot host these sessions; fixed references are a legacy recovery surface. A published attempt is tied to its root, so a context whose attempt was already published under another directory is not re-enqueued; it gets a fresh attempt.
 - `--yes` runs the session autonomously — it suppresses the session's own confirmation gates so the brief runs unattended. It does not weaken any evaluation the session performs; it only closes the interactive prompts a queue-spawned session cannot answer.
 - `--initiator agent` marks the session agent-initiated, which arms best-effort auto-close after the independent `terminus_reached` row. A later `closed` or `close_failed` is cleanup evidence, not completion.
-- Placement itself needs no flag from you beyond the stance. A slugged request derives it from the base work item's declared source checkout (`source_checkout`, seeded by `lore work source-checkout`) and writes it as the hard `required_project_dir` filter: only an instance whose project directory equals it may claim, and every other live instance leaves the request pending. An item that cannot be placed is refused at write time with the repair named on stderr — no declaration on the item, a declared path that no longer resolves, or a checkout no live instance serves. That refusal is a non-zero `ENQUEUE_RC`: report degraded (§5) exactly as for any other write-time refusal, and leave the repair to {{team_lead}} — a placement flag added to route around the refusal defeats the declaration.
-- If your instance fleet may include TUI builds that predate worker-session support or the placement filter, add `--min-vintage <commit-ish|ISO-8601>` naming the newer of the builds that introduced them: a pre-worker instance never claims a request it cannot spawn, and a pre-placement instance cannot see `required_project_dir`, so without the floor it would claim a declaring request it should refuse.
+- Placement itself needs no flag from you beyond the stance. A slugged request derives it from the base work item's declared source checkout (`source_checkout`, seeded by `lore work source-checkout`) and writes it as the hard `required_project_dir` filter: the store's session host, the one process that claims requests, runs the session in that checkout. An item that cannot be placed is refused at write time with the repair named on stderr — no declaration on the item, a declared path that no longer resolves, a declared checkout that is not in this store, or a store host that could not be started (that refusal carries the error and the path of the host's log). Each refusal is a non-zero `ENQUEUE_RC`: report degraded (§5) exactly as for any other write-time refusal, and leave the repair to {{team_lead}} — a placement flag added to route around the refusal defeats the declaration.
+- `--min-vintage <commit-ish|ISO-8601>` is a floor on the store host's build. When the installed lore-tui may predate worker-session support or the placement filter, name the newer of the builds that introduced them; a host whose recorded build is older than that, or that records none, refuses the request at enqueue (`store host is too old: run lore rebuild, then retry`) instead of claiming one it cannot run as written.
 
 A non-zero `ENQUEUE_RC` means the request was refused at write time (a field validation error, named on stderr) — nothing was enqueued. Report degraded (§5) and stop; {{team_lead}} re-dispatches as a same-harness worker.
 
 ### 3. Watch the journal to terminus (bounded)
 
-Nothing spawns the session for you — the queue has no daemon, so a live TUI instance must claim the pending request on its own poll tick. Watch the raw journal for proof the request was **claimed** and for `terminus_reached` matched by slug plus `session_type=worker`. The coordinator may monitor the same stream directly; watcher absence is not coordinator absence.
+The request returns once the row has landed; the store's session host, which `lore session request` started or found running, claims it on its own poll tick and spawns the session. Watch the raw journal for proof the request was **claimed** and for `terminus_reached` matched by slug plus `session_type=worker`. The coordinator may monitor the same stream directly; watcher absence is not coordinator absence.
 
 ```bash
 POLL_INTERVAL=5       # seconds between journal reads
-UNCLAIMED_TIMEOUT=120 # no claim within this ⇒ no live instance will take it
+UNCLAIMED_TIMEOUT=120 # no claim within this ⇒ the store host is not taking it
 RUN_TIMEOUT=3600      # overall backstop; a session that never reaches terminus
 
 T_START="$(date +%s)"
@@ -121,7 +121,7 @@ while :; do
            || printf '{"events":[],"next_cursor":%s}' "$CURSOR")"
   CURSOR="$(printf '%s' "$BATCH" | jq -r --arg c "$CURSOR" '.next_cursor // ($c|tonumber)')"
 
-  # Claimed/spawned for our slug ⇒ an instance took the request.
+  # Claimed/spawned for our slug ⇒ the store host took the request.
   if [[ $CLAIMED -eq 0 ]] && printf '%s' "$BATCH" \
        | jq -e --arg s "$DERIVED_SLUG" \
          '.events[] | select(.slug==$s and (.event=="claimed" or .event=="spawned"))' \
@@ -158,7 +158,7 @@ done
 
 `lore session events` already owns the malformed-row tolerance contract — an interior-malformed row is excluded with a warning and the cursor advances past it; a trailing torn row leaves the cursor at the last valid row. You inherit that by consuming its output and echoing its `next_cursor`; do not re-implement it, and treat its stderr warnings as noise, not events.
 
-The two non-terminus outcomes both degrade honestly (§5): `unclaimed` means no eligible live instance existed to run the session (re-dispatch as a same-harness worker); `timeout` means the session was claimed but never reached terminus within the backstop (it may still be running — flag it rather than inventing a result).
+The two non-terminus outcomes both degrade honestly (§5): `unclaimed` means the store host did not claim the request within the window — the journal row for the request says whether it was archived with a reason (re-dispatch as a same-harness worker); `timeout` means the session was claimed but never reached terminus within the backstop (it may still be running — flag it rather than inventing a result).
 
 ### 4. Read the report file (terminus only)
 
@@ -239,7 +239,7 @@ Mark the result **degraded** and write your own honest meta-report. Do **not** i
 
 ```
 **Task:** <subject>
-**Status:** degraded — <brief or session context file missing or empty (nothing enqueued) | request refused at admission | no live instance claimed the request | session did not reach terminus within RUN_TIMEOUT | session reached terminus without a parseable report file | session ran but no published bundle validates against the retained context (binder stderr kept beside the report)>
+**Status:** degraded — <brief or session context file missing or empty (nothing enqueued) | request refused at admission | the store host did not claim the request | session did not reach terminus within RUN_TIMEOUT | session reached terminus without a parseable report file | session ran but no published bundle validates against the retained context (binder stderr kept beside the report)>
 $SPEND_SECTION
 **Changes:** none confirmed (worker session did not return a parseable report)
 **Checks:** none performed by chaperone
