@@ -110,8 +110,8 @@ func (m model) hostDir() string {
 
 // sessionHostMain runs a host that serves every checkout of one knowledge
 // store. Exit codes: 0 after an idle withdrawal, 1 on an error, 2 on invalid
-// arguments (including the retired --source-dir form), 3 when another host
-// already holds the store's runtime lock.
+// arguments (including the retired --source-dir form and a host key that is not
+// the store's), 3 when another host already holds the store's runtime lock.
 func sessionHostMain(args []string) int {
 	fs := flag.NewFlagSet("session-host", flag.ContinueOnError)
 	var o hostOptions
@@ -148,6 +148,10 @@ func sessionHostMain(args []string) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
+	}
+	if namespace, _ := config.SessionRuntime(); o.Key != session.StoreHostKey(o.KnowledgeDir, namespace) {
+		fmt.Fprintf(os.Stderr, "session host: --host-key %s is not this store's host key in this runtime (%s, from the resolved store path %s and runtime %q)\n", o.Key, session.StoreHostKey(o.KnowledgeDir, namespace), o.KnowledgeDir, namespace)
+		return 2
 	}
 	// Every hosted session inherits this environment, and resolve-repo.sh answers
 	// LORE_KNOWLEDGE_DIR for any directory, so a value naming another store would

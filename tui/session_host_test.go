@@ -478,6 +478,7 @@ func TestStoreHostArgumentContract(t *testing.T) {
 	os.Unsetenv("LORE_KNOWLEDGE_DIR")
 	kdir := t.TempDir()
 	runtime := os.Getenv(config.SessionRuntimeEnv)
+	storeHostKey := session.StoreHostKey(config.NormalizeProjectDir(kdir), runtime)
 	ready := filepath.Join(t.TempDir(), "hosts", storeHostKey, "ready.json")
 	store := func(extra ...string) []string {
 		return append([]string{"--scope", "store", "--host-key", storeHostKey, "--kdir", kdir, "--ready-file", ready, "--idle-timeout", "1", "--runtime", runtime}, extra...)
@@ -552,6 +553,7 @@ func TestStoreHostArgumentContract(t *testing.T) {
 func TestStoreHostPublishesStoreReadyAndRegistryRowThenWithdrawsIdle(t *testing.T) {
 	f := newStoreHostFixture(t)
 	runtime := os.Getenv(config.SessionRuntimeEnv)
+	storeHostKey := session.StoreHostKey(config.NormalizeProjectDir(f.store), runtime)
 	ready := filepath.Join(config.SessionHostsDir(filepath.Join(f.store, "_sessions")), storeHostKey, "ready.json")
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -796,5 +798,53 @@ func TestStoreHostInstanceNameAvoidsAnotherStoresTmuxSession(t *testing.T) {
 	}
 	if _, err := storeHostInstanceName(sessions, storeHostKey, sequence("amber-otter"), tmuxSessionNames); err == nil {
 		t.Fatal("an exhausted draw produced a name")
+	}
+}
+
+// --host-key must be the store's key: sha256 over the symlink-resolved store
+// path, plus the runtime name in a named runtime. Anything else exits 2 before
+// the host creates state or touches tmux.
+func TestStoreHostRefusesAHostKeyThatIsNotItsStores(t *testing.T) {
+	t.Setenv("LORE_KNOWLEDGE_DIR", "")
+	os.Unsetenv("LORE_KNOWLEDGE_DIR")
+	runtime := os.Getenv(config.SessionRuntimeEnv)
+	kdir := t.TempDir()
+	link := filepath.Join(t.TempDir(), "store-link")
+	if err := os.Symlink(kdir, link); err != nil {
+		t.Fatal(err)
+	}
+	resolved := config.NormalizeProjectDir(kdir)
+	// The host-key check comes first. Should it ever not, this setting stops the
+	// host with exit 1 before it could serve.
+	t.Setenv("LORE_KNOWLEDGE_DIR", t.TempDir())
+	for name, key := range map[string]string{
+		"another store's key":   session.StoreHostKey(config.NormalizeProjectDir(t.TempDir()), runtime),
+		"the default runtime's": session.StoreHostKey(resolved, ""),
+		"the unresolved path's": session.StoreHostKey(link, runtime),
+		"a legacy key":          "storekey0123456789abcdef",
+	} {
+		ready := filepath.Join(t.TempDir(), "hosts", key, "ready.json")
+		if code := sessionHostMain([]string{"--scope", "store", "--host-key", key, "--kdir", link, "--ready-file", ready, "--runtime", runtime}); code != 2 {
+			t.Errorf("%s: exit %d, want 2", name, code)
+		}
+		if _, err := os.Stat(filepath.Dir(ready)); !os.IsNotExist(err) {
+			t.Errorf("%s: refused host created its state directory", name)
+		}
+	}
+	// The store's own key passes the check; with runtime.lock held the host
+	// then stops at 3, before serving.
+	os.Unsetenv("LORE_KNOWLEDGE_DIR")
+	key := session.StoreHostKey(resolved, runtime)
+	ready := filepath.Join(t.TempDir(), "hosts", key, "ready.json")
+	if err := os.MkdirAll(filepath.Dir(ready), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := hostLock(filepath.Join(filepath.Dir(ready), "runtime.lock"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if code := sessionHostMain([]string{"--scope", "store", "--host-key", key, "--kdir", link, "--ready-file", ready, "--runtime", runtime}); code != 3 {
+		t.Fatalf("store key through a symlinked --kdir: exit %d, want 3", code)
 	}
 }

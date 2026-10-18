@@ -1,6 +1,8 @@
 package session
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +11,20 @@ import (
 	"strconv"
 	"strings"
 )
+
+// StoreHostKey is the host key of the session host serving the store at kdir,
+// a symlink-resolved path, in the named runtime ("" for the default runtime):
+// the first 24 hex digits of sha256(kdir), or of sha256(kdir NUL "runtime" NUL
+// runtime) under a named runtime. The queue and registry are shared by every
+// runtime and claims match on this key, so the runtime name is part of it.
+func StoreHostKey(kdir, runtime string) string {
+	material := kdir
+	if runtime != "" {
+		material += "\x00runtime\x00" + runtime
+	}
+	sum := sha256.Sum256([]byte(material))
+	return hex.EncodeToString(sum[:])[:24]
+}
 
 // ScanHostAdoptable runs only while the caller holds this host's runtime lock.
 // Host identity and exact source placement scope recovery independently of the

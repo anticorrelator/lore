@@ -104,3 +104,14 @@ func TestHostRegistryRejectsLateSnapshot(t *testing.T) {
 		t.Fatalf("late snapshot lost durable session: %+v", rows)
 	}
 }
+
+func TestStoreHostKeyMatchesTheSupervisorsKey(t *testing.T) {
+	// Vectors from sha256(path [+ "\0runtime\0" + name]).hexdigest()[:24].
+	const store = "/Users/x/.lore/repos/github.com/acme/proj"
+	if got := StoreHostKey(store, ""); got != "9f9b6c167bb9e00ed2f278a5" {
+		t.Fatalf("default runtime key = %s", got)
+	}
+	if got := StoreHostKey(store, "dev"); got != "c624135ebc28ead6d60d7001" {
+		t.Fatalf("named runtime key = %s", got)
+	}
+}
