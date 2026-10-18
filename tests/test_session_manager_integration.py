@@ -17,12 +17,16 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import pty
+import select
 import shutil
 import signal
 import site
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import unittest
 
@@ -32,6 +36,10 @@ session_runtime = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(session_runtime)
 # opencode routes name a provider/model; the other harnesses take a bare model.
 MODELS = {"claude-code": "fixture-model", "codex": "fixture-model", "opencode": "fixture/fixture-model"}
+# The hooks-only Claude settings shape, transcribed from Claude's hooks documentation.
+HOOKS_SCHEMA = REPO / "tests/fixtures/claude-code-hooks-settings.schema.json"
+# Harness configuration trees under a test home that hosting must leave byte-identical.
+HARNESS_CONFIG = (".claude", ".codex", ".config/opencode")
 # Variables the fake harness reports by value; every other name is reported without its value.
 REPORTED_VALUES = ("LORE_KNOWLEDGE_DIR", "LORE_SESSION_SOURCE_DIR", "LORE_SESSION_STORE_ROOT",
                    "LORE_SESSION_HOST_KEY", "LORE_SESSION_RUNTIME", "FIXTURE_CARRIED", "TMUX")
@@ -48,6 +56,212 @@ def record(event, **values):
     finally: os.close(fd)
 state_path = Path(os.environ["LORE_FAKE_STATE_DIR"]) / os.environ["LORE_SESSION_SLUG"]
 state = "composer"
+# Claude's lifecycle hooks, used only when LORE_FAKE_HARNESS_HOOKS=1 constructs
+# Hooks below; without it the fake behaves as it always has. The fake Claude
+# validates the --settings value in its argv against the hooks schema fixture
+# (LORE_FAKE_HOOKS_SCHEMA) and runs each matching command from that value as
+# Claude does: `sh -c`, the event's JSON on stdin, in the background when the
+# handler says `async: true` and before the screen moves on when it does not.
+hooks = None
+QUESTION_TOOL = "AskUserQuestion"
+TOOL_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest", "PermissionDenied"}
+IDENTITY = ("LORE_SESSION_GENERATION", "LORE_SESSION_INSTANCE", "LORE_SESSION_SLUG", "LORE_SESSION_TYPE",
+            "LORE_SESSION_STORE_ROOT")
+SCHEMA_KEYWORDS = {"type", "const", "enum", "required", "properties", "additionalProperties", "propertyNames",
+                   "items", "minItems", "minLength", "minProperties", "$ref"}
+SCHEMA_NOTES = {"$schema", "$id", "$defs", "$comment", "title", "description"}
+SCHEMA_TYPES = {"object": dict, "array": list, "string": str, "boolean": bool}
+def schema_errors(value, schema, root, where="$"):
+    """Where value breaks schema, read with only the keywords the fixture names."""
+    unknown = sorted(set(schema) - SCHEMA_KEYWORDS - SCHEMA_NOTES)
+    if unknown:
+        return [where + ": schema keyword " + ", ".join(unknown) + " is outside the validated subset"]
+    errors = []
+    if "$ref" in schema:
+        target = root
+        for part in schema["$ref"].lstrip("#/").split("/"):
+            target = target[part]
+        errors += schema_errors(value, target, root, where)
+    kind = schema.get("type")
+    if kind and kind not in SCHEMA_TYPES:
+        return errors + [where + ": schema type " + kind + " is outside the validated subset"]
+    if kind and not (isinstance(value, SCHEMA_TYPES[kind]) and (kind == "boolean" or not isinstance(value, bool))):
+        return errors + [where + ": expected " + kind]
+    if "const" in schema and value != schema["const"]:
+        errors.append(where + ": expected " + json.dumps(schema["const"]))
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(where + ": " + json.dumps(value) + " is not an allowed value")
+    if isinstance(value, str) and len(value) < schema.get("minLength", 0):
+        errors.append(where + ": shorter than " + str(schema["minLength"]))
+    if isinstance(value, list):
+        if len(value) < schema.get("minItems", 0):
+            errors.append(where + ": fewer than " + str(schema["minItems"]) + " items")
+        for index, item in enumerate(value):
+            if "items" in schema:
+                errors += schema_errors(item, schema["items"], root, where + "[" + str(index) + "]")
+    if isinstance(value, dict):
+        if len(value) < schema.get("minProperties", 0):
+            errors.append(where + ": fewer than " + str(schema["minProperties"]) + " keys")
+        errors += [where + ": missing " + key for key in schema.get("required", []) if key not in value]
+        properties = schema.get("properties", {})
+        extra = schema.get("additionalProperties")
+        for key, item in value.items():
+            if "propertyNames" in schema:
+                errors += schema_errors(key, schema["propertyNames"], root, where + " key " + json.dumps(key))
+            if key in properties:
+                errors += schema_errors(item, properties[key], root, where + "." + key)
+            elif extra is False:
+                errors.append(where + ": unexpected key " + key)
+            elif isinstance(extra, dict):
+                errors += schema_errors(item, extra, root, where + "." + key)
+    return errors
+def hook_screen(name, rule):
+    if name == "api-error":
+        # A turn that ended on an API error: the error sits under the submitted
+        # prompt as a tool-result row, above an empty composer, with no settled marker.
+        return ["❯ fixture turn", "  ⎿  API Error: 500 Internal server error", "", rule, "❯ ", rule, "  ? for shortcuts"]
+    if name == "question":
+        return [rule, " ☐ Approach", "", "Which approach should the fixture take?", "", "❯ 1. Keep the fixture",
+                "  2. Replace the fixture", "  3. Type something.", "", "Enter to select · ↑/↓ to navigate · Esc to cancel", rule]
+    return ["Settings Error", "", " --settings (Startup settings)", "  └ " + "; ".join(hooks.errors)[:70], "",
+            "❯ 1. Exit and fix manually", "  2. Continue without these settings", "", "Enter to confirm · Esc to cancel"]
+class Hooks:
+    """Turn states, and the hook events Claude fires on each move between them.
+
+    The state file holds "<state>", "<state>+hold" or "<state>+defer". A move to
+    a new state fires its hooks. "+hold" fires them but keeps drawing the previous
+    screen until "<state>" is written; "+defer" draws the screen but keeps the
+    hooks until then. <slug>.hooks beside the state file holds options: "hang"
+    lists hook events whose command gets half its payload and a stdin that stays
+    open until it exits.
+    """
+    def __init__(self):
+        import re, subprocess, threading
+        self.re, self.subprocess, self.threading = re, subprocess, threading
+        self.options_path = state_path.with_name(state_path.name + ".hooks")
+        argv = sys.argv[1:]
+        flag = lambda name: argv[argv.index(name) + 1] if name in argv[:-1] else None
+        self.session_id = flag("--session-id") or ""
+        raw = flag("--settings")
+        self.settings, self.errors = None, ["no --settings argument"] if raw is None else []
+        if raw is not None:
+            try:
+                self.settings = json.loads(raw)
+            except ValueError as error:
+                self.errors = ["--settings is not JSON: " + str(error)]
+        if self.settings is not None:
+            schema = json.loads(Path(os.environ["LORE_FAKE_HOOKS_SCHEMA"]).read_text())
+            self.errors = schema_errors(self.settings, schema, schema)
+        record("settings", slug=os.environ.get("LORE_SESSION_SLUG"), valid=not self.errors, errors=self.errors,
+               identity={key: os.environ.get(key) for key in IDENTITY})
+        self.seen, self.turn, self.deferred, self.drawn_state = None, "composer", [], None
+        self.screen = "settings-error" if self.errors else "composer"
+    def options(self):
+        try:
+            return json.loads(self.options_path.read_text())
+        except (OSError, ValueError):
+            return {}
+    def control(self, requested):
+        """The screen to draw for the state file's value, firing hooks when the value moves."""
+        if self.errors or requested == self.seen:
+            return self.screen
+        self.seen = requested
+        base, _, mode = requested.partition("+")
+        if base != self.turn:
+            firings, self.turn = self.transition(self.turn, base), base
+            self.deferred = firings if mode == "defer" else []
+            if mode != "defer":
+                self.fire(firings)
+        elif mode != "defer" and self.deferred:
+            firings, self.deferred = self.deferred, []
+            self.fire(firings)
+        if mode != "hold":
+            self.screen = base
+        return self.screen
+    def transition(self, turn, base):
+        firings = [("PostToolUse", QUESTION_TOOL)] if turn == "question" else []
+        if base == "working" and turn != "question":
+            firings.append(("UserPromptSubmit", None))
+        return firings + {"settled": [("Stop", None)], "api-error": [("StopFailure", None)],
+                          "modal": [("PermissionRequest", "Bash")], "question": [("PreToolUse", QUESTION_TOOL)]}.get(base, [])
+    def prompt(self, body):
+        if not self.errors:
+            self.turn = "working"
+            self.fire([("UserPromptSubmit", None)], body)
+    def drawn(self, screen):
+        if screen != self.drawn_state:
+            self.drawn_state = screen
+            record("screen", state=screen, at=time.time())
+    def applies(self, matcher, tool):
+        if matcher in (None, "", "*"):
+            return True
+        if self.re.fullmatch(r"[A-Za-z0-9_\- ,|]+", matcher):
+            return tool in {part.strip() for part in self.re.split(r"[|,]", matcher)}
+        return bool(tool) and self.re.search(matcher, tool) is not None
+    def handlers(self, event, tool):
+        found = []
+        for group in self.settings["hooks"].get(event) or []:
+            # Events without matcher support ignore the field, as Claude does.
+            if event not in TOOL_EVENTS or self.applies(group.get("matcher"), tool):
+                found += group["hooks"]
+        return found
+    def payload(self, event, tool, prompt):
+        value = {"session_id": self.session_id, "transcript_path": "/fixture/transcripts/" + self.session_id + ".jsonl",
+                 "cwd": os.getcwd(), "permission_mode": "bypassPermissions", "hook_event_name": event}
+        if event == "UserPromptSubmit":
+            value["prompt"] = prompt or "fixture turn"
+        elif event == "Stop":
+            value.update(stop_hook_active=False, last_assistant_message="Fixture turn finished.")
+        elif event == "StopFailure":
+            value.update(error="server_error", error_details="API Error: 500 Internal server error", last_assistant_message="")
+        if tool:
+            value.update(tool_name=tool, tool_use_id="toolu_fixture", tool_input={"command": "fixture command"}
+                         if tool == "Bash" else {"questions": [{"question": "Which approach should the fixture take?"}]})
+        if event == "PostToolUse":
+            value["tool_response"] = {"answers": {"Which approach should the fixture take?": "Keep the fixture"}}
+        return value
+    def fire(self, firings, prompt=None):
+        hang = set(self.options().get("hang") or [])
+        for event, tool in firings:
+            payload = self.payload(event, tool, prompt)
+            for handler in self.handlers(event, tool):
+                args = (event, handler, payload, event in hang)
+                if handler.get("async") is True:
+                    self.threading.Thread(target=self.run, args=args, daemon=True).start()
+                else:
+                    self.run(*args)
+    def run(self, event, handler, payload, hang):
+        """Run one command with the payload on stdin; record its exit, stdout bytes and duration."""
+        sp, data = self.subprocess, json.dumps(payload).encode()
+        result = dict(hook_event=event, command=handler["command"], background=handler.get("async") is True, hung=hang,
+                      started_at=time.time())
+        clock = time.monotonic()
+        try:
+            child = sp.Popen(["sh", "-c", handler["command"]], stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.DEVNULL)
+        except OSError as error:
+            record("hook", error=str(error), **result)
+            return
+        guard = self.threading.Timer(30, child.kill)
+        guard.start()
+        try:
+            try:
+                child.stdin.write(data[:len(data) // 2] if hang else data)
+                child.stdin.flush()
+                if not hang:
+                    child.stdin.close()
+            except OSError:
+                pass
+            output = child.stdout.read()
+            code = child.wait()
+        finally:
+            guard.cancel()
+            try:
+                child.stdin.close()
+            except OSError:
+                pass
+        record("hook", exit=code, stdout_bytes=len(output), duration=time.monotonic() - clock, **result)
+if os.environ.get("LORE_FAKE_HARNESS_HOOKS") == "1":
+    hooks = Hooks()
 def render(message="ready"):
     rule = "─" * 80
     rows = {
@@ -68,8 +282,12 @@ def render(message="ready"):
         }[framework]
     elif state == "unknown":
         rows = ["Unrecognized application screen", "fixture diagnostic: 42"]
+    elif hooks is not None and framework == "claude-code" and state in ("api-error", "question", "settings-error"):
+        rows = hook_screen(state, rule)
     top = max(1, os.get_terminal_size(1).lines - len(rows) - 1)
     os.write(1, ("\x1b[2J\x1b[" + str(top) + ";1H" + message + "\r\n" + "\r\n".join(rows)).encode())
+    if hooks is not None:
+        hooks.drawn(state)
 tty.setraw(0)
 record("started", argv=sys.argv[1:], cwd=os.getcwd(), instance=os.environ.get("LORE_SESSION_INSTANCE"),
        slug=os.environ.get("LORE_SESSION_SLUG"), env=sorted(os.environ),
@@ -81,6 +299,8 @@ while True:
         requested = state_path.read_text().strip()
     except FileNotFoundError:
         requested = "composer"
+    if hooks is not None:
+        requested = hooks.control(requested)
     if requested != state:
         state = requested
         if state.startswith("history:"):
@@ -102,6 +322,8 @@ while True:
     if b"\r" in buffer or b"\n" in buffer:
         body = buffer.replace(b"\x1b[200~", b"").replace(b"\x1b[201~", b"").strip(b"\r\n")
         record("message", body=body.decode(errors="replace"), slug=os.environ.get("LORE_SESSION_SLUG"))
+        if hooks is not None:
+            hooks.prompt(body.decode(errors="replace"))
         if body == b"kill-owner-after-input":
             store = os.environ.get("LORE_KNOWLEDGE_DIR") or os.environ["LORE_SESSION_STORE_ROOT"]
             for path in (Path(store) / "_sessions/instances").glob("*.json"):
@@ -1409,6 +1631,509 @@ class LoginRuntimeIntegration(RuntimeFixture, unittest.TestCase):
         self.assertTrue(record["values"]["TMUX"].startswith(str(socket) + ","), record)
         self.send(checkout, handle, "pane-reachable", managed=True)
         self.assertEqual([m["pid"] for m in self.messages("pane-reachable")], [record["pid"]])
+
+
+def hook_row(slug, hook_event=None):
+    """Matches a journal row that slug's lifecycle hook wrote, for hook_event when given."""
+    return lambda row: (row.get("slug") == slug and (row.get("links") or {}).get("authority") == "hook-row"
+                        and hook_event in (None, row["links"].get("hook_event")))
+
+
+def host_row(slug, *events):
+    """Matches a row of one of events that the host wrote from its own reading of slug's screen."""
+    return lambda row: (row.get("slug") == slug and row.get("event") in events
+                        and (row.get("links") or {}).get("authority") != "hook-row")
+
+
+@unittest.skipUnless(os.environ.get("LORE_SESSION_HOST_BINARY") and shutil.which("tmux"),
+                     "requires an explicitly built host binary and tmux")
+class SessionLifecycleHookIntegration(RuntimeFixture, unittest.TestCase):
+    """Hosted Claude sessions whose fake harness runs the lifecycle hooks the host launched it with.
+
+    Only this class sets LORE_FAKE_HARNESS_HOOKS=1. The fake Claude then checks the
+    --settings value in its argv against the hooks schema fixture, draws Claude's
+    Settings Error dialog when it does not match, and runs each matching command
+    from it as its screen moves between turn states. Writing "<state>+hold" fires a
+    state's hooks while the previous screen stays drawn, and "<state>+defer" draws
+    the screen while the hooks wait; writing "<state>" then completes the move. That
+    is how a scenario puts a hook row before or after the host's own screen rows.
+
+    Wakes are counted as distinct non-quiet records for the session in the durable
+    delivery file. Each watcher arm reads the journal once and sweeps the session's
+    current observation, and every wake is acknowledged before the next arm, because
+    an unacknowledged wake is replayed in place of the next row's outcome.
+    """
+
+    ROOT_PREFIX = "lore-lh-"
+
+    # The store, checkout, CLI and host helpers of the login-runtime scenarios.
+    use_runtime = LoginRuntimeIntegration.use_runtime
+    make_store = LoginRuntimeIntegration.make_store
+    git = LoginRuntimeIntegration.git
+    make_checkout = LoginRuntimeIntegration.make_checkout
+    create_item = LoginRuntimeIntegration.create_item
+    declare_checkout = LoginRuntimeIntegration.declare_checkout
+    lore = LoginRuntimeIntegration.lore
+    lore_json = LoginRuntimeIntegration.lore_json
+    ensure_host = LoginRuntimeIntegration.ensure_host
+    raw_request = LoginRuntimeIntegration.raw_request
+    send = LoginRuntimeIntegration.send
+    login = LoginRuntimeIntegration.login
+    supervisor_pid = LoginRuntimeIntegration.supervisor_pid
+    key = LoginRuntimeIntegration.key
+    host_dir = LoginRuntimeIntegration.host_dir
+    ready = LoginRuntimeIntegration.ready
+    wait_ready = LoginRuntimeIntegration.wait_ready
+    started = LoginRuntimeIntegration.started
+
+    def setUp(self):
+        self.open_root()
+        self.brief = self.root / "brief.txt"
+        self.brief.write_text("Fixture task: remain available for lifecycle hook tests.\n")
+        self.runtime = os.environ.get("LORE_SESSION_RUNTIME") or "itest-" + str(os.getpid())
+        self.use_hook_runtime()
+        for name, text in ((".claude/settings.json", '{"theme": "dark"}\n'),
+                           (".codex/config.toml", 'model = "fixture-model"\n'),
+                           (".config/opencode/opencode.json", '{"theme": "system"}\n')):
+            (self.home / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.home / name).write_text(text)
+        # A home where Claude has run holds its transcript directory. The host's launch
+        # admission checks that directory is writable, creating it when it is missing.
+        (self.home / ".claude/projects").mkdir()
+        self.harness_config = self.harness_config_tree()
+
+    def use_hook_runtime(self, **values):
+        self.use_runtime(self.runtime, LORE_FAKE_HARNESS_HOOKS="1", LORE_FAKE_HOOKS_SCHEMA=str(HOOKS_SCHEMA), **values)
+
+    def harness_config_tree(self):
+        tree = {}
+        for top in HARNESS_CONFIG:
+            for path in sorted((self.home / top).rglob("*")):
+                tree[str(path.relative_to(self.home))] = (hashlib.sha256(path.read_bytes()).hexdigest()
+                                                          if path.is_file() else "directory")
+        return tree
+
+    def host_store(self):
+        """A store, a checkout and a work item whose worker requests the store host claims."""
+        self.kdir = self.make_store("alpha")
+        self.checkout = self.make_checkout("alpha", "alpha-one")
+        self.item = self.create_item(self.kdir, self.checkout, "Hook Fixture")
+        self.declare_checkout(self.kdir, self.item, self.checkout)
+
+    def launch(self, slug):
+        """Request a worker session for slug; return the fake Claude's start record once its --settings passed."""
+        self.raw_request(self.checkout, slug, "--context", str(self.brief))
+        record = self.started(slug)
+        self.assertEqual(record["framework"], "claude-code", record)
+        settings = self.settings_of(record)
+        self.assertTrue(settings["valid"], settings)
+        self.assertTrue(settings["identity"]["LORE_SESSION_GENERATION"], settings)
+        return record
+
+    def settings_of(self, record):
+        return self.until(lambda: next((e for e in self.events() if e["event"] == "settings" and e["pid"] == record["pid"]),
+                                       None), message="the fake Claude recorded no --settings check")
+
+    def set_state(self, slug, value):
+        (self.state_dir / slug).write_text(value)
+
+    def rows_since(self, offset):
+        """(row, end offset) for each complete journal row after byte offset."""
+        path = self.kdir / "_sessions/events.jsonl"
+        data = path.read_bytes() if path.exists() else b""
+        rows = []
+        for line in data[offset:].split(b"\n")[:-1]:
+            offset += len(line) + 1
+            rows.append((json.loads(line), offset))
+        return rows
+
+    def journal_end(self):
+        rows = self.rows_since(0)
+        return rows[-1][1] if rows else 0
+
+    def await_rows(self, offset, predicate, count=1, timeout=30, message="the expected journal rows did not land"):
+        def landed():
+            rows = [row for row, _ in self.rows_since(offset) if predicate(row)]
+            return rows if len(rows) >= count else None
+        return self.until(landed, timeout, message)
+
+    def turn(self, slug, hook_event="UserPromptSubmit"):
+        """Start a working turn; return the journal end once its hook row and the host's resumed row are in."""
+        offset = self.journal_end()
+        self.set_state(slug, "working")
+        self.await_rows(offset, hook_row(slug, hook_event), message=f"no {hook_event} hook row for {slug}")
+        self.await_rows(offset, host_row(slug, "resumed"), message=f"the host journaled no resumed row for {slug}")
+        return self.journal_end()
+
+    def watch(self, since=None):
+        """One durable watcher arm that reads the journal once; a wake that is not quiet is acknowledged."""
+        args = ["coordinate", "watch", "--durable", "--owner-pid", str(os.getpid()), "--timeout", "0",
+                "--pending-stale", "0", "--json", "--kdir", str(self.kdir)]
+        if since is not None:
+            args += ["--since", str(since)]
+        result = self.lore(*args, cwd=self.checkout, timeout=120)
+        self.assertIn(result.returncode, (0, 2), result.stdout + result.stderr)
+        wake = json.loads(result.stdout)
+        if wake["tier"] != "quiet":
+            acknowledged = self.lore("coordinate", "status", "--wake-id", wake["wake_id"], "--json", cwd=self.checkout)
+            self.assertEqual(acknowledged.returncode, 0, acknowledged.stdout + acknowledged.stderr)
+        return wake
+
+    def wait_once(self, slug, since):
+        """One raw lore session wait that reads the journal once; returns its outcome and next cursor."""
+        result = self.lore("session", "wait", slug, "--since", str(since), "--timeout", "0", "--json",
+                           "--kdir", str(self.kdir), cwd=self.checkout)
+        self.assertIn(result.returncode, (0, 2), result.stdout + result.stderr)
+        value = json.loads(result.stdout)
+        return value["outcome"], value["next_cursor"]
+
+    def wake_ids(self, slug):
+        """Distinct non-quiet durable wake records that concern slug."""
+        found = set()
+        for path in (self.kdir / "_coordination").glob("watch-delivery-*.json"):
+            for record in (read_json(path) or {}).get("wakes", []):
+                payload = record.get("payload") or {}
+                slugs = {(payload.get("matched") or {}).get("slug")} | {r.get("slug") for r in payload.get("current_delta") or []}
+                if payload.get("tier") != "quiet" and slug in slugs:
+                    found.add(record["wake_id"])
+        return found
+
+    def swept(self, slug):
+        """The state the watcher's sweep last recorded for slug."""
+        for path in (self.kdir / "_coordination").glob("watch-observation-*.json"):
+            state = ((read_json(path) or {}).get("states") or {}).get(slug)
+            if state:
+                return state
+        return None
+
+    def peek(self, slug):
+        _, value = self.lore_json("session", "peek", slug, cwd=self.checkout)
+        return value
+
+    def finish(self, record):
+        """Every command the fake ran came from the --settings payload in the argv it started with, and
+        hosting left the test home's Claude, Codex and OpenCode configuration byte-identical."""
+        argv = record["argv"]
+        payload = json.loads(argv[argv.index("--settings") + 1])
+        handlers = [handler for groups in payload["hooks"].values() for group in groups for handler in group["hooks"]]
+        script = "'" + str(REPO / "scripts/session-lifecycle-hook.sh") + "' 'claude-code'"
+        self.assertTrue(handlers, payload)
+        for handler in handlers:
+            self.assertTrue(handler["command"].startswith(script), handler)
+            self.assertIs(handler.get("async"), True, handler)
+        ran = [e for e in self.events() if e["event"] == "hook" and e["pid"] == record["pid"]]
+        self.assertTrue(ran, "the fake Claude ran no hook")
+        for run in ran:
+            self.assertIn(run["command"], {handler["command"] for handler in handlers}, run)
+            self.assertTrue(run["background"], run)
+            self.assertEqual((run["exit"], run["stdout_bytes"]), (0, 0), run)
+        self.assertEqual(self.harness_config_tree(), self.harness_config,
+                         "hosting changed a file under the test home's harness configuration")
+
+    def run_fake(self, slug, settings, states, settle=4):
+        """Run the fake Claude in a pty with no host, moving it through states; return what it drew and its pid."""
+        master, follower = pty.openpty()
+        fcntl.ioctl(follower, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        child = subprocess.Popen([str(self.bin / "claude"), "--model", "fixture-model", "--settings", json.dumps(settings),
+                                  "--session-id", "fixture-session", "fixture prompt"], stdin=follower, stdout=follower,
+                                 stderr=follower, env=dict(self.env, LORE_SESSION_SLUG=slug), cwd=self.root, close_fds=True)
+        os.close(follower)
+        self.extra_pids.append(child.pid)
+        screen = bytearray()
+        def pump(seconds):
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], 0.05)[0]:
+                    try:
+                        screen.extend(os.read(master, 65536))
+                    except OSError:
+                        return
+        pump(1)
+        for value in states:
+            self.set_state(slug, value)
+            pump(settle)
+        os.write(master, b"\x04")
+        pump(0.5)
+        child.wait(timeout=10)
+        os.close(master)
+        return screen.decode(errors="replace"), child.pid
+
+    def test_fake_claude_checks_its_settings_and_holds_its_turn_only_for_synchronous_hooks(self):
+        """No host here: the fake every other scenario relies on refuses a payload outside the hooks
+        schema with Claude's Settings Error dialog, and only a handler without async: true keeps it
+        from drawing the next screen, so a scenario's missing turn delay is not true by construction."""
+        refused = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "true", "async": True, "timeout": 5}]}]}}
+        drawn, pid = self.run_fake("fixture-refused", refused, ["settled"])
+        settings = next(e for e in self.events() if e["event"] == "settings" and e["pid"] == pid)
+        self.assertFalse(settings["valid"], settings)
+        self.assertIn("$.hooks.Stop[0].hooks[0]: unexpected key timeout", settings["errors"])
+        self.assertIn("Settings Error", drawn)
+        self.assertFalse([e for e in self.events() if e["event"] == "hook" and e["pid"] == pid])
+
+        marker = self.root / "synchronous-hook-done"
+        accepted = {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "sleep 1; touch '" + str(marker) + "'"},
+            {"type": "command", "command": "sleep 2", "async": True}]}]}}
+        drawn, pid = self.run_fake("fixture-accepted", accepted, ["working", "settled"])
+        self.assertTrue(next(e for e in self.events() if e["event"] == "settings" and e["pid"] == pid)["valid"])
+        self.assertTrue(marker.exists())
+        runs = {e["background"]: e for e in self.events() if e["event"] == "hook" and e["pid"] == pid}
+        settled = next(e for e in self.events() if e["event"] == "screen" and e["pid"] == pid and e["state"] == "settled")
+        self.assertLessEqual(runs[False]["started_at"] + runs[False]["duration"], settled["at"] + 0.05, (runs, settled))
+        self.assertLess(settled["at"], runs[True]["started_at"] + runs[True]["duration"], (runs, settled))
+        self.assertGreater(runs[True]["duration"], 1.5, runs)
+
+    def test_api_error_turn_end_on_a_screen_the_host_cannot_read_wakes_once_on_its_hook_row(self):
+        self.host_store()
+        slug = self.item + "--w1"
+        record = self.launch(slug)
+        self.assertEqual(self.watch(since=self.turn(slug))["tier"], "quiet")
+        before, offset = self.wake_ids(slug), self.journal_end()
+        self.set_state(slug, "api-error")
+        failure = self.await_rows(offset, hook_row(slug, "StopFailure"), message="StopFailure journaled no row")[0]
+        wake = self.watch()
+        self.assertEqual((wake["outcome"], wake["tier"], wake["authority"]), ("matched", "confirmed", "hook-row"), wake)
+        self.assertEqual((wake["classification"]["label"], wake["matched"]["links"]["error"]),
+                         ("hook-StopFailure", "server_error"), wake)
+        self.assertEqual(self.watch()["tier"], "quiet")
+        self.assertEqual(len(self.wake_ids(slug) - before), 1)
+
+        # The host's own reading of the screen is unknown and it journaled no park of its own;
+        # peek reports the hook's account with that reading beside it.
+        self.assertFalse([row for row, _ in self.rows_since(offset) if host_row(slug, "needs_input", "modal_blocked")(row)])
+        peek = self.peek(slug)
+        observation, evidence = peek["observation"], peek["observation"]["evidence"]
+        self.assertEqual((observation["activity"], observation["authority"], evidence["matcher"]),
+                         ("blocked", "hook-row", "claude-code-hook-stop-failure-v1"), peek)
+        self.assertEqual((evidence["screen"]["activity"], evidence["screen"]["matcher"]),
+                         ("unknown", "unrecognized-screen-v1"), peek)
+        self.assertEqual((evidence["hook"]["hook_event"], evidence["hook"]["error"]), ("StopFailure", "server_error"), peek)
+        self.assertIn("API Error: 500", "\n".join(peek["rows"]))
+
+        # The row speaks for the launch the host runs, under the host that runs it.
+        links, owner = failure["links"], self.wait_ready(self.kdir)["instance_name"]
+        self.assertEqual(links["generation"], observation["generation"])
+        self.assertEqual(links["generation"], self.settings_of(record)["identity"]["LORE_SESSION_GENERATION"])
+        self.assertEqual((failure["actor_instance"], links["spawn_instance"]), (owner, record["instance"]))
+
+        sent = self.journal_end()
+        self.send(self.checkout, slug, "after-api-error")
+        self.await_rows(sent, hook_row(slug, "UserPromptSubmit"), message="the sent prompt fired no UserPromptSubmit row")
+        self.finish(record)
+
+    def test_hung_hook_neither_delays_the_turn_nor_stops_the_screen_wake(self):
+        self.host_store()
+        slug = self.item + "--w1"
+        record = self.launch(slug)
+        self.assertEqual(self.watch(since=self.turn(slug))["tier"], "quiet")
+        (self.state_dir / (slug + ".hooks")).write_text(json.dumps({"hang": ["Stop"]}))
+        before, offset = self.wake_ids(slug), self.journal_end()
+        self.set_state(slug, "settled")
+        self.await_rows(offset, host_row(slug, "needs_input"), message="the host journaled no needs_input for the settled screen")
+        wake = self.watch()
+        self.assertEqual((wake["outcome"], wake["tier"], wake["authority"]), ("matched", "confirmed", "screen-signature"), wake)
+
+        run = self.until(lambda: next((e for e in self.events() if e["event"] == "hook" and e["pid"] == record["pid"]
+                                       and e["hook_event"] == "Stop"), None), 20, "the hung Stop hook never exited")
+        drawn = next(e for e in self.events() if e["event"] == "screen" and e["pid"] == record["pid"] and e["state"] == "settled")
+        self.assertTrue(run["hung"], run)
+        self.assertEqual((run["exit"], run["stdout_bytes"]), (0, 0), run)
+        # It waited on its open stdin, stopped itself within its five-second bound,
+        # and the settled screen was drawn while it was still running.
+        self.assertGreater(run["duration"], 1.5, run)
+        self.assertLess(run["duration"], 5.5, run)
+        self.assertLess(abs(drawn["at"] - run["started_at"]), 1.0, (drawn, run))
+        self.assertLess(drawn["at"], run["started_at"] + run["duration"], (drawn, run))
+        self.assertFalse([row for row, _ in self.rows_since(offset) if hook_row(slug, "Stop")(row)])
+        log = (self.kdir / "_sessions/hooks.log").read_text()
+        self.assertTrue(any(f"slug={slug} " in line and "not a JSON object" in line for line in log.splitlines()), log)
+        self.assertEqual(self.watch()["tier"], "quiet")
+        self.assertEqual(len(self.wake_ids(slug) - before), 1)
+        self.finish(record)
+
+    def test_one_turn_end_wakes_once_whichever_of_its_hook_and_screen_rows_lands_first(self):
+        self.host_store()
+        slug = self.item + "--w1"
+        record = self.launch(slug)
+        self.assertEqual(self.watch(since=self.turn(slug))["tier"], "quiet")
+        for order in ("hook-first", "screen-first"):
+            before, offset = self.wake_ids(slug), self.journal_end()
+            waits, cursor = [], offset
+            def rearm():
+                nonlocal cursor
+                wake = self.watch()
+                outcome, cursor = self.wait_once(slug, cursor)
+                waits.append(outcome)
+                return wake
+            stop, screen = hook_row(slug, "Stop"), host_row(slug, "needs_input")
+            first, second = (stop, screen) if order == "hook-first" else (screen, stop)
+            self.set_state(slug, "settled+hold" if order == "hook-first" else "settled+defer")
+            self.await_rows(offset, first, message=f"{order}: the first row did not land")
+            wake = rearm()
+            self.assertEqual((wake["outcome"], wake["tier"], wake["authority"]),
+                             ("matched", "confirmed", "hook-row" if order == "hook-first" else "screen-signature"), (order, wake))
+            self.assertFalse([row for row, _ in self.rows_since(offset) if second(row)], order)
+            self.set_state(slug, "settled")
+            self.await_rows(offset, second, message=f"{order}: the second row did not land")
+            self.assertEqual(rearm()["tier"], "quiet", order)
+            # This arm's sweep samples the settled park, and the next re-arm stays quiet too.
+            self.assertEqual(rearm()["tier"], "quiet", order)
+            self.assertEqual(self.swept(slug)["activity"], "idle", order)
+            self.assertEqual(len(self.wake_ids(slug) - before), 1, order)
+            self.assertEqual(waits, ["matched", "timeout", "timeout"], order)
+            self.assertEqual(self.watch(since=self.turn(slug))["tier"], "quiet", order)
+        self.finish(record)
+
+    def test_question_dialog_wakes_once_with_its_hook_row_before_or_after_the_host_rows(self):
+        """A question dialog journals three rows: the hook's needs_input and the host's needs_input and
+        modal_blocked. The hook row is put before or after the host's two; the watcher and raw wait are
+        re-armed after each row as it becomes visible and after a sweep has sampled the drawn dialog."""
+        self.host_store()
+        slug = self.item + "--w1"
+        record = self.launch(slug)
+        self.assertEqual(self.watch(since=self.turn(slug))["tier"], "quiet")
+        dialog = host_row(slug, "needs_input", "modal_blocked")
+        for order in ("hook-first", "screen-first"):
+            before, offset = self.wake_ids(slug), self.journal_end()
+            waits, wakes, cursor = [], [], offset
+            def rearm():
+                nonlocal cursor
+                wakes.append(self.watch())
+                outcome, cursor = self.wait_once(slug, cursor)
+                waits.append(outcome)
+            if order == "hook-first":
+                self.set_state(slug, "question+hold")
+                self.await_rows(offset, hook_row(slug, "PreToolUse"), message="PreToolUse journaled no row")
+                rearm()
+                self.assertFalse([row for row, _ in self.rows_since(offset) if dialog(row)], order)
+                self.set_state(slug, "question")
+            else:
+                self.set_state(slug, "question+defer")
+            # Re-arm once the host's first row for the drawn dialog is in, and again once both are.
+            # The host usually writes the two within one watcher read; the pairing of two host rows
+            # read in separate arms is covered by the watcher's delivery tests.
+            self.await_rows(offset, dialog, message=f"{order}: the host journaled nothing for the drawn dialog")
+            rearm()
+            self.until(lambda: {row["event"] for row, _ in self.rows_since(offset) if dialog(row)} == {"needs_input", "modal_blocked"},
+                       30, f"{order}: the host did not journal both needs_input and modal_blocked")
+            rearm()
+            if order == "screen-first":
+                self.assertFalse([row for row, _ in self.rows_since(offset) if hook_row(slug)(row)], order)
+                self.set_state(slug, "question")
+                self.await_rows(offset, hook_row(slug, "PreToolUse"), message="PreToolUse journaled no row")
+                rearm()
+            # A sweep has sampled the drawn dialog; the next re-arm stays quiet.
+            self.assertEqual(self.swept(slug)["activity"], "blocked", order)
+            rearm()
+            self.assertEqual((wakes[0]["outcome"], wakes[0]["tier"], wakes[0]["authority"]),
+                             ("matched", "confirmed", "hook-row" if order == "hook-first" else "screen-signature"), (order, wakes[0]))
+            self.assertEqual([wake["tier"] for wake in wakes[1:]], ["quiet"] * (len(wakes) - 1), (order, wakes))
+            self.assertEqual(len(self.wake_ids(slug) - before), 1, order)
+            self.assertEqual(waits, ["matched"] + ["timeout"] * (len(waits) - 1), order)
+            parks = [row for row, _ in self.rows_since(offset) if dialog(row) or hook_row(slug)(row)]
+            self.assertEqual(sorted((row["event"], (row.get("links") or {}).get("authority") == "hook-row") for row in parks),
+                             [("modal_blocked", False), ("needs_input", False), ("needs_input", True)], (order, parks))
+            self.assertEqual(self.watch(since=self.turn(slug, "PostToolUse"))["tier"], "quiet", order)
+        self.finish(record)
+
+    def assert_hook_park_after_owner_change(self, slug, record, owner):
+        """After the session changed hosts, its hook rows name the new owner and the generation that
+        owner observes, and a hook park on a screen it cannot read still wakes confirmed."""
+        self.assertNotEqual(owner, record["instance"])
+        start = self.journal_end()
+        self.assertEqual(self.watch(since=self.turn(slug))["tier"], "quiet")
+        before, offset = self.wake_ids(slug), self.journal_end()
+        self.set_state(slug, "api-error")
+        self.await_rows(offset, hook_row(slug, "StopFailure"), message="StopFailure journaled no row")
+        wake = self.watch()
+        self.assertEqual((wake["outcome"], wake["tier"], wake["authority"]), ("matched", "confirmed", "hook-row"), wake)
+        self.assertEqual(self.watch()["tier"], "quiet")
+        self.assertEqual(len(self.wake_ids(slug) - before), 1)
+        observation = self.peek(slug)["observation"]
+        self.assertEqual((observation["instance"], observation["activity"], observation["authority"]),
+                         (owner, "blocked", "hook-row"), observation)
+        self.assertEqual(observation["evidence"]["screen"]["activity"], "unknown", observation)
+        generation = self.settings_of(record)["identity"]["LORE_SESSION_GENERATION"]
+        self.assertEqual(observation["generation"], generation)
+        rows = [row for row, _ in self.rows_since(start) if hook_row(slug)(row)]
+        self.assertEqual([row["links"]["hook_event"] for row in rows], ["UserPromptSubmit", "StopFailure"], rows)
+        for row in rows:
+            self.assertEqual((row["actor_instance"], row["links"]["spawn_instance"], row["links"]["generation"]),
+                             (owner, record["instance"], generation), row)
+        self.finish(record)
+
+    def test_hook_rows_after_a_host_drain_and_relaunch_name_the_new_owner_and_its_generation(self):
+        built = self.binary
+        private = self.root / "hostbin/lore-tui"
+        private.parent.mkdir()
+        shutil.copy2(built, private)
+        self.use_hook_runtime(LORE_SESSION_HOST_BINARY=str(private))
+        self.host_store()
+        slug = self.item + "--w1"
+        record = self.launch(slug)
+        before = self.wait_ready(self.kdir)
+        self.assertEqual(before["instance_name"], record["instance"])
+        replacement = private.with_name(".lore-tui.new")
+        shutil.copy2(built, replacement)
+        os.replace(replacement, private)
+        after = self.until(lambda: (lambda r: r if r and r["pid"] != before["pid"] else None)(self.ready(self.kdir)),
+                           90, "the host was not restarted onto the new binary")
+        owner_row = self.kdir / "_sessions/instances" / (after["instance_name"] + ".json")
+        self.until(lambda: any(s.get("slug") == slug for s in (read_json(owner_row) or {}).get("sessions", [])),
+                   60, "the relaunched host never adopted the session")
+        self.assertTrue(alive(record["pid"]))
+        self.assert_hook_park_after_owner_change(slug, record, after["instance_name"])
+
+    def test_hook_rows_after_checkpoint_adoption_name_the_new_owner_and_its_generation(self):
+        """A host that dies after writing a session's launch checkpoint and before listing the session in
+        its own row leaves the checkpoint as the session's only record, and the next host adopts the
+        session from it. The host lists the session within milliseconds of creating its pane, before
+        anything inside the pane can run, and a later host prefers a dead host's own row to its
+        checkpoints. So this scenario launches normally, stops the host and its supervisor, and puts
+        back what such a death leaves: the checkpoint as the host wrote it, from its retired copy, and
+        the host's row without the session."""
+        # The host stays up while idle, so the session starts in a later second than the host and a
+        # checkpoint stamped with the host's start would give the adopted session another generation.
+        self.use_hook_runtime(LORE_SESSION_HOST_IDLE_TIMEOUT="120")
+        self.host_store()
+        first = self.ensure_host(self.kdir)
+        instances = self.kdir / "_sessions/instances"
+        host_started = instant(read_json(instances / (first["instance_name"] + ".json"))["started"])
+        self.until(lambda: time.time() >= host_started.timestamp() + 2, 10)
+        slug = self.item + "--w1"
+        record = self.launch(slug)
+        self.assertEqual(self.wait_ready(self.kdir)["pid"], first["pid"])
+        lists = lambda path: any(s.get("slug") == slug for s in (read_json(path) or {}).get("sessions", []))
+        self.until(lambda: lists(instances / (first["instance_name"] + ".json")) and not list(instances.glob("spawn-*.json"))
+                   and any(row.get("event") == "spawned" and row.get("slug") == slug for row, _ in self.rows_since(0)),
+                   30, "the host never finished launching the session")
+        retired = [path for path in instances.glob(".spawn-*.retired") if lists(path)]
+        self.assertEqual(len(retired), 1, retired)
+        stamped = next(s for s in read_json(retired[0])["sessions"] if s["slug"] == slug)["started"]
+        self.assertGreater(instant(stamped), host_started, "the session did not start after its host")
+        supervisor = self.supervisor_pid()
+        os.kill(supervisor, signal.SIGSTOP)
+        try:
+            os.kill(first["pid"], signal.SIGKILL)
+            self.until(lambda: not lock_held(self.host_dir(self.kdir) / "runtime.lock"), 30, "the host was not killed")
+        finally:
+            os.kill(supervisor, signal.SIGKILL)
+        self.until(lambda: not lock_held(self.login() / "supervisor.lock"), 10, "the supervisor was not killed")
+        checkpoint = instances / (retired[0].name[1:-len(".retired")] + ".json")
+        checkpoint.write_bytes(retired[0].read_bytes())
+        retired[0].unlink()
+        row = read_json(instances / (first["instance_name"] + ".json"))
+        row["sessions"] = [s for s in row["sessions"] if s["slug"] != slug]
+        (instances / (first["instance_name"] + ".json")).write_text(json.dumps(row))
+
+        offset = self.journal_end()
+        owner = self.ensure_host(self.kdir)
+        recovered = self.await_rows(offset, lambda r: r.get("event") == "recovered" and r.get("slug") == slug,
+                                    timeout=60, message="no host adopted the session from its launch checkpoint")[0]
+        self.assertEqual((recovered["actor_instance"], recovered["target_instance"]),
+                         (owner["instance_name"], checkpoint.stem), recovered)
+        self.assertTrue(alive(record["pid"]))
+        self.assert_hook_park_after_owner_change(slug, record, owner["instance_name"])
 
 
 if __name__ == "__main__":
