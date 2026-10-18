@@ -19,7 +19,6 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/coordination/board"
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
-	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/sessionview"
 	"github.com/anticorrelator/lore/tui/internal/work"
 	"github.com/anticorrelator/lore/tui/internal/worktree"
@@ -271,17 +270,34 @@ func press(code rune, mods ...tea.KeyMod) tea.KeyPressMsg {
 	return k
 }
 
-func prepareConfirmEnqueue(t *testing.T, m model) model {
+// prepareConfirmLaunch points a confirm-modal model at a window fixture whose
+// stub lore accepts every launch.
+func prepareConfirmLaunch(t *testing.T, m model) (model, *windowFixture) {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "adapters", "settings.template.json"))
-	if err != nil {
-		t.Fatal(err)
+	f := newWindowFixture(t)
+	f.respond(t, 0, 0, `{"request_id":"req-confirm","enqueued":true}`, "")
+	m.config.KnowledgeDir, m.config.WorkDir, m.config.ProjectDir = f.kdir, filepath.Join(f.kdir, "_work"), f.checkout
+	m = m.viewStore(f.kdir, func() (bool, string) { return true, "" })
+	return m, f
+}
+
+// assertLaunchedThroughTheHost checks that Enter sent exactly one `lore session
+// request` of type typ and left panel creation to the spawn.
+func assertLaunchedThroughTheHost(t *testing.T, f *windowFixture, nm model, slug, typ string) {
+	t.Helper()
+	if nm.flashErr != "" || nm.refusalActive() {
+		t.Fatalf("launch failed: flash=%q refusals=%#v", nm.flashErr, nm.refusals)
 	}
-	setupFakeLoreData(t, string(raw))
-	kdir := t.TempDir()
-	m.config.KnowledgeDir, m.config.ProjectDir, m.normalizedProjectDir = kdir, kdir, kdir
-	m.sessionsDir = filepath.Join(kdir, "_sessions")
-	return m
+	if nm.hasSessionPanel(slug) {
+		t.Error("a sent launch must leave panel creation to the spawn")
+	}
+	calls := f.calls(t, "session", "request", "--type", typ)
+	if len(calls) != 1 {
+		t.Fatalf("lore session request --type %s ran %d times: %#v", typ, len(calls), f.calls(t))
+	}
+	if l, ok := nm.launches[slug]; !ok || l.requestID != "req-confirm" {
+		t.Fatalf("pending launch = %#v", nm.launches)
+	}
 }
 
 // TestSpecConfirmModalKeybindContract verifies the keybinds displayed in
@@ -306,26 +322,16 @@ func TestSpecConfirmModalKeybindContract(t *testing.T) {
 		}
 	})
 	t.Run("Enter (launch)", func(t *testing.T) {
-		m := prepareConfirmEnqueue(t, specConfirmModel())
+		m, f := prepareConfirmLaunch(t, specConfirmModel())
 		nm, cmd := updateModel(t, m, press(tea.KeyEnter))
 		if nm.sessionConfirmActive {
 			t.Error("modal should close on Enter")
 		}
 		if cmd == nil {
-			t.Fatal("Enter should dispatch the enqueue command")
+			t.Fatal("Enter should dispatch the launch command")
 		}
-		result := cmd()
-		nm, _ = updateModel(t, nm, result)
-		if nm.flashErr != "" {
-			t.Fatalf("enqueue failed: %s", nm.flashErr)
-		}
-		if nm.hasSessionPanel("test-item") {
-			t.Error("enqueue completion must leave panel creation to queue claim")
-		}
-		rows := session.ScanPending(nm.sessionsDir)
-		if len(rows) != 1 || rows[0].Route == nil {
-			t.Fatalf("pending route = %#v", rows)
-		}
+		nm = settle(t, nm, cmd)
+		assertLaunchedThroughTheHost(t, f, nm, "test-item", "spec")
 	})
 	t.Run("Esc (cancel)", func(t *testing.T) {
 		m := specConfirmModel()
@@ -448,25 +454,16 @@ func TestImplementConfirmModalKeybindContract(t *testing.T) {
 		}
 	})
 	t.Run("Enter (launch implement)", func(t *testing.T) {
-		m := prepareConfirmEnqueue(t, implementModel())
+		m, f := prepareConfirmLaunch(t, implementModel())
 		nm, cmd := updateModel(t, m, press(tea.KeyEnter))
 		if nm.sessionConfirmActive {
 			t.Error("Enter should close the implement modal")
 		}
 		if cmd == nil {
-			t.Fatal("Enter should dispatch the enqueue command")
+			t.Fatal("Enter should dispatch the launch command")
 		}
-		nm, _ = updateModel(t, nm, cmd())
-		if nm.flashErr != "" {
-			t.Fatalf("enqueue failed: %s", nm.flashErr)
-		}
-		if nm.hasSessionPanel("impl-1") {
-			t.Error("enqueue completion must leave panel creation to queue claim")
-		}
-		rows := session.ScanPending(nm.sessionsDir)
-		if len(rows) != 1 || rows[0].Route == nil {
-			t.Fatalf("pending route = %#v", rows)
-		}
+		nm = settle(t, nm, cmd)
+		assertLaunchedThroughTheHost(t, f, nm, "impl-1", "implement")
 	})
 }
 
@@ -2896,13 +2893,16 @@ func TestArchiveOpensConfirmModal(t *testing.T) {
 }
 
 // TestTerminalModeStatusBarKeybindContract verifies the terminal-mode hint
-// set: "ctrl+t detail · Esc back to list (forwarded) · Ctrl+c terminate".
+// set: "ctrl+t detail · Esc back to list (forwarded) · Ctrl+c close".
 func TestTerminalModeStatusBarKeybindContract(t *testing.T) {
 	terminalModel := func() model {
 		m := workContractModel()
 		m.focusedPanel = panelRight
 		m.terminalMode = true
-		m.setSessionPanel("item-1", work.NewSessionPanelModel("item-1"))
+		m.viewers = map[string]sessionViewer{"item-1": {
+			panel: work.NewViewerSessionPanelModel("item-1", "lore-store-host-item-1"),
+			slug:  "item-1", sessionID: "sid-1", title: "item-1",
+		}}
 		return m
 	}
 	t.Run("ctrl+t (detail)", func(t *testing.T) {
@@ -2911,44 +2911,37 @@ func TestTerminalModeStatusBarKeybindContract(t *testing.T) {
 			t.Error("ctrl+t should switch back to detail view")
 		}
 	})
-	t.Run("Ctrl+c (terminate)", func(t *testing.T) {
+	t.Run("Ctrl+c (close)", func(t *testing.T) {
 		m := terminalModel()
 		hints := stripANSI(strings.Join(m.statusBarHints(kmTerminal), " · "))
-		if !strings.Contains(hints, "Ctrl+c terminate") {
-			t.Errorf("status bar does not advertise terminate: %s", hints)
+		if !strings.Contains(hints, "Ctrl+c close") {
+			t.Errorf("status bar does not advertise close: %s", hints)
 		}
-		_, cmd := updateModel(t, m, press('c', tea.ModCtrl))
-		if cmd == nil {
-			t.Fatal("ctrl+c should dispatch a terminate command")
+		nm, cmd := updateModel(t, m, press('c', tea.ModCtrl))
+		if cmd != nil {
+			t.Fatal("ctrl+c should ask before closing, not act")
 		}
-		msg := cmd()
-		tm, ok := msg.(work.TerminalTerminateMsg)
-		if !ok {
-			t.Fatalf("ctrl+c produced %T, want work.TerminalTerminateMsg", msg)
+		if nm.confirmAction != "close_session" || nm.confirmSlug != "item-1" || nm.confirmSessionID != "sid-1" {
+			t.Fatalf("ctrl+c opened action=%q slug=%q session=%q, want the x close confirmation", nm.confirmAction, nm.confirmSlug, nm.confirmSessionID)
 		}
-		if tm.Slug != "item-1" {
-			t.Errorf("terminate slug = %q, want item-1", tm.Slug)
+		if _, ok := nm.viewers["item-1"]; !ok {
+			t.Error("asking to close must leave the viewer open")
 		}
 	})
 	t.Run("Ctrl+c (discard)", func(t *testing.T) {
 		m := terminalModel()
-		panel := m.sessionPanels["item-1"]
-		panel, _ = panel.Update(work.StreamCompleteMsg{Slug: "item-1"})
-		m.sessionPanels["item-1"] = panel
+		v := m.viewers["item-1"]
+		v.panel, _ = v.panel.Update(work.ViewerEndedMsg{Slug: "item-1", TmuxName: v.panel.TmuxName(), Generation: v.panel.ViewerGeneration(), Reason: work.ViewerSessionEnded})
+		m.viewers["item-1"] = v
 		hints := stripANSI(strings.Join(m.statusBarHints(kmTerminal), " · "))
 		if !strings.Contains(hints, "Ctrl+c discard") {
 			t.Errorf("status bar does not advertise discard on a done panel: %s", hints)
 		}
 		nm, cmd := updateModel(t, m, press('c', tea.ModCtrl))
-		if cmd == nil {
-			t.Fatal("ctrl+c should dispatch the discard command")
+		if cmd != nil || nm.confirmAction != "" {
+			t.Fatalf("discarding a finished viewer should neither ask nor run anything: cmd=%v action=%q", cmd != nil, nm.confirmAction)
 		}
-		msg := cmd()
-		if _, ok := msg.(work.TerminalTerminateMsg); !ok {
-			t.Fatalf("ctrl+c produced %T, want work.TerminalTerminateMsg", msg)
-		}
-		nm, _ = updateModel(t, nm, msg)
-		if nm.hasSessionPanel("item-1") {
+		if nm.hasSessionPanel("item-1") || nm.terminalMode {
 			t.Error("discard should drop the finished panel and its scrollback")
 		}
 	})

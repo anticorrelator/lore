@@ -12,126 +12,134 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
-// sessionsContractModel builds a stateSessions model with one local session
-// (with a live panel to attach) and one cross-instance session, for the
-// sessions-view keybind contract tests.
+// sessionsContractModel builds a stateSessions model with two sessions of the
+// store: one with an open viewer, and one with no tmux name, which cannot be
+// viewed, for the sessions-view keybind contract tests.
 func sessionsContractModel(t *testing.T) model {
 	t.Helper()
 	m := minimalModel(stateSessions, nil, nil)
 	m.width = 120
 	m.height = 40
-	m.instanceName = "inst-a"
-	m.setSessionPanel("impl-foo", work.NewSessionPanelModel("impl-foo"))
-	m.sessionsList.SetSessions([]sessionview.SessionRow{
-		{RowID: "inst-a|impl-foo|sid1", PanelKey: "impl-foo", Slug: "impl-foo", Display: "impl-foo",
-			Type: "implement", Initiator: "human", Instance: "inst-a", Local: true, SessionID: "sid1"},
-		{RowID: "inst-b|other|sid2", Slug: "other", Display: "other",
-			Type: "spec", Initiator: "agent", Instance: "inst-b", Local: false, SessionID: "sid2", Tmux: "other-tmux"},
-	})
+	rows := []sessionview.SessionRow{
+		{RowID: "store-host|impl-foo|sid1", PanelKey: "impl-foo", Slug: "impl-foo", Display: "impl-foo",
+			Type: "implement", Initiator: "human", Instance: "store-host", Local: true, SessionID: "sid1", Tmux: "lore-store-host-impl-foo"},
+		{RowID: "store-host|other|sid2", PanelKey: "other", Slug: "other", Display: "other (not viewable)",
+			Type: "spec", Initiator: "agent", Instance: "store-host", Local: true, SessionID: "sid2"},
+	}
+	m.sessionRows = rows
+	m.sessionsList.SetSessions(rows)
 	m.sessionsPanelCallbacks().resize()
+	m, _ = m.openViewer(rows[0])
 	return m
 }
 
-func remoteMirrorContractModel(t *testing.T) model {
+func viewerContractModel(t *testing.T) model {
 	t.Helper()
 	m := minimalModel(stateSessions, nil, nil)
 	m.width, m.height = 120, 40
-	m.sessionsList.SetSessions([]sessionview.SessionRow{
-		{RowID: "inst-b|one|sid1", Slug: "one", Display: "one", Instance: "inst-b", SessionID: "sid1", Tmux: "tmux-one"},
-		{RowID: "inst-c|two|sid2", Slug: "two", Display: "two", Instance: "inst-c", SessionID: "sid2", Tmux: "tmux-two"},
-	})
+	rows := []sessionview.SessionRow{
+		{RowID: "store-host|one|sid1", PanelKey: "one", Slug: "one", Display: "one", Instance: "store-host", Local: true, SessionID: "sid1", Tmux: "tmux-one"},
+		{RowID: "store-host|two|sid2", PanelKey: "two", Slug: "two", Display: "two", Instance: "store-host", Local: true, SessionID: "sid2", Tmux: "tmux-two"},
+	}
+	m.sessionRows = rows
+	m.sessionsList.SetSessions(rows)
 	m.sessionsPanelCallbacks().resize()
 	return m
 }
 
-func TestSessionsRemoteMirrorOwnershipContract(t *testing.T) {
-	m := remoteMirrorContractModel(t)
-	nm, cmd := updateModel(t, m, sessionview.SessionSelectedMsg{RowID: "inst-b|one|sid1"})
+// TestSessionsViewerOwnershipContract: Enter opens a viewer on the selected
+// session, outside the owned-session panel map; re-entering reuses it, cursor
+// movement opens nothing, and a second session gets a viewer of its own while
+// the first stays open.
+func TestSessionsViewerOwnershipContract(t *testing.T) {
+	m := viewerContractModel(t)
+	nm, cmd := updateModel(t, m, sessionview.SessionSelectedMsg{RowID: "store-host|one|sid1"})
 	if cmd == nil {
-		t.Fatal("explicit remote drill-in should open a mirror generation")
+		t.Fatal("selecting a session should start its viewer's attach")
 	}
-	if !nm.sessionMirrorActive || nm.sessionMirrorRowID != "inst-b|one|sid1" || nm.sessionMirrorGeneration != 1 {
-		t.Fatalf("remote mirror ownership = active:%v row:%q generation:%d", nm.sessionMirrorActive, nm.sessionMirrorRowID, nm.sessionMirrorGeneration)
+	first, ok := nm.viewers["one"]
+	if !ok || !first.panel.IsViewer() || first.panel.TmuxName() != "tmux-one" {
+		t.Fatalf("viewer = %#v ok=%v", first.panel.TmuxName(), ok)
 	}
 	panel, ok := nm.currentSessionsPanel()
-	if !ok || !panel.IsMirror() || panel.TmuxName() != "tmux-one" {
-		t.Fatalf("current sessions panel = mirror:%v tmux:%q ok:%v", panel.IsMirror(), panel.TmuxName(), ok)
+	if !ok || !panel.IsViewer() || !nm.terminalMode || nm.focusedPanel != panelRight {
+		t.Fatalf("current sessions panel = viewer:%v ok:%v terminal:%v", panel.IsViewer(), ok, nm.terminalMode)
 	}
 	if _, stored := nm.sessionPanels["one"]; stored {
-		t.Fatal("remote mirror must stay outside the owned-session panel map")
+		t.Fatal("a viewer must stay outside the owned-session panel map")
 	}
 
-	// Re-entering the same target reuses the generation and does not reopen it.
-	nm, cmd = updateModel(t, nm, sessionview.SessionSelectedMsg{RowID: "inst-b|one|sid1"})
-	if cmd != nil || nm.sessionMirrorGeneration != 1 {
-		t.Fatalf("same-target drill should reuse generation 1, got generation=%d cmd=%v", nm.sessionMirrorGeneration, cmd != nil)
+	nm, cmd = updateModel(t, nm, sessionview.SessionSelectedMsg{RowID: "store-host|one|sid1"})
+	if cmd != nil || nm.viewers["one"].panel.ViewerGeneration() != first.panel.ViewerGeneration() {
+		t.Fatal("re-entering a session should reuse its viewer")
 	}
 
-	// Cursor movement is passive: it can hide the panel but cannot acquire or
-	// replace a pipe. Only the second explicit selection switches targets.
+	nm.focusedPanel = panelLeft
 	nm, _ = updateModel(t, nm, press('j'))
-	if !nm.sessionMirrorActive || nm.sessionMirrorRowID != "inst-b|one|sid1" || nm.sessionMirrorGeneration != 1 {
-		t.Fatal("passive cursor movement changed the active mirror")
+	if _, opened := nm.viewers["two"]; opened {
+		t.Fatal("passive cursor movement opened a viewer")
 	}
-	nm.sessionsList.SetCursorByID("inst-c|two|sid2")
-	nm, cmd = updateModel(t, nm, sessionview.SessionSelectedMsg{RowID: "inst-c|two|sid2"})
-	if cmd == nil || !nm.sessionMirrorActive || nm.sessionMirrorRowID != "inst-c|two|sid2" || nm.sessionMirrorGeneration != 2 {
-		t.Fatalf("target switch = active:%v row:%q generation:%d cmd:%v", nm.sessionMirrorActive, nm.sessionMirrorRowID, nm.sessionMirrorGeneration, cmd != nil)
+	nm, cmd = updateModel(t, nm, sessionview.SessionSelectedMsg{RowID: "store-host|two|sid2"})
+	if cmd == nil || nm.viewers["two"].panel.TmuxName() != "tmux-two" {
+		t.Fatal("selecting the second session should open its viewer")
 	}
-	if nm.sessionMirrorPanel.TmuxName() != "tmux-two" {
-		t.Fatalf("target switch opened %q, want tmux-two", nm.sessionMirrorPanel.TmuxName())
+	if _, kept := nm.viewers["one"]; !kept {
+		t.Fatal("opening a second viewer closed the first")
 	}
 }
 
-func TestSessionsRemoteMirrorRoutingAndCloseContract(t *testing.T) {
-	m := remoteMirrorContractModel(t)
-	m, _ = updateModel(t, m, sessionview.SessionSelectedMsg{RowID: "inst-b|one|sid1"})
+func TestSessionsViewerRoutingAndCloseContract(t *testing.T) {
+	// Each subtest gets its own model: copies of one share the viewers map.
+	opened := func(t *testing.T) model {
+		t.Helper()
+		m, _ := updateModel(t, viewerContractModel(t), sessionview.SessionSelectedMsg{RowID: "store-host|one|sid1"})
+		return m
+	}
 
-	t.Run("generation messages route to root panel", func(t *testing.T) {
-		nm, _ := updateModel(t, m, work.SessionMirrorOpenedMsg{
-			Slug:       "inst-b|one|sid1",
-			TmuxName:   "tmux-one",
-			Generation: 1,
-			Err:        fmt.Errorf("open failed"),
-		})
-		if got := nm.sessionMirrorPanel.MirrorError(); got != "open failed" {
-			t.Fatalf("root mirror error = %q", got)
+	t.Run("viewer messages route to the viewer by key", func(t *testing.T) {
+		m := opened(t)
+		v := m.viewers["one"]
+		nm, _ := updateModel(t, m, work.ViewerEndedMsg{Slug: "one", TmuxName: "tmux-one", Generation: v.panel.ViewerGeneration(), Reason: work.ViewerAttachFailed, Err: fmt.Errorf("no tmux session")})
+		if !nm.viewers["one"].panel.IsDone() || nm.viewers["one"].panel.ViewerEndReason() != work.ViewerAttachFailed {
+			t.Fatal("viewer did not take its end message")
 		}
 		if len(nm.sessionPanels) != 0 {
-			t.Fatal("mirror message mutated the owned-session panel map")
+			t.Fatal("viewer message mutated the owned-session panel map")
 		}
 	})
 
-	t.Run("detail toggling preserves mirror", func(t *testing.T) {
-		nm, _ := updateModel(t, m, press('t', tea.ModCtrl))
-		if nm.terminalMode || !nm.sessionMirrorActive {
-			t.Fatalf("first ctrl+t should show detail without closing mirror: terminal=%v active=%v", nm.terminalMode, nm.sessionMirrorActive)
+	t.Run("detail toggling preserves the viewer", func(t *testing.T) {
+		nm, _ := updateModel(t, opened(t), press('t', tea.ModCtrl))
+		if _, ok := nm.viewers["one"]; nm.terminalMode || !ok {
+			t.Fatalf("first ctrl+t should show detail without closing the viewer: terminal=%v", nm.terminalMode)
 		}
 		nm, _ = updateModel(t, nm, press('t', tea.ModCtrl))
-		if !nm.terminalMode || !nm.sessionMirrorActive {
-			t.Fatalf("second ctrl+t should restore mirror: terminal=%v active=%v", nm.terminalMode, nm.sessionMirrorActive)
+		if !nm.terminalMode {
+			t.Fatal("second ctrl+t should restore the viewer")
 		}
 	})
 
-	t.Run("mirror-only close leaves remote row", func(t *testing.T) {
-		nm, cmd := updateModel(t, m, work.TerminalTerminateMsg{Slug: "inst-b|one|sid1"})
-		if cmd != nil || nm.sessionMirrorActive || nm.terminalMode || nm.focusedPanel != panelLeft {
-			t.Fatalf("mirror close = cmd:%v active:%v terminal:%v focus:%v", cmd != nil, nm.sessionMirrorActive, nm.terminalMode, nm.focusedPanel)
+	t.Run("closing the viewer leaves the session", func(t *testing.T) {
+		m := opened(t)
+		v := m.viewers["one"]
+		nm, cmd := updateModel(t, m, work.ViewerTerminateMsg{Slug: "one", Generation: v.panel.ViewerGeneration()})
+		if _, ok := nm.viewers["one"]; cmd != nil || ok || nm.terminalMode || nm.focusedPanel != panelLeft {
+			t.Fatalf("viewer close = cmd:%v viewer:%v terminal:%v focus:%v", cmd != nil, ok, nm.terminalMode, nm.focusedPanel)
 		}
-		if _, ok := nm.sessionsList.SessionByID("inst-b|one|sid1"); !ok {
-			t.Fatal("closing the mirror removed the remote session row")
+		if _, ok := nm.sessionsList.SessionByID("store-host|one|sid1"); !ok {
+			t.Fatal("closing the viewer removed the session row")
 		}
 		if nm.confirmAction == "close_session" {
-			t.Fatal("mirror-only close entered the remote-session close flow")
+			t.Fatal("closing a viewer entered the session close flow")
 		}
 	})
 
-	t.Run("leaving sessions closes mirror", func(t *testing.T) {
-		nm, _ := updateModel(t, m, press('t', tea.ModCtrl))
+	t.Run("leaving sessions keeps the viewer", func(t *testing.T) {
+		nm, _ := updateModel(t, opened(t), press('t', tea.ModCtrl))
 		nm.focusedPanel = panelLeft
 		nm, _ = updateModel(t, nm, press('w'))
-		if nm.state != stateWork || nm.sessionMirrorActive {
-			t.Fatalf("leaving sessions = state:%v mirror-active:%v", nm.state, nm.sessionMirrorActive)
+		if _, ok := nm.viewers["one"]; nm.state != stateWork || !ok {
+			t.Fatalf("leaving sessions = state:%v viewer:%v", nm.state, ok)
 		}
 	})
 }
@@ -157,7 +165,7 @@ func TestSessionsEntryKeybindContract(t *testing.T) {
 }
 
 // TestSessionsListStatusBarKeybindContract verifies the sessions list hint set:
-// "j/k navigate · Enter attach · x close · h/Esc back · q quit · ? help".
+// "j/k navigate · l/Enter attach · x close · h/Esc back · q quit · ? help".
 func TestSessionsListStatusBarKeybindContract(t *testing.T) {
 	t.Run("j/k (navigate)", func(t *testing.T) {
 		m := sessionsContractModel(t)
@@ -173,6 +181,9 @@ func TestSessionsListStatusBarKeybindContract(t *testing.T) {
 	})
 	t.Run("Enter (attach)", func(t *testing.T) {
 		m := sessionsContractModel(t)
+		if hints := stripANSI(strings.Join(m.statusBarHints(kmSessionsList), " · ")); !strings.Contains(hints, "l/Enter attach") {
+			t.Fatalf("sessions list hints = %s", hints)
+		}
 		_, cmd := updateModel(t, m, press(tea.KeyEnter))
 		if cmd == nil {
 			t.Fatal("Enter should emit a selection command")
@@ -186,7 +197,15 @@ func TestSessionsListStatusBarKeybindContract(t *testing.T) {
 			t.Error("selecting a session should focus the right panel")
 		}
 		if !nm.terminalMode {
-			t.Error("selecting a local session with a live panel should enter terminal mode")
+			t.Error("selecting a session with an open viewer should enter terminal mode")
+		}
+	})
+	t.Run("l (attach)", func(t *testing.T) {
+		m := sessionsContractModel(t)
+		delete(m.viewers, "impl-foo")
+		nm, cmd := updateModel(t, m, press('l'))
+		if _, ok := nm.viewers["impl-foo"]; !ok || cmd == nil || !nm.terminalMode || nm.focusedPanel != panelRight {
+			t.Fatalf("l should open the session's viewer: viewer=%v attach=%v terminal=%v", ok, cmd != nil, nm.terminalMode)
 		}
 	})
 	t.Run("x (close)", func(t *testing.T) {
@@ -222,11 +241,11 @@ func TestSessionsListStatusBarKeybindContract(t *testing.T) {
 	})
 }
 
-// sessionsDetailModel focuses the read-only card on the cross-instance row.
+// sessionsDetailModel focuses the read-only card on the row that cannot be viewed.
 func sessionsDetailModel(t *testing.T) model {
 	t.Helper()
 	m := sessionsContractModel(t)
-	m, _ = updateModel(t, m, press('j')) // cursor → cross-instance row (no panel)
+	m, _ = updateModel(t, m, press('j')) // cursor → the unviewable row (no panel)
 	m, _ = updateModel(t, m, press('l')) // focus the card
 	return m
 }
@@ -264,13 +283,7 @@ func TestSessionsTerminalScrollbackContract(t *testing.T) {
 	m := sessionsContractModel(t)
 	m, _ = updateModel(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
 
-	var out strings.Builder
-	for i := 0; i < 100; i++ {
-		fmt.Fprintf(&out, "session output line %02d\r\n", i)
-	}
-	m, _ = updateModel(t, m, work.TerminalOutputMsg{Slug: "impl-foo", Data: []byte(out.String())})
-
-	// Enter attaches the selected local session and focuses its terminal.
+	// Enter attaches the selected session's viewer and focuses its terminal.
 	_, cmd := updateModel(t, m, press(tea.KeyEnter))
 	if cmd == nil {
 		t.Fatal("Enter should emit a session selection")
@@ -279,9 +292,24 @@ func TestSessionsTerminalScrollbackContract(t *testing.T) {
 	if !m.terminalMode || m.focusedPanel != panelRight {
 		t.Fatalf("session should be attached before scrollback: terminal=%v focus=%v", m.terminalMode, m.focusedPanel)
 	}
+	// A viewer's history is the pane's, captured from the host's tmux server.
+	history := func(t *testing.T, nm model) model {
+		t.Helper()
+		v := nm.viewers["impl-foo"]
+		lines := make([]string, 100)
+		for i := range lines {
+			lines[i] = fmt.Sprintf("session output line %02d", i)
+		}
+		nm, _ = updateModel(t, nm, work.ViewerScrollbackMsg{Slug: "impl-foo", TmuxName: v.panel.TmuxName(), Generation: v.panel.ViewerGeneration(), Lines: lines})
+		return nm
+	}
 
 	t.Run("Shift+PgUp", func(t *testing.T) {
-		nm, _ := updateModel(t, m, press(tea.KeyPgUp, tea.ModShift))
+		nm, capture := updateModel(t, m, press(tea.KeyPgUp, tea.ModShift))
+		if capture == nil {
+			t.Fatal("Shift+PgUp did not ask for the pane's history")
+		}
+		nm = history(t, nm)
 		panel, ok := nm.currentSessionsPanel()
 		if !ok {
 			t.Fatal("attached session panel disappeared")
@@ -293,6 +321,7 @@ func TestSessionsTerminalScrollbackContract(t *testing.T) {
 
 	t.Run("mouse wheel", func(t *testing.T) {
 		nm, _ := updateModel(t, m, tea.MouseWheelMsg{Button: tea.MouseWheelUp, X: 90, Y: 20})
+		nm = history(t, nm)
 		panel, ok := nm.currentSessionsPanel()
 		if !ok {
 			t.Fatal("attached session panel disappeared")
@@ -369,10 +398,11 @@ func TestBuildSessionRowsUnionsSubstrates(t *testing.T) {
 	}
 	instances := []session.Instance{
 		{Name: "inst-a", Sessions: []session.Session{
-			{Slug: "impl-foo--w1", Type: "worker", Initiator: "agent", SessionID: "sidw1"},
+			{Slug: "impl-foo--w1", Type: "worker", Initiator: "agent", SessionID: "sidw1", Tmux: "lore-inst-a-impl-foo--w1"},
 		}},
 		{Name: "inst-b", Sessions: []session.Session{
-			{Slug: "", Type: "chat", Initiator: "human", SessionID: "deadbeefcafef00d"},
+			{Slug: "", Type: "chat", Initiator: "human", SessionID: "deadbeefcafef00d", Tmux: "lore-inst-b-chat"},
+			{Slug: "no-tmux", Type: "chat", Initiator: "human", SessionID: "sid-nt"},
 		}},
 	}
 	pending := []session.Request{
@@ -392,8 +422,11 @@ func TestBuildSessionRowsUnionsSubstrates(t *testing.T) {
 	if !worker.Local || worker.BaseItem != "impl-foo" || !worker.NeedsInput {
 		t.Errorf("worker row wrong: local=%v base=%q needsInput=%v", worker.Local, worker.BaseItem, worker.NeedsInput)
 	}
-	if _, ok := byDisplay["chat:deadbeef"]; !ok {
-		t.Errorf("slugless cross-instance session should compose chat:<8hex>, got rows %v", displays(rows))
+	if r, ok := byDisplay["chat:deadbeef"]; !ok || !r.Local || r.PanelKey != "session:deadbeefcafef00d" {
+		t.Errorf("slugless session should compose chat:<8hex> and key its viewer by session id, got rows %v", displays(rows))
+	}
+	if r, ok := byDisplay["no-tmux (not viewable)"]; !ok || r.Tmux != "" {
+		t.Errorf("a session without tmux should say it cannot be viewed, got rows %v", displays(rows))
 	}
 	if r, ok := byDisplay["impl-bar"]; !ok || !r.InFlight {
 		t.Errorf("in-flight queue request should surface as a spawning row")

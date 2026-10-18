@@ -308,9 +308,16 @@ EOF
 
   local output verb
   output="$(<"$help_out")"
-  for verb in read board status reconcile watch arm disarm worktree pin report spend; do
+  for verb in read board status reconcile watch arm disarm worktree report spend; do
     [[ "$output" == *"  $verb "* ]]
   done
+  [[ "$output" != *"  pin "* ]]
+}
+
+@test "coordinate pin is no longer a verb" {
+  run bash "$LORE" coordinate pin myproject --preflight
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"unknown coordinate verb 'pin'"* ]]
 }
 
 @test "session wait execs the leaf before a mid-wait router edit" {
@@ -365,6 +372,31 @@ EOF
     sleep 0.01
   done
   [[ "$(<"$PID_FILE")" == "$ROUTER_PID request --type chat --anywhere" ]]
+  touch "$RELEASE_FILE"
+  local leaf_status=0
+  wait "$ROUTER_PID" || leaf_status=$?
+  [[ "$leaf_status" -eq 37 ]]
+}
+
+@test "session ensure execs the ensuring entry in session-managed.py" {
+  cat > "$TEST_SCRIPTS/session-managed.py" <<'EOF'
+import os, sys, time
+with open(os.environ["PID_FILE"], "w") as stream:
+    stream.write(f"{os.getpid()} {' '.join(sys.argv[1:])}\n")
+while not os.path.exists(os.environ["RELEASE_FILE"]):
+    time.sleep(0.01)
+sys.exit(37)
+EOF
+  : > "$PID_FILE"
+  rm -f "$RELEASE_FILE"
+  HOME="$TEST_HOME" PID_FILE="$PID_FILE" RELEASE_FILE="$RELEASE_FILE" \
+    bash "$TEST_ROUTER" session ensure --if-work --json &
+  ROUTER_PID=$!
+  for _ in $(seq 1 200); do
+    [[ -s "$PID_FILE" ]] && break
+    sleep 0.01
+  done
+  [[ "$(<"$PID_FILE")" == "$ROUTER_PID ensure --if-work --json" ]]
   touch "$RELEASE_FILE"
   local leaf_status=0
   wait "$ROUTER_PID" || leaf_status=$?

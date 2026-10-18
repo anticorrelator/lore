@@ -30,9 +30,6 @@ func (m model) hostDeliveryPath(id string) string {
 	return filepath.Join(m.hostDir(), "deliveries", id+".json")
 }
 func (m model) hostDeliveryAttempt(kind string, ev session.Event) error {
-	if m.hostKey == "" {
-		return nil
-	}
 	if _, err := os.Stat(m.hostDeliveryPath(ev.RequestID)); err == nil {
 		return fmt.Errorf("delivery already attempted: %s", ev.RequestID)
 	} else if !os.IsNotExist(err) {
@@ -238,9 +235,6 @@ func (m model) hostClosedSlugs() (map[string]bool, error) {
 // A producer may republish the same row after losing its own acknowledgement.
 // Existing evidence wins; never replace it with a new refusal or reinject.
 func (m model) existingHostDelivery(id string) (tea.Cmd, bool) {
-	if m.hostKey == "" {
-		return nil, false
-	}
 	b, err := os.ReadFile(m.hostDeliveryPath(id))
 	if os.IsNotExist(err) {
 		return nil, false

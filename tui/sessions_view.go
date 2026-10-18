@@ -3,6 +3,7 @@ package main
 import (
 	"os/exec"
 	"regexp"
+	"strings"
 	"syscall"
 
 	tea "charm.land/bubbletea/v2"
@@ -38,10 +39,11 @@ type sessionsRefreshedMsg struct {
 	diagnostics   []session.Diagnostic
 }
 
-// sessionCloseRequestedMsg reports the outcome of enqueuing a close request via
-// the existing producer (lore session close).
+// sessionCloseRequestedMsg reports the outcome of `lore session close`, with
+// what it printed when it failed.
 type sessionCloseRequestedMsg struct {
-	err error
+	err    error
+	output string
 }
 
 // sessionsRefreshCmd reads the three sessions substrates off the UI thread and
@@ -77,28 +79,32 @@ func (m model) handleSessionsRefreshed(msg sessionsRefreshedMsg) (model, tea.Cmd
 
 	m.sessionRows = m.buildSessionRows(msg.instances, msg.pending, msg.claimed)
 	m.sessionsList.SetSessions(m.sessionRows)
-	if m.sessionMirrorActive {
-		row, ok := m.sessionsList.SessionByID(m.sessionMirrorRowID)
-		if !ok || row.Local || row.Tmux == "" || row.Tmux != m.sessionMirrorPanel.TmuxName() {
-			m.closeSessionMirror()
-		}
-	}
 	m.sessionsCount = m.sessionsList.Count()
 	m.sessionsNeedsInput = m.sessionsList.NeedsInputCount()
 	m.syncCoordinationSessions()
+	m = m.badgeSessions(msg.instances)
+	m = m.rememberRequestEvents(msg.events)
+	m, cmd := m.followLaunches(msg.instances)
 
 	if m.state == stateSessions {
 		m.loadSessionsDetail(m.sessionsList.CurrentKey())
 	}
-	return m, appendDiagnosticsCmd(m.sessionsDir, msg.diagnostics)
+	// A window writes nothing under _sessions/, so read diagnostics are left to
+	// the store host, which reads the same rows.
+	return m, cmd
 }
 
 // buildSessionRows assembles the three-substrate union into list rows: the
-// registry snapshot supplies every existing session (local + cross-instance),
-// the request queue supplies in-flight spawns, and the folded journal overlay
-// supplies the needs-input / close-pending activity the registry cannot carry.
-// A queued row whose slug is already live in the registry is dropped (the
+// registry snapshot supplies every existing session, the request queue
+// supplies in-flight spawns, and the folded journal overlay supplies the
+// needs-input / close-pending activity the registry cannot carry. A queued row
+// whose slug is already live in the registry is dropped (the
 // claim→spawn→registry-write window can briefly show a slug in both surfaces).
+//
+// Every registry session is a session this window can view, whichever host
+// runs it, so each row is local in the list's sense: it is badged by what the
+// session is doing, not by who hosts it. A session without a tmux name cannot
+// be viewed, and its row says so.
 func (m model) buildSessionRows(instances []session.Instance, pending []session.Request, claimed []session.ClaimedRow) []sessionview.SessionRow {
 	var rows []sessionview.SessionRow
 	liveSlugs := map[string]bool{}
@@ -123,23 +129,25 @@ func (m model) buildSessionRows(instances []session.Instance, pending []session.
 	}
 
 	for _, inst := range instances {
-		local := inst.Name == m.instanceName
 		for _, s := range inst.Sessions {
 			if s.Slug != "" {
 				liveSlugs[s.Slug] = true
 			}
 			act := m.sessionActivity[sessionview.ActivityKey{Instance: inst.Name, Slug: s.Slug}]
 			display := sessionview.SessionDisplay(s.Slug, s.Type, s.SessionID)
+			if s.Tmux == "" {
+				display += " (not viewable)"
+			}
 			base := deriveBase(s.Slug)
 			rows = append(rows, sessionview.SessionRow{
 				RowID:      inst.Name + "|" + s.Slug + "|" + s.SessionID,
-				PanelKey:   s.Slug,
+				PanelKey:   viewerKey(s.Slug, s.SessionID),
 				Slug:       s.Slug,
 				Display:    display,
 				Type:       s.Type,
 				Initiator:  s.Initiator,
 				Instance:   inst.Name,
-				Local:      local,
+				Local:      true,
 				SessionID:  s.SessionID,
 				BaseItem:   base,
 				Tmux:       s.Tmux,
@@ -189,8 +197,9 @@ func (m model) buildSessionRows(instances []session.Instance, pending []session.
 	return rows
 }
 
-// handleSessionSelected attaches an owned local panel or explicitly opens the
-// selected remote tmux mirror. Other rows remain read-only.
+// handleSessionSelected shows the selected session's open panel, or opens a
+// viewer on it. A row that is still spawning, or a session that cannot be
+// viewed, shows the read-only card.
 func (m model) handleSessionSelected(msg sessionview.SessionSelectedMsg) (model, tea.Cmd) {
 	row, ok := m.sessionsList.SessionByID(msg.RowID)
 	if !ok {
@@ -198,18 +207,23 @@ func (m model) handleSessionSelected(msg sessionview.SessionSelectedMsg) (model,
 	}
 	m.focusedPanel = panelRight
 	m.sessionsDetail.SetSession(row, true)
-	if row.Local && m.hasSessionPanel(row.PanelKey) {
-		m.closeSessionMirror()
+	if row.InFlight || row.PanelKey == "" {
+		m.terminalMode = false
+		return m, nil
+	}
+	if panel, ok := m.panelFor(row.PanelKey); ok && !(panel.IsViewer() && panel.IsDone()) {
 		m.setPreferDetail(row.PanelKey, false)
 		m.terminalMode = true
 		return m, nil
 	}
-	if !row.Local && !row.InFlight && row.Tmux != "" {
-		return m.openSessionMirror(row.RowID, row.Tmux)
+	m, cmd := m.openViewer(row)
+	if _, ok := m.viewers[row.PanelKey]; ok {
+		m.setPreferDetail(row.PanelKey, false)
+		m.terminalMode = true
+	} else {
+		m.terminalMode = false
 	}
-	m.closeSessionMirror()
-	m.terminalMode = false
-	return m, nil
+	return m, cmd
 }
 
 // openSessionCloseConfirm opens the confirmation modal for closing the session
@@ -244,11 +258,11 @@ func (m model) openSessionCloseConfirmFor(row sessionview.SessionRow) (model, te
 	return m, nil
 }
 
-// runSessionClose enqueues a close request through the existing producer (lore
-// session close), which resolves the owning instance, writes the close-request
-// row, and journals close_requested — the same path the CLI uses, so this pass
-// adds no new writer. A slugged session is addressed by slug; a slugless one by
-// --session <id>. The owning instance's poll consumes the row and tears down.
+// runSessionClose closes a session through `lore session close`, which asks the
+// host running it to end it: the host's close ladder, receipts and worktree
+// handling all apply, and nothing here writes the request itself. A slugged
+// session is addressed by slug; a slugless one by --session <id>. A managed
+// close can wait for its host, so this runs off the UI thread.
 func runSessionClose(slug, sessionID, requestedBy string) tea.Cmd {
 	return func() tea.Msg {
 		args := []string{"session", "close"}
@@ -263,16 +277,21 @@ func runSessionClose(slug, sessionID, requestedBy string) tea.Cmd {
 		}
 		cmd := exec.Command("lore", args...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		err := cmd.Run()
-		return sessionCloseRequestedMsg{err: err}
+		out, err := cmd.CombinedOutput()
+		return sessionCloseRequestedMsg{err: err, output: strings.TrimSpace(string(out))}
 	}
 }
 
-// handleSessionCloseRequested surfaces a failed enqueue and refreshes the view so
-// the close-pending badge appears once the journal records close_requested.
+// handleSessionCloseRequested shows a failed close in full and refreshes the
+// view so the close-pending badge appears once the journal records
+// close_requested.
 func (m model) handleSessionCloseRequested(msg sessionCloseRequestedMsg) (model, tea.Cmd) {
 	if msg.err != nil {
-		m.flashErr = compactErr("session close", msg.err)
+		text := strings.TrimPrefix(msg.output, "Error: ")
+		if text == "" {
+			text = msg.err.Error()
+		}
+		m.refusals = append(m.refusals, refusalNotice{title: "Close failed", text: "lore session close did not close the session:\n\n" + text})
 		return m, nil
 	}
 	return m, m.sessionsRefreshCmd()

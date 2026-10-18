@@ -1295,11 +1295,11 @@ def enqueue_start(kdir, manifest, status=None):
             atomic(context_path, {'dispatch_guidance': manifest['context']})
             manifest['state'] = 'enqueueing'
             atomic(path, manifest)
-            # A store host claims every row carrying its key, so its rows need no name
-            # pin, which would strand them if the host restarted under a new name.
-            placement = ['--anywhere'] if status.get('scope') == 'store' else ['--target', status['instance_name']]
+            # The row carries the store host's key, so the host that holds it claims
+            # the row under whatever name it has after a restart; the item's
+            # declaration places it.
             run(['bash', SCRIPTS / 'session-request.sh', '--type', 'worker', '--slug', manifest['handle'],
-                 *placement, '--session-route', json.dumps(manifest['route'], separators=(',', ':')),
+                 '--anywhere', '--session-route', json.dumps(manifest['route'], separators=(',', ':')),
                  '--context', context_path, '--initiator', 'agent', '--auto-close', 'true', '--yes', '--kdir', kdir,
                  '--request-id', rid, '--host-key', key, '--json',
                  *(['--packet', manifest['packet']] if manifest.get('packet') else [])], cwd=source)
@@ -1564,7 +1564,7 @@ REQUEST_VALUE_FLAGS = frozenset({
     '--type', '--slug', '--target', '--initiator', '--auto-close', '--requested-by', '--context', '--packet',
     '--position', '--route', '--session-route', '--min-vintage', '--track', '--model', '--framework',
     '--routing-source', '--worktree-identity', '--worktree-id', '--execution-dir', '--prefer-dir', '--request-id',
-    '--host-key', '--kdir', '--store-host-unavailable'})
+    '--host-key', '--kdir'})
 LEGACY_ENSURE_SECONDS = 10
 INSTANCE_LIVENESS_SECONDS = 30
 
@@ -1583,11 +1583,10 @@ def request_options(argv):
 
 
 def request_names_checkout(kdir, options):
-    """Whether the writer will place this request in a checkout: a work item that
-    declares an existing one, or an explicit preference. A targeted request names
-    an instance instead and keeps its unkeyed path."""
-    if '--target' in options:
-        return False
+    """Whether the writer would place this request in a checkout: a work item that
+    declares an existing one, or, when its work item declares none, an explicit
+    --prefer-dir or --prefer-cwd. This mirrors the writer's own derivation, so a
+    request it would refuse for naming no checkout never starts a host."""
     slug = options.get('--slug') or ''
     if slug:
         worker = re.fullmatch(r'(.+)--w[0-9]+', slug)
@@ -1599,34 +1598,76 @@ def request_names_checkout(kdir, options):
     return '--prefer-dir' in options or '--prefer-cwd' in options
 
 
+def refuse_request(argv, text):
+    """A refusal of lore session request: under --json its only stdout is one JSON
+    object carrying the whole text, otherwise the text goes to stderr."""
+    if '--json' in argv:
+        print(json.dumps({'error': text}))
+    else:
+        print('Error: ' + text, file=sys.stderr)
+    return 1
+
+
 def request(argv):
-    """lore session request: send a request that names a checkout to the store's
-    session host, ensured first, with the writer run under the host's ensure.lock
-    so the host cannot withdraw before the row lands. Any other request keeps the
-    unkeyed path a visible lore-tui claims."""
+    """lore session request: ensure the store's session host, then run the writer
+    under the host's ensure.lock, so the host cannot withdraw before the row lands.
+    A request the writer refuses whatever the host's state (one that names no
+    checkout, or a malformed one) goes straight to the writer and starts nothing."""
     writer = ['bash', str(SCRIPTS / 'session-request.sh')]
     options = request_options(argv)
-    if options.keys() & {'-h', '--help', '--host-key', '--request-id', '--store-host-unavailable'}:
+    if options.keys() & {'-h', '--help', '--host-key', '--request-id'}:
         os.execv('/bin/bash', [*writer, *argv])
     try:
         kdir = Path(options['--kdir']).resolve() if options.get('--kdir') else resolve()
     except RuntimeError:
         os.execv('/bin/bash', [*writer, *argv])
-    if not request_names_checkout(kdir, options):
+    # The writer refuses both of these whatever the host's state.
+    if '--target' in options or not request_names_checkout(kdir, options):
         os.execv('/bin/bash', [*writer, *argv])
     argv = [*argv, '--kdir', str(kdir)]
     key = RUNTIME.store_host_key(kdir)
-    unavailable = 'the store host withdrew its readiness each time the request was about to be written'
+    directory = host_dir(kdir, key)
+    diagnostics = f'{directory / "host.log"} and {directory / "supervisor-error.json"}'
     for _ in range(3):
         try:
             ensure(kdir)
         except (RuntimeError, OSError) as error:
-            unavailable = str(error)
-            break
-        with lock(host_dir(kdir, key) / 'ensure.lock'):
+            return refuse_request(argv, (
+                'store host did not start; fix the error below, retry\n'
+                f'This store\'s session host claims every request, and it could not be started or '
+                f'reached:\n  {error}\nIts diagnostics are {diagnostics}. When the installed lore-tui '
+                'is older than these scripts, run lore rebuild (or bash install.sh) first. '
+                'Nothing was enqueued.'))
+        with lock(directory / 'ensure.lock'):
             if ready(kdir, key):
                 return subprocess.call([*writer, *argv, '--host-key', key])
-    return subprocess.call([*writer, *argv, '--store-host-unavailable', unavailable])
+    return refuse_request(argv, (
+        'store host kept withdrawing; retry lore session request\n'
+        'This store\'s session host withdrew its readiness each time the request was about to '
+        f'be written, three times. Its diagnostics are {diagnostics}. Nothing was enqueued.'))
+
+
+def ensure_verb(argv):
+    """lore session ensure: bring up this store's session host and print its status."""
+    parser = argparse.ArgumentParser(prog='lore session ensure', description=(
+        "Start this store's session host if it is not running, and print its status as JSON. "
+        "A failure exits 1 with the reason; under --json the reason is a JSON object on stdout."))
+    parser.add_argument('--kdir', help='the knowledge store (default: the one this directory resolves to)')
+    parser.add_argument('--if-work', action='store_true', help=(
+        'only when the host has work: requests keyed to it, unsent managed starts, or a dead '
+        'registry row whose sessions it would adopt; otherwise print {"ensured": false}'))
+    parser.add_argument('--json', action='store_true', help='report a failure as a JSON object on stdout')
+    args = parser.parse_args(argv)
+    kdir = Path(args.kdir).resolve() if args.kdir else resolve()
+    # The supervisor's own predicate, so a caller never starts a host the
+    # supervisor would let idle straight back out.
+    if args.if_work and not store_work(kdir):
+        print(json.dumps({'ensured': False}))
+        return 0
+    status = ensure(kdir)
+    print(json.dumps({'ensured': True, 'instance_name': status.get('instance_name'),
+                      'host_key': status.get('host_key'), 'scope': status.get('scope')}))
+    return 0
 
 
 def live_owner(kdir, handle):
@@ -1673,6 +1714,8 @@ def main(argv=None):
     RUNTIME.runtime_name()
     if argv[:1] == ['request']:
         return request(argv[1:])
+    if argv[:1] == ['ensure']:
+        return ensure_verb(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('verb', choices=['start', 'inspect', 'attach', 'send', 'answer', 'peek', 'close', 'wait',
                                          '_supervise', '_self-check', '_source-owner'])

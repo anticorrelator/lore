@@ -13,12 +13,13 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 	libghostty "go.mitchellh.com/libghostty"
 
@@ -161,59 +162,114 @@ type TerminalDetachMsg struct {
 // presses.
 const escDetachWindow = 500 * time.Millisecond
 
-const sessionMirrorResizeInterval = 500 * time.Millisecond
+// TerminalTerminateMsg is sent when user presses Ctrl+\ to kill the subprocess
+// and close the session panel entirely.
+type TerminalTerminateMsg struct {
+	Slug string
+}
 
-// SessionMirrorOpenedMsg carries one atomic state/capture/pipe generation.
-// The transport is intentionally private; the panel owns its local resources.
-type SessionMirrorOpenedMsg struct {
+// A viewer panel's traffic travels in its own message types, each carrying the
+// panel's slug and generation. None of them is a type the owned-session handlers
+// (session end, close, quiescence and observation) match, so nothing a viewer
+// reports can end, close or journal a session.
+
+// ViewerAttachedMsg carries the tmux client a viewer's attach command started.
+// A panel takes it only for its current generation; a message no panel takes
+// must be closed with Close so its client does not stay attached.
+type ViewerAttachedMsg struct {
 	Slug       string
 	TmuxName   string
 	Generation uint64
-	State      TmuxMirrorPaneState
-	Rows       []string
-	Err        error
-	transport  *tmuxMirrorTransport
+	client     *viewerClient
+	cols, rows int
 }
 
-// SessionMirrorOutputMsg carries raw pane output for one mirror generation.
-type SessionMirrorOutputMsg struct {
+// Close stops the message's tmux client. The session is not touched.
+func (msg ViewerAttachedMsg) Close() { msg.client.stop() }
+
+// ViewerOutputMsg carries a chunk of a viewer client's screen stream.
+type ViewerOutputMsg struct {
 	Slug       string
 	Generation uint64
 	Data       []byte
 }
 
-// SessionMirrorEOFMsg reports that one generation's FIFO writer disappeared.
-type SessionMirrorEOFMsg struct {
-	Slug       string
-	Generation uint64
-}
+// ViewerEndReason says why a viewer's tmux client stopped.
+type ViewerEndReason string
 
-// SessionMirrorResizeTickMsg requests a pane-geometry sample for an active mirror.
-type SessionMirrorResizeTickMsg struct {
-	Slug       string
-	Generation uint64
-}
+const (
+	// ViewerSessionEnded: the tmux session is gone; its harness has exited.
+	ViewerSessionEnded ViewerEndReason = "session-ended"
+	// ViewerAttachFailed: the client could not attach, or failed while the
+	// session still runs. The session is unaffected.
+	ViewerAttachFailed ViewerEndReason = "attach-failed"
+	// ViewerDetached: the client was detached while the session still runs.
+	ViewerDetached ViewerEndReason = "detached"
+)
 
-// SessionMirrorGeometryMsg carries one client-less pane-geometry sample.
-type SessionMirrorGeometryMsg struct {
+// ViewerEndedMsg reports that a viewer's client has ended, or never attached.
+type ViewerEndedMsg struct {
 	Slug       string
+	TmuxName   string
 	Generation uint64
-	Width      int
-	Height     int
+	Reason     ViewerEndReason
 	Err        error
 }
 
-// SessionMirrorWriteMsg reports completion of one asynchronous manual write.
-type SessionMirrorWriteMsg struct {
+// ViewerScrollbackMsg carries a viewer's capture of the pane's history.
+type ViewerScrollbackMsg struct {
 	Slug       string
+	TmuxName   string
 	Generation uint64
+	Lines      []string
 	Err        error
 }
 
-// TerminalTerminateMsg is sent when user presses Ctrl+\ to kill the subprocess
-// and close the session panel entirely.
-type TerminalTerminateMsg struct {
-	Slug string
+// ViewerTerminateMsg is a viewer's Ctrl+\. The panel owns no harness, so what
+// the key does to the session is the caller's decision.
+type ViewerTerminateMsg struct {
+	Slug       string
+	Generation uint64
+}
+
+// viewerGenerations numbers viewer panels across the process, so a message
+// from a closed viewer's client never matches a later viewer of the same slug.
+var viewerGenerations atomic.Uint64
+
+// viewerClient is one running `tmux attach-session` under a PTY. It is the
+// viewer's only process; stopping it detaches the viewer and leaves the session
+// running.
+type viewerClient struct {
+	ptmx   *os.File
+	cmd    *exec.Cmd
+	output <-chan []byte
+	exited <-chan error
+	done   chan struct{}
+	once   sync.Once
+}
+
+func (c *viewerClient) stop() {
+	if c == nil {
+		return
+	}
+	c.once.Do(func() {
+		close(c.done)
+		if c.cmd != nil && c.cmd.Process != nil {
+			_ = c.cmd.Process.Kill()
+		}
+		if c.ptmx != nil {
+			_ = c.ptmx.Close()
+		}
+	})
+}
+
+func (c *viewerClient) stopped() bool {
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
 }
 
 // ClosedPanelInputMsg is sent when a keystroke or paste reaches a torn-down
@@ -294,16 +350,17 @@ type SessionPanelModel struct {
 	tmuxName string
 	panePID  int
 
-	// mirror fields are populated only by NewMirrorSessionPanelModel. The
-	// backend remains pane-sized while width/height describe the TUI viewport.
-	mirror           bool
-	mirrorGeneration uint64
-	mirrorPaneWidth  int
-	mirrorPaneHeight int
-	mirrorTransport  *tmuxMirrorTransport
-	mirrorOwned      bool
-	mirrorTakenOver  bool
-	mirrorErr        string
+	// viewer fields are populated only by NewViewerSessionPanelModel: a tmux
+	// client on a session another process hosts. A viewer owns no harness, so
+	// ptmx, cmd and outputChan stay nil and every owned-session operation
+	// (InjectMessage, Interrupt, Process, the close ladder) finds nothing to act on.
+	viewer           bool
+	viewerGeneration uint64
+	viewerClient     *viewerClient
+	viewerClosed     bool
+	viewerSawOutput  bool
+	viewerEnd        ViewerEndReason
+	viewerErr        error
 }
 
 // NewSessionPanelModel creates a session panel model for the given work item slug.
@@ -317,58 +374,219 @@ func NewSessionPanelModel(slug string) SessionPanelModel {
 	}
 }
 
-// NewMirrorSessionPanelModel creates a panel that observes and writes an
-// existing tmux session without attaching a tmux client.
-func NewMirrorSessionPanelModel(slug, tmuxName string, generation uint64) SessionPanelModel {
+// NewViewerSessionPanelModel creates a panel that views and types into the
+// tmux session tmuxName, which another process (the store host) runs. Init, or
+// ViewerAttachCmd, attaches its client at the panel's size; the session's
+// window keeps the size its host pinned.
+func NewViewerSessionPanelModel(slug, tmuxName string) SessionPanelModel {
 	return SessionPanelModel{
 		slug:             slug,
 		open:             true,
 		tmuxName:         tmuxName,
-		mirror:           true,
-		mirrorGeneration: generation,
+		backend:          newTerminalBackend(80, 24),
+		viewer:           true,
+		viewerGeneration: viewerGenerations.Add(1),
 	}
 }
 
-// MirrorOpenCmd atomically samples, captures, and attaches the panel's current
-// mirror generation.
-func (m SessionPanelModel) MirrorOpenCmd() tea.Cmd {
-	if !m.mirror || m.tmuxName == "" {
+// IsViewer reports whether the panel is a tmux client on a session it does
+// not own.
+func (m SessionPanelModel) IsViewer() bool { return m.viewer }
+
+// ViewerGeneration identifies this viewer's client among every viewer of the
+// process; viewer messages carry it.
+func (m SessionPanelModel) ViewerGeneration() uint64 { return m.viewerGeneration }
+
+// ViewerEndReason is why the viewer's client ended, or "" while it is
+// attaching or attached.
+func (m SessionPanelModel) ViewerEndReason() ViewerEndReason { return m.viewerEnd }
+
+// ViewerErr is the failure behind a ViewerAttachFailed end.
+func (m SessionPanelModel) ViewerErr() error { return m.viewerErr }
+
+// ViewerAttachCmd starts the viewer's tmux client: `attach-session -f
+// ignore-size` (plain attach before tmux 3.2) under a PTY of the panel's last
+// tea.WindowSizeMsg size (80x24 before one arrives), with TERM=xterm-256color
+// and the supervisor's recorded TMUX_TMPDIR. It answers ViewerAttachedMsg, or
+// ViewerEndedMsg with ViewerAttachFailed when the session is not on the
+// server or the client cannot start. It is nil for a panel that is not a
+// waiting viewer.
+func (m SessionPanelModel) ViewerAttachCmd() tea.Cmd {
+	if !m.viewer || m.tmuxName == "" || m.viewerClient != nil || m.viewerClosed || m.done {
 		return nil
 	}
-	return OpenSessionMirrorCmd(m.slug, m.tmuxName, m.mirrorGeneration)
+	slug, name, generation := m.slug, m.tmuxName, m.viewerGeneration
+	cols, rows := m.width, m.height
+	if cols < 1 {
+		cols = 80
+	}
+	if rows < 1 {
+		rows = 24
+	}
+	return func() tea.Msg { return attachViewer(slug, name, generation, cols, rows) }
 }
 
-// MirrorGeneration identifies the open or pending mirror generation.
-func (m SessionPanelModel) MirrorGeneration() uint64 { return m.mirrorGeneration }
-
-// IsMirror reports whether the panel observes a remote tmux pane.
-func (m SessionPanelModel) IsMirror() bool { return m.mirror }
-
-// MirrorTakenOver reports whether the active pipe was displaced by another viewer.
-func (m SessionPanelModel) MirrorTakenOver() bool { return m.mirrorTakenOver }
-
-// MirrorError reports the latest open, sample, or manual-write failure.
-func (m SessionPanelModel) MirrorError() string { return m.mirrorErr }
-
-// RetakeMirror starts a caller-selected generation after displacement.
-func (m SessionPanelModel) RetakeMirror(generation uint64) (SessionPanelModel, tea.Cmd) {
-	if !m.mirror {
-		return m, nil
+func attachViewer(slug, name string, generation uint64, cols, rows int) (result tea.Msg) {
+	failed := func(err error) tea.Msg {
+		return ViewerEndedMsg{Slug: slug, TmuxName: name, Generation: generation, Reason: ViewerAttachFailed, Err: err}
 	}
-	if m.mirrorTransport != nil {
-		m.mirrorTransport.closeLocal()
-		m.mirrorTransport = nil
+	defer func() {
+		if r := recover(); r != nil {
+			writeCrashLog("attachViewer", r)
+			result = failed(fmt.Errorf("attach panic: %v", r))
+		}
+	}()
+	env := viewerTmuxEnv()
+	// Checked first because an attach client with no server to reach starts
+	// one, under whatever TMUX_TMPDIR it was given.
+	if !tmuxSessionAliveOn(env, name) {
+		where := "TMUX_TMPDIR unset"
+		for _, kv := range env {
+			if dir, ok := strings.CutPrefix(kv, "TMUX_TMPDIR="); ok {
+				where = "TMUX_TMPDIR=" + dir
+			}
+		}
+		return failed(fmt.Errorf("no tmux session %s on server %s (%s)", name, config.TmuxServer(), where))
 	}
-	if m.backend != nil {
-		m.backend.close()
-		m.backend = nil
+	cmd := exec.Command(tmuxBinary, viewerAttachArgs(name, tmuxHasClientFlags(tmuxVersionOn(env)))...)
+	cmd.Env = env
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	if err != nil {
+		return failed(fmt.Errorf("start tmux client: %w", err))
 	}
-	m.mirrorGeneration = generation
-	m.mirrorOwned = false
-	m.mirrorTakenOver = false
-	m.mirrorErr = ""
-	m.cachedRender = ""
-	return m, m.MirrorOpenCmd()
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	done := make(chan struct{})
+	client := &viewerClient{ptmx: ptmx, cmd: cmd, output: viewerOutput(ptmx, done), exited: exited, done: done}
+	return ViewerAttachedMsg{Slug: slug, TmuxName: name, Generation: generation, client: client, cols: cols, rows: rows}
+}
+
+// viewerOutput drains a viewer client's PTY. Unlike ptyReaderChan it gives up
+// when the client is stopped, so a viewer nobody polls any more leaves no
+// goroutine blocked on a full channel.
+func viewerOutput(ptmx *os.File, done <-chan struct{}) <-chan []byte {
+	output := make(chan []byte, 64)
+	go func() {
+		defer close(output)
+		defer func() {
+			if r := recover(); r != nil {
+				writeCrashLog("viewer PTY reader", r)
+			}
+		}()
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := ptmx.Read(buf)
+			if n > 0 {
+				select {
+				case output <- append([]byte(nil), buf[:n]...):
+				case <-done:
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return output
+}
+
+// pollViewerCmd waits for the next chunk of the client's output, or for its end.
+func pollViewerCmd(slug, name string, generation uint64, client *viewerClient) tea.Cmd {
+	return func() (result tea.Msg) {
+		defer func() {
+			if r := recover(); r != nil {
+				writeCrashLog("pollViewerCmd", r)
+				client.stop()
+				result = ViewerEndedMsg{Slug: slug, TmuxName: name, Generation: generation, Reason: ViewerAttachFailed, Err: fmt.Errorf("poll panic: %v", r)}
+			}
+		}()
+		chunk, ok := <-client.output
+		if !ok {
+			return endViewer(slug, name, generation, client)
+		}
+		data := append([]byte(nil), chunk...)
+		for i := 0; i < 8; i++ {
+			select {
+			case more, moreOK := <-client.output:
+				if !moreOK {
+					return ViewerOutputMsg{Slug: slug, Generation: generation, Data: data}
+				}
+				data = append(data, more...)
+			default:
+				return ViewerOutputMsg{Slug: slug, Generation: generation, Data: data}
+			}
+		}
+		return ViewerOutputMsg{Slug: slug, Generation: generation, Data: data}
+	}
+}
+
+// endViewer classifies a client whose output has ended. The session's own
+// liveness decides "ended" (a dead pane and a killed server both end the
+// client); with the session still live, a clean exit is a detach and any other
+// is a failed client.
+func endViewer(slug, name string, generation uint64, client *viewerClient) tea.Msg {
+	// stop closes done before it closes the PTY, so a stop that ended the
+	// output is already visible here.
+	locallyStopped := client.stopped()
+	var waitErr error
+	select {
+	case waitErr = <-client.exited:
+	case <-time.After(5 * time.Second):
+		client.stop()
+		waitErr = <-client.exited
+	}
+	client.stop()
+	msg := ViewerEndedMsg{Slug: slug, TmuxName: name, Generation: generation}
+	switch {
+	case locallyStopped:
+		msg.Reason = ViewerDetached
+	case !tmuxSessionAliveOn(viewerTmuxEnv(), name):
+		msg.Reason = ViewerSessionEnded
+	case waitErr == nil:
+		msg.Reason = ViewerDetached
+	default:
+		msg.Reason = ViewerAttachFailed
+		msg.Err = fmt.Errorf("tmux client for %s exited: %w", name, waitErr)
+	}
+	return msg
+}
+
+// resizeViewerClientCmd resizes the viewer client's PTY. The client reports its
+// new size to tmux, which leaves the session's pinned window as it is.
+func resizeViewerClientCmd(ptmx *os.File, cols, rows int) tea.Cmd {
+	return func() tea.Msg {
+		_ = pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+		return nil
+	}
+}
+
+func captureViewerScrollbackCmd(slug, tmuxName string, generation uint64) tea.Cmd {
+	return func() tea.Msg {
+		lines, err := captureTmuxPaneHistoryOn(viewerTmuxEnv(), "="+tmuxName+":")
+		return ViewerScrollbackMsg{Slug: slug, TmuxName: tmuxName, Generation: generation, Lines: lines, Err: err}
+	}
+}
+
+// tmuxScrollbackCmd reads the pane's history the way this panel reaches its
+// server: a viewer under the supervisor's TMUX_TMPDIR, an owner under its own.
+func (m SessionPanelModel) tmuxScrollbackCmd() tea.Cmd {
+	if m.viewer {
+		return captureViewerScrollbackCmd(m.slug, m.tmuxName, m.viewerGeneration)
+	}
+	return captureTmuxScrollbackCmd(m.slug, m.tmuxName)
+}
+
+// inputPTY is where the person's keys and pastes go: the harness's PTY for an
+// owned panel, the tmux client's for a viewer.
+func (m SessionPanelModel) inputPTY() *os.File {
+	if m.viewer {
+		if m.viewerClient == nil {
+			return nil
+		}
+		return m.viewerClient.ptmx
+	}
+	return m.ptmx
 }
 
 // WithTerminalColorPair configures replies to default-color queries emitted by
@@ -637,18 +855,12 @@ func (m SessionPanelModel) SetPtmx(ptmx *os.File, cmd *exec.Cmd, output <-chan [
 // backend. Reaps the subprocess in a background goroutine so the caller is
 // never blocked. Safe to call multiple times (the backend close is idempotent).
 func (m SessionPanelModel) Cleanup() SessionPanelModel {
-	if m.mirror {
-		// Only a generation whose FIFO is still live owns the tmux pipe. EOF
-		// means another viewer displaced it, so detaching here would tear down
-		// that viewer's replacement pipe.
-		if m.mirrorOwned {
-			_ = detachTmuxMirror(m.tmuxName)
-		}
-		if m.mirrorTransport != nil {
-			m.mirrorTransport.closeLocal()
-			m.mirrorTransport = nil
-		}
-		m.mirrorOwned = false
+	if m.viewer {
+		// A viewer's only process is its tmux client; the session and its
+		// harness belong to the host and keep running.
+		m.viewerClient.stop()
+		m.viewerClient = nil
+		m.viewerClosed = true
 	}
 	if m.ptmx != nil {
 		m.ptmx.Close()
@@ -669,158 +881,10 @@ func (m SessionPanelModel) Cleanup() SessionPanelModel {
 }
 
 func (m SessionPanelModel) Init() tea.Cmd {
-	if m.mirror {
-		return m.MirrorOpenCmd()
+	if m.viewer {
+		return m.ViewerAttachCmd()
 	}
 	return nil
-}
-
-// OpenSessionMirrorCmd creates one atomic mirror generation.
-func OpenSessionMirrorCmd(slug, tmuxName string, generation uint64) tea.Cmd {
-	return func() tea.Msg {
-		transport, state, rows, err := openTmuxMirror(tmuxName)
-		return SessionMirrorOpenedMsg{
-			Slug: slug, TmuxName: tmuxName, Generation: generation,
-			State: state, Rows: rows, Err: err, transport: transport,
-		}
-	}
-}
-
-// PollSessionMirrorCmd waits for the next raw pane-output chunk or FIFO EOF.
-func PollSessionMirrorCmd(slug string, generation uint64, output <-chan []byte) tea.Cmd {
-	return func() tea.Msg {
-		chunk, ok := <-output
-		if !ok {
-			return SessionMirrorEOFMsg{Slug: slug, Generation: generation}
-		}
-		data := append([]byte(nil), chunk...)
-		for i := 0; i < 8; i++ {
-			select {
-			case more, moreOK := <-output:
-				if !moreOK {
-					return SessionMirrorOutputMsg{Slug: slug, Generation: generation, Data: data}
-				}
-				data = append(data, more...)
-			default:
-				return SessionMirrorOutputMsg{Slug: slug, Generation: generation, Data: data}
-			}
-		}
-		return SessionMirrorOutputMsg{Slug: slug, Generation: generation, Data: data}
-	}
-}
-
-// SessionMirrorResizeTickCmd schedules the next active geometry sample.
-func SessionMirrorResizeTickCmd(slug string, generation uint64) tea.Cmd {
-	return tea.Tick(sessionMirrorResizeInterval, func(time.Time) tea.Msg {
-		return SessionMirrorResizeTickMsg{Slug: slug, Generation: generation}
-	})
-}
-
-// QuerySessionMirrorGeometryCmd samples pane dimensions without attaching a client.
-func QuerySessionMirrorGeometryCmd(slug, tmuxName string, generation uint64) tea.Cmd {
-	return func() tea.Msg {
-		width, height, err := tmuxMirrorGeometry(tmuxName)
-		return SessionMirrorGeometryMsg{Slug: slug, Generation: generation, Width: width, Height: height, Err: err}
-	}
-}
-
-func sessionMirrorWriteTextCmd(slug, tmuxName string, generation uint64, text string) tea.Cmd {
-	return func() tea.Msg {
-		return SessionMirrorWriteMsg{Slug: slug, Generation: generation, Err: sendTmuxMirrorLiteral(tmuxName, text)}
-	}
-}
-
-func sessionMirrorWriteKeyCmd(slug, tmuxName string, generation uint64, key string) tea.Cmd {
-	return func() tea.Msg {
-		return SessionMirrorWriteMsg{Slug: slug, Generation: generation, Err: sendTmuxMirrorKey(tmuxName, key)}
-	}
-}
-
-func sessionMirrorSeed(state TmuxMirrorPaneState, rows []string) []byte {
-	var seed strings.Builder
-	if state.Alternate {
-		seed.WriteString("\x1b[?1049h")
-	}
-	seed.WriteString("\x1b[?7l")
-	seed.WriteString(strings.Join(rows, "\r\n"))
-	seed.WriteString("\x1b[?7h")
-	fmt.Fprintf(&seed, "\x1b[%d;%dH", state.CursorY+1, state.CursorX+1)
-	return []byte(seed.String())
-}
-
-func sessionMirrorKey(km tea.KeyPressMsg) (text, key string) {
-	k := km.Key()
-	if k.Mod.Contains(tea.ModCtrl) {
-		switch {
-		case k.Code >= 'a' && k.Code <= 'z':
-			return "", "C-" + string(k.Code)
-		case k.Code == '\\' || k.Code == ']':
-			return "", "C-" + string(k.Code)
-		}
-	}
-	if k.Mod.Contains(tea.ModAlt) {
-		if k.Text != "" {
-			return "", "M-" + k.Text
-		}
-		if k.Code >= 0 && k.Code <= unicode.MaxRune {
-			return "", "M-" + string(k.Code)
-		}
-	}
-	switch k.Code {
-	case tea.KeyEnter:
-		return "", sessionMirrorNamedKey(k, "Enter")
-	case tea.KeyEscape:
-		return "", sessionMirrorNamedKey(k, "Escape")
-	case tea.KeyUp:
-		return "", sessionMirrorNamedKey(k, "Up")
-	case tea.KeyDown:
-		return "", sessionMirrorNamedKey(k, "Down")
-	case tea.KeyRight:
-		return "", sessionMirrorNamedKey(k, "Right")
-	case tea.KeyLeft:
-		return "", sessionMirrorNamedKey(k, "Left")
-	case tea.KeyHome:
-		return "", sessionMirrorNamedKey(k, "Home")
-	case tea.KeyEnd:
-		return "", sessionMirrorNamedKey(k, "End")
-	case tea.KeyPgUp:
-		return "", sessionMirrorNamedKey(k, "PPage")
-	case tea.KeyPgDown:
-		return "", sessionMirrorNamedKey(k, "NPage")
-	case tea.KeyDelete:
-		return "", sessionMirrorNamedKey(k, "DC")
-	case tea.KeyInsert:
-		return "", sessionMirrorNamedKey(k, "IC")
-	case tea.KeyBackspace:
-		return "", sessionMirrorNamedKey(k, "BSpace")
-	case tea.KeyTab:
-		if k.Mod.Contains(tea.ModShift) {
-			return "", "BTab"
-		}
-		return "", sessionMirrorNamedKey(k, "Tab")
-	case tea.KeySpace:
-		return " ", ""
-	}
-	if k.Text != "" {
-		return k.Text, ""
-	}
-	if k.Code >= 0 && k.Code <= unicode.MaxRune && unicode.IsPrint(k.Code) {
-		return string(k.Code), ""
-	}
-	return "", ""
-}
-
-func sessionMirrorNamedKey(key tea.Key, name string) string {
-	if key.Mod.Contains(tea.ModCtrl) {
-		name = "C-" + name
-	}
-	if key.Mod.Contains(tea.ModAlt) {
-		name = "M-" + name
-	}
-	if key.Mod.Contains(tea.ModShift) {
-		name = "S-" + name
-	}
-	return name
 }
 
 // totalLines returns the total number of lines in the terminal document
@@ -879,7 +943,7 @@ func (m SessionPanelModel) requestTmuxScrollback() (SessionPanelModel, tea.Cmd) 
 	}
 	m.tmuxCapturePending = true
 	m.tmuxScrollError = ""
-	return m, captureTmuxScrollbackCmd(m.slug, m.tmuxName)
+	return m, m.tmuxScrollbackCmd()
 }
 
 func (m SessionPanelModel) leaveTmuxScrollback() SessionPanelModel {
@@ -889,105 +953,94 @@ func (m SessionPanelModel) leaveTmuxScrollback() SessionPanelModel {
 	return m
 }
 
+// applyTmuxScrollback installs one capture-pane snapshot of the pane's history.
+func (m SessionPanelModel) applyTmuxScrollback(lines []string, err error) (SessionPanelModel, tea.Cmd) {
+	m.tmuxCapturePending = false
+	if m.scrollOffset <= 0 {
+		return m.leaveTmuxScrollback(), nil
+	}
+	if err != nil {
+		m.tmuxScrollError = err.Error()
+		return m, nil
+	}
+	oldTotal := len(m.tmuxHistory)
+	m.tmuxHistory = lines
+	m.tmuxScrollError = ""
+	// Preserve the visible historical content when new pane rows arrived
+	// after a prior snapshot, matching the direct-emulator contract.
+	if oldTotal > 0 && len(m.tmuxHistory) > oldTotal {
+		m.scrollOffset += len(m.tmuxHistory) - oldTotal
+	}
+	maxOff := maxScrollOffset(len(m.tmuxHistory), m.visibleHeight())
+	if m.scrollOffset > maxOff {
+		m.scrollOffset = maxOff
+	}
+	if m.scrollOffset <= 0 {
+		return m.leaveTmuxScrollback(), nil
+	}
+	return m, nil
+}
+
 func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) {
 	defer func() {
 		if r := recover(); r != nil {
 			writeCrashLog(fmt.Sprintf("SessionPanelModel.Update(%T)", msg), r)
 		}
 	}()
+	if m.viewer {
+		switch msg.(type) {
+		case SessionProcessStartedMsg, TerminalOutputMsg, StreamCompleteMsg, StreamErrorMsg, QuiescenceTickMsg, tmuxScrollbackCapturedMsg:
+			// An owned session's traffic for the same slug; a viewer is not its owner.
+			return m, nil
+		}
+	}
 	switch msg := msg.(type) {
-	case SessionMirrorOpenedMsg:
-		validGeneration := msg.Generation == m.mirrorGeneration || (m.mirrorOwned && msg.Generation == m.mirrorGeneration+1)
-		if !m.mirror || msg.Slug != m.slug || msg.TmuxName != m.tmuxName || !validGeneration {
-			if msg.transport != nil {
-				msg.transport.closeLocal()
-			}
-			return m, nil
+	case ViewerAttachedMsg:
+		if !m.viewer || m.viewerClosed || m.done || m.viewerClient != nil ||
+			msg.Slug != m.slug || msg.TmuxName != m.tmuxName || msg.Generation != m.viewerGeneration {
+			return m, func() tea.Msg { msg.Close(); return nil }
 		}
-		if msg.Err != nil {
-			m.mirrorErr = msg.Err.Error()
-			if m.mirrorOwned {
-				return m, SessionMirrorResizeTickCmd(m.slug, m.mirrorGeneration)
-			}
-			return m, nil
-		}
-		// The successful pipe-pane command displaced the prior generation, so
-		// only local resources may be closed while installing the new backend.
-		if m.mirrorTransport != nil {
-			m.mirrorTransport.closeLocal()
-		}
+		m.viewerClient = msg.client
 		if m.backend != nil {
-			m.backend.close()
+			m.backend.setPtyWriter(msg.client.ptmx)
 		}
-		m.mirrorGeneration = msg.Generation
-		m.mirrorTransport = msg.transport
-		m.mirrorPaneWidth = msg.State.Width
-		m.mirrorPaneHeight = msg.State.Height
-		m.mirrorOwned = true
-		m.mirrorTakenOver = false
-		m.mirrorErr = ""
-		m.backend = newTerminalBackend(msg.State.Width, msg.State.Height)
-		m.backend.write(sessionMirrorSeed(msg.State, msg.Rows))
-		m.cachedRender = m.backend.renderScreen()
-		return m, tea.Batch(
-			PollSessionMirrorCmd(m.slug, m.mirrorGeneration, m.mirrorTransport.output),
-			SessionMirrorResizeTickCmd(m.slug, m.mirrorGeneration),
-		)
+		poll := pollViewerCmd(m.slug, m.tmuxName, m.viewerGeneration, m.viewerClient)
+		if m.width >= 1 && m.height >= 1 && (m.width != msg.cols || m.height != msg.rows) {
+			// The panel was resized while the client attached.
+			return m, tea.Batch(poll, resizeViewerClientCmd(msg.client.ptmx, m.width, m.height))
+		}
+		return m, poll
 
-	case SessionMirrorOutputMsg:
-		if !m.mirror || msg.Slug != m.slug || msg.Generation != m.mirrorGeneration || !m.mirrorOwned || m.backend == nil {
+	case ViewerOutputMsg:
+		if !m.viewer || m.viewerClosed || m.viewerClient == nil || msg.Slug != m.slug || msg.Generation != m.viewerGeneration {
 			return m, nil
 		}
+		m.viewerSawOutput = true
 		m.backend.write(msg.Data)
 		m.cachedRender = m.backend.renderScreen()
-		return m, PollSessionMirrorCmd(m.slug, m.mirrorGeneration, m.mirrorTransport.output)
+		cmds := []tea.Cmd{pollViewerCmd(m.slug, m.tmuxName, m.viewerGeneration, m.viewerClient)}
+		if m.scrollOffset > 0 && !m.tmuxCapturePending {
+			m.tmuxCapturePending = true
+			cmds = append(cmds, m.tmuxScrollbackCmd())
+		}
+		return m, tea.Batch(cmds...)
 
-	case SessionMirrorEOFMsg:
-		if !m.mirror || msg.Slug != m.slug || msg.Generation != m.mirrorGeneration || !m.mirrorOwned {
+	case ViewerEndedMsg:
+		if !m.viewer || m.viewerClosed || m.done || msg.Slug != m.slug || msg.TmuxName != m.tmuxName || msg.Generation != m.viewerGeneration {
 			return m, nil
 		}
-		m.mirrorOwned = false
-		m.mirrorTakenOver = true
-		m.mirrorErr = ""
-		if m.mirrorTransport != nil {
-			m.mirrorTransport.closeLocal()
-			m.mirrorTransport = nil
-		}
-		if m.backend != nil {
-			m.backend.close()
-			m.backend = nil
-		}
-		m.cachedRender = ""
+		m.done = true
+		m.viewerClient = nil
+		m.viewerEnd = msg.Reason
+		m.viewerErr = msg.Err
+		m.hasError = msg.Reason == ViewerAttachFailed
 		return m, nil
 
-	case SessionMirrorResizeTickMsg:
-		if !m.mirror || msg.Slug != m.slug || msg.Generation != m.mirrorGeneration || !m.mirrorOwned {
+	case ViewerScrollbackMsg:
+		if !m.viewer || m.viewerClosed || msg.Slug != m.slug || msg.TmuxName != m.tmuxName || msg.Generation != m.viewerGeneration {
 			return m, nil
 		}
-		return m, QuerySessionMirrorGeometryCmd(m.slug, m.tmuxName, m.mirrorGeneration)
-
-	case SessionMirrorGeometryMsg:
-		if !m.mirror || msg.Slug != m.slug || msg.Generation != m.mirrorGeneration || !m.mirrorOwned {
-			return m, nil
-		}
-		if msg.Err != nil {
-			m.mirrorErr = msg.Err.Error()
-			return m, SessionMirrorResizeTickCmd(m.slug, m.mirrorGeneration)
-		}
-		m.mirrorErr = ""
-		if msg.Width != m.mirrorPaneWidth || msg.Height != m.mirrorPaneHeight {
-			return m, OpenSessionMirrorCmd(m.slug, m.tmuxName, m.mirrorGeneration+1)
-		}
-		return m, SessionMirrorResizeTickCmd(m.slug, m.mirrorGeneration)
-
-	case SessionMirrorWriteMsg:
-		if !m.mirror || msg.Slug != m.slug || msg.Generation != m.mirrorGeneration {
-			return m, nil
-		}
-		if msg.Err != nil {
-			m.mirrorErr = msg.Err.Error()
-		}
-		return m, nil
+		return m.applyTmuxScrollback(msg.Lines, msg.Err)
 
 	case SessionProcessStartedMsg:
 		m.ptmx = msg.Ptmx
@@ -1023,7 +1076,7 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 		// While direct-PTY scrollback is visible, keep the same content in view
 		// as the emulator document grows. Tmux-hosted panels refresh from
 		// capture-pane below because tmux owns their authoritative history.
-		if m.scrollOffset > 0 && (m.tmuxName == "" || m.mirror) {
+		if m.scrollOffset > 0 && m.tmuxName == "" {
 			if grown := m.totalLines() - prevTotal; grown > 0 {
 				m.scrollOffset += grown
 			}
@@ -1032,7 +1085,7 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 				m.scrollOffset = maxOff
 			}
 		}
-		if m.scrollOffset > 0 && m.tmuxName != "" && !m.mirror && !m.tmuxCapturePending {
+		if m.scrollOffset > 0 && m.tmuxName != "" && !m.tmuxCapturePending {
 			m.tmuxCapturePending = true
 			cmds = append(cmds, captureTmuxScrollbackCmd(m.slug, m.tmuxName))
 		}
@@ -1047,30 +1100,7 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 		if msg.Slug != m.slug || msg.TmuxName != m.tmuxName {
 			return m, nil
 		}
-		m.tmuxCapturePending = false
-		if m.scrollOffset <= 0 {
-			return m.leaveTmuxScrollback(), nil
-		}
-		if msg.Err != nil {
-			m.tmuxScrollError = msg.Err.Error()
-			return m, nil
-		}
-		oldTotal := len(m.tmuxHistory)
-		m.tmuxHistory = msg.Lines
-		m.tmuxScrollError = ""
-		// Preserve the visible historical content when new pane rows arrived
-		// after a prior snapshot, matching the direct-emulator contract.
-		if oldTotal > 0 && len(m.tmuxHistory) > oldTotal {
-			m.scrollOffset += len(m.tmuxHistory) - oldTotal
-		}
-		maxOff := maxScrollOffset(len(m.tmuxHistory), m.visibleHeight())
-		if m.scrollOffset > maxOff {
-			m.scrollOffset = maxOff
-		}
-		if m.scrollOffset <= 0 {
-			return m.leaveTmuxScrollback(), nil
-		}
-		return m, nil
+		return m.applyTmuxScrollback(msg.Lines, msg.Err)
 
 	case QuiescenceTickMsg:
 		// Ignore ticks for other panels or if panel is done.
@@ -1090,7 +1120,7 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 		return m, QuiescenceTickCmd(m.slug)
 
 	case tea.MouseWheelMsg:
-		if m.tmuxName != "" && !m.mirror {
+		if m.tmuxName != "" {
 			switch msg.Button {
 			case tea.MouseWheelUp:
 				m.scrollOffset += 3
@@ -1123,9 +1153,6 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		if m.mirror {
-			return m, nil
-		}
 		vpWidth := msg.Width
 		if vpWidth < 1 {
 			vpWidth = 1
@@ -1134,8 +1161,14 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 		if vpHeight < 1 {
 			vpHeight = 1
 		}
+		if m.viewer && m.viewerClosed {
+			return m, nil
+		}
 		m.backend.resize(vpWidth, vpHeight)
 		m.cachedRender = m.backend.renderScreen()
+		if m.viewer && m.viewerClient != nil {
+			return m, resizeViewerClientCmd(m.viewerClient.ptmx, vpWidth, vpHeight)
+		}
 		return m, nil
 
 	case StreamCompleteMsg:
@@ -1156,11 +1189,26 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 		if m.done {
 			return m.refuseClosedInput("paste")
 		}
-		if m.mirror {
-			if !m.mirrorOwned || msg.Content == "" {
+		if m.viewer {
+			// Delivered as a terminal delivers a paste to the program in it, here
+			// the tmux client: bracketed when the client turned DECSET 2004 on, so
+			// tmux passes it to the pane as one paste rather than as typed lines.
+			w := m.inputPTY()
+			if w == nil || msg.Content == "" {
 				return m, nil
 			}
-			return m, sessionMirrorWriteTextCmd(m.slug, m.tmuxName, m.mirrorGeneration, msg.Content)
+			bracketed := false
+			if m.backend != nil && !m.backend.closed && m.backend.term != nil {
+				bracketed, _ = m.backend.term.ModeGet(libghostty.ModeBracketedPaste)
+			}
+			encoded, err := libghostty.PasteEncode([]byte(msg.Content), bracketed)
+			if err != nil {
+				return m, nil
+			}
+			if _, err := w.Write(encoded); err != nil {
+				return m.refuseClosedInput("paste")
+			}
+			return m, nil
 		}
 		if m.ptmx != nil && msg.Content != "" {
 			if _, err := m.ptmx.Write([]byte(msg.Content)); err != nil {
@@ -1181,13 +1229,6 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 		if msg.Code != tea.KeyEscape {
 			m.lastEscTime = time.Time{}
 		}
-		if m.mirror && m.mirrorTakenOver && msg.String() == "r" {
-			return m.RetakeMirror(m.mirrorGeneration + 1)
-		}
-		if m.mirror && msg.String() == "ctrl+\\" {
-			slug := m.slug
-			return m, func() tea.Msg { return TerminalTerminateMsg{Slug: slug} }
-		}
 
 		// Lore scrollback lives on the shifted keys, following the common
 		// terminal-emulator convention (shift+PgUp scrolls the host, plain
@@ -1195,7 +1236,7 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 		// string form of modified keys varies across input protocols.
 		if msg.Mod.Contains(tea.ModShift) {
 			visH := m.visibleHeight()
-			if m.tmuxName != "" && !m.mirror {
+			if m.tmuxName != "" {
 				switch msg.Code {
 				case tea.KeyPgUp:
 					m.scrollOffset += visH / 2
@@ -1236,29 +1277,6 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 			}
 		}
 
-		if m.mirror {
-			if !m.mirrorOwned {
-				return m, nil
-			}
-			if msg.Code == tea.KeyEscape {
-				now := time.Now()
-				if !m.lastEscTime.IsZero() && now.Sub(m.lastEscTime) < escDetachWindow {
-					m.lastEscTime = time.Time{}
-					slug := m.slug
-					return m, func() tea.Msg { return TerminalDetachMsg{Slug: slug} }
-				}
-				m.lastEscTime = now
-			}
-			text, key := sessionMirrorKey(msg)
-			if text != "" {
-				return m, sessionMirrorWriteTextCmd(m.slug, m.tmuxName, m.mirrorGeneration, text)
-			}
-			if key != "" {
-				return m, sessionMirrorWriteKeyCmd(m.slug, m.tmuxName, m.mirrorGeneration, key)
-			}
-			return m, nil
-		}
-
 		switch msg.String() {
 		case "esc": // single Esc forwards; double Esc within window detaches
 			if m.done {
@@ -1267,15 +1285,19 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 			return m.handleEscKey()
 		case "ctrl+\\": // Ctrl+\ — terminate subprocess (dismisses a closed panel)
 			slug := m.slug
+			if m.viewer {
+				generation := m.viewerGeneration
+				return m, func() tea.Msg { return ViewerTerminateMsg{Slug: slug, Generation: generation} }
+			}
 			return m, func() tea.Msg { return TerminalTerminateMsg{Slug: slug} }
 
 		default:
 			if m.done {
 				return m.refuseClosedInput(msg.String())
 			}
-			if m.ptmx != nil {
+			if w := m.inputPTY(); w != nil {
 				if b := KeyToBytes(msg); b != nil {
-					if _, err := m.ptmx.Write(b); err != nil {
+					if _, err := w.Write(b); err != nil {
 						return m.refuseClosedInput(msg.String())
 					}
 				}
@@ -1313,8 +1335,8 @@ func (m SessionPanelModel) handleEscKey() (SessionPanelModel, tea.Cmd) {
 		return m, func() tea.Msg { return TerminalDetachMsg{Slug: slug} }
 	}
 	m.lastEscTime = now
-	if m.ptmx != nil {
-		if _, err := m.ptmx.Write([]byte{0x1b}); err != nil {
+	if w := m.inputPTY(); w != nil {
+		if _, err := w.Write([]byte{0x1b}); err != nil {
 			return m.refuseClosedInput("esc")
 		}
 	}
@@ -1340,7 +1362,7 @@ func (m SessionPanelModel) View() (result string) {
 
 		total := m.totalLines()
 		var history []string
-		if m.tmuxName != "" && !m.mirror {
+		if m.tmuxName != "" {
 			history = m.tmuxHistory
 			total = len(history)
 			if m.tmuxScrollError != "" {
@@ -1362,7 +1384,7 @@ func (m SessionPanelModel) View() (result string) {
 		}
 
 		var source []string
-		if m.tmuxName != "" && !m.mirror {
+		if m.tmuxName != "" {
 			source = history[startIdx:endIdx]
 		} else {
 			source = m.backend.readScrollback(startIdx, endIdx)
@@ -1380,13 +1402,20 @@ func (m SessionPanelModel) View() (result string) {
 		lines = append(lines, "  "+dimS.Render(indicator))
 		return strings.Join(lines, "\n")
 	}
-	if m.mirrorTakenOver {
+	if m.viewer && m.done && !m.viewerSawOutput {
 		dimS := lipgloss.NewStyle().Foreground(style.ColorDim)
-		return "  " + dimS.Render("mirror taken by another viewer — press r to re-take")
-	}
-	if m.mirror && m.cachedRender == "" && m.mirrorErr != "" {
-		dimS := lipgloss.NewStyle().Foreground(style.ColorDim)
-		return "  " + dimS.Render("mirror unavailable: "+m.mirrorErr)
+		switch m.viewerEnd {
+		case ViewerAttachFailed:
+			reason := "the tmux client failed"
+			if m.viewerErr != nil {
+				reason = m.viewerErr.Error()
+			}
+			return "  " + dimS.Render("could not attach to "+m.tmuxName+": "+reason)
+		case ViewerDetached:
+			return "  " + dimS.Render("viewer detached; the session is still running")
+		default:
+			return "  " + dimS.Render("session ended")
+		}
 	}
 
 	// Live view: return the cached render (updated in Update() handlers).
@@ -1395,24 +1424,7 @@ func (m SessionPanelModel) View() (result string) {
 		return dimS.Render("  Waiting for output...")
 	}
 
-	if m.mirror {
-		return clipSessionMirrorRender(m.cachedRender, m.width, m.height)
-	}
 	return m.cachedRender
-}
-
-func clipSessionMirrorRender(render string, width, height int) string {
-	if render == "" || width < 1 || height < 1 {
-		return render
-	}
-	lines := strings.Split(render, "\n")
-	if len(lines) > height {
-		lines = lines[:height]
-	}
-	for i := range lines {
-		lines[i] = ansi.Cut(lines[i], 0, width)
-	}
-	return strings.Join(lines, "\n")
 }
 
 // PollTerminalCmd returns a Cmd that blocks until PTY data arrives, then drains
@@ -1912,9 +1924,11 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 		// under tmux, slugged and slugless alike: a slugless session gets a
 		// generated `chat-<short-id>` name (TmuxSessionNameSlugless) in place of the
 		// slug, carried onto the registry row so adoption re-attaches by that name.
-		// No session class silently loses crash recovery while hosting is active —
-		// the two degradations below (no instance name, or a tmux creation error)
-		// each announce the direct-PTY fallback rather than falling through quietly.
+		// No session class silently loses crash recovery while hosting is active.
+		// A tmux creation or size-pin error fails the launch: a direct-PTY session
+		// would have no pane for any viewer to attach to and would end with this
+		// process, so the caller's spawn-failure path handles it instead. Only a
+		// process with no instance name still falls back, and announces it.
 		var cmd *exec.Cmd
 		var tmuxName string
 		var panePID int
@@ -1941,17 +1955,13 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 				}
 				extras := append([]string{"LORE_FRAMEWORK=" + activeFramework}, sessionEnv.vars()...)
 				extras = append(extras, positionEnv...)
-				pid, terr := createTmuxSession(name, worktreeDir, width, height, extras, harnessBinary, args)
+				pid, terr := createTmuxSession(name, worktreeDir, width, height, extras, harnessBinary, args, paneLaunchDir(sessionEnv.HostKey))
 				if terr != nil {
-					notices = append(notices, OperatorNotice{
-						Code:    "tmux-hosting-failed",
-						Message: fmt.Sprintf("tmux hosting failed for %s (%v); using direct PTY", label, terr),
-					})
-				} else {
-					tmuxName, panePID = name, pid
-					cmd = tmuxAttachCommand(name)
-					cmd.Dir = worktreeDir
+					return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("tmux hosting failed for %s: %w", label, terr), Notices: notices}
 				}
+				tmuxName, panePID = name, pid
+				cmd = tmuxAttachCommand(name)
+				cmd.Dir = worktreeDir
 			} else {
 				// tmux is active but this process advertises no instance name to build
 				// the session name from — host capability present, identity absent.
@@ -2067,7 +2077,10 @@ func runManagedWorktreeCommand(ctx context.Context, knowledgeDir, action, worktr
 // (the original spawn's died with the crashed TUI's memory) and echoes the
 // registry-recovered sessionID/harness so teardown can still bind the spend probe.
 // A pane-PID query failure means the session died between the adoption scan and the
-// attach; that surfaces as a spawn error (the caller journals it closed).
+// attach; that surfaces as a spawn error (the caller journals it closed). Before its
+// client attaches, the window is pinned at width x height, so a session an older
+// lore-tui left at another size, or with no size of its own, takes this caller's
+// size and keeps it; a pin that fails fails the re-attach.
 func AttachTerminalCmd(slug, tmuxName, sessionID, harness, knowledgeDir, worktreeID, executionDir string, identity worktree.Identity, width, height int) tea.Cmd {
 	return func() (result tea.Msg) {
 		defer func() {
@@ -2099,6 +2112,9 @@ func AttachTerminalCmd(slug, tmuxName, sessionID, harness, knowledgeDir, worktre
 		panePID, perr := tmuxPanePID(tmuxName)
 		if perr != nil {
 			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("tmux pane pid: %w", perr)}
+		}
+		if err := pinTmuxWindowSize(tmuxName, width, height); err != nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse tmux adoption: %w", err)}
 		}
 		cmd := tmuxAttachCommand(tmuxName)
 		cmd.Dir = identity.CanonicalPath

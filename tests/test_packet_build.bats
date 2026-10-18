@@ -108,15 +108,38 @@ PY
 @test "worker request inserts one pointer after the floor including precomposed briefs" {
   result=$(build_role worker)
   id=$(jq -r .packet_id <<< "$result")
+  # The writer resolves a canonical route and sends the row to the store's session
+  # host: give it current routes, a git checkout outside the store, and a live
+  # store-host row, with the store pinned so the checkout belongs to it.
+  printf '%s\n' '{"version":2,"tui_launch_framework":"codex","capability_overrides":{},"routes":{"worker":"codex/worker-model","default":"codex/default-model"},"harnesses":{"codex":{"args":[],"native_models":{"default":"gpt-5.5-high"}}}}' > "$LORE_DATA_DIR/config/settings.json"
+  checkout="$(mktemp -d)"
+  git -C "$checkout" init -q
+  checkout="$(cd "$checkout" && pwd -P)"
+  python3 - "$REPO_DIR/scripts" "$TEST_KDIR" <<'PY'
+import importlib.util, json, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("session_runtime", sys.argv[1] + "/session_runtime.py")
+runtime = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runtime)
+kdir = Path(sys.argv[2]).resolve()
+login = runtime.login_dir()
+login.mkdir(parents=True, exist_ok=True)
+(login / "served.json").write_text(json.dumps({"schema_version": 1, "stores": {str(kdir): {"pin_knowledge_dir": True}}}))
+(kdir / "_sessions/instances").mkdir(parents=True, exist_ok=True)
+(kdir / "_sessions/instances/store-host.json").write_text(json.dumps(dict(
+    name="store-host", pid=4242, role="session-host", scope="store", host_key=runtime.store_host_key(kdir),
+    runtime=runtime.runtime_name(), sessions=[])))
+PY
   for mode in plain composed; do
     brief='Read the widget boundary.'
     if [ "$mode" = composed ]; then
       brief="$(bash "$REPO_DIR/scripts/render-dispatch-guidance.sh" --packet "$id")
 $brief"
     fi
-    run bash "$REPO_DIR/scripts/session-request.sh" --type worker --slug unrelated--w1 --context "$brief" --packet "$id" --anywhere --kdir "$TEST_KDIR" --json
-    [ "$status" -eq 0 ]
+    run bash "$REPO_DIR/scripts/session-request.sh" --type worker --slug unrelated--w1 --context "$brief" --packet "$id" --prefer-dir "$checkout" --kdir "$TEST_KDIR" --json
+    [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
   done
+  rm -rf "$checkout"
   python3 - "$TEST_KDIR" "$id" <<'PY'
 import json, pathlib, sys
 rows=list(pathlib.Path(sys.argv[1], '_sessions/requests/pending').glob('*.json'))

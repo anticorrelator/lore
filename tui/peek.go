@@ -15,8 +15,8 @@ const peekResponseTTL = 5 * time.Minute
 
 // --- messages ---
 
-// peekRequestScanMsg carries the peek-requests addressed to this instance for a
-// slug it hosts, discovered on the poll tick.
+// peekRequestScanMsg carries the peek-requests for a slug this host runs,
+// discovered on the poll tick.
 type peekRequestScanMsg struct {
 	matched     []session.PeekRequest
 	diagnostics []session.Diagnostic
@@ -32,18 +32,15 @@ type peekRespondedMsg struct {
 // --- Cmds ---
 
 // scanPeekRequestsCmd garbage-collects stale peek-responses, then returns the
-// peek-requests addressed to this instance for a slug it hosts. Both filters
-// (target + hosted) must hold, mirroring the send/close scans.
-func scanPeekRequestsCmd(sessionsDir, myName string, hosted map[string]bool, retarget ...bool) tea.Cmd {
+// peek-requests for a slug this host runs, whatever instance a row names, as
+// the send and close scans do.
+func scanPeekRequestsCmd(sessionsDir string, hosted map[string]bool) tea.Cmd {
 	return func() tea.Msg {
 		session.GCPeekResponses(sessionsDir, peekResponseTTL)
 		var matched []session.PeekRequest
 		rows, diagnostics := session.ScanPeekRequestsWithDiagnostics(sessionsDir)
 		for _, pr := range rows {
-			if pr.RequestID == "" || (pr.TargetInstance != myName && !hostRetarget(retarget)) {
-				continue
-			}
-			if !hosted[pr.Slug] {
+			if pr.RequestID == "" || !hosted[pr.Slug] {
 				continue
 			}
 			matched = append(matched, pr)

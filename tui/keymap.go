@@ -204,13 +204,19 @@ var keymapRegistry = []keymapSection{
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestWorkListStatusBarKeybindContract/j/k (navigate)"},
 		{key: "l/Enter", label: "open", surfaces: surfStatusBar | surfHelp, helpKey: "l / Enter", helpLabel: "open detail / attach session",
 			labelFn: func(m model) string {
-				if m.terminalMode && m.hasSessionPanel(m.list.CurrentSlug()) {
+				slug := m.list.CurrentSlug()
+				if m.terminalMode && m.hasSessionPanel(slug) {
 					return "attach session"
+				}
+				if !m.hasSessionPanel(slug) {
+					if row, live := m.liveSessionRow(slug); live && row.Tmux != "" {
+						return "attach session"
+					}
 				}
 				return "open"
 			},
 			ownerLayers: []ownerLayer{ownerRouter, ownerSubModel},
-			test:        "TestWorkListStatusBarKeybindContract/l (open), …/Enter (open), TestWorkListAttachSessionKeybindContract"},
+			test:        "TestWorkListStatusBarKeybindContract/l (open), …/Enter (open), TestWorkListAttachSessionKeybindContract, TestViewerTUIOpensOtherSessionsOnExplicitKeys"},
 		{key: "s", label: "spec", surfaces: surfStatusBar | surfHelp, helpLabel: "run spec",
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestWorkListStatusBarKeybindContract/s (spec)"},
 		{key: "i", label: "implement", surfaces: surfStatusBar | surfHelp, helpLabel: "run implement",
@@ -269,8 +275,8 @@ var keymapRegistry = []keymapSection{
 	{ctx: kmSessionsList, helpTitle: "Sessions", entries: []keymapEntry{
 		{key: "j/k", label: "navigate", surfaces: surfStatusBar | surfHelp, helpKey: "j / k",
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestSessionsListStatusBarKeybindContract/j/k (navigate)"},
-		{key: "Enter", label: "attach", surfaces: surfStatusBar | surfHelp, helpLabel: "focus / attach session",
-			ownerLayers: []ownerLayer{ownerSubModel, ownerRouter}, test: "TestSessionsListStatusBarKeybindContract/Enter (attach)"},
+		{key: "l/Enter", label: "attach", surfaces: surfStatusBar | surfHelp, helpKey: "l / Enter", helpLabel: "open the session's terminal",
+			ownerLayers: []ownerLayer{ownerSubModel, ownerRouter}, test: "TestSessionsListStatusBarKeybindContract/l (attach), …/Enter (attach)"},
 		{key: "x", label: "close", surfaces: surfStatusBar | surfHelp, helpLabel: "request close (confirm)",
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSessionsListStatusBarKeybindContract/x (close)"},
 		{key: "o", label: "coordination", surfaces: surfStatusBar | surfHelp, helpLabel: "coordination view",
@@ -392,7 +398,7 @@ var keymapRegistry = []keymapSection{
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestTerminalModeStatusBarKeybindContract/Esc (forwarded to subprocess, focus kept)"},
 		{key: "Esc", label: "back to list", surfaces: surfStatusBar | surfHelp, helpKey: "Esc Esc", helpLabel: "detach focus, back to list",
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestTerminalDetachKeepsTerminalView"},
-		{key: "Ctrl+c", label: "terminate", surfaces: surfStatusBar | surfHelp, helpLabel: "terminate subprocess (discard when finished)",
+		{key: "Ctrl+c", label: "close", surfaces: surfStatusBar | surfHelp, helpLabel: "close session (confirm); discard when finished",
 			labelFn: func(m model) string {
 				panel, ok := m.currentSessionPanel()
 				switch m.state {
@@ -404,13 +410,13 @@ var keymapRegistry = []keymapSection{
 				if ok && panel.IsDone() {
 					return "discard"
 				}
-				return "terminate"
+				return "close"
 			},
 			ownerLayers: []ownerLayer{ownerRouter},
-			test:        "TestTerminalModeStatusBarKeybindContract/Ctrl+c (terminate), …/Ctrl+c (discard)"},
-		{key: "Ctrl+\\", label: "terminate subprocess", surfaces: surfHelp,
-			ownerLayers: []ownerLayer{ownerSubModel}},
-		{key: "(all other keys)", label: "forwarded to subprocess", surfaces: surfHelp,
+			test:        "TestTerminalModeStatusBarKeybindContract/Ctrl+c (close), …/Ctrl+c (discard), TestViewerTUICtrlCAndXCloseThroughTheHost"},
+		{key: "Ctrl+\\", label: "close the view", surfaces: surfHelp, helpLabel: "close the view; the session keeps running",
+			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestViewerTUICtrlBackslashClosesOnlyTheViewer"},
+		{key: "(all other keys)", label: "forwarded to the session", surfaces: surfHelp,
 			ownerLayers: []ownerLayer{ownerSubModel}},
 	}},
 	{ctx: kmSettingsModal, helpTitle: "Settings", entries: []keymapEntry{
@@ -446,8 +452,8 @@ var keymapRegistry = []keymapSection{
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestHelpModalKeybindContract"},
 		{key: "S / Ctrl+,", label: "settings configurator", surfaces: surfHelp,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSettingsModalStatusBarKeybindContract/S / Ctrl+, (open)"},
-		{key: "q / Ctrl+C / Ctrl+D", label: "quit", surfaces: surfHelp,
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestGlobalQuitKeybindContract"},
+		{key: "q / Ctrl+C / Ctrl+D", label: "quit", surfaces: surfHelp, helpLabel: "quit (sessions keep running)",
+			ownerLayers: []ownerLayer{ownerRouter}, test: "TestGlobalQuitKeybindContract, TestViewerTUIQuitClosesViewersOnly"},
 	}},
 }
 

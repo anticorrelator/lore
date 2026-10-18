@@ -214,8 +214,8 @@ func waitExit(proc harnessProc, grace, poll time.Duration) bool {
 
 // --- messages ---
 
-// closeRequestScanMsg carries the close-requests addressed to this instance for
-// a slug it hosts, discovered on the poll tick.
+// closeRequestScanMsg carries the close-requests for a session this host runs,
+// discovered on the poll tick.
 type closeRequestScanMsg struct {
 	matched     []session.CloseRequest
 	diagnostics []session.Diagnostic
@@ -279,19 +279,18 @@ func resolveCloseTargetSlug(cr session.CloseRequest, idToSlug map[string]string)
 	return cr.Slug, true
 }
 
-// scanCloseRequestsCmd reads close-requests/ and returns the rows addressed to
-// this instance (target_instance == myName) for a session it currently hosts.
-// BOTH filters must hold: a row for another instance, or for a session this
-// instance does not host, is left untouched (neither returned nor deleted). A
+// scanCloseRequestsCmd reads close-requests/ and returns the rows for a session
+// this host currently runs, whatever instance a row names. A row for a session
+// this host does not run is left untouched (neither returned nor deleted). A
 // row's target session is its session_id when present (see resolveCloseTargetSlug),
 // else its slug. hosted and idToSlug are snapshotted at Cmd-build time, mirroring
 // queueTickCmd's plan-doc snapshot.
-func scanCloseRequestsCmd(sessionsDir, myName string, hosted map[string]bool, idToSlug map[string]string, retarget ...bool) tea.Cmd {
+func scanCloseRequestsCmd(sessionsDir string, hosted map[string]bool, idToSlug map[string]string) tea.Cmd {
 	return func() tea.Msg {
 		var matched []session.CloseRequest
 		rows, diagnostics := session.ScanCloseRequestsWithDiagnostics(sessionsDir)
 		for _, cr := range rows {
-			if cr.RequestID == "" || (cr.TargetInstance != myName && !hostRetarget(retarget)) {
+			if cr.RequestID == "" {
 				continue
 			}
 			slug, ok := resolveCloseTargetSlug(cr, idToSlug)
@@ -313,17 +312,13 @@ func deleteCloseRequestCmd(sessionsDir, requestID string) tea.Cmd {
 	}
 }
 
-// consumeCloseRequestCmd durably records the updated recovery manifest after
-// deleting a matched close-request. handleCloseRequestScan sequences these
-// commands before any close action it dispatches in the same update.
+// consumeCloseRequestCmd durably records the updated recovery manifest, which
+// now lists the consumed close-request. The request row itself stays until the
+// close delivery that answers it commits. handleCloseRequestScan sequences
+// these commands before any close action it dispatches in the same update.
 func consumeCloseRequestCmd(sessionsDir, requestID string, inst session.Instance) tea.Cmd {
 	return func() tea.Msg {
-		var deleteErr error
-		if inst.HostKey == "" {
-			deleteErr = session.DeleteCloseRequest(sessionsDir, requestID)
-		}
-		writeErr := session.WriteInstance(sessionsDir, inst)
-		return closeRequestDeletedMsg{requestID: requestID, err: errors.Join(deleteErr, writeErr)}
+		return closeRequestDeletedMsg{requestID: requestID, err: session.WriteInstance(sessionsDir, inst)}
 	}
 }
 
@@ -381,9 +376,11 @@ func shouldAutoClose(ls liveSession) bool {
 	return ls.initiator == "agent"
 }
 
-// handleCloseRequestScan consumes each matched close-request. Consuming always
-// deletes the row (the durable ack; the journal's close_requested already recorded
-// intent). What follows branches on the request's reason:
+// handleCloseRequestScan consumes each matched close-request. Consuming records
+// the request on the session's recovery manifest; the row itself is deleted
+// when the close delivery that answers it commits (the journal's
+// close_requested already recorded intent). What follows branches on the
+// request's reason:
 //
 //   - explicit close (reason human — the CLI default — or coordinator): full
 //     discretion. Always schedule teardown, regardless of initiator or state; a

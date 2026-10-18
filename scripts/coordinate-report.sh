@@ -46,10 +46,10 @@
 #   4  the report path already exists — nothing was written, and the existing
 #      file is named in the message
 #
-#   4 stays distinct from 1 for the same reason it does on `coordinate pin
-#   --preflight`: 1 means what you handed me is wrong, 4 means the destination is
-#   already spoken for. They call for different corrections, and a caller that
-#   cannot tell them apart has to go look at the directory to find out.
+#   4 stays distinct from 1 because they call for different corrections: 1
+#   means what you handed me is wrong, 4 means the destination is already
+#   spoken for. A caller that cannot tell them apart has to go look at the
+#   directory to find out.
 
 set -euo pipefail
 

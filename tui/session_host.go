@@ -27,13 +27,8 @@ type hostOptions struct {
 	Idle                                  time.Duration
 }
 
-func sessionHostRole(key string) string {
-	if key != "" {
-		return "session-host"
-	}
-	return ""
-}
-func hostRetarget(v []bool) bool { return len(v) > 0 && v[0] }
+// sessionHostRole is the role the store host's registry row carries.
+const sessionHostRole = "session-host"
 
 func hostLock(path string, nonblock bool) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
@@ -180,6 +175,12 @@ func sessionHostMain(args []string) int {
 		return 1
 	}
 	defer os.Remove(o.ReadyFile)
+	// A launch spec holds a session's whole environment. One a dead predecessor
+	// wrote and its pane never read would otherwise stay on disk; under the
+	// runtime lock, no other host of this key is launching.
+	if err = work.SweepStalePaneLaunchSpecs(o.Key, time.Now()); err != nil {
+		fmt.Fprintln(os.Stderr, "session host: stale launch specs:", err)
+	}
 	// The runtime owns a virtual terminal even when its supervisor has none.
 	if err = os.Setenv("TERM", "xterm-256color"); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -753,7 +754,7 @@ func (h *sessionHostModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return h.fail(v.err)
 		}
 	case work.StreamErrorMsg:
-		if pending, ok := h.runtime.pendingSpawns[v.Slug]; ok && (pending.adopted || h.runtime.hostKey != "") {
+		if pending, ok := h.runtime.pendingSpawns[v.Slug]; ok {
 			if !pending.adopted && pending.requestID != "" {
 				cmds = append(cmds, h.wrap(h.runtime.settleRefusedLaunchCmd(v, pending)))
 				break
@@ -816,12 +817,12 @@ func (h *sessionHostModel) sessionTick() tea.Cmd {
 	for slug := range m.localSessions {
 		hosted[slug] = true
 	}
-	cmds := []tea.Cmd{m.syncInstanceCmd(), scanPeekRequestsCmd(m.sessionsDir, m.instanceName, hosted, true)}
+	cmds := []tea.Cmd{m.syncInstanceCmd(), scanPeekRequestsCmd(m.sessionsDir, hosted)}
 	if !h.draining {
 		// A draining host finishes what it started and takes on nothing new;
 		// what waits in the queue is the next host's.
 		h.queueTicks++
-		cmds = append(cmds, scanInterruptRequestsCmd(m.sessionsDir, m.instanceName), m.queueTickCmd(), scanSendRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanAnswerRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanCloseRequestsCmd(m.sessionsDir, m.instanceName, hosted, sessionIDIndex(m.localSessions), true))
+		cmds = append(cmds, scanInterruptRequestsCmd(m.sessionsDir, m.instanceName), m.queueTickCmd(), scanSendRequestsCmd(m.sessionsDir, hosted), scanAnswerRequestsCmd(m.sessionsDir, hosted), scanCloseRequestsCmd(m.sessionsDir, hosted, sessionIDIndex(m.localSessions)))
 	}
 	var more []tea.Cmd
 	*m, more = m.advanceCloseLadders()

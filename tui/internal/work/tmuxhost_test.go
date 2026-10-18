@@ -33,19 +33,34 @@ func TestTmuxLaunchCapabilityContractHarnessMatrix(t *testing.T) {
 	}
 	for _, fixture := range fixtures {
 		t.Run(fixture.framework, func(t *testing.T) {
-			args := tmuxSessionArgs("lore-test-session", "/tmp/session-worktree", 80, 24,
-				[]string{"LORE_FRAMEWORK=" + fixture.framework, "COLORTERM=wrong"},
+			spec := newPaneLaunchSpec([]string{"LORE_FRAMEWORK=" + fixture.framework, "COLORTERM=wrong", "PANE_CONTRACT_CARRIED=override"},
 				fixture.binary, []string{"--fixture"})
-			joined := strings.Join(args, "\x00")
 			for _, stale := range []string{"TERM=operator-term", "COLORTERM=operator-value", "COLORTERM=wrong", "TMUX=stale",
-				"TMUX_PANE=%99", "TERM_PROGRAM=operator-terminal", "SHELL=/operator/shell"} {
-				if strings.Contains(joined, stale) {
-					t.Errorf("tmux args leaked %q", stale)
+				"TMUX_PANE=%99", "TERM_PROGRAM=operator-terminal", "SHELL=/operator/shell", "PANE_CONTRACT_CARRIED=carried"} {
+				if slices.Contains(spec.Env, stale) {
+					t.Errorf("launch spec leaked %q", stale)
 				}
 			}
-			if strings.Count(joined, "COLORTERM=truecolor") != 1 {
-				t.Errorf("tmux args COLORTERM count = %d, want 1", strings.Count(joined, "COLORTERM=truecolor"))
+			for _, want := range []string{"LORE_FRAMEWORK=" + fixture.framework, "PANE_CONTRACT_CARRIED=override", "COLORTERM=truecolor"} {
+				if !slices.Contains(spec.Env, want) {
+					t.Errorf("launch spec lost %q", want)
+				}
 			}
+			keys := map[string]bool{}
+			for _, kv := range spec.Env {
+				key, _, _ := strings.Cut(kv, "=")
+				if keys[key] {
+					t.Errorf("launch spec lists %s twice; the harness would read the first", key)
+				}
+				keys[key] = true
+			}
+			if !slices.Equal(spec.Argv, []string{fixture.binary, "--fixture"}) {
+				t.Errorf("launch spec argv = %v, want the harness command", spec.Argv)
+			}
+
+			pane := []string{"/opt/lore/lore-tui", PaneExecFlag, "/tmp/hosts/key/launch/pane-1.json"}
+			args := tmuxSessionArgs("lore-test-session", "/tmp/session-worktree", 80, 24, pane)
+			joined := strings.Join(args, "\x00")
 			if !strings.Contains(joined, "new-session\x00-d\x00-s\x00lore-test-session\x00-x\x0080\x00-y\x0024\x00-c\x00/tmp/session-worktree") {
 				t.Errorf("tmux args did not pin the pane cwd")
 			}
@@ -55,19 +70,8 @@ func TestTmuxLaunchCapabilityContractHarnessMatrix(t *testing.T) {
 				t.Errorf("tmux args still layer %d -e assignments over the server environment", n)
 			}
 			separator := slices.Index(args, "--")
-			if separator < 0 || len(args) < separator+5 || args[separator+1] != "/bin/sh" || args[separator+2] != "-c" ||
-				!strings.Contains(args[separator+3], "/usr/bin/env -i") {
-				t.Fatalf("pane command does not start from an empty environment: it begins %q", args[max(separator, 0):min(max(separator, 0)+3, len(args))])
-			}
-			command := args[separator+4:]
-			wantTail := []string{fixture.binary, "--fixture"}
-			if !slices.Equal(command[len(command)-len(wantTail):], wantTail) {
-				t.Errorf("pane command tail = %v, want %v", command[len(command)-len(wantTail):], wantTail)
-			}
-			for _, want := range []string{"LORE_FRAMEWORK=" + fixture.framework, "PANE_CONTRACT_CARRIED=carried", "COLORTERM=truecolor"} {
-				if !slices.Contains(command, want) {
-					t.Errorf("pane command lost %q", want)
-				}
+			if separator < 0 || !slices.Equal(args[separator+1:], pane) {
+				t.Fatalf("pane command = %q, want exactly %q", args[max(separator, 0):], pane)
 			}
 		})
 	}
@@ -111,10 +115,14 @@ func TestTmuxPaneEnvironmentIgnoresTheServersStartupEnvironment(t *testing.T) {
 	}
 	envFile, pidFile := filepath.Join(root, "pane.env"), filepath.Join(root, "pane.pid")
 	script := "echo $$ > " + pidFile + "; env > " + envFile + ".tmp; mv " + envFile + ".tmp " + envFile + "; exec sleep 120"
+	launch := filepath.Join(root, "launch")
 	pid, err := createTmuxSession("lore-pane-env-probe", work, 80, 24,
-		[]string{"LORE_FRAMEWORK=claude-code", "LORE_SESSION_SLUG=pane-probe"}, "/bin/sh", []string{"-c", script})
+		[]string{"LORE_FRAMEWORK=claude-code", "LORE_SESSION_SLUG=pane-probe"}, "/bin/sh", []string{"-c", script}, launch)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if specs, _ := filepath.Glob(filepath.Join(launch, "*")); len(specs) != 0 {
+		t.Errorf("launch specs left after the pane started: %v", specs)
 	}
 	var data []byte
 	deadline := time.Now().Add(10 * time.Second)
@@ -182,146 +190,14 @@ func TestTmuxCapabilityPinsPreserveExistingOptions(t *testing.T) {
 	}
 }
 
-func TestTmuxMirrorOpenArgsKeepStateCaptureAndPipeAtomic(t *testing.T) {
-	t.Setenv(config.SessionRuntimeEnv, "")
-	got := tmuxMirrorOpenArgs("lore-remote", "/tmp/lore-tui-mirror-ab12/stream")
-	want := []string{
-		"-L", "lore-tui",
-		"display-message", "-p", "-t", "lore-remote", tmuxMirrorStateFormat, ";",
-		"capture-pane", "-p", "-e", "-S", "-", "-t", "lore-remote", ";",
-		"pipe-pane", "-O", "-t", "lore-remote", "cat > /tmp/lore-tui-mirror-ab12/stream",
-	}
-	if !slices.Equal(got, want) {
-		t.Fatalf("mirror open args = %#v, want %#v", got, want)
-	}
-	if strings.Contains(strings.Join(got, " "), "attach") {
-		t.Fatalf("mirror observation attached a tmux client: %v", got)
-	}
-}
-
-func TestParseTmuxMirrorOpenOutputSeparatesStateAndDisplayRows(t *testing.T) {
-	state, rows, err := parseTmuxMirrorOpenOutput([]byte("4 2 80 24 1 133\nfirst\r\n\x1b[31msecond\x1b[0m\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantState := (TmuxMirrorPaneState{CursorX: 4, CursorY: 2, Width: 80, Height: 24, Alternate: true, HistorySize: 133})
-	if state != wantState {
-		t.Fatalf("state = %+v, want %+v", state, wantState)
-	}
-	if !slices.Equal(rows, []string{"first", "\x1b[31msecond\x1b[0m"}) {
-		t.Fatalf("rows = %#v", rows)
-	}
-}
-
-func TestTmuxMirrorWriteAndDetachArgs(t *testing.T) {
-	t.Setenv(config.SessionRuntimeEnv, "")
-	text := "Enter literal text with spaces"
-	if got := tmuxMirrorLiteralArgs("remote", text); !slices.Equal(got, []string{"-L", "lore-tui", "send-keys", "-t", "remote", "-l", text}) {
-		t.Errorf("literal args = %#v", got)
-	}
-	if got := tmuxMirrorKeyArgs("remote", "Enter"); !slices.Equal(got, []string{"-L", "lore-tui", "send-keys", "-t", "remote", "Enter"}) {
-		t.Errorf("key args = %#v", got)
-	}
-	if got := tmuxMirrorDetachArgs("remote"); !slices.Equal(got, []string{"-L", "lore-tui", "pipe-pane", "-t", "remote"}) {
-		t.Errorf("detach args = %#v", got)
-	}
-}
-
-func TestOpenTmuxMirrorSeedsThenStreamsFromFIFO(t *testing.T) {
-	dir := t.TempDir()
-	fake := filepath.Join(dir, "tmux")
-	script := `#!/bin/sh
-last=""
-for arg in "$@"; do last="$arg"; done
-fifo=${last#cat > }
-(printf 'live-bytes' > "$fifo") &
-printf '2 1 10 3 0 7\nseed-one\nseed-two\nseed-three\n'
-`
-	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	transport, state, rows, err := openTmuxMirror("remote")
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := transport.path
-	defer transport.closeLocal()
-	if state.Width != 10 || state.Height != 3 || !slices.Equal(rows, []string{"seed-one", "seed-two", "seed-three"}) {
-		t.Fatalf("open result state=%+v rows=%#v", state, rows)
-	}
-	select {
-	case chunk, ok := <-transport.output:
-		if !ok || string(chunk) != "live-bytes" {
-			t.Fatalf("stream chunk = %q ok=%v", chunk, ok)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for mirror FIFO bytes")
-	}
-	transport.closeLocal()
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("FIFO remains after local cleanup: %v", err)
-	}
-}
-
-func TestOpenTmuxMirrorDetachesOwnedPipeWhenStateParsingFails(t *testing.T) {
-	t.Setenv(config.SessionRuntimeEnv, "")
-	dir := t.TempDir()
-	logPath := filepath.Join(dir, "tmux.log")
-	fake := filepath.Join(dir, "tmux")
-	script := `#!/bin/sh
-printf '%s\n' "$*" >> "$TMUX_LOG"
-case "$*" in
-  *display-message*)
-    last=""
-    for arg in "$@"; do last="$arg"; done
-    fifo=${last#cat > }
-    (printf 'unread' > "$fifo") &
-    printf 'malformed-state\n'
-    ;;
-esac
-`
-	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("TMUX_LOG", logPath)
-
-	transport, _, _, err := openTmuxMirror("remote")
-	if err == nil {
-		if transport != nil {
-			transport.closeLocal()
-		}
-		t.Fatal("malformed state unexpectedly opened a mirror")
-	}
-	logData, readErr := os.ReadFile(logPath)
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	lines := strings.Split(strings.TrimSpace(string(logData)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("tmux calls = %#v, want open then detach", lines)
-	}
-	if !strings.Contains(lines[0], "display-message -p -t remote") || !strings.Contains(lines[0], "capture-pane -p -e -S - -t remote") || !strings.Contains(lines[0], "pipe-pane -O -t remote") {
-		t.Fatalf("first call was not atomic mirror open: %q", lines[0])
-	}
-	if lines[1] != "-L lore-tui pipe-pane -t remote" {
-		t.Fatalf("failed open cleanup = %q, want no-command detach", lines[1])
-	}
-}
-
 func TestTmuxCommandsFollowSessionRuntime(t *testing.T) {
 	t.Setenv(config.SessionRuntimeEnv, "dev")
 	want := []string{"-L", "lore-tui-dev"}
 	for name, args := range map[string][]string{
-		"session":  tmuxSessionArgs("s", "/tmp/w", 80, 24, nil, "codex", nil),
-		"open":     tmuxMirrorOpenArgs("s", "/tmp/f"),
-		"geometry": tmuxMirrorGeometryArgs("s"),
-		"literal":  tmuxMirrorLiteralArgs("s", "x"),
-		"key":      tmuxMirrorKeyArgs("s", "Enter"),
-		"detach":   tmuxMirrorDetachArgs("s"),
-		"attach":   tmuxAttachCommand("s").Args[1:],
+		"session": tmuxSessionArgs("s", "/tmp/w", 80, 24, []string{"/bin/true"}),
+		"attach":  tmuxAttachCommand("s").Args[1:],
+		"pin":     tmuxWindowPinArgs("s", 80, 24),
+		"viewer":  viewerAttachArgs("s", true),
 	} {
 		if !slices.Equal(args[:2], want) {
 			t.Errorf("%s args = %v, want server %v", name, args, want)
@@ -335,19 +211,23 @@ func TestTmuxCommandsFollowSessionRuntime(t *testing.T) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX_LOG", logPath)
+	t.Setenv("LORE_DATA_DIR", t.TempDir())
 	TmuxHasSession("s")
 	_, _ = TmuxPanePID("s")
 	_, _ = TmuxPaneCWD("s")
 	_, _ = captureTmuxPaneHistory("s")
 	_, _ = CaptureTmuxHistory("s", 10, 100)
 	killTmuxSession("s")
+	_ = pinTmuxWindowSize("s", 80, 24)
+	ViewerSessionAlive("s")
+	_, _ = captureTmuxPaneHistoryOn(viewerTmuxEnv(), "=s:")
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 6 {
-		t.Fatalf("tmux calls = %q, want 6", lines)
+	if len(lines) != 9 {
+		t.Fatalf("tmux calls = %q, want 9", lines)
 	}
 	for _, line := range lines {
 		if !strings.HasPrefix(line, "-L lore-tui-dev ") {

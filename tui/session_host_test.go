@@ -160,7 +160,6 @@ func TestHostAllocationIntentPrecedesCreateAndRecoversNoLaunch(t *testing.T) {
 	_, source, _ := closedSessionWorktree(t, "source-fixture")
 	m, _ := baseSessionModel(t)
 	m.hostKey = "key"
-	m.normalizedProjectDir = source
 	m.eventScript = repoScriptPath(t, "session-event-append.sh")
 	path := filepath.Join(m.sessionsDir, "worktrees", "allocation-crash")
 	checkpoint := m.hostAllocationCheckpoint("spawn", work.SessionDescriptor{Slug: "demo", Type: "worker"})
@@ -634,6 +633,67 @@ func TestStoreHostPublishesStoreReadyAndRegistryRowThenWithdrawsIdle(t *testing.
 	}
 }
 
+// A launch spec holds a session's whole environment. One a dead host wrote and
+// its pane never read is removed when the next host for its key starts, and a
+// fresh one is left for the launch that may still be reading it.
+func TestStoreHostSweepsStaleLaunchSpecsAtStart(t *testing.T) {
+	f := newStoreHostFixture(t)
+	runtime := os.Getenv(config.SessionRuntimeEnv)
+	storeHostKey := session.StoreHostKey(config.NormalizeProjectDir(f.store), runtime)
+	tmp := t.TempDir()
+	launch := filepath.Join(tmp, "lore-pane-launch", storeHostKey)
+	if err := os.MkdirAll(launch, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale, fresh := filepath.Join(launch, "pane-stale.json"), filepath.Join(launch, "pane-fresh.json")
+	for _, p := range []string{stale, fresh} {
+		if err := os.WriteFile(p, []byte(`{"env":["SECRET=1"],"argv":["/bin/true"]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	ready := filepath.Join(config.SessionHostsDir(filepath.Join(f.store, "_sessions")), storeHostKey, "ready.json")
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "--session-host", "--scope", "store", "--host-key", storeHostKey,
+		"--kdir", f.store, "--ready-file", ready, "--idle-timeout", "1", "--runtime", runtime)
+	cmd.Env = append(os.Environ(), mainRuntimeProbeEnv+"="+runtime, "TMPDIR="+tmp)
+	var output bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &output, &output
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		select {
+		case err := <-exited:
+			t.Fatalf("host exited before publishing ready: %v\n%s", err, output.String())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("a stale launch spec survived host start: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("host start removed a fresh launch spec: %v", err)
+	}
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("idle withdrawal exit: %v\n%s", err, output.String())
+		}
+	case <-ctx.Done():
+		t.Fatalf("host never withdrew idle\n%s", output.String())
+	}
+}
+
 func TestStoreHostSeedsEachSessionFromItsRowsCheckout(t *testing.T) {
 	f := newStoreHostFixture(t)
 	m := storeHostModel(t, f.store)
@@ -682,7 +742,8 @@ func TestStoreHostSeedsEachSessionFromItsRowsCheckout(t *testing.T) {
 		if s.SourceDir != want[s.Slug] {
 			t.Fatalf("session %s row names checkout %q, want %q", s.Slug, s.SourceDir, want[s.Slug])
 		}
-		if got := m.spendDir(m.localSessions[s.Slug]); got != want[s.Slug] {
+		// The spend probe runs in the session's own checkout.
+		if got := m.localSessions[s.Slug].sourceDir; got != want[s.Slug] {
 			t.Fatalf("session %s spend probe reads %q, want its checkout", s.Slug, got)
 		}
 	}
@@ -1306,7 +1367,7 @@ func TestStoreHostRecoveryNeverOrphansASessionAliveOnAnotherRuntimeServer(t *tes
 	if err := session.WriteInstance(sessionsDir, session.Instance{Name: "dead-b", PID: deadPID(t), Repo: m.config.RepoIdentifier, Started: "2026-10-01T00:00:00Z", Sessions: tmuxSession("gone--w1", "lore-gone-"+strconv.Itoa(os.Getpid()))}); err != nil {
 		t.Fatal(err)
 	}
-	msg := m.adoptionScanCmd()().(adoptionScanMsg)
+	msg := m.adoptionScanner()(nil)
 	if len(msg.notices) != 0 {
 		t.Fatalf("scan notices: %+v", msg.notices)
 	}

@@ -64,7 +64,9 @@ setup() {
   export LORE_SESSION_RUNTIME=bats-session-verbs LORE_SESSION_HOST_BINARY="$STUB_HOST" \
     LORE_SESSION_SUPERVISOR_QUIET_SECONDS=1
   STORE_HOST_PID=""
-  CHECKOUT_ROOT=""
+  # Created here rather than on first use: make_checkout runs in a command
+  # substitution, which could not hand a root it created back to the test.
+  CHECKOUT_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
 }
 
 worker_guidance_file() {
@@ -90,7 +92,7 @@ teardown() {
 
 # --- Store session host fixtures ---------------------------------------------
 
-# Run a session-runtime operation for this store: key | dir | pin | refuse.
+# Run a session-runtime operation for this store: key | dir | pin | refuse | serve.
 store_runtime() {
   python3 - "$REPO_DIR/scripts" "$TEST_KDIR" "$@" <<'PYEOF'
 import importlib.util, sys
@@ -112,7 +114,52 @@ elif op == "refuse":
     m.atomic(m.host_dir(kdir, key) / "supervisor-error.json", dict(
         schema_version=1, at=m.now(), store=str(kdir), host_key=key, exit_code=2, binary=str(stub),
         binary_identity=m.file_identity(stub), error="test host binary refuses the store-host arguments"))
+elif op == "serve":
+    m.atomic(m.RUNTIME.login_dir() / "served.json",
+             {"schema_version": 1, "stores": {str(kdir): {"wanted_at": m.now(), "pin_knowledge_dir": True}}})
+    m.atomic(kdir / "_sessions/instances/store-host.json", dict(
+        name="store-host", pid=4242, role="session-host", scope="store", host_key=key,
+        runtime=m.RUNTIME.runtime_name(), started=m.now(), sessions=[],
+        runtime_capabilities=["position-preparation-v1"], build_time="2026-10-18T00:00:00Z"))
+    print(key)
 PYEOF
+}
+
+# The store's session host as the writer sees it: a live, store-scoped registry
+# row under this store's key, with the store pinned (as a host started with
+# LORE_KNOWLEDGE_DIR naming a scratch store is), so membership needs no
+# resolution. Sets STORE_KEY, and CHECKOUT to a git checkout of the store.
+serve_store() {
+  STORE_KEY="$(store_runtime serve)"
+  CHECKOUT="$(make_checkout main)"
+}
+
+# The refusal's lead: the first 55 bytes of its first line, without the "Error: "
+# prefix die() adds. A lore-tui from before store-scoped hosting shows only 61 bytes
+# of the writer's message, so the reason and the repair must both fit in this.
+refusal_lead() {
+  local LC_ALL=C
+  local text="${output#Error: }"
+  text="${text%%$'\n'*}"
+  printf '%s' "${text:0:55}"
+}
+
+# lead_names <needle>... — the last refusal's lead is ASCII and contains each needle.
+lead_names() {
+  local lead needle
+  lead="$(refusal_lead)"
+  if LC_ALL=C grep -q '[^ -~]' <<<"$lead"; then
+    echo "lead is not ASCII: $lead" >&2
+    return 1
+  fi
+  for needle in "$@"; do
+    if [[ "$lead" != *"$needle"* ]]; then
+      echo "expected the lead to contain: $needle" >&2
+      echo "lead: $lead" >&2
+      echo "output: $output" >&2
+      return 1
+    fi
+  done
 }
 
 # Record that this runtime's host binary refuses the store-host arguments, so
@@ -123,7 +170,6 @@ refuse_store_host() {
 
 # A git checkout outside the store; prints its physical path.
 make_checkout() {
-  [ -n "$CHECKOUT_ROOT" ] || CHECKOUT_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
   mkdir -p "$CHECKOUT_ROOT/$1"
   git -C "$CHECKOUT_ROOT/$1" init -q
   printf '%s\n' "$CHECKOUT_ROOT/$1"
@@ -355,13 +401,13 @@ journal_boundaries() {
 # =====================================================================
 
 @test "request happy path writes a pending row and emits a requested event" {
-  write_instance inst-a existing
-  run bash "$REQUEST" --type implement --slug wi --target inst-a --initiator agent --kdir "$TEST_KDIR"
+  serve_store
+  run bash "$REQUEST" --type implement --slug wi --prefer-dir "$CHECKOUT" --initiator agent --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
 
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   [ -f "$pending" ]
-  run jq -e '.type=="implement" and .slug=="wi" and .target_instance=="inst-a" and .initiator=="agent" and .attempts==0 and .last_error==null' "$pending"
+  run jq -e --arg k "$STORE_KEY" '.type=="implement" and .slug=="wi" and .target_instance==null and .host_key==$k and .initiator=="agent" and .attempts==0 and .last_error==null' "$pending"
   [ "$status" -eq 0 ]
 
   # attempts is a JSON number, not a quoted string (type discipline).
@@ -373,7 +419,8 @@ journal_boundaries() {
 }
 
 @test "unscoped chat request persists one slug on the request and journal row" {
-  run bash "$REQUEST" --type chat --initiator agent --anywhere --kdir "$TEST_KDIR" --json
+  serve_store
+  run bash "$REQUEST" --type chat --initiator agent --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
 
   local request_id slug pending
@@ -388,25 +435,27 @@ journal_boundaries() {
     "$TEST_KDIR/_sessions/events.jsonl" >/dev/null
 }
 
-@test "request refuses a missing or stale hard target and accepts a live target" {
-  run bash "$REQUEST" --type chat --target gone --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"registry row is absent"* ]]
-  [[ "$output" == *"age unavailable"* ]]
-  [[ "$output" == *"Re-pin"* ]]
-  [[ "$output" == *"--anywhere"* ]]
-
-  write_instance stale-inst existing
-  touch -t 202601010000 "$TEST_KDIR/_sessions/instances/stale-inst.json"
-  run bash "$REQUEST" --type chat --target stale-inst --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"registry row is "*"s old"* ]]
-  [[ "$output" == *"live window 30s"* ]]
-
+@test "request refuses --target before anything else, with nothing enqueued and no host started" {
+  serve_store
   write_instance live-inst existing
+  local target
+  for target in live-inst store-host gone; do
+    run bash "$REQUEST" --type chat --target "$target" --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
+    outcome_is 1 "--target is not accepted; drop it and name a checkout" "Nothing was enqueued" || return 1
+  done
   run bash "$REQUEST" --type chat --target live-inst --kdir "$TEST_KDIR" --json
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.enqueued==true and .target_instance=="live-inst"'
+  [ "$status" -eq 1 ] || return 1
+  echo "$output" | jq -e 'keys == ["error"] and (.error | startswith("--target is not accepted"))' >/dev/null || return 1
+  [ ! -e "$TEST_KDIR/_sessions/requests" ] || return 1
+
+  rm "$TEST_KDIR/_sessions/instances/store-host.json"
+  refuse_store_host
+  local served="$LORE_DATA_DIR/session-runtimes/bats-session-verbs/served.json"
+  rm -f "$served"
+  run python3 "$MANAGED" request --type chat --target live-inst --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 1 ] || return 1
+  echo "$output" | jq -e '.error | startswith("--target is not accepted")' >/dev/null || return 1
+  [ ! -e "$served" ] && [ ! -e "$TEST_KDIR/_sessions/requests" ]
 }
 
 @test "request without --type refuses and creates no pending dir" {
@@ -429,7 +478,8 @@ journal_boundaries() {
 }
 
 @test "request --type worker with a derived slug writes a pending row" {
-  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --initiator agent --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --initiator agent --context "$(worker_guidance_file)" --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.type=="worker" and .slug=="impl-foo--w1"' "$pending"
@@ -460,7 +510,8 @@ journal_boundaries() {
 }
 
 @test "request slug shape check applies only to --type worker" {
-  run bash "$REQUEST" --type spec --slug "impl-foo" --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  run bash "$REQUEST" --type spec --slug "impl-foo" --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   outcome_is 0
 }
 
@@ -471,40 +522,38 @@ journal_boundaries() {
 }
 
 @test "requested event for a worker derives links.work_item from the derived slug" {
-  bash "$REQUEST" --type worker --slug "impl-foo--w1" --initiator agent --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  bash "$REQUEST" --type worker --slug "impl-foo--w1" --initiator agent --context "$(worker_guidance_file)" --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   run jq -e 'select(.event=="requested") | .links.work_item == "impl-foo"' "$TEST_KDIR/_sessions/events.jsonl"
   [ "$status" -eq 0 ]
 }
 
 @test "request omits auto_close when the flag is not passed" {
-  bash "$REQUEST" --type spec --slug wi --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  bash "$REQUEST" --type spec --slug wi --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e 'has("auto_close") | not' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request resolves framework and model from the role route when the flags are not passed" {
-  bash "$REQUEST" --type spec --slug wi --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  bash "$REQUEST" --type spec --slug wi --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.framework == "claude-code" and .model == "lead-model" and .routing_source == "role-route"' "$pending"
   [ "$status" -eq 0 ]
 }
 
 # Requests that carry a build-vintage floor or a prepared position are published
-# only to a live runtime that satisfies them. This one meets the route-options
-# floor session-request.sh applies and advertises position preparation.
-write_vintage_instance() {
-  write_instance_dir "$1" "$2"
-  local row="$TEST_KDIR/_sessions/instances/$1.json"
-  jq '. + {build_time:"2026-09-09T01:27:42Z", runtime_capabilities:["position-preparation-v1"]}' "$row" > "$row.tmp"
-  mv "$row.tmp" "$row"
-}
+# only when the live store host satisfies them; serve_store's host meets the
+# route-options floor session-request.sh applies and advertises position
+# preparation.
 
 @test "request --framework writes the framework field" {
-  write_vintage_instance admission-fixture "$TEST_KDIR"
+  serve_store
   # --framework alone would be a half-override against the claude-code route;
   # paired with --model it is a recorded override.
-  bash "$REQUEST" --type implement --slug wi --framework codex --model codex-model --min-vintage 2026-07-05T12:00:00Z --anywhere --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type implement --slug wi --framework codex --model codex-model --min-vintage 2026-07-05T12:00:00Z --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.framework == "codex"' "$pending"
   [ "$status" -eq 0 ]
@@ -512,7 +561,8 @@ write_vintage_instance() {
 
 @test "request --worktree-identity carries the complete versioned identity" {
   local identity='{"version":1,"canonical_path":"/tmp/session-tree","git_common_dir":"/tmp/repo/.git","git_dir":"/tmp/repo/.git/worktrees/session-tree","epoch":"epoch-1","captured":{"canonical_path":"/tmp/repo","git_common_dir":"/tmp/repo/.git","git_dir":"/tmp/repo/.git","head_oid":"abc","index_digest":"index","worktree_digest":"tree"},"target_ref":"refs/heads/main","target_oid":"abc","state":"captured"}'
-  bash "$REQUEST" --type implement --slug wi --worktree-identity "$identity" --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  bash "$REQUEST" --type implement --slug wi --worktree-identity "$identity" --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.worktree_identity.version == 1 and .worktree_identity.epoch == "epoch-1" and .worktree_identity.captured.worktree_digest == "tree" and .worktree_identity.state == "captured"' "$pending"
   [ "$status" -eq 0 ]
@@ -522,11 +572,12 @@ write_vintage_instance() {
   local execution_dir; execution_dir="$(managed_execution_dir)"
   local identity; identity="$(managed_identity "$execution_dir")"
 
-  # No registry row is written: the allocation verb validated the tuple when it
-  # handed it back, so this verb transports it rather than re-deriving it.
+  # The allocation verb validated the tuple when it handed it back, so this verb
+  # transports it rather than re-deriving it; it checks only the checkout.
+  serve_store
   run bash "$REQUEST" --type worker --slug impl-demo--w1 --worktree-id tree-1 \
     --execution-dir "$execution_dir" --worktree-identity "$identity" \
-    --context "brief body" --anywhere --kdir "$TEST_KDIR" --json
+    --context "brief body" --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR" --json
   outcome_is 0 '"worktree_id": "tree-1"' '"enqueued": true' || return 1
 
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
@@ -555,7 +606,8 @@ write_vintage_instance() {
 @test "request --framework without --min-vintage enqueues silently" {
   local err="$TEST_KDIR/framework.err"
   local out
-  out="$(bash "$REQUEST" --type implement --slug wi --framework codex --model codex-model --anywhere --kdir "$TEST_KDIR" 2>"$err")"
+  serve_store
+  out="$(bash "$REQUEST" --type implement --slug wi --framework codex --model codex-model --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR" 2>"$err")"
   [[ "$out" == *"Enqueued implement request"* ]] || return 1
   [ ! -s "$err" ] || return 1
 
@@ -565,40 +617,36 @@ write_vintage_instance() {
 }
 
 @test "request omits prefer_project_dir when neither prefer flag is passed" {
-  write_instance inst-a existing
-  bash "$REQUEST" --type spec --slug wi --target inst-a --kdir "$TEST_KDIR"
+  serve_store
+  write_work_item wi "$CHECKOUT"
+  bash "$REQUEST" --type spec --slug wi --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e 'has("prefer_project_dir") | not' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request --prefer-dir stores the physically-resolved directory" {
-  write_vintage_instance admission-fixture "$TEST_KDIR"
-  local target; target="$(mkdir -p "$TEST_KDIR/checkout" && cd "$TEST_KDIR/checkout" && pwd -P)"
-  bash "$REQUEST" --type implement --slug wi --prefer-dir "$TEST_KDIR/checkout" --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR"
+  serve_store
+  bash "$REQUEST" --type implement --slug wi --prefer-dir "$CHECKOUT/../main" --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
-  run jq -e --arg d "$target" '.prefer_project_dir == $d' "$pending"
+  run jq -e --arg d "$CHECKOUT" '.prefer_project_dir == $d' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request --prefer-dir collapses a symlink to its physical target" {
-  write_vintage_instance admission-fixture "$TEST_KDIR"
-  mkdir -p "$TEST_KDIR/realdir"
-  ln -s "$TEST_KDIR/realdir" "$TEST_KDIR/linkdir"
-  local physical; physical="$(cd "$TEST_KDIR/realdir" && pwd -P)"
-  bash "$REQUEST" --type implement --slug wi --prefer-dir "$TEST_KDIR/linkdir" --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR"
+  serve_store
+  ln -s "$CHECKOUT" "$CHECKOUT_ROOT/linkdir"
+  bash "$REQUEST" --type implement --slug wi --prefer-dir "$CHECKOUT_ROOT/linkdir" --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
-  run jq -e --arg d "$physical" '.prefer_project_dir == $d' "$pending"
+  run jq -e --arg d "$CHECKOUT" '.prefer_project_dir == $d' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request --prefer-cwd captures the physically-resolved working directory" {
-  write_vintage_instance admission-fixture "$TEST_KDIR"
-  mkdir -p "$TEST_KDIR/here"
-  local physical; physical="$(cd "$TEST_KDIR/here" && pwd -P)"
-  ( cd "$TEST_KDIR/here" && bash "$REQUEST" --type chat --prefer-cwd --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR" )
+  serve_store
+  ( cd "$CHECKOUT" && bash "$REQUEST" --type chat --prefer-cwd --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR" )
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
-  run jq -e --arg d "$physical" '.prefer_project_dir == $d' "$pending"
+  run jq -e --arg d "$CHECKOUT" '.prefer_project_dir == $d' "$pending"
   [ "$status" -eq 0 ]
 }
 
@@ -619,7 +667,8 @@ write_vintage_instance() {
 @test "request --prefer-cwd without --min-vintage enqueues silently" {
   local err="$TEST_KDIR/prefer.err"
   local out
-  out="$(bash "$REQUEST" --type implement --slug wi --prefer-cwd --kdir "$TEST_KDIR" 2>"$err")"
+  serve_store
+  out="$(cd "$CHECKOUT" && bash "$REQUEST" --type implement --slug wi --prefer-cwd --kdir "$TEST_KDIR" 2>"$err")"
   [[ "$out" == *"Enqueued implement request"* ]] || return 1
   [ ! -s "$err" ] || return 1
 
@@ -628,37 +677,33 @@ write_vintage_instance() {
   outcome_is 0
 }
 
-@test "request without a placement stance refuses naming all four options" {
+@test "request without a placement stance refuses naming all three options" {
   run bash "$REQUEST" --type worker --slug "impl-foo--w1" --context hi --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"placement stance"* ]]
-  [[ "$output" == *"--target"* ]]
-  [[ "$output" == *"--prefer-dir"* ]]
-  [[ "$output" == *"--prefer-cwd"* ]]
-  [[ "$output" == *"--anywhere"* ]]
+  outcome_is 1 "placement stance" "--prefer-dir" "--prefer-cwd" "--anywhere" || return 1
+  out_lacks "--target" || return 1
   [ ! -e "$TEST_KDIR/_sessions/requests" ]
 }
 
 @test "each placement stance alone satisfies the requirement" {
-  write_vintage_instance admission-fixture "$TEST_KDIR"
-  mkdir -p "$TEST_KDIR/dir"
-  write_instance inst-a existing
-  bash "$REQUEST" --type chat --target inst-a --kdir "$TEST_KDIR"
-  bash "$REQUEST" --type chat --prefer-dir "$TEST_KDIR/dir" --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR"
-  ( cd "$TEST_KDIR/dir" && bash "$REQUEST" --type chat --prefer-cwd --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR" )
-  bash "$REQUEST" --type chat --anywhere --kdir "$TEST_KDIR"
-  [ "$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json | wc -l | tr -d ' ')" -eq 4 ]
+  serve_store
+  write_work_item wi "$CHECKOUT"
+  bash "$REQUEST" --type chat --prefer-dir "$CHECKOUT" --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR"
+  ( cd "$CHECKOUT" && bash "$REQUEST" --type chat --prefer-cwd --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR" )
+  bash "$REQUEST" --type chat --slug wi --anywhere --kdir "$TEST_KDIR"
+  [ "$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json | wc -l | tr -d ' ')" -eq 3 ]
 }
 
-@test "request --anywhere enqueues and writes no placement field" {
+@test "request --anywhere adds no placement of its own to the item's declaration" {
+  serve_store
+  write_work_item wi "$CHECKOUT"
   bash "$REQUEST" --type spec --slug wi --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
-  run jq -e '(has("prefer_project_dir") | not) and .target_instance == null' "$pending"
+  run jq -e --arg d "$CHECKOUT" '(has("prefer_project_dir") | not) and .target_instance == null and .required_project_dir == $d' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request refuses --anywhere combined with an explicit placement" {
-  run bash "$REQUEST" --type spec --slug wi --anywhere --target inst-a --kdir "$TEST_KDIR"
+  run bash "$REQUEST" --type spec --slug wi --anywhere --prefer-dir "$TEST_KDIR" --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
   [[ "$output" == *"--anywhere contradicts"* ]]
   run bash "$REQUEST" --type spec --slug wi --anywhere --prefer-cwd --kdir "$TEST_KDIR"
@@ -693,113 +738,149 @@ write_vintage_instance() {
   [ "$status" -eq 0 ]
 }
 
-@test "request leaves a request naming no checkout unkeyed and needs no store host" {
+@test "lore session request refuses a request that names no checkout before starting a host" {
   refuse_store_host
+  local served="$LORE_DATA_DIR/session-runtimes/bats-session-verbs/served.json"
   run python3 "$MANAGED" request --type chat --anywhere --kdir "$TEST_KDIR" --json
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '(has("host_key") | not) and .placement_stance == "any"'
-  [[ "$output" != *"store's session host is unavailable"* ]]
+  [ "$status" -eq 1 ] || return 1
+  echo "$output" | jq -e 'keys == ["error"] and (.error | startswith("request names no checkout; pass --prefer-dir <checkout>"))' >/dev/null || return 1
+  [ ! -e "$served" ] || return 1
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
 }
 
-@test "request falls back to an unkeyed row only when a live lore-tui serves the checkout" {
+@test "the writer refuses a request that names no checkout, with nothing enqueued" {
+  serve_store
+  write_work_item declared "$CHECKOUT"
+  run bash "$REQUEST" --type chat --anywhere --kdir "$TEST_KDIR"
+  outcome_is 1 "request names no checkout" "--prefer-dir <checkout>" "Nothing was enqueued" || return 1
+  run bash "$REQUEST" --type spec --slug not-an-item --anywhere --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 1 ] || return 1
+  echo "$output" | jq -e '.error | startswith("request names no checkout")' >/dev/null || return 1
+  [ ! -e "$TEST_KDIR/_sessions/requests" ] || return 1
+  run bash "$REQUEST" --type spec --slug declared --anywhere --kdir "$TEST_KDIR"
+  outcome_is 0
+}
+
+@test "each placement refusal leads with its repair in 55 ASCII bytes" {
   local clone; clone="$(make_checkout clone-a)"
-  write_work_item fallback "$clone"
+  write_work_item undeclared
+  write_work_item movedaway /nonexistent/clone/xyzzy
+  write_work_item declared "$clone"
+  store_runtime pin
+
+  run bash "$REQUEST" --type implement --slug declared --anywhere --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ] && lead_names "no live store host" "lore session ensure" "retry" || return 1
+
+  serve_store
+  run bash "$REQUEST" --type chat --anywhere --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ] && lead_names "names no checkout" "--prefer-dir" || return 1
+  run bash "$REQUEST" --type spec --slug undeclared --anywhere --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ] && lead_names "no checkout declared" "lore work source-checkout" || return 1
+  run bash "$REQUEST" --type spec --slug movedaway --anywhere --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ] && lead_names "checkout gone" "lore work source-checkout" || return 1
+  run bash "$REQUEST" --type chat --prefer-dir "$CHECKOUT_ROOT" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ] && lead_names "not a checkout of this store" "name one" || return 1
+  run bash "$REQUEST" --type chat --prefer-dir "$CHECKOUT" --host-key aaaaaaaaaaaaaaaaaaaaaaaa --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ] && lead_names "not this store's key" "omit --host-key" || return 1
+  run bash "$REQUEST" --type chat --prefer-dir "$CHECKOUT" --request-id managed-0123456789abcdef0123456789abcdef \
+    --host-key aaaaaaaaaaaaaaaaaaaaaaaa --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ] && lead_names "not this store's" "retry lore session start" || return 1
+  run bash "$REQUEST" --type chat --target store-host --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ] && lead_names "--target is not accepted" "drop it" || return 1
+
+  # Under --json the refusal is one JSON object on stdout carrying the whole text.
+  run bash -c 'bash "$1" --type chat --anywhere --kdir "$2" --json 2>/dev/null' _ "$REQUEST" "$TEST_KDIR"
+  [ "$status" -eq 1 ] || return 1
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = 1 ] || return 1
+  printf '%s' "$output" | jq -e 'keys == ["error"] and (.error | startswith("request names no checkout; pass --prefer-dir <checkout>\n")) and (.error | contains("Nothing was enqueued"))' >/dev/null || return 1
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+@test "lore session request refuses when the store host cannot be ensured, and a live lore-tui no longer takes the row" {
+  local clone; clone="$(make_checkout clone-a)"
+  write_work_item unhosted "$clone"
   refuse_store_host
-  run python3 "$MANAGED" request --type worker --slug fallback--w1 --initiator agent \
+  run python3 "$MANAGED" request --type worker --slug unhosted--w1 --initiator agent \
     --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR" --json
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"so it goes to the store's session host, and that host could not be started or reached"* ]]
-  [[ "$output" == *"lore rebuild"* && "$output" == *"bash install.sh"* ]]
-  [[ "$output" == *"$(store_runtime dir)/host.log"* ]]
-  [[ "$output" == *"$(store_runtime dir)/supervisor-error.json"* ]]
-  [ ! -e "$TEST_KDIR/_sessions/requests/pending" ] || [ -z "$(ls "$TEST_KDIR/_sessions/requests/pending")" ]
+  [ "$status" -eq 1 ] || return 1
+  local error; error="$(echo "$output" | jq -er 'select(keys == ["error"]) | .error')" || return 1
+  [[ "$error" == "store host did not start; fix the error below, retry"$'\n'* ]] || return 1
+  [[ "$error" == *"cannot start"*"lore rebuild"* && "$error" == *"bash install.sh"* ]] || return 1
+  [[ "$error" == *"$(store_runtime dir)/host.log"* && "$error" == *"$(store_runtime dir)/supervisor-error.json"* ]] || return 1
+  [ ! -e "$TEST_KDIR/_sessions/requests/pending" ] || [ -z "$(ls "$TEST_KDIR/_sessions/requests/pending")" ] || return 1
 
   write_instance_dir live-tui "$clone"
-  run python3 "$MANAGED" request --type worker --slug fallback--w1 --initiator agent \
-    --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"store's session host is unavailable"* ]]
-  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
-  run jq -e --arg d "$clone" '(has("host_key") | not) and .required_project_dir == $d' "$pending"
-  [ "$status" -eq 0 ]
-}
-
-@test "request falls back for a preference only to a lore-tui serving that checkout" {
-  local clone; clone="$(make_checkout clone-a)"
-  refuse_store_host
   run python3 "$MANAGED" request --type chat --prefer-dir "$clone" --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"names checkout '$clone'"* ]]
-  write_instance_dir live-tui "$clone"
-  run python3 "$MANAGED" request --type chat --prefer-dir "$clone" --kdir "$TEST_KDIR" --json
-  [ "$status" -eq 0 ]
+  outcome_is 1 "Error: store host did not start" || return 1
+  [ ! -e "$TEST_KDIR/_sessions/requests/pending" ] || [ -z "$(ls "$TEST_KDIR/_sessions/requests/pending")" ]
 }
 
-@test "a keyed request's preflight counts only rows that would claim it" {
+@test "a direct writer call without --host-key stamps the store host key" {
   local clone; clone="$(make_checkout clone-a)"
   write_work_item keyed "$clone"
+  store_runtime pin
   write_instance_dir live-tui "$clone"
-  local key; key="$(store_runtime key)"
-  run bash "$REQUEST" --type implement --slug keyed --anywhere --host-key "$key" --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"no live instance serves that checkout for the store's session host"* ]]
-  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+  # A visible lore-tui serving the checkout no longer counts: only the store host claims.
+  run bash "$REQUEST" --type implement --slug keyed --anywhere --kdir "$TEST_KDIR"
+  outcome_is 1 "no live store host: run lore session ensure, then retry" "lore session request" || return 1
+  out_lacks "Start an instance in that checkout" || return 1
+  [ ! -e "$TEST_KDIR/_sessions/requests" ] || return 1
 
   rm "$TEST_KDIR/_sessions/instances/live-tui.json"
   fake_store_host
-  run bash "$REQUEST" --type implement --slug keyed --anywhere --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"no live instance serves that checkout for an unkeyed request"* ]]
-  [[ "$output" == *"lore session request"* ]]
-  [[ "$output" != *"Start an instance in that checkout"* ]]
-
-  run bash "$REQUEST" --type implement --slug keyed --anywhere --host-key "$STORE_KEY" --kdir "$TEST_KDIR" --json
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e --arg k "$STORE_KEY" '.host_key == $k'
+  run bash "$REQUEST" --type implement --slug keyed --anywhere --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ] || return 1
+  echo "$output" | jq -e --arg k "$STORE_KEY" '.host_key == $k' >/dev/null || return 1
+  run jq -e --arg k "$STORE_KEY" '.host_key == $k' "$TEST_KDIR"/_sessions/requests/pending/*.json
+  outcome_is 0
 }
 
 @test "the store host serves only checkouts of its store" {
-  mkdir -p "$TEST_KDIR/plain-dir"
-  local plain; plain="$(cd "$TEST_KDIR/plain-dir" && pwd -P)"
+  serve_store
+  local plain="$CHECKOUT_ROOT/plain-dir"
+  mkdir -p "$plain"
   local inside; inside="$TEST_KDIR/_sessions/worktrees/inner"
   mkdir -p "$inside"
   git -C "$inside" init -q
-  fake_store_host
   write_work_item notgit "$plain"
   run bash "$REQUEST" --type implement --slug notgit --anywhere --host-key "$STORE_KEY" --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"is not a git checkout"* ]]
+  outcome_is 1 "declared checkout is not in this store" "is not a git checkout" || return 1
   write_work_item inside "$inside"
   run bash "$REQUEST" --type implement --slug inside --anywhere --host-key "$STORE_KEY" --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"lies inside the knowledge store"* ]]
+  outcome_is 1 "lies inside the knowledge store" || return 1
   run bash "$REQUEST" --type chat --prefer-dir "$plain" --host-key "$STORE_KEY" --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"serves only checkouts of this store"* ]]
+  outcome_is 1 "--prefer-dir is not a checkout of this store" "is not a git checkout" || return 1
+  run bash "$REQUEST" --type chat --prefer-dir "$CHECKOUT" --host-key "$STORE_KEY" --kdir "$TEST_KDIR"
+  outcome_is 0
 }
 
-@test "request refuses a host key other than this store's without a request id" {
-  local clone; clone="$(make_checkout clone-a)"
-  write_work_item keyed "$clone"
+@test "request refuses a foreign --host-key, a managed start's included" {
+  serve_store
+  write_work_item keyed "$CHECKOUT"
   run bash "$REQUEST" --type implement --slug keyed --anywhere --host-key "aaaaaaaaaaaaaaaaaaaaaaaa" --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"may carry only this store's session host key in this runtime ($(store_runtime key))"* ]]
+  outcome_is 1 "--host-key is not this store's key; omit --host-key" "($STORE_KEY)" || return 1
+  run bash "$REQUEST" --type implement --slug keyed --anywhere --request-id "managed-0123456789abcdef0123456789abcdef" \
+    --host-key "aaaaaaaaaaaaaaaaaaaaaaaa" --kdir "$TEST_KDIR"
+  outcome_is 1 "host key is not this store's; retry lore session start" "holds $STORE_KEY" || return 1
+  [ ! -e "$TEST_KDIR/_sessions/requests" ] || return 1
+  run bash "$REQUEST" --type implement --slug keyed --anywhere --host-key "$STORE_KEY" --kdir "$TEST_KDIR"
+  outcome_is 0
 }
 
-@test "a store host target is checked against store membership" {
+@test "a managed start to the store host is checked against store membership" {
   local clone; clone="$(make_checkout clone-a)"
   mkdir -p "$TEST_KDIR/plain-dir"
   write_work_item managed "$clone"
   write_work_item unmanaged "$(cd "$TEST_KDIR/plain-dir" && pwd -P)"
   fake_store_host
   local rid="managed-0123456789abcdef0123456789abcdef"
-  run bash "$REQUEST" --type implement --slug managed --target store-host --request-id "$rid" \
+  run bash "$REQUEST" --type implement --slug managed --anywhere --request-id "$rid" \
     --host-key "$STORE_KEY" --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
-  run bash "$REQUEST" --type implement --slug unmanaged --target store-host \
+  run bash "$REQUEST" --type implement --slug unmanaged --anywhere \
     --request-id "managed-fedcba9876543210fedcba9876543210" --host-key "$STORE_KEY" --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"which that instance does not serve"* ]]
+  [[ "$output" == *"declared checkout is not in this store: re-declare it"* ]]
 }
 
 @test "session list shows the store host as serving every checkout of the store" {
@@ -838,8 +919,9 @@ PYEOF
 # --- Placement declared by the work item ----------------------------------
 
 @test "request refuses a slugged request whose work item declares no source checkout" {
+  serve_store
   write_work_item undeclared
-  run bash "$REQUEST" --type spec --slug undeclared --anywhere --kdir "$TEST_KDIR"
+  run bash "$REQUEST" --type spec --slug undeclared --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
   [[ "$output" == *"declares no source checkout"* ]]
   [[ "$output" == *"lore work source-checkout undeclared"* ]]
@@ -856,39 +938,41 @@ PYEOF
   [ ! -e "$TEST_KDIR/_sessions/requests" ]
 }
 
-@test "request refuses a declaration no live instance serves and names the live checkouts" {
-  mkdir -p "$TEST_KDIR/clone-a" "$TEST_KDIR/clone-b"
+@test "request refuses a declared checkout when no store host is live, naming its diagnostics" {
   local a b
-  a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
-  b="$(cd "$TEST_KDIR/clone-b" && pwd -P)"
+  a="$(make_checkout clone-a)"
+  b="$(make_checkout clone-b)"
+  store_runtime pin
   write_work_item unserved "$a"
   write_instance_dir inst-b "$b"
   run bash "$REQUEST" --type spec --slug unserved --anywhere --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"no live instance serves that checkout"* ]]
-  [[ "$output" == *"$a"* ]]
-  [[ "$output" == *"$b"* ]]
-  [[ "$output" != *"Start an instance in that checkout"* ]]
-  [[ "$output" == *"lore session request"* ]]
+  outcome_is 1 "no live store host: run lore session ensure, then retry" "lore session request" \
+    "$(store_runtime dir)/host.log" || return 1
+  out_lacks "Start an instance in that checkout" || return 1
   [ ! -e "$TEST_KDIR/_sessions/requests" ]
 }
 
-@test "request refuses a stale instance as a server of the declared checkout" {
-  mkdir -p "$TEST_KDIR/clone-a"
-  local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
-  write_work_item staleserved "$a"
-  write_instance_dir inst-stale "$a"
-  touch -t 202601010000 "$TEST_KDIR/_sessions/instances/inst-stale.json"
+@test "request refuses a stale store host as the server of the declared checkout" {
+  serve_store
+  write_work_item staleserved "$CHECKOUT"
+  touch -t 202601010000 "$TEST_KDIR/_sessions/instances/store-host.json"
   run bash "$REQUEST" --type spec --slug staleserved --anywhere --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"no live instance serves that checkout"* ]]
+  outcome_is 1 "no live store host"
+}
+
+@test "request refuses a checkout of another store before asking for a host" {
+  local clone; clone="$(make_checkout clone-a)"
+  write_work_item foreign "$clone"
+  run bash "$REQUEST" --type spec --slug foreign --anywhere --kdir "$TEST_KDIR"
+  outcome_is 1 "declared checkout is not in this store: re-declare it" "not $TEST_KDIR" || return 1
+  run bash "$REQUEST" --type chat --prefer-dir "$clone" --kdir "$TEST_KDIR"
+  outcome_is 1 "--prefer-dir is not a checkout of this store; name one"
 }
 
 @test "request derives required_project_dir and the stance token from the work item" {
-  mkdir -p "$TEST_KDIR/clone-a"
-  local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  serve_store
+  local a="$CHECKOUT"
   write_work_item declared "$a"
-  write_instance_dir inst-a "$a"
   run bash "$REQUEST" --type implement --slug declared --anywhere --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e --arg d "$a" '.required_project_dir == $d and .placement_stance == "required_dir"'
@@ -899,10 +983,9 @@ PYEOF
 }
 
 @test "request derives the declaration for a worker slug from its base work item" {
-  mkdir -p "$TEST_KDIR/clone-a"
-  local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  serve_store
+  local a="$CHECKOUT"
   write_work_item declared "$a"
-  write_instance_dir inst-a "$a"
   bash "$REQUEST" --type worker --slug "declared--w3" --initiator agent \
     --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
@@ -911,54 +994,36 @@ PYEOF
 }
 
 @test "request reads the declaration of an archived work item" {
-  mkdir -p "$TEST_KDIR/clone-a" "$TEST_KDIR/_work/_archive/oldwork"
-  local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  serve_store
+  mkdir -p "$TEST_KDIR/_work/_archive/oldwork"
+  local a="$CHECKOUT"
   printf '{"slug":"oldwork","status":"archived","source_checkout":"%s"}\n' "$a" \
     > "$TEST_KDIR/_work/_archive/oldwork/_meta.json"
-  write_instance_dir inst-a "$a"
   bash "$REQUEST" --type chat --slug oldwork --anywhere --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e --arg d "$a" '.required_project_dir == $d' "$pending"
   [ "$status" -eq 0 ]
 }
 
-@test "request refuses a target that does not serve the declared checkout" {
-  mkdir -p "$TEST_KDIR/clone-a" "$TEST_KDIR/clone-b"
-  local a b
-  a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
-  b="$(cd "$TEST_KDIR/clone-b" && pwd -P)"
-  write_work_item declared "$a"
-  write_instance_dir inst-a "$a"
-  write_instance_dir inst-b "$b"
-  run bash "$REQUEST" --type implement --slug declared --target inst-b --kdir "$TEST_KDIR"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"which that instance does not serve"* ]]
-  [ ! -e "$TEST_KDIR/_sessions/requests" ]
-
-  run bash "$REQUEST" --type implement --slug declared --target inst-a --kdir "$TEST_KDIR"
-  [ "$status" -eq 0 ]
-}
-
 @test "request derives nothing for a slug that names no tracked work item" {
-  bash "$REQUEST" --type spec --slug not-an-item --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  bash "$REQUEST" --type spec --slug not-an-item --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
-  run jq -e '(has("required_project_dir") | not) and .placement_stance == "any"' "$pending"
+  run jq -e '(has("required_project_dir") | not) and .placement_stance == "preferred_dir"' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "every request carries a placement_stance token naming the governing axis" {
-  mkdir -p "$TEST_KDIR/dir"
-  write_instance inst-a existing
-  bash "$REQUEST" --type chat --target inst-a --kdir "$TEST_KDIR" --json | jq -e '.placement_stance == "targeted"'
-  bash "$REQUEST" --type chat --prefer-dir "$TEST_KDIR/dir" --kdir "$TEST_KDIR" --json | jq -e '.placement_stance == "preferred_dir"'
-  bash "$REQUEST" --type chat --anywhere --kdir "$TEST_KDIR" --json | jq -e '.placement_stance == "any"'
+  serve_store
+  write_work_item declared "$CHECKOUT"
+  bash "$REQUEST" --type chat --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR" --json | jq -e '.placement_stance == "preferred_dir"'
+  bash "$REQUEST" --type chat --slug declared --anywhere --kdir "$TEST_KDIR" --json | jq -e '.placement_stance == "required_dir"'
 }
 
 @test "the requested journal row carries the full placement stance" {
-  mkdir -p "$TEST_KDIR/clone-a"
-  local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  serve_store
+  local a="$CHECKOUT"
   write_work_item declared "$a"
-  write_vintage_instance inst-a "$a"
   bash "$REQUEST" --type implement --slug declared --requested-by coord-1 \
     --min-vintage 2026-07-05T12:00:00Z --anywhere --kdir "$TEST_KDIR"
   run jq -e --arg d "$a" 'select(.event=="requested")
@@ -971,9 +1036,9 @@ PYEOF
 }
 
 @test "the requested journal row records a soft preference and a declared identity" {
-  mkdir -p "$TEST_KDIR/dir"
-  local d; d="$(cd "$TEST_KDIR/dir" && pwd -P)"
-  bash "$REQUEST" --type implement --slug wi --prefer-dir "$TEST_KDIR/dir" \
+  serve_store
+  local d="$CHECKOUT"
+  bash "$REQUEST" --type implement --slug wi --prefer-dir "$CHECKOUT" \
     --worktree-identity '{"version":1}' --kdir "$TEST_KDIR"
   run jq -e --arg d "$d" 'select(.event=="requested")
     | .placement_stance == "preferred_dir"
@@ -984,19 +1049,20 @@ PYEOF
 }
 
 @test "request carries the dispatching session's declared branch, verification-only" {
-  mkdir -p "$TEST_KDIR/clone-a" "$TEST_KDIR/_sessions/worktrees/wt"
-  local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  serve_store
+  mkdir -p "$TEST_KDIR/_sessions/worktrees/wt"
+  local a="$CHECKOUT"
   write_instance_with_captured inst-a "$a" wi implement "$a" refs/heads/feature-x
   (
     export LORE_SESSION_INSTANCE=inst-a LORE_SESSION_SLUG=wi LORE_SESSION_TYPE=implement
-    bash "$REQUEST" --type chat --anywhere --kdir "$TEST_KDIR"
+    bash "$REQUEST" --type chat --prefer-dir "$a" --kdir "$TEST_KDIR"
   )
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.required_target_ref == "refs/heads/feature-x"' "$pending"
   [ "$status" -eq 0 ]
 
   # It travels but never places: the stance stays whatever the axes decided.
-  run jq -e '.placement_stance == "any"' "$pending"
+  run jq -e '.placement_stance == "preferred_dir"' "$pending"
   [ "$status" -eq 0 ]
 
   run jq -e 'select(.event=="requested") | .required_target_ref == "refs/heads/feature-x"' \
@@ -1005,7 +1071,8 @@ PYEOF
 }
 
 @test "request omits required_target_ref when there is no session to read it from" {
-  bash "$REQUEST" --type chat --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  bash "$REQUEST" --type chat --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e 'has("required_target_ref") | not' "$pending"
   [ "$status" -eq 0 ]
@@ -1014,8 +1081,9 @@ PYEOF
 # --- --prefer-cwd resolves session provenance, not $PWD --------------------
 
 @test "request --prefer-cwd inside a session resolves its captured source checkout" {
-  mkdir -p "$TEST_KDIR/clone-a" "$TEST_KDIR/_sessions/worktrees/wt"
-  local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  serve_store
+  mkdir -p "$TEST_KDIR/_sessions/worktrees/wt"
+  local a="$CHECKOUT"
   write_instance_with_captured inst-a "$a" wi implement "$a"
   (
     cd "$TEST_KDIR/_sessions/worktrees/wt" || exit 1
@@ -1028,8 +1096,9 @@ PYEOF
 }
 
 @test "request --prefer-cwd falls back to the instance project dir for a slugless session" {
-  mkdir -p "$TEST_KDIR/clone-a" "$TEST_KDIR/elsewhere"
-  local a; a="$(cd "$TEST_KDIR/clone-a" && pwd -P)"
+  serve_store
+  mkdir -p "$TEST_KDIR/elsewhere"
+  local a="$CHECKOUT"
   write_instance_dir inst-a "$a"
   (
     cd "$TEST_KDIR/elsewhere" || exit 1
@@ -1061,11 +1130,12 @@ PYEOF
 }
 
 @test "directory resolution ignores a set CDPATH" {
-  mkdir -p "$TEST_KDIR/sub" "$TEST_KDIR/elsewhere"
-  local physical; physical="$(cd "$TEST_KDIR/sub" && pwd -P)"
+  serve_store
+  mkdir -p "$TEST_KDIR/elsewhere"
+  local physical; physical="$(make_checkout sub)"
   (
     cd "$TEST_KDIR/elsewhere" || exit 1
-    export CDPATH="$TEST_KDIR"
+    export CDPATH="$CHECKOUT_ROOT"
     bash "$REQUEST" --type chat --prefer-dir sub --kdir "$TEST_KDIR"
   )
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
@@ -1085,14 +1155,16 @@ PYEOF
 }
 
 @test "request --auto-close true writes a JSON boolean" {
-  bash "$REQUEST" --type spec --slug wi --auto-close true --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  bash "$REQUEST" --type spec --slug wi --auto-close true --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.auto_close == true and (.auto_close | type == "boolean")' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request --auto-close false holds an agent session open" {
-  bash "$REQUEST" --type implement --slug wi --initiator agent --auto-close false --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  bash "$REQUEST" --type implement --slug wi --initiator agent --auto-close false --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.auto_close == false and (.auto_close | type == "boolean")' "$pending"
   [ "$status" -eq 0 ]
@@ -1105,14 +1177,16 @@ PYEOF
 }
 
 @test "request wraps plain --context text as a dispatch_guidance object" {
-  bash "$REQUEST" --type spec --context "Run /spec and report the plan slug." --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  bash "$REQUEST" --type spec --context "Run /spec and report the plan slug." --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.extra_context.dispatch_guidance == "Run /spec and report the plan slug."' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "worker request renders the guidance floor and prepends it to a bare brief" {
-  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --context "brief body" --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --context "brief body" --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   outcome_is 0 "Enqueued worker request" || return 1
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   local guidance; guidance="$(jq -r '.extra_context.dispatch_guidance' "$pending")"
@@ -1129,7 +1203,8 @@ PYEOF
   local brief="$TEST_KDIR/composed.md"
   cat "$(worker_guidance_file)" > "$brief"
   printf 'brief body\n' >> "$brief"
-  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --context "$brief" --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --context "$brief" --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   outcome_is 0 "Enqueued worker request" || return 1
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   local guidance; guidance="$(jq -r '.extra_context.dispatch_guidance' "$pending")"
@@ -1143,7 +1218,8 @@ PYEOF
 }
 
 @test "request stores a JSON-object --context verbatim" {
-  bash "$REQUEST" --type spec --context '{"priority":"high","asks":["A","B"]}' --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  bash "$REQUEST" --type spec --context '{"priority":"high","asks":["A","B"]}' --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.extra_context.priority == "high" and (.extra_context.asks | length) == 2' "$pending"
   [ "$status" -eq 0 ]
@@ -1152,34 +1228,39 @@ PYEOF
 @test "request reads --context from a file when the value names one" {
   local cf="$TEST_KDIR/ctx.txt"
   printf 'guidance from a file' > "$cf"
-  bash "$REQUEST" --type chat --context "$cf" --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  bash "$REQUEST" --type chat --context "$cf" --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.extra_context.dispatch_guidance == "guidance from a file"' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request --json emits a structured result" {
-  run bash "$REQUEST" --type spec --slug demo --anywhere --kdir "$TEST_KDIR" --json
+  serve_store
+  run bash "$REQUEST" --type spec --slug demo --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.enqueued == true and .type == "spec" and .slug == "demo" and (.request_id | length > 0)'
+  echo "$output" | jq -e --arg k "$STORE_KEY" '.enqueued == true and .type == "spec" and .slug == "demo" and .host_key == $k and (.request_id | length > 0)'
 }
 
 @test "request --route writes a routing_overrides map" {
-  bash "$REQUEST" --type implement --slug wi --route worker=claude-code/opus --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  bash "$REQUEST" --type implement --slug wi --route worker=claude-code/opus --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.routing_overrides.worker == "claude-code/opus" and (.routing_overrides | type == "object")' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request --route is repeatable across roles" {
-  bash "$REQUEST" --type implement --slug wi --route worker=claude-code/opus --route reviewer=claude-code/haiku --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  bash "$REQUEST" --type implement --slug wi --route worker=claude-code/opus --route reviewer=claude-code/haiku --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.routing_overrides.worker == "claude-code/opus" and .routing_overrides.reviewer == "claude-code/haiku"' "$pending"
   [ "$status" -eq 0 ]
 }
 
 @test "request --route accepts a hyphenated class-qualified role" {
-  bash "$REQUEST" --type implement --slug wi --route worker-mechanical=claude-code/haiku --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  bash "$REQUEST" --type implement --slug wi --route worker-mechanical=claude-code/haiku --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.routing_overrides."worker-mechanical" == "claude-code/haiku"' "$pending"
   [ "$status" -eq 0 ]
@@ -1199,7 +1280,8 @@ PYEOF
 }
 
 @test "request omits routing_overrides when no --route is passed" {
-  bash "$REQUEST" --type spec --slug wi --anywhere --kdir "$TEST_KDIR"
+  serve_store
+  bash "$REQUEST" --type spec --slug wi --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e 'has("routing_overrides") | not' "$pending"
   [ "$status" -eq 0 ]
@@ -1710,7 +1792,8 @@ EOF
 }
 
 @test "close --request cancels a pending spawn row and emits request_cancelled" {
-  local rid; rid="$(bash "$REQUEST" --type chat --slug wi --anywhere --kdir "$TEST_KDIR" --json | jq -r .request_id)"
+  serve_store
+  local rid; rid="$(bash "$REQUEST" --type chat --slug wi --prefer-dir "$CHECKOUT" --kdir "$TEST_KDIR" --json | jq -r .request_id)"
   [ -f "$TEST_KDIR/_sessions/requests/pending/$rid.json" ]
 
   run bash "$CLOSE" --request "$rid" --kdir "$TEST_KDIR" --json
@@ -3808,7 +3891,8 @@ answer_peek_observation() {
 @test "request resolves the worker route when neither --framework nor --model is given" {
   write_settings_roles '{"worker":"codex/gpt-5.6-sol","default":"opus"}'
   echo brief > "$TEST_KDIR/brief.md"
-  run bash "$REQUEST" --type worker --slug x--w1 --anywhere --initiator agent --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes
+  serve_store
+  run bash "$REQUEST" --type worker --slug x--w1 --prefer-dir "$CHECKOUT" --initiator agent --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes
   [ "$status" -eq 0 ]
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.framework=="codex" and .model=="gpt-5.6-sol" and .routing_source=="role-route"' "$pending"
@@ -3832,20 +3916,20 @@ esac
 exec /usr/bin/python3 "$@"
 SH
   chmod +x "$TEST_KDIR/bin/python3"
-  write_vintage_instance admission-fixture "$TEST_KDIR"
-  run env PATH="$TEST_KDIR/bin:$PATH" bash "$REQUEST" --type worker --slug x--w1 --anywhere --initiator agent --context "$context" --kdir "$TEST_KDIR" --yes
+  serve_store
+  run env PATH="$TEST_KDIR/bin:$PATH" bash "$REQUEST" --type worker --slug x--w1 --prefer-dir "$CHECKOUT" --initiator agent --context "$context" --kdir "$TEST_KDIR" --yes
   [ "$status" -eq 0 ]
   jq -e '.framework=="codex" and .model=="gpt-6-astra" and .route.routing_source.role=="researcher"' "$TEST_KDIR"/_sessions/requests/pending/*.json
 }
 
 @test "request resolves lead@ceremony for spec and implement and default for chat" {
   write_settings_roles '{"lead":"codex/gpt-6-astra","default":"opus"}'
-  write_instance inst-a existing
-  run bash "$REQUEST" --type implement --slug wi --target inst-a --initiator agent --kdir "$TEST_KDIR"
+  serve_store
+  run bash "$REQUEST" --type implement --slug wi --prefer-dir "$CHECKOUT" --initiator agent --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
   run jq -e '.framework=="codex" and .model=="gpt-6-astra" and .routing_source=="role-route"' "$TEST_KDIR"/_sessions/requests/pending/*.json
   [ "$status" -eq 0 ]
-  run bash "$REQUEST" --type chat --target inst-a --initiator agent --kdir "$TEST_KDIR"
+  run bash "$REQUEST" --type chat --prefer-dir "$CHECKOUT" --initiator agent --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
   run bash -c "jq -c 'select(.type==\"chat\") | [.framework,.model,.routing_source]' '$TEST_KDIR'/_sessions/requests/pending/*.json"
   [ "$output" = '["claude-code","opus","role-route"]' ]
@@ -3871,7 +3955,8 @@ SH
 @test "request accepts --framework with --model as a recorded override" {
   write_settings_roles '{"worker":"codex/gpt-5.6-sol","default":"opus"}'
   echo brief > "$TEST_KDIR/brief.md"
-  run bash "$REQUEST" --type worker --slug x--w1 --anywhere --initiator agent --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes --framework claude-code --model opus
+  serve_store
+  run bash "$REQUEST" --type worker --slug x--w1 --prefer-dir "$CHECKOUT" --initiator agent --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes --framework claude-code --model opus
   [ "$status" -eq 0 ]
   run jq -e '.framework=="claude-code" and .model=="opus" and .routing_source=="override"' "$TEST_KDIR"/_sessions/requests/pending/*.json
   [ "$status" -eq 0 ]
@@ -3893,8 +3978,8 @@ SH
 @test "request replays a canonical session route without changing provenance" {
   local route='{"framework":"codex","model":"gpt-5.6-sol","options":{"effort":"high","service_tier":"fast"},"routing_source":{"layer":"routes","role":"worker"}}'
   echo brief > "$TEST_KDIR/brief.md"
-  write_vintage_instance admission-fixture "$TEST_KDIR"
-  bash "$REQUEST" --type worker --slug x--w1 --anywhere --initiator agent \
+  serve_store
+  bash "$REQUEST" --type worker --slug x--w1 --prefer-dir "$CHECKOUT" --initiator agent \
     --context "$TEST_KDIR/brief.md" --kdir "$TEST_KDIR" --yes --session-route "$route"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   jq -e --argjson route "$route" '.route == $route and .framework == $route.framework and .model == $route.model' "$pending"
@@ -3913,8 +3998,7 @@ SH
 
 @test "request refuses when no route resolves and no override pair is given" {
   write_settings_roles '{"worker":"worker-model"}'
-  write_instance inst-a existing
-  run bash "$REQUEST" --type chat --target inst-a --initiator agent --kdir "$TEST_KDIR"
+  run bash "$REQUEST" --type chat --anywhere --initiator agent --kdir "$TEST_KDIR"
   [ "$status" -ne 0 ]
   [[ "$output" == *"no route resolves for role 'default'"* ]]
 }

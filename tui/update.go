@@ -88,7 +88,7 @@ func handlePanelRouting(m *model, msg tea.Msg, cb panelCallbacks) (tea.Cmd, bool
 				m.setPreferDetail(cb.currentSlug(), true)
 				return nil, true
 			}
-			if panel, ok := cb.sessionPanelFn(); ok && (panel.Ptmx() != nil || panel.IsDone() || panel.IsMirror()) {
+			if panel, ok := cb.sessionPanelFn(); ok && (panel.Ptmx() != nil || panel.IsDone() || panel.IsViewer()) {
 				m.terminalMode = true
 				m.setPreferDetail(cb.currentSlug(), false)
 				return nil, true
@@ -131,13 +131,8 @@ func routePanelMsg(m *model, panel panelFocus, msg tea.Msg, cb panelCallbacks) t
 		if cb.sessionPanelUpdate != nil {
 			return cb.sessionPanelUpdate(msg)
 		}
-		id := cb.currentSlug()
-		if m.sessionPanels != nil {
-			if panel, ok := m.sessionPanels[id]; ok {
-				sm, cmd := panel.Update(msg)
-				m.sessionPanels[id] = sm
-				return cmd
-			}
+		if cmd, ok := m.updatePanel(cb.currentSlug(), msg); ok {
+			return cmd
 		}
 		// No panel for the current item — fall back to detail.
 		m.terminalMode = false
@@ -161,30 +156,13 @@ func (m model) Init() tea.Cmd {
 		tea.RequestForegroundColor,
 		tea.RequestBackgroundColor,
 	}
-	if m.instanceName == "" {
-		cmds = append(cmds, indexPollTick())
-	}
-	// Register this instance in the substrate so other instances see it (and the
-	// queue's own-liveness check works) from the first tick.
-	if m.instanceName != "" {
-		cmds = append(cmds, tea.Sequence(m.writeInstanceCmd(), indexPollTick()), m.sessionsRefreshCmd())
-		// D5 crash/restart recovery: scan for dead instances' still-running
-		// tmux-hosted sessions and adopt them, once at startup (before the first
-		// poll tick, which is scheduled 5s out). tmux-gated — with tmux off,
-		// sessions were TUI-lifetime-bound and there is nothing to recover.
-		//
-		// The sweep then reclaims session checkouts nothing owns any more. It is
-		// sequenced after the adoption scan rather than batched beside it:
-		// adoption is what drives a dead instance's sessions to a terminal state
-		// with preserved refs, and only then can the sweep see those checkouts as
-		// reclaimable. It runs with tmux off too — there is nothing to adopt in
-		// that mode, but checkouts an earlier tmux-hosted run leaked are still on
-		// disk and nothing else will ever visit them.
-		if m.tmuxEnabled {
-			cmds = append(cmds, tea.Sequence(m.adoptionScanCmd(), m.sweepSessionWorktreesCmd()))
-		} else {
-			cmds = append(cmds, m.sweepSessionWorktreesCmd())
-		}
+	cmds = append(cmds, indexPollTick())
+	// The window reads its store's sessions from the start and checks at once
+	// whether sessions only dead registry rows list need the store host
+	// brought back. It registers, claims, adopts and sweeps nothing: the
+	// store's background host does all of that.
+	if m.sessionsDir != "" {
+		cmds = append(cmds, m.sessionsRefreshCmd(), func() tea.Msg { return hostRevivalDueMsg{} })
 	}
 	return tea.Batch(cmds...)
 }
@@ -208,6 +186,18 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.terminalBackground = msg.Color
 		m.applyTerminalColorPair()
 		return m, nil
+	}
+
+	// Refusal modal: a launch or close that did not happen, shown in full over
+	// everything else. Esc dismisses it, Enter takes its offer when it has one,
+	// and every other key is swallowed.
+	if m.refusalActive() {
+		if km, ok := msg.(tea.KeyPressMsg); ok {
+			return m.handleRefusalKey(km)
+		}
+		if _, ok := msg.(tea.PasteMsg); ok {
+			return m, nil
+		}
 	}
 
 	// Help modal: intercept all keys; Esc or ? closes it, scroll keys move
@@ -246,24 +236,16 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			// control codes that no widget claims, so they always quit.
 			switch km.String() {
 			case "ctrl+c", "ctrl+d":
-				m.cleanupAllSubprocesses()
+				m.closeViewersForQuit()
 				return m, tea.Quit
 			case "q":
 				if !m.settingsPanel.FocusConsumesRunes() {
-					m.cleanupAllSubprocesses()
+					m.closeViewersForQuit()
 					return m, tea.Quit
 				}
 			}
 			panel, cmd := m.settingsPanel.Update(msg)
 			m.settingsPanel = panel
-			// A tui_launch_framework commit changes the launch framework this
-			// instance's registry row advertises; rewrite the row now so the row
-			// tells the truth within one commit rather than at the next session-set
-			// change. Drained before the Closed() nil-out below so the latch is
-			// never stranded on the panel being torn down.
-			if m.settingsPanel.TakeFrameworkCommitted() && m.instanceName != "" {
-				cmd = tea.Batch(cmd, m.writeInstanceCmd())
-			}
 			if m.settingsPanel.Closed() {
 				m.settingsActive = false
 				m.focusedPanel = m.settingsPriorFocus
@@ -296,7 +278,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.confirmCount = 0
 				m.confirmSessionID = ""
 				if action == "close_session" {
-					return m, runSessionClose(slug, sessionID, m.instanceName)
+					return m, runSessionClose(slug, sessionID, windowRequester)
 				}
 				if action == "delete" {
 					return m, runDelete(slug)
@@ -337,12 +319,13 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 			switch km.String() {
 			case "enter":
-				// Enter stamps the textarea into the descriptor and hands it to
-				// the shared spawn path — the descriptor is the only mode carrier.
+				// Enter stamps the textarea into the descriptor and sends it to
+				// the store's background host — the descriptor is the only mode
+				// carrier.
 				d := m.sessionConfirmDescriptor
 				d.ExtraContext = strings.TrimSpace(m.sessionConfirmInput.Value())
 				m.sessionConfirmActive = false
-				return m.enqueueSession(d)
+				return m.launchSession(d)
 			case "esc", "ctrl+c":
 				m.sessionConfirmActive = false
 				return m, nil
@@ -680,23 +663,25 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		return m.handlePeekResponded(msg)
 
 	case instanceSyncedMsg:
-		if msg.err != nil && m.hostKey == "" && os.IsNotExist(msg.err) {
-			m.pollingStopped = true
-		}
 		if msg.err != nil {
 			m.flashErr = compactErr("session registry", msg.err)
 		}
 		return m, nil
 
-	case directEnqueueResultMsg:
-		if msg.err != nil {
-			m.flashErr = compactErr("enqueue session", msg.err)
-			return m, nil
-		}
-		// The queue owns session creation. A tick may already have claimed and
-		// spawned this row before writer completion arrives, so success must not
-		// replace panel or live-session state.
-		return m, nil
+	case launchRequestedMsg:
+		return m.handleLaunchRequested(msg)
+
+	case launchRefreshTickMsg:
+		return m.handleLaunchRefreshTick()
+
+	case checkoutDeclaredMsg:
+		return m.handleCheckoutDeclared(msg)
+
+	case hostRevivalDueMsg:
+		return m.startHostRevival()
+
+	case hostRevivalMsg:
+		return m.handleHostRevival(msg)
 
 	case journalResultMsg:
 		if msg.err != nil {
@@ -791,23 +776,12 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 					m.aiCancel()
 					m.aiCancel = nil
 				}
-				var slug string
-				switch m.state {
-				case stateFollowUps:
-					slug = m.followupDetail.CurrentID()
-				case stateSessions:
-					if panel, ok := m.currentSessionsPanel(); ok {
-						slug = panel.Slug()
-					}
-				default:
-					slug = m.list.CurrentSlug()
-				}
-				return m, func() tea.Msg { return work.TerminalTerminateMsg{Slug: slug} }
+				return m.terminalCtrlC()
 			}
-			m.cleanupAllSubprocesses()
+			m.closeViewersForQuit()
 			return m, tea.Quit
 		case "ctrl+d":
-			m.cleanupAllSubprocesses()
+			m.closeViewersForQuit()
 			return m, tea.Quit
 		case "?":
 			if !(m.terminalMode && m.focusedPanel == panelRight) {
@@ -818,13 +792,13 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 		case "q":
 			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
-				m.cleanupAllSubprocesses()
+				m.closeViewersForQuit()
 				return m, tea.Quit
 			}
 			// Knowledge browser: q quits as the help modal's Global section
 			// advertises, except while the search input owns letter keys.
 			if m.state == stateKnowledge && !m.browser.SearchActive() {
-				m.cleanupAllSubprocesses()
+				m.closeViewersForQuit()
 				return m, tea.Quit
 			}
 		case "A":
@@ -933,13 +907,14 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.sessionsPanelCallbacks().resize()
 				m.coordinationPanelCallbacks().resize()
 				m.resizeSessionPanels()
+				viewerCmd := m.resizeViewers()
 
 				// Persist preference asynchronously
 				prefs := config.Prefs{Layout: m.layoutMode}
-				return m, func() tea.Msg {
+				return m, tea.Batch(viewerCmd, func() tea.Msg {
 					_ = config.SavePrefs(prefs)
 					return nil
-				}
+				})
 			}
 		case "/":
 			if m.state == stateWork && m.focusedPanel == panelLeft {
@@ -982,9 +957,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				if m.state == stateCoordination {
 					m.coordinationDetail.StopMarquee()
 				}
-				if m.state == stateSessions {
-					m.closeSessionMirror()
-				}
 				m.state = stateKnowledge
 				m.browser = knowledge.NewBrowserModel(m.config.KnowledgeDir)
 				m.browser, _ = m.browser.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
@@ -1005,9 +977,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			if (m.state == stateWork || m.state == stateSessions || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				if m.state == stateCoordination {
 					m.coordinationDetail.StopMarquee()
-				}
-				if m.state == stateSessions {
-					m.closeSessionMirror()
 				}
 				m.state = stateFollowUps
 				// Preserve items already loaded by the background poll so the
@@ -1030,9 +999,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			if (m.state == stateSessions || m.state == stateCoordination) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				if m.state == stateCoordination {
 					m.coordinationDetail.StopMarquee()
-				}
-				if m.state == stateSessions {
-					m.closeSessionMirror()
 				}
 				m.state = stateWork
 				m.terminalMode = false
@@ -1088,9 +1054,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			// explicit empty state.
 			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions) &&
 				!(m.terminalMode && m.focusedPanel == panelRight) {
-				if m.state == stateSessions {
-					m.closeSessionMirror()
-				}
 				m.state = stateCoordination
 				m.terminalMode = false
 				m.focusedPanel = panelLeft
@@ -1190,10 +1153,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.sessionsPanelCallbacks().resize()
 		m.coordinationPanelCallbacks().resize()
 		m.resizeSessionPanels()
+		viewerCmd := m.resizeViewers()
 
 		m.popup.SetSize(msg.Width, msg.Height)
 
-		return m, tea.Batch(wcmd, fcmd, bcmd)
+		return m, tea.Batch(wcmd, fcmd, bcmd, viewerCmd)
 
 	case workItemsLoadedMsg:
 		if msg.err != nil {
@@ -1224,6 +1188,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		// re-tagging each with its session type so the per-type label survives.
 		for slug := range m.sessionPanels {
 			m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: slug, Type: m.sessionTypeForSlug(slug)})
+		}
+		for _, status := range m.badgedSessions {
+			m.list, _ = m.list.Update(status)
 		}
 
 		var cmds []tea.Cmd
@@ -1297,23 +1264,20 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case work.TerminalOutputMsg:
 		return m.handleTerminalOutput(msg)
 
-	case work.SessionMirrorOpenedMsg:
-		return m.handleSessionMirrorMessage(msg)
+	case work.ViewerAttachedMsg:
+		return m.handleViewerMsg(msg.Slug, msg)
 
-	case work.SessionMirrorOutputMsg:
-		return m.handleSessionMirrorMessage(msg)
+	case work.ViewerOutputMsg:
+		return m.handleViewerMsg(msg.Slug, msg)
 
-	case work.SessionMirrorEOFMsg:
-		return m.handleSessionMirrorMessage(msg)
+	case work.ViewerEndedMsg:
+		return m.handleViewerMsg(msg.Slug, msg)
 
-	case work.SessionMirrorResizeTickMsg:
-		return m.handleSessionMirrorMessage(msg)
+	case work.ViewerScrollbackMsg:
+		return m.handleViewerMsg(msg.Slug, msg)
 
-	case work.SessionMirrorGeometryMsg:
-		return m.handleSessionMirrorMessage(msg)
-
-	case work.SessionMirrorWriteMsg:
-		return m.handleSessionMirrorMessage(msg)
+	case work.ViewerTerminateMsg:
+		return m.handleViewerTerminate(msg)
 
 	case work.QuiescenceTickMsg:
 		return m.handleQuiescenceTick(msg)
@@ -1342,9 +1306,18 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		return m, nil
 
 	case work.ItemSelectedMsg:
-		// Enter on list item: load detail and shift focus to right panel
+		// Enter on list item: load detail and shift focus to right panel, and
+		// open the viewer of the item's live session when it has one.
 		m.focusedPanel = panelRight
-		return m.loadDetail(msg.Item.Slug)
+		m, cmd := m.loadDetail(msg.Item.Slug)
+		if !m.hasSessionPanel(msg.Item.Slug) {
+			if _, live := m.liveSessionRow(msg.Item.Slug); live {
+				var viewCmd tea.Cmd
+				m, viewCmd, _ = m.viewItemSession(msg.Item.Slug)
+				cmd = batchCmd(cmd, viewCmd)
+			}
+		}
+		return m, cmd
 
 	case work.LoadDetailMsg:
 		// Hover-prefetch emitted by the list's onCursorChange hook.
@@ -1634,6 +1607,17 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m.returnToCoordinationView()
 			}
 		}
+		// l on the list opens the viewer of the item's live session, as Enter
+		// does, when no panel is open for it yet.
+		if km, ok := msg.(tea.KeyPressMsg); ok && km.String() == "l" && m.focusedPanel == panelLeft {
+			if slug := m.list.CurrentSlug(); slug != "" && !m.hasSessionPanel(slug) {
+				if _, live := m.liveSessionRow(slug); live {
+					next, cmd, _ := m.viewItemSession(slug)
+					next.focusedPanel = panelRight
+					return next, cmd
+				}
+			}
+		}
 		cb := m.workPanelCallbacks()
 		if cmd, consumed := handlePanelRouting(&m, msg, cb); consumed {
 			return m, cmd
@@ -1646,6 +1630,12 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		}
 		return m, routeFocusedPanel(&m, msg, cb)
 	case stateSessions:
+		// l on the list opens the selected session's viewer, as Enter does.
+		if km, ok := msg.(tea.KeyPressMsg); ok && km.String() == "l" && m.focusedPanel == panelLeft {
+			if row, ok := m.sessionsList.CurrentSession(); ok && !row.InFlight && row.PanelKey != "" {
+				return m.handleSessionSelected(sessionview.SessionSelectedMsg{RowID: row.RowID})
+			}
+		}
 		cb := m.sessionsPanelCallbacks()
 		if cmd, consumed := handlePanelRouting(&m, msg, cb); consumed {
 			return m, cmd
@@ -1657,7 +1647,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		if km, ok := msg.(tea.KeyPressMsg); ok && m.focusedPanel == panelLeft {
 			switch km.String() {
 			case "esc", "h":
-				m.closeSessionMirror()
 				if m.returnToCoordination {
 					return m.returnToCoordinationView()
 				}
@@ -1735,10 +1724,6 @@ func (m *model) resizeSessionPanels() {
 			})
 		}
 		m.sessionPanels[slug] = sm
-	}
-	if m.sessionMirrorActive {
-		sm, _ := m.sessionMirrorPanel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
-		m.sessionMirrorPanel = sm
 	}
 }
 

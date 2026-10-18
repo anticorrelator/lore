@@ -27,6 +27,7 @@ import runpy
 from pathlib import Path
 import shutil
 import shlex
+import site
 import subprocess
 import sys
 import textwrap
@@ -46,16 +47,39 @@ for name in ('scripts', 'adapters', 'agents', 'docs', 'cli', 'skills'):
 store = home / '.lore'
 (store / 'config').mkdir(parents=True)
 (store / 'scripts').symlink_to(repo / 'scripts')
-settings = {'version': 1, 'harnesses': {'codex': {'roles': {'lead': 'planning-model', 'reviewer': 'review-model', 'worker': 'worker-model', 'researcher': 'research-model', 'advisor': 'advisor-model'}, 'ceremony_roles': {'spec': {'lead': 'spec-model'}}}}}
+settings = {'version': 2, 'tui_launch_framework': 'codex',
+            'routes': {'default': 'codex/default-model', 'lead': 'codex/planning-model', 'reviewer': 'codex/review-model', 'worker': 'codex/worker-model',
+                       'researcher': 'codex/research-model', 'advisor': 'codex/advisor-model', 'ceremony_overlays': {'spec': {'lead': 'codex/spec-model'}}},
+            'harnesses': {'codex': {'args': [], 'native_models': {'default': 'gpt-5.5-high'}}}}
 (store / 'config/settings.json').write_text(json.dumps(settings))
 item = store / '_work/fixture'
 if scenario not in ('implement-envelope', 'spec-report-fields'):
     item.mkdir(parents=True)
     (item / '_meta.json').write_text(json.dumps({'title': 'Fixture', 'source_checkout': str(repo)}))
 instances = store / '_sessions/instances'; instances.mkdir(parents=True)
-(instances / 'fixture.json').write_text(json.dumps({'name': 'fixture', 'project_dir': str(repo), 'runtime_capabilities': ['position-preparation-v1']}))
 env = {k:v for k,v in os.environ.items() if not k.startswith(('LORE_', 'CLAUDE_'))}
-env.update(HOME=str(home), LORE_DATA_DIR=str(store), LORE_KNOWLEDGE_DIR=str(store), LORE_FRAMEWORK='codex')
+# HOME moves into the case root; keep the caller's Python user site so PyYAML stays importable.
+env.update(HOME=str(home), PYTHONUSERBASE=site.getuserbase(), LORE_DATA_DIR=str(store), LORE_KNOWLEDGE_DIR=str(store), LORE_FRAMEWORK='codex')
+# The store's session host claims every request, in a checkout of its store. The
+# checkout is a git checkout and the store is pinned, so it belongs to the store;
+# this process stands in for a ready host ('fixture') by holding its runtime lock
+# and the login's supervisor lock, so 'lore session request' finds it ensured.
+subprocess.run(['git', 'init', '-q'], cwd=repo, check=True)
+runtime_spec = importlib.util.spec_from_file_location('session_runtime', repo / 'scripts/session_runtime.py')
+session_runtime = importlib.util.module_from_spec(runtime_spec); runtime_spec.loader.exec_module(session_runtime)
+import fcntl
+store_key = session_runtime.store_host_key(store, env)
+host_state = session_runtime.hosts_dir(store, env) / store_key; host_state.mkdir(parents=True)
+login = session_runtime.login_dir(env); login.mkdir(parents=True)
+held_locks = [open(host_state / 'runtime.lock', 'a+'), open(login / 'supervisor.lock', 'a+')]
+for held_lock in held_locks:
+    fcntl.flock(held_lock, fcntl.LOCK_EX)
+(login / 'served.json').write_text(json.dumps({'schema_version': 1, 'stores': {str(store): {'pin_knowledge_dir': True}}}))
+host_capabilities = ['position-preparation-v1']
+(instances / 'fixture.json').write_text(json.dumps({'name': 'fixture', 'pid': os.getpid(), 'role': 'session-host', 'scope': 'store',
+    'host_key': store_key, 'runtime_capabilities': host_capabilities, 'build_time': '2027-01-01T00:00:00Z', 'sessions': []}))
+(host_state / 'ready.json').write_text(json.dumps({'schema_version': 2, 'ready': True, 'scope': 'store', 'host_key': store_key,
+    'instance_name': 'fixture', 'pid': os.getpid(), 'knowledge_dir': str(store), 'runtime_capabilities': host_capabilities}))
 os.environ.update(env)
 for key in list(os.environ):
     if key.startswith('LORE_') and key not in env:

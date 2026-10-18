@@ -236,18 +236,38 @@ type model struct {
 	// live (or just-completed) session — spec, implement, or chat. The panel for
 	// the currently selected list item is shown in the right panel when present.
 	// Keyed by slug alone (one panel per subject): a second launch of any type
-	// attaches to the existing panel rather than replacing it.
+	// attaches to the existing panel rather than replacing it. Only a store
+	// host owns sessions, so only a store host has these.
 	sessionPanels map[string]work.SessionPanelModel
-	// sessionMirrorPanel is the single remote tmux mirror hosted by the
-	// sessions workspace. It stays outside sessionPanels because closing a
-	// mirror must not enter the owned-session teardown path.
-	sessionMirrorPanel      work.SessionPanelModel
-	sessionMirrorRowID      string
-	sessionMirrorGeneration uint64
-	sessionMirrorActive     bool
-	terminalMode            bool
-	terminalForeground      color.Color
-	terminalBackground      color.Color
+	// viewers holds a window's viewer panels, keyed like sessionPanels (see
+	// viewerKey). They stay out of sessionPanels because the close, quit and
+	// observation paths treat every entry there as a session this process owns.
+	viewers map[string]sessionViewer
+	// badgedSessions is the work-list badge of each slug a live session runs
+	// on, re-applied when the list is rebuilt.
+	badgedSessions     map[string]work.SessionStatusMsg
+	terminalMode       bool
+	terminalForeground color.Color
+	terminalBackground color.Color
+
+	// launches are this window's launches still waiting to spawn, keyed by
+	// slug; launchTickArmed is set while their fast refresh is scheduled.
+	// requestEvents remembers recent request outcomes from the journal, and
+	// refusals queues the refusal modals, the first of which is showing.
+	launches        map[string]pendingLaunch
+	launchTickArmed bool
+	requestEvents   []session.Event
+	refusals        []refusalNotice
+	// noTmuxReason is why tmux is unavailable to this window, or "" when it is
+	// available: without it a window lists sessions but cannot show them.
+	noTmuxReason string
+	// lastHostRevival is when this window last ran `lore session ensure
+	// --if-work`; hostRevivalBusy is set while a revival check runs, and
+	// hostRevivalErr is the failure last shown. clock replaces time.Now in tests.
+	lastHostRevival time.Time
+	hostRevivalBusy bool
+	hostRevivalErr  string
+	clock           func() time.Time
 
 	// preferDetailView records, per work slug / follow-up ID, that the user
 	// explicitly switched the right panel to the detail view (ctrl+t) while a
@@ -260,19 +280,18 @@ type model struct {
 	// holds its optional context input. sessionConfirmDescriptor is the sole mode
 	// carrier — request handlers build it, the modal's checkboxes toggle its
 	// ShortMode/SkipConfirm, and Enter stamps ExtraContext and hands it to
-	// spawnSession. This mirrors the descriptor the agent queue builds, so the
+	// launchSession. This mirrors the descriptor the agent queue builds, so the
 	// human and agent launch paths share one shape.
 	sessionConfirmActive     bool
 	sessionConfirmInput      textarea.Model
 	sessionConfirmDescriptor work.SessionDescriptor
-	sessionLaunchedFromModal bool
 
-	// Session substrate (_sessions/): this instance's identity, the substrate
-	// root, and the journal appender path. localSessions is the authoritative
-	// set of sessions this instance owns (written into its registry row);
-	// pendingSpawns holds a session's metadata between claim/confirm and the
-	// SpecProcessStarted that promotes it into localSessions.
-	pollingStopped     bool
+	// Session substrate (_sessions/): the substrate root, and for a store host
+	// its instance identity and the journal appender path. localSessions is the
+	// authoritative set of sessions a host owns (written into its registry
+	// row); pendingSpawns holds a session's metadata between claim and the
+	// SpecProcessStarted that promotes it into localSessions. A window has no
+	// instance name and owns none of these.
 	instanceName       string
 	sessionsDir        string
 	eventScript        string
@@ -284,15 +303,10 @@ type model struct {
 	// buildTime is the orderable quantity min_vintage filtering compares against.
 	buildSHA  string
 	buildTime string
-	// normalizedProjectDir is config.ProjectDir resolved to a physical absolute
-	// path once at startup (config.NormalizeProjectDir). It is stamped onto the
-	// registry row and snapshotted into queueTickCmd as the match key a request's
-	// prefer_project_dir compares against; config.ProjectDir stays the spawn cwd.
-	normalizedProjectDir string
-	// tmuxEnabled is the D3 host-capability gate resolved once at startup: when
-	// true, sessions are hosted in tmux (survive crash/restart, adoptable); when
-	// false (tmux absent or LORE_TUI_TMUX=off), spawning/close/quit behave exactly
-	// as the direct-PTY path and no adoption scan runs.
+	// tmuxEnabled is the host's D3 capability gate resolved once at startup:
+	// when true, sessions are hosted in tmux (survive crash/restart, adoptable);
+	// when false (tmux absent or LORE_TUI_TMUX=off), each session runs on a
+	// direct PTY that ends with the host.
 	tmuxEnabled            bool
 	localSessions          map[string]liveSession
 	pendingSpawns          map[string]liveSession
@@ -589,11 +603,11 @@ func (m *model) knowledgePanelCallbacks() panelCallbacks {
 
 // sessionsPanelCallbacks builds the split-pane callbacks for the sessions
 // workspace. It clones the work/follow-ups shape: the left panel is the sessions
-// list, the right panel routes by the current row's session key — a locally-
-// hosted row's live SessionPanelModel (attach/scrollback) or, for an external or
-// in-flight row, the read-only detail card. currentSlug returns the panel-map
-// key only for a local row, so the terminal-routing and ctrl+t seams reach the
-// right panel exactly as they do for work.
+// list, the right panel routes by the current row's panel key — the session's
+// open viewer (attach/scrollback) or, for any other row, the read-only detail
+// card. currentSlug returns the panel key only for a row with an open panel,
+// so the terminal-routing and ctrl+t seams reach the right panel exactly as
+// they do for work.
 func (m *model) sessionsPanelCallbacks() panelCallbacks {
 	return panelCallbacks{
 		currentSlug: func() string {
@@ -679,71 +693,42 @@ func (m *model) coordinationPanelCallbacks() panelCallbacks {
 	}
 }
 
-// currentSessionsPanel returns the panel explicitly attached to the current
-// sessions row: an owned local panel or the root-owned remote mirror.
+// currentSessionsPanel returns the panel open for the current sessions row.
 func (m model) currentSessionsPanel() (work.SessionPanelModel, bool) {
 	row, ok := m.sessionsList.CurrentSession()
-	if !ok {
+	if !ok || row.InFlight {
 		return work.SessionPanelModel{}, false
 	}
-	if !row.Local {
-		if m.sessionMirrorActive && row.RowID == m.sessionMirrorRowID {
-			return m.sessionMirrorPanel, true
-		}
-		return work.SessionPanelModel{}, false
-	}
-	panel, ok := m.sessionPanels[row.PanelKey]
-	return panel, ok
+	return m.panelFor(row.PanelKey)
 }
 
 // loadSessionsDetail points the read-only card at the row under the cursor and
-// derives terminalMode: a locally-hosted row with a live panel shows the panel
-// (unless the user toggled to detail via ctrl+t); every other row shows the card.
+// derives terminalMode: a row with an open panel shows the panel (unless the
+// user toggled to detail via ctrl+t); every other row shows the card.
 func (m *model) loadSessionsDetail(rowID string) tea.Cmd {
 	row, ok := m.sessionsList.SessionByID(rowID)
 	m.sessionsDetail.SetSession(row, ok)
-	panelKey := ""
 	hasPanel := false
-	if ok && row.Local {
-		panelKey = row.PanelKey
-		hasPanel = m.hasSessionPanel(row.PanelKey)
-	} else if ok && m.sessionMirrorActive && row.RowID == m.sessionMirrorRowID {
-		panelKey = row.RowID
-		hasPanel = true
+	if ok && !row.InFlight {
+		_, hasPanel = m.panelFor(row.PanelKey)
 	}
-	m.terminalMode = hasPanel && !m.preferDetailView[panelKey]
+	m.terminalMode = hasPanel && !m.preferDetailView[row.PanelKey]
 	return nil
 }
 
-// currentSessionPanel returns the spec panel for the currently selected work item, if any.
+// currentSessionPanel returns the panel for the currently selected work item, if any.
 func (m model) currentSessionPanel() (work.SessionPanelModel, bool) {
-	if m.sessionPanels == nil {
-		return work.SessionPanelModel{}, false
-	}
-	slug := m.list.CurrentSlug()
-	if slug == "" {
-		return work.SessionPanelModel{}, false
-	}
-	panel, ok := m.sessionPanels[slug]
-	return panel, ok
+	return m.panelFor(m.list.CurrentSlug())
 }
 
-// currentFollowupPanel returns the spec panel for the currently selected follow-up item, if any.
+// currentFollowupPanel returns the panel for the currently selected follow-up item, if any.
 func (m model) currentFollowupPanel() (work.SessionPanelModel, bool) {
-	if m.sessionPanels == nil {
-		return work.SessionPanelModel{}, false
-	}
-	id := m.followupDetail.CurrentID()
-	if id == "" {
-		return work.SessionPanelModel{}, false
-	}
-	panel, ok := m.sessionPanels[id]
-	return panel, ok
+	return m.panelFor(m.followupDetail.CurrentID())
 }
 
-// hasSessionPanel reports whether a spec panel exists for the given slug.
+// hasSessionPanel reports whether a panel exists for the given slug.
 func (m model) hasSessionPanel(slug string) bool {
-	_, ok := m.sessionPanels[slug]
+	_, ok := m.panelFor(slug)
 	return ok
 }
 
@@ -783,8 +768,9 @@ func (m *model) applyTerminalColorPair() {
 	for slug, panel := range m.sessionPanels {
 		m.sessionPanels[slug] = panel.WithTerminalColorPair(pair)
 	}
-	if m.sessionMirrorActive {
-		m.sessionMirrorPanel = m.sessionMirrorPanel.WithTerminalColorPair(pair)
+	for key, v := range m.viewers {
+		v.panel = v.panel.WithTerminalColorPair(pair)
+		m.viewers[key] = v
 	}
 }
 
@@ -812,7 +798,6 @@ func (m *model) cleanupAllSubprocesses() {
 	for slug, panel := range m.sessionPanels {
 		m.sessionPanels[slug] = panel.Cleanup()
 	}
-	m.closeSessionMirror()
 	anySessionRetained := false
 	for slug, ls := range m.localSessions {
 		if ls.tmuxName != "" || ls.worktreeID != "" {
@@ -954,9 +939,13 @@ func (m model) buildPaneConfig() paneConfig {
 		filterAnnot, filterAnnotW := annotFollowupFilter.render(filterSel)
 
 		sessionPanel, hasSessionPanel := m.currentFollowupPanel()
+		detailView := m.followupDetail.View()
+		if !hasSessionPanel {
+			detailView = m.withLaunchStatus(m.followupDetail.CurrentID(), detailView)
+		}
 		return paneConfig{
 			listView:           m.followupList.View(),
-			detailView:         m.followupDetail.View(),
+			detailView:         detailView,
 			sessionPanel:       sessionPanel,
 			hasSessionPanel:    hasSessionPanel,
 			listTitle:          listTitle,
@@ -998,9 +987,13 @@ func (m model) buildPaneConfig() paneConfig {
 		}
 
 		sessionPanel, hasSessionPanel := m.currentSessionPanel()
+		detailView := m.detail.View()
+		if !hasSessionPanel {
+			detailView = m.withLaunchStatus(m.list.CurrentSlug(), detailView)
+		}
 		return paneConfig{
 			listView:           m.list.View(),
-			detailView:         m.detail.View(),
+			detailView:         detailView,
 			sessionPanel:       sessionPanel,
 			hasSessionPanel:    hasSessionPanel,
 			listTitle:          listTitle,

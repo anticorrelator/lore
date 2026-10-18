@@ -163,7 +163,7 @@ Subcommands:
   resolve   Resolve a fuzzy work-item reference to (slug, archived)
   path      Print a work item's absolute directory (a cwd-independent Write/cp target)
   set       Set metadata fields (issue, pr, scope, project, intent anchor) on a work item
-  source-checkout  Declare the checkout sessions must use, from the calling session or --from-instance
+  source-checkout  Declare the checkout sessions must use: the one it runs in, the calling session's, or --from-instance
   archive   Archive a completed work item
   delete    Permanently delete a work item
   unarchive Restore an archived work item
@@ -676,10 +676,6 @@ Verbs:
             deadline, so expect one last wake
   worktree  Allocate, bind, renew, transition, clean, sweep, or inspect a
             manager-owned stream worktree
-  pin       Set, clear, or read a project's sticky dispatch pin (sole writer
-            of the _coordination.json sidecar). --preflight turns the read into
-            a dispatch gate: the live instance on stdout, exit 3 on a dead pin,
-            exit 4 when none is set
   report    Land a returned worker report at the path assigned to it. Body on
             stdin, --report-id <id> decides the filename; validates the
             schema-v1 identity header, writes once, and refuses an existing
@@ -714,8 +710,12 @@ Managed handles also use send, answer, peek, wait, and close below. These resolv
 current ownership and await outcomes; close includes cleanup disposition.
 
 Raw substrate and shared verbs:
-  request   Enqueue a session spawn request into requests/pending/; one that
-            names a checkout goes to the store's session host, started if needed
+  request   Enqueue a session spawn request into requests/pending/ for the
+            store's session host, started if needed; every request names the
+            checkout it runs in
+  ensure    Start the store's session host if it is not running and print its
+            status as JSON; --if-work starts it only when it has work (queued
+            requests, unsent starts, or sessions to adopt)
   list      Render live instances plus the pending/claimed/close-request queues
   events    Read the events.jsonl journal from an opaque byte-offset cursor
   close     Request teardown of a live session (<slug> | --self), or cancel a
@@ -1064,9 +1064,6 @@ cmd_coordinate() {
     worktree)
       exec "$SCRIPTS_DIR/coordinate-worktree.sh" "$@"
       ;;
-    pin)
-      exec "$SCRIPTS_DIR/coordinate-pin.sh" "$@"
-      ;;
     report)
       exec "$SCRIPTS_DIR/coordinate-report.sh" "$@"
       ;;
@@ -1105,6 +1102,9 @@ cmd_session() {
       ;;
     request)
       exec python3 "$SCRIPTS_DIR/session-managed.py" request "$@"
+      ;;
+    ensure)
+      exec python3 "$SCRIPTS_DIR/session-managed.py" ensure "$@"
       ;;
     list)
       exec "$SCRIPTS_DIR/session-list.sh" "$@"
@@ -1913,9 +1913,10 @@ cmd_work() {
         echo "Usage: lore work source-checkout <slug> [--from-instance <name>] [--json]" >&2
         echo "Declare the checkout that sessions for <slug> must run in." >&2
         echo "The path is not a caller argument: with --from-instance it is read from that live" >&2
-        echo "instance's registry row; otherwise it is read from the calling session's registry" >&2
-        echo "provenance. It is resolved physically and checked against the live instances before" >&2
-        echo "it is written. Use 'lore session list' to find live instance names." >&2
+        echo "instance's registry row; inside a lore session it is read from the calling" >&2
+        echo "session's registry provenance; otherwise it is the git checkout this command runs" >&2
+        echo "in. It is resolved physically and must be a checkout of this store before it is" >&2
+        echo "written; no session host needs to be running. 'lore session list' names live instances." >&2
         [[ $# -eq 0 ]] && return 1 || return 0
       fi
       exec "$SCRIPTS_DIR/set-work-meta.sh" "$@" --seed-source-checkout

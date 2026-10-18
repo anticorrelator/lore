@@ -97,20 +97,20 @@ Before calling, check that `selection_name` appears among the `subagent_type` va
 
 **Chaperone** (`route` is `codex-chaperone`, set when a native request named Codex from another framework). Dispatch through the Codex chaperone with `payload.model` and `payload.prompt`. Tell it the return shape is the investigator report, so it relays the body verbatim; a relay reshaped into worker fields would replace a finding with a claim nobody made.
 
-**Session** (`route` is `session`). The request carries the context file the directive-context recipe wrote. `SESSION_SLUG` is `<slug>--w<n>`, and the report still belongs to the base item. Give exactly one placement stance. `SESSION_ROUTE` is the payload's `session_route` as JSON. Pass the worktree pair only for a `prepared` context frozen against a fixed placement, using that exact directory. A `pending-execution-root` context goes with an empty pair, and the host supplies the root:
+**Session** (`route` is `session`). The request carries the context file the directive-context recipe wrote. `SESSION_SLUG` is `<slug>--w<n>`, and the report still belongs to the base item. The store's session host claims the request and runs it in the item's declared checkout; `--anywhere` says the recipe adds no placement of its own. `SESSION_ROUTE` is the payload's `session_route` as JSON. Pass the worktree pair only for a `prepared` context frozen against a fixed placement, using that exact directory. A `pending-execution-root` context goes with an empty pair, and the host supplies the root:
 
-**Recipe inputs:** SESSION_SLUG, SESSION_ROUTE, CONTEXT_FILE, TARGET_INSTANCE, MIN_VINTAGE, WORKTREE_ID, EXECUTION_DIR.
+**Recipe inputs:** SESSION_SLUG, SESSION_ROUTE, CONTEXT_FILE, MIN_VINTAGE, WORKTREE_ID, EXECUTION_DIR.
 <!-- spec-recipe: request-session -->
 ```bash
 args=(--type worker --slug "$SESSION_SLUG" --session-route "$SESSION_ROUTE"
       --context "$CONTEXT_FILE" --initiator agent --json)
-if [[ -n "$TARGET_INSTANCE" ]]; then args+=(--target "$TARGET_INSTANCE"); else args+=(--anywhere); fi
+args+=(--anywhere)
 [[ -n "$MIN_VINTAGE" ]] && args+=(--min-vintage "$MIN_VINTAGE")
 [[ -n "$WORKTREE_ID" ]] && args+=(--worktree-id "$WORKTREE_ID" --execution-dir "$EXECUTION_DIR")
 lore session request "${args[@]}"
 ```
 
-Don't add `--position`: the context is already an admitted preparation, and generic bindings would drop the spec wrapper and its attribution. A slugged request derives where it may run from the item's declared source checkout. When a refusal says the declaration is missing, seed it once with `lore work source-checkout <slug>`. If publication or activation fails at launch, read the diagnostic; it is not a reason to switch routes.
+Don't add `--position`: the context is already an admitted preparation, and generic bindings would drop the spec wrapper and its attribution. A slugged request derives where it may run from the item's declared source checkout. When a refusal says the declaration is missing, seed it once with `lore work source-checkout <slug>` from inside that checkout. `lore session request` starts the store's session host when none is running; a refusal that says the host did not start carries the error and the path of its log. If publication or activation fails at launch, read the diagnostic; it is not a reason to switch routes.
 
 When the harness has no subagents at all, read the questions yourself and say so in the plan.
 

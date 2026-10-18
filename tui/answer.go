@@ -41,26 +41,19 @@ type pendingAnswerState struct {
 	writtenAt      time.Time
 }
 
-func scanAnswerRequestsCmd(sessionsDir, myName string, hosted map[string]bool, retarget ...bool) tea.Cmd {
+// scanAnswerRequestsCmd returns the answer-requests for a slug this host runs,
+// whatever instance a row names.
+func scanAnswerRequestsCmd(sessionsDir string, hosted map[string]bool) tea.Cmd {
 	return func() tea.Msg {
 		var matched []session.AnswerRequest
 		rows, diagnostics := session.ScanAnswerRequestsWithDiagnostics(sessionsDir)
 		for _, request := range rows {
-			if request.RequestID == "" || (request.TargetInstance != myName && !hostRetarget(retarget)) || !hosted[request.Slug] {
+			if request.RequestID == "" || !hosted[request.Slug] {
 				continue
 			}
 			matched = append(matched, request)
 		}
 		return answerRequestScanMsg{matched: matched, diagnostics: diagnostics}
-	}
-}
-
-func consumeAnswerCmd(sessionsDir, script, kdir, requestID string, event session.Event) tea.Cmd {
-	return func() tea.Msg {
-		if err := session.DeleteAnswerRequest(sessionsDir, requestID); err != nil {
-			return answerConsumedMsg{requestID: requestID, err: err}
-		}
-		return answerConsumedMsg{requestID: requestID, err: session.AppendEvent(script, kdir, event)}
 	}
 }
 
@@ -157,10 +150,7 @@ func (m model) handleAnswerRequestScanWithContract(msg answerRequestScanMsg, con
 			reason = answerReasonError
 			m.flashErr = compactErr("persist answer attempt", err)
 		} else if err := panel.SelectModalOption(delta); err != nil {
-			reason = answerReasonError
-			if m.hostKey != "" {
-				reason = "delivery-uncertain"
-			}
+			reason = "delivery-uncertain"
 			m.flashErr = compactErr("session answer", err)
 		} else {
 			wrote = true
@@ -181,11 +171,7 @@ func (m model) handleAnswerRequestScanWithContract(msg answerRequestScanMsg, con
 		if reason == answerReasonNoContract {
 			m = m.routeRuntimeNotices([]runtimeNotice{noContractNotice(framework)})
 		}
-		if m.hostKey != "" {
-			cmds = append(cmds, m.hostDeliveryTerminalCmd("answer", m.answerOutcomeEvent(request, false, reason)))
-		} else {
-			cmds = append(cmds, consumeAnswerCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, request.RequestID, m.answerOutcomeEvent(request, false, reason)))
-		}
+		cmds = append(cmds, m.hostDeliveryTerminalCmd("answer", m.answerOutcomeEvent(request, false, reason)))
 	}
 	if len(cmds) == 0 {
 		return m, nil
@@ -249,14 +235,11 @@ func (m model) answerVerifyTerminalCmd(pending pendingAnswerState, confirmed boo
 	reason := ""
 	if !confirmed {
 		reason = answerReasonUnconfirmed
-		if m.hostKey != "" && pending.uncertain {
+		if pending.uncertain {
 			reason = "delivery-uncertain"
 		}
 	}
-	if m.hostKey != "" {
-		return m.hostDeliveryTerminalCmd("answer", m.answerOutcomeEvent(request, confirmed, reason))
-	}
-	return journalCmd(m.eventScript, m.config.KnowledgeDir, m.answerOutcomeEvent(request, confirmed, reason))
+	return m.hostDeliveryTerminalCmd("answer", m.answerOutcomeEvent(request, confirmed, reason))
 }
 
 func (m model) answerOutcomeEvent(request session.AnswerRequest, answered bool, reason string) session.Event {

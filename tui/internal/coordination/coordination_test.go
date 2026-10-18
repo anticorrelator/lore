@@ -22,51 +22,6 @@ var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 func stripANSI(s string) string { return ansiRe.ReplaceAllString(s, "") }
 
-// --- ReadPin (sidecar schema v1) ---
-
-func TestReadPinMissingSidecarIsPinless(t *testing.T) {
-	pin, err := ReadPin(t.TempDir())
-	if err != nil || pin != nil {
-		t.Fatalf("missing sidecar must read as pin-less, got pin=%v err=%v", pin, err)
-	}
-}
-
-func TestReadPinClearedSidecarIsPinless(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "_coordination.json"), []byte(`{"schema_version":1}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	pin, err := ReadPin(dir)
-	if err != nil || pin != nil {
-		t.Fatalf("cleared sidecar (no pin key) must read as pin-less, got pin=%v err=%v", pin, err)
-	}
-}
-
-func TestReadPinSetSidecar(t *testing.T) {
-	dir := t.TempDir()
-	raw := `{"schema_version":1,"pin":{"instance":"calm-cedar","pinned_at":"2026-07-22T09:00:00Z","pinned_by":"dustin"}}`
-	if err := os.WriteFile(filepath.Join(dir, "_coordination.json"), []byte(raw), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	pin, err := ReadPin(dir)
-	if err != nil || pin == nil {
-		t.Fatalf("set sidecar must read the pin, got pin=%v err=%v", pin, err)
-	}
-	if pin.Instance != "calm-cedar" || pin.PinnedAt != "2026-07-22T09:00:00Z" || pin.PinnedBy != "dustin" {
-		t.Errorf("pin fields mismatch: %+v", pin)
-	}
-}
-
-func TestReadPinCorruptSidecarSurfacesError(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "_coordination.json"), []byte(`{"schema_version":"one"`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ReadPin(dir); err == nil {
-		t.Error("corrupt sidecar must surface an error, not read as unpinned")
-	}
-}
-
 // --- ListModel ---
 
 func TestListModelCursorRestsOnArcsNotSectionHeaders(t *testing.T) {
@@ -437,30 +392,26 @@ func TestListModelSectionHeadersRuleToThePanelEdge(t *testing.T) {
 	}
 }
 
-// The sweep predicate is stricter than the bucket, because its callers write to
-// the record: an arc whose instant cannot be read has not been shown to be old,
-// even though it still sorts and buckets under Older.
-func TestArcAgedOutAtRequiresAReadableInstant(t *testing.T) {
+// The week boundary the Older header and the ctrl+a fold are drawn from. An
+// instant that cannot be read still sorts and buckets under Older.
+func TestArcBucketAtPlacesTheWeekBoundary(t *testing.T) {
 	now := time.Date(2026, 7, 29, 9, 0, 0, 0, time.Local)
 	cases := []struct {
 		name string
 		arc  Arc
-		want bool
+		want Bucket
 	}{
-		{"closed three weeks back", Arc{ClosedAt: iso(now.AddDate(0, 0, -21))}, true},
-		{"closed a moment past the boundary", Arc{ClosedAt: iso(time.Date(2026, 7, 22, 23, 59, 0, 0, time.Local))}, true},
-		{"closed six days back", Arc{ClosedAt: iso(time.Date(2026, 7, 23, 0, 0, 0, 0, time.Local))}, false},
-		{"closed this morning", Arc{ClosedAt: iso(now.Add(-2 * time.Hour))}, false},
-		{"no declared instant", Arc{}, false},
-		{"unparseable instant", Arc{ClosedAt: "whenever"}, false},
+		{"closed three weeks back", Arc{ClosedAt: iso(now.AddDate(0, 0, -21))}, BucketOlder},
+		{"closed a moment past the boundary", Arc{ClosedAt: iso(time.Date(2026, 7, 22, 23, 59, 0, 0, time.Local))}, BucketOlder},
+		{"closed six days back", Arc{ClosedAt: iso(time.Date(2026, 7, 23, 0, 0, 0, 0, time.Local))}, BucketThisWeek},
+		{"closed this morning", Arc{ClosedAt: iso(now.Add(-2 * time.Hour))}, BucketToday},
+		{"no declared instant", Arc{}, BucketOlder},
+		{"unparseable instant", Arc{ClosedAt: "whenever"}, BucketOlder},
 	}
 	for _, c := range cases {
-		if got := c.arc.AgedOutAt(now); got != c.want {
-			t.Errorf("%s: AgedOutAt=%v want %v", c.name, got, c.want)
+		if got := c.arc.BucketAt(now); got != c.want {
+			t.Errorf("%s: BucketAt=%v want %v", c.name, got, c.want)
 		}
-	}
-	if got := (Arc{ClosedAt: "whenever"}).BucketAt(now); got != BucketOlder {
-		t.Errorf("an unreadable instant must still bucket as older, got %v", got)
 	}
 }
 

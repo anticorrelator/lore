@@ -140,35 +140,22 @@ func TestStoreHostRecoveryKeySetFollowsMigrationRecords(t *testing.T) {
 	}
 }
 
-func TestHostQueueRetargetsAndLegacyDeclines(t *testing.T) {
-	stageRouteScripts(t)
-	dir := t.TempDir()
+// TestQueueIgnoresTargetInstanceAndReclaimsDeadPredecessor: a keyed row is the
+// store host's whatever instance an older writer addressed it to, and a
+// successor host takes back a dead predecessor's claim without waiting out the
+// reclaim window.
+func TestQueueIgnoresTargetInstanceAndReclaimsDeadPredecessor(t *testing.T) {
+	q := newHostQueue(t)
 	now := time.Now()
-	req := Request{Framework: StrPtr("claude-code"), Model: StrPtr("fixture-model"), RequestID: "r-host", Type: "worker", Slug: StrPtr("item--w123"), Initiator: "agent", HostKey: "host", TargetInstance: StrPtr("dead"), RequestedAt: now.UTC().Format(time.RFC3339)}
-	if err := WritePending(dir, req); err != nil {
-		t.Fatal(err)
-	}
+	q.plant(t, Request{Framework: StrPtr("claude-code"), Model: StrPtr("fixture-model"), RequestID: "r-host", Type: "worker", Slug: StrPtr("item--w123"), Initiator: "agent", TargetInstance: StrPtr("dead"), RequestedAt: now.UTC().Format(time.RFC3339)})
 	yes := func(string) bool { return true }
 	no := func(string) bool { return false }
-	got, err := QueueTick(dir, "legacy", "", "/source", nil, yes, no, now, ReclaimAfter)
-	if err != nil {
-		t.Fatal(err)
+	got := q.tick(t, "fresh", "", nil, yes, no, now)
+	if got.Claimed == nil || got.Claimed.RequestID != "r-host" {
+		t.Fatalf("keyed row addressed to another instance was not claimed: %+v", got)
 	}
-	if got.Claimed != nil {
-		t.Fatal("legacy claimed managed request")
-	}
-	got, err = QueueTickForHost(dir, "fresh", "", "/source", "host", nil, yes, no, now, ReclaimAfter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Claimed == nil {
-		t.Fatalf("retarget claim=%+v", got)
-	}
-	got, err = QueueTickForHost(dir, "new-generation", "", "/source", "host", nil, yes, no, now, ReclaimAfter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Reclaimed) != 1 || got.Claimed == nil {
+	got = q.tick(t, "new-generation", "", nil, yes, no, now)
+	if len(got.Reclaimed) != 1 || got.Reclaimed[0].Reason != "host-predecessor-dead" || got.Claimed == nil || *got.Claimed.ClaimedBy != "new-generation" {
 		t.Fatalf("fresh dead predecessor not reclaimed: %+v", got)
 	}
 }

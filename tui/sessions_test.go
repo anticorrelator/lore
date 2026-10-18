@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,8 +36,8 @@ func stageMainRouteScripts(t *testing.T) {
 	t.Setenv("LORE_DATA_DIR", dataDir)
 }
 
-// baseSessionModel builds a minimal model wired for the session substrate at a
-// temp store, with one work item that has a plan doc.
+// baseSessionModel builds a minimal store host wired for the session substrate
+// at a temp store, with one work item that has a plan doc.
 func baseSessionModel(t *testing.T) (model, string) {
 	t.Helper()
 	kdir := t.TempDir()
@@ -49,7 +48,8 @@ func baseSessionModel(t *testing.T) (model, string) {
 		width:        120,
 		height:       40,
 		list:         work.NewListModel([]work.WorkItem{{Slug: "demo", HasPlanDoc: true}}),
-		config:       config.Config{KnowledgeDir: kdir, ProjectDir: kdir},
+		config:       config.Config{KnowledgeDir: kdir, WorkDir: filepath.Join(kdir, "_work")},
+		hostKey:      storeHostKey,
 		instanceName: "me",
 		sessionsDir:  sessionsDir,
 		eventScript:  "", // journal Cmds are constructed but not run in this test
@@ -57,17 +57,15 @@ func baseSessionModel(t *testing.T) (model, string) {
 	return m, sessionsDir
 }
 
-// TestAgentClaimSpawnsWithoutStealingFocus is the TUI half of the closed loop: a
-// planted request is claimed on a queue tick, a session panel is created, the
-// spawn is marked agent-initiated, and focus is left untouched.
-func TestAgentClaimSpawnsWithoutStealingFocus(t *testing.T) {
-	stageMainRouteScripts(t)
-	m, sessionsDir := baseSessionModel(t)
-	if err := session.WritePending(sessionsDir, session.Request{Framework: strPtr("claude-code"), Model: strPtr("fixture-model"),
-		RequestID: "req-1", Type: "spec", Slug: strPtr("demo"), Initiator: "agent",
-	}); err != nil {
-		t.Fatal(err)
-	}
+// TestStoreHostClaimCreatesPanelAndRecordsClaimant is the host half of the
+// closed loop: a planted keyed request is claimed on a queue tick, a session
+// panel is created, the spawn is recorded as agent-initiated, and the claimed
+// row names the host.
+func TestStoreHostClaimCreatesPanelAndRecordsClaimant(t *testing.T) {
+	f := newStoreHostFixture(t)
+	m := storeHostModel(t, f.store)
+	writeStoreRequest(t, m.sessionsDir, session.Request{RequestID: "req-1", HostKey: storeHostKey, Type: "spec", Slug: strPtr("demo"), Initiator: "agent",
+		RequiredProjectDir: strPtr(f.one), PlacementStance: strPtr(session.StanceRequiredDir)})
 
 	msg, ok := m.queueTickCmd()().(queueTickResultMsg)
 	if !ok {
@@ -89,40 +87,30 @@ func TestAgentClaimSpawnsWithoutStealingFocus(t *testing.T) {
 	if !ok {
 		t.Fatal("claimed session not recorded in pendingSpawns")
 	}
-	if meta.initiator != "agent" || meta.requestID != "req-1" {
+	if meta.initiator != "agent" || meta.requestID != "req-1" || meta.checkpointID != "req-1" {
 		t.Fatalf("pending spawn metadata wrong: %+v", meta)
 	}
-	if m.terminalMode {
-		t.Error("agent spawn stole focus (terminalMode=true)")
-	}
-	if m.focusedPanel != panelLeft {
-		t.Error("agent spawn moved focus off the list")
-	}
 
-	// The claim is durable: the claimed row carries this instance's name.
-	claimed, err := session.ReadClaimed(sessionsDir, "req-1")
+	// The claim is durable: the claimed row carries the host's name.
+	claimed, err := session.ReadClaimed(m.sessionsDir, "req-1")
 	if err != nil {
 		t.Fatalf("ReadClaimed: %v", err)
 	}
-	if claimed.ClaimedBy == nil || *claimed.ClaimedBy != "me" {
+	if claimed.ClaimedBy == nil || *claimed.ClaimedBy != m.instanceName {
 		t.Fatalf("claim metadata not written: %+v", claimed)
 	}
 }
 
-// TestLegacyChatClaimDerivesAddressableIdentity covers rolling compatibility:
-// an older pending row with a null slug is claimed under a deterministic slug,
-// journals that slug, and promotes it into the registry writer's live set.
+// TestLegacyChatClaimDerivesAddressableIdentity: a pending chat row with a null
+// slug is claimed under a deterministic slug, journals that slug, and promotes
+// it into the registry writer's live set.
 func TestLegacyChatClaimDerivesAddressableIdentity(t *testing.T) {
-	stageMainRouteScripts(t)
-	m, sessionsDir := baseSessionModel(t)
-	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	f := newStoreHostFixture(t)
+	m := storeHostModel(t, f.store)
 	const requestID = "20260815T022031Z-940ee194"
 	const slug = "chat-940ee194"
-	if err := session.WritePending(sessionsDir, session.Request{Framework: strPtr("claude-code"), Model: strPtr("fixture-model"),
-		RequestID: requestID, Type: "chat", Initiator: "agent",
-	}); err != nil {
-		t.Fatal(err)
-	}
+	writeStoreRequest(t, m.sessionsDir, session.Request{RequestID: requestID, HostKey: storeHostKey, Type: "chat", Initiator: "agent",
+		PreferProjectDir: strPtr(f.one), PlacementStance: strPtr(session.StancePreferredDir)})
 
 	msg := m.queueTickCmd()().(queueTickResultMsg)
 	if msg.err != nil || msg.result.Claimed == nil {
@@ -158,7 +146,7 @@ func TestLegacyChatClaimDerivesAddressableIdentity(t *testing.T) {
 	}
 }
 
-// TestQueueTickHostsRequestExpiry pins the host decision: the live TUI
+// TestQueueTickHostsRequestExpiry pins the host decision: the store host's
 // heartbeat invokes the expiry writer before its Go claim pass. session list
 // and requester-owned watchers remain readers only.
 func TestQueueTickHostsRequestExpiry(t *testing.T) {
@@ -829,59 +817,69 @@ func TestTabIndicatorIdentityRendering(t *testing.T) {
 	}
 }
 
-func TestEnqueueSessionUsesSoleWriterWithFrozenRoute(t *testing.T) {
-	stageMainRouteScripts(t)
-	m, sessionsDir := baseSessionModel(t)
-	m.normalizedProjectDir = m.config.ProjectDir
-	configDir := filepath.Join(os.Getenv("LORE_DATA_DIR"), "config")
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+// TestWindowLaunchUsesSoleWriterWithFrozenRoute runs a window's launch through
+// the real request writer: the row carries the route the window resolved, the
+// store host's key and no instance target.
+func TestWindowLaunchUsesSoleWriterWithFrozenRoute(t *testing.T) {
+	f := newWindowFixture(t)
+	repo, err := filepath.Abs("..")
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("STUB_LORE_WRITER", filepath.Join(repo, "scripts", "session-request.sh"))
+	configDir := filepath.Join(os.Getenv("LORE_DATA_DIR"), "config")
 	settings := map[string]any{"version": 2, "tui_launch_framework": "claude-code", "capability_overrides": map[string]string{}, "routes": map[string]any{"default": "codex/gpt-5.6-sol-high", "lead": "codex/gpt-6-astra-high"}, "harnesses": map[string]any{"claude-code": map[string]any{"args": []string{}, "native_models": map[string]any{"default": "opus"}}, "codex": map[string]any{"args": []string{}, "native_models": map[string]any{"default": "gpt-5.5-high"}}, "opencode": map[string]any{"args": []string{}, "native_models": map[string]any{"default": "anthropic/opus"}}}}
 	raw, _ := json.Marshal(settings)
 	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), raw, 0644); err != nil {
 		t.Fatal(err)
 	}
 	// An option-bearing route carries a build-vintage floor, and a floor is only
-	// published to a live runtime whose build time meets it, as this TUI's own
-	// registration does.
-	if err := session.WriteInstance(sessionsDir, session.Instance{Name: m.instanceName, PID: os.Getpid(), ProjectDir: m.config.ProjectDir, BuildTime: "2026-09-09T01:27:42Z"}); err != nil {
-		t.Fatal(err)
+	// published to a store host whose build time meets it.
+	hostKey := serveStoreForWriter(t, f.kdir, "2026-09-09T01:27:42Z")
+	m := f.window(t)
+	m, cmd := m.launchSession(work.SessionDescriptor{Type: work.SessionChat, Slug: "scratch", Initiator: "human", SkipConfirm: true})
+	m = settle(t, m, cmd)
+	if m.refusalActive() {
+		t.Fatalf("the writer refused the launch: %s", m.refusals[0].text)
 	}
-	_, cmd := m.enqueueSession(work.SessionDescriptor{Type: work.SessionSpec, Slug: "demo", SkipConfirm: true})
-	msg := cmd()
-	result, ok := msg.(directEnqueueResultMsg)
-	if !ok || result.err != nil {
-		t.Fatalf("enqueue result=%T %+v err=%v", msg, msg, result.err)
-	}
-	rows := session.ScanPending(sessionsDir)
+	rows := session.ScanPending(f.sessions)
 	if len(rows) != 1 || rows[0].Route == nil {
 		t.Fatalf("pending rows = %#v", rows)
 	}
-	if rows[0].Route.Framework != "codex" || rows[0].Route.Model != "gpt-6-astra" || rows[0].Route.Options["effort"] != "high" {
+	if rows[0].Route.Framework != "codex" || rows[0].Route.Model != "gpt-5.6-sol" || rows[0].Route.Options["effort"] != "high" {
 		t.Fatalf("route = %#v", rows[0].Route)
 	}
-	if rows[0].TargetInstance == nil || *rows[0].TargetInstance != m.instanceName {
-		t.Fatalf("target_instance = %v, want the live runtime that meets the floor", rows[0].TargetInstance)
+	if rows[0].HostKey != hostKey || rows[0].TargetInstance != nil {
+		t.Fatalf("host_key=%q target_instance=%v, want the store host's key and no target", rows[0].HostKey, rows[0].TargetInstance)
+	}
+	if l := m.launches["scratch"]; l.requestID != rows[0].RequestID {
+		t.Fatalf("pending launch follows %q, the row is %q", l.requestID, rows[0].RequestID)
 	}
 }
 
-func TestDirectEnqueueCompletionPreservesClaimedPanelAndRefusesPhantom(t *testing.T) {
-	m, _ := baseSessionModel(t)
-	panel := work.NewSessionPanelModel("claimed")
-	m.setSessionPanel("claimed", panel)
-	before := m.sessionPanels["claimed"].View()
-	m, _ = updateModel(t, m, directEnqueueResultMsg{descriptor: work.SessionDescriptor{Slug: "claimed"}})
-	if m.sessionPanels["claimed"].View() != before {
-		t.Fatal("writer completion replaced already-claimed panel")
+// TestLaunchResultNeverCreatesAPanel: a launch's own completion opens nothing.
+// The viewer opens only when the store host's spawn shows in the registry, and
+// a refusal is a modal, never a phantom panel or a flash.
+func TestLaunchResultNeverCreatesAPanel(t *testing.T) {
+	m := minimalModel(stateWork, []work.WorkItem{{Slug: "claimed"}, {Slug: "failed"}}, nil)
+	m.width, m.height = 120, 40
+	d := work.SessionDescriptor{Type: work.SessionSpec, Slug: "claimed", Initiator: "human"}
+	m.launches = map[string]pendingLaunch{"claimed": {descriptor: d}}
+	m, _ = updateModel(t, m, launchRequestedMsg{descriptor: d, requestID: "req-claimed"})
+	if m.hasSessionPanel("claimed") || m.launches["claimed"].requestID != "req-claimed" {
+		t.Fatalf("writer completion created a panel or lost the request: %#v", m.launches)
 	}
 
-	m2, _ := baseSessionModel(t)
-	m2, _ = updateModel(t, m2, directEnqueueResultMsg{descriptor: work.SessionDescriptor{Slug: "failed"}, err: errors.New("writer refused")})
-	if m2.hasSessionPanel("failed") {
+	failed := work.SessionDescriptor{Type: work.SessionSpec, Slug: "failed", Initiator: "human"}
+	m.launches["failed"] = pendingLaunch{descriptor: failed}
+	m, _ = updateModel(t, m, launchRequestedMsg{descriptor: failed, refusal: "writer refused: no live store host: run lore session ensure, then retry"})
+	if m.hasSessionPanel("failed") {
 		t.Fatal("writer refusal created phantom panel")
 	}
-	if !strings.Contains(m2.flashErr, "writer refused") {
-		t.Fatalf("refusal flash = %q", m2.flashErr)
+	if _, pending := m.launches["failed"]; pending {
+		t.Fatal("a refused launch stayed pending")
+	}
+	if m.flashErr != "" || !m.refusalActive() || !strings.Contains(m.refusals[0].text, "writer refused") {
+		t.Fatalf("refusal flash=%q modal=%#v", m.flashErr, m.refusals)
 	}
 }

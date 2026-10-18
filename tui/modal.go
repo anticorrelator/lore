@@ -219,12 +219,44 @@ func (m model) renderConfirmModal() string {
 			s.key.Render("n / Esc") + s.dim.Render("  cancel")
 	case "close_session":
 		title = "Close Session"
-		body = fmt.Sprintf("Request close of %s?\n\n", s.key.Render(m.confirmTitle)) +
+		body = fmt.Sprintf("Close %s?\n", s.key.Render(m.confirmTitle)) +
+			s.dim.Render("The background host running it ends the session.") + "\n\n" +
 			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
 			s.key.Render("any key") + s.dim.Render("  cancel")
 	}
 
 	return m.placeModal(buildModalBox(s, title, body))
+}
+
+// renderRefusalModal shows, in full, why a launch or a close did not happen.
+// When the refusal is that a work item declares no checkout, it also offers to
+// declare the window's own checkout and launch again.
+func (m model) renderRefusalModal() string {
+	s := modalStyles
+	n := m.refusals[0]
+	var b strings.Builder
+	b.WriteString("\n")
+	for _, line := range wrapParagraphs(n.text, modalInnerW-2) {
+		b.WriteString(" " + line + "\n")
+	}
+	b.WriteString("\n")
+	if n.offer {
+		offer := fmt.Sprintf("Enter declares this window's checkout, %s, as the checkout of %s (lore work source-checkout %s), then launches again.", n.checkout, n.descriptor.Slug, n.descriptor.Slug)
+		if n.declaring {
+			offer = fmt.Sprintf("Declaring %s as the checkout of %s…", n.checkout, n.descriptor.Slug)
+		}
+		for _, line := range wrapParagraphs(offer, modalInnerW-2) {
+			b.WriteString(" " + s.dim.Render(line) + "\n")
+		}
+		b.WriteString("\n " + s.key.Render("Enter") + s.dim.Render("  declare and launch") + "    " +
+			s.key.Render("Esc") + s.dim.Render("  dismiss"))
+	} else {
+		b.WriteString(" " + s.key.Render("Esc") + s.dim.Render("  dismiss"))
+	}
+	if more := len(m.refusals) - 1; more > 0 {
+		b.WriteString("\n\n " + s.dim.Render(fmt.Sprintf("%d more after this one", more)))
+	}
+	return m.placeModal(buildModalBox(s, n.title, b.String()))
 }
 
 // helpContent builds the keybinding list shown in the help modal: the keymap

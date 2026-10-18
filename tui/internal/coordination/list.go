@@ -100,20 +100,6 @@ func bucketOf(recency string, now time.Time) Bucket {
 // story.
 func (a Arc) BucketAt(now time.Time) Bucket { return bucketOf(a.Recency(), now) }
 
-// AgedOutAt reports whether the arc's latest declared instant is both readable
-// and more than a week old. It is deliberately stricter than BucketAt, which
-// buckets an empty or unreadable instant as older: bucketing is a reversible
-// placement, while the callers of this predicate write to the record. An arc
-// whose record cannot say when it last moved has not been shown to be old.
-//
-// Status is not consulted here — the caller decides which states are eligible.
-func (a Arc) AgedOutAt(now time.Time) bool {
-	if _, ok := parseInstant(a.Recency()); !ok {
-		return false
-	}
-	return a.BucketAt(now) == BucketOlder
-}
-
 // parseInstant reads a declared instant, accepting the record's RFC3339 form
 // and the date-only form, matching what work.FormatRelativeTime tolerates.
 func parseInstant(s string) (time.Time, bool) {

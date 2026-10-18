@@ -33,9 +33,6 @@ func (m model) clearHostAllocation(id string) error {
 }
 func (m model) hostAllocationCheckpoint(id string, d work.SessionDescriptor) func(worktree.AllocationIntent) error {
 	return func(intent worktree.AllocationIntent) error {
-		if m.hostKey == "" {
-			return nil
-		}
 		return hostAtomicJSON(m.hostAllocationPath(id), hostAllocation{RequestID: id, Slug: d.Slug, Type: d.Type, Intent: intent})
 	}
 }

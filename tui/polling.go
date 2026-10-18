@@ -10,7 +10,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/followup"
-	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
@@ -181,21 +180,9 @@ func readPlanContent(workDir, slug string) tea.Cmd {
 	}
 }
 
-// handleIndexPollTick handles the periodic poll tick: schedules mtime checks, touches
-// session files for active spec panels, and kicks off a new tick.
+// handleIndexPollTick handles the periodic poll tick: schedules mtime checks,
+// re-reads the store's sessions, and kicks off a new tick.
 func (m model) handleIndexPollTick() (model, tea.Cmd) {
-	if m.pollingStopped {
-		return m, nil
-	}
-	if m.instanceName != "" {
-		// Registration is established by Init. Its removal retires this UI's
-		// poll loop; a heartbeat must not resurrect it or launch more readers.
-		if _, err := os.Stat(filepath.Join(session.InstancesDir(m.sessionsDir), m.instanceName+".json")); err != nil {
-			m.pollingStopped = true
-			m.flashErr = compactErr("polling stopped: session registry", err)
-			return m, nil
-		}
-	}
 	cmds := []tea.Cmd{checkIndexMtime(m.indexPath), indexPollTick()}
 	// Poll plan.md and detail files for the current item on every tick.
 	if slug := m.list.CurrentSlug(); slug != "" {
@@ -220,47 +207,15 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 			cmds = append(cmds, checkFollowupDetailMtime(m.config.KnowledgeDir, id))
 		}
 	}
-	// Session substrate: heartbeat our registry file, refresh the external-
-	// session snapshot for badging, run one reclaim/claim queue pass, and scan
-	// for close-requests addressed to us. Guarded on a resolved instance identity
-	// (present only inside a real repo). The close scan rides this one heartbeat
-	// — no second tick loop.
-	if m.instanceName != "" {
-		hosted := make(map[string]bool, len(m.localSessions))
-		for slug := range m.localSessions {
-			hosted[slug] = true
-		}
-		// The id→slug snapshot lets a session-addressed close-request resolve to the
-		// exact session it named (see resolveCloseTargetSlug); snapshotted here at
-		// Cmd-build time alongside hosted, read live inside the scan Cmd.
-		closeIDToSlug := sessionIDIndex(m.localSessions)
-		cmds = append(cmds, m.syncInstanceCmd(), readInstancesCmd(m.sessionsDir), m.queueTickCmd(),
-			scanCloseRequestsCmd(m.sessionsDir, m.instanceName, hosted, closeIDToSlug),
-			scanSendRequestsCmd(m.sessionsDir, m.instanceName, hosted),
-			scanInterruptRequestsCmd(m.sessionsDir, m.instanceName),
-			scanAnswerRequestsCmd(m.sessionsDir, m.instanceName, hosted),
-			scanPeekRequestsCmd(m.sessionsDir, m.instanceName, hosted),
-			m.sessionsRefreshCmd())
-		// Re-evaluate any close-request already waiting on quiescence.
-		var advCmds []tea.Cmd
-		m, advCmds = m.advanceCloseLadders()
-		cmds = append(cmds, advCmds...)
-		// Re-observe any gate-passing send whose outcome is deferred until it can
-		// confirm the composer submitted.
-		var sendCmds []tea.Cmd
-		m, sendCmds = m.advanceSendVerifications()
-		cmds = append(cmds, sendCmds...)
-		// Confirm modal answers only after a later screen no longer contains the
-		// request's expectation. Answer keys are never replayed.
-		var answerCmds []tea.Cmd
-		m, answerCmds = m.advanceAnswerVerifications()
-		cmds = append(cmds, answerCmds...)
-		// Observe modal-entry edges on the same heartbeat and Bubble Tea goroutine
-		// as the other screen consumers. The returned append commands do the disk
-		// write asynchronously through the sole journal writer.
-		var modalCmds []tea.Cmd
-		m, modalCmds = m.advanceModalObservations()
-		cmds = append(cmds, modalCmds...)
+	// Session substrate: re-read the registry, queue and journal for the
+	// sessions view, the work-list badges and any pending launch, and bring
+	// the store host back when only dead registry rows list sessions. A
+	// window claims, scans and writes nothing here.
+	if m.sessionsDir != "" {
+		cmds = append(cmds, m.sessionsRefreshCmd())
+		var revival tea.Cmd
+		m, revival = m.startHostRevival()
+		cmds = append(cmds, revival)
 	}
 	return m, tea.Batch(cmds...)
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # test_work_source_checkout.sh — Regression tests for declaring a work item's
-# source checkout from a named live instance outside a hosted session.
+# source checkout outside a hosted session: from the checkout the command runs in,
+# or from a named live instance.
 
 set -euo pipefail
 
@@ -26,8 +27,7 @@ cp "$REPO_DIR/adapters/settings.template.json" "$TEST_HOME/.lore/config/settings
 
 # Every lore call runs in its own session runtime with a host binary that refuses
 # the store-host arguments, recorded as such, so ensure() fails at once instead of
-# starting a supervisor: a request then falls back to the live lore-tui serving
-# its checkout, as it does before 'bash install.sh' has rebuilt lore-tui.
+# starting a supervisor, as it does before 'bash install.sh' has rebuilt lore-tui.
 STUB_HOST="$TEST_HOME/bin/lore-tui-old"
 mkdir -p "$TEST_HOME/bin"
 printf '#!/bin/sh\nexit 2\n' > "$STUB_HOST"
@@ -59,6 +59,9 @@ PYEOF
 }
 session_runtime refuse "$KDIR" "$STUB_HOST"
 STORE_KEY="$(session_runtime key "$KDIR")"
+# The store is pinned, as a host started with LORE_KNOWLEDGE_DIR naming a scratch
+# store is, so a git checkout outside it belongs to it without resolution.
+session_runtime pin "$KDIR"
 
 assert_contains() {
   local label="$1" haystack="$2" needle="$3"
@@ -121,8 +124,9 @@ capture_failure() {
   set -e
 }
 
-mkdir -p "$KDIR/checkouts/live"
-LIVE_CHECKOUT="$(cd "$KDIR/checkouts/live" && pwd -P)"
+mkdir -p "$CHECKOUTS/live"
+git -C "$CHECKOUTS/live" init -q
+LIVE_CHECKOUT="$(cd "$CHECKOUTS/live" && pwd -P)"
 write_instance live-seat "$LIVE_CHECKOUT"
 
 # --- Happy path: no hosted-session environment is required ------------------
@@ -134,14 +138,14 @@ assert_contains "happy: command reports the source_checkout write" \
 assert_eq "happy: stores the named live instance's physical checkout" \
   "$(meta_checkout happy)" "$LIVE_CHECKOUT"
 
-REQUEST_OUTPUT=$(run_lore session request --type worker --slug happy--w9 \
-  --prefer-dir "$LIVE_CHECKOUT" --context probe --initiator agent 2>&1)
-assert_contains "happy: declared item permits the worker request" "$REQUEST_OUTPUT" \
-  "[session] Enqueued worker request"
-assert_contains "happy: a store host that cannot start leaves the row to the live lore-tui" "$REQUEST_OUTPUT" \
-  "store's session host is unavailable"
-assert_eq "happy: the fallback row carries no host key" \
-  "$(python3 -c 'import json,sys,glob; print([json.load(open(p)).get("host_key", "") for p in glob.glob(sys.argv[1] + "/*.json")])' "$KDIR/_sessions/requests/pending")" "['']"
+capture_failure session request --type worker --slug happy--w9 \
+  --prefer-dir "$LIVE_CHECKOUT" --context probe --initiator agent
+assert_eq "happy: a store host that cannot start refuses the request" "$CAPTURED_STATUS" "1"
+assert_contains "happy: the refusal leads with its repair" "$CAPTURED_OUTPUT" \
+  "Error: store host did not start; fix the error below, retry"
+assert_contains "happy: the refusal names the rebuild" "$CAPTURED_OUTPUT" "lore rebuild"
+assert_eq "happy: a live lore-tui no longer takes the row instead" \
+  "$(find "$KDIR/_sessions/requests/pending" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')" "0"
 
 # --- Explicit instance takes precedence over session provenance -------------
 
@@ -210,17 +214,57 @@ assert_contains "help: usage names --from-instance" "$HELP_OUTPUT" \
   "Usage: lore work source-checkout <slug> [--from-instance <name>] [--json]"
 assert_contains "help: explains the live registry source" "$HELP_OUTPUT" \
   "with --from-instance it is read from that live"
-
-write_work_item no-provenance
-capture_failure work source-checkout no-provenance
-assert_contains "no provenance: existing refusal names the new repair" "$CAPTURED_OUTPUT" \
-  "pass '--from-instance <name>'"
+assert_contains "help: explains the checkout the command runs in" "$HELP_OUTPUT" \
+  "otherwise it is the git checkout this command runs"
 
 write_work_item request-repair
 capture_failure session request --type worker --slug request-repair--w9 \
   --prefer-dir "$LIVE_CHECKOUT" --context probe --initiator agent
-assert_contains "request refusal: seed command names --from-instance" "$CAPTURED_OUTPUT" \
-  "lore work source-checkout request-repair --from-instance <live-instance-name>"
+assert_contains "request refusal: leads with the seed command" "$CAPTURED_OUTPUT" \
+  "Error: no checkout declared: run lore work source-checkout request-repair"
+assert_contains "request refusal: says where to run it" "$CAPTURED_OUTPUT" \
+  "From inside the checkout this work belongs in, run:"
+
+# --- Outside a session: the checkout the command runs in ---------------------
+# No live host serves anything in this store yet: membership is the whole test.
+
+write_work_item cwd-form
+CWD_OUTPUT=$(cd "$LIVE_CHECKOUT" && run_lore work source-checkout cwd-form 2>&1)
+assert_contains "cwd form: declares the checkout it runs in" "$CWD_OUTPUT" "source_checkout=$LIVE_CHECKOUT"
+assert_eq "cwd form: stores that checkout" "$(meta_checkout cwd-form)" "$LIVE_CHECKOUT"
+
+mkdir -p "$LIVE_CHECKOUT/sub/dir"
+write_work_item cwd-subdir
+SUBDIR_OUTPUT=$(cd "$LIVE_CHECKOUT/sub/dir" && run_lore work source-checkout cwd-subdir 2>&1)
+assert_eq "cwd form from a subdirectory: declares the git top level" "$(meta_checkout cwd-subdir)" "$LIVE_CHECKOUT"
+
+write_work_item cwd-partial
+PARTIAL_OUTPUT=$(cd "$LIVE_CHECKOUT" && LORE_SESSION_INSTANCE=some-seat HOME="$TEST_HOME" LORE_KNOWLEDGE_DIR="$KDIR" \
+  "$LORE" work source-checkout cwd-partial 2>&1)
+assert_eq "cwd form when the session variables are not all set" "$(meta_checkout cwd-partial)" "$LIVE_CHECKOUT"
+
+write_work_item no-provenance
+set +e
+NO_CHECKOUT_OUTPUT=$(cd "$CHECKOUTS" && run_lore work source-checkout no-provenance 2>&1)
+NO_CHECKOUT_STATUS=$?
+set -e
+assert_eq "cwd form outside any checkout: exits non-zero" "$NO_CHECKOUT_STATUS" "1"
+assert_contains "cwd form outside any checkout: says why" "$NO_CHECKOUT_OUTPUT" "is not inside a git checkout"
+assert_contains "cwd form outside any checkout: names the other repairs" "$NO_CHECKOUT_OUTPUT" "'--from-instance <name>'"
+assert_eq "cwd form outside any checkout: does not mutate the item" "$(meta_checkout no-provenance)" ""
+
+CWD_INSIDE="$KDIR/_coordination/worktrees/cwd-inner"
+mkdir -p "$CWD_INSIDE"
+git -C "$CWD_INSIDE" init -q
+write_work_item cwd-inside
+set +e
+CWD_INSIDE_OUTPUT=$(cd "$CWD_INSIDE" && run_lore work source-checkout cwd-inside 2>&1)
+CWD_INSIDE_STATUS=$?
+set -e
+assert_eq "cwd form inside the store: exits non-zero" "$CWD_INSIDE_STATUS" "1"
+assert_contains "cwd form inside the store: names membership" "$CWD_INSIDE_OUTPUT" "is not a checkout of this store"
+assert_contains "cwd form inside the store: says why" "$CWD_INSIDE_OUTPUT" "lies inside the knowledge store"
+assert_eq "cwd form inside the store: does not mutate the item" "$(meta_checkout cwd-inside)" ""
 
 # --- The store's session host serves every checkout of the store -------------
 
@@ -228,7 +272,6 @@ STORE_CHECKOUT="$CHECKOUTS/store-checkout"
 mkdir -p "$STORE_CHECKOUT"
 git -C "$STORE_CHECKOUT" init -q
 STORE_CHECKOUT="$(cd "$STORE_CHECKOUT" && pwd -P)"
-session_runtime pin "$KDIR"
 write_store_host() {
   printf '%s\n' "{\"name\":\"store-host\",\"pid\":$$,\"role\":\"session-host\",\"scope\":\"store\",\"host_key\":\"$STORE_KEY\",\"runtime\":\"$RUNTIME_NAME\",\"sessions\":$1}" \
     > "$KDIR/_sessions/instances/store-host.json"

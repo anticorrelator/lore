@@ -6,15 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
-	"syscall"
-	"time"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 )
@@ -27,249 +24,6 @@ const tmuxBinary = "tmux"
 // recovery is an accepted loss (reattach redraws the visible screen only), so this
 // bounds pane memory rather than preserving history.
 const tmuxHistoryLimit = 5000
-
-const tmuxMirrorStateFormat = "#{cursor_x} #{cursor_y} #{pane_width} #{pane_height} #{alternate_on} #{history_size}"
-
-// TmuxMirrorPaneState is sampled immediately before a mirror's captured rows.
-type TmuxMirrorPaneState struct {
-	CursorX, CursorY int
-	Width, Height    int
-	Alternate        bool
-	HistorySize      int
-}
-
-// tmuxMirrorTransport owns only one generation's local FIFO reader. Whether
-// the corresponding tmux pipe may be detached is tracked by SessionPanelModel.
-type tmuxMirrorTransport struct {
-	dir    string
-	path   string
-	reader *os.File
-	output <-chan []byte
-	done   chan struct{}
-	once   sync.Once
-}
-
-func tmuxMirrorOpenArgs(name, fifo string) []string {
-	return []string{
-		"-L", config.TmuxServer(),
-		"display-message", "-p", "-t", name, tmuxMirrorStateFormat, ";",
-		"capture-pane", "-p", "-e", "-S", "-", "-t", name, ";",
-		"pipe-pane", "-O", "-t", name, "cat > " + fifo,
-	}
-}
-
-func tmuxMirrorGeometryArgs(name string) []string {
-	return []string{"-L", config.TmuxServer(), "display-message", "-p", "-t", name, "#{pane_width} #{pane_height}"}
-}
-
-func tmuxMirrorLiteralArgs(name, text string) []string {
-	return []string{"-L", config.TmuxServer(), "send-keys", "-t", name, "-l", text}
-}
-
-func tmuxMirrorKeyArgs(name, key string) []string {
-	return []string{"-L", config.TmuxServer(), "send-keys", "-t", name, key}
-}
-
-func tmuxMirrorDetachArgs(name string) []string {
-	return []string{"-L", config.TmuxServer(), "pipe-pane", "-t", name}
-}
-
-func parseTmuxMirrorOpenOutput(out []byte) (TmuxMirrorPaneState, []string, error) {
-	lineEnd := bytes.IndexByte(out, '\n')
-	if lineEnd < 0 {
-		return TmuxMirrorPaneState{}, nil, fmt.Errorf("tmux mirror state: missing state line")
-	}
-	var state TmuxMirrorPaneState
-	var alternate int
-	stateLine := strings.TrimSuffix(string(out[:lineEnd]), "\r")
-	if n, err := fmt.Sscanf(stateLine, "%d %d %d %d %d %d",
-		&state.CursorX, &state.CursorY, &state.Width, &state.Height, &alternate, &state.HistorySize); err != nil || n != 6 {
-		if err == nil {
-			err = fmt.Errorf("read %d fields", n)
-		}
-		return TmuxMirrorPaneState{}, nil, fmt.Errorf("parse tmux mirror state %q: %w", stateLine, err)
-	}
-	if state.Width < 1 || state.Height < 1 || state.CursorX < 0 || state.CursorY < 0 || (alternate != 0 && alternate != 1) {
-		return TmuxMirrorPaneState{}, nil, fmt.Errorf("invalid tmux mirror state %q", stateLine)
-	}
-	state.Alternate = alternate == 1
-
-	capture := strings.ReplaceAll(string(out[lineEnd+1:]), "\r\n", "\n")
-	rows := strings.Split(capture, "\n")
-	if len(rows) > 0 && rows[len(rows)-1] == "" {
-		rows = rows[:len(rows)-1]
-	}
-	return state, rows, nil
-}
-
-func openTmuxMirror(name string) (*tmuxMirrorTransport, TmuxMirrorPaneState, []string, error) {
-	if name == "" {
-		return nil, TmuxMirrorPaneState{}, nil, fmt.Errorf("open tmux mirror: empty session name")
-	}
-	dir, err := os.MkdirTemp("/tmp", "lore-tui-mirror-")
-	if err != nil {
-		return nil, TmuxMirrorPaneState{}, nil, fmt.Errorf("create tmux mirror directory: %w", err)
-	}
-	fifo := dir + "/stream"
-	cleanup := func() {
-		_ = os.Remove(fifo)
-		_ = os.Remove(dir)
-	}
-	if strings.Contains(fifo, "#{") {
-		cleanup()
-		return nil, TmuxMirrorPaneState{}, nil, fmt.Errorf("unsafe tmux mirror FIFO path %q", fifo)
-	}
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		cleanup()
-		return nil, TmuxMirrorPaneState{}, nil, fmt.Errorf("create tmux mirror FIFO: %w", err)
-	}
-
-	type readerResult struct {
-		file *os.File
-		err  error
-	}
-	readerReady := make(chan readerResult, 1)
-	go func() {
-		reader, openErr := os.Open(fifo)
-		readerReady <- readerResult{file: reader, err: openErr}
-	}()
-	unblockReader := func() readerResult {
-		for {
-			select {
-			case result := <-readerReady:
-				return result
-			default:
-			}
-			writer, _ := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0)
-			if writer != nil {
-				_ = writer.Close()
-				return <-readerReady
-			}
-			time.Sleep(time.Millisecond)
-		}
-	}
-	out, err := exec.Command(tmuxBinary, tmuxMirrorOpenArgs(name, fifo)...).Output()
-	if err != nil {
-		result := unblockReader()
-		if result.file != nil {
-			_ = result.file.Close()
-		}
-		cleanup()
-		return nil, TmuxMirrorPaneState{}, nil, fmt.Errorf("tmux mirror open: %w", err)
-	}
-	var result readerResult
-	select {
-	case result = <-readerReady:
-	case <-time.After(5 * time.Second):
-		result = unblockReader()
-		if result.file != nil {
-			_ = result.file.Close()
-		}
-		cleanup()
-		return nil, TmuxMirrorPaneState{}, nil, fmt.Errorf("tmux mirror FIFO writer did not connect")
-	}
-	if result.err != nil {
-		cleanup()
-		return nil, TmuxMirrorPaneState{}, nil, fmt.Errorf("open tmux mirror FIFO: %w", result.err)
-	}
-	reader := result.file
-	state, rows, err := parseTmuxMirrorOpenOutput(out)
-	if err != nil {
-		detachErr := detachTmuxMirror(name)
-		_ = reader.Close()
-		cleanup()
-		if detachErr != nil {
-			return nil, TmuxMirrorPaneState{}, nil, errors.Join(err, detachErr)
-		}
-		return nil, TmuxMirrorPaneState{}, nil, err
-	}
-	done := make(chan struct{})
-	transport := &tmuxMirrorTransport{dir: dir, path: fifo, reader: reader, done: done}
-	transport.output = tmuxMirrorReader(reader, done)
-	return transport, state, rows, nil
-}
-
-func tmuxMirrorReader(reader io.Reader, done <-chan struct{}) <-chan []byte {
-	output := make(chan []byte, 64)
-	go func() {
-		defer close(output)
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := reader.Read(buf)
-			if n > 0 {
-				chunk := append([]byte(nil), buf[:n]...)
-				select {
-				case output <- chunk:
-				case <-done:
-					return
-				}
-			}
-			if err != nil || n == 0 {
-				return
-			}
-		}
-	}()
-	return output
-}
-
-func (t *tmuxMirrorTransport) closeLocal() {
-	if t == nil {
-		return
-	}
-	t.once.Do(func() {
-		close(t.done)
-		if t.reader != nil {
-			_ = t.reader.Close()
-		}
-		_ = os.Remove(t.path)
-		_ = os.Remove(t.dir)
-	})
-}
-
-func tmuxMirrorGeometry(name string) (int, int, error) {
-	out, err := exec.Command(tmuxBinary, tmuxMirrorGeometryArgs(name)...).Output()
-	if err != nil {
-		return 0, 0, fmt.Errorf("tmux mirror geometry: %w", err)
-	}
-	var width, height int
-	if n, scanErr := fmt.Sscanf(strings.TrimSpace(string(out)), "%d %d", &width, &height); scanErr != nil || n != 2 || width < 1 || height < 1 {
-		if scanErr == nil {
-			scanErr = fmt.Errorf("invalid dimensions")
-		}
-		return 0, 0, fmt.Errorf("parse tmux mirror geometry %q: %w", strings.TrimSpace(string(out)), scanErr)
-	}
-	return width, height, nil
-}
-
-func sendTmuxMirrorLiteral(name, text string) error {
-	if text == "" {
-		return nil
-	}
-	if err := exec.Command(tmuxBinary, tmuxMirrorLiteralArgs(name, text)...).Run(); err != nil {
-		return fmt.Errorf("tmux mirror send text: %w", err)
-	}
-	return nil
-}
-
-func sendTmuxMirrorKey(name, key string) error {
-	if key == "" {
-		return nil
-	}
-	if err := exec.Command(tmuxBinary, tmuxMirrorKeyArgs(name, key)...).Run(); err != nil {
-		return fmt.Errorf("tmux mirror send key: %w", err)
-	}
-	return nil
-}
-
-func detachTmuxMirror(name string) error {
-	if name == "" {
-		return nil
-	}
-	if err := exec.Command(tmuxBinary, tmuxMirrorDetachArgs(name)...).Run(); err != nil {
-		return fmt.Errorf("tmux mirror detach: %w", err)
-	}
-	return nil
-}
 
 // TmuxAvailable reports whether tmux hosting is active for this process and a
 // one-line detail for the startup notice. It is the D3 host-capability gate: an
@@ -334,8 +88,12 @@ func TmuxSessionNameSlugless(instance string) string {
 //   - status off: no status line synthesising a row that breaks bottom-region
 //     signature anchors.
 //   - remain-on-exit off: a dead pane must not linger and strand done-detection.
-//   - window-size latest: the sole attached client dictates dimensions so pty.Setsize
-//     resize forwarding keeps working.
+//   - window-size latest: for a window with no size of its own, the active client
+//     dictates dimensions so pty.Setsize resize forwarding keeps working. Every
+//     window lore creates or re-attaches gets its own manual size
+//     (pinTmuxWindowSize), which this global option does not override; it still
+//     governs windows created before that pin, and older lore-tui builds keep
+//     re-applying it.
 //
 // Set globally (`set -g`) before new-session so history-limit and default-terminal
 // are in force when the pane spawns; re-applying on an already-running server is an
@@ -369,40 +127,34 @@ func tmuxRGBFeaturePin() []string {
 // and the pane's working directory.
 var tmuxOwnedPaneVars = []string{"TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TMUX", "TMUX_PANE", "SHELL", "PWD"}
 
-// tmuxPaneEnvScript starts the harness from an empty environment: the values tmux
-// gave this pane for its own variables, then the launcher's KEY=VAL list and the
-// harness command passed as arguments. tmux builds a pane's environment from the
-// server's global environment, which is whatever the client that started the
-// shared server had, and -e can add to that but never remove from it. Starting
-// from nothing is the only way the pane gets exactly the launcher's environment.
-// Each step execs, so the pane pid tmux reports is the harness process.
-var tmuxPaneEnvScript = func() string {
-	script := "exec /usr/bin/env -i"
-	for _, name := range tmuxOwnedPaneVars {
-		script += " ${" + name + "+\"" + name + "=$" + name + "\"}"
-	}
-	return script + ` "$@"`
-}()
-
 // tmuxPaneEnv is the complete environment a new pane's harness runs with, as
 // KEY=VAL entries: the process environment plus the session extras
-// (LORE_FRAMEWORK, LORE_SESSION_*), with later entries winning. Variables tmux owns
-// in the pane are left out so tmux's values stand, as they always have, and
-// COLORTERM is replaced with the capability this embedder actually provides.
+// (LORE_FRAMEWORK, LORE_SESSION_*), with later entries winning and each key
+// listed once. Variables tmux owns in the pane are left out so tmux's values
+// stand, as they always have, and COLORTERM is replaced with the capability this
+// embedder actually provides.
 func tmuxPaneEnv(extras []string) []string {
-	var out []string
+	var keys []string
+	values := map[string]string{}
 	add := func(kv string) {
 		key, _, ok := strings.Cut(kv, "=")
 		if !ok || key == "" || key == "COLORTERM" || slices.Contains(tmuxOwnedPaneVars, key) {
 			return
 		}
-		out = append(out, kv)
+		if _, seen := values[key]; !seen {
+			keys = append(keys, key)
+		}
+		values[key] = kv
 	}
 	for _, kv := range os.Environ() {
 		add(kv)
 	}
 	for _, kv := range extras {
 		add(kv)
+	}
+	out := make([]string, 0, len(keys)+1)
+	for _, key := range keys {
+		out = append(out, values[key])
 	}
 	return append(out, "COLORTERM=truecolor")
 }
@@ -411,36 +163,93 @@ func tmuxPaneEnv(extras []string) []string {
 // the harness and returns its pane PID (the harness process, captured via
 // new-session's -P -F so the close ladder can later signal it directly rather than
 // the attach client). env is the per-session extra environment; harnessBin/args is
-// the exact command the direct-PTY path would have run.
-func createTmuxSession(name, worktreeDir string, cols, rows int, env []string, harnessBin string, harnessArgs []string) (int, error) {
-	if strings.Contains(harnessBin, "=") {
-		// env(1) would read the path as one more assignment and run the next argument instead.
-		return 0, fmt.Errorf("tmux new-session: harness path %q contains '='", harnessBin)
+// the exact command the direct-PTY path would have run. Both travel in a launch
+// spec written to specDir, which the pane reads and removes (PaneExec); the
+// session is returned once the pane has done so. The new window is pinned at
+// cols x rows (pinTmuxWindowSize) before it is returned; a session that was
+// created but could not be pinned, identified or started is killed, its spec
+// removed, and an error returned.
+func createTmuxSession(name, worktreeDir string, cols, rows int, env []string, harnessBin string, harnessArgs []string, specDir string) (int, error) {
+	exe, err := paneExecutable()
+	if err != nil {
+		return 0, fmt.Errorf("tmux new-session: locate this binary for the pane: %w", err)
 	}
-	args := tmuxSessionArgs(name, worktreeDir, cols, rows, env, harnessBin, harnessArgs)
+	specPath, err := writePaneLaunchSpec(specDir, newPaneLaunchSpec(env, harnessBin, harnessArgs))
+	if err != nil {
+		return 0, fmt.Errorf("tmux new-session: %w", err)
+	}
+	fail := func(err error) (int, error) {
+		killTmuxSession(name)
+		_ = os.Remove(specPath)
+		return 0, err
+	}
+	args := tmuxSessionArgs(name, worktreeDir, cols, rows, []string{exe, PaneExecFlag, specPath})
 
 	cmd := exec.Command(tmuxBinary, args...)
 	out, err := cmd.Output()
 	if err != nil {
+		// No kill here: a failed new-session made nothing, and the name may
+		// belong to another live session ("duplicate session").
+		_ = os.Remove(specPath)
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && len(bytes.TrimSpace(exit.Stderr)) > 0 {
+			return 0, fmt.Errorf("tmux new-session: %w: %s", err, bytes.TrimSpace(exit.Stderr))
+		}
 		return 0, fmt.Errorf("tmux new-session: %w", err)
 	}
 	pid, perr := strconv.Atoi(strings.TrimSpace(string(out)))
 	if perr != nil {
-		return 0, fmt.Errorf("parse pane pid %q: %w", strings.TrimSpace(string(out)), perr)
+		return fail(fmt.Errorf("parse pane pid %q: %w", strings.TrimSpace(string(out)), perr))
+	}
+	if !waitPaneSpecConsumed(specPath, paneSpecConsumedTimeout) {
+		return fail(fmt.Errorf("tmux new-session: the pane did not read its launch spec %s within %s", specPath, paneSpecConsumedTimeout))
+	}
+	// Its own invocation, not one more command in the new-session chain: tmux
+	// splits a command line at every argument that ends in ";".
+	if err := pinTmuxWindowSize(name, cols, rows); err != nil {
+		return fail(err)
 	}
 	return pid, nil
 }
 
-func tmuxSessionArgs(name, worktreeDir string, cols, rows int, env []string, harnessBin string, harnessArgs []string) []string {
+// pinTmuxWindowSize resizes the session's window to cols x rows with
+// resize-window, which also sets that window's own window-size option to
+// manual. From then on no attach client changes the window's size, whatever its
+// own size, flags or activity, and neither does a later `set -g window-size
+// latest` from another lore-tui, so the harness keeps one size however many
+// viewers attach. The global window-size latest pin stays for windows created
+// before this pin existed. The size is the caller's: the session's creator and
+// whoever re-attaches it pass the size their own client and screen reader use.
+func pinTmuxWindowSize(name string, cols, rows int) error {
+	if cols < 1 || rows < 1 {
+		return fmt.Errorf("tmux resize-window %s: invalid size %dx%d", name, cols, rows)
+	}
+	out, err := exec.Command(tmuxBinary, tmuxWindowPinArgs(name, cols, rows)...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("tmux resize-window %s to %dx%d: %w: %s", name, cols, rows, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// tmuxWindowPinArgs targets the session's current window by exact session name
+// ("=name:"), so a pin never lands on another session whose name the target
+// merely prefixes.
+func tmuxWindowPinArgs(name string, cols, rows int) []string {
+	return []string{"-L", config.TmuxServer(), "resize-window", "-t", "=" + name + ":",
+		"-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows)}
+}
+
+// tmuxSessionArgs builds the new-session command that pins the server's options
+// and starts paneCommand as the new pane's first process. paneCommand is the
+// short PaneExecFlag form, so the command's size does not grow with the
+// harness argv or environment.
+func tmuxSessionArgs(name, worktreeDir string, cols, rows int, paneCommand []string) []string {
 	args := []string{"-L", config.TmuxServer(), "-f", "/dev/null"}
 	args = append(args, tmuxOptionPins()...)
 	args = append(args, tmuxRGBFeaturePin()...)
 	args = append(args, "new-session", "-d", "-s", name, "-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows), "-c", worktreeDir)
-	args = append(args, "-P", "-F", "#{pane_pid}", "--", "/bin/sh", "-c", tmuxPaneEnvScript, "lore-pane")
-	args = append(args, tmuxPaneEnv(env)...)
-	args = append(args, harnessBin)
-	args = append(args, harnessArgs...)
-	return args
+	args = append(args, "-P", "-F", "#{pane_pid}", "--")
+	return append(args, paneCommand...)
 }
 
 // tmuxAttachCommand builds the `tmux attach-session` client that runs under the
@@ -455,10 +264,12 @@ func tmuxAttachCommand(name string) *exec.Cmd {
 }
 
 // killTmuxSession tears down a tmux session on the dedicated server. Best-effort:
-// used to reclaim a just-created detached session whose attach client failed to
-// start, so it is not left orphaned with no client and no registry row.
+// used to reclaim a just-created detached session that could not be pinned or
+// whose attach client failed to start, so it is not left orphaned with no client
+// and no registry row. The exact-name target matters when the session has
+// already died: a plain target would then match a longer live name by prefix.
 func killTmuxSession(name string) {
-	_ = exec.Command(tmuxBinary, "-L", config.TmuxServer(), "kill-session", "-t", name).Run()
+	_ = exec.Command(tmuxBinary, "-L", config.TmuxServer(), "kill-session", "-t", "="+name).Run()
 }
 
 // TmuxHasSession reports whether the named tmux session is still alive on the
@@ -520,8 +331,16 @@ func captureTmuxPaneHistory(name string) ([]string, error) {
 	if name == "" {
 		return nil, fmt.Errorf("capture tmux history: empty session name")
 	}
-	out, err := exec.Command(tmuxBinary, "-L", config.TmuxServer(),
-		"capture-pane", "-p", "-e", "-S", "-", "-t", name).Output()
+	return captureTmuxPaneHistoryOn(nil, name)
+}
+
+// captureTmuxPaneHistoryOn is captureTmuxPaneHistory against a target under the
+// given environment; a nil env is this process's own.
+func captureTmuxPaneHistoryOn(env []string, target string) ([]string, error) {
+	cmd := exec.Command(tmuxBinary, "-L", config.TmuxServer(),
+		"capture-pane", "-p", "-e", "-S", "-", "-t", target)
+	cmd.Env = env
+	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("tmux capture-pane: %w", err)
 	}
@@ -531,4 +350,78 @@ func captureTmuxPaneHistory(name string) ([]string, error) {
 		lines = lines[:len(lines)-1]
 	}
 	return lines, nil
+}
+
+// viewerTerm is the terminal a viewer's tmux client is told it runs in: the
+// panel's emulator understands xterm-256color, and tmux refuses to attach a
+// client whose TERM it has no usable terminfo for.
+const viewerTerm = "xterm-256color"
+
+// viewerTmuxEnv is the environment of every tmux command a viewer runs. A viewer
+// is a separate process from the store host that owns the session, so it finds
+// the host's tmux server under the TMUX_TMPDIR the login's supervisor recorded,
+// not its own (config.SupervisorTmuxTmpdir); with no record it keeps its own.
+func viewerTmuxEnv() []string {
+	dir, recorded := config.SupervisorTmuxTmpdir()
+	var env []string
+	for _, kv := range os.Environ() {
+		key, _, _ := strings.Cut(kv, "=")
+		if key == "TERM" || (recorded && key == "TMUX_TMPDIR") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env, "TERM="+viewerTerm)
+	if recorded && dir != "" {
+		env = append(env, "TMUX_TMPDIR="+dir)
+	}
+	return env
+}
+
+// ViewerSessionAlive reports whether the named session is live on the store
+// hosts' tmux server, found the way a viewer finds it.
+func ViewerSessionAlive(name string) bool {
+	return tmuxSessionAliveOn(viewerTmuxEnv(), name)
+}
+
+func tmuxSessionAliveOn(env []string, name string) bool {
+	if name == "" {
+		return false
+	}
+	cmd := exec.Command(tmuxBinary, "-L", config.TmuxServer(), "has-session", "-t", "="+name)
+	cmd.Env = env
+	return cmd.Run() == nil
+}
+
+var tmuxVersionNumber = regexp.MustCompile(`(\d+)\.(\d+)`)
+
+// tmuxHasClientFlags reports whether a `tmux -V` line names a tmux whose
+// attach-session takes -f client flags, which arrived in 3.2. A line with no
+// version number, such as a build from master, is taken to be current.
+func tmuxHasClientFlags(version string) bool {
+	m := tmuxVersionNumber.FindStringSubmatch(version)
+	if m == nil {
+		return true
+	}
+	major, _ := strconv.Atoi(m[1])
+	minor, _ := strconv.Atoi(m[2])
+	return major > 3 || (major == 3 && minor >= 2)
+}
+
+func tmuxVersionOn(env []string) string {
+	cmd := exec.Command(tmuxBinary, "-V")
+	cmd.Env = env
+	out, _ := cmd.Output()
+	return strings.TrimSpace(string(out))
+}
+
+// viewerAttachArgs is a viewer's read-write client. ignore-size keeps the client
+// out of the window's size for windows that predate the per-window pin; on a
+// pinned window no client affects the size either way.
+func viewerAttachArgs(name string, ignoreSize bool) []string {
+	args := []string{"-L", config.TmuxServer(), "attach-session"}
+	if ignoreSize {
+		args = append(args, "-f", "ignore-size")
+	}
+	return append(args, "-t", "="+name)
 }

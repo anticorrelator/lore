@@ -21,8 +21,8 @@ const sendVerifyGraceDefault = 12 * time.Second
 
 // --- messages ---
 
-// sendRequestScanMsg carries the send-requests addressed to this instance for a
-// slug it hosts, discovered on the poll tick.
+// sendRequestScanMsg carries the send-requests for a slug this host runs,
+// discovered on the poll tick.
 type sendRequestScanMsg struct {
 	matched     []session.SendRequest
 	diagnostics []session.Diagnostic
@@ -54,37 +54,20 @@ type pendingSendState struct {
 
 // --- Cmds ---
 
-// scanSendRequestsCmd reads send-requests/ and returns the rows addressed to
-// this instance (target_instance == myName) for a slug it currently hosts —
-// both filters must hold, mirroring scanCloseRequestsCmd. hosted is snapshotted
-// at Cmd-build time.
-func scanSendRequestsCmd(sessionsDir, myName string, hosted map[string]bool, retarget ...bool) tea.Cmd {
+// scanSendRequestsCmd reads send-requests/ and returns the rows for a slug this
+// host currently runs, whatever instance a row names: the store host runs every
+// session of its store. hosted is snapshotted at Cmd-build time.
+func scanSendRequestsCmd(sessionsDir string, hosted map[string]bool) tea.Cmd {
 	return func() tea.Msg {
 		var matched []session.SendRequest
 		rows, diagnostics := session.ScanSendRequestsWithDiagnostics(sessionsDir)
 		for _, sr := range rows {
-			if sr.RequestID == "" || (sr.TargetInstance != myName && !hostRetarget(retarget)) {
-				continue
-			}
-			if !hosted[sr.Slug] {
+			if sr.RequestID == "" || !hosted[sr.Slug] {
 				continue
 			}
 			matched = append(matched, sr)
 		}
 		return sendRequestScanMsg{matched: matched, diagnostics: diagnostics}
-	}
-}
-
-// consumeSendCmd finalizes one send-request: it deletes the durable request file
-// then appends the outcome event (sent | send_refused). The delete lands first
-// so the journal row can never precede the consume it records — the durable-
-// before-journal ordering the substrate integration relies on.
-func consumeSendCmd(sessionsDir, script, kdir, requestID string, ev session.Event) tea.Cmd {
-	return func() tea.Msg {
-		if err := session.DeleteSendRequest(sessionsDir, requestID); err != nil {
-			return sendConsumedMsg{requestID: requestID, err: err}
-		}
-		return sendConsumedMsg{requestID: requestID, err: session.AppendEvent(script, kdir, ev)}
 	}
 }
 
@@ -144,11 +127,7 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 			if sr.Action == "interrupt" {
 				ev.Reason = "identity-unavailable"
 			}
-			if m.hostKey != "" {
-				cmds = append(cmds, m.hostDeliveryTerminalCmd("send", ev))
-			} else {
-				cmds = append(cmds, consumeSendCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, sr.RequestID, ev))
-			}
+			cmds = append(cmds, m.hostDeliveryTerminalCmd("send", ev))
 			continue
 		}
 		framework := m.sessionHarness(sr.Slug)
@@ -184,10 +163,7 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 					if errors.Is(err, work.ErrUnsafePayload) {
 						reason = sendReasonUnsafe
 					} else {
-						reason = sendReasonInternal
-						if m.hostKey != "" {
-							reason = "delivery-uncertain"
-						}
+						reason = "delivery-uncertain"
 						m.flashErr = compactErr("session send", err)
 					}
 				} else {
@@ -220,12 +196,7 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 		if reason == sendReasonNoContract {
 			m = m.routeRuntimeNotices([]runtimeNotice{noContractNotice(framework)})
 		}
-		ev := m.sendOutcomeEvent(sr, false, reason)
-		if m.hostKey != "" {
-			cmds = append(cmds, m.hostDeliveryTerminalCmd("send", ev))
-		} else {
-			cmds = append(cmds, consumeSendCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, sr.RequestID, ev))
-		}
+		cmds = append(cmds, m.hostDeliveryTerminalCmd("send", m.sendOutcomeEvent(sr, false, reason)))
 	}
 	if len(cmds) == 0 {
 		return m, nil
@@ -328,22 +299,18 @@ func (m model) advanceSendVerifications() (model, []tea.Cmd) {
 	return m, cmds
 }
 
-// sendVerifyTerminalCmd journals a deferred send's single outcome row: `sent`
-// (observed-submitted) or send_refused reason=unsubmitted. The request file is
-// already deleted, so this appends only.
+// sendVerifyTerminalCmd delivers a deferred send's single outcome row: `sent`
+// (observed-submitted), send_refused reason=unsubmitted, or reason
+// delivery-uncertain when the submission could not be observed.
 func (m model) sendVerifyTerminalCmd(ps pendingSendState, submitted bool) tea.Cmd {
 	reason := ""
 	if !submitted {
 		reason = sendReasonUnsubmitted
-		if m.hostKey != "" && ps.uncertain {
+		if ps.uncertain {
 			reason = "delivery-uncertain"
 		}
 	}
-	ev := m.sendOutcomeEvent(session.SendRequest{Slug: ps.slug, RequestID: ps.requestID}, submitted, reason)
-	if m.hostKey != "" {
-		return m.hostDeliveryTerminalCmd("send", ev)
-	}
-	return journalCmd(m.eventScript, m.config.KnowledgeDir, ev)
+	return m.hostDeliveryTerminalCmd("send", m.sendOutcomeEvent(session.SendRequest{Slug: ps.slug, RequestID: ps.requestID}, submitted, reason))
 }
 
 // sendOutcomeEvent builds the sent / send_refused journal row for one consumed

@@ -101,78 +101,83 @@ func TestClaimIsAtMostOnce(t *testing.T) {
 	}
 }
 
-func TestQueueTickTargeting(t *testing.T) {
-	dir := t.TempDir()
-	openReq := Request{RequestID: "open1", Type: "spec", Slug: strp("a"), Initiator: "agent"}
-	targetedMine := Request{RequestID: "mine1", Type: "spec", Slug: strp("b"), Initiator: "agent", TargetInstance: strp("me")}
-	targetedOther := Request{RequestID: "other1", Type: "spec", Slug: strp("c"), Initiator: "agent", TargetInstance: strp("someone-else")}
+// hostQueue is one store host's view of a queue directory: the key it holds, a
+// pinned scope over its store, and a checkout of that store for rows to name.
+type hostQueue struct {
+	dir, key, checkout string
+	scope              StoreScope
+}
 
-	// An open request is claimable by this instance.
-	plantPending(t, dir, openReq)
-	res, err := QueueTick(dir, "me", "", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Claimed == nil || res.Claimed.RequestID != "open1" {
-		t.Fatalf("open request not claimed: %+v", res.Claimed)
-	}
-	_ = DeleteClaimed(dir, "open1")
-
-	// A targeted request is claimable only by its named instance.
-	plantPending(t, dir, targetedMine)
-	res, _ = QueueTick(dir, "me", "", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
-	if res.Claimed == nil || res.Claimed.RequestID != "mine1" {
-		t.Fatalf("targeted-to-me request not claimed: %+v", res.Claimed)
-	}
-	_ = DeleteClaimed(dir, "mine1")
-
-	// A request targeted at another instance stays pending here.
-	plantPending(t, dir, targetedOther)
-	res, _ = QueueTick(dir, "me", "", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
-	if res.Claimed != nil {
-		t.Fatalf("claimed a request targeted at another instance: %+v", res.Claimed)
-	}
-	if len(ScanPending(dir)) != 1 {
-		t.Fatal("targeted-other request should remain pending")
+func newHostQueue(t *testing.T) hostQueue {
+	t.Helper()
+	stageRouteScripts(t)
+	checkout := gitCheckout(t, filepath.Join(t.TempDir(), "proj"), "https://example.com/acme/proj.git")
+	return hostQueue{
+		dir:      t.TempDir(),
+		key:      "storekey0123456789abcdef",
+		checkout: config.NormalizeProjectDir(checkout),
+		scope:    StoreScope{KnowledgeDir: t.TempDir(), Pinned: true},
 	}
 }
 
-// TestQueueTickMinVintage exercises the read-side vintage filter mirroring the
-// targeting filter: a request requiring a minimum vintage is claimed by an
-// instance at-or-newer, skipped by an older or vintage-unknown instance.
+// row keys req to this host and, when it names no checkout, gives it the
+// store's checkout as its work item's declaration.
+func (q hostQueue) row(req Request) Request {
+	req.HostKey = q.key
+	if req.Checkout() == "" {
+		req.RequiredProjectDir, req.PlacementStance = strp(q.checkout), strp(StanceRequiredDir)
+	}
+	return req
+}
+
+func (q hostQueue) plant(t *testing.T, req Request) {
+	t.Helper()
+	plantPending(t, q.dir, q.row(req))
+}
+
+func (q hostQueue) tick(t *testing.T, name, vintage string, live map[string]bool, hasPlanDoc, slugLive func(string) bool, now time.Time) QueueTickResult {
+	t.Helper()
+	res, err := QueueTickForStoreHost(q.dir, name, vintage, q.key, q.scope, live, hasPlanDoc, slugLive, now, ReclaimAfter, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+// TestQueueTickMinVintage exercises the read-side vintage filter: a request
+// requiring a minimum vintage is claimed by a host at-or-newer, skipped by an
+// older or vintage-unknown host.
 func TestQueueTickMinVintage(t *testing.T) {
 	const cutoff = "2026-07-06T00:00:00Z"
 	newer := "2026-07-06T12:00:00Z"
 	older := "2026-07-05T12:00:00Z"
+	q := newHostQueue(t)
+	live := map[string]bool{"me": true}
 
-	// A new-enough instance claims a min_vintage request.
-	dir := t.TempDir()
-	plantPending(t, dir, Request{RequestID: "v1", Type: "spec", Slug: strp("a"), Initiator: "agent", MinVintage: strp(cutoff)})
-	res, err := QueueTick(dir, "me", newer, "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A new-enough host claims a min_vintage request.
+	q.plant(t, Request{RequestID: "v1", Type: "spec", Slug: strp("a"), Initiator: "agent", MinVintage: strp(cutoff)})
+	res := q.tick(t, "me", newer, live, noPlan, nil, time.Now())
 	if res.Claimed == nil || res.Claimed.RequestID != "v1" {
-		t.Fatalf("new-enough instance did not claim min_vintage request: %+v", res.Claimed)
+		t.Fatalf("new-enough host did not claim min_vintage request: %+v", res.Claimed)
 	}
 
-	// An older instance leaves the same request pending.
-	dir = t.TempDir()
-	plantPending(t, dir, Request{RequestID: "v2", Type: "spec", Slug: strp("b"), Initiator: "agent", MinVintage: strp(cutoff)})
-	res, _ = QueueTick(dir, "me", older, "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
+	// An older host leaves the same request pending.
+	q.dir = t.TempDir()
+	q.plant(t, Request{RequestID: "v2", Type: "spec", Slug: strp("b"), Initiator: "agent", MinVintage: strp(cutoff)})
+	res = q.tick(t, "me", older, live, noPlan, nil, time.Now())
 	if res.Claimed != nil {
-		t.Fatalf("older instance claimed a request it is too old for: %+v", res.Claimed)
+		t.Fatalf("older host claimed a request it is too old for: %+v", res.Claimed)
 	}
-	if len(ScanPending(dir)) != 1 {
-		t.Fatal("min_vintage-gated request should remain pending for an older instance")
+	if len(ScanPending(q.dir)) != 1 {
+		t.Fatal("min_vintage-gated request should remain pending for an older host")
 	}
 
 	// An explicit floor requires evidence even when runtime vintage is unknown.
-	dir = t.TempDir()
-	plantPending(t, dir, Request{RequestID: "v3", Type: "spec", Slug: strp("c"), Initiator: "agent", MinVintage: strp(cutoff)})
-	res, _ = QueueTick(dir, "me", "", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
+	q.dir = t.TempDir()
+	q.plant(t, Request{RequestID: "v3", Type: "spec", Slug: strp("c"), Initiator: "agent", MinVintage: strp(cutoff)})
+	res = q.tick(t, "me", "", live, noPlan, nil, time.Now())
 	if res.Claimed != nil {
-		t.Fatalf("vintage-unknown instance claimed a request with an explicit floor: %+v", res.Claimed)
+		t.Fatalf("vintage-unknown host claimed a request with an explicit floor: %+v", res.Claimed)
 	}
 }
 
@@ -198,40 +203,40 @@ func TestMinVintageRoundTrips(t *testing.T) {
 }
 
 func TestQueueTickImplementGate(t *testing.T) {
-	dir := t.TempDir()
-	plantPending(t, dir, Request{RequestID: "impl1", Type: "implement", Slug: strp("needs-plan"), Initiator: "agent"})
+	q := newHostQueue(t)
+	q.plant(t, Request{RequestID: "impl1", Type: "implement", Slug: strp("needs-plan"), Initiator: "agent"})
 
 	// Without a plan doc, an implement request is not claimed.
-	res, _ := QueueTick(dir, "me", "", "", nil, func(string) bool { return false }, nil, time.Now(), ReclaimAfter)
+	res := q.tick(t, "me", "", nil, func(string) bool { return false }, nil, time.Now())
 	if res.Claimed != nil {
 		t.Fatalf("implement claimed despite no plan doc: %+v", res.Claimed)
 	}
 	// With a plan doc, it becomes claimable.
-	res, _ = QueueTick(dir, "me", "", "", nil, func(string) bool { return true }, nil, time.Now(), ReclaimAfter)
+	res = q.tick(t, "me", "", nil, func(string) bool { return true }, nil, time.Now())
 	if res.Claimed == nil || res.Claimed.RequestID != "impl1" {
 		t.Fatalf("implement not claimed once plan doc present: %+v", res.Claimed)
 	}
 }
 
 // TestQueueTickEvictionGuard: a pending request whose slug already has a live
-// session on this instance is not claimed — claiming would silently replace the
+// session on this host is not claimed — claiming would silently replace the
 // running session. The row stays pending and becomes claimable the moment the
 // slug frees (slugLive reports false).
 func TestQueueTickEvictionGuard(t *testing.T) {
-	dir := t.TempDir()
-	plantPending(t, dir, Request{RequestID: "impl-evict", Type: "spec", Slug: strp("busy-slug"), Initiator: "agent"})
+	q := newHostQueue(t)
+	q.plant(t, Request{RequestID: "impl-evict", Type: "spec", Slug: strp("busy-slug"), Initiator: "agent"})
 
 	// The slug is live here: the claim is refused and the row stays pending.
 	live := func(slug string) bool { return slug == "busy-slug" }
-	res, _ := QueueTick(dir, "me", "", "", nil, noPlan, live, time.Now(), ReclaimAfter)
+	res := q.tick(t, "me", "", nil, noPlan, live, time.Now())
 	if res.Claimed != nil {
 		t.Fatalf("claimed a request whose slug is live — would evict the session: %+v", res.Claimed)
 	}
-	if len(ScanPending(dir)) != 1 {
+	if len(ScanPending(q.dir)) != 1 {
 		t.Fatal("eviction-guarded row should remain pending, not be consumed")
 	}
 	// Once the slug frees, the same row is claimable.
-	res, _ = QueueTick(dir, "me", "", "", nil, noPlan, func(string) bool { return false }, time.Now(), ReclaimAfter)
+	res = q.tick(t, "me", "", nil, noPlan, func(string) bool { return false }, time.Now())
 	if res.Claimed == nil || res.Claimed.RequestID != "impl-evict" {
 		t.Fatalf("row not claimed once the slug freed: %+v", res.Claimed)
 	}
@@ -244,72 +249,63 @@ func TestQueueTickEvictionGuard(t *testing.T) {
 // from the derived slug being distinct — this pins that a base session going live
 // never blocks its workers.
 func TestQueueTickWorkerGates(t *testing.T) {
-	dir := t.TempDir()
-	plantPending(t, dir, Request{RequestID: "w1", Type: "worker", Slug: strp("impl-foo--w1"), Initiator: "agent"})
+	q := newHostQueue(t)
+	q.plant(t, Request{RequestID: "w1", Type: "worker", Slug: strp("impl-foo--w1"), Initiator: "agent"})
 
 	// Base work item impl-foo is live; noPlan denies every plan-doc query. The
 	// worker is still claimed: it is not implement (so not plan-gated) and its
 	// derived slug is distinct from the live base slug (so not eviction-guarded).
 	baseLive := func(slug string) bool { return slug == "impl-foo" }
-	res, err := QueueTick(dir, "me", "", "", nil, noPlan, baseLive, time.Now(), ReclaimAfter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := q.tick(t, "me", "", nil, noPlan, baseLive, time.Now())
 	if res.Claimed == nil || res.Claimed.RequestID != "w1" {
 		t.Fatalf("worker not claimed while base slug live / no plan doc: %+v", res.Claimed)
 	}
 
 	// The eviction guard still applies to the worker's own derived slug: a second
 	// live session under that exact slug leaves an identical request pending.
-	dir2 := t.TempDir()
-	plantPending(t, dir2, Request{RequestID: "w1b", Type: "worker", Slug: strp("impl-foo--w1"), Initiator: "agent"})
+	q.dir = t.TempDir()
+	q.plant(t, Request{RequestID: "w1b", Type: "worker", Slug: strp("impl-foo--w1"), Initiator: "agent"})
 	workerLive := func(slug string) bool { return slug == "impl-foo--w1" }
-	res, _ = QueueTick(dir2, "me", "", "", nil, noPlan, workerLive, time.Now(), ReclaimAfter)
+	res = q.tick(t, "me", "", nil, noPlan, workerLive, time.Now())
 	if res.Claimed != nil {
 		t.Fatalf("claimed a worker whose own derived slug is live — would evict it: %+v", res.Claimed)
 	}
 }
 
 func TestQueueTickAbandonsAtAttemptCeiling(t *testing.T) {
-	dir := t.TempDir()
-	plantPending(t, dir, Request{RequestID: "dead1", Type: "spec", Slug: strp("x"), Initiator: "agent", Attempts: MaxAttempts})
-	res, err := QueueTick(dir, "me", "", "", nil, noPlan, nil, time.Now(), ReclaimAfter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	q := newHostQueue(t)
+	q.plant(t, Request{RequestID: "dead1", Type: "spec", Slug: strp("x"), Initiator: "agent", Attempts: MaxAttempts})
+	res := q.tick(t, "me", "", nil, noPlan, nil, time.Now())
 	if len(res.Abandoned) != 1 || res.Abandoned[0].RequestID != "dead1" {
 		t.Fatalf("attempts-ceiling row not abandoned: %+v", res.Abandoned)
 	}
 	if res.Claimed != nil {
 		t.Fatal("abandoned row must not also be claimed")
 	}
-	if len(ScanPending(dir)) != 0 {
+	if len(ScanPending(q.dir)) != 0 {
 		t.Fatal("abandoned row should be deleted from pending")
 	}
 }
 
 func TestQueueTickReclaimsIncompleteClaim(t *testing.T) {
-	dir := t.TempDir()
-	// A claimed row with no claim metadata, aged past the reclaim window. Target
-	// it at another instance so it is reclaimed but not re-claimed here in the
-	// same tick — isolating the reclaim transition under test.
+	q := newHostQueue(t)
+	// A claimed row with no claim metadata, aged past the reclaim window. It is an
+	// implement row with no plan doc, so once back in pending it is not claimed
+	// again in the same pass, which isolates the reclaim transition under test.
 	id := "incomplete1"
-	if err := ClaimRequestFixture(t, dir, Request{RequestID: id, Type: "spec", Slug: strp("y"), Initiator: "agent", TargetInstance: strp("other")}); err != nil {
+	if err := ClaimRequestFixture(t, q.dir, q.row(Request{RequestID: id, Type: "implement", Slug: strp("y"), Initiator: "agent"})); err != nil {
 		t.Fatal(err)
 	}
 	old := time.Now().Add(-2 * ReclaimAfter)
-	if err := os.Chtimes(claimedPath(dir, id), old, old); err != nil {
+	if err := os.Chtimes(claimedPath(q.dir, id), old, old); err != nil {
 		t.Fatal(err)
 	}
-	res, err := QueueTick(dir, "me", "", "", nil, noPlan, nil, time.Now(), ReclaimAfter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := q.tick(t, "me", "", nil, noPlan, nil, time.Now())
 	if len(res.Reclaimed) != 1 || res.Reclaimed[0].Reason != ReasonIncompleteClaim {
 		t.Fatalf("incomplete claim not reclaimed: %+v", res.Reclaimed)
 	}
 	// The row is back in pending carrying the reclaim reason and no claim fields.
-	pend := ScanPending(dir)
+	pend := ScanPending(q.dir)
 	if len(pend) != 1 || pend[0].LastError == nil || *pend[0].LastError != ReasonIncompleteClaim {
 		t.Fatalf("reclaimed row not returned to pending with reason: %+v", pend)
 	}
@@ -318,50 +314,48 @@ func TestQueueTickReclaimsIncompleteClaim(t *testing.T) {
 	}
 }
 
+// TestQueueTickReclaimsStaleClaimer: a completed claim this host made, whose
+// registry row is no longer live, is reclaimed once it has aged past the window.
 func TestQueueTickReclaimsStaleClaimer(t *testing.T) {
-	dir := t.TempDir()
+	q := newHostQueue(t)
 	id := "stale1"
-	// A completed claim whose claimer is dead and whose claim aged out.
-	if err := ClaimRequestFixture(t, dir, Request{RequestID: id, Type: "spec", Slug: strp("z"), Initiator: "agent"}); err != nil {
+	if err := ClaimRequestFixture(t, q.dir, q.row(Request{RequestID: id, Type: "spec", Slug: strp("z"), Initiator: "agent"})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := WriteClaimMetadata(dir, id, "dead-instance"); err != nil {
+	if _, err := WriteClaimMetadata(q.dir, id, "me"); err != nil {
 		t.Fatal(err)
 	}
 	// Backdate claimed_at by rewriting the row.
-	req, _ := ReadClaimed(dir, id)
+	req, _ := ReadClaimed(q.dir, id)
 	old := time.Now().Add(-2 * ReclaimAfter).UTC().Format("2006-01-02T15:04:05Z")
 	req.ClaimedAt = &old
 	req.Framework, req.Model = strp("claude-code"), strp("fixture-model")
-	if err := writeRow(claimedPath(dir, id), req); err != nil {
+	if err := writeRow(claimedPath(q.dir, id), req); err != nil {
 		t.Fatal(err)
 	}
-	// Claimer "dead-instance" is absent from the live set → reclaim.
-	res, err := QueueTick(dir, "me", "", "", map[string]bool{"me": true}, noPlan, nil, time.Now(), ReclaimAfter)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The claimer "me" is absent from the live set → reclaim.
+	res := q.tick(t, "me", "", map[string]bool{"other": true}, noPlan, nil, time.Now())
 	if len(res.Reclaimed) != 1 || res.Reclaimed[0].Reason != ReasonStaleInstance {
 		t.Fatalf("stale claim not reclaimed: %+v", res.Reclaimed)
 	}
 }
 
 func TestQueueTickLeavesLiveClaimerAlone(t *testing.T) {
-	dir := t.TempDir()
+	q := newHostQueue(t)
 	id := "live1"
-	if err := ClaimRequestFixture(t, dir, Request{RequestID: id, Type: "spec", Slug: strp("z"), Initiator: "agent"}); err != nil {
+	if err := ClaimRequestFixture(t, q.dir, q.row(Request{RequestID: id, Type: "spec", Slug: strp("z"), Initiator: "agent"})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := WriteClaimMetadata(dir, id, "busy-instance"); err != nil {
+	if _, err := WriteClaimMetadata(q.dir, id, "busy-instance"); err != nil {
 		t.Fatal(err)
 	}
 	// The claimer is live → the claim must not be reclaimed even if aged.
-	req, _ := ReadClaimed(dir, id)
+	req, _ := ReadClaimed(q.dir, id)
 	old := time.Now().Add(-2 * ReclaimAfter).UTC().Format("2006-01-02T15:04:05Z")
 	req.ClaimedAt = &old
 	req.Framework, req.Model = strp("claude-code"), strp("fixture-model")
-	_ = writeRow(claimedPath(dir, id), req)
-	res, _ := QueueTick(dir, "me", "", "", map[string]bool{"me": true, "busy-instance": true}, noPlan, nil, time.Now(), ReclaimAfter)
+	_ = writeRow(claimedPath(q.dir, id), req)
+	res := q.tick(t, "me", "", map[string]bool{"me": true, "busy-instance": true}, noPlan, nil, time.Now())
 	if len(res.Reclaimed) != 0 {
 		t.Fatalf("reclaimed a live claimer's row: %+v", res.Reclaimed)
 	}
@@ -502,73 +496,6 @@ func TestSkipConfirmDistinguishesAbsentFromFalse(t *testing.T) {
 	}
 }
 
-// TestQueueTickPreferProjectDir exercises the soft prefer_project_dir grace: a
-// matching instance claims a preferring row immediately, a non-matching instance
-// defers until the row ages past PreferMatchGrace (then claims), an unparseable
-// requested_at degrades to claim-now (the preference only delays, never blocks),
-// and a row with no preference is claimed immediately regardless of dir.
-func TestQueueTickPreferProjectDir(t *testing.T) {
-	const mine = "/work/mine"
-	const other = "/work/other"
-	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
-	iso := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05Z") }
-	recent := iso(now.Add(-2 * time.Second)) // inside the 15s grace
-	aged := iso(now.Add(-20 * time.Second))  // past the grace
-
-	// A matching instance claims a preferring row immediately, inside the window.
-	dir := t.TempDir()
-	plantPending(t, dir, Request{RequestID: "p1", Type: "spec", Slug: strp("a"), Initiator: "agent",
-		RequestedAt: recent, PreferProjectDir: strp(mine)})
-	res, err := QueueTick(dir, "me", "", mine, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Claimed == nil || res.Claimed.RequestID != "p1" {
-		t.Fatalf("matching instance did not claim preferring row immediately: %+v", res.Claimed)
-	}
-
-	// A non-matching instance leaves the same fresh row pending inside the window.
-	dir = t.TempDir()
-	plantPending(t, dir, Request{RequestID: "p2", Type: "spec", Slug: strp("b"), Initiator: "agent",
-		RequestedAt: recent, PreferProjectDir: strp(mine)})
-	res, _ = QueueTick(dir, "me", "", other, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
-	if res.Claimed != nil {
-		t.Fatalf("non-matching instance claimed inside the grace window: %+v", res.Claimed)
-	}
-	if len(ScanPending(dir)) != 1 {
-		t.Fatal("preferring row should remain pending for a non-matching instance inside the window")
-	}
-
-	// The same non-matching instance claims once the row has aged past the grace.
-	dir = t.TempDir()
-	plantPending(t, dir, Request{RequestID: "p3", Type: "spec", Slug: strp("c"), Initiator: "agent",
-		RequestedAt: aged, PreferProjectDir: strp(mine)})
-	res, _ = QueueTick(dir, "me", "", other, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
-	if res.Claimed == nil || res.Claimed.RequestID != "p3" {
-		t.Fatalf("non-matching instance did not claim past the grace window: %+v", res.Claimed)
-	}
-
-	// An unparseable requested_at degrades to claim-now even for a non-matching
-	// instance — the additive posture: a malformed timestamp never strands a row.
-	dir = t.TempDir()
-	plantPending(t, dir, Request{RequestID: "p4", Type: "spec", Slug: strp("d"), Initiator: "agent",
-		RequestedAt: "not-a-timestamp", PreferProjectDir: strp(mine)})
-	res, _ = QueueTick(dir, "me", "", other, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
-	if res.Claimed == nil || res.Claimed.RequestID != "p4" {
-		t.Fatalf("unparseable requested_at did not degrade to claim-now: %+v", res.Claimed)
-	}
-
-	// A row with no preference is claimed immediately regardless of dir — today's
-	// behavior is unchanged.
-	dir = t.TempDir()
-	plantPending(t, dir, Request{RequestID: "p5", Type: "spec", Slug: strp("e"), Initiator: "agent",
-		RequestedAt: recent})
-	res, _ = QueueTick(dir, "me", "", other, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
-	if res.Claimed == nil || res.Claimed.RequestID != "p5" {
-		t.Fatalf("no-preference row was not claimed immediately: %+v", res.Claimed)
-	}
-}
-
 // TestPreferProjectDirRoundTrips guards the request-row amendment: prefer_project_dir
 // decodes into the pointer accessor, and an absent field is omitted on marshal.
 func TestPreferProjectDirRoundTrips(t *testing.T) {
@@ -633,87 +560,10 @@ func ClaimRequestFixture(t *testing.T, dir string, req Request) error {
 	return err
 }
 
-// TestQueueTickRequiredProjectDir exercises the hard required_project_dir filter:
-// only an instance whose normalized project dir equals the requirement may claim,
-// a non-matching instance is refused permanently rather than delayed, and a row
-// carrying the requirement but no placement stance predates the field and keeps
-// its original claim behavior.
-func TestQueueTickRequiredProjectDir(t *testing.T) {
-	const mine = "/work/mine"
-	const other = "/work/other"
-	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
-	iso := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05Z") }
-	recent := iso(now.Add(-2 * time.Second))
-	aged := iso(now.Add(-20 * time.Second)) // past PreferMatchGrace
-
-	// The matching instance claims a requiring row.
-	dir := t.TempDir()
-	plantPending(t, dir, Request{RequestID: "r1", Type: "spec", Slug: strp("a"), Initiator: "agent",
-		RequestedAt: recent, RequiredProjectDir: strp(mine), PlacementStance: strp(StanceRequiredDir)})
-	res, err := QueueTick(dir, "me", "", mine, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Claimed == nil || res.Claimed.RequestID != "r1" {
-		t.Fatalf("matching instance did not claim requiring row: %+v", res.Claimed)
-	}
-
-	// A non-matching instance leaves it pending, and — unlike the preference —
-	// aging past PreferMatchGrace does not release it.
-	dir = t.TempDir()
-	plantPending(t, dir, Request{RequestID: "r2", Type: "spec", Slug: strp("b"), Initiator: "agent",
-		RequestedAt: aged, RequiredProjectDir: strp(mine), PlacementStance: strp(StanceRequiredDir)})
-	res, _ = QueueTick(dir, "me", "", other, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
-	if res.Claimed != nil {
-		t.Fatalf("non-matching instance claimed a requiring row: %+v", res.Claimed)
-	}
-	if len(ScanPending(dir)) != 1 {
-		t.Fatal("requiring row should remain pending for a non-matching instance")
-	}
-
-	// An instance of unknown project dir matches nothing and is refused too.
-	dir = t.TempDir()
-	plantPending(t, dir, Request{RequestID: "r3", Type: "spec", Slug: strp("c"), Initiator: "agent",
-		RequestedAt: recent, RequiredProjectDir: strp(mine), PlacementStance: strp(StanceRequiredDir)})
-	res, _ = QueueTick(dir, "me", "", "", map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
-	if res.Claimed != nil {
-		t.Fatalf("dir-unknown instance claimed a requiring row: %+v", res.Claimed)
-	}
-
-	// A row carrying the requirement but no stance was written before the field
-	// existed: it keeps today's semantics and is claimed by any instance.
-	dir = t.TempDir()
-	plantPending(t, dir, Request{RequestID: "r4", Type: "spec", Slug: strp("d"), Initiator: "agent",
-		RequestedAt: recent, RequiredProjectDir: strp(mine)})
-	res, _ = QueueTick(dir, "me", "", other, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
-	if res.Claimed == nil || res.Claimed.RequestID != "r4" {
-		t.Fatalf("stanceless row did not keep pre-feature claim behavior: %+v", res.Claimed)
-	}
-
-	// Presence of the stance arms the filter regardless of the token's value: a
-	// mis-set or unrecognized token must not silently disable a hard filter.
-	dir = t.TempDir()
-	plantPending(t, dir, Request{RequestID: "r5", Type: "spec", Slug: strp("e"), Initiator: "agent",
-		RequestedAt: recent, RequiredProjectDir: strp(mine), PlacementStance: strp("something-else")})
-	res, _ = QueueTick(dir, "me", "", other, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
-	if res.Claimed != nil {
-		t.Fatalf("unrecognized stance token disabled the hard filter: %+v", res.Claimed)
-	}
-
-	// A stance with no requirement constrains nothing.
-	dir = t.TempDir()
-	plantPending(t, dir, Request{RequestID: "r6", Type: "spec", Slug: strp("f"), Initiator: "agent",
-		RequestedAt: recent, PlacementStance: strp(StanceAny)})
-	res, _ = QueueTick(dir, "me", "", other, map[string]bool{"me": true}, noPlan, nil, now, ReclaimAfter)
-	if res.Claimed == nil || res.Claimed.RequestID != "r6" {
-		t.Fatalf("stance with no requirement blocked a claim: %+v", res.Claimed)
-	}
-}
-
 // TestPlacementFieldsRoundTrip guards the request-row amendment: the three
 // placement fields decode into their accessors, an absent stance stays
-// distinguishable from an explicit empty one (it is the pre-feature
-// discriminator), and absent fields are omitted on marshal.
+// distinguishable from an explicit empty one, and absent fields are omitted on
+// marshal.
 func TestPlacementFieldsRoundTrip(t *testing.T) {
 	var req Request
 	raw := `{"request_id":"x","type":"spec","required_project_dir":"/work/mine",` +
@@ -730,24 +580,24 @@ func TestPlacementFieldsRoundTrip(t *testing.T) {
 	if got := req.RequiredTargetRefValue(); got != "refs/heads/main" {
 		t.Fatalf("RequiredTargetRefValue = %q, want the decoded ref", got)
 	}
-	if !req.HasPlacementStance() {
-		t.Fatal("a decoded stance should report as present")
+	if req.PlacementStance == nil {
+		t.Fatal("a decoded stance should decode to a set pointer")
 	}
 
 	var absent Request
 	if err := json.Unmarshal([]byte(`{"request_id":"x","type":"spec"}`), &absent); err != nil {
 		t.Fatalf("decode absent placement fields: %v", err)
 	}
-	if absent.HasPlacementStance() {
-		t.Fatal("an absent stance must not report as present — it is the pre-feature discriminator")
+	if absent.PlacementStance != nil {
+		t.Fatal("an absent stance must decode to nil")
 	}
 
 	var empty Request
 	if err := json.Unmarshal([]byte(`{"request_id":"x","type":"spec","placement_stance":""}`), &empty); err != nil {
 		t.Fatalf("decode empty placement stance: %v", err)
 	}
-	if !empty.HasPlacementStance() {
-		t.Fatal("an explicit empty stance is still a stance and must arm the filter")
+	if empty.PlacementStance == nil {
+		t.Fatal("an explicit empty stance must decode to a set pointer, distinct from an absent one")
 	}
 
 	data, err := json.Marshal(Request{RequestID: "x", Type: "spec"})
@@ -761,16 +611,16 @@ func TestPlacementFieldsRoundTrip(t *testing.T) {
 	}
 }
 
-func TestClaimableByOptionRouteRequiresKnownVintage(t *testing.T) {
+func TestQueueOptionRouteRequiresKnownVintage(t *testing.T) {
 	req := Request{Route: &config.Route{Framework: "codex", Model: "gpt-5.6-sol", Options: map[string]string{"effort": "high"}}}
-	if claimableBy(req, "host", "", "", time.Now()) {
+	if claimable(req, "", time.Now()) {
 		t.Fatal("unknown-vintage host claimed option-bearing route")
 	}
-	if !claimableBy(req, "host", "2026-09-08T12:00:00Z", "", time.Now()) {
+	if !claimable(req, "2026-09-08T12:00:00Z", time.Now()) {
 		t.Fatal("known-vintage host should claim option-bearing route")
 	}
 	legacy := Request{Framework: strp("codex"), Model: strp("gpt-5.6-sol")}
-	if !claimableBy(legacy, "host", "", "", time.Now()) {
+	if !claimable(legacy, "", time.Now()) {
 		t.Fatal("legacy empty-option pair lost unknown-vintage compatibility")
 	}
 }
