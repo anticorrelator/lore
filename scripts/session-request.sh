@@ -113,6 +113,14 @@
 #                      coordinator send window). Sets skip_confirm=false.
 #   --kdir <path>      Knowledge-store override (test isolation).
 #   --json             Emit a JSON result object instead of a human line.
+#   --host-key <key>   The store session host's key, stamped only on a row that
+#                      names a checkout (a declared work item or a preference).
+#                      'lore session request' passes it after ensuring that host;
+#                      without --request-id no other key is accepted.
+#   --store-host-unavailable <why>
+#                      Set by 'lore session request' when it could not ensure the
+#                      store host: the row stays unkeyed and is written only when
+#                      a live lore-tui will claim it, else refused naming <why>.
 #
 # Derived placement (no flag): a request naming a work-item slug takes its hard
 # placement from that item's declared source checkout, resolved physically here and
@@ -169,6 +177,7 @@ KDIR_OVERRIDE=""
 JSON_MODE=0
 MANAGED_REQUEST_ID=""
 HOST_KEY=""
+STORE_HOST_UNAVAILABLE=""
 ROUTE_SPECS=()
 SESSION_ROUTE=""
 SESSION_ROUTE_PROVIDED=0
@@ -218,6 +227,7 @@ while [[ $# -gt 0 ]]; do
     --confirm) SKIP_CONFIRM="false"; shift ;;
     --request-id) MANAGED_REQUEST_ID="$2"; shift 2 ;;
     --host-key) HOST_KEY="$2"; shift 2 ;;
+    --store-host-unavailable) STORE_HOST_UNAVAILABLE="$2"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
     -h|--help) awk 'NR > 1 { if ($0 !~ /^#/) exit; print }' "$0"; exit 0 ;;
@@ -664,6 +674,34 @@ else
   KNOWLEDGE_DIR="$(resolve_knowledge_dir)"
 fi
 [[ -d "$KNOWLEDGE_DIR" ]] || fail "knowledge store not found at: $KNOWLEDGE_DIR"
+
+# A managed start names its own host key beside its request id. Without a request
+# id the only key a row may carry is this store's session host key in this
+# runtime, which 'lore session request' supplies after ensuring that host.
+if [[ -n "$MANAGED_REQUEST_ID" ]]; then
+  [[ "$MANAGED_REQUEST_ID" =~ ^managed-[a-f0-9]{32}$ && "$HOST_KEY" =~ ^[a-f0-9]{24}$ ]] || fail "managed request identity requires valid --request-id and --host-key"
+elif [[ -n "$HOST_KEY" ]]; then
+  EXPECTED_HOST_KEY="$(store_host_key_for "$KNOWLEDGE_DIR")" || fail "could not compute this store's session host key"
+  [[ "$HOST_KEY" == "$EXPECTED_HOST_KEY" ]] || fail "invalid --host-key '$HOST_KEY': without --request-id a request may carry only this store's session host key in this runtime ($EXPECTED_HOST_KEY); 'lore session request' supplies it"
+fi
+[[ -z "$STORE_HOST_UNAVAILABLE" || -z "$HOST_KEY" ]] || fail "--store-host-unavailable describes a request the store's session host could not take, so it cannot also carry --host-key"
+
+# Where the store host's own diagnostics live, for the refusals below.
+store_host_diagnostics() {
+  local dir
+  dir="$(store_host_dir_for "$KNOWLEDGE_DIR" 2>/dev/null || true)"
+  printf '%s/host.log and %s/supervisor-error.json' "$dir" "$dir"
+}
+
+# 'lore session request' writes an unkeyed row when it could not ensure the store
+# host only if a live lore-tui will claim it; otherwise nothing is enqueued.
+refuse_without_store_host() {
+  fail "refusing to enqueue: this request names checkout '$1', so it goes to the store's session host, and that host could not be started or reached:
+  $STORE_HOST_UNAVAILABLE
+No live lore-tui serves that checkout to take the request instead, so nothing was enqueued.
+The store host's diagnostics are $(store_host_diagnostics). Fix the cause and retry; when the installed lore-tui is older than these scripts, run 'lore rebuild' (or 'bash install.sh') first. Opening lore-tui in that checkout also lets the request through."
+}
+
 if [[ -n "$PACKET_ID" && $POSITION_PROVIDED -eq 0 ]]; then
   [[ "$TYPE" == "worker" ]] || fail "--packet requires --type worker"
   PACKET_LINE=$(python3 "$SCRIPT_DIR/packet_builder.py" --kdir "$KNOWLEDGE_DIR" pointer "$PACKET_ID") || fail "packet could not be resolved"
@@ -748,6 +786,14 @@ if [[ -n "$SLUG" ]]; then
   done
 fi
 
+# A row that names a checkout (a declared work item or an explicit preference)
+# carries the store host's key when the caller supplied it; every other row stays
+# unkeyed, for a visible lore-tui to claim.
+ROW_HOST_KEY=""
+if [[ -n "$HOST_KEY" ]] && [[ -n "$MANAGED_REQUEST_ID" || -n "$WORK_META" || -n "${PREFER_RESOLVED:-}" ]]; then
+  ROW_HOST_KEY="$HOST_KEY"
+fi
+
 if [[ -n "$WORK_META" ]]; then
   DECLARED_CHECKOUT="$(jq -r '.source_checkout // empty' "$WORK_META" 2>/dev/null || true)"
   if [[ -z "$DECLARED_CHECKOUT" ]]; then
@@ -768,39 +814,67 @@ removed. Re-declare it with:
   # An unsatisfiable hard filter has to be refused here, before the row is durable.
   # Each instance's claim loop can only decline for itself and nothing aggregates
   # "every instance declined", so a row no instance can claim is never reported as
-  # unclaimable — it waits out the request TTL, and the sweep that enforces that TTL
-  # is TUI-hosted, so a store with no live instance never runs one. A pinned target
-  # narrows the check to that instance, since nothing else could claim the row.
-  LIVE_DIRS="$(live_instance_project_dirs "$INSTANCES_DIR" || true)"
-  SERVED=0
-  LIVE_CHECKOUTS=""
-  while IFS= read -r live_dir; do
-    [[ -n "$live_dir" ]] || continue
-    LIVE_CHECKOUTS="${LIVE_CHECKOUTS}  $live_dir
+  # unclaimable — it waits out the request TTL. Only live rows that would claim
+  # this row count: the store host for a row carrying its key, a visible lore-tui
+  # for an unkeyed one. A pinned target narrows the check to that instance.
+  PLACEMENT="$(live_placement "$INSTANCES_DIR" "$ROW_HOST_KEY" "$REQUIRED_RESOLVED")" \
+    || fail "could not read the live instance registry at $INSTANCES_DIR; nothing was enqueued"
+  LIVE_CHECKOUTS="$(printf '%s' "$PLACEMENT" | jq -r '.servers[] | "  " + .')"
+  if [[ -n "$LIVE_CHECKOUTS" ]]; then
+    LIVE_CHECKOUTS="$LIVE_CHECKOUTS
 "
-    [[ "$live_dir" == "$REQUIRED_RESOLVED" ]] && SERVED=1
-  done <<< "$LIVE_DIRS"
-  [[ -n "$LIVE_CHECKOUTS" ]] || LIVE_CHECKOUTS="  (no live instance publishes a project directory in this store)
+  else
+    LIVE_CHECKOUTS="  (no live instance that would claim this request serves a checkout in this store)
 "
+  fi
 
   if [[ -n "$TARGET" ]]; then
-    TARGET_DIR="$(jq -r '.project_dir // empty' "$INSTANCES_DIR/$TARGET.json" 2>/dev/null || true)"
-    TARGET_RESOLVED=""
-    [[ -n "$TARGET_DIR" ]] && TARGET_RESOLVED="$(resolve_physical_dir "$TARGET_DIR" || printf '%s' "$TARGET_DIR")"
-    if [[ "$TARGET_RESOLVED" != "$REQUIRED_RESOLVED" ]]; then
+    if ! printf '%s' "$PLACEMENT" | jq -e --arg t "$TARGET" '.served_by | index($t) != null' >/dev/null; then
       fail "refusing --target '$TARGET' for --slug '$SLUG': work item '$WORK_ITEM_SLUG' belongs to
-'$REQUIRED_RESOLVED', which that instance does not serve. Live checkouts:
-${LIVE_CHECKOUTS}Target an instance in that checkout, or drop --target and let the
+'$REQUIRED_RESOLVED', which that instance does not serve for this request. Live checkouts:
+${LIVE_CHECKOUTS}Target an instance that serves that checkout, or drop --target and let the
 declaration place the request."
     fi
-  elif [[ $SERVED -eq 0 ]]; then
+  elif ! printf '%s' "$PLACEMENT" | jq -e '.served' >/dev/null; then
+    [[ -z "$STORE_HOST_UNAVAILABLE" ]] || refuse_without_store_host "$REQUIRED_RESOLVED"
+    if [[ -n "$ROW_HOST_KEY" ]]; then
+      WHY="$(printf '%s' "$PLACEMENT" | jq -r '.store_checkout_error // "no live session host holds this key"')"
+      fail "refusing --slug '$SLUG': work item '$WORK_ITEM_SLUG' belongs to '$REQUIRED_RESOLVED',
+and no live instance serves that checkout for the store's session host: $WHY.
+Live hosts for this request:
+${LIVE_CHECKOUTS}Re-declare the item with a checkout of this store:
+  lore work source-checkout $WORK_ITEM_SLUG"
+    fi
     fail "refusing --slug '$SLUG': work item '$WORK_ITEM_SLUG' belongs to '$REQUIRED_RESOLVED',
-and no live instance serves that checkout. Live checkouts:
-${LIVE_CHECKOUTS}Start an instance in that checkout, or re-declare the item with:
+and no live instance serves that checkout for an unkeyed request. Live checkouts:
+${LIVE_CHECKOUTS}Send it with 'lore session request', which starts the store's session host and routes
+the request to it (its diagnostics: $(store_host_diagnostics)), or re-declare the item with:
   lore work source-checkout $WORK_ITEM_SLUG"
   fi
 
   REQUIRED_PROJECT_DIR_JSON="$(jq -n --arg d "$REQUIRED_RESOLVED" '$d')"
+fi
+
+# A preference alone is soft for a visible lore-tui, but the store host claims only
+# checkouts of its store, so a keyed row's preference must be one. A request the
+# store host could not take is written unkeyed only when a live lore-tui will
+# claim it: one serving its checkout, or any live one for a row naming none.
+if [[ -z "$REQUIRED_RESOLVED" && -n "${PREFER_RESOLVED:-}" && ( -n "$ROW_HOST_KEY" || -n "$STORE_HOST_UNAVAILABLE" ) ]]; then
+  PLACEMENT="$(live_placement "$INSTANCES_DIR" "$ROW_HOST_KEY" "$PREFER_RESOLVED")" \
+    || fail "could not read the live instance registry at $INSTANCES_DIR; nothing was enqueued"
+  if ! printf '%s' "$PLACEMENT" | jq -e '.served' >/dev/null; then
+    [[ -z "$STORE_HOST_UNAVAILABLE" ]] || refuse_without_store_host "$PREFER_RESOLVED"
+    WHY="$(printf '%s' "$PLACEMENT" | jq -r '.store_checkout_error // "no live session host holds this key"')"
+    fail "refusing --prefer-dir '$PREFER_DIR': the store's session host serves only checkouts of this store, and $WHY.
+Name a checkout of this store, or pass --anywhere."
+  fi
+fi
+if [[ -n "$STORE_HOST_UNAVAILABLE" && -z "$REQUIRED_RESOLVED" && -z "${PREFER_RESOLVED:-}" ]]; then
+  live_placement "$INSTANCES_DIR" "" "" | jq -e '.servers | length > 0' >/dev/null \
+    || refuse_without_store_host "(none named)"
+fi
+if [[ -n "$STORE_HOST_UNAVAILABLE" ]]; then
+  echo "[session] the store's session host is unavailable ($STORE_HOST_UNAVAILABLE); this request is left for the live lore-tui that serves it" >&2
 fi
 
 # placement_stance names the axis that actually governs, so no reader has to infer
@@ -875,8 +949,7 @@ mkdir -p "$PENDING_DIR"
 
 RAND="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 REQUEST_ID="$(date -u +%Y%m%dT%H%M%SZ)-${RAND}"
-if [[ -n "$MANAGED_REQUEST_ID" || -n "$HOST_KEY" ]]; then
-  [[ "$MANAGED_REQUEST_ID" =~ ^managed-[a-f0-9]{32}$ && "$HOST_KEY" =~ ^[a-f0-9]{24}$ ]] || fail "managed request identity requires valid --request-id and --host-key"
+if [[ -n "$MANAGED_REQUEST_ID" ]]; then
   REQUEST_ID="$MANAGED_REQUEST_ID"
 fi
 REQUESTED_AT="$(timestamp_iso)"
@@ -996,8 +1069,8 @@ if [[ -n "$SKIP_CONFIRM_JSON" ]]; then
   ROW="$(printf '%s' "$ROW" | jq -c --argjson sc "$SKIP_CONFIRM_JSON" '. + {skip_confirm: $sc}')"
 fi
 
-if [[ -n "$HOST_KEY" ]]; then
-  ROW="$(printf '%s' "$ROW" | jq -c --arg key "$HOST_KEY" '. + {host_key: $key}')"
+if [[ -n "$ROW_HOST_KEY" ]]; then
+  ROW="$(printf '%s' "$ROW" | jq -c --arg key "$ROW_HOST_KEY" '. + {host_key: $key}')"
 fi
 
 # Pin semantic requirements through the target field understood by legacy readers.
@@ -1070,8 +1143,10 @@ if [[ $JSON_MODE -eq 1 ]]; then
     --arg path "$RELPATH" \
     --arg placement_stance "$PLACEMENT_STANCE" \
     --arg required_dir "$REQUIRED_RESOLVED" \
+    --arg host_key "$ROW_HOST_KEY" \
     '{request_id: $request_id, type: $type, slug: $slug, target_instance: $target, path: $path,
       placement_stance: $placement_stance, enqueued: true}
+     + (if $host_key != "" then {host_key: $host_key} else {} end)
      + (if $required_dir != "" then {required_project_dir: $required_dir} else {} end)
      + (if $worktree_id != "" then {worktree_id: $worktree_id, execution_dir: $execution_dir} else {} end)')"
   json_output "$RESULT"

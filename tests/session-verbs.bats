@@ -33,6 +33,7 @@ APPEND="$REPO_DIR/scripts/session-event-append.sh"
 STEP="$REPO_DIR/scripts/session-step.sh"
 TERMINUS="$REPO_DIR/scripts/session-terminus.sh"
 COORDINATE="$REPO_DIR/scripts/coordinate-status.sh"
+MANAGED="$REPO_DIR/scripts/session-managed.py"
 
 setup() {
   [ -f "$REQUEST" ] || skip "session-request.sh missing"
@@ -52,7 +53,18 @@ setup() {
   WATCH_CURSOR="_coordination/watch-cursor-$(bash -c 'source "$1"; watcher_identity_hash "$2" none "" lore-tui' _ "$LIB" "$TEST_KDIR")-board.json"
   # These tests run inside a live session as often as not, and --prefer-cwd now
   # reads the session identity. Clear it so each test declares its own.
-  unset LORE_SESSION_INSTANCE LORE_SESSION_SLUG LORE_SESSION_TYPE
+  unset LORE_SESSION_INSTANCE LORE_SESSION_SLUG LORE_SESSION_TYPE LORE_SESSION_HOST_KEY LORE_SESSION_SOURCE_DIR
+  # A verb that ensures the store's session host must never reach a real host or
+  # the production tmux server: give it its own runtime and a host binary that
+  # refuses the store-host arguments, so ensure() fails fast.
+  STUB_HOST="$TEST_KDIR/bin/lore-tui-old"
+  mkdir -p "$TEST_KDIR/bin"
+  printf '#!/bin/sh\nexit 2\n' > "$STUB_HOST"
+  chmod +x "$STUB_HOST"
+  export LORE_SESSION_RUNTIME=bats-session-verbs LORE_SESSION_HOST_BINARY="$STUB_HOST" \
+    LORE_SESSION_SUPERVISOR_QUIET_SECONDS=1
+  STORE_HOST_PID=""
+  CHECKOUT_ROOT=""
 }
 
 worker_guidance_file() {
@@ -64,9 +76,101 @@ worker_guidance_file() {
 }
 
 teardown() {
+  if [ -n "${STORE_HOST_PID:-}" ]; then
+    kill "$STORE_HOST_PID" 2>/dev/null || true
+    wait "$STORE_HOST_PID" 2>/dev/null || true
+  fi
+  if [ -n "${CHECKOUT_ROOT:-}" ] && [ -d "$CHECKOUT_ROOT" ]; then
+    rm -rf "$CHECKOUT_ROOT"
+  fi
   if [ -n "${TEST_KDIR:-}" ] && [ -d "$TEST_KDIR" ]; then
     rm -rf "$TEST_KDIR"
   fi
+}
+
+# --- Store session host fixtures ---------------------------------------------
+
+# Run a session-runtime operation for this store: key | dir | pin | refuse.
+store_runtime() {
+  python3 - "$REPO_DIR/scripts" "$TEST_KDIR" "$@" <<'PYEOF'
+import importlib.util, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("managed", sys.argv[1] + "/session-managed.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+kdir, op = Path(sys.argv[2]).resolve(), sys.argv[3]
+key = m.RUNTIME.store_host_key(kdir)
+if op == "key":
+    print(key)
+elif op == "dir":
+    print(m.host_dir(kdir, key))
+elif op == "pin":
+    m.atomic(m.RUNTIME.login_dir() / "served.json",
+             {"schema_version": 1, "stores": {str(kdir): {"wanted_at": m.now(), "pin_knowledge_dir": True}}})
+elif op == "refuse":
+    stub = Path(sys.argv[4]).resolve()
+    m.atomic(m.host_dir(kdir, key) / "supervisor-error.json", dict(
+        schema_version=1, at=m.now(), store=str(kdir), host_key=key, exit_code=2, binary=str(stub),
+        binary_identity=m.file_identity(stub), error="test host binary refuses the store-host arguments"))
+PYEOF
+}
+
+# Record that this runtime's host binary refuses the store-host arguments, so
+# ensure() fails at once without starting a supervisor.
+refuse_store_host() {
+  store_runtime refuse "$STUB_HOST"
+}
+
+# A git checkout outside the store; prints its physical path.
+make_checkout() {
+  [ -n "$CHECKOUT_ROOT" ] || CHECKOUT_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$CHECKOUT_ROOT/$1"
+  git -C "$CHECKOUT_ROOT/$1" init -q
+  printf '%s\n' "$CHECKOUT_ROOT/$1"
+}
+
+# Stand in for the store's session host until teardown: a live, ready,
+# store-scoped registry row under this store's key, with its runtime.lock and the
+# login's supervisor.lock held. The store is pinned, as a host started with
+# LORE_KNOWLEDGE_DIR naming a scratch store is, so membership needs no resolution.
+fake_store_host() {
+  local ready="$TEST_KDIR/store-host.key"
+  store_runtime pin
+  python3 - "$REPO_DIR/scripts" "$TEST_KDIR" "$ready" <<'PYEOF' &
+import fcntl, importlib.util, os, sys, time
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("managed", sys.argv[1] + "/session-managed.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+kdir = Path(sys.argv[2]).resolve()
+key = m.RUNTIME.store_host_key(kdir)
+directory = m.host_dir(kdir, key)
+directory.mkdir(parents=True, exist_ok=True)
+login = m.RUNTIME.login_dir()
+login.mkdir(parents=True, exist_ok=True)
+locks = [open(directory / "runtime.lock", "a+"), open(login / "supervisor.lock", "a+")]
+for held in locks:
+    fcntl.flock(held, fcntl.LOCK_EX)
+capabilities = ["position-preparation-v1"]
+row = kdir / "_sessions/instances/store-host.json"
+m.atomic(row, dict(name="store-host", pid=os.getpid(), role="session-host", scope="store", host_key=key,
+                   runtime=m.RUNTIME.runtime_name(), started=m.now(), sessions=[],
+                   runtime_capabilities=capabilities, build_time="2026-10-18T00:00:00Z"))
+m.atomic(directory / "ready.json", dict(schema_version=2, scope="store", host_key=key, instance_name="store-host",
+                                        pid=os.getpid(), knowledge_dir=str(kdir), ready=True,
+                                        runtime_capabilities=capabilities))
+Path(sys.argv[3]).write_text(key)
+while True:
+    time.sleep(1)
+    os.utime(row)
+PYEOF
+  STORE_HOST_PID=$!
+  local _i
+  for _i in $(seq 1 200); do
+    [ -s "$ready" ] && break
+    sleep 0.05
+  done
+  STORE_KEY="$(cat "$ready")"
 }
 
 # --- Fixtures --------------------------------------------------------------
@@ -563,6 +667,174 @@ write_vintage_instance() {
   [ ! -e "$TEST_KDIR/_sessions/requests" ]
 }
 
+# --- Requests that name a checkout go to the store's session host ----------
+
+@test "request sends a request naming a checkout to the store host with its key" {
+  local clone; clone="$(make_checkout clone-a)"
+  write_work_item routed "$clone"
+  fake_store_host
+  run python3 "$MANAGED" request --type worker --slug routed--w1 --initiator agent \
+    --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg k "$STORE_KEY" --arg d "$clone" \
+    '.host_key == $k and .required_project_dir == $d and .placement_stance == "required_dir"'
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e --arg k "$STORE_KEY" '.host_key == $k and (.target_instance == null)' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request admits a position-bearing row to the store host without pinning its generation" {
+  local clone; clone="$(make_checkout clone-a)"
+  write_work_item positioned "$clone"
+  fake_store_host
+  printf '%s' "{\"request_id\":\"r1\",\"host_key\":\"$STORE_KEY\",\"required_project_dir\":\"$clone\",\"extra_context\":{\"position_preparation\":{}}}" \
+    | python3 "$REPO_DIR/scripts/session-admission.py" "$TEST_KDIR/_sessions/instances" 30 > "$TEST_KDIR/admitted.json"
+  run jq -e '(.target_instance == null) and .required_runtime_capabilities == ["position-preparation-v1"]' "$TEST_KDIR/admitted.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "request leaves a request naming no checkout unkeyed and needs no store host" {
+  refuse_store_host
+  run python3 "$MANAGED" request --type chat --anywhere --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '(has("host_key") | not) and .placement_stance == "any"'
+  [[ "$output" != *"store's session host is unavailable"* ]]
+}
+
+@test "request falls back to an unkeyed row only when a live lore-tui serves the checkout" {
+  local clone; clone="$(make_checkout clone-a)"
+  write_work_item fallback "$clone"
+  refuse_store_host
+  run python3 "$MANAGED" request --type worker --slug fallback--w1 --initiator agent \
+    --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"so it goes to the store's session host, and that host could not be started or reached"* ]]
+  [[ "$output" == *"lore rebuild"* && "$output" == *"bash install.sh"* ]]
+  [[ "$output" == *"$(store_runtime dir)/host.log"* ]]
+  [[ "$output" == *"$(store_runtime dir)/supervisor-error.json"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests/pending" ] || [ -z "$(ls "$TEST_KDIR/_sessions/requests/pending")" ]
+
+  write_instance_dir live-tui "$clone"
+  run python3 "$MANAGED" request --type worker --slug fallback--w1 --initiator agent \
+    --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"store's session host is unavailable"* ]]
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e --arg d "$clone" '(has("host_key") | not) and .required_project_dir == $d' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request falls back for a preference only to a lore-tui serving that checkout" {
+  local clone; clone="$(make_checkout clone-a)"
+  refuse_store_host
+  run python3 "$MANAGED" request --type chat --prefer-dir "$clone" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"names checkout '$clone'"* ]]
+  write_instance_dir live-tui "$clone"
+  run python3 "$MANAGED" request --type chat --prefer-dir "$clone" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+}
+
+@test "a keyed request's preflight counts only rows that would claim it" {
+  local clone; clone="$(make_checkout clone-a)"
+  write_work_item keyed "$clone"
+  write_instance_dir live-tui "$clone"
+  local key; key="$(store_runtime key)"
+  run bash "$REQUEST" --type implement --slug keyed --anywhere --host-key "$key" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no live instance serves that checkout for the store's session host"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+
+  rm "$TEST_KDIR/_sessions/instances/live-tui.json"
+  fake_store_host
+  run bash "$REQUEST" --type implement --slug keyed --anywhere --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no live instance serves that checkout for an unkeyed request"* ]]
+  [[ "$output" == *"lore session request"* ]]
+  [[ "$output" != *"Start an instance in that checkout"* ]]
+
+  run bash "$REQUEST" --type implement --slug keyed --anywhere --host-key "$STORE_KEY" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg k "$STORE_KEY" '.host_key == $k'
+}
+
+@test "the store host serves only checkouts of its store" {
+  mkdir -p "$TEST_KDIR/plain-dir"
+  local plain; plain="$(cd "$TEST_KDIR/plain-dir" && pwd -P)"
+  local inside; inside="$TEST_KDIR/_sessions/worktrees/inner"
+  mkdir -p "$inside"
+  git -C "$inside" init -q
+  fake_store_host
+  write_work_item notgit "$plain"
+  run bash "$REQUEST" --type implement --slug notgit --anywhere --host-key "$STORE_KEY" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"is not a git checkout"* ]]
+  write_work_item inside "$inside"
+  run bash "$REQUEST" --type implement --slug inside --anywhere --host-key "$STORE_KEY" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"lies inside the knowledge store"* ]]
+  run bash "$REQUEST" --type chat --prefer-dir "$plain" --host-key "$STORE_KEY" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"serves only checkouts of this store"* ]]
+}
+
+@test "request refuses a host key other than this store's without a request id" {
+  local clone; clone="$(make_checkout clone-a)"
+  write_work_item keyed "$clone"
+  run bash "$REQUEST" --type implement --slug keyed --anywhere --host-key "aaaaaaaaaaaaaaaaaaaaaaaa" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"may carry only this store's session host key in this runtime ($(store_runtime key))"* ]]
+}
+
+@test "a store host target is checked against store membership" {
+  local clone; clone="$(make_checkout clone-a)"
+  mkdir -p "$TEST_KDIR/plain-dir"
+  write_work_item managed "$clone"
+  write_work_item unmanaged "$(cd "$TEST_KDIR/plain-dir" && pwd -P)"
+  fake_store_host
+  local rid="managed-0123456789abcdef0123456789abcdef"
+  run bash "$REQUEST" --type implement --slug managed --target store-host --request-id "$rid" \
+    --host-key "$STORE_KEY" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  run bash "$REQUEST" --type implement --slug unmanaged --target store-host \
+    --request-id "managed-fedcba9876543210fedcba9876543210" --host-key "$STORE_KEY" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"which that instance does not serve"* ]]
+}
+
+@test "session list shows the store host as serving every checkout of the store" {
+  fake_store_host
+  run bash "$LIST" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"instance store-host"*"store host serving every checkout of $TEST_KDIR"* ]]
+}
+
+@test "a verb for a session no live host lists brings up the store host first, then falls through" {
+  local served="$LORE_DATA_DIR/session-runtimes/bats-session-verbs/served.json"
+  run python3 "$MANAGED" send ghost "hi" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no live instance is running session 'ghost'"* ]]
+  run jq -e --arg k "$TEST_KDIR" '.stores[$k].wanted_at | length > 0' "$served"
+  [ "$status" -eq 0 ]
+  python3 - "$LORE_DATA_DIR/session-runtimes/bats-session-verbs/supervisor.lock" <<'PYEOF'
+import fcntl, sys, time
+for _ in range(100):
+    with open(sys.argv[1], "a+") as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            sys.exit(0)
+        except BlockingIOError:
+            pass
+    time.sleep(.1)
+sys.exit("the supervisor did not exit")
+PYEOF
+  rm "$served"
+  write_instance inst-a owned
+  run python3 "$MANAGED" send owned "hi" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [ ! -e "$served" ]
+}
+
 # --- Placement declared by the work item ----------------------------------
 
 @test "request refuses a slugged request whose work item declares no source checkout" {
@@ -596,6 +868,8 @@ write_vintage_instance() {
   [[ "$output" == *"no live instance serves that checkout"* ]]
   [[ "$output" == *"$a"* ]]
   [[ "$output" == *"$b"* ]]
+  [[ "$output" != *"Start an instance in that checkout"* ]]
+  [[ "$output" == *"lore session request"* ]]
   [ ! -e "$TEST_KDIR/_sessions/requests" ]
 }
 
@@ -2793,6 +3067,7 @@ EOF
 
 @test "session wait routes through the dispatcher" {
   : > "$TEST_KDIR/_sessions/events.jsonl"
+  refuse_store_host
   run bash "$LORE" session wait ghost --until spawned --since 0 --timeout 1 --kdir "$TEST_KDIR"
   [ "$status" -eq 2 ]                          # pre-spawn until suppresses gone; times out
 }

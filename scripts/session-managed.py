@@ -1295,8 +1295,11 @@ def enqueue_start(kdir, manifest, status=None):
             atomic(context_path, {'dispatch_guidance': manifest['context']})
             manifest['state'] = 'enqueueing'
             atomic(path, manifest)
+            # A store host claims every row carrying its key, so its rows need no name
+            # pin, which would strand them if the host restarted under a new name.
+            placement = ['--anywhere'] if status.get('scope') == 'store' else ['--target', status['instance_name']]
             run(['bash', SCRIPTS / 'session-request.sh', '--type', 'worker', '--slug', manifest['handle'],
-                 '--target', status['instance_name'], '--session-route', json.dumps(manifest['route'], separators=(',', ':')),
+                 *placement, '--session-route', json.dumps(manifest['route'], separators=(',', ':')),
                  '--context', context_path, '--initiator', 'agent', '--auto-close', 'true', '--yes', '--kdir', kdir,
                  '--request-id', rid, '--host-key', key, '--json',
                  *(['--packet', manifest['packet']] if manifest.get('packet') else [])], cwd=source)
@@ -1557,9 +1560,119 @@ def operate_attempt(args, kdir, manifest):
     return result
 
 
+REQUEST_VALUE_FLAGS = frozenset({
+    '--type', '--slug', '--target', '--initiator', '--auto-close', '--requested-by', '--context', '--packet',
+    '--position', '--route', '--session-route', '--min-vintage', '--track', '--model', '--framework',
+    '--routing-source', '--worktree-identity', '--worktree-id', '--execution-dir', '--prefer-dir', '--request-id',
+    '--host-key', '--kdir', '--store-host-unavailable'})
+LEGACY_ENSURE_SECONDS = 10
+INSTANCE_LIVENESS_SECONDS = 30
+
+
+def request_options(argv):
+    """The session-request.sh options this entry routes on; the writer parses the rest."""
+    options, index = {}, 0
+    while index < len(argv):
+        if argv[index] in REQUEST_VALUE_FLAGS:
+            options[argv[index]] = argv[index + 1] if index + 1 < len(argv) else ''
+            index += 2
+        else:
+            options[argv[index]] = True
+            index += 1
+    return options
+
+
+def request_names_checkout(kdir, options):
+    """Whether the writer will place this request in a checkout: a work item that
+    declares an existing one, or an explicit preference. A targeted request names
+    an instance instead and keeps its unkeyed path."""
+    if '--target' in options:
+        return False
+    slug = options.get('--slug') or ''
+    if slug:
+        worker = re.fullmatch(r'(.+)--w[0-9]+', slug)
+        item = worker.group(1) if worker else slug
+        for meta in (kdir / '_work' / item / '_meta.json', kdir / '_work/_archive' / item / '_meta.json'):
+            if meta.is_file():
+                declared = read_quiet(meta, {}).get('source_checkout')
+                return bool(declared) and Path(declared).is_dir()
+    return '--prefer-dir' in options or '--prefer-cwd' in options
+
+
+def request(argv):
+    """lore session request: send a request that names a checkout to the store's
+    session host, ensured first, with the writer run under the host's ensure.lock
+    so the host cannot withdraw before the row lands. Any other request keeps the
+    unkeyed path a visible lore-tui claims."""
+    writer = ['bash', str(SCRIPTS / 'session-request.sh')]
+    options = request_options(argv)
+    if options.keys() & {'-h', '--help', '--host-key', '--request-id', '--store-host-unavailable'}:
+        os.execv('/bin/bash', [*writer, *argv])
+    try:
+        kdir = Path(options['--kdir']).resolve() if options.get('--kdir') else resolve()
+    except RuntimeError:
+        os.execv('/bin/bash', [*writer, *argv])
+    if not request_names_checkout(kdir, options):
+        os.execv('/bin/bash', [*writer, *argv])
+    argv = [*argv, '--kdir', str(kdir)]
+    key = RUNTIME.store_host_key(kdir)
+    unavailable = 'the store host withdrew its readiness each time the request was about to be written'
+    for _ in range(3):
+        try:
+            ensure(kdir)
+        except (RuntimeError, OSError) as error:
+            unavailable = str(error)
+            break
+        with lock(host_dir(kdir, key) / 'ensure.lock'):
+            if ready(kdir, key):
+                return subprocess.call([*writer, *argv, '--host-key', key])
+    return subprocess.call([*writer, *argv, '--store-host-unavailable', unavailable])
+
+
+def live_owner(kdir, handle):
+    """The live registry row that lists a session, by name."""
+    slug = 'chat-' + handle[len('chat:'):] if handle.startswith('chat:') else handle
+    now = time.time()
+    for path in sorted((Path(kdir) / '_sessions/instances').glob('*.json')):
+        try:
+            if now - path.stat().st_mtime > INSTANCE_LIVENESS_SECONDS:
+                continue
+        except OSError:
+            continue
+        row = read_quiet(path, {})
+        if any(isinstance(s, dict) and s.get('slug') == slug for s in row.get('sessions') or []):
+            return row.get('name') or path.stem
+    return None
+
+
+def ensure_for_unowned_session(kdir, handle):
+    """A session no live host lists may be one the store host would adopt or claim,
+    so bring that host up, for a bounded wait, before the enqueue-only verb runs."""
+    if not handle or handle.startswith('-') or live_owner(kdir, handle):
+        return
+    try:
+        ensure(kdir, timeout=LEGACY_ENSURE_SECONDS)
+    except (RuntimeError, OSError):
+        pass
+
+
+def source_owner(kdir, handle):
+    """The instance that hosts a session now, for seeding its work item's checkout."""
+    try:
+        manifest = read(manifest_path(kdir, handle))
+    except RuntimeError:
+        manifest = None
+    if manifest:
+        status = ensure(kdir)
+        return (serving_host(kdir, current_manifest(kdir, manifest)) or status)['instance_name']
+    return live_owner(kdir, handle) or ensure(kdir)['instance_name']
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     RUNTIME.runtime_name()
+    if argv[:1] == ['request']:
+        return request(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('verb', choices=['start', 'inspect', 'attach', 'send', 'answer', 'peek', 'close', 'wait',
                                          '_supervise', '_self-check', '_source-owner'])
@@ -1604,6 +1717,7 @@ def main(argv=None):
         except RuntimeError:
             managed = False
         if not managed:
+            ensure_for_unowned_session(kdir, handle)
             os.execv('/bin/bash', ['bash', str(SCRIPTS / ('session-' + verb + '.sh')), *argv[1:]])
     args = parser.parse_args(argv)
     if (any(arg == '--lines' or arg.startswith('--lines=') for arg in argv) and args.lines < 1) or (any(arg == '--max-bytes' or arg.startswith('--max-bytes=') for arg in argv) and args.max_bytes < 1):
@@ -1628,13 +1742,12 @@ def main(argv=None):
     else:
         if not args.handle:
             parser.error('a session handle is required')
+        if args.verb == '_source-owner':
+            print(source_owner(kdir, args.handle))
+            return 0
         manifest = read(manifest_path(kdir, args.handle))
         if not manifest:
             raise RuntimeError('unknown managed session handle')
-        if args.verb == '_source-owner':
-            status = ensure(kdir)
-            print((serving_host(kdir, current_manifest(kdir, manifest)) or status)['instance_name'])
-            return 0
         result = operate(args, kdir, manifest)
     if args.json or args.verb == 'inspect':
         print(json.dumps(result))

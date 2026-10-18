@@ -261,11 +261,26 @@ Restart that instance, or choose a live instance name from 'lore session list' a
       seed_fail "instance '$FROM_INSTANCE' is stale: its registry row is ${INSTANCE_AGE}s old (live window ${SESSION_INSTANCE_LIVENESS_TTL_SECONDS}s).
 Restart that instance, or choose a live instance name from 'lore session list' and re-run."
     fi
-    if ! SOURCE_CHECKOUT_RAW="$(jq -er --arg instance "$FROM_INSTANCE" '
-        select(.name == $instance) | (.project_dir // "")
+    if ! FROM_SCOPE="$(jq -er --arg instance "$FROM_INSTANCE" '
+        select(.name == $instance) | (.scope // "")
       ' "$REGISTRY" 2>/dev/null)"; then
       seed_fail "registry row for instance '$FROM_INSTANCE' is invalid or names a different instance.
 Restart that instance so it publishes a fresh registry row, then re-run."
+    fi
+    if [[ "$FROM_SCOPE" == "store" ]]; then
+      # The store's session host serves every checkout of the store, so the checkout
+      # to declare is the one this command runs in.
+      CWD_CHECKOUT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+      if [[ -z "$CWD_CHECKOUT" ]]; then
+        seed_fail "instance '$FROM_INSTANCE' is the store's session host, which serves every checkout of this store, so the checkout to declare is the one this command runs in; '$PWD' is not inside a git checkout.
+Re-run from inside the checkout this item builds in."
+      fi
+      if ! SOURCE_CHECKOUT_RAW="$(store_checkout_of "$KNOWLEDGE_DIR" "$CWD_CHECKOUT" 2>&1)"; then
+        seed_fail "instance '$FROM_INSTANCE' is the store's session host, which serves only checkouts of this store, and the checkout this command runs in cannot be declared: $SOURCE_CHECKOUT_RAW.
+Re-run from inside a checkout of this store."
+      fi
+    else
+      SOURCE_CHECKOUT_RAW="$(jq -r '.project_dir // ""' "$REGISTRY")"
     fi
     if [[ -z "$SOURCE_CHECKOUT_RAW" ]]; then
       seed_fail "instance '$FROM_INSTANCE' records no checkout path (project_dir).
@@ -293,9 +308,10 @@ The instance that spawned this session is gone; re-run from a session on a live 
     fi
 
     # The session's own row carries its provenance: the checkout the worktree guard
-    # captured when the session worktree was allocated. A session that runs without
-    # a worktree has no such capture, and its checkout is the hosting instance's
-    # project directory — set once at process start and immutable for its life.
+    # captured when the session worktree was allocated, else the checkout the row
+    # names as its source (a store host records one per session). Only then does a
+    # session fall back to the hosting instance's project directory, set once at
+    # process start and immutable for its life.
     # Neither value is inferred from git or from the working directory, both of
     # which describe the session worktree rather than the checkout behind it.
     if ! SOURCE_CHECKOUT_RAW="$(jq -er \
@@ -304,7 +320,7 @@ The instance that spawned this session is gone; re-run from a session on a live 
           | (.project_dir // "") as $instance_dir
           | [.sessions[]? | select(.slug == $slug and .type == $type)]
           | if length == 1
-            then ((.[0].worktree.captured.canonical_path // "")
+            then ((.[0].worktree.captured.canonical_path // .[0].source_dir // "")
                   | if . == "" then $instance_dir else . end)
             else error("no unique session row") end
         ' "$REGISTRY" 2>/dev/null)"; then
@@ -324,18 +340,27 @@ Restore that checkout, or re-run from a session in the clone this item should bu
   fi
 
   # Validate against the live registry before writing — the same preflight every
-  # other declared placement field gets. A declaration no instance serves would
-  # be authoritative and unclaimable, and nothing downstream re-validates it.
-  LIVE_DIRS="$(live_instance_project_dirs "$INSTANCES_DIR")"
-  if ! printf '%s\n' "$LIVE_DIRS" | grep -qxF -- "$SOURCE_CHECKOUT"; then
-    if [[ -n "$LIVE_DIRS" ]]; then
-      seed_fail "no live instance is running in '$SOURCE_CHECKOUT'.
-Live checkouts (live window ${SESSION_INSTANCE_LIVENESS_TTL_SECONDS}s):
-$(printf '%s\n' "$LIVE_DIRS" | sed 's/^/  /')
-Start or re-point an instance in that checkout, then re-run."
-    fi
-    seed_fail "no live instance is running in '$SOURCE_CHECKOUT', and no live instance reports a checkout at all (live window ${SESSION_INSTANCE_LIVENESS_TTL_SECONDS}s).
-Start an instance in that checkout, then re-run."
+  # other declared placement field gets. A declaration no live host would claim
+  # requests for is authoritative and unclaimable, and nothing downstream
+  # re-validates it. The store's session host claims requests carrying its key and
+  # a visible lore-tui claims unkeyed ones, so either serving the checkout counts.
+  STORE_HOST_KEY="$(store_host_key_for "$KNOWLEDGE_DIR")" || seed_fail "could not compute this store's session host key"
+  STORE_PLACEMENT="$(live_placement "$INSTANCES_DIR" "$STORE_HOST_KEY" "$SOURCE_CHECKOUT")" \
+    || seed_fail "could not read the live instance registry at $INSTANCES_DIR"
+  TUI_PLACEMENT="$(live_placement "$INSTANCES_DIR" "" "$SOURCE_CHECKOUT")" \
+    || seed_fail "could not read the live instance registry at $INSTANCES_DIR"
+  if ! printf '%s' "$STORE_PLACEMENT" | jq -e '.served' >/dev/null \
+      && ! printf '%s' "$TUI_PLACEMENT" | jq -e '.served' >/dev/null; then
+    LIVE_HOSTS="$( { printf '%s' "$STORE_PLACEMENT"; printf '%s' "$TUI_PLACEMENT"; } | jq -rs '[.[].servers[]] | .[] | "  " + .')"
+    WHY="$(printf '%s' "$STORE_PLACEMENT" | jq -r '.store_checkout_error // empty')"
+    [[ -z "$WHY" ]] || WHY="The store's session host serves only checkouts of this store, and $WHY.
+"
+    [[ -n "$LIVE_HOSTS" ]] || LIVE_HOSTS="  (none)"
+    STORE_HOST_DIR="$(store_host_dir_for "$KNOWLEDGE_DIR" 2>/dev/null || true)"
+    seed_fail "no live host would claim requests for '$SOURCE_CHECKOUT'.
+Live hosts (live window ${SESSION_INSTANCE_LIVENESS_TTL_SECONDS}s):
+$LIVE_HOSTS
+${WHY}Requests naming a checkout go to the store's session host, which 'lore session start' and 'lore session request' start when needed; its diagnostics are $STORE_HOST_DIR/host.log and $STORE_HOST_DIR/supervisor-error.json. Open lore-tui in that checkout instead, or re-run from a checkout of this store."
   fi
 fi
 

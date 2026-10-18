@@ -109,5 +109,80 @@ class Admission(unittest.TestCase):
         self.assertIn('known build vintage', result.stderr)
         self.assertEqual(list((self.root / '_sessions/requests/pending').glob('*.json')), [])
 
+class StoreScopeAdmission(unittest.TestCase):
+    """A store host serves every checkout of its store, checked as the host checks
+    it at claim time: by resolving the checkout with LORE_KNOWLEDGE_DIR removed."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        env = {k: v for k, v in os.environ.items() if k not in {'LORE_KNOWLEDGE_DIR', 'LORE_SESSION_RUNTIME'}}
+        env['LORE_DATA_DIR'] = str(self.root / 'data')
+        patcher = patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.kdir = self.root / 'data/repos/github.com/acme/widget'
+        self.instances = self.kdir / '_sessions/instances'
+        self.instances.mkdir(parents=True)
+        self.key = m.RUNTIME.store_host_key(self.kdir)
+        self.ours = self.checkout('ours', 'https://github.com/acme/widget.git')
+        self.foreign = self.checkout('foreign', 'https://github.com/other/thing.git')
+        self.unresolvable = self.checkout('unresolvable', None)
+        (self.instances / 'store-host.json').write_text(json.dumps(dict(
+            name='store-host', pid=os.getpid(), role='session-host', scope='store', host_key=self.key,
+            runtime_capabilities=[a.POSITION_CAPABILITY], build_time='2026-10-18T00:00:00Z')))
+
+    def checkout(self, name, remote):
+        path = self.root / 'checkouts' / name
+        path.mkdir(parents=True)
+        subprocess.run(['git', '-C', str(path), 'init', '-q'], check=True)
+        if remote:
+            subprocess.run(['git', '-C', str(path), 'remote', 'add', 'origin', remote], check=True)
+        return str(path)
+
+    def row(self, required, **fields):
+        row = dict(host_key=self.key, required_project_dir=required, extra_context={'position_preparation': {}})
+        row.update(fields)
+        return row
+
+    def test_a_checkout_of_the_store_is_admitted_to_its_store_host_without_a_name_pin(self):
+        self.assertNotIn('LORE_KNOWLEDGE_DIR', os.environ)
+        row = a.admit(self.row(self.ours), self.instances)
+        self.assertNotIn('target_instance', row)
+        self.assertEqual(row['required_runtime_capabilities'], [a.POSITION_CAPABILITY])
+
+    def test_a_foreign_checkout_or_one_inside_the_store_is_refused(self):
+        inside = self.kdir / '_coordination/worktrees/tree'
+        inside.mkdir(parents=True)
+        subprocess.run(['git', '-C', str(inside), 'init', '-q'], check=True)
+        for required in (self.foreign, str(inside), str(self.root / 'checkouts')):
+            with self.subTest(required=required), self.assertRaisesRegex(RuntimeError, 'no live compatible runtime'):
+                a.admit(self.row(required), self.instances)
+        self.assertIn('belongs to knowledge store', a.placement(self.instances, self.key, self.foreign)['store_checkout_error'])
+        self.assertIn('lies inside the knowledge store', a.placement(self.instances, self.key, str(inside))['store_checkout_error'])
+
+    def test_a_pinned_store_skips_resolution(self):
+        with self.assertRaises(RuntimeError):
+            a.admit(self.row(self.unresolvable), self.instances)
+        served = m.RUNTIME.login_dir() / 'served.json'
+        served.parent.mkdir(parents=True)
+        served.write_text(json.dumps({'schema_version': 1, 'stores': {str(self.kdir): {'pin_knowledge_dir': True}}}))
+        self.assertNotIn('target_instance', a.admit(self.row(self.unresolvable), self.instances))
+        with self.assertRaises(RuntimeError):
+            a.admit(self.row(str(self.kdir / '_sessions')), self.instances)
+
+    def test_placement_counts_only_rows_that_would_claim(self):
+        (self.instances / 'tui.json').write_text(json.dumps(dict(name='tui', project_dir=self.foreign)))
+        keyed = a.placement(self.instances, self.key, self.ours)
+        self.assertEqual((keyed['served'], keyed['served_by']), (True, ['store-host']))
+        self.assertEqual(a.placement(self.instances, self.key, self.foreign)['served_by'], [])
+        unkeyed = a.placement(self.instances, '', self.ours)
+        self.assertEqual((unkeyed['served'], unkeyed['servers']), (False, [f'tui: {self.foreign}']))
+        self.assertEqual(a.placement(self.instances, '', self.foreign)['served_by'], ['tui'])
+        with self.assertRaisesRegex(RuntimeError, 'no live compatible runtime'):
+            a.admit(self.row(self.ours, host_key=''), self.instances)
+
+
 if __name__ == '__main__':
     unittest.main()

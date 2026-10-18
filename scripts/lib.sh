@@ -499,39 +499,51 @@ resolve_physical_dir() {
   (cd -P -- "$dir" >/dev/null 2>&1 && pwd -P) || return 1
 }
 
-# live_instance_project_dirs <instances-dir> [ttl-seconds]
-# Print the project directory of every live registry row, one per line, sorted
-# and deduplicated — the checkouts a placement declaration can currently be
-# served from. The stored value is already physically resolved by its writer, so
-# it is emitted verbatim: byte equality against a resolve_physical_dir result is
-# the match the claiming side performs. Rows written before the field existed
-# carry no project_dir and are skipped rather than printed empty.
-live_instance_project_dirs() {
-  local instances_dir="$1"
-  local ttl="${2:-$SESSION_INSTANCE_LIVENESS_TTL_SECONDS}"
-  python3 - "$instances_dir" "$ttl" <<'PYEOF'
-import json, os, sys, time
+# live_placement <instances-dir> <host-key> <dir> [ttl-seconds]
+# The one placement check every enqueue-side reader shares. It prints JSON naming
+# the live registry rows that would claim a request carrying <host-key> (empty for
+# an unkeyed request, which only an unkeyed visible lore-tui claims), whether one
+# of them serves <dir>, and why <dir> is not a checkout of this store when that is
+# the reason. A row serves <dir> when it runs in exactly that checkout, or when it
+# is the store's session host (scope "store") and <dir> belongs to the store: the
+# top level of a git checkout outside the store directory that resolve-repo.sh,
+# run without LORE_KNOWLEDGE_DIR, resolves to this store (skipped when the store
+# host is pinned to the store). Counting only rows that can claim is what makes
+# "served" mean "will be claimed". <dir> may be empty to list the claimants.
+live_placement() {
+  python3 "$LORE_LIB_DIR/session-admission.py" placement "$1" "$2" "$3" \
+    "${4:-$SESSION_INSTANCE_LIVENESS_TTL_SECONDS}"
+}
 
-instances_dir, ttl = sys.argv[1], float(sys.argv[2])
-now = time.time()
-dirs = set()
-if os.path.isdir(instances_dir):
-    for name in sorted(os.listdir(instances_dir)):
-        if not name.endswith(".json"):
-            continue
-        path = os.path.join(instances_dir, name)
-        try:
-            if (now - os.path.getmtime(path)) > ttl:
-                continue
-            with open(path) as f:
-                row = json.load(f)
-        except (OSError, ValueError):
-            continue
-        project_dir = (row.get("project_dir") or "").strip()
-        if project_dir:
-            dirs.add(project_dir)
-for d in sorted(dirs):
-    print(d)
+# store_checkout_of <kdir> <dir>
+# Print the physically resolved checkout <dir> is when it belongs to the store by
+# live_placement's definition; otherwise print why not on stderr and return 1.
+store_checkout_of() {
+  python3 "$LORE_LIB_DIR/session-admission.py" checkout "$1" "$2"
+}
+
+# store_host_key_for <kdir> / store_host_dir_for <kdir>
+# The store host's key in the current runtime, and its host-state directory
+# (ready file, host.log, supervisor-error.json).
+store_host_key_for() {
+  python3 - "$LORE_LIB_DIR" "$1" <<'PYEOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("session_runtime", sys.argv[1] + "/session_runtime.py")
+runtime = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runtime)
+print(runtime.store_host_key(sys.argv[2]))
+PYEOF
+}
+
+store_host_dir_for() {
+  python3 - "$LORE_LIB_DIR" "$1" <<'PYEOF'
+import importlib.util, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("session_runtime", sys.argv[1] + "/session_runtime.py")
+runtime = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runtime)
+kdir = Path(sys.argv[2]).resolve()
+print(runtime.hosts_dir(kdir) / runtime.store_host_key(kdir))
 PYEOF
 }
 

@@ -12,14 +12,53 @@ PASS=0
 FAIL=0
 KDIR=$(mktemp -d)
 TEST_HOME=$(mktemp -d)
+CHECKOUTS=$(mktemp -d)
+RUNTIME_NAME="wsc-$$"
 
 cleanup() {
-  rm -rf "$KDIR" "$TEST_HOME"
+  rm -rf "$KDIR" "$TEST_HOME" "$CHECKOUTS"
 }
 trap cleanup EXIT
 
-mkdir -p "$KDIR/_work" "$KDIR/_sessions/instances" "$TEST_HOME/.lore"
+mkdir -p "$KDIR/_work" "$KDIR/_sessions/instances" "$TEST_HOME/.lore/config"
 ln -s "$SCRIPTS_DIR" "$TEST_HOME/.lore/scripts"
+cp "$REPO_DIR/adapters/settings.template.json" "$TEST_HOME/.lore/config/settings.json"
+
+# Every lore call runs in its own session runtime with a host binary that refuses
+# the store-host arguments, recorded as such, so ensure() fails at once instead of
+# starting a supervisor: a request then falls back to the live lore-tui serving
+# its checkout, as it does before 'bash install.sh' has rebuilt lore-tui.
+STUB_HOST="$TEST_HOME/bin/lore-tui-old"
+mkdir -p "$TEST_HOME/bin"
+printf '#!/bin/sh\nexit 2\n' > "$STUB_HOST"
+chmod +x "$STUB_HOST"
+export LORE_SESSION_RUNTIME="$RUNTIME_NAME" LORE_SESSION_HOST_BINARY="$STUB_HOST" \
+  LORE_SESSION_SUPERVISOR_QUIET_SECONDS=1 LORE_DATA_DIR="$TEST_HOME/.lore"
+unset LORE_SESSION_HOST_KEY LORE_SESSION_SOURCE_DIR
+
+session_runtime() {
+  HOME="$TEST_HOME" python3 - "$SCRIPTS_DIR" "$@" <<'PYEOF'
+import importlib.util, json, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("managed", sys.argv[1] + "/session-managed.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+op, kdir = sys.argv[2], Path(sys.argv[3]).resolve()
+key = m.RUNTIME.store_host_key(kdir)
+if op == "key":
+    print(key)
+elif op == "refuse":
+    stub = Path(sys.argv[4]).resolve()
+    m.atomic(m.host_dir(kdir, key) / "supervisor-error.json", dict(
+        schema_version=1, at=m.now(), store=str(kdir), host_key=key, exit_code=2, binary=str(stub),
+        binary_identity=m.file_identity(stub), error="test host binary refuses the store-host arguments"))
+elif op == "pin":
+    m.atomic(m.RUNTIME.login_dir() / "served.json",
+             {"schema_version": 1, "stores": {str(kdir): {"wanted_at": m.now(), "pin_knowledge_dir": True}}})
+PYEOF
+}
+session_runtime refuse "$KDIR" "$STUB_HOST"
+STORE_KEY="$(session_runtime key "$KDIR")"
 
 assert_contains() {
   local label="$1" haystack="$2" needle="$3"
@@ -96,9 +135,13 @@ assert_eq "happy: stores the named live instance's physical checkout" \
   "$(meta_checkout happy)" "$LIVE_CHECKOUT"
 
 REQUEST_OUTPUT=$(run_lore session request --type worker --slug happy--w9 \
-  --framework codex --prefer-dir "$LIVE_CHECKOUT" --context probe --initiator agent 2>&1)
+  --prefer-dir "$LIVE_CHECKOUT" --context probe --initiator agent 2>&1)
 assert_contains "happy: declared item permits the worker request" "$REQUEST_OUTPUT" \
   "[session] Enqueued worker request"
+assert_contains "happy: a store host that cannot start leaves the row to the live lore-tui" "$REQUEST_OUTPUT" \
+  "store's session host is unavailable"
+assert_eq "happy: the fallback row carries no host key" \
+  "$(python3 -c 'import json,sys,glob; print([json.load(open(p)).get("host_key", "") for p in glob.glob(sys.argv[1] + "/*.json")])' "$KDIR/_sessions/requests/pending")" "['']"
 
 # --- Explicit instance takes precedence over session provenance -------------
 
@@ -175,9 +218,58 @@ assert_contains "no provenance: existing refusal names the new repair" "$CAPTURE
 
 write_work_item request-repair
 capture_failure session request --type worker --slug request-repair--w9 \
-  --framework codex --prefer-dir "$LIVE_CHECKOUT" --context probe --initiator agent
+  --prefer-dir "$LIVE_CHECKOUT" --context probe --initiator agent
 assert_contains "request refusal: seed command names --from-instance" "$CAPTURED_OUTPUT" \
   "lore work source-checkout request-repair --from-instance <live-instance-name>"
+
+# --- The store's session host serves every checkout of the store -------------
+
+STORE_CHECKOUT="$CHECKOUTS/store-checkout"
+mkdir -p "$STORE_CHECKOUT"
+git -C "$STORE_CHECKOUT" init -q
+STORE_CHECKOUT="$(cd "$STORE_CHECKOUT" && pwd -P)"
+session_runtime pin "$KDIR"
+write_store_host() {
+  printf '%s\n' "{\"name\":\"store-host\",\"pid\":$$,\"role\":\"session-host\",\"scope\":\"store\",\"host_key\":\"$STORE_KEY\",\"runtime\":\"$RUNTIME_NAME\",\"sessions\":$1}" \
+    > "$KDIR/_sessions/instances/store-host.json"
+}
+write_store_host '[]'
+
+write_work_item from-store-host
+STORE_OUTPUT=$(cd "$STORE_CHECKOUT" && run_lore work source-checkout from-store-host --from-instance store-host 2>&1)
+assert_contains "store host: seeds the checkout the command runs in" "$STORE_OUTPUT" \
+  "source_checkout=$STORE_CHECKOUT"
+assert_eq "store host: stores that checkout" "$(meta_checkout from-store-host)" "$STORE_CHECKOUT"
+
+write_work_item store-host-outside
+set +e
+OUTSIDE_OUTPUT=$(cd "$CHECKOUTS" && run_lore work source-checkout store-host-outside --from-instance store-host 2>&1)
+OUTSIDE_STATUS=$?
+set -e
+assert_eq "store host outside a checkout: exits non-zero" "$OUTSIDE_STATUS" "1"
+assert_contains "store host outside a checkout: says why" "$OUTSIDE_OUTPUT" "is not inside a git checkout"
+assert_eq "store host outside a checkout: does not mutate the item" "$(meta_checkout store-host-outside)" ""
+
+INSIDE_STORE="$KDIR/_sessions/worktrees/inner"
+mkdir -p "$INSIDE_STORE"
+git -C "$INSIDE_STORE" init -q
+write_work_item store-host-inside
+set +e
+INSIDE_OUTPUT=$(cd "$INSIDE_STORE" && run_lore work source-checkout store-host-inside --from-instance store-host 2>&1)
+INSIDE_STATUS=$?
+set -e
+assert_eq "store host inside the store: exits non-zero" "$INSIDE_STATUS" "1"
+assert_contains "store host inside the store: names the store" "$INSIDE_OUTPUT" "lies inside the knowledge store"
+
+write_work_item hosted
+write_store_host "[{\"slug\":\"hosted--w1\",\"type\":\"worker\",\"source_dir\":\"$STORE_CHECKOUT\"}]"
+HOSTED_OUTPUT=$(
+  LORE_SESSION_INSTANCE=gone-generation LORE_SESSION_SLUG=hosted--w1 LORE_SESSION_TYPE=worker \
+    LORE_SESSION_HOST_KEY="$STORE_KEY" HOME="$TEST_HOME" LORE_KNOWLEDGE_DIR="$KDIR" \
+    "$LORE" work source-checkout hosted 2>&1
+)
+assert_contains "store-hosted session: seeds the session row's source_dir" "$HOSTED_OUTPUT" \
+  "source_checkout=$STORE_CHECKOUT"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

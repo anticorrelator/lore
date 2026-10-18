@@ -163,11 +163,13 @@ if [[ "$INSTANCE_COUNT" -gt 0 ]]; then
   # explicit-fallback idiom as vintage. The distinction matters to the coordinator's
   # one-list-read routing: an omitted segment would read as claude-code, whereas
   # "unknown" says "can't tell — peek or pin the instance".
+  # The store's session host names no checkout because it serves all of them, so
+  # its row says so instead of rendering "unknown".
   # Generated chat identities retain the compact chat:<suffix> display handle;
   # every session verb canonicalizes it back to the registry's chat-<suffix>.
   # A legacy slugless row falls back to its session id so it stays visible and
   # closeable through `session close --session` during rolling upgrades.
-  printf '%s' "$RESULT" | jq -r '
+  printf '%s' "$RESULT" | jq -r --arg store "$KNOWLEDGE_DIR" '
     .instances[]
     | (if .build_sha then .build_sha + (if .build_time then " (" + .build_time + ")" else "" end)
        elif .build_time then .build_time
@@ -181,7 +183,9 @@ if [[ "$INSTANCE_COUNT" -gt 0 ]]; then
           else "chat:" + ((.session_id // "") | if . == "" then "?" else .[0:8] end)
           end]
        | join(", ")) as $sessions
-    | "  instance \(.name) (pid \(.pid)) — \($framework) @ \($project_dir) — vintage \($vintage) — sessions: \(if $sessions == "" then "none" else $sessions end)"'
+    | (if .scope == "store" then "store host serving every checkout of \($store)"
+       else "\($framework) @ \($project_dir)" end) as $placement
+    | "  instance \(.name) (pid \(.pid)) — \($placement) — vintage \($vintage) — sessions: \(if $sessions == "" then "none" else $sessions end)"'
 fi
 if [[ "$PENDING_COUNT" -gt 0 ]]; then
   # A pending row carries the same session identity the instance line will show

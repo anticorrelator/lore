@@ -214,6 +214,74 @@ Runtime delivery attempts are persisted before input. Mutable facade indexes are
 serialized with advisory locks and atomically replaced; the journal continues
 through its sole sanctioned writer.
 
+### Host keys from before store-scoped hosting
+
+Before store-scoped hosting, each (store, checkout) pair had its own host and
+host key, and its manifests, queued requests and delivery records name that key.
+Before a store's host is launched, and on each supervisor pass after, the
+supervisor moves each such old key onto the store key, once:
+
+1. It copies the old key's delivery, allocation and cleanup records that the
+   store key lacks, byte for byte, by temporary file and rename.
+2. It rewrites `host_key` on the old key's managed manifests, each under its own
+   lock, and on its pending and claimed request rows, under the request expiry
+   sweep's lock, so the sweep cannot revive a row it has just expired.
+3. It writes `migrated.json` (`from`, `to`, `at`) in the old key's directory and
+   leaves the old files in place.
+
+A start intent more than 24 hours old is not moved or started. Its manifest is
+marked `request_abandoned`, with a journal row giving the reason
+`stale-intent-at-migration`, so retrying that start under the same `--key` reports
+the abandonment; start it again with a new key if it is still wanted.
+
+An old key is left alone while its host or supervisor still holds its locks; until
+that host exits, it keeps serving its own sessions. Only the default runtime
+migrates: old keys carry no runtime name, while the manifests and queue they
+index are shared by every runtime, so a key that also appears under a named
+runtime's `hosts/` is skipped and reported in `supervisor.log`. Readers always
+read a manifest's key fresh, so an operation in flight during a migration finds
+the copied records and the new host. The store host adopts the surviving
+sessions of migrated keys on its next pass, without a restart.
+
+## Raw requests
+
+`lore session request` sends a request that names a checkout to the store's
+session host. A request names a checkout when its work item declares one or it
+passes `--prefer-dir` or `--prefer-cwd`. The command ensures the host first,
+then writes the row with the store host's key while holding the host's
+`ensure.lock`, so the host cannot withdraw before the row lands. Any other
+request, including one with `--target`, is written without a key, for a visible
+lore-tui to claim.
+
+If the store host cannot be started or reached, the row is written without a key
+only when a live lore-tui serves its checkout and will claim it. Otherwise the
+request is refused. The refusal gives the reason, the host's `host.log` and
+`supervisor-error.json`, and the repair; when the installed lore-tui is older
+than the scripts, the repair is `lore rebuild` or `bash install.sh`.
+
+Placement checks count only hosts that would claim the row. The writer's
+checkout preflight, its `--target` check, runtime admission and source-checkout
+seeding all ask the same question: does a live registry row carrying the
+request's host key serve this checkout? A row serves a checkout when it runs in
+exactly that checkout. The store host (`scope: "store"`) serves any checkout
+that belongs to its store. That is the top level of a git checkout outside the
+store directory that `resolve-repo.sh`, run without `LORE_KNOWLEDGE_DIR`,
+resolves to the store. When the store host was started with
+`LORE_KNOWLEDGE_DIR` naming its store, the resolution step is skipped. The
+store host applies the same rule when it claims. An unkeyed request matches only
+an unkeyed lore-tui.
+
+`lore work source-checkout <item> --from-instance <store host>` declares the
+checkout the command runs in, which must belong to the store. Inside a session,
+seeding reads the session row's own `source_dir` before falling back to its host's
+project directory.
+
+`send`, `answer`, `peek`, `close` and `wait` on a session without a managed
+manifest first bring up the store host when no live host lists the session, for
+at most 10 seconds, since the host may be about to adopt or claim it. They then
+run as before, so their existing errors are what the caller sees when nothing
+serves the session.
+
 Raw `lore session request`, instance targeting, and unmanaged session verbs remain
 available. Their lower-level placement and cursor contracts are documented in
 [session-substrate.md](session-substrate.md). They are compatibility and explicit
