@@ -670,7 +670,7 @@ def operate_attempt(args, kdir, manifest):
                 time.sleep(.15)
     rid = 'managed-' + secrets.token_hex(16)
     row = dict(request_id=rid, slug=manifest['handle'], target_instance=live['instance_name'],
-               requested_by=os.environ.get('LORE_SESSION_SLUG', 'managed-cli'), requested_at=now())
+               requested_by=args.requested_by or os.environ.get('LORE_SESSION_SLUG', 'managed-cli'), requested_at=now())
     if args.verb == 'send':
         body = args.message if args.message is not None else args.text
         if not body:
@@ -747,6 +747,7 @@ def main(argv=None):
     parser.add_argument('--expect')
     parser.add_argument('--registration-id')
     parser.add_argument('--reason')
+    parser.add_argument('--requested-by')
     parser.add_argument('--generation')
     parser.add_argument('--raw', action='store_true')
     parser.add_argument('--summary', action='store_true')

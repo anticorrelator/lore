@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -198,6 +199,31 @@ class ManagedSessions(unittest.TestCase):
         self.assertEqual(result['instance_name'], 'alive')
         launch.assert_called_once()
         self.assertIn('_supervise', launch.call_args.args[0])
+
+    def managed_close_from_the_tui(self, *extra):
+        manifest = dict(handle='task--w123', host_key='abc', source_dir=str(self.source))
+        m.atomic(m.manifest_path(self.kdir, manifest['handle']), manifest)
+        published = []
+        target = importlib.util.spec_from_file_location('session_target', ROOT / 'scripts/session_target.py')
+        session_target = importlib.util.module_from_spec(target)
+        target.loader.exec_module(session_target)
+        environ = {k: v for k, v in os.environ.items() if k != 'LORE_SESSION_SLUG'}
+        with patch.dict(sys.modules, {'session_target': session_target}), \
+                patch.dict(os.environ, environ, clear=True), \
+                patch.object(m, 'inspect', return_value={'state': 'running'}), patch.object(m, 'ensure'), \
+                patch.object(m, 'owner', return_value={'instance_name': 'host', 'type': 'implement', 'session_id': 's1'}), \
+                patch.object(m, 'publish_operation', side_effect=lambda kdir, manifest, verb, row: published.append(row)), \
+                patch.object(m, 'append'), patch.object(m, 'await_outcome', return_value={'outcome': 'closed'}):
+            code = m.main(['close', manifest['handle'], '--reason', 'human', *extra, '--kdir', str(self.kdir)])
+        return code, published
+
+    def test_managed_close_accepts_the_tui_requested_by(self):
+        code, published = self.managed_close_from_the_tui('--requested-by', 'tui-instance')
+        self.assertEqual(code, 0)
+        self.assertEqual(published[0]['requested_by'], 'tui-instance')
+        self.assertEqual(published[0]['reason'], 'human')
+        code, published = self.managed_close_from_the_tui()
+        self.assertEqual(published[0]['requested_by'], 'managed-cli')
 
     def test_path_escape_rejected(self):
         for handle in ['../../task--w1', '/tmp/task--w1', 'task--w../evil']:

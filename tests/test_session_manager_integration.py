@@ -253,7 +253,9 @@ class ManagedSessionIntegration(unittest.TestCase):
         self.assertTrue(listed.stdout.strip())
         production = self.run_command(["tmux", "-L", "lore-tui", "list-sessions"])
         self.assertNotEqual(production.returncode, 0, production.stdout)
-        self.session("close", handle)
+        # The visible TUI closes with this argument shape (tui/sessions_view.go).
+        _, closed = self.session("close", handle, "--reason", "human", "--requested-by", "tui-instance")
+        self.assertEqual(closed["outcome"], "closed", closed)
 
     def test_peek_separates_input_activity_and_modal_evidence(self):
         for framework in ("claude-code", "codex", "opencode"):
