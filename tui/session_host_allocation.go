@@ -53,7 +53,8 @@ func (m model) recoverHostAllocations() error {
 	}
 	launched := map[string]bool{}
 	for _, owner := range owners {
-		if owner.HostKey == m.hostKey && owner.ProjectDir == m.normalizedProjectDir {
+		// A store host's rows name no checkout; the key alone scopes them.
+		if owner.HostKey == m.hostKey {
 			for _, s := range owner.Sessions {
 				launched[s.RequestID] = true
 			}

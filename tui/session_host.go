@@ -1,12 +1,15 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -20,8 +23,8 @@ import (
 )
 
 type hostOptions struct {
-	Key, KnowledgeDir, SourceDir, ReadyFile, Runtime string
-	Idle                                             time.Duration
+	Key, KnowledgeDir, ReadyFile, Runtime string
+	Idle                                  time.Duration
 }
 
 func sessionHostRole(key string) string {
@@ -104,20 +107,33 @@ func canonicalHostDir(path string) (string, error) {
 func (m model) hostDir() string {
 	return filepath.Join(config.SessionHostsDir(m.sessionsDir), m.hostKey)
 }
+
+// sessionHostMain runs a host that serves every checkout of one knowledge
+// store. Exit codes: 0 after an idle withdrawal, 1 on an error, 2 on invalid
+// arguments (including the retired --source-dir form), 3 when another host
+// already holds the store's runtime lock.
 func sessionHostMain(args []string) int {
 	fs := flag.NewFlagSet("session-host", flag.ContinueOnError)
 	var o hostOptions
 	var idle float64
+	var scope, retiredSource string
+	fs.StringVar(&scope, "scope", "", `host scope; "store" serves every checkout of the knowledge store`)
 	fs.StringVar(&o.Key, "host-key", "", "stable host key")
 	fs.StringVar(&o.KnowledgeDir, "kdir", "", "knowledge store")
-	fs.StringVar(&o.SourceDir, "source-dir", "", "canonical source checkout")
+	fs.StringVar(&retiredSource, "source-dir", "", "retired: checkout-scoped hosting is replaced by --scope store")
 	fs.StringVar(&o.ReadyFile, "ready-file", "", "ready metadata")
 	fs.Float64Var(&idle, "idle-timeout", 60, "idle timeout in seconds")
 	fs.StringVar(&o.Runtime, "runtime", "", "session runtime namespace; must match "+config.SessionRuntimeEnv)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if fs.NArg() != 0 || o.Key == "" || strings.ContainsAny(o.Key, "/\\") || o.SourceDir == "" || o.KnowledgeDir == "" || !filepath.IsAbs(o.ReadyFile) || idle < 0 {
+	sourceGiven := false
+	fs.Visit(func(f *flag.Flag) { sourceGiven = sourceGiven || f.Name == "source-dir" })
+	if sourceGiven || scope != "store" {
+		fmt.Fprintln(os.Stderr, "session host: checkout-scoped hosting (--source-dir) is retired; a host serves every checkout of its store and starts with --scope store")
+		return 2
+	}
+	if fs.NArg() != 0 || o.Key == "" || strings.ContainsAny(o.Key, "/\\") || o.KnowledgeDir == "" || !filepath.IsAbs(o.ReadyFile) || idle < 0 {
 		fmt.Fprintln(os.Stderr, "invalid session host arguments")
 		return 2
 	}
@@ -125,13 +141,19 @@ func sessionHostMain(args []string) int {
 		fmt.Fprintf(os.Stderr, "session host --runtime %q does not match %s=%q\n", o.Runtime, config.SessionRuntimeEnv, namespace)
 		return 2
 	}
-	var err error
-	o.SourceDir, err = canonicalHostDir(o.SourceDir)
+	givenKnowledgeDir, err := filepath.Abs(o.KnowledgeDir)
 	if err == nil {
 		o.KnowledgeDir, err = canonicalHostDir(o.KnowledgeDir)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	// Every hosted session inherits this environment, and resolve-repo.sh answers
+	// LORE_KNOWLEDGE_DIR for any directory, so a value naming another store would
+	// point this store's agents at that one.
+	if pin := os.Getenv("LORE_KNOWLEDGE_DIR"); pin != "" && config.NormalizeProjectDir(pin) != o.KnowledgeDir {
+		fmt.Fprintf(os.Stderr, "session host: LORE_KNOWLEDGE_DIR=%s names another knowledge store than --kdir %s; start the host with it unset or naming this store\n", pin, o.KnowledgeDir)
 		return 1
 	}
 	o.Idle = time.Duration(idle * float64(time.Second))
@@ -158,29 +180,25 @@ func sessionHostMain(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if err = os.Chdir(o.SourceDir); err != nil {
+	// Nothing reads a checkout from the working directory: each session's
+	// checkout comes from its request row.
+	if err = os.Chdir(o.KnowledgeDir); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	cfg, err := config.Load()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
+	cfg := config.Config{
+		KnowledgeDir:   o.KnowledgeDir,
+		WorkDir:        filepath.Join(o.KnowledgeDir, "_work"),
+		RepoIdentifier: storeRepoIdentifier(givenKnowledgeDir, o.KnowledgeDir),
 	}
-	if config.NormalizeProjectDir(cfg.KnowledgeDir) != o.KnowledgeDir {
-		fmt.Fprintln(os.Stderr, "source checkout resolves to another knowledge store")
-		return 1
-	}
-	cfg.ProjectDir = o.SourceDir
-	cfg.KnowledgeDir = o.KnowledgeDir
-	cfg.WorkDir = filepath.Join(o.KnowledgeDir, "_work")
 	m := newModel(cfg, config.LoadPrefs(), stateWork)
 	m.hostKey = o.Key
 	m.width = 140
 	m.height = 48
 	m.sessionsDir = filepath.Join(o.KnowledgeDir, "_sessions")
-	m.normalizedProjectDir = o.SourceDir
-	m.instanceName, err = session.GenerateName(m.sessionsDir, "")
+	m.instanceName, err = storeHostInstanceName(m.sessionsDir, o.Key, func() (string, error) {
+		return session.GenerateName(m.sessionsDir, "")
+	}, tmuxSessionNames)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -217,6 +235,73 @@ func sessionHostMain(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// storeRepoIdentifier names the store the way config.Load names a visible
+// TUI's repo: its path below <data dir>/repos, else its base name. A TUI
+// derives that from unresolved `lore resolve` output, so the store path as
+// given and as resolved are both tried against the data dir as set and as
+// resolved.
+func storeRepoIdentifier(given, resolved string) string {
+	data := os.Getenv("LORE_DATA_DIR")
+	if data == "" {
+		home, _ := os.UserHomeDir()
+		data = filepath.Join(home, ".lore")
+	}
+	roots := []string{data}
+	if r, err := filepath.EvalSymlinks(data); err == nil && r != data {
+		roots = append(roots, r)
+	}
+	for _, root := range roots {
+		prefix := filepath.Join(root, "repos") + string(filepath.Separator)
+		for _, dir := range []string{given, resolved} {
+			if strings.HasPrefix(dir, prefix) {
+				return strings.TrimPrefix(dir, prefix)
+			}
+		}
+	}
+	return filepath.Base(resolved)
+}
+
+// storeHostInstanceName picks this host's instance name. A tmux session is
+// named lore-<instance>-<slug> on a server that every store of this runtime
+// shares, while GenerateName checks a name only against this store's live
+// registry rows, so two stores' hosts could draw the same name and then the
+// same tmux name for equal slugs. The name therefore ends in a tag derived
+// from the store host key, which no other store's host shares, and a draw is
+// refused while any tmux session already starts with lore-<name>- or any
+// registry row of this store, live or dead, still holds the name: a dead
+// row is a recovery manifest that a fresh write would overwrite.
+func storeHostInstanceName(sessionsDir, key string, draw func() (string, error), tmuxNames func() []string) (string, error) {
+	sum := sha256.Sum256([]byte(key))
+	tag := hex.EncodeToString(sum[:3])
+	names := tmuxNames()
+	for attempt := 0; attempt < 32; attempt++ {
+		base, err := draw()
+		if err != nil {
+			return "", err
+		}
+		name := base + "-" + tag
+		taken := false
+		for _, tmux := range names {
+			taken = taken || strings.HasPrefix(tmux, work.TmuxSessionName(name, ""))
+		}
+		rows, _ := filepath.Glob(filepath.Join(session.InstancesDir(sessionsDir), name+".json*"))
+		if !taken && len(rows) == 0 {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("session host: no free instance name for host key %s", key)
+}
+
+// tmuxSessionNames lists every session on this runtime's tmux server, or none
+// when the server is not running.
+func tmuxSessionNames() []string {
+	out, err := exec.Command("tmux", "-L", config.TmuxServer(), "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(string(out))
 }
 
 type hostRuntimeErrorMsg struct{ err error }
@@ -289,7 +374,12 @@ func (h *sessionHostModel) publishReady() error {
 	if err := h.runtime.recoverHostDeliveries(); err != nil {
 		return err
 	}
-	return hostAtomicJSON(h.options.ReadyFile, map[string]any{"schema_version": 1, "host_key": h.options.Key, "instance_name": h.runtime.instanceName, "pid": os.Getpid(), "source_dir": h.options.SourceDir, "knowledge_dir": h.options.KnowledgeDir, "ready": true, "runtime_capabilities": session.RuntimeCapabilities()})
+	return hostAtomicJSON(h.options.ReadyFile, map[string]any{
+		"schema_version": 2, "scope": session.ScopeStore, "host_key": h.options.Key,
+		"instance_name": h.runtime.instanceName, "pid": os.Getpid(), "knowledge_dir": h.options.KnowledgeDir,
+		"ready": true, "runtime_capabilities": session.RuntimeCapabilities(),
+		"build_sha": h.runtime.buildSHA, "build_time": h.runtime.buildTime,
+	})
 }
 func (h *sessionHostModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd

@@ -77,7 +77,7 @@ func TestSessionHostRequiresRuntimeFlagToMatchSetting(t *testing.T) {
 	dir := t.TempDir()
 	ready := filepath.Join(dir, "hosts", "k", "ready.json")
 	args := func(extra ...string) []string {
-		return append([]string{"--host-key", "k", "--kdir", dir, "--source-dir", dir, "--ready-file", ready}, extra...)
+		return append([]string{"--scope", "store", "--host-key", "k", "--kdir", dir, "--ready-file", ready}, extra...)
 	}
 	for _, tc := range []struct {
 		setting string

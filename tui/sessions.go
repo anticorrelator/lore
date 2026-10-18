@@ -458,6 +458,11 @@ func (m model) queueTickCmd() tea.Cmd {
 	kdir := m.config.KnowledgeDir
 	vintage := m.buildTime
 	projectDir := m.normalizedProjectDir
+	hostKey := m.hostKey
+	var scope session.StoreScope
+	if hostKey != "" {
+		scope = m.storeScope()
+	}
 	planDocs := make(map[string]bool)
 	for _, it := range m.list.Items() {
 		planDocs[it.Slug] = it.HasPlanDoc
@@ -498,19 +503,24 @@ func (m model) queueTickCmd() tea.Cmd {
 		live := make(map[string]bool)
 		instances, instanceDiagnostics := session.ListInstancesWithDiagnostics(dir)
 		for _, inst := range instances {
-			if m.hostKey == "" || session.ProcessAlive(inst.PID) {
+			if hostKey == "" || session.ProcessAlive(inst.PID) {
 				live[inst.Name] = true
 			}
 		}
-		res, err := session.QueueTickForHostAdmission(dir, name, vintage, projectDir, m.hostKey, live,
-			func(slug string) bool { return planDocs[slug] },
-			func(slug string) bool { return liveSlugs[slug] },
-			time.Now(), session.ReclaimAfter, func(req session.Request) error {
-				if req.Type != "worker" {
-					return nil
-				}
-				return work.PreflightWorker(req.FrameworkValue(), len(req.PositionContext()) > 0)
-			})
+		hasPlanDoc := func(slug string) bool { return planDocs[slug] }
+		slugLive := func(slug string) bool { return liveSlugs[slug] }
+		admit := func(req session.Request) error {
+			if req.Type != "worker" {
+				return nil
+			}
+			return work.PreflightWorker(req.FrameworkValue(), len(req.PositionContext()) > 0)
+		}
+		var res session.QueueTickResult
+		if hostKey != "" {
+			res, err = session.QueueTickForStoreHost(dir, name, vintage, hostKey, scope, live, hasPlanDoc, slugLive, time.Now(), session.ReclaimAfter, admit)
+		} else {
+			res, err = session.QueueTickForHostAdmission(dir, name, vintage, projectDir, "", live, hasPlanDoc, slugLive, time.Now(), session.ReclaimAfter, admit)
+		}
 		if err == nil {
 			err = expiryErr
 		} else if expiryErr != nil {
@@ -885,6 +895,10 @@ func (m model) adoptionScanCmd() tea.Cmd {
 	destination := m.normalizedProjectDir
 	if destination == "" {
 		destination = m.config.ProjectDir
+	}
+	if m.hostKey != "" {
+		// A store host's rows, and so its predecessors' rows, carry no project dir.
+		destination = ""
 	}
 	transferred := m.instanceRow()
 	return func() tea.Msg {
@@ -1398,7 +1412,33 @@ func (m model) handleQueueTickResult(msg queueTickResultMsg) (model, tea.Cmd) {
 // spawnFromRequest maps a claimed request onto a session descriptor and drives
 // the shared spawn path. Agent-initiated, so it never steals focus.
 func (m model) spawnFromRequest(req session.Request) (model, tea.Cmd) {
-	return m.spawnSessionOnRef(descriptorFromRequest(req), req.RequestID, req.RequiredTargetRefValue())
+	return m.spawnSessionOnRef(descriptorFromRequest(req), req.RequestID, req.RequiredTargetRefValue(), m.requestCheckout(req))
+}
+
+// requestCheckout is the source checkout a claimed request's session is seeded
+// from. A visible TUI seeds from its own checkout. A store host has none: it
+// takes the checkout the row names, which admission already found to belong to
+// its store.
+func (m model) requestCheckout(req session.Request) string {
+	if m.hostKey == "" {
+		return m.normalizedProjectDir
+	}
+	if req.Checkout() == "" {
+		return ""
+	}
+	return config.NormalizeProjectDir(req.Checkout())
+}
+
+// storeScope is the store a host serves, for deciding which checkouts belong to
+// it. The resolver sits beside the journal script both come from.
+func (m model) storeScope() session.StoreScope {
+	kdir := m.config.KnowledgeDir
+	pin := os.Getenv("LORE_KNOWLEDGE_DIR")
+	return session.StoreScope{
+		KnowledgeDir: kdir,
+		Pinned:       pin != "" && config.NormalizeProjectDir(pin) == config.NormalizeProjectDir(kdir),
+		Resolver:     filepath.Join(filepath.Dir(m.eventScript), "resolve-repo.sh"),
+	}
 }
 
 // descriptorFromRequest maps a claimed queue request onto the session descriptor
@@ -1475,7 +1515,7 @@ func allocateSessionWorktreeOnRefCmd(d work.SessionDescriptor, sourceDir, worktr
 // Cmd. Agent-initiated spawns are marked so the started handler never steals
 // focus; human spawns keep the existing modal-return-focus behavior.
 func (m model) spawnSession(d work.SessionDescriptor, requestID string) (model, tea.Cmd) {
-	return m.spawnSessionOnRef(d, requestID, "")
+	return m.spawnSessionOnRef(d, requestID, "", m.normalizedProjectDir)
 }
 
 type directEnqueueResultMsg struct {
@@ -1530,10 +1570,11 @@ func (m model) enqueueSession(d work.SessionDescriptor) (model, tea.Cmd) {
 }
 
 // spawnSessionOnRef is spawnSession with a required source branch, carried from
-// a claimed request's required_target_ref. It only reaches worktree allocation,
-// so it has no effect on a session that arrives with an identity already
-// allocated. A human spawn declares no branch and passes "".
-func (m model) spawnSessionOnRef(d work.SessionDescriptor, requestID, requiredRef string) (model, tea.Cmd) {
+// a claimed request's required_target_ref, and the source checkout the session
+// is seeded from. The branch only reaches worktree allocation, so it has no
+// effect on a session that arrives with an identity already allocated. A human
+// spawn declares no branch and passes "".
+func (m model) spawnSessionOnRef(d work.SessionDescriptor, requestID, requiredRef, sourceDir string) (model, tea.Cmd) {
 	slug := d.Slug
 	m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: slug, Type: sessionType(d.Type)})
 	specH := m.detailPanelHeight()
@@ -1558,19 +1599,18 @@ func (m model) spawnSessionOnRef(d work.SessionDescriptor, requestID, requiredRe
 		started:      time.Now(),
 		autoClose:    d.AutoClose,
 		worktreeID:   d.WorktreeID,
-		executionDir: d.ExecutionDir, sourceDir: m.normalizedProjectDir,
+		executionDir: d.ExecutionDir, sourceDir: sourceDir,
 	}
 	if d.Initiator != "agent" {
 		m.sessionLaunchedFromModal = m.state == stateWork
 	}
 	env := work.SessionEnv{Instance: m.instanceName, Slug: slug, Type: sessionType(d.Type),
-		WorktreeID: d.WorktreeID, ExecutionDir: d.ExecutionDir, SourceDir: m.normalizedProjectDir, HostKey: m.hostKey, RoutingOverrides: d.RoutingOverrides}
+		WorktreeID: d.WorktreeID, ExecutionDir: d.ExecutionDir, SourceDir: sourceDir, HostKey: m.hostKey, RoutingOverrides: d.RoutingOverrides}
 	if m.hostKey != "" || m.tmuxEnabled {
 		env.Prepared = m.hostSpawnCheckpoint(requestID, checkpointID)
 	}
 	if d.Worktree == nil {
-		sourceDir := m.normalizedProjectDir
-		if sourceDir == "" {
+		if sourceDir == "" && m.hostKey == "" {
 			sourceDir = m.config.ProjectDir
 		}
 		epoch := session.NewRequestID()
@@ -1611,6 +1651,12 @@ func (m model) instanceRow() session.Instance {
 	if err != nil {
 		framework = ""
 	}
+	// Every session host serves a whole store; its sessions name their own
+	// checkouts, so its row names none.
+	scope, projectDir := "", m.normalizedProjectDir
+	if m.hostKey != "" {
+		scope, projectDir = session.ScopeStore, ""
+	}
 	return session.Instance{
 		RuntimeCapabilities: session.RuntimeCapabilities(),
 		Revision:            time.Now().UnixNano(),
@@ -1623,7 +1669,8 @@ func (m model) instanceRow() session.Instance {
 		Sessions:         sessions,
 		BuildSHA:         m.buildSHA,
 		BuildTime:        m.buildTime,
-		ProjectDir:       m.normalizedProjectDir,
+		ProjectDir:       projectDir,
+		Scope:            scope,
 		Framework:        framework,
 	}
 }
@@ -1676,8 +1723,18 @@ func (m model) orphanedEventFor(slug string, ls liveSession, deadInstance string
 		RequestID:      ls.requestID,
 		Reason:         "instance-death",
 	}
-	ev.Spend = closedSpend(m.spendScript, ls.harness, ls.sessionID, m.config.ProjectDir, sessionDurationSeconds(ls.started))
+	ev.Spend = closedSpend(m.spendScript, ls.harness, ls.sessionID, m.spendDir(ls), sessionDurationSeconds(ls.started))
 	return ev
+}
+
+// spendDir is the working directory the spend probe derives a transcript
+// location from. A visible TUI passes its own checkout; a store host has none
+// and passes the session's.
+func (m model) spendDir(ls liveSession) string {
+	if m.hostKey != "" {
+		return ls.sourceDir
+	}
+	return m.config.ProjectDir
 }
 
 // closedSpendJournalCmd runs the boundary-time token-spend probe and appends the
@@ -1690,7 +1747,7 @@ func (m model) orphanedEventFor(slug string, ls liveSession, deadInstance string
 // key a ladder-driven teardown carries); empty leaves the spawn request_id.
 func (m model) closedSpendJournalCmd(slug string, ls liveSession, closeRequestID string) tea.Cmd {
 	script, kdir := m.eventScript, m.config.KnowledgeDir
-	spendScript, cwd := m.spendScript, m.config.ProjectDir
+	spendScript, cwd := m.spendScript, m.spendDir(ls)
 	ev := m.closedEventMeta(slug, ls)
 	if closeRequestID != "" {
 		ev.RequestID = closeRequestID
