@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # test_work_source_checkout.sh — Regression tests for declaring a work item's
-# source checkout from a named live instance outside a hosted session.
+# source checkout outside a hosted session: from the checkout the command runs in,
+# or from a named live instance.
 
 set -euo pipefail
 
@@ -213,17 +214,57 @@ assert_contains "help: usage names --from-instance" "$HELP_OUTPUT" \
   "Usage: lore work source-checkout <slug> [--from-instance <name>] [--json]"
 assert_contains "help: explains the live registry source" "$HELP_OUTPUT" \
   "with --from-instance it is read from that live"
-
-write_work_item no-provenance
-capture_failure work source-checkout no-provenance
-assert_contains "no provenance: existing refusal names the new repair" "$CAPTURED_OUTPUT" \
-  "pass '--from-instance <name>'"
+assert_contains "help: explains the checkout the command runs in" "$HELP_OUTPUT" \
+  "otherwise it is the git checkout this command runs"
 
 write_work_item request-repair
 capture_failure session request --type worker --slug request-repair--w9 \
   --prefer-dir "$LIVE_CHECKOUT" --context probe --initiator agent
-assert_contains "request refusal: seed command names --from-instance" "$CAPTURED_OUTPUT" \
-  "lore work source-checkout request-repair --from-instance <live-instance-name>"
+assert_contains "request refusal: leads with the seed command" "$CAPTURED_OUTPUT" \
+  "Error: no checkout declared: run lore work source-checkout request-repair"
+assert_contains "request refusal: says where to run it" "$CAPTURED_OUTPUT" \
+  "From inside the checkout this work belongs in, run:"
+
+# --- Outside a session: the checkout the command runs in ---------------------
+# No live host serves anything in this store yet: membership is the whole test.
+
+write_work_item cwd-form
+CWD_OUTPUT=$(cd "$LIVE_CHECKOUT" && run_lore work source-checkout cwd-form 2>&1)
+assert_contains "cwd form: declares the checkout it runs in" "$CWD_OUTPUT" "source_checkout=$LIVE_CHECKOUT"
+assert_eq "cwd form: stores that checkout" "$(meta_checkout cwd-form)" "$LIVE_CHECKOUT"
+
+mkdir -p "$LIVE_CHECKOUT/sub/dir"
+write_work_item cwd-subdir
+SUBDIR_OUTPUT=$(cd "$LIVE_CHECKOUT/sub/dir" && run_lore work source-checkout cwd-subdir 2>&1)
+assert_eq "cwd form from a subdirectory: declares the git top level" "$(meta_checkout cwd-subdir)" "$LIVE_CHECKOUT"
+
+write_work_item cwd-partial
+PARTIAL_OUTPUT=$(cd "$LIVE_CHECKOUT" && LORE_SESSION_INSTANCE=some-seat HOME="$TEST_HOME" LORE_KNOWLEDGE_DIR="$KDIR" \
+  "$LORE" work source-checkout cwd-partial 2>&1)
+assert_eq "cwd form when the session variables are not all set" "$(meta_checkout cwd-partial)" "$LIVE_CHECKOUT"
+
+write_work_item no-provenance
+set +e
+NO_CHECKOUT_OUTPUT=$(cd "$CHECKOUTS" && run_lore work source-checkout no-provenance 2>&1)
+NO_CHECKOUT_STATUS=$?
+set -e
+assert_eq "cwd form outside any checkout: exits non-zero" "$NO_CHECKOUT_STATUS" "1"
+assert_contains "cwd form outside any checkout: says why" "$NO_CHECKOUT_OUTPUT" "is not inside a git checkout"
+assert_contains "cwd form outside any checkout: names the other repairs" "$NO_CHECKOUT_OUTPUT" "'--from-instance <name>'"
+assert_eq "cwd form outside any checkout: does not mutate the item" "$(meta_checkout no-provenance)" ""
+
+CWD_INSIDE="$KDIR/_coordination/worktrees/cwd-inner"
+mkdir -p "$CWD_INSIDE"
+git -C "$CWD_INSIDE" init -q
+write_work_item cwd-inside
+set +e
+CWD_INSIDE_OUTPUT=$(cd "$CWD_INSIDE" && run_lore work source-checkout cwd-inside 2>&1)
+CWD_INSIDE_STATUS=$?
+set -e
+assert_eq "cwd form inside the store: exits non-zero" "$CWD_INSIDE_STATUS" "1"
+assert_contains "cwd form inside the store: names membership" "$CWD_INSIDE_OUTPUT" "is not a checkout of this store"
+assert_contains "cwd form inside the store: says why" "$CWD_INSIDE_OUTPUT" "lies inside the knowledge store"
+assert_eq "cwd form inside the store: does not mutate the item" "$(meta_checkout cwd-inside)" ""
 
 # --- The store's session host serves every checkout of the store -------------
 

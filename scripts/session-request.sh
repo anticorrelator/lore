@@ -129,7 +129,7 @@
 # names the checkout. A slug naming no tracked work item derives nothing. The
 # refusals, each leading with its repair:
 #   no checkout named                -> pass --prefer-dir <checkout>
-#   the item declares nothing        -> run `lore work source-checkout <slug>`
+#   the item declares nothing        -> run `lore work source-checkout <slug>` there
 #   the declaration names no dir     -> re-declare it from the right checkout
 #   not a checkout of this store     -> name or declare one that is
 #   no live store host               -> run `lore session ensure`, then retry
@@ -798,10 +798,9 @@ if [[ -n "$WORK_META" ]]; then
   if [[ -z "$DECLARED_CHECKOUT" ]]; then
     fail "no checkout declared: run lore work source-checkout $WORK_ITEM_SLUG
 Work item '$WORK_ITEM_SLUG' declares no source checkout, so this request cannot say which
-clone it runs in. Seed the declaration with:
-  lore work source-checkout $WORK_ITEM_SLUG --from-instance <live-instance-name>
-Choose the instance with 'lore session list', or omit --from-instance and run the
-command from a session hosted in the checkout this work belongs to. Nothing was enqueued."
+clone it runs in. From inside the checkout this work belongs in, run:
+  lore work source-checkout $WORK_ITEM_SLUG
+then send the request again. Nothing was enqueued."
   fi
   REQUIRED_RESOLVED="$(resolve_physical_dir "$DECLARED_CHECKOUT" || true)"
   if [[ -z "$REQUIRED_RESOLVED" ]]; then

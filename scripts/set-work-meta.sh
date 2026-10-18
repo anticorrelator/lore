@@ -11,10 +11,11 @@
 # --seed-source-checkout (exposed as `lore work source-checkout <slug>`):
 #   Declares source_checkout — the checkout a session for this item must run in.
 #   This is the field's only writer, and it takes no path from the caller: the value
-#   comes from either the calling session's provenance or an explicitly named live
-#   instance's registry row, is resolved physically, and must be a checkout of this
-#   store, which the store's session host serves, before it is written. Everything
-#   downstream treats the declaration as authoritative and never re-validates it.
+#   comes from an explicitly named live instance's registry row, from the calling
+#   session's provenance, or, outside a session, from the git checkout the command
+#   runs in. It is resolved physically and must be a checkout of this store, which
+#   the store's session host serves, before it is written. Everything downstream
+#   treats the declaration as authoritative and never re-validates it.
 
 set -euo pipefail
 
@@ -286,14 +287,19 @@ Re-run from inside a checkout of this store."
       seed_fail "instance '$FROM_INSTANCE' records no checkout path (project_dir).
 Restart that instance so it publishes checkout provenance, then re-run."
     fi
-  else
-    SESSION_INSTANCE="${LORE_SESSION_INSTANCE:-}"
-    SESSION_SLUG="${LORE_SESSION_SLUG:-}"
-    SESSION_TYPE="${LORE_SESSION_TYPE:-}"
-    if [[ -z "$SESSION_INSTANCE" || -z "$SESSION_SLUG" || -z "$SESSION_TYPE" ]]; then
-      seed_fail "cannot identify the calling session: LORE_SESSION_INSTANCE, LORE_SESSION_SLUG, and LORE_SESSION_TYPE must all be set.
-Run 'lore work source-checkout $SLUG' from inside a lore-spawned session, which exports all three, or pass '--from-instance <name>' for a live instance shown by 'lore session list'."
+  elif [[ -z "${LORE_SESSION_INSTANCE:-}" || -z "${LORE_SESSION_SLUG:-}" || -z "${LORE_SESSION_TYPE:-}" ]]; then
+    # Outside a session the checkout to declare is the one this command runs in:
+    # the store's session host serves every checkout of its store, so membership,
+    # checked below, is the whole test, and no host needs to be running.
+    SOURCE_CHECKOUT_RAW="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [[ -z "$SOURCE_CHECKOUT_RAW" ]]; then
+      seed_fail "'$PWD' is not inside a git checkout.
+Outside a session, 'lore work source-checkout $SLUG' declares the git checkout it runs in, so run it from inside the checkout this item builds in. Inside a lore-spawned session it reads the session's own provenance instead, and '--from-instance <name>' reads a live instance shown by 'lore session list'."
     fi
+  else
+    SESSION_INSTANCE="$LORE_SESSION_INSTANCE"
+    SESSION_SLUG="$LORE_SESSION_SLUG"
+    SESSION_TYPE="$LORE_SESSION_TYPE"
 
     if [[ -n "${LORE_SESSION_HOST_KEY:-}" ]]; then
       if ! CURRENT_INSTANCE="$(python3 "$SCRIPT_DIR/session-managed.py" _source-owner "$SESSION_SLUG" --kdir "$KNOWLEDGE_DIR")"; then
@@ -346,8 +352,8 @@ Restore that checkout, or re-run from a session in the clone this item should bu
   # is still claimable.
   if ! MEMBERSHIP_WHY="$(store_checkout_of "$KNOWLEDGE_DIR" "$SOURCE_CHECKOUT" 2>&1 >/dev/null)"; then
     seed_fail "'$SOURCE_CHECKOUT' is not a checkout of this store: $MEMBERSHIP_WHY.
-The store's session host runs this item's sessions only in a checkout of this store,
-so declare one of those."
+The store's session host runs this item's sessions only in a checkout of this store.
+Run 'lore work source-checkout $SLUG' from inside one of those."
   fi
 fi
 

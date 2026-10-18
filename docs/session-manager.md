@@ -299,12 +299,15 @@ whose `error` field holds the whole text.
 | `--host-key is not this store's key; omit --host-key` | The caller passed another store's or runtime's key. |
 | `host key is not this store's; retry lore session start` | A managed start names a key from before store-scoped hosting. |
 
-`lore work source-checkout <item> --from-instance <store host>` declares the
-checkout the command runs in, which must belong to the store. Inside a session,
-seeding reads the session row's own `source_dir` before falling back to its host's
-project directory. A declaration is accepted when it names a checkout of this
-store, whether or not a host is running, because `lore session request` starts
-the host.
+`lore work source-checkout <item>` run outside a session (when
+`LORE_SESSION_INSTANCE`, `LORE_SESSION_SLUG` and `LORE_SESSION_TYPE` are not all
+set) declares the git checkout the command runs in, its top level even from a
+subdirectory. `--from-instance <store host>` does the same, and `--from-instance`
+naming another live instance declares that instance's project directory. Inside a
+session, seeding reads the session row's own `source_dir` before falling back to
+its host's project directory. A declaration is accepted when it names a checkout
+of this store, whether or not a host is running, because `lore session request`
+starts the host.
 
 `send`, `answer`, `peek`, `close` and `wait` on a session without a managed
 manifest first bring up the store host when no live host lists the session, for
