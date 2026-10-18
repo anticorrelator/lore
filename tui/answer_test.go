@@ -92,7 +92,9 @@ func TestAnswerGuardRefusalsWriteNoPTYBytes(t *testing.T) {
 		{"expect mismatch", ccOptionSelectRows, answerRequest("expect", 1, "different modal"), true, true, answerReasonExpectMismatch},
 		{"option unavailable", ccOptionSelectRows, answerRequest("option", 9, "Choose the next step"), true, true, answerReasonOptionUnavailable},
 		{"no contract", ccOptionSelectRows, answerRequest("contract", 1, "Choose the next step"), false, true, answerReasonNoContract},
-		{"PTY error", ccOptionSelectRows, answerRequest("pty", 2, "Choose the next step"), true, false, answerReasonError},
+		// The attempt is recorded before the write, so a failed write is an
+		// uncertain delivery rather than a refusal that wrote nothing.
+		{"PTY error", ccOptionSelectRows, answerRequest("pty", 2, "Choose the next step"), true, false, "delivery-uncertain"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -186,7 +188,9 @@ func TestAnswerConfirmationTimeoutRefusesWithoutReplay(t *testing.T) {
 	}
 }
 
-func TestAnswerPanelDisappearanceRefusesUnconfirmed(t *testing.T) {
+// A panel that disappears after the write leaves the outcome unobservable, so
+// the answer is refused as an uncertain delivery.
+func TestAnswerPanelDisappearanceRefusesUncertain(t *testing.T) {
 	request := answerRequest("panel-gone", 2, "Choose the next step")
 	m, _, reader := seedAnswerRequest(t, ccOptionSelectRows, true, request)
 	m, cmd := m.handleAnswerRequestScanResolved(answerRequestScanMsg{matched: []session.AnswerRequest{request}}, "claude-code", true, nil)
@@ -205,8 +209,8 @@ func TestAnswerPanelDisappearanceRefusesUnconfirmed(t *testing.T) {
 		t.Fatalf("initial answer bytes = %q err=%v", buf[:n], err)
 	}
 	rows := readEventRows(t, m.config.KnowledgeDir)
-	if len(rows) != 1 || rows[0].Event != session.EventAnswerRefused || rows[0].Reason != answerReasonUnconfirmed {
-		t.Fatalf("events = %+v, want one answer_refused unconfirmed", rows)
+	if len(rows) != 1 || rows[0].Event != session.EventAnswerRefused || rows[0].Reason != "delivery-uncertain" {
+		t.Fatalf("events = %+v, want one answer_refused delivery-uncertain", rows)
 	}
 }
 

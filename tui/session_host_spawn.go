@@ -24,9 +24,6 @@ func (m model) hostSpawnCheckpoint(requestID string, checkpointIDs ...string) fu
 	}
 	row.Name = m.hostSpawnName(checkpointID)
 	row.Role = "session-host-spawn"
-	if m.hostKey == "" {
-		row.Role = "session-spawn"
-	}
 	// The checkpoint names the checkout its launch was seeded from, which a
 	// store host takes per request; its own row names no checkout.
 	sourceDir := row.ProjectDir
@@ -41,10 +38,7 @@ func (m model) hostSpawnCheckpoint(requestID string, checkpointIDs ...string) fu
 		if err := session.WriteInstance(m.sessionsDir, row); err != nil {
 			return err
 		}
-		if m.hostKey != "" {
-			return m.clearHostAllocation(requestID)
-		}
-		return nil
+		return m.clearHostAllocation(requestID)
 	}
 }
 func (m model) clearHostSpawn(requestID string) error {

@@ -77,9 +77,8 @@ func interruptGate(r interruptRequest, ls liveSession, instance, ownerStarted st
 }
 
 type interruptPreparedMsg struct {
-	request     interruptRequest
-	deliveryKey string
-	event       session.Event
+	request interruptRequest
+	event   session.Event
 }
 type interruptConsumedMsg struct {
 	requestID string
@@ -112,12 +111,8 @@ func (m model) handleInterruptScan(rows interruptScanMsg) (model, tea.Cmd) {
 		}
 		m.pendingInterrupt[r.RequestID] = true
 		_, reason := m.interruptScreenGate(r)
-		delivery := m
-		if delivery.hostKey == "" {
-			delivery.hostKey = "interrupt-" + m.instanceName
-		}
 		ev := session.Event{Event: session.EventInterruptRefused, RequestID: r.RequestID, Slug: r.Slug, ActorInstance: session.StrPtr(m.instanceName), Reason: reason, Links: map[string]string{"session_id": r.SessionID, "launch_request_id": r.LaunchRequestID, "epoch": r.Epoch}}
-		cmds = append(cmds, delivery.prepareInterruptCmd(r, ev))
+		cmds = append(cmds, m.prepareInterruptCmd(r, ev))
 	}
 	return m, tea.Batch(cmds...)
 }
@@ -152,7 +147,7 @@ func (m model) prepareInterruptCmd(r interruptRequest, ev session.Event) tea.Cmd
 		if err := session.AppendEvent(m.eventScript, m.config.KnowledgeDir, attempt); err != nil {
 			return interruptConsumedMsg{r.RequestID, err}
 		}
-		return interruptPreparedMsg{request: r, deliveryKey: m.hostKey, event: ev}
+		return interruptPreparedMsg{request: r, event: ev}
 	}
 }
 
@@ -175,9 +170,7 @@ func (m model) handleInterruptPrepared(msg interruptPreparedMsg) (model, tea.Cmd
 			ev.Links["escape_written"] = "true"
 		}
 	}
-	delivery := m
-	delivery.hostKey = msg.deliveryKey
-	return m, delivery.finishInterruptCmd(ev)
+	return m, m.finishInterruptCmd(ev)
 }
 
 func (m model) finishInterruptCmd(ev session.Event) tea.Cmd {

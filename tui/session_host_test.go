@@ -160,7 +160,6 @@ func TestHostAllocationIntentPrecedesCreateAndRecoversNoLaunch(t *testing.T) {
 	_, source, _ := closedSessionWorktree(t, "source-fixture")
 	m, _ := baseSessionModel(t)
 	m.hostKey = "key"
-	m.normalizedProjectDir = source
 	m.eventScript = repoScriptPath(t, "session-event-append.sh")
 	path := filepath.Join(m.sessionsDir, "worktrees", "allocation-crash")
 	checkpoint := m.hostAllocationCheckpoint("spawn", work.SessionDescriptor{Slug: "demo", Type: "worker"})
@@ -682,7 +681,8 @@ func TestStoreHostSeedsEachSessionFromItsRowsCheckout(t *testing.T) {
 		if s.SourceDir != want[s.Slug] {
 			t.Fatalf("session %s row names checkout %q, want %q", s.Slug, s.SourceDir, want[s.Slug])
 		}
-		if got := m.spendDir(m.localSessions[s.Slug]); got != want[s.Slug] {
+		// The spend probe runs in the session's own checkout.
+		if got := m.localSessions[s.Slug].sourceDir; got != want[s.Slug] {
 			t.Fatalf("session %s spend probe reads %q, want its checkout", s.Slug, got)
 		}
 	}
@@ -1306,7 +1306,7 @@ func TestStoreHostRecoveryNeverOrphansASessionAliveOnAnotherRuntimeServer(t *tes
 	if err := session.WriteInstance(sessionsDir, session.Instance{Name: "dead-b", PID: deadPID(t), Repo: m.config.RepoIdentifier, Started: "2026-10-01T00:00:00Z", Sessions: tmuxSession("gone--w1", "lore-gone-"+strconv.Itoa(os.Getpid()))}); err != nil {
 		t.Fatal(err)
 	}
-	msg := m.adoptionScanCmd()().(adoptionScanMsg)
+	msg := m.adoptionScanner()(nil)
 	if len(msg.notices) != 0 {
 		t.Fatalf("scan notices: %+v", msg.notices)
 	}

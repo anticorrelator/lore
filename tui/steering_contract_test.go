@@ -187,50 +187,41 @@ func TestSteeringInterruptIdentityAndModalGate(t *testing.T) {
 }
 
 func TestSteeringInterruptDeliveryNeverReplays(t *testing.T) {
-	for _, host := range []string{"", "managed-host"} {
-		t.Run("host="+host, func(t *testing.T) {
-			m := runtimeModel(t)
-			m.hostKey = host
-			m.instanceName = "host"
-			m.instanceStartedISO = "owner-start"
-			r, ls := steeringRequest(time.Now())
-			m.localSessions["demo"] = ls
-			panel, reader := runtimePanel(t, "demo", []string{"Working (10s · esc to interrupt)"})
-			m.sessionPanels["demo"] = panel
-			queue := filepath.Join(m.sessionsDir, "interrupt-requests", r.RequestID+".json")
-			if err := hostAtomicJSON(queue, r); err != nil {
-				t.Fatal(err)
-			}
-			m = runInterruptRequest(t, m, r)
-			if m.flashErr != "" {
-				t.Fatal(m.flashErr)
-			}
-			readRuntimeBytes(t, reader, "\x1b")
-			if _, err := os.Stat(queue); !os.IsNotExist(err) {
-				t.Fatal("queue not consumed", err)
-			}
-			delivery := m
-			if host == "" {
-				delivery.hostKey = "interrupt-host"
-			}
-			b, err := os.ReadFile(delivery.hostDeliveryPath(r.RequestID))
-			if err != nil {
-				t.Fatal(err)
-			}
-			var saved hostDelivery
-			json.Unmarshal(b, &saved)
-			if saved.Event.Event != "interrupt_uncertain" || saved.Event.Links["escape_written"] != "true" {
-				t.Fatalf("untruthful outcome %+v", saved)
-			}
-			// A scan captured before consumption and a recreated request cannot write twice.
-			hostAtomicJSON(queue, r)
-			m = runInterruptRequest(t, m, r)
-			reader.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
-			buffer := make([]byte, 1)
-			if n, _ := reader.Read(buffer); n != 0 {
-				t.Fatal("replayed ESC")
-			}
-		})
+	m := runtimeModel(t)
+	m.instanceName = "host"
+	m.instanceStartedISO = "owner-start"
+	r, ls := steeringRequest(time.Now())
+	m.localSessions["demo"] = ls
+	panel, reader := runtimePanel(t, "demo", []string{"Working (10s · esc to interrupt)"})
+	m.sessionPanels["demo"] = panel
+	queue := filepath.Join(m.sessionsDir, "interrupt-requests", r.RequestID+".json")
+	if err := hostAtomicJSON(queue, r); err != nil {
+		t.Fatal(err)
+	}
+	m = runInterruptRequest(t, m, r)
+	if m.flashErr != "" {
+		t.Fatal(m.flashErr)
+	}
+	readRuntimeBytes(t, reader, "\x1b")
+	if _, err := os.Stat(queue); !os.IsNotExist(err) {
+		t.Fatal("queue not consumed", err)
+	}
+	b, err := os.ReadFile(m.hostDeliveryPath(r.RequestID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved hostDelivery
+	json.Unmarshal(b, &saved)
+	if saved.Event.Event != "interrupt_uncertain" || saved.Event.Links["escape_written"] != "true" {
+		t.Fatalf("untruthful outcome %+v", saved)
+	}
+	// A scan captured before consumption and a recreated request cannot write twice.
+	hostAtomicJSON(queue, r)
+	m = runInterruptRequest(t, m, r)
+	reader.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+	buffer := make([]byte, 1)
+	if n, _ := reader.Read(buffer); n != 0 {
+		t.Fatal("replayed ESC")
 	}
 }
 
@@ -251,9 +242,7 @@ func TestSteeringInterruptRefusalDoesNotWrite(t *testing.T) {
 	if n, _ := reader.Read(buffer); n != 0 {
 		t.Fatal("modal received ESC")
 	}
-	delivery := m
-	delivery.hostKey = "interrupt-host"
-	b, err := os.ReadFile(delivery.hostDeliveryPath(r.RequestID))
+	b, err := os.ReadFile(m.hostDeliveryPath(r.RequestID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,9 +341,7 @@ func TestSteeringInterruptModalArrivesDuringPersistence(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	// The attempt exists durably before any ESC, and duplicate scans stay held.
-	delivery := m
-	delivery.hostKey = "interrupt-host"
-	if _, err := os.Stat(delivery.hostDeliveryPath(r.RequestID)); err != nil {
+	if _, err := os.Stat(m.hostDeliveryPath(r.RequestID)); err != nil {
 		t.Fatal(err)
 	}
 	if _, duplicate := m.handleInterruptScan(interruptScanMsg{r}); duplicate != nil {
@@ -396,7 +383,7 @@ func TestSteeringInterruptModalArrivesDuringPersistence(t *testing.T) {
 	if n, _ := reader.Read(buffer); n != 0 {
 		t.Fatal("ESC reached the newly displayed modal")
 	}
-	b, err := os.ReadFile(delivery.hostDeliveryPath(r.RequestID))
+	b, err := os.ReadFile(m.hostDeliveryPath(r.RequestID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,9 +436,7 @@ func TestSteeringInterruptPreparedRechecksIdentityAndRecovery(t *testing.T) {
 			if n, _ := reader.Read(buffer); n != 0 {
 				t.Fatal("stale/recovered preparation wrote ESC")
 			}
-			delivery := m
-			delivery.hostKey = "interrupt-host"
-			b, err := os.ReadFile(delivery.hostDeliveryPath(r.RequestID))
+			b, err := os.ReadFile(m.hostDeliveryPath(r.RequestID))
 			if err != nil {
 				t.Fatal(err)
 			}

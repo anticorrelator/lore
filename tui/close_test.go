@@ -62,7 +62,6 @@ func TestCloseDispositionStaleDestinationPreservesHostAndStreamMarkers(t *testin
 
 	m, _ := baseSessionModel(t)
 	m.config.ProjectDir = sourceDir
-	m.normalizedProjectDir = sourceDir
 	ls := liveSession{typ: "implement", initiator: "agent", started: time.Now(), worktree: &identity}
 	m.localSessions = map[string]liveSession{"demo": ls}
 	m, closeCmds := m.endLocalSessionClosed("demo", "close-1")
@@ -331,6 +330,12 @@ func TestCloseLadder_Monotonic(t *testing.T) {
 // plantCloseRequest writes a close-request row into a store.
 func plantCloseRequest(t *testing.T, sessionsDir string, cr session.CloseRequest) {
 	t.Helper()
+	plantCloseRequestAt(t, sessionsDir, cr.RequestID, cr)
+}
+
+// plantCloseRequestAt writes a close-request row under the file stem name.
+func plantCloseRequestAt(t *testing.T, sessionsDir, name string, cr session.CloseRequest) {
+	t.Helper()
 	dir := session.CloseRequestsDir(sessionsDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -339,19 +344,18 @@ func plantCloseRequest(t *testing.T, sessionsDir string, cr session.CloseRequest
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, cr.RequestID+".json"), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, name+".json"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
 
 // TestScanCloseRequestsCmd_TargetingMatrix is the property form of the targeting
-// rule: a row is matched only when target_instance == this instance AND the slug
-// is one it hosts. Every other combination — wrong instance, unhosted slug,
-// empty target, empty request_id — is left untouched.
+// rule: a row is matched when its slug is one this host runs, whatever instance
+// it names. A row for an unhosted slug, or with no request_id, is left
+// untouched.
 func TestScanCloseRequestsCmd_TargetingMatrix(t *testing.T) {
 	dir := t.TempDir()
 	sessionsDir := filepath.Join(dir, "_sessions")
-	const myName = "me"
 	hosted := map[string]bool{"demo": true}
 
 	type row struct {
@@ -361,23 +365,23 @@ func TestScanCloseRequestsCmd_TargetingMatrix(t *testing.T) {
 		wantMatch bool
 	}
 	rows := []row{
-		{"m1", "demo", "me", true},     // mine + hosted → match
-		{"m2", "demo", "other", false}, // another instance → skip
-		{"m3", "ghost", "me", false},   // hosted-by-nobody-here → skip
-		{"m4", "demo", "", false},      // no target → skip
-		{"m5", "", "demo", false},      // (empty request_id row, target me)
+		{"m1", "demo", "me", true},    // hosted → match
+		{"m2", "demo", "other", true}, // hosted, names another instance → match
+		{"m3", "ghost", "me", false},  // hosted-by-nobody-here → skip
+		{"m4", "demo", "", true},      // hosted, no target → match
+		{"m5", "demo", "me", false},   // empty request_id → skip
 	}
 	for _, r := range rows {
-		target := r.target
+		id := r.id
 		if r.id == "m5" {
-			target = "me"
+			id = ""
 		}
-		plantCloseRequest(t, sessionsDir, session.CloseRequest{
-			RequestID: r.id, Slug: r.slug, TargetInstance: target,
+		plantCloseRequestAt(t, sessionsDir, r.id, session.CloseRequest{
+			RequestID: id, Slug: r.slug, TargetInstance: r.target,
 		})
 	}
 
-	msg := scanCloseRequestsCmd(sessionsDir, myName, hosted, nil)().(closeRequestScanMsg)
+	msg := scanCloseRequestsCmd(sessionsDir, hosted, nil)().(closeRequestScanMsg)
 	matched := map[string]bool{}
 	for _, cr := range msg.matched {
 		matched[cr.RequestID] = true
@@ -422,7 +426,7 @@ func TestScanCloseRequestsCmd_SessionIDTargeting(t *testing.T) {
 		})
 	}
 
-	msg := scanCloseRequestsCmd(sessionsDir, myName, hosted, idToSlug)().(closeRequestScanMsg)
+	msg := scanCloseRequestsCmd(sessionsDir, hosted, idToSlug)().(closeRequestScanMsg)
 	matched := map[string]bool{}
 	for _, cr := range msg.matched {
 		matched[cr.RequestID] = true
@@ -454,7 +458,7 @@ func TestHandleCloseRequestScan_SessionIDDiscriminates(t *testing.T) {
 		{RequestID: "c1", Slug: "", SessionID: "sessB", TargetInstance: "me", Reason: "coordinator"},
 	}})
 	if cmd == nil {
-		t.Fatal("expected a delete Cmd for the consumed row")
+		t.Fatal("expected a consume Cmd for the matched row")
 	}
 	if _, pending := m.pendingClose[""]; !pending {
 		t.Fatal("addressed slugless session was not scheduled for teardown")
@@ -504,7 +508,7 @@ func TestHandleCloseRequestScan_LegacySluglessRow(t *testing.T) {
 		{RequestID: "c1", Slug: "", TargetInstance: "me", Reason: "coordinator"},
 	}})
 	if cmd == nil {
-		t.Fatal("expected a delete Cmd for the consumed row")
+		t.Fatal("expected a consume Cmd for the matched row")
 	}
 	if _, pending := m.pendingClose[""]; !pending {
 		t.Fatal("legacy empty-slug close did not schedule teardown of the slugless session")
@@ -544,10 +548,11 @@ func TestAdvanceCloseLadders_QuiescenceWaitOrdering(t *testing.T) {
 	}
 }
 
-// TestHandleCloseRequestScan_MarksAndDeletes: a matched scan marks the slug
-// pending-close and returns a Cmd (the row delete); a re-scan of the same
-// already-pending slug is a no-op (no duplicate work).
-func TestHandleCloseRequestScan_MarksAndDeletes(t *testing.T) {
+// TestHandleCloseRequestScan_MarksAndRecords: a matched scan marks the slug
+// pending-close and returns a Cmd (the manifest write that records the
+// consumed request); a re-scan of the same already-pending slug is a no-op (no
+// duplicate work).
+func TestHandleCloseRequestScan_MarksAndRecords(t *testing.T) {
 	m, _ := baseSessionModel(t)
 	m.localSessions = map[string]liveSession{"demo": {typ: "spec", initiator: "human", started: time.Now()}}
 	m.sessionPanels = map[string]work.SessionPanelModel{"demo": work.NewSessionPanelModel("demo")}
@@ -559,7 +564,7 @@ func TestHandleCloseRequestScan_MarksAndDeletes(t *testing.T) {
 		t.Fatal("slug not marked pending-close")
 	}
 	if cmd == nil {
-		t.Fatal("expected a delete Cmd for the consumed row")
+		t.Fatal("expected a consume Cmd for the matched row")
 	}
 	if got := m.localSessions["demo"].closeRequests; len(got) != 1 || got[0] != "c1" {
 		t.Fatalf("consumed close request not recorded on live session: %v", got)
@@ -1237,7 +1242,6 @@ func TestCloseDispositionRetainsResultAndJournalsPendingIntegration(t *testing.T
 	m.eventScript = repoScriptPath(t, "session-event-append.sh")
 	kdir := m.config.KnowledgeDir
 	m.config.ProjectDir = sourceDir
-	m.normalizedProjectDir = sourceDir
 	ls := liveSession{typ: "implement", initiator: "agent", started: time.Now(), worktree: &identity}
 	m.localSessions = map[string]liveSession{"demo": ls}
 	m, _ = m.endLocalSessionClosed("demo", "close-1")

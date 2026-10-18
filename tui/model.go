@@ -280,12 +280,11 @@ type model struct {
 	// holds its optional context input. sessionConfirmDescriptor is the sole mode
 	// carrier — request handlers build it, the modal's checkboxes toggle its
 	// ShortMode/SkipConfirm, and Enter stamps ExtraContext and hands it to
-	// spawnSession. This mirrors the descriptor the agent queue builds, so the
+	// launchSession. This mirrors the descriptor the agent queue builds, so the
 	// human and agent launch paths share one shape.
 	sessionConfirmActive     bool
 	sessionConfirmInput      textarea.Model
 	sessionConfirmDescriptor work.SessionDescriptor
-	sessionLaunchedFromModal bool
 
 	// Session substrate (_sessions/): the substrate root, and for a store host
 	// its instance identity and the journal appender path. localSessions is the
@@ -304,15 +303,10 @@ type model struct {
 	// buildTime is the orderable quantity min_vintage filtering compares against.
 	buildSHA  string
 	buildTime string
-	// normalizedProjectDir is config.ProjectDir resolved to a physical absolute
-	// path once at startup (config.NormalizeProjectDir). It is stamped onto the
-	// registry row and snapshotted into queueTickCmd as the match key a request's
-	// prefer_project_dir compares against; config.ProjectDir stays the spawn cwd.
-	normalizedProjectDir string
-	// tmuxEnabled is the D3 host-capability gate resolved once at startup: when
-	// true, sessions are hosted in tmux (survive crash/restart, adoptable); when
-	// false (tmux absent or LORE_TUI_TMUX=off), spawning/close/quit behave exactly
-	// as the direct-PTY path and no adoption scan runs.
+	// tmuxEnabled is the host's D3 capability gate resolved once at startup:
+	// when true, sessions are hosted in tmux (survive crash/restart, adoptable);
+	// when false (tmux absent or LORE_TUI_TMUX=off), each session runs on a
+	// direct PTY that ends with the host.
 	tmuxEnabled            bool
 	localSessions          map[string]liveSession
 	pendingSpawns          map[string]liveSession

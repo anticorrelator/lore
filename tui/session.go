@@ -29,7 +29,7 @@ func (m *model) updateCurrentSessionsPanel(msg tea.Msg) tea.Cmd {
 }
 
 // endLocalSession drops a torn-down session from this instance's registry row
-// and returns the Cmds that persist the removal and journal `closed`. It is a
+// and returns the Cmds that persist the removal and deliver `closed`. It is a
 // no-op (nil Cmds) for a slug this instance was not tracking. The `closed` row
 // carries the session's spawn request_id; the ladder-teardown caller overrides it
 // with the consumed close request_id via endLocalSessionClosed.
@@ -84,39 +84,28 @@ func (m model) finalizeLocalSessionClosed(slug, closeRequestID string) (model, [
 	if !ok {
 		return m, nil
 	}
-	if m.hostKey != "" {
-		delivery := m.hostCloseDelivery(slug, ls, closeRequestID)
-		id := delivery.ID
-		if err := hostAtomicJSON(m.hostDeliveryPath(id), delivery); err != nil {
-			return m, []tea.Cmd{func() tea.Msg { return hostRuntimeErrorMsg{err: err} }}
-		}
-		delete(m.localSessions, slug)
-		delete(m.sessionIdle, slug)
-		delete(m.sessionObservations, slug)
-		delete(m.observationSince, slug)
-		delete(m.sessionModalBlocked, slug)
-		row := m.instanceRow()
-		return m, []tea.Cmd{func() tea.Msg {
-			delivery.Event.Spend = closedSpend(m.spendScript, ls.harness, ls.sessionID, ls.sourceDir, sessionDurationSeconds(ls.started))
-			err := hostAtomicJSON(m.hostDeliveryPath(id), delivery)
-			if err == nil {
-				err = m.finishHostDelivery(delivery)
-			}
-			if err == nil {
-				err = session.WriteInstance(m.sessionsDir, row)
-			}
-			return journalResultMsg{err: err}
-		}}
+	delivery := m.hostCloseDelivery(slug, ls, closeRequestID)
+	id := delivery.ID
+	if err := hostAtomicJSON(m.hostDeliveryPath(id), delivery); err != nil {
+		return m, []tea.Cmd{func() tea.Msg { return hostRuntimeErrorMsg{err: err} }}
 	}
 	delete(m.localSessions, slug)
 	delete(m.sessionIdle, slug)
 	delete(m.sessionObservations, slug)
 	delete(m.observationSince, slug)
 	delete(m.sessionModalBlocked, slug)
-	return m, []tea.Cmd{
-		m.writeInstanceCmd(),
-		m.closedSpendJournalCmd(slug, ls, closeRequestID),
-	}
+	row := m.instanceRow()
+	return m, []tea.Cmd{func() tea.Msg {
+		delivery.Event.Spend = closedSpend(m.spendScript, ls.harness, ls.sessionID, ls.sourceDir, sessionDurationSeconds(ls.started))
+		err := hostAtomicJSON(m.hostDeliveryPath(id), delivery)
+		if err == nil {
+			err = m.finishHostDelivery(delivery)
+		}
+		if err == nil {
+			err = session.WriteInstance(m.sessionsDir, row)
+		}
+		return journalResultMsg{err: err}
+	}}
 }
 
 // endLocalSessionFailed journals `close_failed` without releasing the session's
@@ -324,8 +313,9 @@ func (m model) handleSessionProcessStarted(msg work.SessionProcessStartedMsg) (m
 	m.setPreferDetail(slug, false)
 
 	// Promote the pending spawn into this instance's live session set and
-	// register it. For a queue-claimed session, delete the claimed row and
-	// journal `spawned` now that the process is up.
+	// register it. For a queue-claimed session, journal `spawned` (or
+	// `recovered` for an adopted one) and delete the claimed row now that the
+	// process is up.
 	meta, ok := m.pendingSpawns[slug]
 	if !ok {
 		meta = liveSession{typ: "spec", initiator: "human", started: time.Now()}
@@ -351,100 +341,30 @@ func (m model) handleSessionProcessStarted(msg work.SessionProcessStartedMsg) (m
 	delete(m.sessionModalBlocked, slug)
 	m.localSessions[slug] = meta
 
-	cmds := []tea.Cmd{cmd}
-	switch {
-	case meta.adopted:
-		// Recovery: journal `recovered`, not `spawned` — this session already had a
-		// `spawned` row under the dead instance. emitRecoveredCmd writes the durable
-		// registry row (now listing the adopted session) before the journal row.
-		cmds = append(cmds, emitRecoveredCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, m.instanceRow(), session.Event{
-			Event:          session.EventRecovered,
-			ActorInstance:  session.StrPtr(m.instanceName),
-			TargetInstance: session.StrPtr(meta.adoptedFrom),
-			Slug:           slug,
-			SessionType:    meta.typ,
-			Initiator:      meta.initiator,
-			RequestID:      meta.requestID,
-			Reason:         "adopted from " + meta.adoptedFrom,
-		}))
-	default:
-		row := m.instanceRow()
-		cmds = append(cmds, func() tea.Msg {
-			if err := session.WriteInstance(m.sessionsDir, row); err != nil {
-				return journalResultMsg{err: err}
-			}
-			if meta.requestID != "" {
+	// Complete ownership transfer before retiring the provisional launch row.
+	row := m.instanceRow()
+	return m, tea.Batch(cmd, func() tea.Msg {
+		err := session.WriteInstance(m.sessionsDir, row)
+		if err == nil && meta.requestID != "" {
+			if meta.adopted {
+				ev := session.Event{Event: session.EventRecovered, ActorInstance: session.StrPtr(m.instanceName), TargetInstance: session.StrPtr(meta.adoptedFrom), Slug: slug, SessionType: meta.typ, Initiator: meta.initiator, RequestID: meta.requestID, Reason: "adopted from " + meta.adoptedFrom}
+				err = session.AppendEvent(m.eventScript, m.config.KnowledgeDir, ev)
+				if err == nil {
+					err = session.DeleteClaimed(m.sessionsDir, meta.requestID)
+				}
+			} else {
 				ev := session.Event{Event: session.EventSpawned, ActorInstance: session.StrPtr(m.instanceName), Slug: slug, SessionType: meta.typ, Initiator: meta.initiator, RequestID: meta.requestID}
-				if result := emitSpawnedCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, ev)().(journalResultMsg); result.err != nil {
-					return result
+				err = session.AppendEvent(m.eventScript, m.config.KnowledgeDir, ev)
+				if err == nil {
+					err = session.DeleteClaimed(m.sessionsDir, meta.requestID)
 				}
 			}
-			checkpointID := meta.checkpointID
-			if checkpointID == "" {
-				checkpointID = meta.requestID
-			}
-			if checkpointID == "" {
-				checkpointID = slug
-			}
-			return journalResultMsg{err: m.clearHostSpawn(checkpointID)}
-		})
-	}
-
-	if m.hostKey != "" {
-		// Complete ownership transfer before retiring the provisional launch row.
-		row := m.instanceRow()
-		return m, tea.Batch(cmd, func() tea.Msg {
-			err := session.WriteInstance(m.sessionsDir, row)
-			if err == nil && meta.requestID != "" {
-				if meta.adopted {
-					ev := session.Event{Event: session.EventRecovered, ActorInstance: session.StrPtr(m.instanceName), TargetInstance: session.StrPtr(meta.adoptedFrom), Slug: slug, SessionType: meta.typ, Initiator: meta.initiator, RequestID: meta.requestID, Reason: "adopted from " + meta.adoptedFrom}
-					err = session.AppendEvent(m.eventScript, m.config.KnowledgeDir, ev)
-					if err == nil {
-						err = session.DeleteClaimed(m.sessionsDir, meta.requestID)
-					}
-				} else {
-					ev := session.Event{Event: session.EventSpawned, ActorInstance: session.StrPtr(m.instanceName), Slug: slug, SessionType: meta.typ, Initiator: meta.initiator, RequestID: meta.requestID}
-					err = session.AppendEvent(m.eventScript, m.config.KnowledgeDir, ev)
-					if err == nil {
-						err = session.DeleteClaimed(m.sessionsDir, meta.requestID)
-					}
-				}
-			}
-			if err == nil {
-				err = m.clearHostSpawn(meta.requestID)
-			}
-			return hostPromotionDoneMsg{err: err}
-		})
-	}
-
-	// Agent-initiated spawns never steal focus — the request row is the recorded
-	// intent, and interrupting the human to surface an agent's session inverts
-	// who the terminal serves.
-	if meta.initiator == "agent" {
-		return m, tea.Batch(cmds...)
-	}
-
-	// Auto-enter terminal focus when session starts for the currently viewed item,
-	// unless the spec was launched from the confirmation modal — in that case,
-	// return focus to the listing view so the user stays oriented.
-	if slug == m.list.CurrentSlug() {
-		if m.sessionLaunchedFromModal {
-			m.sessionLaunchedFromModal = false
-			m.terminalMode = true
-			m.focusedPanel = panelLeft
-			return m, tea.Batch(cmds...)
 		}
-		m.terminalMode = true
-		m.focusedPanel = panelRight
-		return m, tea.Batch(cmds...)
-	}
-	// Auto-enter terminal focus for follow-up chat sessions.
-	if m.state == stateFollowUps && slug == m.followupDetail.CurrentID() {
-		m.terminalMode = true
-		m.focusedPanel = panelRight
-		return m, tea.Batch(cmds...)
-	}
-	return m, tea.Batch(cmds...)
+		if err == nil {
+			err = m.clearHostSpawn(meta.requestID)
+		}
+		return hostPromotionDoneMsg{err: err}
+	})
 }
 
 func (m model) handleTerminalOutput(msg work.TerminalOutputMsg) (model, tea.Cmd) {
@@ -554,8 +474,8 @@ func (m model) handleStreamError(msg work.StreamErrorMsg) (model, tea.Cmd) {
 	var cmds []tea.Cmd
 	if meta, pending := m.pendingSpawns[slug]; pending {
 		// The process never started: this is a spawn failure, not a session
-		// close. For a queue-claimed request, return it to pending (attempts++)
-		// and journal spawn_failed; a human spawn just drops.
+		// close. Return the claimed request to pending (attempts++) and journal
+		// spawn_failed.
 		delete(m.pendingSpawns, slug)
 		if meta.requestID != "" {
 			reason := "pty_start_failed"

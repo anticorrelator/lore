@@ -77,7 +77,7 @@ func TestAdoptionScanRefusesWrongPaneCWDAndPreservesMarkers(t *testing.T) {
 		Tmux: name, RequestID: "spawn-1", Worktree: &identity,
 	}})
 
-	msg := m.adoptionScanCmd()().(adoptionScanMsg)
+	msg := m.adoptionScanner()(nil)
 	if len(msg.alive) != 0 || len(msg.retained) != 1 || !strings.Contains(msg.retained[0].refusalReason, "tmux pane cwd mismatch") {
 		t.Fatalf("wrong-cwd adoption was not refused and retained: %+v", msg)
 	}
@@ -185,7 +185,7 @@ func TestAdoptionScan_DeadSessionJournalsOrphaned(t *testing.T) {
 			CloseRequests: []string{"term-1", "explicit-2"}}, // no Tmux
 	})
 
-	msg := m.adoptionScanCmd()().(adoptionScanMsg)
+	msg := m.adoptionScanner()(nil)
 	if len(msg.alive) != 0 {
 		t.Fatalf("dead (no-tmux) session returned as alive: %+v", msg.alive)
 	}
@@ -263,38 +263,6 @@ func TestRetireDeadTargetCloseRequests_AppendBeforeDeleteRetryIdempotent(t *test
 	rows := readEventRows(t, kdir)
 	if len(rows) != 1 || rows[0].Event != session.EventCloseFailed || rows[0].Reason != closeFailedTargetInstanceDead || rows[0].TargetInstance == nil || *rows[0].TargetInstance != "dead-inst" {
 		t.Fatalf("retirement rows = %+v", rows)
-	}
-}
-
-// TestEmitRecoveredCmd_DurableBeforeJournal: the adopting instance's registry row
-// (now listing the recovered session) is written before the `recovered` journal
-// row, and both flow through the substrate (WriteInstance + the sole-writer
-// script).
-func TestEmitRecoveredCmd_DurableBeforeJournal(t *testing.T) {
-	m, sessionsDir := baseSessionModel(t)
-	kdir := m.config.KnowledgeDir
-	script := repoScriptPath(t, "session-event-append.sh")
-	inst := session.Instance{Name: "me", Repo: "r", PID: os.Getpid(), Started: "2026-07-06T00:00:00Z",
-		Sessions: []session.Session{{Slug: "demo", Type: "spec", Initiator: "human", Started: "2026-07-06T00:00:00Z", Tmux: "lore-me-demo"}}}
-	ev := session.Event{Event: session.EventRecovered, ActorInstance: session.StrPtr("me"),
-		Slug: "demo", SessionType: "spec", Initiator: "human", Reason: "adopted from dead-inst"}
-
-	res, ok := emitRecoveredCmd(sessionsDir, script, kdir, inst, ev)().(journalResultMsg)
-	if !ok || res.err != nil {
-		t.Fatalf("emitRecoveredCmd: ok=%v err=%v", ok, res.err)
-	}
-	// Durable row written with the session.
-	found := false
-	for _, got := range session.ListInstances(sessionsDir) {
-		if got.Name == "me" && len(got.Sessions) == 1 && got.Sessions[0].Tmux == "lore-me-demo" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("recovered row not written to the registry")
-	}
-	if got := readEventTypes(t, kdir); len(got) != 1 || got[0] != session.EventRecovered {
-		t.Fatalf("events = %v, want exactly [recovered]", got)
 	}
 }
 
@@ -458,7 +426,7 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 		RequestID: "close-dead", Slug: "demo", TargetInstance: "dead-inst", Reason: "coordinator",
 	})
 
-	msg := m.adoptionScanCmd()().(adoptionScanMsg)
+	msg := m.adoptionScanner()(nil)
 	if got := readEventTypes(t, m.config.KnowledgeDir); len(got) != 1 || got[0] != session.EventCloseFailed {
 		t.Fatalf("survivor adoption must emit only dead-target retirement, got events %v", got)
 	}
@@ -551,7 +519,6 @@ func TestAdoptionScan_RetainsSessionWithoutIntegrationOnce(t *testing.T) {
 		t.Fatalf("git commit: %v (%s)", err, out)
 	}
 	m.config.ProjectDir = sourceDir
-	m.normalizedProjectDir = sourceDir
 
 	identity, err := worktree.Create(context.Background(), sourceDir, filepath.Join(t.TempDir(), "session-worktree"), "adopt-epoch")
 	if err != nil {
@@ -578,7 +545,7 @@ func TestAdoptionScan_RetainsSessionWithoutIntegrationOnce(t *testing.T) {
 			ExecutionDir: identity.CanonicalPath},
 	})
 
-	msg := m.adoptionScanCmd()().(adoptionScanMsg)
+	msg := m.adoptionScanner()(nil)
 	if len(msg.alive) != 0 {
 		t.Fatalf("dead (no-tmux) session returned as alive: %+v", msg.alive)
 	}
@@ -618,7 +585,7 @@ func TestAdoptionConflictingSlugPreservesBothGenerationsForRetry(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	msg := m.adoptionScanCmd()().(adoptionScanMsg)
+	msg := m.adoptionScanner()(nil)
 	if len(msg.retained) != 1 || msg.retained[0].requestID != "new-owner" {
 		t.Fatalf("newest identity not retained: %+v", msg)
 	}
@@ -626,7 +593,8 @@ func TestAdoptionConflictingSlugPreservesBothGenerationsForRetry(t *testing.T) {
 	if len(rows) != 1 || rows[0].Sessions[0].RequestID != "old-owner" {
 		t.Fatalf("conflict unavailable while adopter alive: %+v", rows)
 	}
-	if len(msg.notices) == 0 {
+	// A dead TUI's recovery notices are reported apart from the host's own.
+	if len(msg.tuiNotices) == 0 {
 		t.Fatal("conflict did not surface a recovery notice")
 	}
 	m, _ = m.handleAdoptionScan(msg)
@@ -643,12 +611,12 @@ func TestAdoptionStaleTransferReleasesClaimForImmediateRetry(t *testing.T) {
 	if err := session.WriteInstance(dir, row); err != nil {
 		t.Fatal(err)
 	}
-	cmd := m.adoptionScanCmd()
+	scan := m.adoptionScanner()
 	if err := session.WriteInstance(dir, m.instanceRow()); err != nil {
 		t.Fatal(err)
 	}
-	msg := cmd().(adoptionScanMsg)
-	if len(msg.retained) != 0 || len(msg.alive) != 0 || len(msg.notices) == 0 {
+	msg := scan(nil)
+	if len(msg.retained) != 0 || len(msg.alive) != 0 || len(msg.tuiNotices) == 0 {
 		t.Fatalf("stale transfer appeared successful: %+v", msg)
 	}
 	rows := session.ScanAdoptable(dir, "repo", m.instanceName, time.Now())
@@ -656,7 +624,7 @@ func TestAdoptionStaleTransferReleasesClaimForImmediateRetry(t *testing.T) {
 		t.Fatalf("failed transfer stranded claim: %+v", rows)
 	}
 	// Retry succeeds without stopping or replacing this adopter.
-	retry := m.adoptionScanCmd()().(adoptionScanMsg)
+	retry := m.adoptionScanner()(nil)
 	if len(retry.retained) != 1 || retry.retained[0].requestID != "exact-request" {
 		t.Fatalf("retry lost identity: %+v", retry)
 	}
@@ -672,14 +640,14 @@ func TestAdoptionHandlerPreservesNewerLocalAndPendingGenerations(t *testing.T) {
 			if err := session.WriteInstance(dir, old); err != nil {
 				t.Fatal(err)
 			}
-			scan := m.adoptionScanCmd()().(adoptionScanMsg)
+			scan := m.adoptionScanner()(nil)
 			if len(scan.retained) != 1 || len(scan.settledClaims) != 1 {
 				t.Fatalf("scan fixture: %+v", scan)
 			}
 			// B begins after scan(A), using a durable launch checkpoint.
-			m.pendingSpawns = map[string]liveSession{"same": {typ: "worker", initiator: "agent", requestID: "B", checkpointID: "attempt-B", started: time.Now()}}
+			m.pendingSpawns = map[string]liveSession{"same": {typ: "worker", initiator: "agent", requestID: "B", checkpointID: "B", started: time.Now()}}
 			d := work.SessionDescriptor{Slug: "same", Type: work.SessionWorker, Initiator: "agent"}
-			if err := m.hostSpawnCheckpoint("B", "attempt-B")(d, "fake", "session-B", "pane-B", 222); err != nil {
+			if err := m.hostSpawnCheckpoint("B")(d, "fake", "session-B", "pane-B", 222); err != nil {
 				t.Fatal(err)
 			}
 			if started {
@@ -688,11 +656,11 @@ func TestAdoptionHandlerPreservesNewerLocalAndPendingGenerations(t *testing.T) {
 				batch := cmd().(tea.BatchMsg)
 				// The last command is the production registry promotion/checkpoint
 				// retirement. Do not run the fake terminal's polling command.
-				result := batch[len(batch)-1]().(journalResultMsg)
+				result := batch[len(batch)-1]().(hostPromotionDoneMsg)
 				if result.err != nil {
 					t.Fatal(result.err)
 				}
-				if _, err := os.Stat(filepath.Join(session.InstancesDir(dir), m.hostSpawnName("attempt-B")+".json")); !os.IsNotExist(err) {
+				if _, err := os.Stat(filepath.Join(session.InstancesDir(dir), m.hostSpawnName("B")+".json")); !os.IsNotExist(err) {
 					t.Fatalf("B checkpoint was not retired: %v", err)
 				}
 			}
@@ -722,46 +690,5 @@ func TestAdoptionHandlerPreservesNewerLocalAndPendingGenerations(t *testing.T) {
 				t.Fatalf("A cannot be retried while adopter lives: %+v", rows)
 			}
 		})
-	}
-}
-
-func TestRequestlessLaunchCheckpointsBindCleanupToAttempt(t *testing.T) {
-	m, dir := baseSessionModel(t)
-	m.tmuxEnabled = true
-	d := work.SessionDescriptor{Slug: "same-ui-slug", Type: work.SessionWorker, Initiator: "human"}
-	m, _ = m.spawnSession(d, "")
-	first := m.pendingSpawns[d.Slug].checkpointID
-	if first == "" {
-		t.Fatal("requestless launch has no checkpoint token")
-	}
-	if err := m.hostSpawnCheckpoint("", first)(d, "fake", "first-session", "first-pane", 111); err != nil {
-		t.Fatal(err)
-	}
-	m, _ = m.spawnSession(d, "")
-	second := m.pendingSpawns[d.Slug].checkpointID
-	if second == "" || first == second {
-		t.Fatalf("two immediate launches reused token: %q %q", first, second)
-	}
-	if err := m.hostSpawnCheckpoint("", second)(d, "fake", "second-session", "second-pane", 222); err != nil {
-		t.Fatal(err)
-	}
-	// Delayed cleanup for the older launch cannot retire the newer checkpoint.
-	if err := m.clearHostSpawn(first); err != nil {
-		t.Fatal(err)
-	}
-	rows, err := session.OwnershipInstances(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 1 || len(rows[0].Sessions) != 1 || rows[0].Sessions[0].SessionID != "second-session" || rows[0].Sessions[0].RequestID != "" || rows[0].Role != "session-spawn" {
-		t.Fatalf("wrong checkpoint survived: %+v", rows)
-	}
-	if err := m.clearHostSpawn(second); err != nil {
-		t.Fatal(err)
-	}
-	m, _ = m.spawnSession(d, "")
-	third := m.pendingSpawns[d.Slug].checkpointID
-	if err := m.hostSpawnCheckpoint("", third)(d, "fake", "third-session", "third-pane", 333); err != nil {
-		t.Fatalf("retired checkpoint blocked new attempt: %v", err)
 	}
 }

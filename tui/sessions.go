@@ -53,7 +53,7 @@ type liveSession struct {
 	// closeRequests is the ordered, distinct set of close-request ids consumed
 	// during this lifecycle. It survives close_failed outcomes and adoption, then
 	// travels as a compact JSON-array string in closed.links.close_requests.
-	checkpointID  string // exact launch checkpoint token, independent of request identity
+	checkpointID  string // names a fresh launch's checkpoint row (its request id); empty when adopted
 	closeRequests []string
 	// worktree is the durable execution workspace identity. A nil value marks a
 	// legacy session that cannot be safely recovered into a host checkout.
@@ -147,16 +147,12 @@ func readInstancesCmd(sessionsDir string) tea.Cmd {
 	}
 }
 
-// syncInstanceCmd touches an interactive UI's existing registration. Dedicated
-// session hosts retain their recovery heartbeat independently of UI polling.
+// syncInstanceCmd renews the host's registry row, which is its recovery
+// heartbeat.
 func (m model) syncInstanceCmd() tea.Cmd {
 	dir := m.sessionsDir
 	inst := m.instanceRow()
-	host := m.hostKey != ""
 	return func() tea.Msg {
-		if !host {
-			return instanceSyncedMsg{err: session.HeartbeatExisting(dir, inst.Name)}
-		}
 		// A managed tree needs nothing from this loop: it comes down as part of
 		// the release its owner drives, not on a lease this heartbeat renews.
 		return instanceSyncedMsg{err: session.Heartbeat(dir, inst)}
@@ -327,13 +323,10 @@ func (m model) handleWorktreeDisposition(msg worktreeDispositionMsg) (model, tea
 
 	var outcomeCmd tea.Cmd
 	if msg.outcome.Kind == worktree.OutcomeNoChanges || msg.outcome.Kind == worktree.OutcomeWorktreeQuarantined || msg.outcome.Kind == worktree.OutcomePublished {
-		outcomeCmd = journalCmd(m.eventScript, m.config.KnowledgeDir, worktreeOutcomeEvent(m.instanceName, msg.slug, ls, msg.outcome))
-		if m.hostKey != "" {
-			var err error
-			outcomeCmd, err = m.hostWorktreeOutcome(worktreeOutcomeEvent(m.instanceName, msg.slug, ls, msg.outcome), msg.outcome.Identity.Epoch, m.hostCloseDelivery(msg.slug, ls, msg.closeRequestID))
-			if err != nil {
-				return m, func() tea.Msg { return hostRuntimeErrorMsg{err: err} }
-			}
+		var err error
+		outcomeCmd, err = m.hostWorktreeOutcome(worktreeOutcomeEvent(m.instanceName, msg.slug, ls, msg.outcome), msg.outcome.Identity.Epoch, m.hostCloseDelivery(msg.slug, ls, msg.closeRequestID))
+		if err != nil {
+			return m, func() tea.Msg { return hostRuntimeErrorMsg{err: err} }
 		}
 	}
 	var terminalCmds []tea.Cmd
@@ -385,12 +378,13 @@ func (m model) handleSessionWorktreeCleaned(msg sessionWorktreeCleanedMsg) (mode
 	return m, nil
 }
 
-// sweepSessionWorktreesCmd is the crash-resume backstop. A TUI killed
+// sweepSessionWorktreesCmd is the crash-resume backstop. A host killed
 // mid-teardown never reaches the close path above, leaving a checkout with no
 // handler to reclaim it; nothing else will ever visit that directory, so the
 // scan is the only way to find it. Paths any registry row still claims are held
 // back, and each remaining checkout must prove its own terminal state and
-// content preservation before it is touched.
+// content preservation before it is touched. A registry that cannot be read
+// defers the sweep to a later pass.
 func (m model) sweepSessionWorktreesCmd() tea.Cmd {
 	worktreesDir := filepath.Join(m.config.KnowledgeDir, "_sessions", "worktrees")
 	sessionsDir := m.sessionsDir
@@ -398,10 +392,7 @@ func (m model) sweepSessionWorktreesCmd() tea.Cmd {
 		var claimed []string
 		instances, err := session.OwnershipInstances(sessionsDir)
 		if err != nil {
-			if m.hostKey != "" {
-				return sessionWorktreeSweptMsg{deferred: err}
-			}
-			return sessionWorktreeSweptMsg{failures: []error{err}}
+			return sessionWorktreeSweptMsg{deferred: err}
 		}
 		for _, inst := range instances {
 			for _, s := range inst.Sessions {
@@ -449,7 +440,7 @@ func pluralize(n int, singular, plural string) string {
 
 // queueTickCmd runs the request-expiry sweep, then one reclaim+claim pass. The
 // expiry helper owns pending->expiring->journal->delete recovery; hosting it on
-// this heartbeat means every live TUI advances the terminal transition without
+// this heartbeat means the store host advances the terminal transition without
 // making `session list` or a requester-owned watcher mutate state. The
 // live-instance set is read inside the Cmd; the plan-doc gate is snapshotted
 // from the loaded work items now.
@@ -459,12 +450,8 @@ func (m model) queueTickCmd() tea.Cmd {
 	expiryScript := m.expiryScript
 	kdir := m.config.KnowledgeDir
 	vintage := m.buildTime
-	projectDir := m.normalizedProjectDir
 	hostKey := m.hostKey
-	var scope session.StoreScope
-	if hostKey != "" {
-		scope = m.storeScope()
-	}
+	scope := m.storeScope()
 	planDocs := make(map[string]bool)
 	for _, it := range m.list.Items() {
 		planDocs[it.Slug] = it.HasPlanDoc
@@ -505,7 +492,7 @@ func (m model) queueTickCmd() tea.Cmd {
 		live := make(map[string]bool)
 		instances, instanceDiagnostics := session.ListInstancesWithDiagnostics(dir)
 		for _, inst := range instances {
-			if hostKey == "" || session.ProcessAlive(inst.PID) {
+			if session.ProcessAlive(inst.PID) {
 				live[inst.Name] = true
 			}
 		}
@@ -517,12 +504,7 @@ func (m model) queueTickCmd() tea.Cmd {
 			}
 			return work.PreflightWorker(req.FrameworkValue(), len(req.PositionContext()) > 0)
 		}
-		var res session.QueueTickResult
-		if hostKey != "" {
-			res, err = session.QueueTickForStoreHost(dir, name, vintage, hostKey, scope, live, hasPlanDoc, slugLive, time.Now(), session.ReclaimAfter, admit)
-		} else {
-			res, err = session.QueueTickForHostAdmission(dir, name, vintage, projectDir, "", live, hasPlanDoc, slugLive, time.Now(), session.ReclaimAfter, admit)
-		}
+		res, err := session.QueueTickForStoreHost(dir, name, vintage, hostKey, scope, live, hasPlanDoc, slugLive, time.Now(), session.ReclaimAfter, admit)
 		if err == nil {
 			err = expiryErr
 		} else if expiryErr != nil {
@@ -672,31 +654,6 @@ func (m model) advanceModalObservations() (model, []tea.Cmd) {
 		cmds = append(cmds, journalCmd(m.eventScript, m.config.KnowledgeDir, blocked))
 	}
 	return m, cmds
-}
-
-// emitSpawnedCmd deletes the claimed row then journals `spawned` — the delete is
-// the durable terminal state, so it must land before the history row.
-func emitSpawnedCmd(dir, script, kdir string, ev session.Event) tea.Cmd {
-	return func() tea.Msg {
-		if err := session.DeleteClaimed(dir, ev.RequestID); err != nil {
-			return journalResultMsg{err: err}
-		}
-		return journalResultMsg{err: session.AppendEvent(script, kdir, ev)}
-	}
-}
-
-// emitRecoveredCmd writes this instance's registry row (now carrying the adopted
-// session) then journals `recovered` — the durable registry write is the recovery
-// manifest and must land before the history row, matching the substrate's
-// durable-before-journal ordering. Both run in one Cmd goroutine so the order is
-// guaranteed (a batched writeInstanceCmd would race the journal append).
-func emitRecoveredCmd(dir, script, kdir string, inst session.Instance, ev session.Event) tea.Cmd {
-	return func() tea.Msg {
-		if err := session.WriteInstance(dir, inst); err != nil {
-			return journalResultMsg{err: err}
-		}
-		return journalResultMsg{err: session.AppendEvent(script, kdir, ev)}
-	}
 }
 
 // adoptedSession is one still-running tmux-hosted session recovered from a dead
@@ -885,29 +842,19 @@ func retireDeadTargetCloseRequests(sessionsDir, script, kdir, actor, deadInstanc
 	return notices, diagnostics
 }
 
-// adoptionScanCmd is the D5 recovery pass. It scans the instance registry for
+// adoptionScanner is the D5 recovery pass. It scans the instance registry for
 // dead instances' rows (pid-dead), atomically claims each by rename, and for
-// every nested session decides re-attach vs. close by tmux liveness. A visible
-// TUI adopts dead TUI rows of its repo, once at startup. A store host adopts
-// the dead rows of its recovery key set and then dead TUI rows of its repo, at
-// startup and on each reconciliation pass. Filter inputs (repo, self name,
-// script paths) are snapshotted at Cmd-build time; the instances directory is
-// read live inside the Cmd — the same build-time-snapshot/run-time-read split
-// the close/queue scanners use.
-func (m model) adoptionScanCmd() tea.Cmd {
-	scan := m.adoptionScanner()
-	return func() tea.Msg { return scan(nil) }
-}
-
-// adoptionScanner snapshots the scan's inputs now and returns the scan itself,
-// which a store host runs over a recovery key set it has already read; given
-// nil keys it reads the set itself.
+// every nested session decides re-attach vs. close by tmux liveness. The store
+// host adopts the dead rows of its recovery key set and then dead TUI rows of
+// its repo, at startup and on each reconciliation pass. Filter inputs (repo,
+// self name, script paths) are snapshotted now; the instances directory is read
+// live when the returned scan runs, over a recovery key set the host has
+// already read. Given nil keys, the scan reads the set itself.
 func (m model) adoptionScanner() func(keys map[string]bool) adoptionScanMsg {
 	dir := m.sessionsDir
 	repo := m.config.RepoIdentifier
 	self := m.instanceName
 	script, kdir := m.eventScript, m.config.KnowledgeDir
-	host := m.hostKey != ""
 	hostKey := m.hostKey
 	transferred := m.instanceRow()
 	return func(keys map[string]bool) adoptionScanMsg {
@@ -916,27 +863,22 @@ func (m model) adoptionScanner() func(keys map[string]bool) adoptionScanMsg {
 		var notices, tuiNotices []runtimeNotice
 		var diagnostics []session.Diagnostic
 		var settledClaims []string
-		var candidates []session.Instance
+		if keys == nil {
+			var err error
+			if keys, err = session.HostRecoveryKeys(dir, hostKey); err != nil {
+				return adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Code: "host-recovery", Message: err.Error()}}}
+			}
+		}
+		candidates, err := session.ScanHostAdoptable(dir, keys, self)
+		if err != nil {
+			return adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Code: "host-recovery", Message: err.Error()}}}
+		}
 		// hostSeen holds the slugs a host-scoped claim must leave alone: sessions
 		// this host already owns or has closed. seen and known serve dead TUI
 		// claims, whose sessions are compared by generation instead.
-		hostSeen := map[string]bool{}
-		if host {
-			if keys == nil {
-				var err error
-				if keys, err = session.HostRecoveryKeys(dir, hostKey); err != nil {
-					return adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Code: "host-recovery", Message: err.Error()}}}
-				}
-			}
-			var err error
-			candidates, err = session.ScanHostAdoptable(dir, keys, self)
-			if err != nil {
-				return adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Code: "host-recovery", Message: err.Error()}}}
-			}
-			hostSeen, err = m.hostClosedSlugs()
-			if err != nil {
-				return adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Message: err.Error()}}}
-			}
+		hostSeen, err := m.hostClosedSlugs()
+		if err != nil {
+			return adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Message: err.Error()}}}
 		}
 		seen := map[string]bool{}
 		known := map[string]session.Session{}
@@ -948,12 +890,8 @@ func (m model) adoptionScanner() func(keys map[string]bool) adoptionScanMsg {
 		if tuiCandidates := session.ScanAdoptable(dir, repo, self, time.Now()); len(tuiCandidates) > 0 {
 			owners, err := session.OwnershipInstances(dir)
 			if err != nil {
-				notice := runtimeNotice{Class: operationalFailure, Code: "adoption-ownership-read", Message: err.Error()}
-				if !host {
-					return adoptionScanMsg{notices: []runtimeNotice{notice}}
-				}
-				// A store host still recovers its own keys; dead TUIs wait a pass.
-				tuiNotices = append(tuiNotices, notice)
+				// The host still recovers its own keys; dead TUIs wait a pass.
+				tuiNotices = append(tuiNotices, runtimeNotice{Class: operationalFailure, Code: "adoption-ownership-read", Message: err.Error()})
 			} else {
 				for _, owner := range owners {
 					if owner.Repo != repo || owner.HostKey != "" || owner.Name == self || !session.ProcessAlive(owner.PID) {
@@ -971,7 +909,7 @@ func (m model) adoptionScanner() func(keys map[string]bool) adoptionScanMsg {
 		for _, inst := range candidates {
 			hostScoped := inst.HostKey != ""
 			sink := &notices
-			if host && !hostScoped {
+			if !hostScoped {
 				sink = &tuiNotices
 			}
 			if survivesOnAnotherServer(inst, otherServers) {
@@ -1002,7 +940,7 @@ func (m model) adoptionScanner() func(keys map[string]bool) adoptionScanMsg {
 				hostSeen[s.Slug] = true
 				seen[s.Slug] = true
 				known[s.Slug] = s
-				if host && s.SourceDir == "" {
+				if s.SourceDir == "" {
 					s.SourceDir = claim.ProjectDir
 				}
 
@@ -1507,13 +1445,9 @@ func (m model) spawnFromRequest(req session.Request) (model, tea.Cmd) {
 }
 
 // requestCheckout is the source checkout a claimed request's session is seeded
-// from. A visible TUI seeds from its own checkout. A store host has none: it
-// takes the checkout the row names, which admission already found to belong to
-// its store.
+// from. A store host has none of its own: it takes the checkout the row names,
+// which admission already found to belong to its store.
 func (m model) requestCheckout(req session.Request) string {
-	if m.hostKey == "" {
-		return m.normalizedProjectDir
-	}
 	if req.Checkout() == "" {
 		return ""
 	}
@@ -1600,20 +1534,13 @@ func allocateSessionWorktreeOnRefCmd(d work.SessionDescriptor, sourceDir, worktr
 	}
 }
 
-// spawnSession is the single spawn path for both the human confirm modal and the
-// agent request queue. It pre-creates and sizes the panel, records the pending
-// spawn's metadata for the SpecProcessStarted handler, and returns the spawn
-// Cmd. Agent-initiated spawns are marked so the started handler never steals
-// focus; human spawns keep the existing modal-return-focus behavior.
-func (m model) spawnSession(d work.SessionDescriptor, requestID string) (model, tea.Cmd) {
-	return m.spawnSessionOnRef(d, requestID, "", m.normalizedProjectDir)
-}
-
-// spawnSessionOnRef is spawnSession with a required source branch, carried from
-// a claimed request's required_target_ref, and the source checkout the session
-// is seeded from. The branch only reaches worktree allocation, so it has no
-// effect on a session that arrives with an identity already allocated. A human
-// spawn declares no branch and passes "".
+// spawnSessionOnRef is the spawn path for a claimed request. It pre-creates and
+// sizes the panel, records the pending spawn's metadata for the
+// SessionProcessStarted handler, and returns the spawn Cmd. requiredRef is the
+// request's required_target_ref and sourceDir the checkout the session is
+// seeded from; the branch only reaches worktree allocation, so it has no effect
+// on a session that arrives with an identity already allocated. The request id
+// names the launch checkpoint.
 func (m model) spawnSessionOnRef(d work.SessionDescriptor, requestID, requiredRef, sourceDir string) (model, tea.Cmd) {
 	slug := d.Slug
 	m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: slug, Type: sessionType(d.Type)})
@@ -1627,12 +1554,8 @@ func (m model) spawnSessionOnRef(d work.SessionDescriptor, requestID, requiredRe
 	if m.pendingSpawns == nil {
 		m.pendingSpawns = make(map[string]liveSession)
 	}
-	checkpointID := requestID
-	if checkpointID == "" {
-		checkpointID = session.NewRequestID()
-	}
 	m.pendingSpawns[slug] = liveSession{
-		checkpointID: checkpointID,
+		checkpointID: requestID,
 		typ:          sessionType(d.Type),
 		initiator:    d.Initiator,
 		requestID:    requestID,
@@ -1641,18 +1564,10 @@ func (m model) spawnSessionOnRef(d work.SessionDescriptor, requestID, requiredRe
 		worktreeID:   d.WorktreeID,
 		executionDir: d.ExecutionDir, sourceDir: sourceDir,
 	}
-	if d.Initiator != "agent" {
-		m.sessionLaunchedFromModal = m.state == stateWork
-	}
 	env := work.SessionEnv{Instance: m.instanceName, Slug: slug, Type: sessionType(d.Type),
-		WorktreeID: d.WorktreeID, ExecutionDir: d.ExecutionDir, SourceDir: sourceDir, HostKey: m.hostKey, RoutingOverrides: d.RoutingOverrides}
-	if m.hostKey != "" || m.tmuxEnabled {
-		env.Prepared = m.hostSpawnCheckpoint(requestID, checkpointID)
-	}
+		WorktreeID: d.WorktreeID, ExecutionDir: d.ExecutionDir, SourceDir: sourceDir, HostKey: m.hostKey, RoutingOverrides: d.RoutingOverrides,
+		Prepared: m.hostSpawnCheckpoint(requestID)}
 	if d.Worktree == nil {
-		if sourceDir == "" && m.hostKey == "" {
-			sourceDir = m.config.ProjectDir
-		}
 		epoch := session.NewRequestID()
 		worktreePath := filepath.Join(m.config.KnowledgeDir, "_sessions", "worktrees", epoch)
 		return m, allocateSessionWorktreeOnRefCmd(d, sourceDir, worktreePath, epoch, requiredRef, func(allocated work.SessionDescriptor) tea.Msg {
@@ -1691,16 +1606,12 @@ func (m model) instanceRow() session.Instance {
 	if err != nil {
 		framework = ""
 	}
-	// Every session host serves a whole store; its sessions name their own
+	// The session host serves a whole store; its sessions name their own
 	// checkouts, so its row names none.
-	scope, projectDir := "", m.normalizedProjectDir
-	if m.hostKey != "" {
-		scope, projectDir = session.ScopeStore, ""
-	}
 	return session.Instance{
 		RuntimeCapabilities: session.RuntimeCapabilities(),
 		Revision:            time.Now().UnixNano(),
-		HostKey:             m.hostKey, Role: sessionHostRole(m.hostKey),
+		HostKey:             m.hostKey, Role: sessionHostRole,
 		Name:             m.instanceName,
 		PID:              os.Getpid(),
 		Repo:             m.config.RepoIdentifier,
@@ -1709,8 +1620,7 @@ func (m model) instanceRow() session.Instance {
 		Sessions:         sessions,
 		BuildSHA:         m.buildSHA,
 		BuildTime:        m.buildTime,
-		ProjectDir:       projectDir,
-		Scope:            scope,
+		Scope:            session.ScopeStore,
 		Framework:        framework,
 	}
 }
@@ -1743,8 +1653,8 @@ func (m model) closedEventMeta(slug string, ls liveSession) session.Event {
 
 // closedEventFor builds the `closed` row with the duration-only spend shape —
 // the synchronous quit-path row (cleanupAllSubprocesses), where the program is
-// exiting and no boundary-time spend probe can run. The interactive teardown
-// paths enrich instead via closedSpendJournalCmd.
+// exiting and no boundary-time spend probe can run. A close delivery starts from
+// the same row and replaces its spend once the probe has run.
 func (m model) closedEventFor(slug string, ls liveSession) session.Event {
 	ev := m.closedEventMeta(slug, ls)
 	ev.Spend = durationOnlySpend(sessionDurationSeconds(ls.started))
@@ -1763,41 +1673,9 @@ func (m model) orphanedEventFor(slug string, ls liveSession, deadInstance string
 		RequestID:      ls.requestID,
 		Reason:         "instance-death",
 	}
-	ev.Spend = closedSpend(m.spendScript, ls.harness, ls.sessionID, m.spendDir(ls), sessionDurationSeconds(ls.started))
+	// The spend probe finds the transcript from the session's own checkout.
+	ev.Spend = closedSpend(m.spendScript, ls.harness, ls.sessionID, ls.sourceDir, sessionDurationSeconds(ls.started))
 	return ev
-}
-
-// spendDir is the working directory the spend probe derives a transcript
-// location from. A visible TUI passes its own checkout; a store host has none
-// and passes the session's.
-func (m model) spendDir(ls liveSession) string {
-	if m.hostKey != "" {
-		return ls.sourceDir
-	}
-	return m.config.ProjectDir
-}
-
-// closedSpendJournalCmd runs the boundary-time token-spend probe and appends the
-// enriched `closed` row, both inside one Cmd goroutine so the probe never blocks
-// the UI thread and the append still flows through the sole writer
-// (session-event-append.sh). A session with no deterministic transcript binding,
-// or any probe gap, closes with the duration-only spend; duration_seconds is
-// always merged TUI-side — the helper never sees it. A non-empty closeRequestID
-// overrides the row's request_id with the consumed close-request's id (the match
-// key a ladder-driven teardown carries); empty leaves the spawn request_id.
-func (m model) closedSpendJournalCmd(slug string, ls liveSession, closeRequestID string) tea.Cmd {
-	script, kdir := m.eventScript, m.config.KnowledgeDir
-	spendScript, cwd := m.spendScript, m.spendDir(ls)
-	ev := m.closedEventMeta(slug, ls)
-	if closeRequestID != "" {
-		ev.RequestID = closeRequestID
-	}
-	dur := sessionDurationSeconds(ls.started)
-	harness, sessionID := ls.harness, ls.sessionID
-	return func() tea.Msg {
-		ev.Spend = closedSpend(spendScript, harness, sessionID, cwd, dur)
-		return journalResultMsg{err: session.AppendEvent(script, kdir, ev)}
-	}
 }
 
 // sessionDurationSeconds is the teardown wall-clock in whole seconds, floored at

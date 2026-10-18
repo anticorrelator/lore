@@ -149,14 +149,15 @@ func TestCloseLeavesNonTerminalAndLegacySessionsAlone(t *testing.T) {
 	}
 }
 
-// The backstop for a TUI killed mid-teardown: no handler ever ran, no registry
+// The backstop for a host killed mid-teardown: no handler ever ran, no registry
 // row survives, and the sweep is the only thing that will ever visit the tree.
 func TestStartupSweepReclaimsCrashLeakedCheckouts(t *testing.T) {
 	root, repo, identity := closedSessionWorktree(t, "20260725T000000Z-crashed")
 
 	m := model{
-		config:      config.Config{KnowledgeDir: root, ProjectDir: root},
+		config:      config.Config{KnowledgeDir: root},
 		sessionsDir: filepath.Join(root, "_sessions"),
+		hostKey:     storeHostKey,
 	}
 	msg, ok := m.sweepSessionWorktreesCmd()().(sessionWorktreeSweptMsg)
 	if !ok {
@@ -190,7 +191,7 @@ func TestStartupSweepHoldsBackCheckoutsARegistryRowClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := model{config: config.Config{KnowledgeDir: root, ProjectDir: root}, sessionsDir: sessionsDir}
+	m := model{config: config.Config{KnowledgeDir: root}, sessionsDir: sessionsDir, hostKey: storeHostKey}
 	msg := m.sweepSessionWorktreesCmd()().(sessionWorktreeSweptMsg)
 	if len(msg.proofs) != 0 || len(msg.failures) != 0 {
 		t.Fatalf("sweep touched a claimed checkout: proofs=%+v failures=%v", msg.proofs, msg.failures)

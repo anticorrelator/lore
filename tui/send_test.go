@@ -208,8 +208,8 @@ func TestAdvanceSendVerifications_RetryThenUnsubmitted(t *testing.T) {
 }
 
 // TestAdvanceSendVerifications_UnobservableDeadline: an unclassifiable screen
-// waits within the grace, then journals send_refused reason=unsubmitted once the
-// grace elapses.
+// waits within the grace, then journals send_refused reason=delivery-uncertain
+// once the grace elapses.
 func TestAdvanceSendVerifications_UnobservableDeadline(t *testing.T) {
 	// Within grace: no terminal, entry retained.
 	m, _ := seedSendVerify(t, 0)
@@ -223,7 +223,7 @@ func TestAdvanceSendVerifications_UnobservableDeadline(t *testing.T) {
 		t.Fatal("verify entry dropped before the grace elapsed")
 	}
 
-	// Grace elapsed: journal unsubmitted.
+	// Grace elapsed: journal delivery-uncertain.
 	m2, kdir := seedSendVerify(t, 2*time.Hour)
 	m2.sendVerifyGrace = time.Hour
 	m2.observeSendFn = func(work.SessionPanelModel) sendObs { return obsUnobservable }
@@ -235,15 +235,15 @@ func TestAdvanceSendVerifications_UnobservableDeadline(t *testing.T) {
 		runJournalCmds(t, c)
 	}
 	rows := readEventRows(t, kdir)
-	if len(rows) != 1 || rows[0].Event != session.EventSendRefused || rows[0].Reason != sendReasonUnsubmitted {
-		t.Fatalf("events = %+v, want exactly [send_refused unsubmitted]", rows)
+	if len(rows) != 1 || rows[0].Event != session.EventSendRefused || rows[0].Reason != "delivery-uncertain" {
+		t.Fatalf("events = %+v, want exactly [send_refused delivery-uncertain]", rows)
 	}
 }
 
-// TestAdvanceSendVerifications_PanelGoneJournalsUnsubmitted: a raced teardown that
+// TestAdvanceSendVerifications_PanelGoneJournalsUncertain: a raced teardown that
 // removes the panel before the outcome resolves still emits one terminal
-// (send_refused reason=unsubmitted) so a `--wait` requester never hangs.
-func TestAdvanceSendVerifications_PanelGoneJournalsUnsubmitted(t *testing.T) {
+// (send_refused reason=delivery-uncertain) so a `--wait` requester never hangs.
+func TestAdvanceSendVerifications_PanelGoneJournalsUncertain(t *testing.T) {
 	m, kdir := seedSendVerify(t, 0)
 	delete(m.sessionPanels, "demo") // panel torn down
 
@@ -255,8 +255,8 @@ func TestAdvanceSendVerifications_PanelGoneJournalsUnsubmitted(t *testing.T) {
 		runJournalCmds(t, c)
 	}
 	rows := readEventRows(t, kdir)
-	if len(rows) != 1 || rows[0].Event != session.EventSendRefused || rows[0].Reason != sendReasonUnsubmitted {
-		t.Fatalf("events = %+v, want exactly [send_refused unsubmitted]", rows)
+	if len(rows) != 1 || rows[0].Event != session.EventSendRefused || rows[0].Reason != "delivery-uncertain" {
+		t.Fatalf("events = %+v, want exactly [send_refused delivery-uncertain]", rows)
 	}
 }
 

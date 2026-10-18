@@ -36,8 +36,8 @@ func stageMainRouteScripts(t *testing.T) {
 	t.Setenv("LORE_DATA_DIR", dataDir)
 }
 
-// baseSessionModel builds a minimal model wired for the session substrate at a
-// temp store, with one work item that has a plan doc.
+// baseSessionModel builds a minimal store host wired for the session substrate
+// at a temp store, with one work item that has a plan doc.
 func baseSessionModel(t *testing.T) (model, string) {
 	t.Helper()
 	kdir := t.TempDir()
@@ -48,7 +48,8 @@ func baseSessionModel(t *testing.T) (model, string) {
 		width:        120,
 		height:       40,
 		list:         work.NewListModel([]work.WorkItem{{Slug: "demo", HasPlanDoc: true}}),
-		config:       config.Config{KnowledgeDir: kdir, ProjectDir: kdir},
+		config:       config.Config{KnowledgeDir: kdir, WorkDir: filepath.Join(kdir, "_work")},
+		hostKey:      storeHostKey,
 		instanceName: "me",
 		sessionsDir:  sessionsDir,
 		eventScript:  "", // journal Cmds are constructed but not run in this test
@@ -56,17 +57,15 @@ func baseSessionModel(t *testing.T) (model, string) {
 	return m, sessionsDir
 }
 
-// TestAgentClaimSpawnsWithoutStealingFocus is the TUI half of the closed loop: a
-// planted request is claimed on a queue tick, a session panel is created, the
-// spawn is marked agent-initiated, and focus is left untouched.
-func TestAgentClaimSpawnsWithoutStealingFocus(t *testing.T) {
-	stageMainRouteScripts(t)
-	m, sessionsDir := baseSessionModel(t)
-	if err := session.WritePending(sessionsDir, session.Request{Framework: strPtr("claude-code"), Model: strPtr("fixture-model"),
-		RequestID: "req-1", Type: "spec", Slug: strPtr("demo"), Initiator: "agent",
-	}); err != nil {
-		t.Fatal(err)
-	}
+// TestStoreHostClaimCreatesPanelAndRecordsClaimant is the host half of the
+// closed loop: a planted keyed request is claimed on a queue tick, a session
+// panel is created, the spawn is recorded as agent-initiated, and the claimed
+// row names the host.
+func TestStoreHostClaimCreatesPanelAndRecordsClaimant(t *testing.T) {
+	f := newStoreHostFixture(t)
+	m := storeHostModel(t, f.store)
+	writeStoreRequest(t, m.sessionsDir, session.Request{RequestID: "req-1", HostKey: storeHostKey, Type: "spec", Slug: strPtr("demo"), Initiator: "agent",
+		RequiredProjectDir: strPtr(f.one), PlacementStance: strPtr(session.StanceRequiredDir)})
 
 	msg, ok := m.queueTickCmd()().(queueTickResultMsg)
 	if !ok {
@@ -88,40 +87,30 @@ func TestAgentClaimSpawnsWithoutStealingFocus(t *testing.T) {
 	if !ok {
 		t.Fatal("claimed session not recorded in pendingSpawns")
 	}
-	if meta.initiator != "agent" || meta.requestID != "req-1" {
+	if meta.initiator != "agent" || meta.requestID != "req-1" || meta.checkpointID != "req-1" {
 		t.Fatalf("pending spawn metadata wrong: %+v", meta)
 	}
-	if m.terminalMode {
-		t.Error("agent spawn stole focus (terminalMode=true)")
-	}
-	if m.focusedPanel != panelLeft {
-		t.Error("agent spawn moved focus off the list")
-	}
 
-	// The claim is durable: the claimed row carries this instance's name.
-	claimed, err := session.ReadClaimed(sessionsDir, "req-1")
+	// The claim is durable: the claimed row carries the host's name.
+	claimed, err := session.ReadClaimed(m.sessionsDir, "req-1")
 	if err != nil {
 		t.Fatalf("ReadClaimed: %v", err)
 	}
-	if claimed.ClaimedBy == nil || *claimed.ClaimedBy != "me" {
+	if claimed.ClaimedBy == nil || *claimed.ClaimedBy != m.instanceName {
 		t.Fatalf("claim metadata not written: %+v", claimed)
 	}
 }
 
-// TestLegacyChatClaimDerivesAddressableIdentity covers rolling compatibility:
-// an older pending row with a null slug is claimed under a deterministic slug,
-// journals that slug, and promotes it into the registry writer's live set.
+// TestLegacyChatClaimDerivesAddressableIdentity: a pending chat row with a null
+// slug is claimed under a deterministic slug, journals that slug, and promotes
+// it into the registry writer's live set.
 func TestLegacyChatClaimDerivesAddressableIdentity(t *testing.T) {
-	stageMainRouteScripts(t)
-	m, sessionsDir := baseSessionModel(t)
-	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	f := newStoreHostFixture(t)
+	m := storeHostModel(t, f.store)
 	const requestID = "20260815T022031Z-940ee194"
 	const slug = "chat-940ee194"
-	if err := session.WritePending(sessionsDir, session.Request{Framework: strPtr("claude-code"), Model: strPtr("fixture-model"),
-		RequestID: requestID, Type: "chat", Initiator: "agent",
-	}); err != nil {
-		t.Fatal(err)
-	}
+	writeStoreRequest(t, m.sessionsDir, session.Request{RequestID: requestID, HostKey: storeHostKey, Type: "chat", Initiator: "agent",
+		PreferProjectDir: strPtr(f.one), PlacementStance: strPtr(session.StancePreferredDir)})
 
 	msg := m.queueTickCmd()().(queueTickResultMsg)
 	if msg.err != nil || msg.result.Claimed == nil {
@@ -157,7 +146,7 @@ func TestLegacyChatClaimDerivesAddressableIdentity(t *testing.T) {
 	}
 }
 
-// TestQueueTickHostsRequestExpiry pins the host decision: the live TUI
+// TestQueueTickHostsRequestExpiry pins the host decision: the store host's
 // heartbeat invokes the expiry writer before its Go claim pass. session list
 // and requester-owned watchers remain readers only.
 func TestQueueTickHostsRequestExpiry(t *testing.T) {
