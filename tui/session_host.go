@@ -111,7 +111,8 @@ func (m model) hostDir() string {
 // sessionHostMain runs a host that serves every checkout of one knowledge
 // store. Exit codes: 0 after an idle withdrawal, 1 on an error, 2 on invalid
 // arguments (including the retired --source-dir form and a host key that is not
-// the store's), 3 when another host already holds the store's runtime lock.
+// the store's), 3 when another host already holds the store's runtime lock, and
+// 75 after a drain its supervisor requested through restart.json.
 func sessionHostMain(args []string) int {
 	fs := flag.NewFlagSet("session-host", flag.ContinueOnError)
 	var o hostOptions
@@ -238,7 +239,7 @@ func sessionHostMain(args []string) int {
 		fmt.Fprintln(os.Stderr, host.err)
 		return 1
 	}
-	return 0
+	return host.exitCode
 }
 
 // storeRepoIdentifier names the store the way config.Load names a visible
@@ -330,6 +331,10 @@ type hostReconcileDoneMsg struct {
 // running, after its allocated checkout was settled.
 type hostLaunchRefusedMsg struct{ failure work.StreamErrorMsg }
 
+// hostExitRestart is the exit code of a host that drained for the restart its
+// supervisor requested.
+const hostExitRestart = 75
+
 type sessionHostModel struct {
 	promoting int
 
@@ -340,14 +345,19 @@ type sessionHostModel struct {
 	idleSince               time.Time
 	lastSweep               time.Time
 	err                     error
+	exitCode                int
 
 	// recoveredKeys are the host keys whose allocation and delivery records
 	// this process has recovered; a key that joins the recovery set later is
 	// recovered on the next reconciliation pass.
 	recoveredKeys map[string]bool
-	// reconciling is set while a reconciliation pass runs, so passes never
-	// overlap.
+	// reconciling and queueTicks count work in flight that a drain waits out:
+	// a reconciliation pass and queue passes that may still claim a row.
 	reconciling bool
+	queueTicks  int
+	// draining is set while restart.json names this process; the host then
+	// starts no new operation and exits at its first quiescent tick.
+	draining bool
 	// retainedReported holds the retained-checkout reports already written to
 	// the host log, so a checkout the sweep keeps finding is logged once per
 	// host process rather than on every pass.
@@ -479,6 +489,83 @@ func (m model) settleRefusedLaunchCmd(failure work.StreamErrorMsg, pending liveS
 	}
 }
 
+// restartRequested reports whether restart.json beside ready.json names this
+// process, by pid and by the start time its registry row records.
+func (h *sessionHostModel) restartRequested() bool {
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(h.options.ReadyFile), "restart.json"))
+	if err != nil {
+		return false
+	}
+	var request struct {
+		TargetPID     int    `json:"target_pid"`
+		TargetStarted string `json:"target_started"`
+	}
+	return json.Unmarshal(b, &request) == nil && request.TargetPID == os.Getpid() && request.TargetStarted == h.runtime.instanceStartedISO
+}
+
+// quiescent reports whether no operation a restart could cut short is under
+// way: no spawn or promotion, close, send or answer verification, input or
+// interrupt in flight, no worktree outcome being published, no delivery-ledger
+// record without its committed terminal, and no queue or reconciliation pass
+// that may still claim or adopt. It never reads inflight, which every live
+// session's blocking terminal poll holds above zero.
+func (h *sessionHostModel) quiescent() bool {
+	m := &h.runtime
+	if h.promoting > 0 || h.reconciling || h.queueTicks > 0 || len(m.pendingSpawns) > 0 || len(m.pendingClose) > 0 ||
+		len(m.pendingSendVerify) > 0 || len(m.pendingAnswerVerify) > 0 || len(m.pendingSend) > 0 || len(m.pendingAnswer) > 0 || len(m.pendingInterrupt) > 0 {
+		return false
+	}
+	for _, ls := range m.localSessions {
+		// A session outside tmux would end with this process.
+		if ls.worktreeDispositionPending || ls.tmuxName == "" {
+			return false
+		}
+	}
+	return !h.runtime.hostLedgerOpen()
+}
+
+// hostLedgerOpen reports whether any delivery-ledger record still lacks its
+// committed terminal, or cannot be read.
+func (m model) hostLedgerOpen() bool {
+	paths, err := filepath.Glob(filepath.Join(m.hostDir(), "deliveries", "*.json"))
+	if err != nil {
+		return true
+	}
+	for _, path := range paths {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return true
+		}
+		var d hostDelivery
+		if json.Unmarshal(b, &d) != nil || !d.Terminal || !d.Committed {
+			return true
+		}
+	}
+	return false
+}
+
+// withdrawForRestart removes ready.json under ensure.lock, as an idle
+// withdrawal does, so no caller can publish to this process while it exits.
+// Surviving tmux sessions stay as they are for the next host to adopt.
+func (h *sessionHostModel) withdrawForRestart() (bool, error) {
+	lock, err := hostLock(filepath.Join(filepath.Dir(h.options.ReadyFile), "ensure.lock"), true)
+	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer lock.Close()
+	if !h.quiescent() {
+		return false, nil
+	}
+	if err = os.Remove(h.options.ReadyFile); err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	h.ready = false
+	return true, nil
+}
+
 // logNotices writes adoption notices to the host log one by one; the
 // runtime's flash would keep only the last.
 func logNotices(notices ...[]runtimeNotice) {
@@ -582,6 +669,13 @@ func (h *sessionHostModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		next, cmd := h.runtime.Update(v.failure)
 		h.runtime = next.(model)
 		cmds = append(cmds, h.wrap(cmd))
+	case queueTickResultMsg:
+		if h.queueTicks > 0 {
+			h.queueTicks--
+		}
+		next, cmd := h.runtime.Update(msg)
+		h.runtime = next.(model)
+		cmds = append(cmds, h.wrap(cmd))
 	case hostRuntimeErrorMsg:
 		return h.fail(v.err)
 	case hostPromotionDoneMsg:
@@ -593,7 +687,20 @@ func (h *sessionHostModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.inflight--
 	case hostTickMsg:
 		if h.ready {
-			if h.idleCandidate() {
+			h.draining = h.restartRequested()
+			if h.draining {
+				h.idleSince = time.Time{}
+				if h.quiescent() {
+					stopped, err := h.withdrawForRestart()
+					if err != nil {
+						return h.fail(err)
+					}
+					if stopped {
+						h.exitCode = hostExitRestart
+						return h, tea.Quit
+					}
+				}
+			} else if h.idleCandidate() {
 				if h.idleSince.IsZero() {
 					h.idleSince = time.Now()
 				}
@@ -709,7 +816,13 @@ func (h *sessionHostModel) sessionTick() tea.Cmd {
 	for slug := range m.localSessions {
 		hosted[slug] = true
 	}
-	cmds := []tea.Cmd{scanInterruptRequestsCmd(m.sessionsDir, m.instanceName), m.syncInstanceCmd(), m.queueTickCmd(), scanSendRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanPeekRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanAnswerRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanCloseRequestsCmd(m.sessionsDir, m.instanceName, hosted, sessionIDIndex(m.localSessions), true)}
+	cmds := []tea.Cmd{m.syncInstanceCmd(), scanPeekRequestsCmd(m.sessionsDir, m.instanceName, hosted, true)}
+	if !h.draining {
+		// A draining host finishes what it started and takes on nothing new;
+		// what waits in the queue is the next host's.
+		h.queueTicks++
+		cmds = append(cmds, scanInterruptRequestsCmd(m.sessionsDir, m.instanceName), m.queueTickCmd(), scanSendRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanAnswerRequestsCmd(m.sessionsDir, m.instanceName, hosted, true), scanCloseRequestsCmd(m.sessionsDir, m.instanceName, hosted, sessionIDIndex(m.localSessions), true))
+	}
 	var more []tea.Cmd
 	*m, more = m.advanceCloseLadders()
 	cmds = append(cmds, more...)
@@ -745,7 +858,7 @@ func (h *sessionHostModel) sessionTick() tea.Cmd {
 		if len(m.localSessions) == 0 && len(m.pendingSpawns) == 0 {
 			cmds = append(cmds, m.sweepSessionWorktreesCmd())
 		}
-		if !h.reconciling {
+		if !h.draining && !h.reconciling {
 			h.reconciling = true
 			cmds = append(cmds, h.reconcileCmd())
 		}

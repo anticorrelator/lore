@@ -846,6 +846,10 @@ func driveHost(t *testing.T, h *sessionHostModel, cmd tea.Cmd) bool {
 	return drive(cmd)
 }
 
+func isQuit(cmd tea.Cmd) bool {
+	return cmd != nil && reflect.ValueOf(cmd).Pointer() == reflect.ValueOf(tea.Quit).Pointer()
+}
+
 // servingStoreHost is a store host past startup recovery, as a test drives it.
 func servingStoreHost(m model) *sessionHostModel {
 	return &sessionHostModel{runtime: m, options: hostOptions{Key: m.hostKey, ReadyFile: filepath.Join(m.hostDir(), "ready.json"), Idle: time.Hour},
@@ -1323,6 +1327,177 @@ func TestStoreHostRecoveryNeverOrphansASessionAliveOnAnotherRuntimeServer(t *tes
 	}
 	if got := otherRuntimeTmuxServers(m.config.KnowledgeDir); !slices.Contains(got, "lore-tui") || !slices.Contains(got, server) || slices.Contains(got, config.TmuxServer()) {
 		t.Fatalf("servers checked = %v", got)
+	}
+}
+
+// drainingStoreHost is a serving host with one live tmux session whose
+// terminal poll is outstanding, and a restart.json naming this process.
+func drainingStoreHost(t *testing.T) (*sessionHostModel, string) {
+	t.Helper()
+	m, _ := baseSessionModel(t)
+	m.hostKey = storeHostKey
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	m.instanceStartedISO = "2026-10-18T05:00:00Z"
+	output := make(chan []byte)
+	panel := work.NewSessionPanelModel("demo")
+	panel, _ = panel.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.sessionPanels = map[string]work.SessionPanelModel{"demo": panel.SetPtmx(nil, nil, output)}
+	m.localSessions = map[string]liveSession{"demo": {typ: "worker", initiator: "agent", requestID: "spawn", tmuxName: "lore-me-demo", started: time.Now()}}
+	h := servingStoreHost(m)
+	if err := hostAtomicJSON(h.options.ReadyFile, map[string]any{"ready": true}); err != nil {
+		t.Fatal(err)
+	}
+	restart := filepath.Join(filepath.Dir(h.options.ReadyFile), "restart.json")
+	request, _ := json.Marshal(map[string]any{"schema_version": 1, "reason": "binary-changed", "target_pid": os.Getpid(), "target_started": m.instanceStartedISO, "requested_at": "2026-10-18T06:00:00Z"})
+	if err := os.WriteFile(restart, request, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Output re-arms the session's poll through the host's real wrap path; the
+	// poll is never run, so it stays outstanding like a live session's.
+	h.Update(work.TerminalOutputMsg{Slug: "demo", Data: []byte("working")})
+	if h.inflight == 0 {
+		t.Fatal("fixture has no command in flight")
+	}
+	return h, restart
+}
+
+func TestStoreHostDrainExitsAtAQuiescentTickWhileATerminalPollIsOutstanding(t *testing.T) {
+	h, restart := drainingStoreHost(t)
+	_, cmd := h.Update(hostTickMsg{})
+	if !isQuit(cmd) || h.exitCode != hostExitRestart {
+		t.Fatalf("drain did not exit: quit=%v exit=%d inflight=%d", isQuit(cmd), h.exitCode, h.inflight)
+	}
+	if _, err := os.Stat(h.options.ReadyFile); !os.IsNotExist(err) {
+		t.Fatalf("ready.json survived the drain: %v", err)
+	}
+	if _, err := os.Stat(restart); err != nil {
+		t.Fatalf("restart.json is the supervisor's to delete: %v", err)
+	}
+	if ls := h.runtime.localSessions["demo"]; ls.tmuxName != "lore-me-demo" {
+		t.Fatal("drain dropped the surviving session")
+	}
+}
+
+func TestStoreHostDrainWaitsForAPendingSendVerification(t *testing.T) {
+	// An injected send awaiting its verification holds the drain.
+	h, _ := drainingStoreHost(t)
+	h.runtime.pendingSendVerify = map[string]pendingSendState{"send-1": {slug: "demo", requestID: "send-1", injectedAt: time.Now()}}
+	if _, cmd := h.Update(hostTickMsg{}); isQuit(cmd) || h.exitCode != 0 || !h.draining {
+		t.Fatal("drained with a send unverified")
+	}
+	if h.queueTicks != 0 {
+		t.Fatalf("a draining host started %d queue passes", h.queueTicks)
+	}
+
+	// So does a delivery record without its committed terminal, until the
+	// production terminal path settles it.
+	h, _ = drainingStoreHost(t)
+	ev := session.Event{Event: session.EventSent, Slug: "demo", RequestID: "send-2", ActorInstance: session.StrPtr(h.runtime.instanceName)}
+	if err := h.runtime.hostDeliveryAttempt("send", ev); err != nil {
+		t.Fatal(err)
+	}
+	for tick := 0; tick < 2; tick++ {
+		if _, cmd := h.Update(hostTickMsg{}); isQuit(cmd) || h.exitCode != 0 {
+			t.Fatalf("tick %d drained with a delivery unsettled", tick)
+		}
+	}
+	if _, err := os.Stat(h.options.ReadyFile); err != nil {
+		t.Fatalf("ready.json withdrawn mid-delivery: %v", err)
+	}
+	delete(h.runtime.pendingSendVerify, "send-2")
+	driveHost(t, h, h.runtime.hostDeliveryTerminalCmd("send", ev))
+	if _, cmd := h.Update(hostTickMsg{}); !isQuit(cmd) || h.exitCode != hostExitRestart {
+		t.Fatal("drain did not exit once the send settled")
+	}
+
+	// A queue pass started before the request may still claim a row; the drain
+	// waits for its result.
+	h, _ = drainingStoreHost(t)
+	h.queueTicks = 1
+	if _, cmd := h.Update(hostTickMsg{}); isQuit(cmd) {
+		t.Fatal("drained with a queue pass in flight")
+	}
+	h.Update(queueTickResultMsg{})
+	if _, cmd := h.Update(hostTickMsg{}); !isQuit(cmd) {
+		t.Fatal("drain did not exit after the queue pass returned")
+	}
+}
+
+func TestStoreHostDrainIgnoresARestartForAnotherProcess(t *testing.T) {
+	for name, target := range map[string]map[string]any{
+		"other pid":        {"target_pid": os.Getpid() + 1, "target_started": "2026-10-18T05:00:00Z"},
+		"other start time": {"target_pid": os.Getpid(), "target_started": "2026-10-18T04:59:59Z"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, restart := drainingStoreHost(t)
+			target["schema_version"] = 1
+			b, _ := json.Marshal(target)
+			if err := os.WriteFile(restart, b, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, cmd := h.Update(hostTickMsg{}); isQuit(cmd) || h.draining {
+				t.Fatal("host drained for a restart addressed to another process")
+			}
+			if h.queueTicks != 1 {
+				t.Fatalf("a serving host's tick started %d queue passes", h.queueTicks)
+			}
+		})
+	}
+}
+
+// The real binary, asked to restart the way the supervisor asks, removes
+// ready.json and exits 75, leaving restart.json in place.
+func TestStoreHostDrainRealBinaryExits75OnRestartRequest(t *testing.T) {
+	f := newStoreHostFixture(t)
+	runtime := os.Getenv(config.SessionRuntimeEnv)
+	key := session.StoreHostKey(config.NormalizeProjectDir(f.store), runtime)
+	ready := filepath.Join(config.SessionHostsDir(filepath.Join(f.store, "_sessions")), key, "ready.json")
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "--session-host", "--scope", "store", "--host-key", key,
+		"--kdir", f.store, "--ready-file", ready, "--idle-timeout", "600", "--runtime", runtime)
+	cmd.Env = append(os.Environ(), mainRuntimeProbeEnv+"="+runtime)
+	var output bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &output, &output
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	var status struct {
+		InstanceName string `json:"instance_name"`
+		PID          int    `json:"pid"`
+	}
+	for status.InstanceName == "" {
+		select {
+		case err := <-exited:
+			t.Fatalf("host exited before ready: %v\n%s", err, output.String())
+		case <-time.After(20 * time.Millisecond):
+		}
+		if b, err := os.ReadFile(ready); err == nil {
+			_ = json.Unmarshal(b, &status)
+		}
+	}
+	row := readJSONFields(t, filepath.Join(session.InstancesDir(filepath.Join(f.store, "_sessions")), status.InstanceName+".json"))
+	restart := filepath.Join(filepath.Dir(ready), "restart.json")
+	request, _ := json.Marshal(map[string]any{"schema_version": 1, "reason": "binary-changed", "target_pid": status.PID, "target_started": jsonString(t, row["started"]), "requested_at": time.Now().UTC().Format(time.RFC3339)})
+	if err := os.WriteFile(restart, request, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-exited:
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != hostExitRestart {
+			t.Fatalf("drain exit = %v, want %d\n%s", err, hostExitRestart, output.String())
+		}
+	case <-ctx.Done():
+		t.Fatalf("host never drained\n%s", output.String())
+	}
+	if _, err := os.Stat(ready); !os.IsNotExist(err) {
+		t.Fatalf("drained host left ready.json: %v", err)
+	}
+	if _, err := os.Stat(restart); err != nil {
+		t.Fatalf("restart.json removed by the host: %v", err)
 	}
 }
 
