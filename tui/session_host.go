@@ -326,6 +326,10 @@ type hostReconcileDoneMsg struct {
 	err    error
 }
 
+// hostLaunchRefusedMsg carries a spawn failure whose launch left nothing
+// running, after its allocated checkout was settled.
+type hostLaunchRefusedMsg struct{ failure work.StreamErrorMsg }
+
 type sessionHostModel struct {
 	promoting int
 
@@ -436,6 +440,45 @@ func deliveryMintedBy(d hostDelivery, keys map[string]bool) bool {
 	return false
 }
 
+// settleRefusedLaunchCmd handles a fresh launch that failed before its session
+// came up. Its launch checkpoint is the evidence of what it started: with none,
+// or with one whose tmux session and process are both gone, nothing survives,
+// so the allocated checkout is settled as startup recovery would settle it and
+// the request goes back through the ordinary spawn-failure path. Anything else
+// may still be running, and starting the request again could launch a second
+// agent, so the host stops and leaves it to recovery.
+func (m model) settleRefusedLaunchCmd(failure work.StreamErrorMsg, pending liveSession) tea.Cmd {
+	checkpointID := pending.checkpointID
+	if checkpointID == "" {
+		checkpointID = pending.requestID
+	}
+	path := filepath.Join(session.InstancesDir(m.sessionsDir), m.hostSpawnName(checkpointID)+".json")
+	stop := hostRuntimeErrorMsg{err: fmt.Errorf("session %s: %w", failure.Slug, failure.Err)}
+	return func() tea.Msg {
+		b, err := os.ReadFile(path)
+		if err == nil {
+			var row session.Instance
+			if json.Unmarshal(b, &row) != nil {
+				return stop
+			}
+			for _, s := range row.Sessions {
+				if s.Tmux == "" || tmuxAliveOnServer(config.TmuxServer(), s.Tmux) || session.ProcessAlive(s.PID) {
+					return stop
+				}
+			}
+		} else if !os.IsNotExist(err) {
+			return stop
+		}
+		if err := m.settleRefusedLaunchAllocation(pending.requestID); err != nil {
+			return hostRuntimeErrorMsg{err: fmt.Errorf("session %s: settle refused launch: %w", failure.Slug, err)}
+		}
+		if err := m.clearHostSpawn(checkpointID); err != nil {
+			return hostRuntimeErrorMsg{err: fmt.Errorf("session %s: settle refused launch: %w", failure.Slug, err)}
+		}
+		return hostLaunchRefusedMsg{failure: failure}
+	}
+}
+
 // logNotices writes adoption notices to the host log one by one; the
 // runtime's flash would keep only the last.
 func logNotices(notices ...[]runtimeNotice) {
@@ -534,6 +577,11 @@ func (h *sessionHostModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		h.runtime, cmd = h.runtime.handleAdoptionScan(v.result)
 		cmds = append(cmds, h.wrap(cmd))
+	case hostLaunchRefusedMsg:
+		fmt.Fprintf(os.Stderr, "session %s: launch failed before it started: %v\n", v.failure.Slug, v.failure.Err)
+		next, cmd := h.runtime.Update(v.failure)
+		h.runtime = next.(model)
+		cmds = append(cmds, h.wrap(cmd))
 	case hostRuntimeErrorMsg:
 		return h.fail(v.err)
 	case hostPromotionDoneMsg:
@@ -599,6 +647,10 @@ func (h *sessionHostModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case work.StreamErrorMsg:
 		if pending, ok := h.runtime.pendingSpawns[v.Slug]; ok && (pending.adopted || h.runtime.hostKey != "") {
+			if !pending.adopted && pending.requestID != "" {
+				cmds = append(cmds, h.wrap(h.runtime.settleRefusedLaunchCmd(v, pending)))
+				break
+			}
 			// Preserve ownership and retry through scoped startup recovery; never turn
 			// a failed attach into a new launch request.
 			return h.fail(fmt.Errorf("session %s: %w", v.Slug, v.Err))

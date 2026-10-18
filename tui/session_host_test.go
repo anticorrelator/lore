@@ -852,6 +852,160 @@ func servingStoreHost(m model) *sessionHostModel {
 		recovered: true, swept: true, ready: true, recoveredKeys: map[string]bool{m.hostKey: true}}
 }
 
+func writeRouteSettings(t *testing.T) {
+	t.Helper()
+	dir := filepath.Join(os.Getenv("LORE_DATA_DIR"), "config")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"version":2,"tui_launch_framework":"claude-code","capability_overrides":{},"routes":{"default":"claude-code/fixture-model"},"harnesses":{"claude-code":{"args":[],"native_models":{"default":"opus"}}}}`
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func commitCheckout(t *testing.T, dir string) {
+	t.Helper()
+	if out, err := exec.Command("git", "-C", dir, "-c", "user.email=lore@localhost", "-c", "user.name=Lore", "commit", "-q", "--allow-empty", "-m", "seed").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v: %s", err, out)
+	}
+}
+
+func eventNames(t *testing.T, kdir string) map[string]int {
+	t.Helper()
+	out := map[string]int{}
+	for _, name := range readEventTypes(t, kdir) {
+		out[name]++
+	}
+	return out
+}
+
+// The 2026-10-18 crash loop: a launch refused before the harness started made
+// the host exit, its successor reclaimed the row without counting an attempt,
+// and claimed it into the same refusal until the supervisor gave up on the
+// store. Here every launch of one row is refused up front (a position context
+// on a session that cannot take one). The host stays up, archives and journals
+// that row, settles the checkout it allocated, and spawns the next row.
+func TestStoreHostRecoveryKeepsServingWhenALaunchAlwaysFails(t *testing.T) {
+	f := newStoreHostFixture(t)
+	writeRouteSettings(t)
+	commitCheckout(t, f.one)
+	h := servingStoreHost(storeHostModel(t, f.store))
+	sessionsDir := h.runtime.sessionsDir
+	writeStoreRequest(t, sessionsDir, session.Request{RequestID: "a-refused", HostKey: storeHostKey, Type: "spec", Slug: strPtr("refused"), Initiator: "agent",
+		RequiredProjectDir: strPtr(f.one), PlacementStance: strPtr(session.StanceRequiredDir), ExtraContext: json.RawMessage(`{"position_preparation":{}}`)})
+	writeStoreRequest(t, sessionsDir, session.Request{RequestID: "b-next", HostKey: storeHostKey, Type: "spec", Slug: strPtr("next"), Initiator: "agent",
+		RequiredProjectDir: strPtr(f.one), PlacementStance: strPtr(session.StanceRequiredDir)})
+
+	msg := h.runtime.queueTickCmd()().(queueTickResultMsg)
+	if msg.err != nil || msg.result.Claimed == nil || msg.result.Claimed.RequestID != "a-refused" {
+		t.Fatalf("first tick claimed %+v, err %v", msg.result.Claimed, msg.err)
+	}
+	if quit := driveHost(t, h, func() tea.Msg { return msg }); quit || h.err != nil {
+		t.Fatalf("host stopped on a refused launch: quit=%v err=%v", quit, h.err)
+	}
+	if _, pending := h.runtime.pendingSpawns["refused"]; pending {
+		t.Fatal("refused launch is still pending")
+	}
+	if _, err := os.Stat(filepath.Join(sessionsDir, "requests", "abandoned", "a-refused.json")); err != nil {
+		t.Fatalf("refused row not archived: %v", err)
+	}
+	if _, err := session.ReadClaimed(sessionsDir, "a-refused"); err == nil {
+		t.Fatal("refused row still claimed")
+	}
+	events := eventNames(t, f.store)
+	for _, want := range []string{session.EventClaimed, session.EventWorktreeQuarantined, session.EventSpawnFailed, session.EventAbandoned} {
+		if events[want] != 1 {
+			t.Fatalf("journal %v lacks one %s", events, want)
+		}
+	}
+	if left, _ := filepath.Glob(filepath.Join(h.runtime.hostDir(), "allocations", "*.json")); len(left) != 0 {
+		t.Fatalf("allocation records left: %v", left)
+	}
+	if left, _ := filepath.Glob(filepath.Join(sessionsDir, "worktrees", "*")); len(left) != 0 {
+		t.Fatalf("refused launch left its checkout: %v", left)
+	}
+
+	// The next row is claimed and spawned. Its launch would start a real
+	// harness, so the returned command is not run.
+	msg = h.runtime.queueTickCmd()().(queueTickResultMsg)
+	if msg.err != nil || msg.result.Claimed == nil || msg.result.Claimed.RequestID != "b-next" {
+		t.Fatalf("second tick claimed %+v, err %v", msg.result.Claimed, msg.err)
+	}
+	h.Update(msg)
+	if pending, ok := h.runtime.pendingSpawns["next"]; !ok || pending.requestID != "b-next" || h.err != nil {
+		t.Fatalf("next row not spawning: %+v, err %v", h.runtime.pendingSpawns, h.err)
+	}
+}
+
+// A launch that fails for a reason that may pass (here settings.json cannot be
+// read) returns its row with one more attempt, so the queue's ceiling, not the
+// supervisor's restart budget, ends the retries.
+func TestStoreHostRecoveryCountsAnAttemptForATransientLaunchFailure(t *testing.T) {
+	f := newStoreHostFixture(t)
+	commitCheckout(t, f.one)
+	h := servingStoreHost(storeHostModel(t, f.store))
+	sessionsDir := h.runtime.sessionsDir
+	writeStoreRequest(t, sessionsDir, session.Request{RequestID: "flaky", HostKey: storeHostKey, Type: "spec", Slug: strPtr("flaky"), Initiator: "agent",
+		RequiredProjectDir: strPtr(f.one), PlacementStance: strPtr(session.StanceRequiredDir)})
+	for attempt := 1; attempt <= session.MaxAttempts; attempt++ {
+		msg := h.runtime.queueTickCmd()().(queueTickResultMsg)
+		if msg.err != nil || msg.result.Claimed == nil {
+			t.Fatalf("attempt %d: claimed %+v, err %v", attempt, msg.result.Claimed, msg.err)
+		}
+		if quit := driveHost(t, h, func() tea.Msg { return msg }); quit || h.err != nil {
+			t.Fatalf("attempt %d: host stopped: quit=%v err=%v", attempt, quit, h.err)
+		}
+		rows := session.ScanPending(sessionsDir)
+		if len(rows) != 1 || rows[0].Attempts != attempt || rows[0].LastError == nil || !strings.Contains(*rows[0].LastError, "routing settings") {
+			t.Fatalf("attempt %d: pending %+v", attempt, rows)
+		}
+		// Skip the retry backoff.
+		row := rows[0]
+		past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+		row.LastAttemptAt = &past
+		if err := session.WritePending(sessionsDir, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	msg := h.runtime.queueTickCmd()().(queueTickResultMsg)
+	if msg.result.Claimed != nil || len(msg.result.Abandoned) != 1 || len(session.ScanPending(sessionsDir)) != 0 {
+		t.Fatalf("attempt ceiling did not retire the row: %+v", msg.result)
+	}
+	if left, _ := filepath.Glob(filepath.Join(sessionsDir, "worktrees", "*")); len(left) != 0 {
+		t.Fatalf("failed launches left checkouts: %v", left)
+	}
+}
+
+// When a failed launch's checkpoint shows a tmux session that is still alive,
+// the agent may be running. Starting the request again could launch a second
+// one, so the host stops as before and leaves the survivor to recovery.
+func TestStoreHostRecoveryStopsWhenAFailedLaunchMayStillBeRunning(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	m, _ := baseSessionModel(t)
+	m.hostKey = storeHostKey
+	h := servingStoreHost(m)
+	name := "lore-test-launch-" + strconv.Itoa(os.Getpid())
+	if out, err := exec.Command("tmux", "-L", config.TmuxServer(), "-f", "/dev/null", "new-session", "-d", "-s", name, "--", "sleep", "300").CombinedOutput(); err != nil {
+		t.Fatalf("tmux: %v: %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-L", config.TmuxServer(), "kill-session", "-t", "="+name).Run() })
+	h.runtime.pendingSpawns = map[string]liveSession{"live": {requestID: "r-live", checkpointID: "r-live", typ: "worker", initiator: "agent"}}
+	d := work.SessionDescriptor{Slug: "live", Type: work.SessionWorker, Initiator: "agent"}
+	if err := h.runtime.hostSpawnCheckpoint("r-live", "r-live")(d, "fake", "", name, 0); err != nil {
+		t.Fatal(err)
+	}
+	_, cmd := h.Update(work.StreamErrorMsg{Slug: "live", Err: errors.New("pty start: input/output error")})
+	if !driveHost(t, h, cmd) || h.err == nil {
+		t.Fatal("host kept serving beside a launch that may be running")
+	}
+	if _, err := os.Stat(filepath.Join(session.InstancesDir(h.runtime.sessionsDir), h.runtime.hostSpawnName("r-live")+".json")); err != nil {
+		t.Fatalf("launch checkpoint was discarded: %v", err)
+	}
+}
+
 // plantHostRow writes a dead host's registry row listing one session.
 func plantHostRow(t *testing.T, sessionsDir, name, key, slug string) {
 	t.Helper()

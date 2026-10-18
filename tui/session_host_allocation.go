@@ -91,6 +91,24 @@ func (m model) recoverHostAllocationsExcept(keys map[string]bool, inFlight func(
 	return nil
 }
 
+// settleRefusedLaunchAllocation settles the allocation record of one request
+// whose launch was refused before the harness started.
+func (m model) settleRefusedLaunchAllocation(requestID string) error {
+	path := m.hostAllocationPath(requestID)
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var a hostAllocation
+	if err = json.Unmarshal(b, &a); err != nil {
+		return err
+	}
+	return m.settleHostAllocation(path, a, false)
+}
+
 func (m model) settleHostAllocation(path string, a hostAllocation, launched bool) error {
 	var err error
 	if !launched {
