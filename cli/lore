@@ -549,6 +549,22 @@ Options:
 EOF
 }
 
+rebuild_usage() {
+  cat >&2 <<'EOF'
+lore rebuild — rebuild and reinstall the lore-tui binary
+
+Usage: lore rebuild
+
+Builds lore-tui from the tui/ beside the scripts this CLI runs, linking the
+vendored libghostty-vt archive via cgo and stamping HEAD's build identity, and
+installs it at ~/.local/bin/lore-tui. Takes no arguments; LORE_TUI_BUILD_TAGS
+passes build tags to go build.
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
 arc_usage() {
   cat >&2 <<'EOF'
 lore arc — coordination arcs as their own findable documents
@@ -2478,6 +2494,24 @@ case "$1" in
     exec "$SCRIPTS_DIR/export-obsidian.sh" "$@"
     ;;
   rebuild)
+    shift
+    # rebuild takes no arguments, so anything passed is either a request for
+    # help or a mistake; neither may fall through to a build that replaces
+    # the installed binary.
+    if [[ $# -gt 0 ]]; then
+      case "$1" in
+        --help|-h)
+          rebuild_usage
+          exit 0
+          ;;
+        *)
+          echo "Error: unknown argument '$1' for lore rebuild" >&2
+          echo "" >&2
+          rebuild_usage
+          exit 1
+          ;;
+      esac
+    fi
     if ! command -v go >/dev/null 2>&1; then
       echo "Error: go not found on PATH" >&2
       exit 1

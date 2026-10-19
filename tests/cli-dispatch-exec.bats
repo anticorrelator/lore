@@ -284,6 +284,46 @@ EOF
   [[ -e "$TEST_HOME/.local/bin/lore-tui" ]]
 }
 
+@test "rebuild --help prints usage and an unknown flag refuses, neither building" {
+  # A go stub that records every call: a build that slipped past the argument
+  # guard would show up here, and its -o would land under the scratch HOME.
+  # Each [[ ]] ends in '|| return 1' because macOS bash 3.2 does not fail a
+  # bats test on a mid-test [[ ]] that is false.
+  local bin="$TEST_ROOT/go-bin" calls="$TEST_ROOT/go.calls"
+  mkdir -p "$bin"
+  cat > "$bin/go" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GO_CALLS"
+case "$1" in
+  env) [[ "$2" == GOOS ]] && echo darwin || echo arm64 ;;
+  build)
+    while [[ $# -gt 0 ]]; do
+      if [[ "$1" == -o ]]; then mkdir -p "$(dirname "$2")"; : > "$2"; fi
+      shift
+    done
+    ;;
+esac
+EOF
+  chmod +x "$bin/go"
+
+  local flag
+  for flag in --help -h; do
+    HOME="$TEST_HOME" PATH="$bin:$PATH" GO_CALLS="$calls" run bash "$LORE" rebuild "$flag"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Usage: lore rebuild"* ]] || return 1
+    [[ "$output" != *"Building lore-tui"* ]] || return 1
+  done
+
+  HOME="$TEST_HOME" PATH="$bin:$PATH" GO_CALLS="$calls" run bash "$LORE" rebuild --force
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"unknown argument '--force' for lore rebuild"* ]] || return 1
+  [[ "$output" == *"Usage: lore rebuild"* ]] || return 1
+  [[ "$output" != *"Building lore-tui"* ]] || return 1
+
+  [[ ! -e "$calls" ]] || return 1
+  [[ ! -e "$TEST_HOME/.local/bin/lore-tui" ]] || return 1
+}
+
 @test "coordinate --help lists every verb and returns promptly" {
   # The usage heredoc cites sibling verbs in backticks. Were it unquoted, those
   # would be command substitutions and printing the help would run a watcher —
