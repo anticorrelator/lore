@@ -418,9 +418,20 @@
       },
       "session_lifecycle_hooks": {
         "support": "none",
+        "evidence": "opencode-session-lifecycle-hooks",
         "channel": "plugin-env",
-        "events": [],
-        "notes": "Candidate channel: a lore session plugin selected through the pane environment (OPENCODE_CONFIG_CONTENT or OPENCODE_CONFIG_DIR). Blocked on a live probe: OpenCode 2.0.25 has no session-scoped plugin flag, and an environment channel reaches every child process, so a nested opencode run would report rows as the hosted session. The cell stays `none`, with no events declared and no evidence row, until a probe in a hosted pane shows the plugin loads beside the person's own plugins, holds nothing at launch, and stays silent in child processes. Intended mapping once proven: session.idle -> needs_input (idle); permission.asked and session.error -> needs_input (blocked); a user message -> resumed (working)."
+        "events": [
+          {"hook_event": "session.execution.started", "event": "resumed", "activity": "working"},
+          {"hook_event": "session.execution.succeeded", "event": "needs_input", "activity": "idle"},
+          {"hook_event": "session.execution.interrupted", "event": "needs_input", "activity": "idle", "payload_links": {"reason": "reason"}},
+          {"hook_event": "session.execution.failed", "event": "needs_input", "activity": "blocked", "payload_links": {"error": "error"}},
+          {"hook_event": "permission.asked", "event": "needs_input", "activity": "blocked", "payload_links": {"tool_name": "tool_name"}},
+          {"hook_event": "permission.replied", "event": "resumed", "activity": "working"},
+          {"hook_event": "form.created", "event": "needs_input", "activity": "blocked"},
+          {"hook_event": "form.replied", "event": "resumed", "activity": "working"},
+          {"hook_event": "form.cancelled", "event": "resumed", "activity": "working"}
+        ],
+        "notes": "Channel: lore's OpenCode TUI plugin, adapters/opencode/lore-session-lifecycle (its tui entry), named in OPENCODE_CLI_CONFIG_CONTENT in the pane environment; the plugin hands each client event to scripts/session-lifecycle-hook.sh, which accepts a row only from the session's first process because this channel reaches every child. A live probe of OpenCode 2.0.25 on 2026-10-18 (evidence opencode-session-lifecycle-hooks) found the premise this cell was planned on false: OPENCODE_CONFIG_CONTENT and OPENCODE_CONFIG_DIR are read by OpenCode's server process, not by the TUI in the pane. A TUI uses the machine's shared background service unless it is started with --standalone, and that service takes the whole environment of whichever client started it and keeps it for its lifetime, so a server plugin selected this way either never sees the pane's environment or speaks for the first pane that started the service in every session it serves; server plugins never run in the pane's first process. The client channel held where that one failed: the plugin ran in the TUI process, the pane's first process, and journaled resumed, needs_input blocked (permission.asked), resumed (permission.replied) and needs_input idle (session.execution.succeeded) for the session the pane showed, a subagent's turn wrote nothing, and the hook refused the same events from the background service and from a tool shell, which inherit the pane environment. Raising this cell needs three things: a launch that keeps the person's own client plugins, because the environment value replaces the plugins list in their cli.json (in the probe a plugin listed there did not load); a hosted OpenCode 2.x launch that starts, because the launch passes --model and the 2.0.25 TUI refuses it ('Unrecognized flag: --model in command opencode'); and an integration scenario in which a fake OpenCode session wakes from its plugin row. The events are the client events 2.0.25 publishes; session.idle and session.error, named by its earlier docs, are not among them. Nothing installs the plugin while support is none."
       },
       "position_compilation": {"format": "agent-markdown", "consumption": "agent-definition", "activation_operation": "native_launch", "selection_operation": "native_selection", "evidence": "opencode-subagents"},
       "install_paths": {

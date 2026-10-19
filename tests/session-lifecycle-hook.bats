@@ -7,6 +7,11 @@
 #     the row D1 assigns it, as a hook row through the sole writer;
 #   - each Codex event the codex cell declares does the same from a payload of
 #     the shape Codex 0.162.1's hook input schemas give;
+#   - each OpenCode client event the opencode cell declares does the same from
+#     the payload lore's OpenCode plugin builds, and, because that cell's channel
+#     is the pane environment, a row from any process below the session's first
+#     process (a nested harness, one started from a tool shell, the hook run
+#     through a shell) is refused while the first process still reports;
 #   - hooks the cell does not declare write nothing;
 #   - actor_instance names the live owner listing this launch after adoption;
 #   - every path prints nothing and exits 0, including a refused write, a hung
@@ -288,10 +293,167 @@ codex_payload() {
   contains "$(hooks_log)" "declares no event for SessionStart"
 }
 
-@test "opencode declares no events yet, so its hooks write nothing" {
-  fire opencode '{"hook_event_name":"session.idle"}'
+# --- OpenCode: a plugin selected through the pane environment ---
+# The plugin (adapters/opencode/lore-session-lifecycle/tui.ts) runs in the
+# OpenCode TUI process and spawns the hook directly with a payload naming the
+# client event. Its channel is plugin-env, so the hook accepts a row only from
+# the outermost process whose environment carries the session's generation.
+# A python process stands in for the harness: the hook has to read the
+# caller's environment, and macOS hides the environment of its own shells.
+
+harness() {
+  # harness <framework> <payload> [step...] — run the hook from a stand-in
+  # harness process. Each step starts one more process below the previous one,
+  # with the same environment: "python" a python process, "shell" a /bin/sh
+  # that runs the next python process, "late" a python process started without
+  # LORE_SESSION_GENERATION that sets it before going on, and "via-shell" runs
+  # the hook itself through /bin/sh rather than directly. The hook's output is
+  # relayed, so assert_silent_exit still checks it.
+  local script="$BATS_TEST_TMPDIR/harness.py"
+  cat > "$script" <<'PY'
+import os
+import shlex
+import subprocess
+import sys
+
+hook, framework, payload, steps = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+if os.environ.get('HARNESS_RESTORE_GENERATION'):
+    os.environ['LORE_SESSION_GENERATION'] = os.environ.pop('HARNESS_RESTORE_GENERATION')
+if steps and steps[0] != 'via-shell':
+    step, below = steps[0], [sys.executable, __file__, hook, framework, payload, *steps[1:]]
+    if step == 'python':
+        sys.exit(subprocess.run(below).returncode)
+    if step == 'shell':
+        sys.exit(subprocess.run(['/bin/sh', '-c', ' '.join(map(shlex.quote, below)) + '; exit $?']).returncode)
+    if step == 'late':
+        env = dict(os.environ)
+        env['HARNESS_RESTORE_GENERATION'] = env.pop('LORE_SESSION_GENERATION')
+        sys.exit(subprocess.run(below, env=env).returncode)
+    sys.exit(f'unknown step {step}')
+command = ['bash', hook, framework]
+if steps:
+    command = ['/bin/sh', '-c', ' '.join(map(shlex.quote, command)) + '; exit $?']
+done = subprocess.run(command, input=payload.encode(), capture_output=True)
+sys.stdout.buffer.write(done.stdout)
+sys.stderr.buffer.write(done.stderr)
+sys.exit(done.returncode)
+PY
+  local framework="$1" payload="$2"
+  shift 2
+  run python3 "$script" "$HOOK" "$framework" "$payload" "$@"
+}
+
+opencode_payload() {
+  # opencode_payload <client event> [extra JSON object merged in] — the payload
+  # the plugin hands the hook.
+  local extra="${2:-}"
+  [ -n "$extra" ] || extra='{}'
+  jq -nc --arg name "$1" --argjson extra "$extra" \
+    '{hook_event_name: $name, session_id: "ses_eae16fdf8ffe22XSV2A8jvGrf5"} + $extra'
+}
+
+@test "opencode session.execution.started journals resumed with activity working" {
+  harness opencode "$(opencode_payload session.execution.started)"
+  assert_silent_exit
+  assert_hook_row "$(hook_rows | tail -n 1)" resumed working session.execution.started opencode
+}
+
+@test "opencode session.execution.succeeded journals needs_input with activity idle" {
+  harness opencode "$(opencode_payload session.execution.succeeded)"
+  assert_silent_exit
+  assert_hook_row "$(hook_rows | tail -n 1)" needs_input idle session.execution.succeeded opencode
+}
+
+@test "opencode session.execution.interrupted journals needs_input idle and carries the reason" {
+  harness opencode "$(opencode_payload session.execution.interrupted '{"reason":"user"}')"
+  assert_silent_exit
+  row=$(hook_rows | tail -n 1)
+  assert_hook_row "$row" needs_input idle session.execution.interrupted opencode
+  [ "$(jq -r '.links.reason' <<<"$row")" = "user" ]
+}
+
+@test "opencode session.execution.failed journals needs_input blocked and carries the error" {
+  harness opencode "$(opencode_payload session.execution.failed '{"error":"Rate limit exceeded"}')"
+  assert_silent_exit
+  row=$(hook_rows | tail -n 1)
+  assert_hook_row "$row" needs_input blocked session.execution.failed opencode
+  [ "$(jq -r '.links.error' <<<"$row")" = "Rate limit exceeded" ]
+}
+
+@test "opencode permission.asked journals needs_input blocked and names the tool; permission.replied resumes" {
+  harness opencode "$(opencode_payload permission.asked '{"tool_name":"shell"}')"
+  assert_silent_exit
+  row=$(hook_rows | tail -n 1)
+  assert_hook_row "$row" needs_input blocked permission.asked opencode
+  [ "$(jq -r '.links.tool_name' <<<"$row")" = "shell" ]
+  harness opencode "$(opencode_payload permission.replied)"
+  assert_silent_exit
+  assert_hook_row "$(hook_rows | tail -n 1)" resumed working permission.replied opencode
+}
+
+@test "opencode form.created journals needs_input blocked; form.replied and form.cancelled resume" {
+  harness opencode "$(opencode_payload form.created)"
+  assert_silent_exit
+  assert_hook_row "$(hook_rows | tail -n 1)" needs_input blocked form.created opencode
+  harness opencode "$(opencode_payload form.replied)"
+  assert_silent_exit
+  assert_hook_row "$(hook_rows | tail -n 1)" resumed working form.replied opencode
+  harness opencode "$(opencode_payload form.cancelled)"
+  assert_silent_exit
+  assert_hook_row "$(hook_rows | tail -n 1)" resumed working form.cancelled opencode
+}
+
+@test "the opencode mapping tests above cover every event the opencode cell declares" {
+  run jq -r '[.frameworks.opencode.session_lifecycle_hooks.events[].hook_event] | unique | join(",")' "$CAPS"
+  [ "$status" -eq 0 ]
+  [ "$output" = "form.cancelled,form.created,form.replied,permission.asked,permission.replied,session.execution.failed,session.execution.interrupted,session.execution.started,session.execution.succeeded" ]
+}
+
+@test "an opencode event the cell does not declare writes no row" {
+  harness opencode "$(opencode_payload session.idle)"
   assert_silent_exit
   [ "$(row_count)" = "0" ]
+  contains "$(hooks_log)" "declares no event for session.idle"
+}
+
+@test "opencode: a nested process with the session's environment is refused, and the first process still reports" {
+  harness opencode "$(opencode_payload session.execution.succeeded)" python
+  assert_silent_exit
+  [ "$(row_count)" = "0" ]
+  contains "$(hooks_log)" "is a child process of the hosted session, whose first process is pid"
+  harness opencode "$(opencode_payload session.execution.succeeded)"
+  assert_silent_exit
+  assert_hook_row "$(hook_rows | tail -n 1)" needs_input idle session.execution.succeeded opencode
+  [ "$(row_count)" = "1" ]
+}
+
+@test "opencode: a harness started from a tool shell inside the session is refused" {
+  # root -> /bin/sh -> python, which runs the hook: the walk has to step over
+  # the shell, whose environment macOS does not show, to find the root.
+  harness opencode "$(opencode_payload session.execution.succeeded)" shell
+  assert_silent_exit
+  [ "$(row_count)" = "0" ]
+  contains "$(hooks_log)" "is a child process of the hosted session"
+}
+
+@test "opencode: the hook run through a shell, not by the harness itself, is refused" {
+  harness opencode "$(opencode_payload session.execution.succeeded)" via-shell
+  assert_silent_exit
+  [ "$(row_count)" = "0" ]
+  contains "$(hooks_log)" "no row written: "
+}
+
+@test "opencode: a caller started without the generation is refused even when it sets it later" {
+  harness opencode "$(opencode_payload session.execution.succeeded)" late
+  assert_silent_exit
+  [ "$(row_count)" = "0" ]
+  contains "$(hooks_log)" "does not carry this session's generation"
+}
+
+@test "only a plugin-env channel is checked: a claude-code hook run through a shell still journals" {
+  harness claude-code '{"hook_event_name":"Stop"}' python via-shell
+  assert_silent_exit
+  assert_hook_row "$(hook_rows | tail -n 1)" needs_input idle Stop
 }
 
 @test "payload fields copied into links are single-line and bounded" {

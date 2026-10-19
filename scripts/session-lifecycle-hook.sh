@@ -22,6 +22,17 @@
 # host outlives the instance it was launched under. LORE_SESSION_INSTANCE is the
 # fallback and rides along as links.spawn_instance.
 #
+# When the cell's channel is plugin-env, the hooks reach the session through
+# variables in the pane environment, which every process the session starts
+# inherits: tool shells, a nested harness, a background server it launches. So
+# for that channel only the session's first process may report. The caller (the
+# process that ran this script, which must run it directly rather than through
+# a shell) has to be the outermost process in its own ancestry whose environment
+# carries this LORE_SESSION_GENERATION; in a hosted pane that is the pane's first
+# process, the harness itself. A row from any process below it is refused and
+# logged. The other channels are command-line flags, which child processes do not
+# inherit, so they are not checked.
+#
 # Contract with the harness: the script prints nothing, always exits 0, and
 # returns within five seconds even when the journal writer hangs or stdin never
 # closes. Async hooks get no harness timeout, and on Claude Code anything a hook
@@ -54,9 +65,10 @@ if ! command -v python3 >/dev/null; then
   exit 0
 fi
 
-# The program arrives on python's stdin, so the payload moves to fd 3.
+# The program arrives on python's stdin, so the payload moves to fd 3. $PPID is
+# the process that ran this script.
 exec 3<&0 0</dev/null
-python3 - "$SCRIPT_DIR" "$FRAMEWORK" <<'PY' &
+python3 - "$SCRIPT_DIR" "$FRAMEWORK" "$PPID" <<'PY' &
 import json
 import os
 import re
@@ -77,6 +89,10 @@ LINK_LIMIT = 200
 CHECKPOINT_ROLES = {'session-host-spawn', 'session-spawn'}
 
 scripts_dir, framework = sys.argv[1], sys.argv[2]
+try:
+    caller_pid = int(sys.argv[3])
+except (IndexError, ValueError):
+    caller_pid = 0
 env = os.environ
 store = Path(env['LORE_SESSION_STORE_ROOT'])
 slug = env['LORE_SESSION_SLUG']
@@ -179,6 +195,113 @@ def alive(pid):
     return True
 
 
+def process_table():
+    # pid -> (parent pid, command name) for every process, from one ps call.
+    out = subprocess.run(['ps', '-axo', 'pid=,ppid=,comm='], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2).stdout
+    table = {}
+    for line in out.decode(errors='replace').splitlines():
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            table[int(parts[0])] = (int(parts[1]), os.path.basename(parts[2].strip()) if len(parts) > 2 else '')
+    return table
+
+
+def darwin_exec_environment(pid):
+    # The environment a process was started with, from sysctl KERN_PROCARGS2:
+    # argc, the executable path and its padding, argc arguments, then the
+    # environment strings up to an empty one.
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    argmax = ctypes.c_int(0)
+    size = ctypes.c_size_t(ctypes.sizeof(argmax))
+    if libc.sysctl((ctypes.c_int * 2)(1, 8), 2, ctypes.byref(argmax), ctypes.byref(size), None, 0) != 0:
+        return None
+    buffer = ctypes.create_string_buffer(argmax.value)
+    size = ctypes.c_size_t(argmax.value)
+    if libc.sysctl((ctypes.c_int * 3)(1, 49, pid), 3, buffer, ctypes.byref(size), None, 0) != 0:
+        return None
+    data = buffer.raw[:size.value]
+    if len(data) < 4:
+        return None
+    argc = int.from_bytes(data[:4], sys.byteorder)
+    position = data.find(b'\0', 4)
+    if position < 0:
+        return None
+    while position < len(data) and data[position] == 0:
+        position += 1
+    for _ in range(argc):
+        end = data.find(b'\0', position)
+        if end < 0:
+            return None
+        position = end + 1
+    entries = []
+    while position < len(data):
+        end = data.find(b'\0', position)
+        if end < 0 or end == position:
+            break
+        entries.append(data[position:end])
+        position = end + 1
+    return entries
+
+
+def exec_environment(pid):
+    # name -> value of the environment pid was started with; None when it
+    # cannot be read (another user's process, or an unsupported platform), and
+    # empty when macOS hides it, as it does for its own shells.
+    try:
+        if sys.platform.startswith('linux'):
+            entries = Path(f'/proc/{pid}/environ').read_bytes().split(b'\0')
+        elif sys.platform == 'darwin':
+            entries = darwin_exec_environment(pid)
+        else:
+            entries = None
+    except (OSError, ValueError, AttributeError):
+        entries = None
+    if entries is None:
+        return None
+    environment = {}
+    for entry in entries:
+        name, sep, value = entry.partition(b'=')
+        if sep:
+            environment[name.decode(errors='replace')] = value.decode(errors='replace')
+    return environment
+
+
+def child_process_refusal():
+    # None when the caller is the session's first process; otherwise the reason
+    # the row is refused. The first process is the outermost one in the caller's
+    # ancestry whose environment carries this generation. The walk goes all the
+    # way up and steps over processes whose environment cannot be read: macOS
+    # hides the environment of its own shells (/bin/sh, /bin/bash, /bin/zsh), and
+    # a tool shell sits between a nested harness and the session above it.
+    if caller_pid <= 1:
+        return 'the process that ran the hook could not be identified'
+    table = process_table()
+    names = {pid: entry[1] for pid, entry in table.items()}
+    caller = f'pid {caller_pid} ({names.get(caller_pid, "?")})'
+    carriers = []
+    pid, seen = caller_pid, set()
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        environment = exec_environment(pid)
+        if environment and environment.get('LORE_SESSION_GENERATION') == generation_env:
+            carriers.append(pid)
+        elif pid == caller_pid:
+            if not environment:
+                return (f'the environment of {caller}, which ran the hook, cannot be read, so it cannot be '
+                        f'shown to be the session\'s first process; the harness must run the hook itself, '
+                        f'not through a shell')
+            return f'{caller} ran the hook, and its environment does not carry this session\'s generation'
+        pid = table.get(pid, (0, ''))[0]
+    first = carriers[-1]
+    if first != caller_pid:
+        return (f'{caller} is a child process of the hosted session, whose first process is pid {first} '
+                f'({names.get(first, "?")}); only that process reports the session\'s turn edges, because '
+                f'the {framework} hooks reach every child through the pane environment')
+    return None
+
+
 def current_owner():
     sys.path.insert(0, scripts_dir)
     from session_target import generation
@@ -232,6 +355,14 @@ def main():
     except (OSError, ValueError, KeyError, TypeError) as error:
         log(f'no row written: cannot read frameworks.{framework}.session_lifecycle_hooks.events from {capabilities_path} ({type(error).__name__}: {error})')
         return
+    if block.get('channel') == 'plugin-env':
+        try:
+            refusal = child_process_refusal()
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            refusal = f'the process ancestry could not be read ({type(error).__name__}: {error})'
+        if refusal:
+            log(f'no row written: {refusal}')
+            return
     tool_name = payload.get('tool_name')
     entry = next((candidate for candidate in events
                   if isinstance(candidate, dict) and candidate.get('hook_event') == hook_event

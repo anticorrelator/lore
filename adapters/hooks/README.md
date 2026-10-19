@@ -435,6 +435,16 @@ stdin. The script:
 - names the live instance whose registry row lists this slug and generation as
   `actor_instance`, falling back to `LORE_SESSION_INSTANCE`, so rows from a
   session adopted after a host restart name its current owner;
+- for a `plugin-env` channel, accepts a row only from the session's first
+  process. Such a channel reaches the hooks through the pane environment,
+  which every process the session starts inherits, so the process that ran
+  the script must be the outermost one in its ancestry whose environment
+  carries this `LORE_SESSION_GENERATION`. In a hosted pane that process is the
+  harness itself, and it must run the script directly rather than through a
+  shell. The walk steps over processes whose environment cannot be read,
+  such as macOS's own shells. Rows from a nested harness, a tool shell or a
+  background server are refused and logged. Flag channels are not checked,
+  because child processes do not inherit a flag;
 - prints nothing on any path, always exits 0, and stops itself after five
   seconds, including when the journal writer hangs or stdin never closes.
   Async hooks get no harness timeout, and on Claude Code a hook's output is
@@ -448,7 +458,7 @@ stdin. The script:
 |-------------|------|---------|-------------------|
 | claude-code | **partial** on a live check of 2.1.299: no startup Settings dialog, and hooks from `--settings` run; **full** waits on one real turn that journals a hook row | `settings-json` (a hooks-only `--settings` payload, each entry `async: true`) | UserPromptSubmit → `resumed` working; Stop → `needs_input` idle; StopFailure → `needs_input` blocked, `links.error`; PermissionRequest → `needs_input` blocked, `links.tool_name`; PreToolUse on `AskUserQuestion\|ExitPlanMode` → `needs_input` blocked; PostToolUse and PostToolUseFailure on the same tools → `resumed` working |
 | codex       | **none**: a live check of 0.162.1 found `-c` hooks held behind Codex's startup "Hooks need review" prompt. Trust is each machine's own Codex record, so raising the cell also needs the launch to pass the flags only where Codex already trusts them | `config-override` (`-c hooks.<Event>=[…]` session flags; not installed) | declared, not installed: UserPromptSubmit → `resumed` working; Stop and Interrupt → `needs_input` idle; PermissionRequest → `needs_input` blocked, `links.tool_name` |
-| opencode    | **none** until a probe shows an environment-selected plugin stays out of child processes | `plugin-env` (candidate) | none declared |
+| opencode    | **none**: a live check of 2.0.25 found `OPENCODE_CONFIG_CONTENT` and `OPENCODE_CONFIG_DIR` read by OpenCode's server, a background service shared by every client on the machine (or a private child server), never the hosted session. Lore's TUI plugin, named in `OPENCODE_CLI_CONFIG_CONTENT`, reported the session's own edges from the pane's first process; raising the cell also needs the launch to keep the person's own client plugins and a hosted OpenCode 2.x launch that starts | `plugin-env` (`adapters/opencode/lore-session-lifecycle` named in `OPENCODE_CLI_CONFIG_CONTENT`; not installed) | declared, not installed: `session.execution.started` → `resumed` working; `session.execution.succeeded` and `session.execution.interrupted` → `needs_input` idle (`links.reason`); `session.execution.failed` → `needs_input` blocked, `links.error`; `permission.asked` → `needs_input` blocked, `links.tool_name`; `form.created` → `needs_input` blocked; `permission.replied`, `form.replied`, `form.cancelled` → `resumed` working |
 
 The cell's `events` list is the source of truth for the mapping; this table is
 its reading at the time of writing. `tests/fixtures/claude-code-hooks-settings.schema.json`

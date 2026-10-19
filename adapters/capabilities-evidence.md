@@ -531,6 +531,74 @@ non-`none` cell points at an id that exists here.
   for worker fanout, GPT-class for review).
 - **Consumed by:** `opencode.model_routing` (`shape: multi`).
 
+### opencode-session-lifecycle-hooks
+
+- **Source:** A live run of the installed binary as a hosted pane's first
+  process, with lore's lifecycle plugin and probe plugins selected through
+  the pane environment; zero-model-call reads from the same binary
+  (`debug config`, `plugin list`, `models`); the server and client code
+  embedded in the binary.
+- **URL / path:** `/opt/homebrew/Cellar/opencode/2.0.25/bin/opencode`; probe
+  record
+  `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/opencode-2.0.25-session-plugin/probe.md`
+- **Retrieved:** 2026-10-18 (22:06 EDT, 2026-10-19T02:06Z)
+- **Product / version:** OpenCode 2.0.25 (`opencode v2.0.25`)
+- **Method:** live probe — one launch on a private tmux socket in a scratch
+  folder, with a scratch home and XDG tree in which the person's
+  `~/.config/opencode/plugins/` was mirrored, a scratch lore store, and an
+  identity naming no real session. The pane named
+  `adapters/opencode/lore-session-lifecycle` and a logging plugin in
+  `OPENCODE_CLI_CONFIG_CONTENT`, and a server probe plugin, the free model
+  `opencode/big-pickle` and an ask rule for shell commands in
+  `OPENCODE_CONFIG_CONTENT`. One prompt asked for one shell command, one
+  subagent and a one-word reply; the permission dialog was answered once.
+- **Transcript:** `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/opencode-2.0.25-session-plugin/`
+  (`run/` holds the screens, process trees, journal rows, `hooks.log`, the
+  plugins' log and OpenCode's own log; `checks/` the zero-model-call reads;
+  `binary-strings.txt` the code excerpts; and the scripts that produced them)
+- **Claim:** OpenCode 2.0.25 reads the plan's channel,
+  `OPENCODE_CONFIG_CONTENT` / `OPENCODE_CONFIG_DIR`, in its server process,
+  which is not the hosted session; a plugin named in
+  `OPENCODE_CLI_CONFIG_CONTENT` runs in the TUI, the pane's first process,
+  and reports that session's turn edges.
+  - A TUI uses the machine's shared background service unless started with
+    `--standalone`. A freshly started service is spawned detached with the
+    starting client's whole environment and serves every later client. In
+    the probe the pane started one, as its child, carrying the pane's
+    `LORE_SESSION_*`; the person's own service, running since 2026-10-15,
+    carries the environment of a Claude Code agent session.
+  - Server plugins ran in that service, which inherits the pane
+    environment. The hook refused every row they sent ("pid 39099
+    (opencode) is a child process of the hosted session, whose first
+    process is pid 39091 (opencode)").
+  - The lore plugin ran in pid 39091, the TUI, whose parent is the tmux
+    server. It journaled `resumed` (`session.execution.started`),
+    `needs_input` blocked (`permission.asked`, `tool_name` `shell`),
+    `resumed` (`permission.replied`) and `needs_input` idle
+    (`session.execution.succeeded`), with the pane's slug and generation.
+  - A subagent ran as a child session in the same process. Its
+    `session.execution.started` and `session.execution.succeeded` reached
+    the client and wrote no row.
+  - The hook run from the session's tool shell, whose environment carries
+    the generation, wrote no row.
+  - At startup the composer was drawn with nothing holding it. A toast and
+    footer reported "Plugin failed" for the mirrored
+    `~/.config/opencode/plugins/lore-hooks.ts`: 2.0.25 scans that directory,
+    and the file does not default-export `{id, setup}`.
+  - A directory plugin in the global plugins folder loaded beside the
+    environment-selected ones. A plugin listed in the scratch `cli.json` did
+    not load, because the environment value replaces that file's `plugins`
+    list (objects merge, arrays are replaced).
+  - The 2.0.25 root command declares no `--model` flag ("Unrecognized flag:
+    --model in command opencode"), and lore's launch passes one.
+  - The client publishes `session.execution.started|succeeded|interrupted|failed`,
+    `permission.asked|replied` and `form.created|replied|cancelled`;
+    `session.idle`, `session.status` and `session.error` did not appear.
+  - Nothing under the person's `~/.config/opencode`,
+    `~/.local/share/opencode`, `~/.local/state/opencode` or
+    `~/.cache/opencode` changed.
+- **Consumed by:** `opencode.session_lifecycle_hooks` (`support: none`).
+
 ---
 
 ## Codex
@@ -979,11 +1047,16 @@ T70 / `lore doctor` can distinguish a gap from a missing-evidence error.
   events and stays `none` until trust is granted there, a real turn
   journals a hook row, and the launch path passes the flags only where they
   are trusted.
-- **`opencode.session_lifecycle_hooks` = none.** The cell cites no
-  evidence row and declares no events. OpenCode 2.0.25 has no
-  session-scoped plugin flag, and its environment channels reach child
-  processes. The cell is raised only from a live probe's own evidence row;
-  its notes name the intended mapping and what the probe must show.
+- **`opencode.session_lifecycle_hooks` = none.** A live probe
+  (`opencode-session-lifecycle-hooks`) showed OpenCode 2.0.25 reading
+  `OPENCODE_CONFIG_CONTENT` and `OPENCODE_CONFIG_DIR` in its server, which
+  is a background service shared by every client on the machine, or a
+  private child server; neither is the hosted session. Lore's TUI plugin,
+  named in `OPENCODE_CLI_CONFIG_CONTENT`, did report the session's own turn
+  edges from the pane's first process. The cell declares those events and
+  stays `none` until the launch keeps the person's own client plugins, a
+  hosted OpenCode 2.x launch starts at all, and an integration scenario
+  wakes from the plugin's row.
 - **`opencode.team_messaging` = none and `codex.team_messaging` = none.**
   Neither harness exposes a TeamCreate / SendMessage primitive. Skills
   that require inter-agent messaging (`/spec`, `/implement` team mode)
@@ -1068,6 +1141,7 @@ matches the union of all `evidence:` fields in capabilities.json.
 - opencode-model-routing
 - opencode-interaction
 - opencode-spend-telemetry
+- opencode-session-lifecycle-hooks
 - codex-instructions
 - codex-skills
 - codex-mcp
