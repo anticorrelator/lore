@@ -70,3 +70,12 @@ func ReadEventsFrom(sessionsDir string, byteOffset int64) ([]Event, int64) {
 	}
 	return out, byteOffset + int64(len(consumed))
 }
+
+func JournalEventIDs(sessionsDir string) map[string]bool {
+	events, _ := ReadEventsFrom(sessionsDir, 0)
+	ids := make(map[string]bool, len(events))
+	for _, ev := range events {
+		ids[ev.EventID] = true
+	}
+	return ids
+}

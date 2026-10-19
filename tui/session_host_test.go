@@ -1609,3 +1609,194 @@ func TestStoreHostRefusesAHostKeyThatIsNotItsStores(t *testing.T) {
 		t.Fatalf("store key through a symlinked --kdir: exit %d, want 3", code)
 	}
 }
+
+// unrestorableIdentity is a teardown-pending worktree identity copied from
+// another machine: nothing it names exists here. With sourceHere, the captured
+// source checkout does exist, so the refusal carries no proof.
+func unrestorableIdentity(t *testing.T, sourceHere bool) worktree.Identity {
+	t.Helper()
+	gone := filepath.Join(t.TempDir(), "other-home")
+	source := filepath.Join(gone, "work", "proj")
+	if sourceHere {
+		source = t.TempDir()
+	}
+	return worktree.Identity{
+		Version: worktree.IdentityVersion, Epoch: "20260905T151847Z-3e87fcfe",
+		CanonicalPath: filepath.Join(gone, "worktrees", "20260905T151847Z-3e87fcfe"),
+		GitCommonDir:  filepath.Join(gone, "work", "proj", ".git"),
+		GitDir:        filepath.Join(gone, "work", "proj", ".git", "worktrees", "20260905T151847Z-3e87fcfe"),
+		Captured: worktree.Generation{CanonicalPath: source, GitCommonDir: filepath.Join(gone, "work", "proj", ".git"),
+			GitDir: filepath.Join(gone, "work", "proj", ".git"), HeadOID: "7a492ce4f600db2a9e7df88ce3030db2479d83eb",
+			IndexDigest: "index", WorktreeDigest: "tree"},
+		TargetRef: "refs/heads/main", TargetOID: "7a492ce4f600db2a9e7df88ce3030db2479d83eb",
+		State: worktree.StateTeardownPending,
+	}
+}
+
+// tickHost runs one full session tick with the 30 s sweep due.
+func tickHost(t *testing.T, h *sessionHostModel) {
+	t.Helper()
+	h.lastSweep = time.Time{}
+	if quit := driveHost(t, h, h.sessionTick()); quit || h.err != nil {
+		t.Fatalf("host stopped: quit=%v err=%v", quit, h.err)
+	}
+}
+
+func hostRecordSlugs(t *testing.T, h *sessionHostModel) []string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(session.InstancesDir(h.runtime.sessionsDir), h.runtime.instanceName+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row session.Instance
+	if err := json.Unmarshal(b, &row); err != nil {
+		t.Fatal(err)
+	}
+	var slugs []string
+	for _, s := range row.Sessions {
+		slugs = append(slugs, s.Slug)
+	}
+	return slugs
+}
+
+func restoreRefusedRows(t *testing.T, kdir string) []session.Event {
+	t.Helper()
+	var rows []session.Event
+	for _, ev := range readEventRows(t, kdir) {
+		if ev.Event == session.EventRestoreRefused {
+			rows = append(rows, ev)
+		}
+	}
+	return rows
+}
+
+// The 2026-10-19 loop: a store copied from another machine held a dead TUI's
+// teardown-pending session whose repository lives under a home directory that
+// does not exist here. The host adopted it and retried its disposition every
+// 30 s, journaling a restore_refused row each time and never going idle.
+func TestStoreHostRetiresASessionWhoseRepositoryIsGone(t *testing.T) {
+	const slug = "spec-runs-on-investigator-designer-positions-stand"
+	retirementRecord := func(h *sessionHostModel, epoch string) {
+		t.Helper()
+		b, err := os.ReadFile(h.runtime.hostDeliveryPath("outcome-" + epoch))
+		if err != nil {
+			t.Fatalf("no retirement record: %v", err)
+		}
+		var d hostDelivery
+		if err := json.Unmarshal(b, &d); err != nil {
+			t.Fatal(err)
+		}
+		if d.Kind != "worktree" || !d.Committed || d.Event.Event != session.EventRestoreRefused {
+			t.Fatalf("retirement record = %+v", d)
+		}
+	}
+	checkRetired := func(t *testing.T, h *sessionHostModel, identity worktree.Identity) {
+		t.Helper()
+		rows := restoreRefusedRows(t, h.runtime.config.KnowledgeDir)
+		if len(rows) != 1 {
+			t.Fatalf("restore_refused rows = %d, want 1: %+v", len(rows), rows)
+		}
+		if want := "repository_gone: Git repository " + identity.GitCommonDir + " no longer exists"; rows[0].Reason != want {
+			t.Fatalf("reason = %q, want %q", rows[0].Reason, want)
+		}
+		if got := hostRecordSlugs(t, h); len(got) != 0 {
+			t.Fatalf("host instance record still lists %v", got)
+		}
+		retirementRecord(h, identity.Epoch)
+		if !h.idleCandidate() {
+			t.Fatalf("host is not idle: local=%v pending=%v inflight=%d", h.runtime.localSessions, h.runtime.pendingSpawns, h.inflight)
+		}
+		for _, path := range []string{identity.CanonicalPath, identity.GitCommonDir, identity.Captured.CanonicalPath} {
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Fatalf("%s appeared on disk: %v", path, err)
+			}
+		}
+	}
+
+	t.Run("held by the host", func(t *testing.T) {
+		f := newStoreHostFixture(t)
+		h := servingStoreHost(storeHostModel(t, f.store))
+		identity := unrestorableIdentity(t, false)
+		h.runtime.localSessions = map[string]liveSession{slug: {typ: "spec", initiator: "agent", requestID: "spawn-1",
+			started: time.Now().Add(-time.Hour), worktree: &identity, adoptedFrom: "brisk-lantern"}}
+		if err := session.WriteInstance(h.runtime.sessionsDir, h.runtime.instanceRow()); err != nil {
+			t.Fatal(err)
+		}
+		tickHost(t, h)
+		tickHost(t, h)
+		checkRetired(t, h, identity)
+	})
+
+	t.Run("adopted from a dead TUI row", func(t *testing.T) {
+		f := newStoreHostFixture(t)
+		m := storeHostModel(t, f.store)
+		m.config.RepoIdentifier = "example.com/acme/proj"
+		h := servingStoreHost(m)
+		identity := unrestorableIdentity(t, false)
+		dead := session.Session{Slug: slug, Type: "spec", Initiator: "agent", Started: "2026-09-05T15:18:46Z",
+			RequestID: "20260905T151846Z-e53918d9", Tmux: "lore-gone-" + strconv.Itoa(os.Getpid()), Worktree: &identity}
+		plant := func() {
+			t.Helper()
+			if err := session.WriteInstance(h.runtime.sessionsDir, session.Instance{Name: "brisk-lantern", PID: deadPID(t),
+				Repo: m.config.RepoIdentifier, Started: "2026-09-05T15:00:00Z", Sessions: []session.Session{dead}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		plant()
+		// The store's journal already holds this generation's orphaned row,
+		// written on the other machine by a different adopter with different spend.
+		ls := adoptedFromRegistry("brisk-lantern", dead).liveSession()
+		prior := h.runtime.orphanedEventFor(slug, ls, "brisk-lantern")
+		prior.ActorInstance, prior.Spend = session.StrPtr("calm-maple"), nil
+		if err := session.AppendEvent(h.runtime.eventScript, f.store, prior); err != nil {
+			t.Fatal(err)
+		}
+
+		tickHost(t, h)
+		if left, _ := filepath.Glob(filepath.Join(session.InstancesDir(h.runtime.sessionsDir), "brisk-lantern.json*")); len(left) != 0 {
+			t.Fatalf("dead row was not settled by the first pass: %v", left)
+		}
+		tickHost(t, h)
+		checkRetired(t, h, identity)
+		orphaned := 0
+		for _, ev := range readEventRows(t, f.store) {
+			if ev.Event == session.EventOrphaned {
+				orphaned++
+			}
+		}
+		if orphaned != 1 {
+			t.Fatalf("orphaned rows = %d, want the one already journaled", orphaned)
+		}
+
+		// The same row surfacing again is passed over on the retirement record.
+		plant()
+		tickHost(t, h)
+		checkRetired(t, h, identity)
+	})
+
+	t.Run("transient refusal keeps retrying", func(t *testing.T) {
+		f := newStoreHostFixture(t)
+		h := servingStoreHost(storeHostModel(t, f.store))
+		identity := unrestorableIdentity(t, true)
+		h.runtime.localSessions = map[string]liveSession{slug: {typ: "spec", initiator: "agent", requestID: "spawn-1",
+			started: time.Now().Add(-time.Hour), worktree: &identity, adoptedFrom: "brisk-lantern"}}
+		if err := session.WriteInstance(h.runtime.sessionsDir, h.runtime.instanceRow()); err != nil {
+			t.Fatal(err)
+		}
+		tickHost(t, h)
+		tickHost(t, h)
+		rows := restoreRefusedRows(t, f.store)
+		if len(rows) != 1 || strings.HasPrefix(rows[0].Reason, "repository_gone") {
+			t.Fatalf("restore_refused rows = %+v, want one unproven refusal", rows)
+		}
+		if got := hostRecordSlugs(t, h); len(got) != 1 || got[0] != slug {
+			t.Fatalf("host instance record = %v, want the session kept", got)
+		}
+		if _, err := os.Stat(h.runtime.hostDeliveryPath("outcome-" + identity.Epoch)); !os.IsNotExist(err) {
+			t.Fatalf("an unproven refusal left a retirement record: %v", err)
+		}
+		if h.idleCandidate() {
+			t.Fatal("host counts as idle while a session still awaits disposition")
+		}
+	})
+}

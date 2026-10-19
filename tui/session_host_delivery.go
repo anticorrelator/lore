@@ -198,38 +198,54 @@ func (m model) writeHostCleanupReceipt(slug, epoch string, proof worktree.Cleanu
 }
 
 func (m model) hostWorktreeOutcome(outcome session.Event, epoch string, completion ...hostDelivery) (tea.Cmd, error) {
-	id := "outcome-" + epoch
-	outcome.EventID = "host-outcome-" + m.hostKey + "-" + epoch
-	d := hostDelivery{ID: id, Kind: "worktree", Event: outcome, Terminal: true}
+	d := m.hostWorktreeOutcomeDelivery(outcome, epoch)
 	if len(completion) > 0 {
 		d.Completion = &completion[0]
 	}
-	if err := hostAtomicJSON(m.hostDeliveryPath(id), d); err != nil {
+	if err := hostAtomicJSON(m.hostDeliveryPath(d.ID), d); err != nil {
 		return nil, err
 	}
 	return func() tea.Msg { return journalResultMsg{err: m.finishHostDelivery(d)} }, nil
 }
 
-func (m model) hostClosedSlugs() (map[string]bool, error) {
-	out := map[string]bool{}
+func (m model) hostWorktreeOutcomeDelivery(outcome session.Event, epoch string) hostDelivery {
+	outcome.EventID = "host-outcome-" + m.hostKey + "-" + epoch
+	return hostDelivery{ID: "outcome-" + epoch, Kind: "worktree", Event: outcome, Terminal: true}
+}
+
+// The record, not the journal row, is what keeps a later adoption scan from
+// taking a retired session up again.
+func (m model) retiredWorktreeDelivery(slug string, ls liveSession, identity worktree.Identity, repo string) hostDelivery {
+	ev := worktreeOutcomeEvent(m.instanceName, slug, ls, worktree.PublishOutcome{
+		Kind: worktree.OutcomeRestoreRefused, Identity: identity, Expected: identity.Captured,
+		Reason: "repository_gone: Git repository " + repo + " no longer exists",
+	})
+	return m.hostWorktreeOutcomeDelivery(ev, identity.Epoch)
+}
+
+func (m model) hostSettledSessions() (closedSlugs, retiredEpochs map[string]bool, err error) {
+	closedSlugs, retiredEpochs = map[string]bool{}, map[string]bool{}
 	paths, err := filepath.Glob(filepath.Join(m.hostDir(), "deliveries", "*.json"))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, path := range paths {
 		b, err := os.ReadFile(path)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		var d hostDelivery
 		if err = json.Unmarshal(b, &d); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if d.Kind == "close" && d.Terminal {
-			out[d.Event.Slug] = true
+			closedSlugs[d.Event.Slug] = true
+		}
+		if d.Kind == "worktree" && d.Event.Event == session.EventRestoreRefused {
+			retiredEpochs[d.Event.Links["worktree_epoch"]] = true
 		}
 	}
-	return out, nil
+	return closedSlugs, retiredEpochs, nil
 }
 
 // A producer may republish the same row after losing its own acknowledgement.

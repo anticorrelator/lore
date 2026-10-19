@@ -321,6 +321,7 @@ type model struct {
 	// unlatched→modal edge; a classified clear deletes the latch so a later entry
 	// can emit again. Unclassifiable snapshots leave the latch unchanged.
 	sessionModalBlocked map[string]bool
+	worktreeRefusals    map[string]string
 	// pendingClose holds slugs with a consumed close-request awaiting teardown,
 	// keyed by slug. Each entry carries the consumed request's identity (request
 	// id + reason) and its timing state; the exit ladder fires once the panel's

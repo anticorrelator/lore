@@ -458,3 +458,42 @@ func gitInput(t *testing.T, path string, input []byte, args ...string) {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
+
+func TestRepositoryGoneNeedsEveryNamedPathAbsent(t *testing.T) {
+	root := t.TempDir()
+	missing := func(name string) string { return filepath.Join(root, "gone", name) }
+	identity := Identity{
+		CanonicalPath: missing("worktree"), GitCommonDir: missing("repo/.git"),
+		Captured: Generation{CanonicalPath: missing("repo")},
+	}
+	if repo, gone := RepositoryGone(identity); !gone || repo != identity.GitCommonDir {
+		t.Fatalf("RepositoryGone = %q, %v; want %q, true", repo, gone, identity.GitCommonDir)
+	}
+
+	for _, present := range []func(*Identity){
+		func(i *Identity) { i.CanonicalPath = root },
+		func(i *Identity) { i.GitCommonDir = root },
+		func(i *Identity) { i.Captured.CanonicalPath = root },
+		func(i *Identity) { i.Captured.CanonicalPath = "" },
+	} {
+		next := identity
+		present(&next)
+		if _, gone := RepositoryGone(next); gone {
+			t.Fatalf("RepositoryGone(%+v) = true with a path present or unnamed", next)
+		}
+	}
+
+	locked := filepath.Join(root, "locked")
+	if err := os.Mkdir(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	unreadable := identity
+	unreadable.CanonicalPath = filepath.Join(locked, "worktree")
+	if _, err := os.Lstat(unreadable.CanonicalPath); errors.Is(err, os.ErrNotExist) {
+		t.Skip("permission bits are not enforced for this user")
+	}
+	if _, gone := RepositoryGone(unreadable); gone {
+		t.Fatal("RepositoryGone treated an unreadable path as absent")
+	}
+}

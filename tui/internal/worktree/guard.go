@@ -96,6 +96,21 @@ func (i Identity) CleanupEligible() bool {
 	return i.State == StatePublished || i.State == StateQuarantined
 }
 
+// RepositoryGone reports whether the worktree, its Git common directory and the
+// captured source checkout are all absent, returning the common directory. Any
+// other stat failure is not proof, so the identity stays restorable.
+func RepositoryGone(i Identity) (string, bool) {
+	for _, path := range []string{i.CanonicalPath, i.GitCommonDir, i.Captured.CanonicalPath} {
+		if path == "" {
+			return "", false
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			return "", false
+		}
+	}
+	return i.GitCommonDir, true
+}
+
 var validEpoch = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // describeRef renders a captured branch for an error message. inspectGeneration

@@ -89,11 +89,7 @@ func (m model) finalizeLocalSessionClosed(slug, closeRequestID string) (model, [
 	if err := hostAtomicJSON(m.hostDeliveryPath(id), delivery); err != nil {
 		return m, []tea.Cmd{func() tea.Msg { return hostRuntimeErrorMsg{err: err} }}
 	}
-	delete(m.localSessions, slug)
-	delete(m.sessionIdle, slug)
-	delete(m.sessionObservations, slug)
-	delete(m.observationSince, slug)
-	delete(m.sessionModalBlocked, slug)
+	m = m.forgetLocalSession(slug)
 	row := m.instanceRow()
 	return m, []tea.Cmd{func() tea.Msg {
 		delivery.Event.Spend = closedSpend(m.spendScript, ls.harness, ls.sessionID, ls.sourceDir, sessionDurationSeconds(ls.started))
@@ -106,6 +102,18 @@ func (m model) finalizeLocalSessionClosed(slug, closeRequestID string) (model, [
 		}
 		return journalResultMsg{err: err}
 	}}
+}
+
+func (m model) forgetLocalSession(slug string) model {
+	if ls, ok := m.localSessions[slug]; ok && ls.worktree != nil {
+		delete(m.worktreeRefusals, ls.worktree.Epoch)
+	}
+	delete(m.localSessions, slug)
+	delete(m.sessionIdle, slug)
+	delete(m.sessionObservations, slug)
+	delete(m.observationSince, slug)
+	delete(m.sessionModalBlocked, slug)
+	return m
 }
 
 // endLocalSessionFailed journals `close_failed` without releasing the session's

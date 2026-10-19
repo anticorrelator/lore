@@ -107,6 +107,7 @@ type worktreeDispositionMsg struct {
 	ls             liveSession
 	outcome        worktree.PublishOutcome
 	err            error
+	goneRepository string
 }
 
 type managedWorktreeQuiescedMsg struct {
@@ -176,7 +177,13 @@ func (m model) disposeWorktreeCmd(slug string, ls liveSession, closeRequestID st
 				err: fmt.Errorf("missing versioned worktree identity")}
 		}
 		outcome, err := retainWorktree(context.Background(), *ls.worktree)
-		return worktreeDispositionMsg{slug: slug, closeRequestID: closeRequestID, ls: ls, outcome: outcome, err: err}
+		msg := worktreeDispositionMsg{slug: slug, closeRequestID: closeRequestID, ls: ls, outcome: outcome, err: err}
+		if err != nil || outcome.Kind == worktree.OutcomeRestoreRefused {
+			if repo, gone := worktree.RepositoryGone(*ls.worktree); gone {
+				msg.goneRepository = repo
+			}
+		}
+		return msg
 	}
 }
 
@@ -310,11 +317,35 @@ func (m model) handleWorktreeDisposition(msg worktreeDispositionMsg) (model, tea
 	}
 	m.localSessions[msg.slug] = ls
 	if msg.err != nil || msg.outcome.Kind == worktree.OutcomeRestoreRefused {
-		m.flashErr = compactErr("worktree disposition", msg.err)
+		if msg.goneRepository != "" && ls.worktree != nil {
+			d := m.retiredWorktreeDelivery(msg.slug, ls, *ls.worktree, msg.goneRepository)
+			if err := hostAtomicJSON(m.hostDeliveryPath(d.ID), d); err != nil {
+				return m, func() tea.Msg { return hostRuntimeErrorMsg{err: err} }
+			}
+			m = m.forgetLocalSession(msg.slug)
+			return m, tea.Sequence(
+				func() tea.Msg { return journalResultMsg{err: m.finishHostDelivery(d)} },
+				m.writeInstanceCmd(),
+			)
+		}
 		outcome := msg.outcome
 		if outcome.Reason == "" && msg.err != nil {
 			outcome.Reason = msg.err.Error()
 		}
+		// A refusal that keeps recurring unchanged is already in the journal and
+		// the host log; repeating it every pass only grows both.
+		key := msg.slug
+		if ls.worktree != nil {
+			key = ls.worktree.Epoch
+		}
+		if m.worktreeRefusals[key] == outcome.Reason {
+			return m, m.writeInstanceCmd()
+		}
+		if m.worktreeRefusals == nil {
+			m.worktreeRefusals = make(map[string]string)
+		}
+		m.worktreeRefusals[key] = outcome.Reason
+		m.flashErr = compactErr("worktree disposition", msg.err)
 		return m, tea.Sequence(
 			m.writeInstanceCmd(),
 			journalCmd(m.eventScript, m.config.KnowledgeDir, worktreeOutcomeEvent(m.instanceName, msg.slug, ls, outcome)),
@@ -863,6 +894,7 @@ func (m model) adoptionScanner() func(keys map[string]bool) adoptionScanMsg {
 		var notices, tuiNotices []runtimeNotice
 		var diagnostics []session.Diagnostic
 		var settledClaims []string
+		var journaled map[string]bool
 		if keys == nil {
 			var err error
 			if keys, err = session.HostRecoveryKeys(dir, hostKey); err != nil {
@@ -876,7 +908,7 @@ func (m model) adoptionScanner() func(keys map[string]bool) adoptionScanMsg {
 		// hostSeen holds the slugs a host-scoped claim must leave alone: sessions
 		// this host already owns or has closed. seen and known serve dead TUI
 		// claims, whose sessions are compared by generation instead.
-		hostSeen, err := m.hostClosedSlugs()
+		hostSeen, retiredEpochs, err := m.hostSettledSessions()
 		if err != nil {
 			return adoptionScanMsg{notices: []runtimeNotice{{Class: operationalFailure, Message: err.Error()}}}
 		}
@@ -923,8 +955,12 @@ func (m model) adoptionScanner() func(keys map[string]bool) adoptionScanMsg {
 			var claimAlive []adoptedSession
 			var claimRetained []adoptedSession
 			var claimEvents []session.Event
+			var claimRetired []hostDelivery
 			preserveClaim := false
 			for _, s := range claim.Sessions {
+				if s.Worktree != nil && retiredEpochs[s.Worktree.Epoch] {
+					continue
+				}
 				if hostScoped {
 					if hostSeen[s.Slug] {
 						continue
@@ -974,9 +1010,17 @@ func (m model) adoptionScanner() func(keys map[string]bool) adoptionScanMsg {
 						claimRetained = append(claimRetained, a)
 					}
 				} else if err := validatePersistedWorktree(s.Worktree); err != nil {
-					a.refusalReason = err.Error()
-					claimEvents = append(claimEvents, adoptionRefusedEvent(self, a))
-					claimRetained = append(claimRetained, a)
+					repo, gone := "", false
+					if s.Worktree != nil {
+						repo, gone = worktree.RepositoryGone(*s.Worktree)
+					}
+					if gone {
+						claimRetired = append(claimRetired, m.retiredWorktreeDelivery(s.Slug, ls, *s.Worktree, repo))
+					} else {
+						a.refusalReason = err.Error()
+						claimEvents = append(claimEvents, adoptionRefusedEvent(self, a))
+						claimRetained = append(claimRetained, a)
+					}
 				} else {
 					pending := *s.Worktree
 					if pending.State != worktree.StateTeardownPending {
@@ -1022,11 +1066,30 @@ func (m model) adoptionScanner() func(keys map[string]bool) adoptionScanMsg {
 			alive = append(alive, claimAlive...)
 			retained = append(retained, claimRetained...)
 			settled := true
-			for _, ev := range claimEvents {
-				if err := session.AppendEvent(script, kdir, ev); err != nil {
+			for _, d := range claimRetired {
+				err := hostAtomicJSON(m.hostDeliveryPath(d.ID), d)
+				if err == nil {
+					err = m.finishHostDelivery(d)
+				}
+				if err != nil {
 					settled = false
-					*sink = append(*sink, runtimeNotice{Class: operationalFailure, Code: "recovery-outcome-append", Message: compactErr("recovery outcome", err)})
-					continue
+					*sink = append(*sink, runtimeNotice{Class: operationalFailure, Code: "recovery-outcome-append", Message: compactErr("worktree retirement", err)})
+				}
+			}
+			for _, ev := range claimEvents {
+				// A recovery row's id names the fact, while its body carries this
+				// attempt's actor and spend, so a row an earlier adoption already
+				// journaled would be refused as a collision rather than replayed.
+				if journaled == nil {
+					journaled = session.JournalEventIDs(dir)
+				}
+				if !journaled[ev.EventID] {
+					if err := session.AppendEvent(script, kdir, ev); err != nil {
+						settled = false
+						*sink = append(*sink, runtimeNotice{Class: operationalFailure, Code: "recovery-outcome-append", Message: compactErr("recovery outcome", err)})
+						continue
+					}
+					journaled[ev.EventID] = true
 				}
 				if ev.Event == session.EventOrphaned {
 					if err := appendOrphanDue(script, kdir, ev); err != nil {
