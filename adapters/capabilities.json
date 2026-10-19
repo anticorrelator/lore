@@ -355,7 +355,7 @@
         "options": {},
         "shape": "multi",
         "evidence": "opencode-model-routing",
-        "notes": "Per-spawn provider/model selection; the role->model map honors per-role bindings (e.g., Opus for lead, Haiku for worker fanout). Tiers use the provider/model id shape; the Anthropic ladder is the validated ordered set.",
+        "notes": "Per-spawn provider/model selection; the role->model map honors per-role bindings (e.g., Opus for lead, Haiku for worker fanout). Tiers use the provider/model id shape; the Anthropic ladder is the validated ordered set. OpenCode 2.x's TUI takes no model flag, so a hosted session carries its model in OPENCODE_CONFIG_CONTENT and starts with --standalone, whose private server inherits the pane environment and reads it (route_flags and route_env; verified on 2.0.25).",
         "tiers": ["anthropic/haiku", "anthropic/sonnet", "anthropic/opus"]
       },
       "interaction": {
@@ -431,7 +431,7 @@
           {"hook_event": "form.replied", "event": "resumed", "activity": "working"},
           {"hook_event": "form.cancelled", "event": "resumed", "activity": "working"}
         ],
-        "notes": "Channel: lore's OpenCode TUI plugin, adapters/opencode/lore-session-lifecycle (its tui entry), named in OPENCODE_CLI_CONFIG_CONTENT in the pane environment; the plugin hands each client event to scripts/session-lifecycle-hook.sh, which accepts a row only from the session's first process because this channel reaches every child. A live probe of OpenCode 2.0.25 on 2026-10-18 (evidence opencode-session-lifecycle-hooks) found the premise this cell was planned on false: OPENCODE_CONFIG_CONTENT and OPENCODE_CONFIG_DIR are read by OpenCode's server process, not by the TUI in the pane. A TUI uses the machine's shared background service unless it is started with --standalone, and that service takes the whole environment of whichever client started it and keeps it for its lifetime, so a server plugin selected this way either never sees the pane's environment or speaks for the first pane that started the service in every session it serves; server plugins never run in the pane's first process. The client channel held where that one failed: the plugin ran in the TUI process, the pane's first process, and journaled resumed, needs_input blocked (permission.asked), resumed (permission.replied) and needs_input idle (session.execution.succeeded) for the session the pane showed, a subagent's turn wrote nothing, and the hook refused the same events from the background service and from a tool shell, which inherit the pane environment. Raising this cell needs three things: a launch that keeps the person's own client plugins, because the environment value replaces the plugins list in their cli.json (in the probe a plugin listed there did not load); a hosted OpenCode 2.x launch that starts, because the launch passes --model and the 2.0.25 TUI refuses it ('Unrecognized flag: --model in command opencode'); and an integration scenario in which a fake OpenCode session wakes from its plugin row. The events are the client events 2.0.25 publishes; session.idle and session.error, named by its earlier docs, are not among them. Nothing installs the plugin while support is none."
+        "notes": "Channel: lore's OpenCode TUI plugin, adapters/opencode/lore-session-lifecycle (its tui entry), named in OPENCODE_CLI_CONFIG_CONTENT in the pane environment; the plugin hands each client event to scripts/session-lifecycle-hook.sh, which accepts a row only from the session's first process because this channel reaches every child. A live probe of OpenCode 2.0.25 on 2026-10-18 (evidence opencode-session-lifecycle-hooks) found the premise this cell was planned on false: OPENCODE_CONFIG_CONTENT and OPENCODE_CONFIG_DIR are read by OpenCode's server process, not by the TUI in the pane. A TUI uses the machine's shared background service unless it is started with --standalone, and that service takes the whole environment of whichever client started it and keeps it for its lifetime, so a server plugin selected this way either never sees the pane's environment or speaks for the first pane that started the service in every session it serves; server plugins never run in the pane's first process. The client channel held where that one failed: the plugin ran in the TUI process, the pane's first process, and journaled resumed, needs_input blocked (permission.asked), resumed (permission.replied) and needs_input idle (session.execution.succeeded) for the session the pane showed, a subagent's turn wrote nothing, and the hook refused the same events from the background service and from a tool shell, which inherit the pane environment. Raising this cell needs two things: a launch that keeps the person's own client plugins, because the environment value replaces the plugins list in their cli.json (in the probe a plugin listed there did not load); and an integration scenario in which a fake OpenCode session wakes from its plugin row. A third blocker the probe found is gone: the launch passed --model, which the 2.0.25 TUI refuses, and hosted sessions now start with --standalone and carry the model in OPENCODE_CONFIG_CONTENT, so their server is a private child of the pane, which the hook still refuses as a child process. The events are the client events 2.0.25 publishes; session.idle and session.error, named by its earlier docs, are not among them. Nothing installs the plugin while support is none."
       },
       "position_compilation": {"format": "agent-markdown", "consumption": "agent-definition", "activation_operation": "native_launch", "selection_operation": "native_selection", "evidence": "opencode-subagents"},
       "install_paths": {
@@ -467,31 +467,31 @@
         "session_start_hook": {
           "support": "partial",
           "evidence": "opencode-session-start-hook",
-          "notes": "Plugin event dispatched at session start; lore-side mapping translates to load-knowledge / load-work / load-threads. Coverage of Lore's pending-capture and pending-digest first-turn pipelines depends on plugin runtime guarantees."
+          "notes": "The plugin's setup follows the server event stream; session.created dispatches session_start to load-knowledge.sh (verified on 2.0.25). The handler's output is not injected into the session, so knowledge reaches an OpenCode session through AGENTS.md and skills, and coverage of Lore's pending-capture and pending-digest first-turn pipelines stays partial."
         },
         "stop_hook": {
           "support": "partial",
           "evidence": "opencode-stop-hook",
-          "notes": "Plugin event for end-of-turn / agent stop; novelty-check fallback may run in degraded mode if the harness does not surface full context for heuristic detection."
+          "notes": "2.x publishes no session.idle or session.status; a turn ends with session.execution.succeeded, interrupted or failed, which the plugin dispatches as stop (verified on 2.0.25; no Lore handler is wired to stop today). The plugin sees the event, not the transcript, so novelty-check runs degraded."
         },
         "turn_boundary_rewake": {
           "support": "none",
-          "notes": "The plugin return contract carries no continuation: a `session.idle` handler cannot enqueue a turn no matter what it returns, so nothing installed at a turn boundary can re-arm itself. The open lead is the server API (`client.session.promptAsync`), which lore's plugin does not reach today and whose reachability from under the interactive TUI is unproven. Sessions here restart the watcher themselves after each wake."
+          "notes": "Nothing a plugin does at a turn boundary enqueues a turn: 2.x publishes no session.idle, and hooks and event handlers return nothing to OpenCode, so nothing installed there can re-arm itself. The open lead is the 2.x plugin context's ctx.session.prompt, which lore's plugin does not use and whose effect on the session a TUI is showing is unproven. Sessions here restart the watcher themselves after each wake."
         },
         "pre_compact_hook": {
           "support": "fallback",
           "evidence": "opencode-pre-compact-hook",
-          "notes": "Native compaction event semantics not confirmed; fallback path runs the persistence reminder on last-known signal (long session, /clear-equivalent) rather than a true PreCompact event."
+          "notes": "2.x defines session.compaction.started, which the plugin dispatches to pre-compact.sh, but no live run has compacted a session and the reminder's output does not reach the model, so the fallback path stays: the persistence reminder runs on last-known signal (long session, /clear-equivalent) rather than a confirmed PreCompact event."
         },
         "tool_hooks": {
           "support": "partial",
           "evidence": "opencode-tool-hooks",
-          "notes": "Plugin runtime exposes pre/post tool events; matcher coverage and blocking semantics may differ from PreToolUse."
+          "notes": "ctx.tool.hook('execute.before' | 'execute.after') runs around every tool call and may rewrite its input, but a hook can refuse a call only by throwing, which fails the whole turn. Lore's write guard therefore runs in the permission evaluate hook (see permission_hooks); the tool hooks feed the transcript accumulator."
         },
         "permission_hooks": {
           "support": "partial",
           "evidence": "opencode-permission-hooks",
-          "notes": "Permission decision protocol via plugin events; specific accept/deny shape needs adapter translation."
+          "notes": "ctx.permission.hook('evaluate') sees every permission check (action, resources, effect) after deny rules and before any prompt, and the effect and message it leaves decide; a deny reaches the model as permission.rejected with the message. Verified on 2.0.25 for guard-work-writes on the edit permission that write, edit and patch assert, and for the subagent refusal. partial until hooks.bats drives every Lore outcome on opencode."
         },
         "task_completed_hook": {
           "support": "fallback",
@@ -500,7 +500,7 @@
         },
         "native_dispatch_guidance_hook": {
           "support": "none",
-          "notes": "The plugin runtime exposes task execution events, but the exact native subagent prompt field and a blocking pre-launch decision are not proven. Use the validating orchestration adapter or a worker session; native ad-hoc dispatch is unavailable."
+          "notes": "The 2.x native subagent tool is `subagent` (the pre-2.0 `task`). Its prompt field and a blocking pre-launch decision that validates dispatch guidance are not proven, so the plugin refuses the launch through the subagent permission (verified on 2.0.25). Use the validating orchestration adapter or a worker session; native ad-hoc dispatch is unavailable."
         },
         "subagents": {
           "support": "partial",
@@ -530,7 +530,7 @@
         "plugin_runtime": {
           "support": "full",
           "evidence": "opencode-plugin-runtime",
-          "notes": "TypeScript/JavaScript plugin runtime under .opencode/plugins or ~/.config/opencode/plugins; lore ships adapters/opencode/lore-hooks.ts."
+          "notes": "OpenCode 2.x's server loads plain files in ~/.config/opencode/plugins and .opencode/plugins, and directory plugins named in config, each default-exporting {id, setup} or {id, effect}, and runs them in the server process: the shared background service, or a --standalone TUI's private server, never the TUI (TUI plugins are directories with a tui entry). lore ships adapters/opencode/lore-hooks.ts in that shape; it loads on 2.0.25 in both modes."
         }
       }
     },

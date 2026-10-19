@@ -185,8 +185,7 @@
         "options": {}
       },
       "expected": [
-        "--model",
-        "anthropic/opus"
+        "--standalone"
       ]
     },
     {
@@ -577,6 +576,39 @@
           "layer": "native-models",
           "role": "default"
         }
+      }
+    }
+  ],
+  "env": [
+    {
+      "id": "claude-code",
+      "route": {
+        "framework": "claude-code",
+        "model": "opus",
+        "options": {}
+      },
+      "expected": {}
+    },
+    {
+      "id": "codex",
+      "route": {
+        "framework": "codex",
+        "model": "gpt-5.6-sol",
+        "options": {
+          "effort": "high"
+        }
+      },
+      "expected": {}
+    },
+    {
+      "id": "opencode",
+      "route": {
+        "framework": "opencode",
+        "model": "anthropic/opus",
+        "options": {}
+      },
+      "expected": {
+        "OPENCODE_CONFIG_CONTENT": "{\"model\":\"anthropic/opus\"}"
       }
     }
   ]

@@ -94,13 +94,23 @@ contains only present options. Native spawns call
 whole, while a foreign route selects that harness's `native_models` binding.
 Configuration errors propagate without a fallback.
 
-Each adapter exposes `route_flags <canonical-route-json>`. It validates target
-affinity and writes a JSON argv array. Callers decode array elements without
-shell evaluation. Claude Code maps the model to `["--model", model]`;
-OpenCode uses the same CLI spelling; Codex maps to `["-m", model]` followed by
-`["-c", "model_reasoning_effort=..."]` and `["-c", "service_tier=..."]`
-when those options are present. Claude Code and OpenCode reject configured
-options because their CLI surfaces do not declare a carrier.
+Each adapter exposes `route_flags <canonical-route-json>` and
+`route_env <canonical-route-json>`. Both validate target affinity; the first
+writes a JSON argv array, the second a JSON object of environment variables
+the launch adds. Callers decode both without shell evaluation. Claude Code maps
+the model to `["--model", model]`; Codex maps to `["-m", model]` followed by
+`["-c", "model_reasoning_effort=..."]` and `["-c", "service_tier=..."]` when
+those options are present. Neither adds environment. OpenCode 2.x's TUI
+declares no model flag, and its server, not the TUI, reads the model from
+config, so OpenCode maps the route to `["--standalone"]` and
+`{"OPENCODE_CONFIG_CONTENT": "{\"model\":\"<model>\"}"}`: `--standalone`
+gives the session a private server that inherits the pane's environment, and
+`OPENCODE_CONFIG_CONTENT` is that server's last config source. A position
+launch adds its agent definition and `default_agent` to the same document.
+Claude Code and OpenCode reject configured options because their CLI surfaces
+do not declare a carrier. The TUI's Go projection (`RouteFlags`, `RouteEnv` in
+`tui/internal/config/framework.go`) must match; `tests/frameworks/route_parity.bats`
+holds both to `tests/fixtures/route-parity.json`.
 
 Native tool directives use the same canonical route. A tool API that cannot
 carry a present option reports `unsupported native-option` rather than

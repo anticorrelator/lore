@@ -74,6 +74,19 @@ PY
   done < <(jq -c '.flags[]' "$CORPUS")
 }
 
+@test "golden environment corpus matches both actual adapter projectors and Go" {
+  export LORE_DATA_DIR="$ROUTE_PARITY_DIR"
+  while IFS= read -r row; do
+    route="$(jq -c '.route' <<<"$row")"
+    framework="$(jq -r '.route.framework' <<<"$row")"
+    expected="$(jq -cS '.expected' <<<"$row")"
+    shell="$(bash "$REPO_DIR/adapters/agents/$framework.sh" route_env "$route" | jq -cS '.')"
+    go="$($ROUTE_PARITY_DIR/parity-harness route_env "$route" | jq -cS '.')"
+    [ "$shell" = "$expected" ]
+    [ "$go" = "$expected" ]
+  done < <(jq -c '.env[]' "$CORPUS")
+}
+
 @test "global and native resolution preserve precedence and affinity across Python Bash and Go" {
   export LORE_DATA_DIR="$ROUTE_PARITY_DIR"
   jq '.routes.worker={framework:"codex",model:"gpt-5.6-sol",effort:"high",service_tier:"fast"}

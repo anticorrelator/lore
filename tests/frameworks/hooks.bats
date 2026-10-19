@@ -986,7 +986,7 @@ EOF
 import os, re, sys
 text = open(os.environ["OC_ADAPTER"]).read()
 required = [
-    'payload.tool === "task"',
+    'payload.tool === "subagent"',
     "Run 'lore dispatch guidance'",
     'return { allow: false, reason: NATIVE_TASK_GUIDANCE_REASON }',
 ]

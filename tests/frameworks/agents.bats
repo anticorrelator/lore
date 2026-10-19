@@ -263,11 +263,14 @@ PYEOF
   [[ "$output" =~ model=opus ]]
 }
 
-@test "opencode route_flags preserves provider/model as one argv value" {
+@test "opencode route carries provider/model as one config value beside --standalone" {
   [ -f "$OC_AGENT_ADAPTER" ] || skip "adapters/agents/opencode.sh missing (T39 not landed yet)"
   run bash "$OC_AGENT_ADAPTER" route_flags '{"framework":"opencode","model":"anthropic/sonnet","options":{}}'
   [ "$status" -eq 0 ]
-  [ "$output" = '["--model","anthropic/sonnet"]' ]
+  [ "$output" = '["--standalone"]' ]
+  run bash "$OC_AGENT_ADAPTER" route_env '{"framework":"opencode","model":"anthropic/sonnet","options":{}}'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.OPENCODE_CONFIG_CONTENT | fromjson | .model' <<<"$output")" = "anthropic/sonnet" ]
 }
 
 @test "opencode agent spawn fails fast when active framework is not opencode" {

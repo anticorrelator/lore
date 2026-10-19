@@ -165,18 +165,20 @@ for the canonical implementation pattern.
 
 #### OpenCode plugin returns (per plugin event)
 
-OpenCode plugins are TypeScript modules; each plugin function returns a
-typed result object rather than communicating via exit codes/JSON
-stdout. Adapter MUST translate Lore outcomes into the plugin runtime's
-return shape:
+OpenCode 2.x plugins are TypeScript modules that default-export
+`{ id, setup(ctx) }`. `setup` subscribes to `ctx.event` and registers hooks
+(`ctx.tool.hook`, `ctx.session.hook`, `ctx.permission.hook`), each handed a
+mutable payload; a hook's return value is ignored. Nothing communicates via
+exit codes or JSON stdout, so the adapter MUST translate Lore outcomes into
+payload mutations:
 
-| Lore outcome     | OpenCode plugin return (typical shape)                       |
+| Lore outcome     | OpenCode 2.x plugin action                                   |
 |------------------|--------------------------------------------------------------|
-| `allow`          | `return { allow: true }` (or simply `return undefined`)      |
-| `deny`           | `return { allow: false, reason: "..." }`                     |
-| `notify`         | `return undefined` after side-effecting (logging, capture writes) |
-| `unsupported`    | _adapter-side: skip plugin registration entirely_            |
-| `error`          | `throw new Error("...")` — OpenCode logs and continues       |
+| `allow`          | leave the payload as it is                                   |
+| `deny`           | in the permission `evaluate` hook, set `effect: "deny"` and `message`; the tool reports `permission.rejected` with the message |
+| `notify`         | leave the payload after side-effecting (logging, capture writes) |
+| `unsupported`    | _adapter-side: skip the dispatch_                            |
+| `error`          | report on stderr and leave the payload — a hook that throws fails the whole turn |
 
 The exact field names are owned by the OpenCode plugin SDK;
 [`adapters/opencode/lore-hooks.ts`](https://github.com/anticorrelator/lore/blob/main/adapters/opencode/lore-hooks.ts)
@@ -196,12 +198,12 @@ blocked with the corrective command `lore dispatch guidance`.
 |---------|---------------------------|--------------|-------------|
 | Claude Code | `PreToolUse`, tool `Agent` | `tool_input.prompt` | The installed `Agent` matcher returns Claude's blocking JSON when canonical validation fails. |
 | Codex | `PreToolUse`, tool `spawn_agent` | `tool_input.message` | Native task launch is unavailable (`native_dispatch_guidance_hook: partial`). The installed `Agent` matcher exits 1 when canonical validation fails, and Codex 0.162.1 blocks only on exit 2 or a `deny` decision, so a rejected launch is not shown to be blocked. |
-| OpenCode | `tool.execute.before`, tool `task` | unverified | Native task launch is unavailable. The plugin refuses the exact documented `task` route and directs callers through the Lore orchestration adapter or worker session. |
+| OpenCode | permission `evaluate`, action `subagent` (2.x's native subagent tool) | unverified | Native task launch is unavailable. The plugin denies the exact `subagent` permission and directs callers through the Lore orchestration adapter or worker session. |
 
 Only the conditions and fields above are recognized. Similar names, casing
 variants, and inferred aliases are not treated as launches: heuristic matching
 would either block unrelated tools or claim enforcement where the harness has
-not established it. OpenCode therefore fails closed on its definite `task`
+not established it. OpenCode therefore fails closed on its definite `subagent`
 condition rather than parsing a speculative prompt field.
 
 #### Codex hook returns (per native event)
@@ -314,14 +316,14 @@ Evidence ids resolve in
 
 | Lore event           | claude-code adapter (T25)                                    | opencode adapter (T26)                            | codex adapter (T27)                              |
 |----------------------|--------------------------------------------------------------|---------------------------------------------------|--------------------------------------------------|
-| `session_start`      | **full** — SessionStart hook                                 | **partial** — plugin `session.start`              | **full** — SessionStart hook                     |
-| `user_prompt`        | **full** — UserPromptSubmit hook                             | **partial** — plugin `prompt.submit`              | **fallback** — derive from SessionStart bookend  |
-| `pre_tool`           | **full** — PreToolUse hook                                   | **partial** — plugin `tool.before`                | **full** — PreToolUse hook                       |
-| `post_tool`          | **full** — PostToolUse hook                                  | **partial** — plugin `tool.after`                 | **full** — PostToolUse hook                      |
-| `permission_request` | **full** — PreToolUse JSON-stdout decision protocol          | **partial** — plugin `permission.request`         | **full** — PermissionRequest hook                |
+| `session_start`      | **full** — SessionStart hook                                 | **partial** — event `session.created`             | **full** — SessionStart hook                     |
+| `user_prompt`        | **full** — UserPromptSubmit hook                             | **partial** — session hook `prompt`               | **fallback** — derive from SessionStart bookend  |
+| `pre_tool`           | **full** — PreToolUse hook                                   | **partial** — permission hook `evaluate` (`edit`) | **full** — PreToolUse hook                       |
+| `post_tool`          | **full** — PostToolUse hook                                  | **partial** — tool hook `execute.after`           | **full** — PostToolUse hook                      |
+| `permission_request` | **full** — PreToolUse JSON-stdout decision protocol          | **partial** — event `permission.asked`            | **full** — PermissionRequest hook                |
 | `pre_compact`        | **full** — PreCompact hook                                   | **fallback** — SessionStart bookend               | **fallback** — SessionStart bookend              |
-| `stop`               | **full** — Stop hook                                         | **partial** — plugin `session.stop`               | **full** — Stop hook                             |
-| `session_end`        | **full** — SessionEnd hook (matcher=`clear`)                 | **partial** — plugin `session.end`                | **fallback** — derive from Stop                  |
+| `stop`               | **full** — Stop hook                                         | **partial** — event `session.execution.*`         | **full** — Stop hook                             |
+| `session_end`        | **full** — SessionEnd hook (matcher=`clear`)                 | **partial** — event `session.deleted`             | **fallback** — derive from Stop                  |
 | `task_completed`     | **full** — TaskCompleted hook (exit-2 blocking)              | **fallback** — lead-side validator (see T31, T32) | **fallback** — lead-side validator (see T31, T32) |
 
 **Turn-boundary rewake is a separate cell from `stop`.** Whether the Stop
@@ -460,7 +462,7 @@ stdin. The script:
 |-------------|------|---------|-------------------|
 | claude-code | **full** on live checks of 2.1.299: no startup Settings dialog, hooks from `--settings` run, and real turns in hosted sessions journal UserPromptSubmit and Stop rows. StopFailure, PermissionRequest and the question tools have not fired live | `settings-json` (a hooks-only `--settings` payload, each entry `async: true`) | UserPromptSubmit → `resumed` working; Stop → `needs_input` idle; StopFailure → `needs_input` blocked, `links.error`; PermissionRequest → `needs_input` blocked, `links.tool_name`; PreToolUse on `AskUserQuestion\|ExitPlanMode` → `needs_input` blocked; PostToolUse and PostToolUseFailure on the same tools → `resumed` working |
 | codex       | **none**: a live check of 0.162.1 found `-c` hooks held behind Codex's startup "Hooks need review" prompt. Trust is each machine's own Codex record, so raising the cell also needs the launch to pass the flags only where Codex already trusts them | `config-override` (`-c hooks.<Event>=[…]` session flags; not installed) | declared, not installed: UserPromptSubmit → `resumed` working; Stop and Interrupt → `needs_input` idle; PermissionRequest → `needs_input` blocked, `links.tool_name` |
-| opencode    | **none**: a live check of 2.0.25 found `OPENCODE_CONFIG_CONTENT` and `OPENCODE_CONFIG_DIR` read by OpenCode's server, a background service shared by every client on the machine (or a private child server), never the hosted session. Lore's TUI plugin, named in `OPENCODE_CLI_CONFIG_CONTENT`, reported the session's own edges from the pane's first process; raising the cell also needs the launch to keep the person's own client plugins and a hosted OpenCode 2.x launch that starts | `plugin-env` (`adapters/opencode/lore-session-lifecycle` named in `OPENCODE_CLI_CONFIG_CONTENT`; not installed) | declared, not installed: `session.execution.started` → `resumed` working; `session.execution.succeeded` and `session.execution.interrupted` → `needs_input` idle (`links.reason`); `session.execution.failed` → `needs_input` blocked, `links.error`; `permission.asked` → `needs_input` blocked, `links.tool_name`; `form.created` → `needs_input` blocked; `permission.replied`, `form.replied`, `form.cancelled` → `resumed` working |
+| opencode    | **none**: a live check of 2.0.25 found `OPENCODE_CONFIG_CONTENT` and `OPENCODE_CONFIG_DIR` read by OpenCode's server, a background service shared by every client on the machine (or a private child server), never the hosted session. Lore's TUI plugin, named in `OPENCODE_CLI_CONFIG_CONTENT`, reported the session's own edges from the pane's first process; raising the cell also needs the launch to keep the person's own client plugins. Hosted OpenCode 2.x sessions now start, with `--standalone` and the model in `OPENCODE_CONFIG_CONTENT` | `plugin-env` (`adapters/opencode/lore-session-lifecycle` named in `OPENCODE_CLI_CONFIG_CONTENT`; not installed) | declared, not installed: `session.execution.started` → `resumed` working; `session.execution.succeeded` and `session.execution.interrupted` → `needs_input` idle (`links.reason`); `session.execution.failed` → `needs_input` blocked, `links.error`; `permission.asked` → `needs_input` blocked, `links.tool_name`; `form.created` → `needs_input` blocked; `permission.replied`, `form.replied`, `form.cancelled` → `resumed` working |
 
 The cell's `events` list is the source of truth for the mapping; this table is
 its reading at the time of writing. `tests/fixtures/claude-code-hooks-settings.schema.json`

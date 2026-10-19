@@ -10,14 +10,27 @@
  * For every lifecycle event the plugin (a) invokes the matching Lore
  * handler script in ~/.lore/scripts/<name> (per T24 checklist item 6,
  * stable script paths) and translates the script's exit code / stdout
- * into the OpenCode plugin runtime's return shape, AND (b) appends a
- * single JSON event row to the per-session accumulator at
- * ~/.lore/sessions/opencode/<session-id>.jsonl. The accumulator is the
- * agreed contract surface with adapters/transcripts/opencode.py (T51) —
- * one event per line, append-only, no rewrites; opencode.py walks the
- * file in arrival order to synthesize the transcript view that other
- * Lore consumers (extract-session-digest, stop-novelty-check, etc.)
- * normally read from Claude Code's JSONL transcript.
+ * into an OpenCode outcome, AND (b) appends a single JSON event row to
+ * the per-session accumulator at ~/.lore/sessions/opencode/<session-id>.jsonl.
+ * The accumulator is the agreed contract surface with
+ * adapters/transcripts/opencode.py (T51) — one event per line,
+ * append-only, no rewrites; opencode.py walks the file in arrival order
+ * to synthesize the transcript view that other Lore consumers
+ * (extract-session-digest, stop-novelty-check, etc.) normally read from
+ * Claude Code's JSONL transcript.
+ *
+ * Plugin shape (OpenCode 2.x). OpenCode's server loads every plain file in
+ * ~/.config/opencode/plugins and requires its default export to be
+ * `{ id, setup(ctx) }` (or `{ id, effect }`); the pre-2.0 object keyed by
+ * event names is rejected with "Plugin must export a default definition
+ * with an id and an effect or setup function". The plugin runs in the
+ * server process — the machine's shared background service, or the private
+ * server a `--standalone` TUI starts — never in the TUI. `setup` subscribes
+ * to `ctx.event` and registers hooks with `ctx.tool.hook`,
+ * `ctx.session.hook` and `ctx.permission.hook`. A hook mutates the payload
+ * it is handed; a hook that throws fails the whole turn, so refusals set
+ * `effect: "deny"` in the permission `evaluate` hook instead, which the
+ * tool reports as a denied permission.
  *
  * Per-event evidence-gated classification (Phase 3 D8 rule). Each row
  * names the capabilities.json cell consumed and the evidence anchor in
@@ -26,19 +39,24 @@
  * uncertain or experimental vendor behavior stays at `partial` /
  * `fallback` with explicit degraded status (Phase 3 objective).
  *
- *   event              support     native source(s)                evidence
- *   ---------------    --------    ----------------------------    -------------------------------
- *   session_start      partial     session.created                 opencode-session-start-hook
- *   user_prompt        partial     message.updated (role=user)     opencode-tool-hooks (proxy)
- *   pre_tool           partial     tool.execute.before             opencode-tool-hooks
- *   post_tool          partial     tool.execute.after              opencode-tool-hooks
- *   permission_request partial     permission.asked                opencode-permission-hooks
- *   pre_compact        fallback    experimental.session.compacting opencode-pre-compact-hook
- *                                  (experimental — explicit downgrade per evidence)
- *   stop               partial     session.idle                    opencode-stop-hook
- *   session_end        partial     session.status (ended/cleared)  opencode-stop-hook
- *   task_completed     fallback    (no native event)               opencode-task-completed-hook
+ *   event              support     native source(s) on 2.x          evidence
+ *   ---------------    --------    -----------------------------    -------------------------------
+ *   session_start      partial     event session.created            opencode-session-start-hook
+ *   user_prompt        partial     session hook prompt              opencode-tool-hooks (proxy)
+ *   pre_tool           partial     permission hook evaluate (edit)  opencode-tool-hooks
+ *   post_tool          partial     tool hook execute.after          opencode-tool-hooks
+ *   permission_request partial     event permission.asked           opencode-permission-hooks
+ *   pre_compact        fallback    event session.compaction.started opencode-pre-compact-hook
+ *   stop               partial     event session.execution.*        opencode-stop-hook
+ *   session_end        partial     event session.deleted            opencode-stop-hook
+ *   task_completed     fallback    (no native event)                opencode-task-completed-hook
  *                                  (lead-side validator per adapters/agents/README.md T31)
+ *
+ * pre_tool's handler, guard-work-writes.sh, guards file writes. Every
+ * OpenCode tool that writes a file (write, edit, patch) asks the `edit`
+ * permission for each path before touching disk, so the guard runs in the
+ * permission `evaluate` hook for that action and denies there; the tool
+ * hooks only record the call for the accumulator.
  *
  * Smoke output: invoking the bundled CLI entrypoint (`tsx lore-hooks.ts
  * --smoke` or equivalent) prints, for the active framework, every Lore
@@ -147,24 +165,37 @@ const CAPABILITY_KEY: Record<LoreEvent, string> = {
 };
 
 /**
- * Native OpenCode event name(s) that fire each Lore event. Empty array
+ * Native OpenCode 2.x source(s) that fire each Lore event: an event on
+ * `ctx.event`, or a hook registered on the plugin context. Empty array
  * means no native equivalent — plugin returns `unsupported`.
  *
- * `experimental.session.compacting` is the OpenCode pre-compaction event
- * but carries the `experimental.` prefix — per opencode-pre-compact-hook
- * evidence anchor, the cell stays `fallback` because the event is
- * explicitly not stable per the docs. Adapter wires it but logs degraded.
+ * 2.x publishes neither `session.idle` nor `session.status` on the event
+ * stream; a turn ends with one of the `session.execution.*` events.
+ * `session.compaction.started` is published by the 2.x server, but no
+ * live run has compacted yet, so pre_compact stays `fallback` per the
+ * opencode-pre-compact-hook evidence anchor.
  */
 const NATIVE_EVENT_SOURCES: Record<LoreEvent, readonly string[]> = {
   session_start: ["session.created"],
-  user_prompt: ["message.updated"],
-  pre_tool: ["tool.execute.before"],
-  post_tool: ["tool.execute.after"],
+  user_prompt: ["session hook prompt"],
+  pre_tool: ["permission hook evaluate (edit)"],
+  post_tool: ["tool hook execute.after"],
   permission_request: ["permission.asked"],
-  pre_compact: ["experimental.session.compacting"],
-  stop: ["session.idle"],
-  session_end: ["session.status"],
+  pre_compact: ["session.compaction.started"],
+  stop: ["session.execution.succeeded", "session.execution.interrupted", "session.execution.failed"],
+  session_end: ["session.deleted"],
   task_completed: [], // no native — orchestration-adapter fallback (T31)
+};
+
+/** Event-stream types that dispatch a Lore event, from NATIVE_EVENT_SOURCES. */
+const EVENT_DISPATCH: Readonly<Record<string, LoreEvent>> = {
+  "session.created": "session_start",
+  "permission.asked": "permission_request",
+  "session.compaction.started": "pre_compact",
+  "session.execution.succeeded": "stop",
+  "session.execution.interrupted": "stop",
+  "session.execution.failed": "stop",
+  "session.deleted": "session_end",
 };
 
 /**
@@ -199,8 +230,9 @@ const DENY_ALLOWED: ReadonlySet<LoreEvent> = new Set<LoreEvent>([
 ]);
 
 /**
- * OpenCode documents `task` as its native subagent tool, so matching that
- * exact tool name is a definite condition. Its plugin contract does not yet
+ * OpenCode 2.x's native subagent tool is `subagent` (the pre-2.0 `task`),
+ * and it asks the `subagent` permission before it launches, so matching
+ * that exact name is a definite condition. Its plugin contract does not yet
  * provide probe-backed prompt-field and blocking semantics for that launch,
  * however. Fail closed on the known launch instead of guessing at aliases or
  * rewriting an unverified payload shape. The validated adapter/session path
@@ -212,7 +244,7 @@ export const NATIVE_TASK_GUIDANCE_REASON =
 export function refuseUnverifiedNativeTask(
   payload: Record<string, unknown>,
 ): PluginReturn | undefined {
-  if (payload.tool === "task") {
+  if (payload.tool === "subagent") {
     return { allow: false, reason: NATIVE_TASK_GUIDANCE_REASON };
   }
   return undefined;
@@ -388,8 +420,16 @@ export function resolveSupport(): Record<LoreEvent, SupportLevel> {
  * - exit 0 + `{"decision":"block","reason":...}` JSON on stdout → "deny"
  * - exit 2 (TaskCompleted-style) → "deny" with stderr feedback
  * - any other non-zero exit → "error"
+ *
+ * `stdin` is written to the handler's standard input, which is then closed,
+ * so a handler with a stdin contract (guard-work-writes.sh reads the
+ * PreToolUse JSON) sees its input and every other handler sees EOF. A
+ * handler still running after HANDLER_TIMEOUT_MS is killed and reported as
+ * "error": pre_tool runs inside a permission check that holds the tool call.
  */
-function spawnHandler(scriptName: string, env: NodeJS.ProcessEnv): Promise<DispatchResult> {
+const HANDLER_TIMEOUT_MS = 30_000;
+
+function spawnHandler(scriptName: string, env: NodeJS.ProcessEnv, stdin = ""): Promise<DispatchResult> {
   return new Promise((resolve) => {
     const dataRoot = process.env.LORE_DATA_DIR || path.join(os.homedir(), ".lore");
     const scriptPath = path.join(dataRoot, "scripts", scriptName);
@@ -400,17 +440,22 @@ function spawnHandler(scriptName: string, env: NodeJS.ProcessEnv): Promise<Dispa
     // handlers read the wrong capability profile from settings.json.
     const child = spawn(interpreter, [scriptPath], {
       env: { ...process.env, ...env, LORE_FRAMEWORK: "opencode" },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
+    const timer = setTimeout(() => child.kill("SIGKILL"), HANDLER_TIMEOUT_MS);
+    child.stdin.on("error", () => {});
+    child.stdin.end(stdin);
 
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => { stdout += d.toString(); });
     child.stderr.on("data", (d) => { stderr += d.toString(); });
     child.on("error", (err) => {
+      clearTimeout(timer);
       resolve({ outcome: "error", reason: String(err), stderr });
     });
     child.on("close", (code) => {
+      clearTimeout(timer);
       const trimmed = stdout.trim();
       if (code === 0) {
         if (trimmed.startsWith("{")) {
@@ -459,11 +504,14 @@ function spawnHandler(scriptName: string, env: NodeJS.ProcessEnv): Promise<Dispa
  * "session.created"). When omitted, the accumulator records the Lore
  * event name instead — useful for synthetic dispatches but loses the
  * harness-native shape that opencode.py expects.
+ *
+ * `stdin` is the handler's standard input (see spawnHandler).
  */
 export async function dispatch(
   event: LoreEvent,
   payload: Record<string, unknown> = {},
   rawEventName?: string,
+  stdin?: string,
 ): Promise<DispatchResult> {
   // Capture to the accumulator first so transcript consumers see the
   // event even when the lore handler is gated off.
@@ -508,7 +556,7 @@ export async function dispatch(
   const result = await spawnHandler(script, {
     LORE_HOOK_EVENT: event,
     LORE_HOOK_PAYLOAD: JSON.stringify(payload ?? {}),
-  });
+  }, stdin);
 
   // Enforce T24's blocking matrix: deny is only allowed for the four
   // events in DENY_ALLOWED. Translate to error otherwise.
@@ -522,94 +570,165 @@ export async function dispatch(
   return result;
 }
 
-/**
- * Translate a DispatchResult into the OpenCode plugin runtime's return
- * shape. Per adapters/hooks/README.md "OpenCode plugin returns" table:
- *   allow / notify / unsupported → undefined (or { allow: true })
- *   deny                          → { allow: false, reason }
- *   error                         → throw
- */
-export function toPluginReturn(result: DispatchResult): PluginReturn | undefined {
-  switch (result.outcome) {
-    case "allow":
-    case "notify":
-    case "unsupported":
-      return undefined;
-    case "deny":
-      return { allow: false, reason: result.reason ?? "blocked by lore handler" };
-    case "error":
-      throw new Error(result.reason ?? "lore handler failed");
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Plugin entrypoint
 // ---------------------------------------------------------------------------
 
 /**
- * The OpenCode plugin object. Each native event handler maps onto the
- * matching Lore lifecycle dispatch. The exact function-name shape is
- * owned by the OpenCode plugin SDK; this module exports the handlers
- * as named functions so the plugin shell can wire them however the SDK
- * expects (default-export object, named exports, or class-based).
+ * The slice of OpenCode 2.x's server plugin context this adapter uses. Each
+ * hook registrar hands its callback a mutable payload; the callback's
+ * return value is ignored.
+ */
+interface OpenCodeEvent {
+  id?: string;
+  type?: string;
+  data?: Record<string, unknown>;
+}
+
+interface PermissionEvaluation {
+  sessionID?: string;
+  agent?: string;
+  action: string;
+  resources: string[];
+  effect: "allow" | "ask" | "deny";
+  message?: string;
+}
+
+interface OpenCodePluginContext {
+  location?: { directory?: string };
+  event: { subscribe(): AsyncIterable<OpenCodeEvent> };
+  tool: { hook(name: string, fn: (payload: Record<string, unknown>) => unknown): Promise<unknown> };
+  session: { hook(name: string, fn: (payload: Record<string, unknown>) => unknown): Promise<unknown> };
+  permission: { hook(name: "evaluate", fn: (payload: PermissionEvaluation) => unknown): Promise<unknown> };
+}
+
+/**
+ * Event ids already dispatched. OpenCode runs a server plugin once per
+ * project location it serves, and every instance may see the same event, so
+ * the first instance to see an event dispatches it. Bounded to the most
+ * recent ids.
+ */
+const DISPATCHED_EVENTS = new Set<string>();
+
+function firstSighting(id: string | undefined): boolean {
+  if (!id) return true;
+  if (DISPATCHED_EVENTS.has(id)) return false;
+  DISPATCHED_EVENTS.add(id);
+  if (DISPATCHED_EVENTS.size > 1000) {
+    DISPATCHED_EVENTS.delete(DISPATCHED_EVENTS.values().next().value as string);
+  }
+  return true;
+}
+
+/** Record a dispatch failure without failing the OpenCode turn that fired it. */
+function report(result: DispatchResult, event: LoreEvent): void {
+  if (result.outcome === "error") {
+    process.stderr.write(`[lore] ${event} handler failed: ${result.reason ?? "unknown error"}\n`);
+  }
+}
+
+/**
+ * The OpenCode 2.x plugin definition. Every native source passes its
+ * OpenCode name as the third dispatch argument so the per-session
+ * accumulator records the harness-native event type —
+ * adapters/transcripts/opencode.py reads it back as event["type"]. Tool and
+ * prompt rows are written in the shape opencode.py parses (`tool.name` /
+ * `tool.input`, `message.role` / `message.content`).
  *
- * Every handler passes the raw OpenCode event name as the third
- * dispatch argument so the per-session accumulator records the
- * harness-native event type — adapters/transcripts/opencode.py reads
- * this back as event["type"] to decide which schema branch to apply.
- *
- * If the OpenCode SDK shape changes, the field names below are the
- * single point of update — the dispatch logic above is SDK-agnostic.
+ * Nothing here throws into OpenCode: a hook that throws fails the turn, so
+ * handler errors are reported on stderr and the operation proceeds.
+ * Refusals use the permission `evaluate` hook.
  */
 export const plugin = {
-  "session.created": async (payload: Record<string, unknown>) =>
-    toPluginReturn(await dispatch("session_start", payload, "session.created")),
+  id: "lore.hooks",
+  async setup(ctx: OpenCodePluginContext) {
+    const directory = ctx.location?.directory ?? process.cwd();
+    let open = true;
 
-  "session.idle": async (payload: Record<string, unknown>) =>
-    toPluginReturn(await dispatch("stop", payload, "session.idle")),
+    void (async () => {
+      for await (const event of ctx.event.subscribe()) {
+        if (!open) return;
+        const loreEvent = event.type ? EVENT_DISPATCH[event.type] : undefined;
+        if (!loreEvent || !firstSighting(event.id)) continue;
+        report(await dispatch(loreEvent, event.data ?? {}, event.type), loreEvent);
+      }
+    })().catch((err) => {
+      process.stderr.write(`[lore] event subscription ended: ${String(err)}\n`);
+    });
 
-  "session.status": async (payload: Record<string, unknown>) => {
-    const status = (payload as { status?: string }).status;
-    if (status === "ended" || status === "cleared") {
-      return toPluginReturn(await dispatch("session_end", payload, "session.status"));
-    }
-    // Status changes that aren't session terminations still get captured
-    // for the transcript provider but skip the lore dispatch path.
-    const sessionId = extractSessionId(payload);
-    if (sessionId) {
-      appendAccumulatorEvent(sessionId, "session.status", payload);
-    }
-    return undefined;
-  },
+    await ctx.session.hook("prompt", async (payload) => {
+      const prompt = payload.prompt as { text?: unknown } | undefined;
+      const row = {
+        sessionID: payload.sessionID,
+        message: { role: "user", content: [{ type: "text", text: typeof prompt?.text === "string" ? prompt.text : "" }] },
+      };
+      report(await dispatch("user_prompt", row, "message.updated"), "user_prompt");
+    });
 
-  "message.updated": async (payload: Record<string, unknown>) =>
-    toPluginReturn(await dispatch("user_prompt", payload, "message.updated")),
-
-  "tool.execute.before": async (payload: Record<string, unknown>) => {
-    const nativeTaskRefusal = refuseUnverifiedNativeTask(payload);
-    if (nativeTaskRefusal) {
+    await ctx.tool.hook("execute.before", (payload) => {
       const sessionId = extractSessionId(payload);
       if (sessionId) {
-        appendAccumulatorEvent(sessionId, "tool.execute.before", payload);
+        appendAccumulatorEvent(sessionId, "tool.execute.before", {
+          tool: { name: payload.tool, input: payload.input },
+          call_id: payload.id,
+          agent: payload.agent,
+        });
       }
-      return nativeTaskRefusal;
-    }
-    return toPluginReturn(await dispatch("pre_tool", payload, "tool.execute.before"));
+    });
+
+    await ctx.tool.hook("execute.after", async (payload) => {
+      const row = {
+        sessionID: payload.sessionID,
+        tool: { name: payload.tool, input: payload.input },
+        call_id: payload.id,
+        status: payload.status,
+      };
+      report(await dispatch("post_tool", row, "tool.execute.after"), "post_tool");
+    });
+
+    await ctx.permission.hook("evaluate", async (evaluation) => {
+      if (evaluation.effect === "deny") return;
+      const nativeTaskRefusal = refuseUnverifiedNativeTask({ tool: evaluation.action });
+      if (nativeTaskRefusal) {
+        evaluation.effect = "deny";
+        evaluation.message = nativeTaskRefusal.reason;
+        return;
+      }
+      if (evaluation.action !== "edit") return;
+      // guard-work-writes.sh reads Claude Code's PreToolUse shape and
+      // treats every file-writing tool alike, so each path the edit
+      // permission covers is checked as a Write.
+      for (const resource of evaluation.resources) {
+        const filePath = path.isAbsolute(resource) ? resource : path.resolve(directory, resource);
+        const input = JSON.stringify({
+          hook_event_name: "PreToolUse",
+          session_id: evaluation.sessionID ?? "",
+          tool_name: "Write",
+          tool_input: { file_path: filePath },
+        });
+        // Not the evaluation itself: its metadata holds the whole diff, which
+        // could overflow the handler's environment (LORE_HOOK_PAYLOAD).
+        const row = {
+          sessionID: evaluation.sessionID,
+          agent: evaluation.agent,
+          action: evaluation.action,
+          resources: evaluation.resources,
+          file_path: filePath,
+        };
+        const result = await dispatch("pre_tool", row, "permission.evaluate", input);
+        report(result, "pre_tool");
+        if (result.outcome === "deny") {
+          evaluation.effect = "deny";
+          evaluation.message = result.reason ?? "blocked by lore handler";
+          return;
+        }
+      }
+    });
+
+    return () => {
+      open = false;
+    };
   },
-
-  "tool.execute.after": async (payload: Record<string, unknown>) =>
-    toPluginReturn(await dispatch("post_tool", payload, "tool.execute.after")),
-
-  "permission.asked": async (payload: Record<string, unknown>) =>
-    toPluginReturn(await dispatch("permission_request", payload, "permission.asked")),
-
-  // pre_compact uses OpenCode's experimental.session.compacting event; the
-  // experimental prefix downgrades the cell to `fallback` (see capability
-  // evidence opencode-pre-compact-hook). The adapter still wires the
-  // handler so plan-persistence reminders fire when the event does
-  // arrive — degraded log on every dispatch flags the unstable surface.
-  "experimental.session.compacting": async (payload: Record<string, unknown>) =>
-    toPluginReturn(await dispatch("pre_compact", payload, "experimental.session.compacting")),
 };
 
 export default plugin;

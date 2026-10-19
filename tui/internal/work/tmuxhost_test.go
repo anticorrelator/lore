@@ -131,10 +131,15 @@ func TestTmuxLaunchCapabilityContractHarnessMatrix(t *testing.T) {
 			case "codex":
 				today = []string{"-m", model, prompt}
 			case "opencode":
-				today = []string{"--model", model, prompt}
+				today = []string{"--standalone", "--prompt", prompt}
 			}
 			if !slices.Equal(none.Argv, today) {
 				t.Fatalf("argv with the cells at none = %q, want today's %q", none.Argv, today)
+			}
+			if fixture.framework == "opencode" {
+				if got := none.Env["OPENCODE_CONFIG_CONTENT"]; got != `{"model":"anthropic/opus"}` {
+					t.Fatalf("pane OPENCODE_CONFIG_CONTENT = %q, want the routed model", got)
+				}
 			}
 
 			expected := slices.Clone(today)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -504,6 +505,51 @@ func TestStartTerminalCmd_FollowupModeInjectsAppendSystemPromptOnClaudeCode(t *t
 	if !argsContains(started.Cmd.Args, "--append-system-prompt") {
 		t.Errorf("Cmd.Args missing --append-system-prompt in followup mode on claude-code: %v",
 			started.Cmd.Args)
+	}
+}
+
+// TestStartTerminalCmd_OpenCodeRoutesModelThroughStandaloneConfig asserts the
+// OpenCode 2.x launch shape: its TUI declares no --model flag and takes its only
+// positional as the directory to start in, so the routed model rides in
+// OPENCODE_CONFIG_CONTENT, --standalone gives the session the private server
+// that reads it, and the initial prompt goes in --prompt.
+func TestStartTerminalCmd_OpenCodeRoutesModelThroughStandaloneConfig(t *testing.T) {
+	stageFakeBinaries(t)
+	dir := stageFakeLoreData(t, "opencode", nil)
+
+	msg := runStartTerminal(t, "smoke-slug", dir, false)
+	started, ok := msg.(SessionProcessStartedMsg)
+	if !ok {
+		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
+	}
+	want := []string{"--standalone", "--prompt", "/spec smoke-slug --yes"}
+	if !slices.Equal(started.Cmd.Args[1:], want) {
+		t.Errorf("Cmd.Args = %q, want %q", started.Cmd.Args, want)
+	}
+	if !envContains(started.Cmd.Env, `OPENCODE_CONFIG_CONTENT={"model":"anthropic/opus"}`) {
+		t.Errorf("Cmd.Env missing the routed model in OPENCODE_CONFIG_CONTENT: %v", started.Cmd.Env)
+	}
+}
+
+func TestMergeLaunchEnv(t *testing.T) {
+	route := []string{`OPENCODE_CONFIG_CONTENT={"model":"fixture/model"}`}
+	position := []string{`OPENCODE_CONFIG_CONTENT={"agent":{"p":{"mode":"primary"}},"default_agent":"p"}`, "LORE_POSITION_DISPATCH_MANIFEST=/m"}
+	merged, err := mergeLaunchEnv(route, position)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{`OPENCODE_CONFIG_CONTENT={"agent":{"p":{"mode":"primary"}},"default_agent":"p","model":"fixture/model"}`, "LORE_POSITION_DISPATCH_MANIFEST=/m"}
+	if !slices.Equal(merged, want) {
+		t.Errorf("merged = %q, want %q", merged, want)
+	}
+	if merged, err := mergeLaunchEnv(nil, position); err != nil || !slices.Equal(merged, position) {
+		t.Errorf("no route env: merged = %q, %v", merged, err)
+	}
+	if _, err := mergeLaunchEnv(route, []string{`OPENCODE_CONFIG_CONTENT={"model":"other/model"}`}); err == nil {
+		t.Error("a key set by both the route and the position was merged")
+	}
+	if _, err := mergeLaunchEnv(route, []string{"OPENCODE_CONFIG_CONTENT=not-json"}); err == nil {
+		t.Error("a non-object value shared with the route was accepted")
 	}
 }
 

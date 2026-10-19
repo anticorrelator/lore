@@ -109,6 +109,21 @@ except (ValueError, json.JSONDecodeError, RouteConfigError) as exc:
 PYTHON
 }
 
+cmd_route_env() {
+  [[ $# -eq 1 ]] || { echo 'Error: route_env requires <canonical-route-json>' >&2; return 1; }
+  python3 - "$LORE_REPO_DIR" "$1" <<'PYTHON'
+import json, sys
+sys.path.insert(0, sys.argv[1] + '/scripts')
+from route_config import parse_route, RouteConfigError
+try:
+    route = parse_route(json.loads(sys.argv[2]), sys.argv[1])
+    if route['framework'] != 'codex': raise RouteConfigError('route_framework_mismatch', "codex adapter requires framework 'codex'")
+    print('{}')
+except (ValueError, json.JSONDecodeError, RouteConfigError) as exc:
+    print('Error: invalid codex route: ' + str(exc), file=sys.stderr); raise SystemExit(2)
+PYTHON
+}
+
 cmd_native_tool_fields() {
   require_codex
   [[ $# -eq 1 ]] || { echo 'Error: native_tool_fields requires <canonical-route-json>' >&2; return 1; }
@@ -386,6 +401,7 @@ case "$cmd" in
   completion_enforcement)   shift; cmd_completion_enforcement   "$@" ;;
   resolve_model_for_role)   shift; cmd_resolve_model_for_role   "$@" ;;
   route_flags)              shift; cmd_route_flags              "$@" ;;
+  route_env)                shift; cmd_route_env                "$@" ;;
   split_model_variant)      shift; cmd_split_model_variant      "$@" ;;
   system_prompt_flag)       shift; cmd_system_prompt_flag       "$@" ;;
   settings_override_flag)   shift; cmd_settings_override_flag   "$@" ;;

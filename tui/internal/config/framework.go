@@ -193,11 +193,20 @@ func RouteFlags(route Route) ([]string, error) {
 	}
 	route = validated
 	switch route.Framework {
-	case "claude-code", "opencode":
+	case "claude-code":
 		if len(route.Options) != 0 {
 			return nil, fmt.Errorf("%s route options unsupported", route.Framework)
 		}
 		return []string{"--model", route.Model}, nil
+	case "opencode":
+		if len(route.Options) != 0 {
+			return nil, fmt.Errorf("%s route options unsupported", route.Framework)
+		}
+		// OpenCode 2.x's TUI declares no model flag, and its server, not the
+		// TUI, reads the model from config. --standalone gives the session a
+		// private server that inherits the pane's environment, so the model
+		// RouteEnv puts there reaches this session's server and no other.
+		return []string{"--standalone"}, nil
 	case "codex":
 		for key := range route.Options {
 			if key != "effort" && key != "service_tier" {
@@ -214,6 +223,49 @@ func RouteFlags(route Route) ([]string, error) {
 		return args, nil
 	default:
 		return nil, fmt.Errorf("unknown route framework %q", route.Framework)
+	}
+}
+
+// RouteEnv returns the KEY=value entries a launch adds to the session's
+// environment, beside RouteFlags, to select the route. Only OpenCode carries
+// its route there: OPENCODE_CONFIG_CONTENT is the last config source its
+// server reads, so its model key overrides the person's configured default
+// without dropping the rest of their config.
+func RouteEnv(route Route) ([]string, error) {
+	validated, err := ParseCanonicalRoute(route)
+	if err != nil {
+		return nil, fmt.Errorf("invalid canonical route: %w", err)
+	}
+	switch validated.Framework {
+	case "claude-code", "codex":
+		return nil, nil
+	case "opencode":
+		content, err := json.Marshal(map[string]string{"model": validated.Model})
+		if err != nil {
+			return nil, err
+		}
+		return []string{"OPENCODE_CONFIG_CONTENT=" + string(content)}, nil
+	default:
+		return nil, fmt.Errorf("unknown route framework %q", validated.Framework)
+	}
+}
+
+// PromptArgs returns the argv that hands a harness its initial prompt. Claude
+// Code and Codex take it as their positional argument. OpenCode 2.x's only
+// positional is the directory to start in, so its prompt goes in --prompt,
+// which the TUI submits once its model is ready, and an empty prompt adds
+// nothing.
+func PromptArgs(framework, prompt string) ([]string, error) {
+	switch framework {
+	case "claude-code", "codex":
+		return []string{prompt}, nil
+	case "opencode":
+		if prompt == "" {
+			return nil, nil
+		}
+		return []string{"--prompt", prompt}, nil
+	default:
+		return nil, fmt.Errorf("unknown framework %q", framework)
 	}
 }
 

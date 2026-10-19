@@ -42,7 +42,8 @@ HOOKS_SCHEMA = REPO / "tests/fixtures/claude-code-hooks-settings.schema.json"
 HARNESS_CONFIG = (".claude", ".codex", ".config/opencode")
 # Variables the fake harness reports by value; every other name is reported without its value.
 REPORTED_VALUES = ("LORE_KNOWLEDGE_DIR", "LORE_SESSION_SOURCE_DIR", "LORE_SESSION_STORE_ROOT",
-                   "LORE_SESSION_HOST_KEY", "LORE_SESSION_RUNTIME", "FIXTURE_CARRIED", "TMUX")
+                   "LORE_SESSION_HOST_KEY", "LORE_SESSION_RUNTIME", "FIXTURE_CARRIED", "TMUX",
+                   "OPENCODE_CONFIG_CONTENT")
 FAKE_HARNESS = r'''#!/usr/bin/env python3
 import json, os, select, sys, time, tty
 from pathlib import Path
@@ -693,7 +694,14 @@ class ManagedSessionIntegration(RuntimeFixture, unittest.TestCase):
         self.assertEqual({row["framework"] for row in started}, {"claude-code", "codex", "opencode"})
         self.assertEqual(len({row["instance"] for row in started}), 1)
         for record in started:
-            self.assertIn(MODELS[record["framework"]], record["argv"])
+            if record["framework"] == "opencode":
+                # OpenCode 2.x's TUI takes no model flag: the model rides in the
+                # config document its private (--standalone) server reads.
+                self.assertIn("--standalone", record["argv"])
+                self.assertNotIn("--model", record["argv"])
+                self.assertEqual(json.loads(record["values"]["OPENCODE_CONFIG_CONTENT"])["model"], MODELS["opencode"])
+            else:
+                self.assertIn(MODELS[record["framework"]], record["argv"])
             self.assertNotEqual(record["cwd"], str(self.source))
             self.assertTrue((Path(record["cwd"]) / "seed").exists())
         for value in starts:

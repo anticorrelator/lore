@@ -39,6 +39,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 )
@@ -114,6 +115,29 @@ func main() {
 		}
 		flags, err := config.RouteFlags(route)
 		printJSON(flags, err)
+
+	case "route_env":
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "Error: route_env requires <canonical-route-json>")
+			os.Exit(1)
+		}
+		var value any
+		if err := json.Unmarshal([]byte(args[0]), &value); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		route, err := config.ParseCanonicalRoute(value)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		entries, err := config.RouteEnv(route)
+		env := map[string]string{}
+		for _, kv := range entries {
+			key, val, _ := strings.Cut(kv, "=")
+			env[key] = val
+		}
+		printJSON(env, err)
 
 	case "resolve_active_framework":
 		out, err := config.ResolveActiveFramework()

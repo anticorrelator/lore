@@ -162,7 +162,19 @@ func TestPositionProductionLaunch(t *testing.T) {
 			if expectedModel == "" {
 				expectedModel = "provider/opaque-model"
 			}
-			if value("--model") != expectedModel {
+			var openCodeConfig struct {
+				Model        string
+				DefaultAgent string `json:"default_agent"`
+				Agent        map[string]map[string]any
+			}
+			if example.Framework == "opencode" {
+				if err := json.Unmarshal([]byte(actual.Config), &openCodeConfig); err != nil {
+					t.Fatal(err)
+				}
+				if openCodeConfig.Model != expectedModel || value("--model") != "" || actual.Args[0] != "--standalone" {
+					t.Fatal("model pin changed")
+				}
+			} else if value("--model") != expectedModel {
 				t.Fatal("model pin changed")
 			}
 			native, err := os.ReadFile(filepath.Join(filepath.Dir(actual.Manifest), "native.md"))
@@ -186,16 +198,19 @@ func TestPositionProductionLaunch(t *testing.T) {
 						t.Fatal("tool scope changed")
 					}
 				} else {
-					var cfg struct{ Agent map[string]map[string]any }
-					if err := json.Unmarshal([]byte(actual.Config), &cfg); err != nil {
-						t.Fatal(err)
-					}
-					definitions = cfg.Agent
+					definitions = openCodeConfig.Agent
 					if value("--prompt") != string(payload) {
 						t.Fatal("OpenCode prompt was positional")
 					}
+					if value("--agent") != "" {
+						t.Fatal("OpenCode 2.x has no --agent flag")
+					}
 				}
-				selected, ok := definitions[value("--agent")]
+				name := value("--agent")
+				if example.Framework == "opencode" {
+					name = openCodeConfig.DefaultAgent
+				}
+				selected, ok := definitions[name]
 				if !ok {
 					t.Fatal("selected definition absent")
 				}

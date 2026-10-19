@@ -77,7 +77,26 @@ try:
     route = parse_route(json.loads(sys.argv[2]), sys.argv[1])
     if route['framework'] != 'opencode': raise RouteConfigError('route_framework_mismatch', "opencode adapter requires framework 'opencode'")
     if route['options']: raise RouteConfigError('unsupported_route_option', 'opencode CLI cannot carry route options')
-    print(json.dumps(['--model', route['model']], separators=(',', ':')))
+    # The 2.x TUI declares no model flag; route_env carries the model to a
+    # private server, which --standalone gives this session alone.
+    print(json.dumps(['--standalone'], separators=(',', ':')))
+except (ValueError, json.JSONDecodeError, RouteConfigError) as exc:
+    print('Error: invalid opencode route: ' + str(exc), file=sys.stderr); raise SystemExit(2)
+PYTHON
+}
+
+cmd_route_env() {
+  [[ $# -eq 1 ]] || { echo 'Error: route_env requires <canonical-route-json>' >&2; return 1; }
+  python3 - "$LORE_REPO_DIR" "$1" <<'PYTHON'
+import json, sys
+sys.path.insert(0, sys.argv[1] + '/scripts')
+from route_config import parse_route, RouteConfigError
+try:
+    route = parse_route(json.loads(sys.argv[2]), sys.argv[1])
+    if route['framework'] != 'opencode': raise RouteConfigError('route_framework_mismatch', "opencode adapter requires framework 'opencode'")
+    if route['options']: raise RouteConfigError('unsupported_route_option', 'opencode CLI cannot carry route options')
+    content = json.dumps({'model': route['model']}, separators=(',', ':'))
+    print(json.dumps({'OPENCODE_CONFIG_CONTENT': content}, separators=(',', ':')))
 except (ValueError, json.JSONDecodeError, RouteConfigError) as exc:
     print('Error: invalid opencode route: ' + str(exc), file=sys.stderr); raise SystemExit(2)
 PYTHON
@@ -346,9 +365,11 @@ name = 'position-' + hashlib.sha256(raw + sys.argv[2].encode()).hexdigest()
 _, frontmatter, prompt = raw.decode().split('---\n', 2)
 header = yaml.safe_load(frontmatter)
 # Session selection promotes the same scoped definition to a primary agent.
+# The 2.x TUI declares no --agent flag, so default_agent in the server config
+# selects it; the route's model joins this document at launch.
 definition = dict(header, mode='primary', prompt=prompt)
-print(json.dumps({'args': ['--agent', name],
-                  'env': {'OPENCODE_CONFIG_CONTENT': json.dumps({'agent': {name: definition}})},
+print(json.dumps({'args': [],
+                  'env': {'OPENCODE_CONFIG_CONTENT': json.dumps({'agent': {name: definition}, 'default_agent': name})},
                   'prompt_flag': '--prompt'}))
 PYTHON
 }
@@ -382,6 +403,7 @@ case "$cmd" in
   completion_enforcement)   shift; cmd_completion_enforcement   "$@" ;;
   resolve_model_for_role)   shift; cmd_resolve_model_for_role   "$@" ;;
   route_flags)              shift; cmd_route_flags              "$@" ;;
+  route_env)                shift; cmd_route_env                "$@" ;;
   system_prompt_flag)       shift; cmd_system_prompt_flag       "$@" ;;
   settings_override_flag)   shift; cmd_settings_override_flag   "$@" ;;
   smoke|--smoke)            shift; cmd_smoke                    "$@" ;;
@@ -413,6 +435,12 @@ Subcommands (mirroring adapters/agents/README.md §Operation Surface):
                             'provider/model' form). Optional ceremony id
                             (spec|implement) selects the ceremony-scoped
                             binding ahead of the role overlay.
+  route_flags <canonical-route-json>
+                            Print the route's argv as JSON: --standalone,
+                            which gives the session a private server.
+  route_env <canonical-route-json>
+                            Print the route's environment as a JSON
+                            object: the model in OPENCODE_CONFIG_CONTENT.
   system_prompt_flag        Returns 'unsupported' (opencode has no
                             --append-system-prompt equivalent).
   settings_override_flag    Returns 'unsupported' (opencode has no
@@ -427,7 +455,7 @@ EOF
     [[ -z "$cmd" ]] && exit 1 || exit 0
     ;;
   *)
-    echo "Error: unknown subcommand '$cmd' (allowed: spawn, wait, send_message, collect_result, shutdown, completion_enforcement, resolve_model_for_role, system_prompt_flag, settings_override_flag, smoke)" >&2
+    echo "Error: unknown subcommand '$cmd' (allowed: spawn, wait, send_message, collect_result, shutdown, completion_enforcement, resolve_model_for_role, route_flags, route_env, system_prompt_flag, settings_override_flag, smoke)" >&2
     exit 1
     ;;
 esac

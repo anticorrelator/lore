@@ -84,6 +84,21 @@ except (ValueError, json.JSONDecodeError, RouteConfigError) as exc:
 PYTHON
 }
 
+cmd_route_env() {
+  [[ $# -eq 1 ]] || { echo 'Error: route_env requires <canonical-route-json>' >&2; return 1; }
+  python3 - "$LORE_REPO_DIR" "$1" <<'PYTHON'
+import json, sys
+sys.path.insert(0, sys.argv[1] + '/scripts')
+from route_config import parse_route, RouteConfigError
+try:
+    route = parse_route(json.loads(sys.argv[2]), sys.argv[1])
+    if route['framework'] != 'claude-code': raise RouteConfigError('route_framework_mismatch', "claude-code adapter requires framework 'claude-code'")
+    print('{}')
+except (ValueError, json.JSONDecodeError, RouteConfigError) as exc:
+    print('Error: invalid claude-code route: ' + str(exc), file=sys.stderr); raise SystemExit(2)
+PYTHON
+}
+
 cmd_native_tool_fields() {
   require_claude_code
   [[ $# -eq 1 ]] || { echo 'Error: native_tool_fields requires <canonical-route-json>' >&2; return 1; }
@@ -389,6 +404,7 @@ case "$cmd" in
   completion_enforcement)   shift; cmd_completion_enforcement   "$@" ;;
   resolve_model_for_role)   shift; cmd_resolve_model_for_role   "$@" ;;
   route_flags)              shift; cmd_route_flags              "$@" ;;
+  route_env)                shift; cmd_route_env                "$@" ;;
   system_prompt_flag)       shift; cmd_system_prompt_flag       "$@" ;;
   settings_override_flag)   shift; cmd_settings_override_flag   "$@" ;;
   smoke|--smoke)            shift; cmd_smoke                    "$@" ;;

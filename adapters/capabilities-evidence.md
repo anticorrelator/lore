@@ -406,64 +406,102 @@ non-`none` cell points at an id that exists here.
 
 ### opencode-session-start-hook
 
-- **Source:** OpenCode — Plugins reference (event list)
-- **URL / path:** https://opencode.ai/docs/plugins/
-- **Retrieved:** 2026-05-03
-- **Product / version:** OpenCode, "Last updated: May 1, 2026"
-- **Claim:** Plugin events `session.created`, `session.updated`,
-  `server.connected` fire at session lifecycle moments. The plugin
-  runtime is the surface lore uses to wire SessionStart-equivalent
-  behavior; coverage is `partial` because the lore-side first-turn
-  pipeline (pending captures, pending digest) depends on plugin runtime
-  guarantees not yet exercised end-to-end.
+- **Source:** OpenCode 2.0.25 run in scratch config trees with a local stand-in model API; one hosted
+  session through lore's launch path in a private session runtime, with lore's
+  `adapters/opencode/lore-hooks.ts` in the scratch plugins directory; the server
+  code embedded in the binary.
+- **URL / path:** `/opt/homebrew/Cellar/opencode/2.0.25/bin/opencode`; probe record
+  `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/opencode-2.0.25-launch-and-plugin/probe.md`
+- **Retrieved:** 2026-10-19
+- **Product / version:** OpenCode 2.0.25 (`opencode v2.0.25`)
+- **Claim:** The 2.x server plugin's `setup(ctx)` follows `ctx.event.subscribe()`,
+  which publishes `session.created` when a session starts. lore's plugin
+  dispatched it as `session_start` in the hosted run: its accumulator holds the
+  `session.created` row, and that dispatch spawns `load-knowledge.sh`. The
+  handler's output is not injected into the session, as before 2.0. Coverage
+  is `partial` because Lore's first-turn pipelines (pending captures, pending
+  digest) are not exercised end-to-end. Replaces the 2026-05-03 reading of the
+  pre-2.0 plugins docs.
 - **Consumed by:** `opencode.capabilities.session_start_hook`.
 
 ### opencode-stop-hook
 
-- **Source:** OpenCode — Plugins reference (event list)
-- **URL / path:** https://opencode.ai/docs/plugins/
-- **Retrieved:** 2026-05-03
-- **Product / version:** OpenCode, "Last updated: May 1, 2026"
-- **Claim:** Plugin events `session.idle`, `session.status`, and
-  `message.updated` fire at end-of-turn / agent-stop boundaries. Used to
-  trigger novelty-check and plan-persistence reminders; degraded if the
-  harness does not surface full transcript context to the plugin.
+- **Source:** OpenCode 2.0.25 run in scratch config trees with a local stand-in model API; one hosted
+  session through lore's launch path in a private session runtime, with lore's
+  `adapters/opencode/lore-hooks.ts` in the scratch plugins directory; the server
+  code embedded in the binary.
+- **URL / path:** `/opt/homebrew/Cellar/opencode/2.0.25/bin/opencode`; probe record
+  `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/opencode-2.0.25-launch-and-plugin/probe.md`
+- **Retrieved:** 2026-10-19
+- **Product / version:** OpenCode 2.0.25 (`opencode v2.0.25`)
+- **Claim:** 2.0.25 publishes no `session.idle` or `session.status` to a
+  plugin; a turn ends with `session.execution.succeeded`, `interrupted` or
+  `failed`. lore's plugin dispatched each turn end of the hosted run as `stop`
+  (three `session.execution.succeeded` rows). No Lore handler is wired to
+  `stop`, and the plugin sees the event, not the transcript, so the cell stays
+  `partial`. Replaces the 2026-05-03 reading of the pre-2.0 plugins docs.
 - **Consumed by:** `opencode.capabilities.stop_hook`.
 
 ### opencode-pre-compact-hook
 
-- **Source:** OpenCode — Plugins reference (experimental events)
-- **URL / path:** https://opencode.ai/docs/plugins/
-- **Retrieved:** 2026-05-03
-- **Product / version:** OpenCode, "Last updated: May 1, 2026"
-- **Claim:** `experimental.session.compacting` fires before the LLM
-  generates a continuation summary, and `session.compacted` fires after.
-  The `experimental.` prefix downgrades this to `fallback` because the
-  event is explicitly not stable per the docs.
+- **Source:** OpenCode 2.0.25 run in scratch config trees with a local stand-in model API; one hosted
+  session through lore's launch path in a private session runtime, with lore's
+  `adapters/opencode/lore-hooks.ts` in the scratch plugins directory; the server
+  code embedded in the binary.
+- **URL / path:** `/opt/homebrew/Cellar/opencode/2.0.25/bin/opencode`; probe record
+  `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/opencode-2.0.25-launch-and-plugin/probe.md`
+- **Retrieved:** 2026-10-19
+- **Product / version:** OpenCode 2.0.25 (`opencode v2.0.25`)
+- **Claim:** 2.0.25 defines `session.compaction.started`, `session.compacted`
+  and `session.compaction.ended|failed`, and lore's plugin dispatches
+  `session.compaction.started` to `pre-compact.sh`. No run compacted a session,
+  so the event's delivery to a plugin is unobserved, and the reminder's output
+  does not reach the model. The cell stays `fallback`. Replaces the
+  2026-05-03 reading of `experimental.session.compacting` in the pre-2.0 docs.
 - **Consumed by:** `opencode.capabilities.pre_compact_hook`.
 
 ### opencode-tool-hooks
 
-- **Source:** OpenCode — Plugins reference (tool events)
-- **URL / path:** https://opencode.ai/docs/plugins/
-- **Retrieved:** 2026-05-03
-- **Product / version:** OpenCode, "Last updated: May 1, 2026"
-- **Claim:** `tool.execute.before` and `tool.execute.after` fire around
-  tool invocations. Matcher coverage and blocking semantics differ from
-  Claude `PreToolUse` (event-bus shape rather than synchronous JSON
-  decision), so the cell is `partial`.
+- **Source:** OpenCode 2.0.25 run in scratch config trees with a local stand-in model API; one hosted
+  session through lore's launch path in a private session runtime, with lore's
+  `adapters/opencode/lore-hooks.ts` in the scratch plugins directory; the server
+  code embedded in the binary.
+- **URL / path:** `/opt/homebrew/Cellar/opencode/2.0.25/bin/opencode`; probe record
+  `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/opencode-2.0.25-launch-and-plugin/probe.md`
+- **Retrieved:** 2026-10-19
+- **Product / version:** OpenCode 2.0.25 (`opencode v2.0.25`)
+- **Claim:** `ctx.tool.hook("execute.before" | "execute.after", fn)` runs
+  `fn` around every tool call with a mutable payload (`tool`, `sessionID`,
+  `agent`, `id`, `input`; after: `status`, `result` or `error`). Hooks run in
+  order and nothing catches a failure, and a plugin callback runs through
+  `Effect.promise`, so a hook can refuse a call only by throwing, which fails
+  the turn. lore's plugin records each call for the accumulator there
+  (`tool.execute.before` / `after` rows in the hosted run) and guards writes
+  through the permission hook instead. `partial`. Replaces the 2026-05-03
+  reading of the pre-2.0 plugins docs.
 - **Consumed by:** `opencode.capabilities.tool_hooks`.
 
 ### opencode-permission-hooks
 
-- **Source:** OpenCode — Plugins reference (permission events)
-- **URL / path:** https://opencode.ai/docs/plugins/
-- **Retrieved:** 2026-05-03
-- **Product / version:** OpenCode, "Last updated: May 1, 2026"
-- **Claim:** `permission.asked` and `permission.replied` events expose
-  permission lifecycle. The accept/deny shape is event-driven rather
-  than blocking-decision JSON, so adapter translation is required —
-  `partial`.
+- **Source:** OpenCode 2.0.25 run in scratch config trees with a local stand-in model API; one hosted
+  session through lore's launch path in a private session runtime, with lore's
+  `adapters/opencode/lore-hooks.ts` in the scratch plugins directory; the server
+  code embedded in the binary.
+- **URL / path:** `/opt/homebrew/Cellar/opencode/2.0.25/bin/opencode`; probe record
+  `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/opencode-2.0.25-launch-and-plugin/probe.md`
+- **Retrieved:** 2026-10-19
+- **Product / version:** OpenCode 2.0.25 (`opencode v2.0.25`)
+- **Claim:** A 2.0.25 permission check returns early on a deny rule, then
+  calls `ctx.permission.hook("evaluate", fn)` with `{sessionID, agent, action,
+  resources, metadata, source, effect}` and adopts the `effect` and `message`
+  `fn` leaves. `write`, `edit` and `patch` assert the `edit` permission for
+  each path before writing; the native `subagent` tool asserts `subagent`. In
+  the hosted run lore's plugin ran `guard-work-writes.sh` there: a write to
+  `_work/demo/_meta.json` came back to the model as `permission.rejected` with
+  the guard's reason, a write to `notes.txt` succeeded, and a `subagent` launch
+  was rejected with lore's dispatch-guidance reason. `partial` until hooks.bats
+  drives every Lore outcome on opencode. Replaces the 2026-05-03 reading of
+  `permission.asked` / `permission.replied` in the pre-2.0 docs.
 - **Consumed by:** `opencode.capabilities.permission_hooks`.
 
 ### opencode-task-completed-hook
@@ -520,17 +558,25 @@ non-`none` cell points at an id that exists here.
 
 ### opencode-plugin-runtime
 
-- **Source:** OpenCode — Plugins reference (TypeScript/JavaScript
-  plugin runtime)
-- **URL / path:** https://opencode.ai/docs/plugins/
-- **Retrieved:** 2026-05-03
-- **Product / version:** OpenCode, "Last updated: May 1, 2026"
-- **Claim:** OpenCode loads plugins from `.opencode/plugins/` (project)
-  and `~/.config/opencode/plugins/` (global) at startup; npm packages
-  are also loadable via the `plugin` config option and cached at
-  `~/.cache/opencode/node_modules/`. Plugins are TypeScript/JavaScript
-  modules that subscribe to the documented event list; lore ships
-  `adapters/opencode/lore-hooks.ts` here.
+- **Source:** OpenCode 2.0.25 run in scratch config trees with a local stand-in model API; one hosted
+  session through lore's launch path in a private session runtime, with lore's
+  `adapters/opencode/lore-hooks.ts` in the scratch plugins directory; the server
+  code embedded in the binary.
+- **URL / path:** `/opt/homebrew/Cellar/opencode/2.0.25/bin/opencode`; probe record
+  `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/opencode-2.0.25-launch-and-plugin/probe.md`
+- **Retrieved:** 2026-10-19
+- **Product / version:** OpenCode 2.0.25 (`opencode v2.0.25`)
+- **Claim:** The 2.0.25 server loads plain files in
+  `~/.config/opencode/plugins` and `.opencode/plugins`, and directory plugins
+  named in config, each default-exporting `{id, setup}` or `{id, effect}`;
+  the pre-2.0 object keyed by event names is rejected ("Plugin must export a
+  default definition with an id and an effect or setup function"). Server
+  plugins run in the server process, the shared background service or a
+  `--standalone` TUI's private server, once per project location, never in the
+  TUI, whose plugins are directories with a `tui` entry. lore's ported
+  `lore-hooks.ts` loaded with no failure in both modes ("loading plugin", no
+  toast or `plugin failed` footer). Replaces the 2026-05-03 reading of the
+  pre-2.0 plugins docs.
 - **Consumed by:** `opencode.capabilities.plugin_runtime`.
 
 ### opencode-model-routing
@@ -545,6 +591,15 @@ non-`none` cell points at an id that exists here.
   is supported, justifying the `multi` model_routing shape — the
   role→model map honors per-role bindings (e.g., Opus for lead, Haiku
   for worker fanout, GPT-class for review).
+- **2.x launch (retrieved 2026-10-19, OpenCode 2.0.25):** the TUI declares no
+  `--model` flag and takes its only positional as the directory to start in.
+  The model is the server config's `model` key, and `OPENCODE_CONFIG_CONTENT`
+  is the server's last config source. `--standalone` gives a TUI a private
+  server that inherits its environment, so a hosted session carries its route
+  as `--standalone` plus `OPENCODE_CONFIG_CONTENT={"model": …}` and its prompt
+  in `--prompt`. In the hosted run every model request carried the routed
+  model over the config default. Probe record
+  `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/opencode-2.0.25-launch-and-plugin/probe.md`.
 - **Consumed by:** `opencode.model_routing` (`shape: multi`).
 
 ### opencode-session-lifecycle-hooks

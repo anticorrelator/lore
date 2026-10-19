@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1741,6 +1742,44 @@ type positionLaunch struct {
 	} `json:"activation"`
 }
 
+// mergeLaunchEnv joins the route's environment with a position's. Both may
+// set the same variable only when it holds a JSON object, as OpenCode's
+// OPENCODE_CONFIG_CONTENT does for the route's model and the position's agent:
+// the objects are merged, and a key set by both refuses the launch rather than
+// letting one silently replace the other.
+func mergeLaunchEnv(route, position []string) ([]string, error) {
+	routeValues := map[string]string{}
+	for _, kv := range route {
+		key, value, _ := strings.Cut(kv, "=")
+		routeValues[key] = value
+	}
+	merged := slices.Clone(route)
+	for _, kv := range position {
+		key, value, _ := strings.Cut(kv, "=")
+		base, shared := routeValues[key]
+		if !shared {
+			merged = append(merged, kv)
+			continue
+		}
+		var routeObject, positionObject map[string]json.RawMessage
+		if json.Unmarshal([]byte(base), &routeObject) != nil || json.Unmarshal([]byte(value), &positionObject) != nil {
+			return nil, fmt.Errorf("%s is set by both the route and the position, and is not a JSON object in both", key)
+		}
+		for field, raw := range positionObject {
+			if _, taken := routeObject[field]; taken {
+				return nil, fmt.Errorf("%s key %q is set by both the route and the position", key, field)
+			}
+			routeObject[field] = raw
+		}
+		joined, err := json.Marshal(routeObject)
+		if err != nil {
+			return nil, err
+		}
+		merged[slices.Index(merged, key+"="+base)] = key + "=" + string(joined)
+	}
+	return merged, nil
+}
+
 func materializePosition(d SessionDescriptor, framework, root, kdir string) (*positionLaunch, error) {
 	if len(d.PositionContext) == 0 {
 		return nil, nil
@@ -1918,13 +1957,21 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 		args := append([]string(nil), config.LoadHarnessArgsForInitiator(activeFramework, d.Initiator)...)
 
 		// Project the already canonical, frozen route after harness args. The
-		// canonicalizer owns route grammar and validation; RouteFlags alone owns
-		// the Go-side native argv spelling.
+		// canonicalizer owns route grammar and validation; RouteFlags and
+		// RouteEnv alone own the Go-side native spelling, argv and environment.
 		routeArgs, err := config.RouteFlags(route)
 		if err != nil {
 			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: %w", err)}
 		}
 		args = append(args, routeArgs...)
+		routeEnv, err := config.RouteEnv(route)
+		if err != nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: %w", err)}
+		}
+		launchEnv, err := mergeLaunchEnv(routeEnv, positionEnv)
+		if err != nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse position spawn: %w", err)}
+		}
 		sessionEnv.Model = route.Model
 		noticeCode, noticeDetail := "lead-model-role-resolved", "role "+leadSeat
 		if route.RoutingSource["layer"] == "override" {
@@ -1984,8 +2031,14 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 			if position.Activation.PromptFlag != "" {
 				args = append(args, position.Activation.PromptFlag)
 			}
+			args = append(args, initialPrompt)
+		} else {
+			promptArgs, err := config.PromptArgs(activeFramework, initialPrompt)
+			if err != nil {
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("refuse harness spawn: %w", err)}
+			}
+			args = append(args, promptArgs...)
 		}
-		args = append(args, initialPrompt)
 
 		// Under tmux hosting the harness runs in a detached tmux session and the
 		// panel's subprocess is a `tmux attach` client relaying it — so the harness
@@ -2026,7 +2079,7 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 					}
 				}
 				extras := append([]string{"LORE_FRAMEWORK=" + activeFramework}, sessionEnv.vars()...)
-				extras = append(extras, positionEnv...)
+				extras = append(extras, launchEnv...)
 				pid, terr := createTmuxSession(name, worktreeDir, width, height, extras, harnessBinary, args, paneLaunchDir(sessionEnv.HostKey))
 				if terr != nil {
 					return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("tmux hosting failed for %s: %w", label, terr), Notices: notices}
@@ -2060,7 +2113,7 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 			cmd.Dir = worktreeDir
 			cmd.Env = append(os.Environ(), "LORE_FRAMEWORK="+activeFramework)
 			cmd.Env = append(cmd.Env, sessionEnv.vars()...)
-			cmd.Env = append(cmd.Env, positionEnv...)
+			cmd.Env = append(cmd.Env, launchEnv...)
 			// Do NOT set cmd.Stderr = io.Discard here: with a PTY the subprocess's
 			// stdin/stdout/stderr are all wired to the PTY slave, so claude's full
 			// TUI output (including stderr) is captured by the emulator. Discarding
