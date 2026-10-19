@@ -87,6 +87,7 @@ func newWindowFixture(t *testing.T) *windowFixture {
 	t.Cleanup(func() { os.RemoveAll(tmuxDir) })
 	t.Setenv("TMUX_TMPDIR", tmuxDir)
 	t.Setenv(config.SessionRuntimeEnv, windowRuntime)
+	t.Cleanup(func() { removeTmuxServer(config.TmuxServer()) })
 	t.Setenv("LORE_KNOWLEDGE_DIR", "")
 
 	kdir, err := filepath.EvalSymlinks(t.TempDir())

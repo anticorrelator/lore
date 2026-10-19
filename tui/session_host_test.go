@@ -1357,7 +1357,7 @@ func TestStoreHostRecoveryNeverOrphansASessionAliveOnAnotherRuntimeServer(t *tes
 	if out, err := exec.Command("tmux", "-L", server, "-f", "/dev/null", "new-session", "-d", "-s", survivor, "--", "sleep", "300").CombinedOutput(); err != nil {
 		t.Fatalf("tmux: %v: %s", err, out)
 	}
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", server, "kill-server").Run() })
+	t.Cleanup(func() { removeTmuxServer(server) })
 	tmuxSession := func(slug, tmux string) []session.Session {
 		return []session.Session{{Slug: slug, Type: "worker", Initiator: "agent", Started: "2026-10-01T00:00:00Z", RequestID: "r-" + slug, Tmux: tmux}}
 	}

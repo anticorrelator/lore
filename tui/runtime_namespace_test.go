@@ -30,13 +30,18 @@ func TestMain(m *testing.M) {
 	}
 	os.Setenv(config.SessionRuntimeEnv, "gotest-"+strconv.Itoa(os.Getpid()))
 	code := m.Run()
-	_ = exec.Command("tmux", "-L", config.TmuxServer(), "kill-server").Run()
+	removeTmuxServer(config.TmuxServer())
+	os.Exit(code)
+}
+
+// kill-server leaves the server's socket behind, so it is removed by path.
+func removeTmuxServer(server string) {
+	_ = exec.Command("tmux", "-L", server, "kill-server").Run()
 	socketDir := os.Getenv("TMUX_TMPDIR")
 	if socketDir == "" {
 		socketDir = "/tmp"
 	}
-	_ = os.Remove(filepath.Join(socketDir, "tmux-"+strconv.Itoa(os.Getuid()), config.TmuxServer()))
-	os.Exit(code)
+	_ = os.Remove(filepath.Join(socketDir, "tmux-"+strconv.Itoa(os.Getuid()), server))
 }
 
 func TestPackageTestsRunInTheirOwnRuntime(t *testing.T) {

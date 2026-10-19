@@ -46,7 +46,7 @@ func launchPaneGenerationSession(t *testing.T, slug string) paneGenerationHost {
 	}
 	t.Setenv("TMUX_TMPDIR", root)
 	t.Setenv(config.SessionRuntimeEnv, fmt.Sprintf("pgen-%d-%d", os.Getpid(), paneGenerationSeq.Add(1)))
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", config.TmuxServer(), "kill-server").Run() })
+	t.Cleanup(func() { removeTmuxServer(config.TmuxServer()) })
 	t.Setenv("TMPDIR", t.TempDir())
 	t.Setenv("TERM", "xterm-256color")
 	for _, name := range []string{"TMUX", "TMUX_PANE"} {
