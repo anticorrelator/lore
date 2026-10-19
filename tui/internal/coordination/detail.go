@@ -583,14 +583,12 @@ func (m DetailModel) targetSummary(row board.Row) string {
 
 func sessionTargetSummary(row sessionview.SessionRow) string {
 	target := "target session " + explicit(row.Display)
-	switch {
-	case row.Local:
-		return "live terminal available in sessions · " + target
-	case row.Tmux != "":
-		return "live drill-in available in sessions · " + target
-	default:
-		return "live screen unavailable — tmux identity unknown · " + target
+	// Every registry row is Local, so viewability is the tmux pane alone —
+	// the same test the sessions list uses to mark a row "(not viewable)".
+	if row.Tmux == "" {
+		return "live screen unavailable — no tmux pane · " + target
 	}
+	return "live terminal available in sessions · " + target
 }
 
 func (m DetailModel) renderEvents() string {

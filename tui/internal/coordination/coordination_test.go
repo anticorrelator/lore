@@ -795,14 +795,17 @@ func TestDetailRowRoutingUsesSessionThenWorkWithoutGuessing(t *testing.T) {
 
 func TestDetailSessionTargetsRenderExplicitLiveScreenState(t *testing.T) {
 	row := board.Row{Arc: "arc-a", StreamID: "s1", Label: "Run", Gate: "notify", Status: "pending", Verdict: "unknown", WorkItem: strptr("item-a")}
+	// Registry rows are all built Local: true (the background host runs every
+	// session), so only the tmux pane separates a viewable session from one
+	// the sessions list marks "(not viewable)".
 	cases := []struct {
-		name string
-		row  sessionview.SessionRow
-		want string
+		name    string
+		row     sessionview.SessionRow
+		want    string
+		notWant string
 	}{
-		{"local", sessionview.SessionRow{RowID: "local", Slug: "item-a", Display: "local", Local: true}, "live terminal available in sessions"},
-		{"remote tmux", sessionview.SessionRow{RowID: "tmux", Slug: "item-a", Display: "tmux", Tmux: "lore-b-item-a"}, "live drill-in available in sessions"},
-		{"remote unknown", sessionview.SessionRow{RowID: "bare", Slug: "item-a", Display: "bare"}, "live screen unavailable — tmux identity unknown"},
+		{"tmux pane", sessionview.SessionRow{RowID: "tmux", Slug: "item-a", Display: "tmux", Local: true, Tmux: "lore-b-item-a"}, "live terminal available in sessions", "unavailable"},
+		{"no tmux pane", sessionview.SessionRow{RowID: "bare", Slug: "item-a", Display: "bare (not viewable)", Local: true}, "live screen unavailable — no tmux pane", "live terminal available"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -811,8 +814,12 @@ func TestDetailSessionTargetsRenderExplicitLiveScreenState(t *testing.T) {
 			m.SetMembers([]Member{{Slug: "item-a", Resolved: true}}, nil)
 			m.SetBoard([]board.Row{row}, true, nil)
 			m.SetSessions([]sessionview.SessionRow{tc.row})
-			if got := m.targetSummary(row); !strings.Contains(got, tc.want) {
+			got := m.targetSummary(row)
+			if !strings.Contains(got, tc.want) {
 				t.Fatalf("session target summary %q missing %q", got, tc.want)
+			}
+			if strings.Contains(got, tc.notWant) {
+				t.Fatalf("session target summary %q must not contain %q", got, tc.notWant)
 			}
 			out := stripANSI(m.View())
 			wantLive := tc.row.Tmux != ""
