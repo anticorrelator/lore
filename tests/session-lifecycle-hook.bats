@@ -5,6 +5,8 @@
 # Coverage:
 #   - each Claude Code event the session_lifecycle_hooks cell declares journals
 #     the row D1 assigns it, as a hook row through the sole writer;
+#   - each Codex event the codex cell declares does the same from a payload of
+#     the shape Codex 0.162.1's hook input schemas give;
 #   - hooks the cell does not declare write nothing;
 #   - actor_instance names the live owner listing this launch after adoption;
 #   - every path prints nothing and exits 0, including a refused write, a hung
@@ -115,14 +117,16 @@ assert_silent_exit() {
 
 assert_hook_row() {
   # assert_hook_row <row> <event> <activity> <hook_event>
+  # assert_hook_row <row> <event> <activity> <hook_event> [framework, default claude-code]
   local row="$1"
   [ -n "$row" ] || { echo "no hook row was written"; return 1; }
-  jq -e --arg event "$2" --arg activity "$3" --arg hook "$4" --arg gen "$GENERATION" '
+  jq -e --arg event "$2" --arg activity "$3" --arg hook "$4" --arg gen "$GENERATION" \
+    --arg framework "${5:-claude-code}" '
     .event == $event and .slug == "hook-slug" and .session_type == "chat"
     and (has("request_id") | not)
     and .links.authority == "hook-row" and .links.hook_event == $hook
     and .links.activity == $activity and .links.generation == $gen
-    and .links.framework == "claude-code" and .links.spawn_instance == "spawn-host"
+    and .links.framework == $framework and .links.spawn_instance == "spawn-host"
     and (.links | has("observation") | not)
     and (.links.fired_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"))
   ' <<<"$row" >/dev/null || { echo "unexpected row: $row"; return 1; }
@@ -224,9 +228,67 @@ valid_hook_row() {
   contains "$(hooks_log)" "declares no event for PreToolUse with tool_name Bash"
 }
 
-@test "codex and opencode declare no events yet, so their hooks write nothing" {
-  fire codex '{"hook_event_name":"Stop","turn_id":"t1"}'
+# --- each declared Codex event journals the row its cell assigns it ---
+# Payload fields follow the hook input schemas embedded in Codex 0.162.1: every
+# event carries session_id, turn_id, transcript_path, cwd, hook_event_name,
+# model and permission_mode; PermissionRequest adds tool_name and tool_input,
+# Stop adds stop_hook_active and last_assistant_message.
+
+codex_payload() {
+  # codex_payload <hook_event_name> [extra JSON object merged in]
+  local extra="${2:-}"
+  [ -n "$extra" ] || extra='{}'
+  jq -nc --arg name "$1" --argjson extra "$extra" '{
+    session_id: "019a0000-0000-7000-8000-00000000c0de", turn_id: "turn-1",
+    transcript_path: null, cwd: "/tmp/codex-work", hook_event_name: $name,
+    model: "gpt-5.6-sol", permission_mode: "bypassPermissions"} + $extra'
+}
+
+@test "codex UserPromptSubmit journals resumed with activity working" {
+  fire codex "$(codex_payload UserPromptSubmit '{"prompt":"Reply with the single word: ok"}')"
   assert_silent_exit
+  assert_hook_row "$(hook_rows | tail -n 1)" resumed working UserPromptSubmit codex
+}
+
+@test "codex Stop journals needs_input with activity idle" {
+  fire codex "$(codex_payload Stop '{"stop_hook_active":false,"last_assistant_message":"ok"}')"
+  assert_silent_exit
+  row=$(hook_rows | tail -n 1)
+  assert_hook_row "$row" needs_input idle Stop codex
+  [ "$(jq -r '.links | has("last_assistant_message")' <<<"$row")" = "false" ]
+}
+
+@test "codex Interrupt journals needs_input with activity idle" {
+  fire codex "$(codex_payload Interrupt)"
+  assert_silent_exit
+  assert_hook_row "$(hook_rows | tail -n 1)" needs_input idle Interrupt codex
+}
+
+@test "codex PermissionRequest journals needs_input blocked and names the tool" {
+  fire codex "$(codex_payload PermissionRequest '{"tool_name":"exec_command","tool_input":{"cmd":"rm -rf build"}}')"
+  assert_silent_exit
+  row=$(hook_rows | tail -n 1)
+  assert_hook_row "$row" needs_input blocked PermissionRequest codex
+  [ "$(jq -r '.links.tool_name' <<<"$row")" = "exec_command" ]
+}
+
+@test "the codex mapping tests above cover every event the codex cell declares" {
+  run jq -r '[.frameworks.codex.session_lifecycle_hooks.events[].hook_event] | unique | join(",")' "$CAPS"
+  [ "$status" -eq 0 ]
+  [ "$output" = "Interrupt,PermissionRequest,Stop,UserPromptSubmit" ]
+}
+
+@test "a codex hook the cell does not declare writes no row" {
+  fire codex "$(codex_payload SessionStart '{"source":"startup"}')"
+  assert_silent_exit
+  fire codex "$(codex_payload PreToolUse '{"tool_name":"exec_command","tool_input":{}}')"
+  assert_silent_exit
+  [ "$(row_count)" = "0" ]
+  contains "$(hooks_log)" "frameworks.codex.session_lifecycle_hooks"
+  contains "$(hooks_log)" "declares no event for SessionStart"
+}
+
+@test "opencode declares no events yet, so its hooks write nothing" {
   fire opencode '{"hook_event_name":"session.idle"}'
   assert_silent_exit
   [ "$(row_count)" = "0" ]

@@ -447,7 +447,7 @@ stdin. The script:
 | Framework   | Cell | Channel | Native hook → row |
 |-------------|------|---------|-------------------|
 | claude-code | **partial** on a live check of 2.1.299: no startup Settings dialog, and hooks from `--settings` run; **full** waits on one real turn that journals a hook row | `settings-json` (a hooks-only `--settings` payload, each entry `async: true`) | UserPromptSubmit → `resumed` working; Stop → `needs_input` idle; StopFailure → `needs_input` blocked, `links.error`; PermissionRequest → `needs_input` blocked, `links.tool_name`; PreToolUse on `AskUserQuestion\|ExitPlanMode` → `needs_input` blocked; PostToolUse and PostToolUseFailure on the same tools → `resumed` working |
-| codex       | **none** until a probe shows `-c` hooks run without the startup hook review | `config-override` (candidate) | none declared |
+| codex       | **none**: a live check of 0.162.1 found `-c` hooks held behind Codex's startup "Hooks need review" prompt. Trust is each machine's own Codex record, so raising the cell also needs the launch to pass the flags only where Codex already trusts them | `config-override` (`-c hooks.<Event>=[…]` session flags; not installed) | declared, not installed: UserPromptSubmit → `resumed` working; Stop and Interrupt → `needs_input` idle; PermissionRequest → `needs_input` blocked, `links.tool_name` |
 | opencode    | **none** until a probe shows an environment-selected plugin stays out of child processes | `plugin-env` (candidate) | none declared |
 
 The cell's `events` list is the source of truth for the mapping; this table is

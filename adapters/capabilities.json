@@ -599,9 +599,15 @@
       },
       "session_lifecycle_hooks": {
         "support": "none",
+        "evidence": "codex-session-lifecycle-hooks",
         "channel": "config-override",
-        "events": [],
-        "notes": "Candidate channel: hooks passed as per-launch `-c` session flags. Blocked on a live probe: Codex 0.162.1 holds a new or changed hook behind a startup review ('Hooks need review' ... 'Continue without trusting (hooks won't run)'), and 'Session flags' is one of the hook sources it reviews, so a hook lore injects could hold an unattended session at launch or silently not run. The cell stays `none`, with no events declared and no evidence row, until a probe in a hosted pane shows these hooks run with no startup review and the person's own hooks still run. Intended mapping once proven: UserPromptSubmit -> resumed (working); Stop and Interrupt -> needs_input (idle); PermissionRequest -> needs_input (blocked)."
+        "events": [
+          {"hook_event": "UserPromptSubmit", "event": "resumed", "activity": "working"},
+          {"hook_event": "Stop", "event": "needs_input", "activity": "idle"},
+          {"hook_event": "Interrupt", "event": "needs_input", "activity": "idle"},
+          {"hook_event": "PermissionRequest", "event": "needs_input", "activity": "blocked", "payload_links": {"tool_name": "tool_name"}}
+        ],
+        "notes": "Channel: per-launch `-c hooks.<Event>=[{hooks=[{type=\"command\",command=\"'<lore checkout>/scripts/session-lifecycle-hook.sh' 'codex' 2>/dev/null; exit 0\",async=true}]}]` session flags, one per declared event. Codex 0.162.1 loads these beside the person's own hooks (source `sessionFlags`, keys `/<session-flags>/config.toml:<event>:0:0`), but a live probe on 2026-10-18 (evidence codex-session-lifecycle-hooks) found the premise this cell rests on false: at startup Codex shows 'Hooks need review / 4 hooks are new or changed' and waits there with no composer, and hooks nobody has trusted do not run. Trust is the person's own record in ~/.codex/config.toml (`hooks.state.\"<key>\".trusted_hash`), granted by answering that prompt in Codex; lore never writes it. Raising this cell needs three things: trust granted on the machine for exactly these hooks; one real turn in which Stop journals a needs_input row carrying the pane's identity; and a launch path that passes the flags only when that machine's Codex trusts them. The last is needed because this cell is shared by every install while trust is per machine and tied to each hook's hash, so a machine where nobody approved the hooks, or a Codex release that hashes them differently, would hold every hosted codex session at launch. The events are the intended mapping; their payload fields come from 0.162.1's embedded hook input schemas (`hook_event_name` on every event, `tool_name` on PermissionRequest). Nothing installs them while support is `none`."
       },
       "position_compilation": {"format": "prompt", "consumption": "prompt-text", "activation_operation": "native_launch", "selection_operation": "native_selection", "evidence": "codex-subagents"},
       "install_paths": {

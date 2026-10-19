@@ -627,6 +627,60 @@ non-`none` cell points at an id that exists here.
   the rejection string is the load-bearing artifact.
 - **Consumed by:** `codex.capabilities.turn_boundary_rewake`.
 
+### codex-session-lifecycle-hooks
+
+- **Source:** A live startup check of the installed binary with lore's
+  lifecycle hooks as `-c` session flags; `hooks/list` reads from that
+  binary's stdio app-server; the hook input schemas and strings embedded in
+  the binary.
+- **URL / path:** `/opt/homebrew/Caskroom/codex/0.162.1/bin/codex`; probe
+  record
+  `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/codex-0.162.1-session-flag-hooks/probe.md`
+- **Retrieved:** 2026-10-18 (21:11 EDT, 2026-10-19T01:11Z)
+- **Product / version:** Codex CLI 0.162.1 (`codex-cli 0.162.1`)
+- **Method:** live probe — one launch of the installed binary on a private
+  tmux socket in an empty scratch folder, with the arguments of an
+  agent-initiated hosted worker launch, no prompt, and four hook flags
+  `-c hooks.<Event>=[{hooks=[{type="command",command="'<lore checkout>/scripts/session-lifecycle-hook.sh' 'codex' 2>/dev/null; exit 0",async=true}]}]`
+  for UserPromptSubmit, Stop, Interrupt and PermissionRequest, the checkout
+  being the installed one that `~/.lore/scripts` resolves to. No key was
+  sent to the screen it drew, and no model turn was requested. Four
+  `initialize` + `hooks/list` reads on `codex app-server --listen
+  stdio://` started no thread.
+- **Transcript:** `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/codex-0.162.1-session-flag-hooks/`
+  (`1-startup-4s.txt`, `1-startup-10s.txt`, `2-still-held-25s.txt`,
+  `argv.txt`, `hooks-list-*.json`, `binary-strings.txt`,
+  `codex-0.162.1-hook-input-schemas.json`, and the scripts that produced
+  them)
+- **Claim:** Codex 0.162.1 holds `-c` session-flag hooks behind its startup
+  review, so they cannot be installed in an unattended hosted session as
+  they are.
+  - The launch drew only "Hooks need review / 4 hooks are new or changed. /
+    Hooks can run outside the sandbox after you trust them." with "1.
+    Review hooks", "2. Trust all and continue" and "3. Continue without
+    trusting (hooks won't run)". It was unchanged about 25 s later, with
+    no composer drawn.
+  - `hooks/list` lists the four hooks with source `sessionFlags`, keys
+    `/<session-flags>/config.toml:<event>:0:0`, `enabled: true`,
+    `async: true`, and `trustStatus: untrusted`.
+  - The keys and hashes are the same from any folder. Trust is recorded in
+    the person's own `~/.codex/config.toml` as
+    `hooks.state."<key>".trusted_hash`, so it holds per machine for these
+    exact strings.
+  - In a scratch `CODEX_HOME`, a user Stop hook and a session-flag Stop
+    hook are both listed, so the flags add to the person's hooks rather
+    than replacing them.
+  - The flat `[[hooks.<Event>]]` / `command = …` form, which the person's
+    config uses for lore's managed hooks, defines no hook on 0.162.1.
+  - The binary's hook input schemas give every event a `hook_event_name`
+    equal to its name, and PermissionRequest a `tool_name`. 0.146.0's
+    "async hooks are not supported yet" rejection string is absent.
+  - Starting Codex appended its own `[tui] screen_reader_detection_done =
+    true` to `~/.codex/config.toml`; nothing about hooks was written there.
+  - Not established: that these hooks run once trusted, which needs one
+    real turn.
+- **Consumed by:** `codex.session_lifecycle_hooks` (`support: none`).
+
 ### codex-pre-compact-hook
 
 - **Source:** OpenAI Developers — Codex Hooks reference (event list,
@@ -918,15 +972,18 @@ T70 / `lore doctor` can distinguish a gap from a missing-evidence error.
   invoked from `config.toml`; no in-process plugin runtime. (The
   changelog mentions `0.128.0` "plugin workflows" via marketplace, but
   that is plugin distribution, not an in-process event-bus runtime.)
-- **`codex.session_lifecycle_hooks` = none and
-  `opencode.session_lifecycle_hooks` = none.** Neither cell cites an
-  evidence row, and neither declares events. Codex 0.162.1 reviews new or
-  changed hooks at startup, with "Session flags" among the reviewed
-  sources, so a `-c` hook could hold an unattended session at launch or not
-  run. OpenCode 2.0.25 has no session-scoped plugin flag, and its
-  environment channels reach child processes. Each cell is raised only from
-  a live probe's own evidence row; the cells' notes name the intended
-  mapping and what the probe must show.
+- **`codex.session_lifecycle_hooks` = none.** A live probe
+  (`codex-session-lifecycle-hooks`) showed Codex 0.162.1 holding lore's
+  `-c` hooks behind its startup "Hooks need review" prompt. Trust lives in
+  each machine's own Codex configuration, so the cell declares its intended
+  events and stays `none` until trust is granted there, a real turn
+  journals a hook row, and the launch path passes the flags only where they
+  are trusted.
+- **`opencode.session_lifecycle_hooks` = none.** The cell cites no
+  evidence row and declares no events. OpenCode 2.0.25 has no
+  session-scoped plugin flag, and its environment channels reach child
+  processes. The cell is raised only from a live probe's own evidence row;
+  its notes name the intended mapping and what the probe must show.
 - **`opencode.team_messaging` = none and `codex.team_messaging` = none.**
   Neither harness exposes a TeamCreate / SendMessage primitive. Skills
   that require inter-agent messaging (`/spec`, `/implement` team mode)
@@ -1017,6 +1074,7 @@ matches the union of all `evidence:` fields in capabilities.json.
 - codex-session-start-hook
 - codex-stop-hook
 - codex-turn-boundary-rewake
+- codex-session-lifecycle-hooks
 - codex-pre-compact-hook
 - codex-tool-hooks
 - codex-permission-hooks
