@@ -41,9 +41,16 @@ follow-ups, and the settlement view.
 
 **Arc window** — in Claude Code, a session working on an arc (`/coordinate`)
 shows a one-row summary above the prompt. Press its ▴, or run `/arcs`, to open
-a window with the step graph, the arc's documents, and each step's work item.
-It appears only in projects with a lore store, and only while an arc is
-active. Restart running sessions after installing to load it.
+a window with the step graph, the Brief and decisions one line each, the arc's
+documents, and each step's work item. It appears only in projects with a lore
+store, and only while an arc is active. Restart running sessions after
+installing to load it.
+
+**Review panel** — `/reviews` in Claude Code opens the project's open
+`/pr-review` results: pick a review, select and edit its comments and
+findings, choose Comment / Approve / Request changes, preview the payload, and
+post it. A review a session makes announces itself. The panel changes reviews
+only through `lore followup edit-review` and `lore followup post-review`.
 
 **Driving work** — slash commands in an agent session:
 

@@ -31,7 +31,46 @@ export type LoreDetail = {
 }
 export type LoreBlock = { kind: 'markdown' | 'code'; text: string }
 export type LorePopout = { title: string; source: string; blocks: LoreBlock[] }
-export type LoreSize = 'compact' | 'expanded'
+export type LoreReviewEntry = { id: string; title: string; pr: string; updated: string }
+export type LoreReviewList = { entries: LoreReviewEntry[]; error: string | null }
+export type LoreReviewComment = {
+  index: number
+  path: string
+  line: number
+  title: string
+  body: string
+  selected: boolean
+  severity: string
+  lenses: string[]
+  ordinal: number | null
+}
+export type LoreReviewFinding = {
+  index: number
+  severity: string
+  title: string
+  file: string
+  line: number
+  body: string
+  lens: string
+  grounding: string
+  selected: boolean
+}
+export type LoreReviewEvent = 'COMMENT' | 'APPROVE' | 'REQUEST_CHANGES'
+export type LoreReview = {
+  id: string
+  title: string
+  pr: number | null
+  repo: string
+  event: LoreReviewEvent
+  general: { body: string; selected: boolean } | null
+  comments: LoreReviewComment[]
+  findings: LoreReviewFinding[]
+  report: string | null
+  canPost: boolean
+  error: string | null
+}
+export type LoreReviewConfirm = 'post' | 'dismiss' | 'promote' | null
+export type LoreNotice = { text: string; isError: boolean } | null
 
 declare module 'claude-code' {
   interface PluginState {
@@ -42,13 +81,20 @@ declare module 'claude-code' {
       candidates: string[]
       pinned: string | null
       isOpen: boolean
-      isDismissed: boolean
-      isPicking: boolean
-      size: LoreSize
       rails: LoreRails | null
       detail: LoreDetail | null
-      openDecisions: string[]
+      openEntries: string[]
       popout: LorePopout | null
+      isReviewsOpen: boolean
+      reviews: LoreReviewList | null
+      review: LoreReview | null
+      reviewChosen: string | null
+      reviewOpen: string[]
+      reviewEditing: string | null
+      reviewConfirm: LoreReviewConfirm
+      reviewBusy: string | null
+      reviewNotice: LoreNotice
+      reviewPopout: LorePopout | null
     }
   }
 }

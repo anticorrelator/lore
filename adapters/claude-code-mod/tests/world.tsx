@@ -49,6 +49,40 @@ export const ARC_SHOW = {
   ],
 }
 
+// Two open reviews as `lore followup list --json` lists them, plus a follow-up
+// that is no review; review-a is the newer.
+export function reviewList() {
+  return [
+    { id: 'retro-note', title: 'A retro note', status: 'open', source: 'retro', attachments: [], updated: '2026-10-05T00:00:00Z' },
+    { id: 'review-b', title: 'Review: Older change (#8)', status: 'open', source: 'pr-review', attachments: [{ type: 'pr', ref: '#8' }], updated: '2026-10-01T00:00:00Z' },
+    { id: 'review-a', title: 'Review: Newer change (#7)', status: 'open', source: 'pr-review', attachments: [{ type: 'pr', ref: '#7' }], updated: '2026-10-04T00:00:00Z' },
+  ]
+}
+
+export type ReviewFixture = {
+  proposed_comments: Record<string, unknown> | unknown[] | null
+  lens_findings: Record<string, unknown> | null
+}
+
+export function reviewFixture(pr: number): ReviewFixture {
+  return {
+    proposed_comments: {
+      pr,
+      owner: 'o',
+      repo: 'r',
+      head_sha: 'abc',
+      comments: [
+        { path: 'a.py', line: 3, title: 'Guard drops the error', finding_ordinal: 1, body: 'The guard returns early. The error is lost.' },
+        { path: 'b.py', line: 9, title: 'Name says less than it does', finding_ordinal: 2, body: 'Rename it.', selected: false },
+      ],
+      review_body: 'Two notes on the change.',
+      review_body_selected: true,
+      review_event: 'COMMENT',
+    },
+    lens_findings: null,
+  }
+}
+
 export const LONG_DOCUMENT = Array.from({ length: 500 }, (_, i) => `Line ${i} ${'x'.repeat(40)}`).join('\n')
 
 const encoder = new TextEncoder()
@@ -74,6 +108,9 @@ export function boardJson(width: number) {
 
 export type Fixture = {
   active?: boolean
+  reviews?: Record<string, unknown>[]
+  review?: Record<string, ReviewFixture>
+  postExit?: number
   isLoreMissing?: boolean
   boardExit?: number
   nextUpdate?: number
@@ -84,6 +121,11 @@ export type Fixture = {
 export type World = {
   clock: MockClock
   runs: string[]
+  stdins: string[]
+  toasts: string[]
+  fills: string[]
+  listed: Record<string, unknown>[]
+  review: Record<string, ReviewFixture>
   reads: string[]
   commands: string[]
   opened: PaneOpenArgs[]
@@ -92,8 +134,40 @@ export type World = {
   files: Record<string, string>
 }
 
-function ran(stdout: string, exitCode = 0) {
-  return { value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+function ran(stdout: string, exitCode = 0, stderr = '') {
+  return { value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } }
+}
+
+function view(id: string, entry: Record<string, unknown> | undefined, held: ReviewFixture) {
+  return { id, title: entry?.title ?? id, source: 'pr-review', status: 'open', attachments: entry?.attachments ?? [], finding_content: `# ${String(entry?.title ?? id)}\n\nThe whole report.`, ...held }
+}
+
+// The edit-review verb as the fixture holds it: the changes the panel asks
+// for, made to the review it will read back.
+function editReview(held: ReviewFixture, argv: readonly string[], stdin: string | undefined): boolean {
+  const review = held.proposed_comments
+  if (!review || Array.isArray(review)) return false
+  const comments = review.comments as Record<string, unknown>[]
+  const findings = (held.lens_findings?.findings ?? []) as Record<string, unknown>[]
+  const at = (flag: string) => argv[argv.indexOf(flag) + 1] ?? ''
+  const selected = argv.includes('--select') ? true : argv.includes('--deselect') ? false : undefined
+  const body = argv.includes('--body-file') ? stdin : undefined
+  const apply = (item: Record<string, unknown> | undefined) => {
+    if (!item) return false
+    if (selected !== undefined) item.selected = selected
+    if (body !== undefined) item.body = body
+    return true
+  }
+  if (argv.includes('--event')) review.review_event = at('--event')
+  if (argv.includes('--comment')) return apply(comments[Number(at('--comment'))])
+  if (argv.includes('--finding')) return apply(findings[Number(at('--finding'))])
+  if (argv.includes('--all-comments')) comments.forEach(apply)
+  if (argv.includes('--all-findings')) findings.forEach(apply)
+  if (argv.includes('--general')) {
+    if (selected !== undefined) review.review_body_selected = selected
+    if (body !== undefined) review.review_body = body
+  }
+  return true
 }
 
 export function world(on: On, fixture: Fixture = {}): World {
@@ -101,6 +175,11 @@ export function world(on: On, fixture: Fixture = {}): World {
   const seen: World = {
     clock,
     runs: [],
+    stdins: [],
+    toasts: [],
+    fills: [],
+    listed: fixture.reviews ?? [],
+    review: fixture.review ?? { 'review-a': reviewFixture(7), 'review-b': reviewFixture(8) },
     reads: [],
     commands: [],
     opened: [],
@@ -125,6 +204,14 @@ export function world(on: On, fixture: Fixture = {}): World {
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: SESSION }))
   on('session.messages', () => ({ value: fixture.history ?? [] }))
+  on('ui.toast', (_$, e) => {
+    seen.toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('prompt.fill', (_$, e) => {
+    seen.fills.push(e.text)
+    return { isFilled: true }
+  })
   on('command.register', (_$, e) => {
     seen.commands.push(e.name)
     return { value: { command: e.name } }
@@ -155,6 +242,7 @@ export function world(on: On, fixture: Fixture = {}): World {
   on('process.run', (_$, e) => {
     const args = e.argv.slice(1).join(' ')
     seen.runs.push(args)
+    if (e.init?.stdin !== undefined) seen.stdins.push(e.init.stdin)
     if (fixture.isLoreMissing) throw new Error('spawn lore ENOENT')
     if (args.startsWith('active ')) {
       const isActive = fixture.active ?? true
@@ -162,6 +250,36 @@ export function world(on: On, fixture: Fixture = {}): World {
       return ran(JSON.stringify({ active: isActive, harness: 'claude-code', store: STORE, reason }), isActive ? 0 : 1)
     }
     if (args === 'arc list --json') return ran(JSON.stringify(ARC_LIST))
+    if (args === 'followup list --json') return ran(JSON.stringify(seen.listed))
+    const followup = /^followup (?:view --json|edit-review|post-review|update) ([a-z0-9-]+)/.exec(args)?.[1] ?? /--followup-id ([a-z0-9-]+)/.exec(args)?.[1]
+    const held = followup ? seen.review[followup] : undefined
+    const settled = () => {
+      seen.listed = seen.listed.filter(entry => entry.id !== followup)
+    }
+    if (followup && held) {
+      if (args.startsWith('followup view --json ')) return ran(JSON.stringify(view(followup, seen.listed.find(entry => entry.id === followup), held)))
+      if (args.startsWith('followup edit-review ')) {
+        if (!editReview(held, e.argv, e.init?.stdin)) return ran(JSON.stringify({ error: 'no comment at position 9' }), 1)
+        return ran(JSON.stringify({ id: followup, ...held }))
+      }
+      if (args === `followup post-review ${followup} --dry-run`) return ran('[post-proposed-review] DRY RUN\nEvent: COMMENT\nInline comments: 1')
+      if (args === `followup post-review ${followup}`) {
+        if (fixture.postExit) return ran('', fixture.postExit, '[post-proposed-review] ERROR: head moved and two comments are lost')
+        return ran('[post-proposed-review] Posted: https://github.com/o/r/pull/7#pullrequestreview-1\n[post-proposed-review] Outcomes persisted to sidecar')
+      }
+      if (args === `followup update ${followup} --status reviewed`) {
+        settled()
+        return ran('{}')
+      }
+      if (args.startsWith('followup dismiss ')) {
+        settled()
+        return ran(`[followup] Dismissed: ${followup}`)
+      }
+      if (args.startsWith('followup promote ')) {
+        settled()
+        return ran(`[followup] Promoted: ${followup} → work item 'Fix the guard' (fix-the-guard)`)
+      }
+    }
     if (args === 'coordinate read --refresh --json') return ran(JSON.stringify(snapshot()))
     if (args.startsWith('coordinate board --arc alpha --width ')) {
       if (fixture.boardExit === 3) return ran('', 3)

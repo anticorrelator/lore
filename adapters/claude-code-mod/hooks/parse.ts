@@ -8,7 +8,7 @@ import type {
   LoreTitle,
 } from '../types'
 
-export type Ran = { exitCode: number; stdout: string; isStdoutTruncated: boolean } | null
+export type Ran = { exitCode: number; stdout: string; stderr?: string; isStdoutTruncated: boolean } | null
 
 const SNAPSHOT_VERSION = '1'
 // Markdown and Code each take at most 10,000 characters.
