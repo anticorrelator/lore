@@ -280,6 +280,7 @@ Subcommands:
   archive      Archive a terminal-status follow-up to _archive/
   unarchive    Restore an archived follow-up to the active set
   delete       Permanently delete a follow-up
+  edit-review  Select, deselect or rewrite a proposed review's comments before posting
   post-review  Post a proposed review comment to GitHub
 
 Options:
@@ -2059,6 +2060,9 @@ cmd_followup() {
       ;;
     delete)
       exec "$SCRIPTS_DIR/delete-followup.sh" "$@"
+      ;;
+    edit-review)
+      exec "$SCRIPTS_DIR/edit-proposed-review.sh" "$@"
       ;;
     post-review)
       exec "$SCRIPTS_DIR/post-proposed-review.sh" "$@"

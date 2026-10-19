@@ -89,6 +89,7 @@ def read_file(path):
 
 finding_path = os.path.join(item_dir, 'finding.md')
 proposed_comments_path = os.path.join(item_dir, 'proposed-comments.json')
+lens_findings_path = os.path.join(item_dir, 'lens-findings.json')
 
 def read_json(path):
     if os.path.isfile(path):
@@ -107,6 +108,8 @@ result = {
     'updated': meta.get('updated', ''),
     'finding_content': read_file(finding_path),
     'proposed_comments': read_json(proposed_comments_path),
+    'lens_findings': read_json(lens_findings_path),
+    'author': meta.get('author', ''),
 }
 
 print(json.dumps(result))
