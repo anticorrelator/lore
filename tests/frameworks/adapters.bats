@@ -408,13 +408,15 @@ cap_support() {
 
 @test "native ad-hoc eligibility requires proven blocking guidance-hook coverage" {
   [ "$(jq -r '.frameworks["claude-code"].capabilities.native_dispatch_guidance_hook.support' "$CAPS")" = "full" ]
-  [ "$(jq -r '.frameworks.codex.capabilities.native_dispatch_guidance_hook.support' "$CAPS")" = "full" ]
+  # Codex 0.162.1 blocks a tool only on exit 2 or a deny decision; lore's codex
+  # validator rejects with exit 1, so its blocking is unproven there.
+  [ "$(jq -r '.frameworks.codex.capabilities.native_dispatch_guidance_hook.support' "$CAPS")" = "partial" ]
   [ "$(jq -r '.frameworks.opencode.capabilities.native_dispatch_guidance_hook.support' "$CAPS")" = "none" ]
 
   set_framework claude-code
   [[ "$(bash "$CC_AGENT" smoke)" == *"native ad-hoc dispatch:   eligible"* ]]
   set_framework codex
-  [[ "$(bash "$CODEX_AGENT" smoke)" == *"native ad-hoc dispatch:   eligible"* ]]
+  [[ "$(bash "$CODEX_AGENT" smoke)" == *"native ad-hoc dispatch:   unavailable"* ]]
   set_framework opencode
   [[ "$(bash "$OC_AGENT" smoke)" == *"native ad-hoc dispatch:   unavailable"* ]]
 }

@@ -663,34 +663,60 @@ non-`none` cell points at an id that exists here.
 
 ### codex-session-start-hook
 
-- **Source:** OpenAI Developers — Codex Hooks reference and Codex
-  changelog
-- **URL / path:** https://developers.openai.com/codex/hooks,
-  https://developers.openai.com/codex/changelog
-- **Retrieved:** 2026-05-03
-- **Product / version:** Codex CLI 0.123.0 (hooks introduced) /
-  0.124.0 (hooks marked stable), April 2026 per the changelog
-- **Claim:** Codex's `SessionStart` hook fires when a session begins,
-  with a matcher that distinguishes `startup`, `resume`, and `clear`.
-  Hooks share the JSON shape `{continue, stopReason, systemMessage,
-  suppressOutput}` and SessionStart stdout is appended as developer
-  context. **This evidence supersedes the February 2026 'Codex has no
-  session lifecycle hooks' premise** in `gotchas/hooks/hook-system-gotchas.md`
-  and is the source of record for T16 / T67.
+- **Source:** `hooks/list` reads from the installed binary's stdio app-server
+  against a scratch `CODEX_HOME` holding the block `adapters/codex/hooks.sh`
+  renders; the hook input/output schemas and strings embedded in that binary;
+  and OpenAI's Codex hooks manual.
+- **URL / path:** `/opt/homebrew/Caskroom/codex/0.162.1/bin/codex`;
+  https://learn.chatgpt.com/docs/hooks (the 308 target of
+  https://developers.openai.com/codex/hooks); probe record
+  `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/codex-0.162.1-config-hooks/probe.md`
+- **Retrieved:** 2026-10-19
+- **Product / version:** Codex CLI 0.162.1 (`codex-cli 0.162.1`); the manual
+  names no version
+- **Method:** zero-model-call reads — `initialize` + `hooks/list` only, no
+  thread and no turn; no hook trusted anywhere.
+- **Claim:** Codex 0.162.1 has a native `SessionStart` hook defined in
+  `config.toml`; with no matcher it matches every `source`
+  (`startup|resume|clear|compact|fork`), and per the manual plain stdout or
+  `hookSpecificOutput.additionalContext` is added as developer context.
+  - A hook is a `[[hooks.SessionStart.hooks]]` handler (`type = "command"`,
+    `command`) inside a `[[hooks.SessionStart]]` group. `hooks/list` lists
+    all eight of lore's SessionStart handlers from the rendered block, and
+    none from the flat `[[hooks.SessionStart]]` / `command = …` form the
+    adapter wrote before, with no warning for it.
+  - Matching handlers launch concurrently.
+  - Config hooks run only once the person trusts them (startup review or
+    `/hooks`); trust is recorded against each hook's hash and key
+    (`<config path>:<event>:<group>:<handler>`), so a changed or moved hook
+    asks again.
+  - Not established: execution on 0.162.1, which needs a trusted hook and a
+    real turn.
+  This supersedes the 2026-05-03 docs-only row (Codex 0.123.0 / 0.124.0).
 - **Consumed by:** `codex.capabilities.session_start_hook`.
 
 ### codex-stop-hook
 
-- **Source:** OpenAI Developers — Codex Hooks reference, plus string
-  extraction from the locally installed binary.
-- **URL / path:** https://developers.openai.com/codex/hooks
-- **Retrieved:** 2026-08-03
-- **Product / version:** Codex CLI 0.146.0 (docs written against 0.124.0)
-- **Claim:** Codex's `Stop` hook fires when a conversation turn stops and
-  is blockable: the 0.146.0 binary carries the error `Stop hook exited
-  with code 2 but did not write a continuation prompt to stderr`, which
-  only makes sense if exit 2 + stderr is an honored continuation
-  channel. No matcher support.
+- **Source:** `hooks/list` reads from the installed binary's stdio app-server
+  against a scratch `CODEX_HOME` holding the block `adapters/codex/hooks.sh`
+  renders; the hook input/output schemas and strings embedded in that binary;
+  and OpenAI's Codex hooks manual.
+- **URL / path:** `/opt/homebrew/Caskroom/codex/0.162.1/bin/codex`;
+  https://learn.chatgpt.com/docs/hooks (the 308 target of
+  https://developers.openai.com/codex/hooks); probe record
+  `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/codex-0.162.1-config-hooks/probe.md`
+- **Retrieved:** 2026-10-19
+- **Product / version:** Codex CLI 0.162.1 (`codex-cli 0.162.1`); the manual
+  names no version
+- **Method:** zero-model-call reads — `initialize` + `hooks/list` only, no
+  thread and no turn; no hook trusted anywhere.
+- **Claim:** Codex's `Stop` hook fires when a turn stops and is blockable:
+  the 0.162.1 binary still carries `Stop hook exited with code 2 but did not
+  write a continuation prompt to stderr`, which only makes sense if exit 2 +
+  stderr is an honored continuation channel, and its Stop output schema
+  takes `decision`/`reason`. No matcher support. Lore's managed block
+  installs no Stop hook, so `hooks/list` has nothing of lore's to show here.
+  This re-dates the 2026-08-03 row read off 0.146.0.
 - **Consumed by:** `codex.capabilities.stop_hook`.
 
 ### codex-turn-boundary-rewake
@@ -782,40 +808,93 @@ non-`none` cell points at an id that exists here.
 
 ### codex-tool-hooks
 
-- **Source:** OpenAI Developers — Codex Hooks reference
-- **URL / path:** https://developers.openai.com/codex/hooks
-- **Retrieved:** 2026-05-03
-- **Product / version:** Codex CLI 0.124.0 (hooks stable, MCP-aware),
-  April 2026
-- **Claim:** `PreToolUse` fires before tool execution for Bash, file
-  edits via `apply_patch`, and MCP tools (matcher filters by tool
-  name). `PostToolUse` fires after supported tools complete (including
-  failures). PreToolUse can block by returning
-  `permissionDecision: "deny"`.
+- **Source:** `hooks/list` reads from the installed binary's stdio app-server
+  against a scratch `CODEX_HOME` holding the block `adapters/codex/hooks.sh`
+  renders; the hook input/output schemas and strings embedded in that binary;
+  and OpenAI's Codex hooks manual.
+- **URL / path:** `/opt/homebrew/Caskroom/codex/0.162.1/bin/codex`;
+  https://learn.chatgpt.com/docs/hooks (the 308 target of
+  https://developers.openai.com/codex/hooks); probe record
+  `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/codex-0.162.1-config-hooks/probe.md`
+- **Retrieved:** 2026-10-19
+- **Product / version:** Codex CLI 0.162.1 (`codex-cli 0.162.1`); the manual
+  names no version
+- **Method:** zero-model-call reads — `initialize` + `hooks/list` only, no
+  thread and no turn; no hook trusted anywhere.
+- **Claim:** `PreToolUse` and `PostToolUse` are native on 0.162.1.
+  - `hooks/list` lists lore's `matcher = "Write"` and `matcher = "Agent"`
+    PreToolUse handlers from the rendered block.
+  - PreToolUse blocks on `hookSpecificOutput.permissionDecision: "deny"`
+    with a non-empty reason, on legacy `decision: "block"`, or on exit 2
+    with the reason on stderr (binary: `PreToolUse hook exited with code 2
+    but did not write a blocking reason to stderr`).
+  - `permissionDecision: "ask"` and legacy `decision: "approve"` are parsed
+    but unsupported: Codex marks the run failed, reports it, and continues
+    the tool (manual; binary: `PreToolUse hook returned unsupported
+    decision:approve`).
+  - apply_patch matches `apply_patch`, `Edit` or `Write`, but its payload
+    reports `tool_name: "apply_patch"` with the patch in
+    `tool_input.command`.
+  - Not established: execution on 0.162.1.
+  This supersedes the 2026-05-03 docs-only row (Codex 0.124.0).
 - **Consumed by:** `codex.capabilities.tool_hooks`.
 
 ### codex-permission-hooks
 
-- **Source:** OpenAI Developers — Codex Hooks reference
-- **URL / path:** https://developers.openai.com/codex/hooks
-- **Retrieved:** 2026-05-03
-- **Product / version:** Codex CLI 0.124.0, April 2026
-- **Claim:** `PermissionRequest` fires when Codex requests approval
-  (e.g., shell escalation), with matcher by tool name. Hooks return
-  `behavior: "allow" | "deny" | "abstain"`; any `deny` blocks the
-  request. Distinct from PreToolUse's `permissionDecision` shape, so
-  the hook adapter must use the right field per event.
+- **Source:** `hooks/list` reads from the installed binary's stdio app-server
+  against a scratch `CODEX_HOME` holding the block `adapters/codex/hooks.sh`
+  renders; the hook input/output schemas and strings embedded in that binary;
+  and OpenAI's Codex hooks manual.
+- **URL / path:** `/opt/homebrew/Caskroom/codex/0.162.1/bin/codex`;
+  https://learn.chatgpt.com/docs/hooks (the 308 target of
+  https://developers.openai.com/codex/hooks); probe record
+  `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/codex-0.162.1-config-hooks/probe.md`
+- **Retrieved:** 2026-10-19
+- **Product / version:** Codex CLI 0.162.1 (`codex-cli 0.162.1`); the manual
+  names no version
+- **Method:** zero-model-call reads — `initialize` + `hooks/list` only, no
+  thread and no turn; no hook trusted anywhere.
+- **Claim:** `PermissionRequest` is native on 0.162.1 and fires when Codex
+  asks for approval, with a matcher by tool name. Its output schema takes
+  `hookSpecificOutput.decision.behavior` of `allow` or `deny` only — the
+  `abstain` value the 2026-05-03 row named is not in the 0.162.1 schema —
+  and exit 2 with a reason on stderr denies (binary: `PermissionRequest
+  hook exited with code 2 but did not write a denial reason to stderr`).
+  Lore's managed block installs no PermissionRequest hook.
 - **Consumed by:** `codex.capabilities.permission_hooks`.
 
 ### codex-native-dispatch-guidance-hook
 
-- **Source:** OpenAI — Codex Hooks reference and current local-function schema
-- **URL / path:** https://learn.chatgpt.com/docs/hooks.md
-- **Retrieved:** 2026-07-21
-- **Product / version:** Codex, current manual
-- **Claim:** `PreToolUse` supports a blocking command hook on the `Agent`
-  matcher used for `spawn_agent`; the launch payload retains
-  `tool_name=spawn_agent` and its exact prompt in `tool_input.message`.
+- **Source:** `hooks/list` reads from the installed binary's stdio app-server
+  against a scratch `CODEX_HOME` holding the block `adapters/codex/hooks.sh`
+  renders; the hook input/output schemas and strings embedded in that binary;
+  and OpenAI's Codex hooks manual.
+- **URL / path:** `/opt/homebrew/Caskroom/codex/0.162.1/bin/codex`;
+  https://learn.chatgpt.com/docs/hooks (the 308 target of
+  https://developers.openai.com/codex/hooks); probe record
+  `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/codex-0.162.1-config-hooks/probe.md`
+- **Retrieved:** 2026-10-19
+- **Product / version:** Codex CLI 0.162.1 (`codex-cli 0.162.1`); the manual
+  names no version
+- **Method:** zero-model-call reads — `initialize` + `hooks/list` only, no
+  thread and no turn; no hook trusted anywhere.
+- **Claim:** The surface exists but a blocking launch is not proven, so the
+  cell is `partial`.
+  - The manual says spawn_agent also matches `Agent`, and `hooks/list`
+    lists `validate-dispatch-guidance.sh --hook codex` under
+    `matcher = "Agent"`.
+  - The binary's spawn_agent text: "Initial plain-text task for the new
+    agent. Use either message or items." A launch can carry its task in
+    `items`, which the validator does not read.
+  - The validator rejects with exit 1 and a reason on stderr. The manual
+    names only exit 2 + stderr, or `permissionDecision: "deny"`, as
+    blocking, and the binary's generic `hook exited with code ` string
+    gives other codes no blocking meaning.
+  - The hook runs only after the person trusts it.
+  - What would raise the cell: the validator rejecting through a
+    documented blocking channel, and one trusted spawn_agent launch observed
+    blocked.
+  This supersedes the 2026-07-21 manual row.
 - **Consumed by:** `codex.capabilities.native_dispatch_guidance_hook`.
 
 ### codex-task-completed-hook

@@ -23,16 +23,24 @@
 #              through. Honors adapters/hooks/README.md checklist
 #              item 5.
 #
-# Wire format reference: ~/.codex/config.toml uses a TOML
-# table-array per native event:
+# Wire format reference: ~/.codex/config.toml defines hooks as matcher
+# groups holding command handlers (Codex 0.162.1, probed 2026-10-19):
 #
-#   [[hooks.SessionStart]]
-#   command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/load-knowledge.sh"
+#   [[hooks.PreToolUse]]
+#   matcher = "Write"
 #
-# Per gotchas/hooks/hook-system-gotchas.md (May 2026 update), Codex
-# signals via exit code (non-zero = abort the tool) for tool-shaped
-# events and via JSON `behavior: allow|deny|abstain` for
-# PermissionRequest. The hook commands written here are the same
+#   [[hooks.PreToolUse.hooks]]
+#   type = "command"
+#   command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/guard-work-writes.sh"
+#
+# The older flat form, `[[hooks.<Event>]]` with `command = …` on the group,
+# defines no hook on 0.162.1 and Codex reports nothing about it. Codex runs a
+# config hook only after the person trusts it (startup "Hooks need review" or
+# /hooks), and asks again whenever a hook's command or position changes.
+#
+# Codex blocks a tool on exit 2 with a reason on stderr, or on
+# `permissionDecision: "deny"` JSON; PermissionRequest answers with
+# `behavior: allow|deny`. The hook commands written here are the same
 # Lore handler scripts the claude-code adapter invokes; the adapter
 # does NOT translate per-handler protocols (e.g. PreToolUse JSON
 # stdout) — handlers that depend on Claude-Code-specific signaling
@@ -102,10 +110,11 @@ resolve_settings_path() {
 }
 
 # Render the lore-managed TOML block. Hook commands point at the stable
-# ~/.lore/scripts/<name> install symlink per checklist item 6. The chain
-# of SessionStart hooks mirrors the claude-code adapter's order:
+# ~/.lore/scripts/<name> install symlink per checklist item 6. The
+# SessionStart handlers are listed in the claude-code adapter's order:
 # doctor -> auto-reindex -> mine-retrieval-misses -> load-knowledge ->
-# load-work -> load-threads -> extract-session-digest.
+# load-work -> load-threads -> extract-session-digest. Codex launches the
+# matching handlers of one event concurrently, so the order is for readers.
 # (mine-retrieval-misses self-skips on codex: the transcript provider is
 # partial, and the miner gates on provider status like the digest.) Lore no longer ships a Stop hook (the prior
 # stop-novelty-check.py was retired 2026-05-06, and check-plan-persistence.py
@@ -127,47 +136,59 @@ resolve_settings_path() {
 render_lore_block() {
   cat <<'TOML'
 # >>> lore hooks (managed) — do not edit between markers
-# Lore manages every entry between this marker and `<<< lore hooks
-# (managed)`. To customize a hook, add a sibling [[hooks.<Event>]]
-# table outside the markers — Codex concatenates table-arrays across
-# the file. To opt out entirely, run `bash adapters/codex/hooks.sh
-# uninstall` (or re-run install.sh with --framework=<other>).
+# Lore rewrites the hook groups it wrote between this marker and `<<< lore
+# hooks (managed)`; any other table here (Codex appends its own settings
+# just above the end marker) is moved above this marker on reinstall. To
+# customize a hook, add your own [[hooks.<Event>]] group outside the
+# markers — Codex runs every matching group. To opt out entirely, run
+# `bash adapters/codex/hooks.sh uninstall` (or re-run install.sh with
+# --framework=<other>).
 
 [[hooks.SessionStart]]
+
+[[hooks.SessionStart.hooks]]
+type = "command"
 command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/doctor.sh --quiet"
 
-[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
 command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/auto-reindex.sh"
 
-[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
 command = "LORE_FRAMEWORK=codex python3 ~/.lore/scripts/mine-retrieval-misses.py"
 
-[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
 command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/load-knowledge.sh"
 
-[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
 command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/load-work.sh"
 
-[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
 command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/load-threads.sh"
 
-[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
 command = "LORE_FRAMEWORK=codex python3 ~/.lore/scripts/extract-session-digest.py"
 
 # pre_compact fallback: Codex has no native PreCompact event, so the
 # pre-compact reminder runs at SessionStart as a bookend. See
 # adapters/hooks/README.md "Per-Harness Mapping" for the fallback.
-[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
 command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/pre-compact.sh"
 
 [[hooks.PreToolUse]]
-# Codex 0.124+ requires `matcher` to be a TOML string (the tool name),
-# not an inline table. The previous `{ tool = "Write" }` form parsed
-# under earlier codex versions but fails config load on 0.124 with
-# "invalid type: map, expected a string in hooks.PreToolUse.matcher"
-# (verified empirically against the installed binary). The bare-string
-# form below is the schema codex actually expects.
+# `matcher` is a string matched against the tool name; Codex also matches
+# apply_patch file edits on `Write` (the payload still says apply_patch).
+# The `{ tool = "Write" }` inline-table form fails config load on 0.124+.
 matcher = "Write"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
 command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/guard-work-writes.sh"
 
 [[hooks.PreToolUse]]
@@ -175,16 +196,220 @@ command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/guard-work-writes.sh"
 # The hook payload retains tool_name=spawn_agent and tool_input.message;
 # validate-dispatch-guidance.sh accepts only that probe-backed exact shape.
 matcher = "Agent"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
 command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/validate-dispatch-guidance.sh --hook codex"
 # <<< lore hooks (managed)
 TOML
 }
 
+# Rewrite config.toml without lore's managed block, keeping every table in
+# it that lore did not write. Codex and the ChatGPT app add new tables at the
+# end of the document but before its trailing comment, which is lore's end
+# marker, so their settings ([desktop], [mcp_servers.*], [tui], hook trust
+# under [hooks.state.*]) land inside the markers. A unit lore wrote is a
+# [[hooks.<Event>]] group, with its [[hooks.<Event>.hooks]] handlers, whose
+# every `command` runs a script under ~/.lore/scripts/ — true of every form
+# this adapter has rendered, flat or nested. Any other table, with the
+# comments just above it, stays where the block was. With a block argument
+# (install) the fresh block is appended at the end; without one (uninstall)
+# nothing is. The file is left untouched if the result would not parse as
+# TOML where the original did (checked when python3 has tomllib).
+rewrite_settings() {
+  local settings_path="$1" lore_block="${2:-}"
+  python3 - "$settings_path" "$LORE_BEGIN_MARKER" "$LORE_END_MARKER" "$lore_block" <<'PYEOF'
+import os, re, shutil, sys, tempfile
+
+settings_path, begin, end, lore_block = sys.argv[1:5]
+LORE_SCRIPTS = "~/.lore/scripts/"
+HEADER = re.compile(r"\s*\[")
+ARRAY_HEADER = re.compile(r"\s*\[\[\s*([^\[\]]+?)\s*\]\]")
+GROUP = re.compile(r"hooks\.[A-Za-z]+")
+COMMAND = re.compile(r"\s*command\s*=")
+
+
+def escaped(line, j):
+    k = j
+    while k > 0 and line[k - 1] == "\\":
+        k -= 1
+    return (j - k) % 2 == 1
+
+
+TOP = (None, 0)
+
+
+def scan(line, state):
+    """(open multi-line string delimiter, open bracket depth) after `line`.
+
+    A line starts a table header or a comment only at TOP: outside any
+    multi-line string and any array or inline table spanning lines."""
+    delim, depth = state
+    i, n = 0, len(line)
+    while i < n:
+        if delim:
+            j = line.find(delim, i)
+            while delim == '"""' and j > 0 and escaped(line, j):
+                j = line.find(delim, j + 1)
+            if j < 0:
+                return (delim, depth)
+            j += 3
+            # A closing delimiter may carry up to two content quotes before it.
+            for _ in range(2):
+                if j < n and line[j] == delim[0]:
+                    j += 1
+            i, delim = j, None
+            continue
+        c = line[i]
+        if c == "#":
+            break
+        if line.startswith('"""', i) or line.startswith("'''", i):
+            delim = line[i:i + 3]
+            i += 3
+        elif c == '"':
+            i += 1
+            while i < n and line[i] != '"':
+                i += 2 if line[i] == "\\" else 1
+            i += 1
+        elif c == "'":
+            j = line.find("'", i + 1)
+            i = n if j < 0 else j + 1
+        else:
+            if c in "[{":
+                depth += 1
+            elif c in "]}":
+                depth = max(0, depth - 1)
+            i += 1
+    return (delim, depth)
+
+
+def is_comment_or_blank(line):
+    s = line.strip()
+    return not s or s.startswith("#")
+
+
+def kept_from_region(region):
+    """Lines of the managed region that lore did not write, in order."""
+    lead = []      # key lines before any header: they belong to the table above
+    items = []     # {"header", "lines", "commands"}
+    pending = []   # comments/blank lines waiting for the next header
+    state = TOP
+    for line in region:
+        opened = state
+        state = scan(line, state)
+        if opened == TOP and HEADER.match(line):
+            items.append({"header": line.strip(), "lines": pending + [line], "commands": []})
+            pending = []
+        elif opened == TOP and is_comment_or_blank(line):
+            pending.append(line)
+        elif items:
+            items[-1]["lines"].extend(pending + [line])
+            pending = []
+            if opened == TOP and COMMAND.match(line):
+                items[-1]["commands"].append(line)
+        else:
+            # Comments before the first header are lore's own preamble.
+            lead.append(line)
+            pending = []
+    if items:
+        items[-1]["lines"].extend(pending)
+
+    units = []
+    for item in items:
+        m = ARRAY_HEADER.match(item["header"])
+        path = re.sub(r"\s+", "", m.group(1)) if m else None
+        if units and path and units[-1]["group"] and path == units[-1]["group"] + ".hooks":
+            units[-1]["items"].append(item)
+            continue
+        group = path if path and GROUP.fullmatch(path) else None
+        units.append({"group": group, "items": [item]})
+
+    kept = list(lead)
+    for unit in units:
+        commands = [c for item in unit["items"] for c in item["commands"]]
+        if unit["group"] and commands and all(LORE_SCRIPTS in c for c in commands):
+            continue
+        lines = [line for item in unit["items"] for line in item["lines"]]
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if kept and kept[-1].strip():
+            kept.append("\n")
+        kept.extend(lines)
+    if kept and not kept[-1].endswith("\n"):
+        kept[-1] += "\n"
+    return kept
+
+
+with open(settings_path, "r") as f:
+    text = f.read()
+
+out = []
+region = None
+state = TOP
+for line in text.splitlines(keepends=True):
+    stripped = line.rstrip("\n").rstrip("\r")
+    if region is None:
+        opened = state
+        state = scan(line, state)
+        if opened == TOP and stripped == begin:
+            region = []
+            state = TOP
+        else:
+            out.append(line)
+    elif stripped == end:
+        kept = kept_from_region(region)
+        if kept and out and out[-1].strip():
+            if not out[-1].endswith("\n"):
+                out[-1] += "\n"
+            out.append("\n")
+        out.extend(kept)
+        region = None
+    else:
+        region.append(line)
+if region is not None:
+    # An unterminated block: keep what lore did not write up to the end.
+    out.extend(kept_from_region(region))
+
+preserved = "".join(out).rstrip()
+if lore_block:
+    new_text = (preserved + "\n\n" if preserved else "") + lore_block.rstrip() + "\n"
+else:
+    new_text = preserved + ("\n" if out else "")
+
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
+if tomllib is not None:
+    try:
+        tomllib.loads(text)
+        parsed_before = True
+    except tomllib.TOMLDecodeError:
+        parsed_before = False
+    if parsed_before:
+        try:
+            tomllib.loads(new_text)
+        except tomllib.TOMLDecodeError as exc:
+            sys.exit(f"Error: rewriting {settings_path} would leave invalid TOML ({exc}); file left unchanged")
+
+# Replace the file a symlinked config.toml points at, not the link itself.
+target = os.path.realpath(settings_path)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".config.toml.")
+with os.fdopen(fd, "w") as f:
+    f.write(new_text)
+shutil.copymode(target, tmp)
+os.replace(tmp, target)
+PYEOF
+}
+
 # --- Subcommand: install ---
-# Inject the lore-managed block into config.toml. Idempotent: existing
-# managed block (between markers) is replaced; everything outside is
-# preserved byte-for-byte. New file is created if config.toml does not
-# exist yet.
+# Inject the lore-managed block into config.toml. Idempotent: lore's hook
+# groups in the existing managed block are replaced, tables lore did not
+# write there move above the fresh block, and everything outside the
+# markers is preserved. New file is created if config.toml does not exist
+# yet.
 cmd_install() {
   require_codex
   local settings_path
@@ -206,45 +431,7 @@ cmd_install() {
   fi
 
   # Strip any existing lore-managed block, then append the fresh one.
-  python3 - "$settings_path" "$LORE_BEGIN_MARKER" "$LORE_END_MARKER" "$lore_block" <<'PYEOF'
-import sys
-
-settings_path = sys.argv[1]
-begin = sys.argv[2]
-end = sys.argv[3]
-lore_block = sys.argv[4]
-
-with open(settings_path, "r") as f:
-    text = f.read()
-
-# Remove every existing managed block (handles repeat installs and
-# accidental duplication). Use a stable line-anchored split so user
-# content adjacent to the markers survives unchanged.
-lines = text.splitlines(keepends=True)
-out = []
-in_block = False
-for line in lines:
-    stripped = line.rstrip("\n").rstrip("\r")
-    if not in_block and stripped == begin:
-        in_block = True
-        continue
-    if in_block:
-        if stripped == end:
-            in_block = False
-        continue
-    out.append(line)
-
-# Preserve trailing newline behavior; ensure there is exactly one blank
-# line between user content and the lore block when both are present.
-preserved = "".join(out).rstrip()
-if preserved:
-    new_text = preserved + "\n\n" + lore_block.rstrip() + "\n"
-else:
-    new_text = lore_block.rstrip() + "\n"
-
-with open(settings_path, "w") as f:
-    f.write(new_text)
-PYEOF
+  rewrite_settings "$settings_path" "$lore_block"
 
   emit_degraded_notices
 }
@@ -260,9 +447,9 @@ emit_degraded_notices() {
 }
 
 # --- Subcommand: uninstall ---
-# Strip every line between (and including) the lore sentinel markers.
-# User content above and below the markers is preserved verbatim. If
-# config.toml does not exist, this is a no-op.
+# Strip lore's hook groups and the sentinel markers. User content above and
+# below the markers, and any table inside them that lore did not write, is
+# preserved. If config.toml does not exist, this is a no-op.
 cmd_uninstall() {
   require_codex
   local settings_path
@@ -271,34 +458,7 @@ cmd_uninstall() {
     return 0
   fi
 
-  python3 - "$settings_path" "$LORE_BEGIN_MARKER" "$LORE_END_MARKER" <<'PYEOF'
-import sys
-
-settings_path = sys.argv[1]
-begin = sys.argv[2]
-end = sys.argv[3]
-
-with open(settings_path, "r") as f:
-    text = f.read()
-
-lines = text.splitlines(keepends=True)
-out = []
-in_block = False
-for line in lines:
-    stripped = line.rstrip("\n").rstrip("\r")
-    if not in_block and stripped == begin:
-        in_block = True
-        continue
-    if in_block:
-        if stripped == end:
-            in_block = False
-        continue
-    out.append(line)
-
-new_text = "".join(out).rstrip() + ("\n" if out else "")
-with open(settings_path, "w") as f:
-    f.write(new_text)
-PYEOF
+  rewrite_settings "$settings_path"
 }
 
 # --- Subcommand: smoke ---
@@ -321,7 +481,7 @@ cmd_smoke() {
   printf '  %-20s %-9s %s\n' user_prompt        full      "(no native UserPromptSubmit; PreToolUse matcher=Write covers lore writes)"
   printf '  %-20s %-9s %s\n' pre_tool           full      "PreToolUse hooks (Write guard; Agent/spawn_agent -> validate-dispatch-guidance.sh)"
   printf '  %-20s %-9s %s\n' post_tool          full      "(currently unused by lore; PostToolUse hook surface available)"
-  printf '  %-20s %-9s %s\n' permission_request full      "PermissionRequest hook (behavior=allow|deny|abstain JSON-stdout)"
+  printf '  %-20s %-9s %s\n' permission_request full      "PermissionRequest hook (decision.behavior=allow|deny JSON-stdout, or exit 2 to deny)"
   printf '  %-20s %-9s %s\n' pre_compact        fallback  "(no native PreCompact; SessionStart bookend -> pre-compact.sh)"
   printf '  %-20s %-9s %s\n' stop               full      "(no lore Stop hook; ephemeral builtin plans are not auto-persisted)"
   printf '  %-20s %-9s %s\n' session_end        full      "(no native SessionEnd; Stop hook covers both turn-stop and clear)"

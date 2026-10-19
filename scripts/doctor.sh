@@ -328,11 +328,16 @@ if [[ "$GUIDANCE_HOOK_SUPPORT" == "full" && "$ACTIVE_FRAMEWORK" == "codex" ]]; t
 import sys, tomllib
 with open(sys.argv[1], "rb") as f:
     settings = tomllib.load(f)
-for entries in settings.get("hooks", {}).values():
-    for entry in entries:
-        command = entry.get("command")
-        if command:
-            print(command)
+# Codex defines a hook only as a handler inside a matcher group; a flat
+# group-level `command` and the [hooks.state] trust table define none.
+for groups in settings.get("hooks", {}).values():
+    if not isinstance(groups, list):
+        continue
+    for group in groups:
+        for handler in group.get("hooks", []):
+            command = handler.get("command")
+            if command:
+                print(command)
 PYEOF
 )"
     if ! echo "$installed_guidance_commands" | grep -qxF "$expected_guidance_command"; then

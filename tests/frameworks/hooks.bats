@@ -1131,14 +1131,269 @@ import sys, tomllib
 with open(sys.argv[1], "rb") as f:
     settings = tomllib.load(f)
 commands = [
-    entry["command"]
-    for entries in settings.get("hooks", {}).values()
-    for entry in entries
-    if entry.get("command")
+    handler["command"]
+    for groups in settings.get("hooks", {}).values()
+    for group in groups
+    for handler in group.get("hooks", [])
 ]
 assert len(commands) >= 8, commands
 unpinned = [c for c in commands if not c.startswith("LORE_FRAMEWORK=codex ")]
 assert not unpinned, unpinned
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "codex install writes every hook as a command handler inside a matcher group" {
+  # Codex 0.162.1 defines a hook only from [[hooks.<Event>]] groups holding
+  # [[hooks.<Event>.hooks]] handlers; a group-level `command` defines nothing
+  # and Codex reports no warning for it.
+  [ -f "$CODEX_ADAPTER" ] || skip "adapters/codex/hooks.sh missing"
+  set_framework codex
+  export HOME="$TEST_LORE_DATA_DIR/home"
+  run bash "$CODEX_ADAPTER" install --framework codex
+  [ "$status" -eq 0 ]
+  run python3 - "$HOME/.codex/config.toml" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    hooks = tomllib.load(f)["hooks"]
+assert sorted(hooks) == ["PreToolUse", "SessionStart"], sorted(hooks)
+for event, groups in hooks.items():
+    for group in groups:
+        assert "command" not in group, (event, group)
+        assert group["hooks"], (event, group)
+        for handler in group["hooks"]:
+            assert handler["type"] == "command", (event, handler)
+            assert "~/.lore/scripts/" in handler["command"], (event, handler)
+start = [h["command"] for g in hooks["SessionStart"] for h in g["hooks"]]
+assert [c.split("/")[-1] for c in start] == [
+    "doctor.sh --quiet", "auto-reindex.sh", "mine-retrieval-misses.py", "load-knowledge.sh",
+    "load-work.sh", "load-threads.sh", "extract-session-digest.py", "pre-compact.sh",
+], start
+by_matcher = {g.get("matcher"): [h["command"] for h in g["hooks"]] for g in hooks["PreToolUse"]}
+assert by_matcher == {
+    "Write": ["LORE_FRAMEWORK=codex bash ~/.lore/scripts/guard-work-writes.sh"],
+    "Agent": ["LORE_FRAMEWORK=codex bash ~/.lore/scripts/validate-dispatch-guidance.sh --hook codex"],
+}, by_matcher
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "codex reinstall and uninstall keep tables lore did not write inside its markers" {
+  # Codex and the ChatGPT app append their own tables just above lore's end
+  # marker (the document's trailing comment), so they land inside the block:
+  # here a previous release's flat lore block holds [desktop], an MCP server
+  # with its env table, [tui], a hook-trust record and a person's own Stop
+  # group. The [projects] table carries a multi-line string and a multi-line
+  # array whose inner line starts with '[' to prove neither reads as a header.
+  [ -f "$CODEX_ADAPTER" ] || skip "adapters/codex/hooks.sh missing"
+  set_framework codex
+  export HOME="$TEST_LORE_DATA_DIR/home"
+  mkdir -p "$HOME/.codex"
+  cat > "$HOME/.codex/config.toml" <<'TOML'
+model = "user-owned-model"
+
+[sandbox_workspace_write]
+network_access = true
+
+# >>> lore hooks (managed) — do not edit between markers
+# Lore manages every entry between this marker and `<<< lore hooks
+# (managed)`.
+
+[[hooks.SessionStart]]
+command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/doctor.sh --quiet"
+
+[[hooks.SessionStart]]
+command = "bash ~/.lore/scripts/load-knowledge.sh"
+
+[[hooks.PreToolUse]]
+matcher = { tool = "Write" }
+command = "bash ~/.lore/scripts/guard-work-writes.sh"
+
+[desktop]
+followUpQueueMode = "steer"
+
+[mcp_servers.node_repl]
+args = []
+command = "/Applications/Example.app/node_repl"
+
+[mcp_servers.node_repl.env]
+CODEX_HOME = "/Users/someone/.codex"
+
+[hooks.state."/Users/someone/.codex/config.toml:session_start:0:0"]
+trusted_hash = "sha256:0000"
+
+# my own stop hook
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = "echo person-owned-stop"
+
+[projects."/tmp/example"]
+trust_level = "trusted"
+notes = """
+[not.a.header]
+command = "~/.lore/scripts/not-a-command.sh"
+"""
+paths = [
+  ["nested", "array"],
+  "x",
+]
+
+[tui]
+screen_reader_detection_done = true
+# <<< lore hooks (managed)
+TOML
+  python3 - "$HOME/.codex/config.toml" "$TEST_LORE_DATA_DIR/expected.json" <<'PY'
+import json, sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    d = tomllib.load(f)
+hooks = d.pop("hooks")
+d["hooks"] = {"state": hooks["state"], "Stop": hooks["Stop"]}
+json.dump(d, open(sys.argv[2], "w"), sort_keys=True)
+PY
+
+  run bash "$CODEX_ADAPTER" install --framework codex
+  [ "$status" -eq 0 ]
+  cp "$HOME/.codex/config.toml" "$TEST_LORE_DATA_DIR/first.toml"
+  run python3 - "$HOME/.codex/config.toml" "$TEST_LORE_DATA_DIR/expected.json" <<'PY'
+import json, sys, tomllib
+text = open(sys.argv[1]).read()
+d = tomllib.loads(text)
+expected = json.load(open(sys.argv[2]))
+hooks = d.pop("hooks")
+lore = {k: hooks.pop(k) for k in ("SessionStart", "PreToolUse")}
+d["hooks"] = hooks
+assert json.loads(json.dumps(d, sort_keys=True)) == expected, d
+assert all("command" not in g for groups in lore.values() for g in groups), lore
+assert len([h for g in lore["SessionStart"] for h in g["hooks"]]) == 8, lore
+assert "# my own stop hook" in text
+assert 'matcher = { tool = "Write" }' not in text
+# What lore did not write now sits above the begin marker, and the end marker
+# closes the file.
+begin = text.index("# >>> lore hooks (managed)")
+for header in ("[desktop]", "[mcp_servers.node_repl.env]", "[hooks.state.", "[[hooks.Stop]]", "[tui]"):
+    assert text.index(header) < begin, header
+assert text.rstrip().endswith("# <<< lore hooks (managed)"), text[-200:]
+PY
+  [ "$status" -eq 0 ]
+
+  run bash "$CODEX_ADAPTER" install --framework codex
+  [ "$status" -eq 0 ]
+  run cmp "$TEST_LORE_DATA_DIR/first.toml" "$HOME/.codex/config.toml"
+  [ "$status" -eq 0 ]
+
+  run bash "$CODEX_ADAPTER" uninstall --framework codex
+  [ "$status" -eq 0 ]
+  run python3 - "$HOME/.codex/config.toml" "$TEST_LORE_DATA_DIR/expected.json" <<'PY'
+import json, sys, tomllib
+text = open(sys.argv[1]).read()
+d = tomllib.loads(text)
+assert json.loads(json.dumps(d, sort_keys=True)) == json.load(open(sys.argv[2])), d
+assert "lore hooks (managed)" not in text
+assert "~/.lore/scripts/doctor.sh" not in text
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "codex install keeps what follows a begin marker that has no end marker" {
+  [ -f "$CODEX_ADAPTER" ] || skip "adapters/codex/hooks.sh missing"
+  set_framework codex
+  export HOME="$TEST_LORE_DATA_DIR/home"
+  mkdir -p "$HOME/.codex"
+  cat > "$HOME/.codex/config.toml" <<'TOML'
+# >>> lore hooks (managed) — do not edit between markers
+[[hooks.SessionStart]]
+command = "bash ~/.lore/scripts/load-knowledge.sh"
+
+[tui]
+screen_reader_detection_done = true
+TOML
+  run bash "$CODEX_ADAPTER" install --framework codex
+  [ "$status" -eq 0 ]
+  run python3 - "$HOME/.codex/config.toml" <<'PY'
+import sys, tomllib
+text = open(sys.argv[1]).read()
+d = tomllib.loads(text)
+assert d["tui"] == {"screen_reader_detection_done": True}, d
+assert text.count("# >>> lore hooks (managed)") == 1
+assert all("command" not in g for g in d["hooks"]["SessionStart"]), d["hooks"]
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "codex install writes through a symlinked config.toml" {
+  [ -f "$CODEX_ADAPTER" ] || skip "adapters/codex/hooks.sh missing"
+  set_framework codex
+  export HOME="$TEST_LORE_DATA_DIR/home"
+  mkdir -p "$HOME/.codex" "$TEST_LORE_DATA_DIR/dotfiles"
+  printf 'model = "user-owned-model"\n' > "$TEST_LORE_DATA_DIR/dotfiles/config.toml"
+  ln -s "$TEST_LORE_DATA_DIR/dotfiles/config.toml" "$HOME/.codex/config.toml"
+  run bash "$CODEX_ADAPTER" install --framework codex
+  [ "$status" -eq 0 ]
+  [ -L "$HOME/.codex/config.toml" ]
+  grep -qF 'model = "user-owned-model"' "$TEST_LORE_DATA_DIR/dotfiles/config.toml"
+  grep -qF '[[hooks.SessionStart.hooks]]' "$TEST_LORE_DATA_DIR/dotfiles/config.toml"
+}
+
+@test "codex hooks/list defines every lore hook from the rendered block" {
+  # Asks the installed binary which hooks it defines, through its stdio
+  # app-server: initialize + hooks/list only, no thread and no model turn.
+  # The scratch CODEX_HOME is the test's own, so no trust is read or written.
+  [ -f "$CODEX_ADAPTER" ] || skip "adapters/codex/hooks.sh missing"
+  command -v codex >/dev/null 2>&1 || skip "codex is not installed"
+  set_framework codex
+  export HOME="$TEST_LORE_DATA_DIR/home"
+  run bash "$CODEX_ADAPTER" install --framework codex
+  [ "$status" -eq 0 ]
+  mkdir -p "$TEST_LORE_DATA_DIR/work"
+  export CODEX_HOME="$HOME/.codex"
+  run python3 - "$TEST_LORE_DATA_DIR/work" "$HOME/.codex/config.toml" <<'PY'
+import json, os, select, subprocess, sys, time, tomllib
+cwd, config = sys.argv[1], sys.argv[2]
+env = {k: v for k, v in os.environ.items() if not k.startswith("LORE_")}
+p = subprocess.Popen(["codex", "app-server", "--listen", "stdio://"], cwd=cwd, env=env,
+                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+def send(obj):
+    p.stdin.write((json.dumps(obj) + "\n").encode()); p.stdin.flush()
+def reply(want, timeout=30):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not select.select([p.stdout], [], [], 0.5)[0]:
+            continue
+        line = p.stdout.readline()
+        if not line:
+            return None
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if msg.get("id") == want:
+            return msg
+    return None
+try:
+    send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+          "params": {"clientInfo": {"name": "lore-test", "version": "0"}}})
+    assert reply(1), "no initialize reply"
+    send({"jsonrpc": "2.0", "method": "initialized"})
+    send({"jsonrpc": "2.0", "id": 2, "method": "hooks/list", "params": {"cwds": [cwd]}})
+    resp = reply(2)
+finally:
+    p.stdin.close()
+    try:
+        p.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        p.kill()
+assert resp and "result" in resp, resp
+data = resp["result"]["data"][0]
+assert not data["warnings"] and not data["errors"], data
+listed = sorted((h["eventName"], h.get("matcher"), h["command"]) for h in data["hooks"])
+with open(config, "rb") as f:
+    hooks = tomllib.load(f)["hooks"]
+names = {"SessionStart": "sessionStart", "PreToolUse": "preToolUse"}
+rendered = sorted((names[e], g.get("matcher"), h["command"])
+                  for e, groups in hooks.items() for g in groups for h in g["hooks"])
+assert len(rendered) == 10 and listed == rendered, (listed, rendered)
 PY
   [ "$status" -eq 0 ]
 }

@@ -195,7 +195,7 @@ blocked with the corrective command `lore dispatch guidance`.
 | Harness | Definite launch condition | Prompt field | Enforcement |
 |---------|---------------------------|--------------|-------------|
 | Claude Code | `PreToolUse`, tool `Agent` | `tool_input.prompt` | The installed `Agent` matcher returns Claude's blocking JSON when canonical validation fails. |
-| Codex | `PreToolUse`, tool `spawn_agent` | `tool_input.message` | The installed `Agent` matcher exits non-zero when canonical validation fails. |
+| Codex | `PreToolUse`, tool `spawn_agent` | `tool_input.message` | Native task launch is unavailable (`native_dispatch_guidance_hook: partial`). The installed `Agent` matcher exits 1 when canonical validation fails, and Codex 0.162.1 blocks only on exit 2 or a `deny` decision, so a rejected launch is not shown to be blocked. |
 | OpenCode | `tool.execute.before`, tool `task` | unverified | Native task launch is unavailable. The plugin refuses the exact documented `task` route and directs callers through the Lore orchestration adapter or worker session. |
 
 Only the conditions and fields above are recognized. Similar names, casing
@@ -206,17 +206,19 @@ condition rather than parsing a speculative prompt field.
 
 #### Codex hook returns (per native event)
 
-Codex hooks (introduced in Codex CLI 0.123.0, stable in 0.124.0) signal
-via a structured `behavior` field rather than exit codes for the
-permission-style events, and via exit codes for the
-notification-shaped events:
+Codex hooks (introduced in Codex CLI 0.123.0, stable in 0.124.0) answer with
+exit codes or with JSON on stdout. The table below is as of 0.162.1, read off
+the binary's hook output schemas and the hooks manual on 2026-10-19 (see the
+`codex-tool-hooks` and `codex-permission-hooks` rows in
+`adapters/capabilities-evidence.md`). On 0.162.1 a config hook runs only after
+the person has trusted it in Codex.
 
 | Native event       | `allow`                                | `deny`                                  | `notify`                       |
 |--------------------|----------------------------------------|-----------------------------------------|--------------------------------|
 | SessionStart       | exit 0                                 | _not blockable; treat deny as `error`_  | exit 0 + stderr                |
-| PreToolUse         | exit 0                                 | exit non-zero (Codex aborts the tool)   | exit 0 + stderr                |
+| PreToolUse         | exit 0                                 | `exit 2` + reason on stderr, or `permissionDecision: "deny"` + reason JSON (other exit codes are not documented as blocking; `decision: "approve"` is unsupported and records a failed run) | exit 0 + stderr                |
 | PostToolUse        | exit 0                                 | _not blockable; treat deny as `error`_  | exit 0 + stderr                |
-| PermissionRequest  | `{"behavior":"allow"}` JSON on stdout  | `{"behavior":"deny","reason":"..."}` JSON on stdout (or `{"behavior":"abstain"}` to delegate) | exit 0 + stderr |
+| PermissionRequest  | `hookSpecificOutput.decision.behavior: "allow"` JSON on stdout | `decision.behavior: "deny"` (+ `message`) JSON on stdout, or `exit 2` + reason on stderr; the schema has no `abstain` value | exit 0 + stderr |
 | Stop               | exit 0                                 | **`exit 2` + a continuation prompt on stderr** | exit 0 + stderr                |
 
 The Codex Stop row is a continuation channel, not a notification: 0.146.0

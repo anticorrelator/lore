@@ -654,12 +654,12 @@
         "session_start_hook": {
           "support": "full",
           "evidence": "codex-session-start-hook",
-          "notes": "Native SessionStart hook documented in current Codex releases; supersedes the stale February assumption that Codex has only `notify`."
+          "notes": "Native SessionStart hook on 0.162.1: `hooks/list` lists all eight of lore's SessionStart handlers from the block `adapters/codex/hooks.sh` renders, and stdout or `hookSpecificOutput.additionalContext` becomes developer context. Codex defines a hook only as a `[[hooks.SessionStart.hooks]]` handler inside a `[[hooks.SessionStart]]` group; the flat group-level `command` form defines nothing, silently. Config hooks run only after the person trusts them in Codex, and every change to a hook's command or position asks again. Execution on 0.162.1 is not yet observed."
         },
         "stop_hook": {
           "support": "full",
           "evidence": "codex-stop-hook",
-          "notes": "Native Stop hook, and it is blockable: 0.146.0 rejects an exit-2 Stop hook that writes nothing to stderr with `Stop hook exited with code 2 but did not write a continuation prompt to stderr`, which proves exit 2 + stderr is an honored continuation channel rather than a notification-only event. No matcher support."
+          "notes": "Native Stop hook, and it is blockable: 0.162.1, like 0.146.0, rejects an exit-2 Stop hook that writes nothing to stderr with `Stop hook exited with code 2 but did not write a continuation prompt to stderr`, which proves exit 2 + stderr is an honored continuation channel rather than a notification-only event; the Stop output schema also takes `decision`/`reason`. No matcher support. Lore installs no Stop hook in its managed block."
         },
         "turn_boundary_rewake": {
           "support": "partial",
@@ -674,12 +674,12 @@
         "tool_hooks": {
           "support": "full",
           "evidence": "codex-tool-hooks",
-          "notes": "Native PreToolUse and PostToolUse hooks documented in current Codex releases."
+          "notes": "Native PreToolUse and PostToolUse hooks on 0.162.1. PreToolUse blocks on `permissionDecision: \"deny\"` with a reason, legacy `decision: \"block\"`, or exit 2 with the reason on stderr; `decision: \"approve\"` and `permissionDecision: \"ask\"` are parsed but unsupported, so Codex records the run as failed and continues the tool. Matcher `Write` (or `Edit`) also matches apply_patch, but the payload reports `tool_name: \"apply_patch\"` with the patch in `tool_input.command`, so lore's guard-work-writes.sh, which reads Write/Edit and `tool_input.file_path` and answers `decision: approve`, guards nothing there."
         },
         "permission_hooks": {
           "support": "full",
           "evidence": "codex-permission-hooks",
-          "notes": "Native PermissionRequest hook documented in current Codex releases."
+          "notes": "Native PermissionRequest hook on 0.162.1: `hookSpecificOutput.decision.behavior` is `allow` or `deny` (there is no `abstain` value), and exit 2 with a reason on stderr denies. Lore installs no PermissionRequest hook in its managed block."
         },
         "task_completed_hook": {
           "support": "fallback",
@@ -687,9 +687,9 @@
           "notes": "Lead-side validator checks worker reports after collection (D9 fallback mode: lead-side validator). The cell stays `fallback` on lore's side rather than the harness's: 0.146.0's HookEventName enum does include `subagentStart` and `subagentStop`, so the earlier 'no native subagent-completion event' claim is stale, but whether `subagentStop` can *block* a completion — the semantic this cell is about — is unprobed. Re-probe before promoting."
         },
         "native_dispatch_guidance_hook": {
-          "support": "full",
+          "support": "partial",
           "evidence": "codex-native-dispatch-guidance-hook",
-          "notes": "PreToolUse matcher=`Agent` covers the spawn_agent local-function alias; the hook payload exposes tool_input.message and a non-zero validator result blocks launch."
+          "notes": "PreToolUse matcher=`Agent` covers spawn_agent on 0.162.1, and `hooks/list` lists lore's validator under it, but no blocking launch is proven: validate-dispatch-guidance.sh --hook codex rejects with exit 1, while Codex documents only exit 2 + stderr or `permissionDecision: \"deny\"` as blocking, and the hook runs only once the person trusts it. spawn_agent also accepts its task as `items` instead of `message`. Native ad-hoc dispatch is unavailable; use the validating orchestration adapter or a worker session."
         },
         "subagents": {
           "support": "partial",

@@ -417,7 +417,7 @@ or with `subagents=none` outright.
 | `shutdown`                 | shutdown_request via SendMessage             | plugin runtime kill                         | subagent stop                            |
 | `completion_enforcement`   | `native_blocking`                            | `lead_validator`                            | `lead_validator`                         |
 | `resolve_model_for_role`   | `--model <id>` (single)                      | provider/model selector (multi)             | model selector (single)                  |
-| native ad-hoc dispatch     | eligible (`Agent` prompt hook)               | _unavailable_                               | eligible (`spawn_agent` message hook)    |
+| native ad-hoc dispatch     | eligible (`Agent` prompt hook)               | _unavailable_                               | _unavailable_ (`spawn_agent` hook not proven blocking) |
 
 Cells in italics mark `unsupported`/`fallback` operations per
 [`adapters/capabilities.json`](../capabilities.json). Unsupported
