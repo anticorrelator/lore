@@ -1,6 +1,6 @@
 ---
 name: coordinate
-description: "Drive a feature end-to-end across multiple protocol sessions — the coordinator role's protocol home"
+description: "Carry a feature as an arc of streams and decisions — do the work yourself or dispatch it"
 user_invocable: true
 argument_description: "[work_item_ref] — the feature's work item (or project) to coordinate; omit to resume an open arc (`lore arc list`)"
 ---

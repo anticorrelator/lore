@@ -4,7 +4,7 @@ Work items persist in the project's `_work/` directory (path resolved by `lore r
 
 ### Starting Work
 
-Work usually runs through `/coordinate`, which plans it and carries it across sessions. When work comes up that needs a plan or will outlast this session, and no clear task has been proposed for it yet, suggest a coordination session.
+Work usually runs through `/coordinate`. When work needs a plan or will outlast this session, bring it under `/coordinate`: a stream on an open arc counts, and you can still do the work yourself.
 
 ### Work Items
 
