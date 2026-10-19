@@ -2974,6 +2974,131 @@ equals() {
   done
 }
 
+# precise_now — the current UTC instant with six fractional digits, as a hook stamps it.
+precise_now() {
+  python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"))'
+}
+
+# answer_peeks_in_turn <slug> <generation> <activity>... — answer each peek request
+# in turn as the owning host would, with a screen read at answer time, and leave
+# $TEST_KDIR/peek-answered-<n> after the n-th answer.
+answer_peeks_in_turn() {
+  local slug="$1" gen="$2" n=0 f="" rid at _i activity
+  shift 2
+  mkdir -p "$TEST_KDIR/_sessions/peek-responses"
+  for activity in "$@"; do
+    f=""
+    for _i in $(seq 1 150); do
+      f="$(ls "$TEST_KDIR/_sessions/peek-requests"/*.json 2>/dev/null | head -1)"
+      [ -n "$f" ] && break
+      touch "$TEST_KDIR/_sessions/instances/inst-a.json"
+      sleep 0.1
+    done
+    [ -n "$f" ] || return 1
+    rid="$(jq -r .request_id "$f")"
+    rm -f "$f"
+    at="$(precise_now)"
+    jq -n --arg rid "$rid" --arg slug "$slug" --arg gen "$gen" --arg activity "$activity" --arg at "$at" \
+      '{request_id:$rid, slug:$slug, captured_at:$at, ready:($activity == "idle"), rows:["fixture"],
+        observation:{schema_version:1, activity:$activity, authority:"screen-signature", observed_at:$at,
+                     session_id:$slug, session_handle:$slug, generation:$gen, instance:"inst-a",
+                     max_age_seconds:5, fresh:true, can_accept_input:($activity == "idle"),
+                     evidence:{matcher:"claude-code-worked-for-v1", reason:"fixture screen"}}}' \
+      > "$TEST_KDIR/_sessions/peek-responses/.$rid.tmp"
+    mv "$TEST_KDIR/_sessions/peek-responses/.$rid.tmp" "$TEST_KDIR/_sessions/peek-responses/$rid.json"
+    n=$((n + 1))
+    touch "$TEST_KDIR/peek-answered-$n"
+  done
+}
+
+@test "watch hook park: a Stop row newer than the sweep's sample of the session is read again and wakes confirmed" {
+  local gen start watcher responder _i
+  gen="$(write_live_session inst-a feature-x)"
+  append_lifecycle_row resumed 0 feature-x "$gen"
+  start="$(journal_end)"
+  answer_peeks_in_turn feature-x "$gen" working idle &
+  responder=$!
+  bash "$WATCH" --since "$start" --durable --owner-pid $$ --timeout 10 --pending-stale 0 --peek-timeout 5 \
+    --reconcile-budget 5 --json --kdir "$TEST_KDIR" > "$TEST_KDIR/wake.json" 2>/dev/null &
+  watcher=$!
+  # The Stop row lands once the sweep that read the screen has finished, so only
+  # the watcher's own second look at the session can see the park.
+  for _i in $(seq 1 150); do
+    if [ -f "$TEST_KDIR/peek-answered-1" ] && ls "$TEST_KDIR"/_coordination/watch-observation-*.json >/dev/null 2>&1; then break; fi
+    sleep 0.1
+  done
+  bash "$APPEND" --kdir "$TEST_KDIR" --row "$(jq -cn --arg gen "$gen" --arg at "$(precise_now)" \
+    '{event:"needs_input", slug:"feature-x", session_type:"worker", actor_instance:"inst-a",
+      links:{authority:"hook-row", hook_event:"Stop", activity:"idle", generation:$gen, fired_at:$at,
+             framework:"claude-code", spawn_instance:"inst-a"}}')" >/dev/null
+  wait "$watcher" || true
+  wait "$responder" || true
+  output="$(cat "$TEST_KDIR/wake.json")"
+  [ -f "$TEST_KDIR/peek-answered-2" ]
+  json_has '.outcome == "matched" and .matched.links.hook_event == "Stop" and .tier == "confirmed" and .authority == "hook-row"'
+  json_has '.classification.state == "confirmed_park" and .classification.label == "hook-Stop"'
+  json_has '.classification.observation.evidence.screen.matcher == "claude-code-worked-for-v1"'
+}
+
+@test "watch: a teardown's worktree outcome and its closed row reach a durable watch as one wake" {
+  local out id
+  echo '{"event":"close_requested","slug":"feature-x","request_id":"c1"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  echo '{"event":"worktree_quarantined","slug":"feature-x","reason":"integration_pending"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  ( sleep 2; echo '{"event":"closed","slug":"feature-x","request_id":"c1"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  out="$(watch_durable --since 0)"
+  wait
+  output="$out"
+  json_has '.outcome == "matched" and .tier == "confirmed" and .matched.event == "closed"'
+  json_has '[.journal_batch[].event] == ["worktree_quarantined", "closed"]'
+  id="$(printf '%s' "$out" | jq -r '.wake_id')"
+  output="$(printf '%s' "$out" | python3 "$REPO_DIR/scripts/coordinate_watch_state.py" compact)"
+  json_has '.journal_batch_count == 2 and [.journal_batch[].event] == ["worktree_quarantined", "closed"]'
+  ack_wake "$id"
+  equals timeout "$(watch_durable | jq -r '.outcome')" "the re-arm after the teardown's wake"
+  equals 1 "$(durable_wakes)" "durable wakes for one teardown"
+}
+
+@test "status receipt: a wake delivered confirmed reads confirmed after acknowledgement, and the park's end is reported beside it" {
+  local gen out id
+  gen="$(write_live_session inst-a feature-x)"
+  append_lifecycle_row resumed 0 feature-x "$gen"
+  append_lifecycle_row stop 1 feature-x "$gen"
+  out="$(watch_durable --since 0)"
+  id="$(printf '%s' "$out" | jq -r '.wake_id')"
+  equals confirmed "$(printf '%s' "$out" | jq -r '.tier')" "the delivered tier"
+  run bash "$COORDINATE" --kdir "$TEST_KDIR" --wake-id "$id" --full-evidence --receipt-only --json
+  outcome_is 0
+  json_has '.wake_receipt.payload.tier == "confirmed" and .wake_receipt.acknowledged_at == null'
+  # The session takes its next prompt; the receipt keeps what was delivered.
+  bash "$APPEND" --kdir "$TEST_KDIR" --row "$(jq -cn --arg gen "$gen" \
+    '{event:"resumed", slug:"feature-x", session_type:"worker", actor_instance:"inst-a",
+      links:{authority:"hook-row", hook_event:"UserPromptSubmit", activity:"working", generation:$gen,
+             fired_at:"2026-10-18T10:00:02.000000Z", framework:"claude-code", spawn_instance:"inst-a"}}')" >/dev/null
+  run bash "$COORDINATE" --kdir "$TEST_KDIR" --wake-id "$id" --full-evidence --receipt-only --json
+  outcome_is 0
+  json_has '.wake_receipt.payload.tier == "confirmed" and .wake_receipt.payload.authority == "hook-row" and .wake_receipt.acknowledged_at != null'
+  json_has '.wake_receipt.payload.reevaluation.tier == "advisory" and .wake_receipt.payload.reevaluation.classification.label == "hook-Stop-not-current"'
+  run bash "$COORDINATE" --kdir "$TEST_KDIR" --wake-id "$id" --receipt-only --json
+  outcome_is 0
+  json_has '.wake_receipt.payload.tier == "confirmed" and .wake_receipt.payload.reevaluation.tier == "advisory"'
+}
+
+@test "peek: a turn the hook reported starting reads working while the screen cannot be read" {
+  local gen
+  gen="$(write_live_session inst-a feature-x)"
+  bash "$APPEND" --kdir "$TEST_KDIR" --row "$(jq -cn --arg gen "$gen" --arg at "$(precise_now)" \
+    '{event:"resumed", slug:"feature-x", session_type:"worker", actor_instance:"inst-a",
+      links:{authority:"hook-row", hook_event:"UserPromptSubmit", activity:"working", generation:$gen, fired_at:$at,
+             framework:"claude-code", spawn_instance:"inst-a"}}')" >/dev/null
+  ( seed_peek_response feature-x "$gen" unknown ) &
+  run bash "$PEEK" feature-x --json --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  outcome_is 0
+  json_has '.observation.activity == "working" and .observation.authority == "hook-row" and .observation.fresh == true'
+  json_has '.observation.evidence.matcher == "claude-code-hook-user-prompt-submit-v1" and .observation.evidence.turn.held == true'
+  json_has '.observation.evidence.screen.activity == "unknown" and .ready == false'
+}
+
 @test "corroboration: every arrival order of a dialog's three rows, re-armed between rows, returns raw wait once and its re-arm times out" {
   local order gen kind second cursor matched outcome out
   gen="$(write_live_session inst-a feature-x)"

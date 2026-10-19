@@ -23,8 +23,13 @@ The rules, applied to one session generation:
 4. The newest remaining edge decides. A park keeps the authority, matcher and
    block_signature of the edge that established it for as long as it lasts.
 5. An unknown or starting screen never overrides a hook edge: a hook park keeps
-   its activity, and beside a hook working edge the activity stays the
-   screen's unknown.
+   its activity. A turn the hook reported starting, whose resumed row is the
+   newest hook edge with only resumed rows after it, reads working on hook-row
+   authority for TURN_HOLD_SECONDS from its last sign (the hook's fired_at, a
+   later resumed row, the screen's last observed output progress); after that
+   the screen's unknown stands. A turn can end with no hook row, after an
+   Escape typed into an attached terminal or a failed Stop hook, so the hold
+   is bounded rather than lasting until the next edge.
 6. When the deciding edge is the screen's, the screen stands; a hook was missed.
 7. When the deciding edge is a hook's and the screen shows a different known
    activity, the hook's activity stands and the screen's view is recorded under
@@ -52,6 +57,10 @@ SCAN_CHUNK_BYTES = 256 * 1024
 # show the resumed row landed late. Late rows trail by seconds, not megabytes.
 LATE_WINDOW_BYTES = 1024 * 1024
 OWNER_FRESH_SECONDS = 30
+# How long a turn the hook reported starting reads working while the screen
+# cannot be read: the screen's own horizon for working chrome with no output,
+# after which it reports the turn stalled.
+TURN_HOLD_SECONDS = 300
 CHECKPOINT_ROLES = frozenset({'session-host-spawn', 'session-spawn'})
 INTERRUPT_EVENTS = frozenset({'interrupt_sent', 'interrupt_uncertain'})
 BOUNDARY_EVENTS = frozenset({'spawned', 'recovered'})
@@ -319,6 +328,31 @@ def edges(kdir, slug, generation):
                 examined_from=stats['position'], scanned_bytes=stats['scanned_bytes'], limit_bytes=SCAN_LIMIT_BYTES)
 
 
+TEARDOWN_ENDED = frozenset({'closed', 'orphaned'})
+TEARDOWN_UNDERWAY = frozenset({'close_requested', 'worktree_quarantined', 'worktree_no_changes', 'worktree_published'})
+TEARDOWN_LIVE = BOUNDARY_EVENTS | frozenset({'close_failed', 'needs_input', 'resumed', 'modal_blocked'})
+
+
+def teardown(kdir, slug):
+    """How far the slug's newest teardown has got, read from the journal.
+
+    The newest row of the slug that says so decides: closed or orphaned means
+    the session ended ('ended'); close_requested or a worktree outcome means a
+    teardown is under way and its closing row has not landed ('underway'); a
+    spawn, recovery, failed close or turn edge means the session was live after
+    any earlier teardown ('live'). Returns dict(state, event, event_id, ts), or
+    None when no such row lies within SCAN_LIMIT_BYTES of the journal's end.
+    """
+    stats = dict(scanned_bytes=0, capped=False, floor_reached=False, floor=None, position=None)
+    for _, _, row in _rows_backward(Path(kdir) / '_sessions' / 'events.jsonl', slug, stats):
+        event = row.get('event')
+        state = ('ended' if event in TEARDOWN_ENDED else 'underway' if event in TEARDOWN_UNDERWAY
+                 else 'live' if event in TEARDOWN_LIVE else None)
+        if state:
+            return dict(state=state, event=event, event_id=row.get('event_id'), ts=row.get('ts'))
+    return None
+
+
 def _view(value):
     if isinstance(value, dict) and 'edges' in value:
         items = [item if isinstance(item, dict) and 'kind' in item else _edge(item)
@@ -581,6 +615,65 @@ def _with_evidence(screen, extra):
     return out
 
 
+def _turn(items, notes):
+    """The hook resumed edge of a turn nothing has ended, and the resumed rows after it.
+
+    That is the generation's newest hook edge when it is a resumed row and every
+    edge after it in journal order, landed late ones aside, is a resumed row too
+    (the screen seeing the same turn start). Returns (edge, later resumes) or
+    (None, []).
+    """
+    newest = None
+    for index, item in enumerate(items):
+        if item['source'] == 'hook' and not notes[index]['late']:
+            newest = index
+    if newest is None or items[newest]['kind'] != 'resume':
+        return None, []
+    later = [item for index, item in enumerate(items[newest + 1:], start=newest + 1) if not notes[index]['late']]
+    if any(item['kind'] != 'resume' for item in later):
+        return None, []
+    return items[newest], later
+
+
+def _iso(micros):
+    return datetime.datetime.fromtimestamp(micros / 1e6, datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def _held_turn(screen, edge, later, view, extra):
+    """What an unreadable screen shows during a turn the hook reported starting.
+
+    The turn reads working on hook-row authority while its last sign is at most
+    TURN_HOLD_SECONDS older than the screen observation: the hook's fired_at, a
+    later resumed row, or the screen's last observed output progress. Past that
+    the screen's unknown stands. Either way the evidence says which.
+    """
+    hook = _hook_view(edge)
+    seen = _screen_view(screen)
+    signs = [item['at'] for item in [edge] + later if item['at'] is not None]
+    progress = edge_time(screen.get('progress_observed_at'))
+    if progress is not None:
+        signs.append(progress)
+    observed = edge_time(screen.get('observed_at')) or int(time.time() * 1e6)
+    last = max(signs) if signs else None
+    held = last is not None and observed - last <= TURN_HOLD_SECONDS * 1000000
+    turn = dict(held=held, bound_seconds=TURN_HOLD_SECONDS)
+    if last is not None:
+        turn.update(last_sign_at=_iso(last), holds_until=_iso(last + TURN_HOLD_SECONDS * 1000000))
+    evidence = dict(extra, hook=hook, screen=seen, turn=turn)
+    if later:
+        evidence['corroborated_by'] = [_summary(item) for item in later]
+    if not held:
+        out = dict(screen)
+        out['evidence'] = dict(_evidence(screen), **evidence)
+        out['evidence']['reason'] = _says(hook, seen)
+        return out
+    evidence.update(matcher=hook_matcher(edge), reason=_says(hook, seen))
+    out = _based(screen, view)
+    out.update(activity='working', authority='hook-row', fresh=True, evidence=evidence)
+    out.pop('block_signature', None)
+    return out
+
+
 def merge(screen_observation, edges):
     """The session's observation once its edges are applied to what the screen shows.
 
@@ -608,7 +701,12 @@ def merge(screen_observation, edges):
     if not view['generation_known']:
         return _with_evidence(screen, dict(extra, hook_unconfirmed=dict(
             _hook_view(hooks[-1]), reason='no live owner lists this session, so its current generation is unknown')))
-    decided, park = _current(items, _annotate(items))
+    notes = _annotate(items)
+    decided, park = _current(items, notes)
+    if not _known(screen):
+        edge, later = _turn(items, notes)
+        if edge is not None:
+            return _held_turn(screen, edge, later, view, extra)
     if decided is not None and decided['source'] == 'hook':
         return _hook_decides(screen, decided, park, view, extra)
     if decided is not None and decided['kind'] == 'park' and any(item['source'] == 'hook' for item in park):

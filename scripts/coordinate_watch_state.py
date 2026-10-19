@@ -200,6 +200,26 @@ def annotate_records(kdir, result, observation_path=None):
     return result
 
 
+def row_time(row):
+    """When a journal row says its edge happened, in epoch seconds, or None.
+
+    A hook row stamps links.fired_at and a screen row links.observed_at; any
+    other row has only the writer's ts.
+    """
+    links = row.get('links') if isinstance(row.get('links'), dict) else {}
+    stamp = links.get('fired_at') if links.get('authority') == 'hook-row' else links.get('observed_at')
+    return epoch(stamp or row.get('ts'))
+
+
+def predates(value, row):
+    """True when observation value was taken before row's edge, so it cannot speak to it.
+
+    An observation with no readable time is not known to be newer, so it predates.
+    """
+    at, edge = epoch((value or {}).get('observed_at')), row_time(row)
+    return edge is not None and (at is None or at < edge)
+
+
 def classify(row, peek, kdir=None):
     links = row.get('links') or {}
     if kdir is not None and links.get('authority') == 'hook-row' and row.get('slug'):
@@ -220,7 +240,9 @@ def classify_hook(row, peek, kdir):
 
     The current generation comes from the live owner's registry row, so a hook
     park of that generation confirms with no screen read. With the generation
-    unknown it stays advisory.
+    unknown it stays advisory. An observation taken before the row cannot speak
+    to it, and one no longer fresh cannot speak to now, so either way the row
+    is judged as if the screen had not been read: by the journal's newest edge.
     """
     reducer = lifecycle()
     slug = row['slug']
@@ -230,16 +252,23 @@ def classify_hook(row, peek, kdir):
     owner = reducer.current_owner(kdir, slug)
     generation = reducer.current_generation(kdir, slug)
     observed = peek.get('observation')
-    if isinstance(observed, dict) and lifecycle_merged(observed):
+    unread = None
+    if not isinstance(observed, dict):
+        unread = 'The screen was not read for this wake.'
+    elif predates(observed, row):
+        unread = 'The screen was last read at {}, before this row; it was not read again for this wake.'.format(observed.get('observed_at'))
+    elif not assessed(peek, identity)['fresh']:
+        unread = 'The screen was last read at {}, and that reading is no longer current.'.format(observed.get('observed_at'))
+    if unread is None and lifecycle_merged(observed):
         value = observation(peek, identity)
     else:
-        if not isinstance(observed, dict):
+        if unread is not None:
             entry = owner[1] if owner else {}
-            peek = dict(peek, slug=slug, ready=bool(peek.get('ready')), observation=dict(
+            peek = dict(peek, slug=slug, ready=bool(peek.get('ready')) and not isinstance(observed, dict), observation=dict(
                 schema_version=1, activity='unknown', authority='none', fresh=False, observed_at=timestamp(),
                 session_id=entry.get('session_id') or slug, session_handle=slug,
                 generation=generation or links.get('generation'), instance=owner[0] if owner else None,
-                max_age_seconds=5, evidence={'matcher': 'screen-not-read-v1', 'reason': 'The screen was not read for this wake.'}))
+                max_age_seconds=5, evidence={'matcher': 'screen-not-read-v1', 'reason': unread}))
         value = observation(peek, identity, kdir)
     deciding = (value.get('evidence') or {}).get('hook') or {}
     confirmed = (generation is not None and value.get('fresh') is True and value.get('authority') == 'hook-row'
@@ -340,6 +369,10 @@ def reconcile_samples(saved, current):
     return dict(saved, states=states, meaningful=meaningful, pending=pending)
 
 
+# The fields a delivery's own judgment of the evidence sets on a payload.
+VERDICT_FIELDS = ('tier', 'authority', 'classification', 'original_classification', 'current_delta', 'original_delta')
+
+
 class Delivery:
     def __init__(self, path):
         self.path = Path(path)
@@ -383,8 +416,9 @@ class Delivery:
                 if actionable:
                     chosen = actionable[-1]
             chosen['last_delivery'] = time.time()
+            presented = self.deliver(chosen, payload.get('current_observations'))
             atomic(self.path, state)
-            return self.present(chosen, payload.get('current_observations'))
+            return presented
 
     def pending(self, current=None):
         with locked(self.lock):
@@ -397,35 +431,84 @@ class Delivery:
                 return None
             chosen = choices[-1] if actionable else choices[0]
             chosen['last_delivery'] = time.time()
+            presented = self.deliver(chosen, current)
             atomic(self.path, state)
-            return self.present(chosen, current)
+            return presented
 
-    def present(self, row, current=None):
+    def deliver(self, row, current=None):
+        """Present row for delivery and record the verdict delivered on it.
+
+        A receipt read later shows this verdict; the receipt's own re-reading of
+        the evidence travels beside it, under reevaluation.
+        """
+        payload = self.present(row, current)
+        row['delivered'] = dict({key: payload[key] for key in VERDICT_FIELDS if key in payload}, at=timestamp())
+        return payload
+
+    def present(self, row, current=None, receipt=False):
+        """The payload a delivery, or with receipt=True a receipt, shows for row.
+
+        A delivery judges a historical park or a current delta again against the
+        newest observation it has, and its verdict is the payload's tier. A
+        receipt keeps the tier, authority and evidence last delivered, so a wake
+        reads the same after acknowledgement as when it arrived, and reports
+        what the evidence says at the time of reading under reevaluation.
+        """
         payload = dict(row['payload'], wake_id=row['wake_id'], created_at=row['created_at'],
                        acknowledgment_required=True, recipient=row['identity'],
                        evidence_store=str(self.path.parent.parent.resolve()))
         payload['original_observations'] = payload.get('current_observations')
         current = current_snapshot(current) if current is not None else None
         payload['current_observations'] = current if current is not None else {'current': [], 'complete': False, 'unavailable': [{'error': 'not-reconciled-by-receipt'}]}
+        verdict = self.judge(payload, current)
+        if not receipt:
+            if verdict:
+                payload.update(verdict)
+            return payload
+        delivered = row.get('delivered') or {}
+        for key in VERDICT_FIELDS:
+            if key in delivered:
+                payload[key] = delivered[key]
+        if verdict:
+            payload['reevaluation'] = dict({k: v for k, v in verdict.items() if not k.startswith('original_')},
+                                           evaluated_at=timestamp(), delivered_at=delivered.get('at'))
+        return payload
+
+    def judge(self, payload, current):
+        """The verdict the evidence supports now for a park or a current delta, or None.
+
+        The current snapshot is the evidence. A historical park is judged against
+        the newest observation of its session: the snapshot's, or the one the
+        watcher classified it with when that one is newer. A hook park can also
+        be judged with no snapshot, from the registry and the journal; any
+        other wake read without a snapshot has nothing new to say.
+        """
         matched = payload.get('matched') or {}
-        if matched.get('event') in {'needs_input', 'modal_blocked'}:
+        if matched.get('event') in PARK_EVENTS:
+            hook = (matched.get('links') or {}).get('authority') == 'hook-row'
+            if current is None and not hook:
+                return None
             snapshot = next((v for v in (current or {}).get('current', []) if v.get('slug') == matched.get('slug')), {})
-            current_class = classify(matched, snapshot.get('peek', {}), self.path.parent.parent)
-            payload['original_classification'] = payload.get('classification')
-            payload['classification'] = dict(current_class, historical_event=matched)
-            payload['tier'] = current_class['tier']
-            payload['authority'] = current_class['authority']
-        if payload.get('outcome') == 'current_delta':
+            screen = snapshot.get('peek', {}) if current is not None else {}
+            classified = (payload.get('classification') or {}).get('peek')
+            if current is not None and isinstance(classified, dict) and isinstance(classified.get('observation'), dict):
+                newest = epoch((screen.get('observation') or {}).get('observed_at'))
+                if newest is None or (epoch(classified['observation'].get('observed_at')) or 0) > newest:
+                    screen = classified
+            current_class = classify(matched, screen, self.path.parent.parent)
+            return dict(tier=current_class['tier'], authority=current_class['authority'],
+                        original_classification=payload.get('classification'),
+                        classification=dict(current_class, historical_event=matched))
+        if payload.get('outcome') == 'current_delta' and current is not None:
             original = payload.get('current_delta', [])
             refreshed = []
             for old in original:
-                snapshot = next((v for v in (current or {}).get('current', []) if v.get('slug') == old.get('slug')), {})
+                snapshot = next((v for v in current.get('current', []) if v.get('slug') == old.get('slug')), {})
                 value = observation(snapshot.get('peek', {}), old.get('observation'))
                 refreshed.append({'slug': old.get('slug'), 'observation': value})
-            payload['original_delta'] = original
-            payload['current_delta'] = refreshed
-            payload['tier'] = 'confirmed' if any(r['observation'].get('fresh') and r['observation'].get('activity') in {'idle', 'blocked'} for r in refreshed) else 'advisory'
-        return payload
+            tier = 'confirmed' if any(r['observation'].get('fresh') and r['observation'].get('activity') in {'idle', 'blocked'} for r in refreshed) else 'advisory'
+            return dict(tier=tier, original_delta=original, current_delta=refreshed)
+        return None
 
 
 def wake_receipt(kdir, wake_id, acknowledge=False):
@@ -452,7 +535,7 @@ def wake_receipt(kdir, wake_id, acknowledge=False):
                             tokens.append(token)
                         acknowledged[sample['slug']] = tokens
                 atomic(path, state)
-            return dict(wake_id=wake_id, payload=delivery.present(row), historical_payload=row['payload'],
+            return dict(wake_id=wake_id, payload=delivery.present(row, receipt=True), historical_payload=row['payload'],
                         current_observation_available=False, recipient=row['identity'],
                         acknowledged_at=row.get('acknowledged_at'), acknowledgment_requested=True, action_completed=False)
     raise ValueError('unknown wake id in this store')
@@ -460,6 +543,33 @@ def wake_receipt(kdir, wake_id, acknowledge=False):
 
 def matches(slug, scope):
     return not scope or slug in scope or re.sub(r'--w[0-9]+$', '', slug) in scope
+
+
+# The host journals a teardown's closed row after its worktree outcome and a
+# spend probe bounded at five seconds, and may drop the session from its
+# registry row before either lands.
+TEARDOWN_HOLD_SECONDS = 60
+
+
+def departure(kdir, slug):
+    """What explains a session's leaving the live registry: 'ended', 'underway' or None.
+
+    'ended' means its closed or orphaned row is in the journal. 'underway'
+    means a close request or worktree outcome is, and is younger than
+    TEARDOWN_HOLD_SECONDS, so the closing row is still to come. None means
+    nothing explains it.
+    """
+    try:
+        settled = lifecycle().teardown(kdir, slug)
+    except OSError:
+        return None
+    if settled and settled['state'] == 'ended':
+        return 'ended'
+    if settled and settled['state'] == 'underway':
+        at = epoch(settled.get('ts'))
+        if at is not None and time.time() - at < TEARDOWN_HOLD_SECONDS:
+            return 'underway'
+    return None
 
 
 def sweep(kdir, scripts, path, scope, budget, peek_timeout):
@@ -507,18 +617,36 @@ def sweep(kdir, scripts, path, scope, budget, peek_timeout):
     with locked(Path(path).with_suffix('.lock')):
         saved = read(path, {})
         previous = saved.get('states', {})
-        states = dict(previous)
         pending = saved.get('pending', {})
+        departed = {slug: at for slug, at in (saved.get('departed') or {}).items() if slug in previous}
+        ended = []
         for slug, prior in previous.items():
             if not matches(slug, scope):
                 pending.pop(slug, None)
                 continue
-            if slug not in targets:
-                value = dict(prior, schema_version=1, activity='unknown', authority='none', fresh=False,
-                             observed_at=timestamp(), evidence={'reason': 'previous-session-not-in-live-registry'})
-                current.append({'slug': slug, 'observation': value, 'peek': {'slug': slug, 'observation': value}})
-                unavailable.append({'slug': slug, 'error': 'previous-session-not-in-live-registry'})
-        saved = reconcile_samples(dict(saved, pending=pending), current)
+            if slug in targets:
+                departed.pop(slug, None)
+                continue
+            # A session that left the registry because it was torn down is
+            # reported by its closed row; leaving is not a second fact to wake
+            # on. Only a departure no teardown explains is a delta.
+            if slug not in departed:
+                settled = departure(kdir, slug)
+                if settled == 'ended':
+                    ended.append(slug)
+                    continue
+                if settled == 'underway':
+                    continue
+                departed[slug] = timestamp()
+            value = dict(prior, schema_version=1, activity='unknown', authority='none', fresh=False,
+                         observed_at=timestamp(), evidence={'reason': 'previous-session-not-in-live-registry'})
+            current.append({'slug': slug, 'observation': value, 'peek': {'slug': slug, 'observation': value}})
+            unavailable.append({'slug': slug, 'error': 'previous-session-not-in-live-registry'})
+        saved = dict(saved, pending=pending, departed=departed)
+        for key in ('states', 'meaningful', 'pending', 'reported_parks', 'departed'):
+            if ended and isinstance(saved.get(key), dict):
+                saved[key] = {slug: value for slug, value in saved[key].items() if slug not in ended}
+        saved = reconcile_samples(saved, current)
         pending = saved['pending']
         atomic(path, dict(saved, schema_version=1, next_index=offset + len(selected), observed_at=timestamp()))
     return dict(observed_at=timestamp(), current=current, delta=list(pending.values()), unavailable=unavailable,
@@ -568,7 +696,14 @@ def consume_delta(path, payload):
 COMPACT_LIMIT = 8192
 
 
-def compact_wake(payload, budget=COMPACT_LIMIT):
+def compact_wake(payload, budget=COMPACT_LIMIT, revalidate=True):
+    """The bounded notification for a wake payload.
+
+    It shows the tier the payload carries and never changes it. When revalidate
+    is set and no fresh observation still shows a confirmed park, or when the
+    payload carries a receipt's reevaluation, that verdict is shown beside the
+    tier under reevaluation.
+    """
     omitted = {'sessions': 0, 'pending_requests': 0, 'unavailable': 0, 'modal_options': 0,
                'strings_truncated': 0, 'terminal_content': True, 'historical_payloads': True}
 
@@ -601,8 +736,11 @@ def compact_wake(payload, budget=COMPACT_LIMIT):
     current = payload.get('current_observations') or {}
     result = fields(payload, ('schema_version', 'wake_id', 'outcome', 'tier', 'authority', 'created_at',
                               'acknowledgment_required', 'next_cursor'))
-    if payload.get('journal_batch'):
-        result['journal_batch_count'] = len(payload['journal_batch'])
+    batch = payload.get('journal_batch') or []
+    if batch:
+        result['journal_batch_count'] = len(batch)
+        result['journal_batch'] = [fields(row, ('event', 'slug', 'ts')) for row in batch[:8] if isinstance(row, dict)]
+        omitted['journal_batch'] = len(batch) - len(result['journal_batch'])
     result.update(presentation='compact', presentation_version=1, max_bytes=COMPACT_LIMIT, omitted=omitted)
     wake_id = payload.get('wake_id')
     store = payload.get('evidence_store')
@@ -622,14 +760,12 @@ def compact_wake(payload, budget=COMPACT_LIMIT):
     current_confirmation = False
     seen = set()
     classified = payload.get('classification') or {}
-    recorded = classified.get('observation') or (classified.get('peek') or {}).get('observation')
-    hook_value = None
-    if matched.get('slug') and isinstance(recorded, dict) and recorded.get('authority') == 'hook-row':
-        hook_value = observation({'observation': recorded})
-        if hook_value.get('fresh') and hook_value.get('activity') in {'idle', 'blocked'}:
-            current_confirmation = True
-        else:
-            hook_value = None
+    recorded_peek = classified.get('peek') if isinstance(classified.get('peek'), dict) else {}
+    recorded = classified.get('observation') or recorded_peek.get('observation')
+    # The matched session was classified on the newest observation the watcher
+    # had of it, which can be newer than the reconciliation snapshot: the
+    # watcher looks again when its last sample predates the matched row.
+    classified_screen = dict(recorded_peek, observation=recorded) if matched.get('slug') and isinstance(recorded, dict) else None
     ordered = list(payload.get('current_delta') or []) + list(current.get('current') or [])
     if matched.get('slug'):
         ordered.sort(key=lambda row: row.get('slug') != matched['slug'])
@@ -642,11 +778,15 @@ def compact_wake(payload, budget=COMPACT_LIMIT):
             continue
         snapshot = next((r for r in current.get('current', []) if r.get('slug') == slug), row)
         screen = snapshot.get('peek') or {}
+        if classified_screen is not None and slug == matched['slug']:
+            sampled = epoch(((screen.get('observation') or snapshot.get('observation')) or {}).get('observed_at'))
+            if sampled is None or (epoch(recorded.get('observed_at')) or 0) >= sampled:
+                screen = classified_screen
         value = observation(screen if screen.get('observation') else {'observation': snapshot.get('observation')})
         if (not matched.get('slug') or slug == matched['slug']) and value.get('fresh') and value.get('activity') in {'idle', 'blocked'}:
             current_confirmation = True
         entry = dict(fields({'slug': slug}, ('slug',)), observation=observed(value))
-        modal = screen.get('modal')
+        modal = screen.get('modal') if screen is not classified_screen or recorded_peek else (snapshot.get('peek') or {}).get('modal')
         if modal:
             entry['modal'] = fields(modal, ('title', 'kind', 'matcher', 'selected_option', 'selected', 'answerable', 'reason'))
             options = modal.get('options') or []
@@ -655,13 +795,20 @@ def compact_wake(payload, budget=COMPACT_LIMIT):
             entry['modal']['options_omitted'] = max(0, len(options) - 4)
             omitted['modal_options'] += max(0, len(options) - 4)
         sessions.append(entry)
-    if hook_value is not None and matched['slug'] not in seen and payload.get('tier') != 'quiet':
-        seen.add(matched['slug'])
-        sessions.insert(0, dict(fields({'slug': matched['slug']}, ('slug',)), observation=observed(hook_value)))
-    if result.get('tier') == 'confirmed' and (matched.get('event') in {'needs_input', 'modal_blocked'} or payload.get('outcome') == 'current_delta'):
-        if not current_confirmation:
-            result['tier'] = 'advisory'
-            result['authority'] = 'none'
+    if classified_screen is not None and matched['slug'] not in seen and payload.get('tier') != 'quiet':
+        value = observation(classified_screen)
+        if value.get('fresh') and value.get('activity') in {'idle', 'blocked'}:
+            current_confirmation = True
+            seen.add(matched['slug'])
+            sessions.insert(0, dict(fields({'slug': matched['slug']}, ('slug',)), observation=observed(value)))
+    reevaluation = payload.get('reevaluation')
+    if isinstance(reevaluation, dict):
+        result['reevaluation'] = fields(reevaluation, ('tier', 'authority', 'evaluated_at', 'delivered_at'))
+        result['reevaluation'].update(fields(reevaluation.get('classification') or {}, ('state', 'label')))
+    elif (revalidate and result.get('tier') == 'confirmed' and not current_confirmation
+          and (matched.get('event') in PARK_EVENTS or payload.get('outcome') == 'current_delta')):
+        result['reevaluation'] = dict(tier='advisory', authority='none', evaluated_at=timestamp(),
+                                      reason='no fresh observation of the session still shows the park')
     if sessions:
         result['sessions'] = sessions[:8]
     omitted['sessions'] = len(seen) - len(result.get('sessions', []))
@@ -674,7 +821,7 @@ def compact_wake(payload, budget=COMPACT_LIMIT):
         result['unavailable'] = [fields(row, ('slug', 'error', 'reason')) for row in unavailable[:4]]
     omitted['unavailable'] = max(0, len(unavailable) - 4)
     while len(json.dumps(result, ensure_ascii=True, indent=2).encode()) > budget - 256:
-        for key, count in (('sessions', 'sessions'), ('pending', 'pending_requests'), ('unavailable', 'unavailable')):
+        for key, count in (('sessions', 'sessions'), ('pending', 'pending_requests'), ('unavailable', 'unavailable'), ('journal_batch', 'journal_batch')):
             if result.get(key):
                 result[key].pop()
                 omitted[count] += 1
@@ -692,7 +839,7 @@ def compact_wake(payload, budget=COMPACT_LIMIT):
 def compact_receipt(receipt):
     result = {key: receipt[key] for key in ('wake_id', 'current_observation_available', 'acknowledged_at',
                                           'acknowledgment_requested', 'action_completed')}
-    result['payload'] = compact_wake(receipt['payload'], budget=6144)
+    result['payload'] = compact_wake(receipt['payload'], budget=6144, revalidate=False)
     return result
 
 
@@ -705,6 +852,10 @@ def peek_summary(peek):
     if isinstance(hook, dict):
         screen = (evidence.get('screen') or {}).get('activity') or 'unknown'
         lines.insert(1, '[session] hook says {} since {}; screen {}'.format(hook.get('activity'), hook.get('fired_at'), screen))
+        turn = evidence.get('turn')
+        if isinstance(turn, dict) and turn.get('holds_until'):
+            lines.insert(2, '[session] the turn holds working until {}'.format(turn['holds_until']) if turn.get('held')
+                         else '[session] the turn stopped holding working at {}; no sign of it since {}'.format(turn['holds_until'], turn.get('last_sign_at')))
     if evidence.get('truncated'):
         lines.insert(1, '[session] lifecycle journal scan reached its bound before it found where the current state began; showing the screen, and watchers keep their previous state for this session')
     for field in ('screen', 'modal'):
@@ -715,7 +866,7 @@ def peek_summary(peek):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['publish', 'pending', 'cursor', 'classify', 'sweep', 'consume', 'peek', 'peek-text', 'current', 'compact', 'lifecycle-records'])
+    parser.add_argument('command', choices=['publish', 'pending', 'cursor', 'classify', 'predates', 'sweep', 'consume', 'peek', 'peek-text', 'current', 'compact', 'lifecycle-records'])
     parser.add_argument('--path')
     parser.add_argument('--kdir')
     parser.add_argument('--scripts')
@@ -746,6 +897,8 @@ def main():
             result = True
         elif args.command == 'classify':
             result = classify(payload['row'], payload['peek'], args.kdir)
+        elif args.command == 'predates':
+            result = predates((payload.get('peek') or {}).get('observation'), payload['row'])
         elif args.command == 'lifecycle-records':
             result = annotate_records(args.kdir, payload, args.observation_path)
         elif args.command == 'publish':

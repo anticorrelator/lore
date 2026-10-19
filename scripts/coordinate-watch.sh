@@ -501,10 +501,18 @@ park_shaped() {
   return 1
 }
 
+# peek_session <slug> <row> — the observation a park row is classified against.
+# The reconciliation sweep's sample is reused only when it was taken at or after
+# the row's own edge time: a sample from before the row cannot say whether the
+# park the row reports is current, so the session is read again.
 peek_session() {
-  local slug="$1" out status=0
+  local slug="$1" row="$2" out status=0
 
   out="$(printf '%s' "$CURRENT_OBSERVATIONS" | jq -c --arg slug "$slug" '[.current[]? | select(.slug == $slug) | .peek][0] // null')"
+  if [[ "$out" != "null" ]] && [[ "$(jq -cn --argjson row "$row" --argjson peek "$out" '{row:$row,peek:$peek}' \
+      | python3 "$WATCH_HELPER" predates 2>/dev/null)" != "false" ]]; then
+    out="null"
+  fi
   if [[ "$out" == "null" ]]; then
     out="$(bash "$PEEK_SH" "$slug" --json --timeout "$PEEK_TIMEOUT" --kdir "$KNOWLEDGE_DIR" 2>/dev/null)" || status=$?
   fi
@@ -558,7 +566,7 @@ classify_match() {
   if [[ "$PEEK_TIMEOUT" -eq 0 ]]; then
     WAKE_LABEL="observation-unavailable"
     [[ "$hook" == "true" ]] || return 0
-  elif ! peek_session "$slug"; then
+  elif ! peek_session "$slug" "$row"; then
     WAKE_LABEL="peek-unavailable"
     [[ "$hook" == "true" ]] || return 0
   fi
@@ -639,6 +647,43 @@ if [[ -n "$OWNER_PID" || -n "$OWNER_TMUX" ]]; then
   OWNER_CHECK_ENABLED=1
 fi
 
+# A teardown journals its worktree outcome and then, after the host's spend
+# probe (bounded at five seconds), its closed row. A durable wake on the outcome
+# alone would be followed by a second wake on the closed row a moment later, so
+# the watcher waits up to this long for the closing row and delivers the two as
+# one batch. An outcome no close follows is delivered alone once the wait ends.
+TEARDOWN_SETTLE_SECONDS=8
+
+# teardown_unsettled <record-json> — true when the durable batch holds a worktree
+# outcome whose slug has no closed, close_failed or orphaned row after it yet.
+teardown_unsettled() {
+  printf '%s' "$1" | jq -e --argjson until "$UNTIL_JSON" '
+    ($until | index("closed")) != null and
+    (.matched_batch // [.event]) as $batch
+    | [range(0; $batch | length) as $i | $batch[$i]
+       | select(.event == "worktree_quarantined" or .event == "worktree_no_changes" or .event == "worktree_published")
+       | .slug as $slug
+       | select([$batch[$i + 1:][] | select(.slug == $slug and (.event == "closed" or .event == "close_failed" or .event == "orphaned"))] | length == 0)]
+    | length > 0' >/dev/null 2>&1
+}
+
+# settle_teardown <record-json> — the record to deliver, re-read from the same
+# cursor until a teardown in it has its closing row or the settle bound passes.
+settle_teardown() {
+  local record="$1" result next waited=0
+  if [[ $DURABLE -eq 1 ]]; then
+    while [[ $waited -lt $TEARDOWN_SETTLE_SECONDS ]] && teardown_unsettled "$record"; do
+      sleep 1
+      waited=$((waited + 1))
+      result="$(session_events_read "$EVENTS_SH" "$KNOWLEDGE_DIR" "$CURSOR")" || break
+      next="$(first_match_record "$result")"
+      [[ -n "$next" && "$next" != "null" ]] || break
+      record="$next"
+    done
+  fi
+  printf '%s' "$record"
+}
+
 # emit_matched_from_record <record-json> — terminal for one matched read record.
 emit_matched_from_record() {
   local record="$1" row cursor
@@ -712,7 +757,7 @@ while :; do
   RECORD="$(first_match_record "$RESULT")"
   NEXT="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
   if [[ -n "$RECORD" && "$RECORD" != "null" ]]; then
-    emit_matched_from_record "$RECORD"
+    emit_matched_from_record "$(settle_teardown "$RECORD")"
   fi
   # No match: nothing was withheld from the caller, so the batch cursor is the
   # row after the last row this read consumed, and advancing to it is correct.

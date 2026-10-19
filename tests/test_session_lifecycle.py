@@ -34,6 +34,11 @@ def hook_stamp(second):
     return '2026-10-18T10:00:{:09.6f}Z'.format(second)
 
 
+def ago(seconds):
+    """A hook-style stamp the given number of seconds before now."""
+    return L._iso(int((time.time() - seconds) * 1e6))
+
+
 def host_stamp(second):
     """A host's observed_at: Go RFC3339Nano, nine digits with trailing zeros trimmed."""
     whole, fraction = divmod(round(second * 1e9), 10 ** 9)
@@ -261,16 +266,62 @@ class D5Rules(Store):
         unavailable = self.merged(live('unknown', fresh=False))
         self.assertEqual((unavailable['activity'], unavailable['authority'], unavailable['fresh']), ('blocked', 'hook-row', True))
 
-    def test_rule5_an_unknown_screen_stays_unknown_beside_a_hook_working_edge(self):
+    def test_rule5_an_unknown_screen_stays_unknown_beside_a_hook_working_edge_past_the_turns_hold(self):
         self.append(hook_row('needs_input', 'Stop', 'idle', 1), hook_row('resumed', 'UserPromptSubmit', 'working', 2))
         result = self.merged(live('unknown'))
         self.assertEqual((result['activity'], result['authority']), ('unknown', 'none'))
+        self.assertFalse(result['evidence']['turn']['held'])
         self.assertEqual(result['evidence']['hook']['activity'], 'working')
         self.assertEqual(result['evidence']['hook']['fired_at'], hook_stamp(2))
         self.assertEqual(result['evidence']['screen']['activity'], 'unknown')
         self.assertEqual(result['evidence']['reason'], 'hook says working since {}; screen unknown'.format(hook_stamp(2)))
         text = W.peek_summary(dict(peek(live('unknown')), observation=result))
         self.assertIn('hook says working since {}; screen unknown'.format(hook_stamp(2)), text)
+
+    def test_rule5_a_turn_the_hook_reported_starting_reads_working_over_an_unknown_screen_within_its_hold(self):
+        # The live run's mid-turn peek: the hook's and the screen's resumed rows, then a shell
+        # command no signature matches, read activity=unknown authority=none.
+        self.append(hook_row('needs_input', 'Stop', 'idle', 1),
+                    dict(hook_row('resumed', 'UserPromptSubmit', 'working', 2), links=dict(hook_row('resumed', 'UserPromptSubmit', 'working', 2)['links'], fired_at=ago(62))))
+        started = self.rows()[-1]
+        later = screen_row('resumed', 'working', 0)
+        later['links']['observed_at'] = ago(60)
+        self.append(later)
+        for screen in ('unknown', 'starting'):
+            with self.subTest(screen=screen):
+                result = self.merged(live(screen))
+                self.assertTrue(result['fresh'])
+                self.assertEqual((result['activity'], result['authority']), ('working', 'hook-row'))
+                self.assertEqual(result['evidence']['matcher'], 'claude-code-hook-user-prompt-submit-v1')
+                self.assertEqual(result['evidence']['hook']['event_id'], started['event_id'])
+                self.assertEqual(result['evidence']['corroborated_by'][0]['source'], 'screen')
+                self.assertTrue(result['evidence']['turn']['held'])
+                self.assertEqual(result['evidence']['turn']['last_sign_at'], later['links']['observed_at'])
+                self.assertEqual(result['evidence']['reason'], 'hook says working since {}; screen {}'.format(started['links']['fired_at'], screen))
+                self.assertEqual(result['can_accept_input'], False)
+        # A known screen still decides, as before.
+        working = live('working')
+        self.assertIs(L.merge(working, self.edges()), working)
+
+    def test_rule5_the_turns_hold_runs_from_its_last_sign_and_ends_with_any_edge_but_a_resume(self):
+        bound = L.TURN_HOLD_SECONDS
+        self.append(dict(hook_row('resumed', 'UserPromptSubmit', 'working', 1), links=dict(hook_row('resumed', 'UserPromptSubmit', 'working', 1)['links'], fired_at=ago(bound + 30))))
+        self.assertEqual(self.merged(live('unknown'))['activity'], 'unknown')
+        # Output the screen last saw while it could still read the turn is a sign of it.
+        progressed = dict(live('unknown'), progress_observed_at=ago(bound - 30))
+        result = self.merged(progressed)
+        self.assertEqual((result['activity'], result['authority']), ('working', 'hook-row'))
+        self.assertEqual(result['evidence']['turn']['last_sign_at'], progressed['progress_observed_at'])
+        for ending in (interrupt_row(), screen_row('needs_input', 'idle', 3), dict(event='closed', slug=SLUG, request_id='close-1')):
+            with self.subTest(ending=ending['event']):
+                self.journal.write_text('')
+                self.append(dict(hook_row('resumed', 'UserPromptSubmit', 'working', 1), links=dict(hook_row('resumed', 'UserPromptSubmit', 'working', 1)['links'], fired_at=ago(5))))
+                self.assertEqual(self.merged(live('unknown'))['activity'], 'working')
+                ending = dict(ending)
+                if ending['event'] == 'needs_input':
+                    ending['links'] = dict(ending['links'], observed_at=ago(1))
+                self.append(ending)
+                self.assertNotEqual(self.merged(live('unknown'))['activity'], 'working')
 
     def test_rule6_a_newer_separated_screen_edge_overrides_an_older_hook_edge(self):
         self.append(hook_row('needs_input', 'Stop', 'idle', 1), screen_row('resumed', 'working', 2))

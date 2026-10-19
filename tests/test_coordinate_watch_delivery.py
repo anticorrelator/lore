@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -14,6 +15,11 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('watch_state', ROOT / 'scripts/coordinate_watch_state.py')
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+
+
+def ago(seconds):
+    """An ISO stamp the given number of seconds before now, six fractional digits."""
+    return m.lifecycle()._iso(int((time.time() - seconds) * 1e6))
 
 
 def peek(activity='idle', **fields):
@@ -83,12 +89,14 @@ class WatchDelivery(unittest.TestCase):
         self.assertTrue(compact['sessions'][0]['observation']['fresh'])
         self.assertEqual(compact['sessions'][0]['observation']['generation'], 'generation-a')
 
-    def test_compact_revalidates_freshness_before_presenting_confirmed_park(self):
+    def test_compact_revalidates_freshness_beside_the_delivered_tier_of_a_confirmed_park(self):
         current = {'current': [{'slug': 'task--w1', 'peek': peek()}], 'complete': True}
         wake = self.delivery.publish(self.payload(matched={'event': 'needs_input', 'slug': 'task--w1'}, current_observations=current), self.identity, 0)
+        self.assertNotIn('reevaluation', m.compact_wake(wake))
         with patch.object(m.time, 'time', return_value=time.time() + 10):
             compact = m.compact_wake(wake)
-        self.assertEqual(compact['tier'], 'advisory')
+        self.assertEqual((compact['tier'], compact['authority']), ('confirmed', 'screen-signature'))
+        self.assertEqual((compact['reevaluation']['tier'], compact['reevaluation']['authority']), ('advisory', 'none'))
         self.assertFalse(compact['sessions'][0]['observation']['fresh'])
         self.assertEqual(compact['sessions'][0]['observation']['activity'], 'unknown')
 
@@ -243,6 +251,68 @@ class WatchDelivery(unittest.TestCase):
         self.assertFalse(result['complete'])
         self.assertEqual(result['delta'][0]['observation']['activity'], 'unknown')
         self.assertEqual(result['unavailable'][0]['slug'], 'task--w1')
+
+    def test_a_session_that_left_the_registry_after_closing_raises_no_departure_delta(self):
+        # The live run's wake-e84b5e11: a closed session's leaving the registry woke the seat a third time.
+        state = self.kdir / 'observation.json'
+        prior = {k: peek()['observation'].get(k) for k in ('activity', 'generation', 'session_id', 'authority', 'fresh')}
+        m.atomic(state, {'states': {'task--w1': prior, 'task--w2': prior, 'task--w3': prior},
+                         'meaningful': {'task--w1': prior}, 'pending': {}, 'reported_parks': {'task--w1': 'e0'}})
+        journal = self.kdir / '_sessions/events.jsonl'
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        rows = [dict(event='close_requested', slug='task--w1', ts=ago(3)), dict(event='worktree_quarantined', slug='task--w1', ts=ago(2)),
+                dict(event='closed', slug='task--w1', ts=ago(1)), dict(event='close_requested', slug='task--w2', ts=ago(1))]
+        journal.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        result = m.sweep(self.kdir, ROOT / 'scripts', state, ['task'], 8, 10)
+        saved = m.read(state)
+        self.assertEqual([row['slug'] for row in result['delta']], ['task--w3'])
+        self.assertNotIn('task--w1', saved['states'])
+        self.assertNotIn('task--w1', saved['meaningful'])
+        self.assertNotIn('task--w1', saved['reported_parks'])
+        # A teardown under way holds the departure quietly until its closed row lands.
+        self.assertEqual(saved['states']['task--w2'], prior)
+        with journal.open('a') as stream:
+            stream.write(json.dumps(dict(event='closed', slug='task--w2', ts=ago(0))) + '\n')
+        m.consume_delta(state, {'outcome': 'current_delta', 'current_delta': result['delta'],
+                                'current_observations': {'delta': result['delta']}})
+        again = m.sweep(self.kdir, ROOT / 'scripts', state, ['task'], 8, 10)
+        self.assertEqual(again['delta'], [])
+        self.assertEqual(sorted(m.read(state)['states']), ['task--w3'])
+        # One whose close request has gone unanswered past the hold is an unexplained departure.
+        with journal.open('a') as stream:
+            stream.write(json.dumps(dict(event='close_requested', slug='task--w4', ts=ago(m.TEARDOWN_HOLD_SECONDS + 5))) + '\n')
+        m.atomic(state, dict(m.read(state), states=dict(m.read(state)['states'], **{'task--w4': prior})))
+        self.assertEqual([row['slug'] for row in m.sweep(self.kdir, ROOT / 'scripts', state, ['task'], 8, 10)['delta']], ['task--w4'])
+
+    def test_a_confirmed_current_delta_reads_confirmed_in_its_receipt_after_acknowledgement(self):
+        # The live run's wake-a0362e4e: delivered confirmed, its stored receipt read advisory once acknowledged.
+        captured = peek()
+        row = {'slug': 'task--w1', 'peek': captured, 'observation': captured['observation']}
+        wake = self.delivery.publish(self.payload(outcome='current_delta', tier='confirmed', authority='observation', matched=None,
+                                                  current_delta=[row], current_observations={'current': [row], 'delta': [row], 'complete': True}),
+                                     self.identity, 0)
+        self.assertEqual(wake['tier'], 'confirmed')
+        with patch.object(m.time, 'time', return_value=time.time() + 30):
+            first = m.wake_receipt(self.kdir, wake['wake_id'], acknowledge=True)
+            again = m.wake_receipt(self.kdir, wake['wake_id'])
+        for receipt in (first, again):
+            self.assertEqual((receipt['payload']['tier'], receipt['payload']['authority']), ('confirmed', 'observation'))
+            self.assertTrue(receipt['payload']['current_delta'][0]['observation']['fresh'])
+            self.assertNotIn('reevaluation', receipt['payload'])
+            compact = m.compact_receipt(receipt)['payload']
+            self.assertEqual(compact['tier'], 'confirmed')
+            self.assertNotIn('reevaluation', compact)
+        self.assertEqual(m.read(self.path)['wakes'][0]['delivered']['tier'], 'confirmed')
+
+    def test_a_receipt_keeps_the_verdict_of_its_last_delivery(self):
+        current = {'current': [{'slug': 'task--w1', 'peek': peek()}]}
+        first = self.delivery.publish(self.payload(matched={'event': 'needs_input', 'slug': 'task--w1'}, current_observations=current), self.identity, 0)
+        self.assertEqual(m.wake_receipt(self.kdir, first['wake_id'])['payload']['tier'], 'confirmed')
+        replay = self.delivery.pending({'current': [{'slug': 'task--w1', 'peek': peek('working')}]})
+        self.assertEqual(replay['tier'], 'advisory')
+        receipt = m.wake_receipt(self.kdir, first['wake_id'], acknowledge=True)
+        self.assertEqual((receipt['payload']['tier'], receipt['payload']['classification']['label']), ('advisory', 'current-working'))
+        self.assertEqual(receipt['historical_payload']['tier'], 'confirmed')
 
     def test_round_robin_sweep_covers_peers_beyond_concurrency_limit(self):
         m.atomic(self.kdir / '_sessions/instances/instance-a.json', {'name': 'instance-a', 'sessions': [{'slug': 'task-' + str(n)} for n in range(8)]})
@@ -428,6 +498,117 @@ class HookParkDelivery(unittest.TestCase):
         plain = self.watch('--compact')
         self.assertEqual((plain['wake_id'], plain['tier']), (wake['wake_id'], 'confirmed'))
 
+    def answer_peeks(self, activities, answered):
+        """Answer the watcher's peek requests in order, each with a screen read at answer time."""
+        requests = self.kdir / '_sessions/peek-requests'
+        responses = self.kdir / '_sessions/peek-responses'
+        deadline = time.monotonic() + 30
+        for activity in activities:
+            found = []
+            while not found and time.monotonic() < deadline:
+                os.utime(self.registry)
+                found = sorted(path for path in requests.glob('*.json') if not path.name.startswith('.')) if requests.exists() else []
+                time.sleep(.05)
+            if not found:
+                return
+            request = json.loads(found[0].read_text())
+            found[0].unlink()
+            responses.mkdir(parents=True, exist_ok=True)
+            screen = self.live(activity)
+            body = dict(request_id=request['request_id'], slug=self.SLUG, captured_at=screen['observation']['observed_at'],
+                        ready=screen['ready'], rows=['fixture'], observation=screen['observation'])
+            staged = responses / ('.' + request['request_id'])
+            staged.write_text(json.dumps(body))
+            staged.rename(responses / (request['request_id'] + '.json'))
+            answered.append(screen['observation']['observed_at'])
+
+    def test_a_hook_park_newer_than_the_observation_it_is_compared_with_confirms_from_the_journal(self):
+        # The live run's wake-36b3338d: the sweep read the screen 12s before the Stop row fired.
+        resumed = self.hook('UserPromptSubmit', 'working', 0)
+        resumed['links']['fired_at'] = ago(30)
+        self.append(resumed)
+        swept = self.live('working')
+        swept['observation']['observed_at'] = ago(12)
+        merged = dict(swept, observation=m.observation(swept, kdir=self.kdir))
+        self.assertIn('hook', merged['observation']['evidence'])
+        stop = self.hook('Stop', 'idle', 0)
+        stop['links']['fired_at'] = ago(.5)
+        stop, = self.append(stop)
+        result = m.classify(stop, merged, self.kdir)
+        self.assertEqual((result['tier'], result['authority'], result['state'], result['label']),
+                         ('confirmed', 'hook-row', 'confirmed_park', 'hook-Stop'))
+        self.assertEqual(result['observation']['evidence']['hook']['event_id'], stop['event_id'])
+        self.assertIn('before this row', result['observation']['evidence']['screen']['reason'])
+        self.assertFalse(m.predates(result['observation'], stop))
+
+    def test_the_watcher_reads_a_session_again_when_its_sample_predates_the_matched_park(self):
+        rows = {'hook': lambda: dict(self.hook('Stop', 'idle', 0), links=dict(self.hook('Stop', 'idle', 0)['links'], fired_at=m.timestamp())),
+                'screen': lambda: dict(self.screen('needs_input', 'idle', 0), links=dict(self.screen('needs_input', 'idle', 0)['links'], observed_at=m.timestamp()))}
+        for source, make in rows.items():
+            with self.subTest(source=source):
+                for path in (self.kdir / '_coordination').glob('*'):
+                    path.unlink()
+                self.journal_path.write_text('')
+                self.append(self.screen('resumed', 'working', 0))
+                start = self.journal_path.stat().st_size
+                os.utime(self.registry)
+                answered = []
+                host = threading.Thread(target=self.answer_peeks, args=(['working', 'idle'], answered))
+                host.start()
+                watcher = subprocess.Popen(['bash', str(ROOT / 'scripts/coordinate-watch.sh'), '--kdir', str(self.kdir), '--since', str(start),
+                                            '--owner-pid', str(os.getpid()), '--durable', '--timeout', '10', '--pending-stale', '0',
+                                            '--peek-timeout', '5', '--reconcile-budget', '5', '--json'],
+                                           env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                # The row lands once the sweep that read the screen has finished,
+                # as it did in the live run, so only the watcher's own look can see it.
+                swept = lambda: next((self.kdir / '_coordination').glob('watch-observation-*.json'), None)
+                while not (answered and swept()) and host.is_alive() and watcher.poll() is None:
+                    time.sleep(.02)
+                park, = self.append(make())
+                out, err = watcher.communicate(timeout=60)
+                host.join(timeout=30)
+                self.assertEqual(watcher.returncode, 0, err)
+                wake = json.loads(out)
+                self.assertEqual(len(answered), 2, err)
+                self.assertEqual(wake['matched']['event_id'], park['event_id'])
+                self.assertEqual((wake['tier'], wake['classification']['state']), ('confirmed', 'confirmed_park'))
+                self.assertLess(m.epoch(answered[0]), m.row_time(park))
+                screen = wake['classification']['observation']
+                screen = screen['evidence']['screen'] if source == 'hook' else screen
+                self.assertEqual(screen['observed_at'], answered[1])
+                compact = m.compact_wake(wake)
+                self.assertEqual(compact['tier'], 'confirmed')
+                self.assertNotIn('reevaluation', compact)
+                self.assertEqual(compact['sessions'][0]['observation']['activity'], 'idle')
+
+    def test_a_late_redelivery_of_a_hook_park_still_current_is_judged_by_the_journal(self):
+        self.append(self.screen('resumed', 'working', 0), self.hook('Stop', 'idle', 1))
+        wake = self.watch('--durable', '--since', '0')
+        delivery = m.Delivery(next((self.kdir / '_coordination').glob('watch-delivery-*.json')))
+        state = delivery.state()
+        stored = state['wakes'][0]
+        stored['last_delivery'] = 0
+        stored['payload']['classification']['peek']['observation']['observed_at'] = ago(900)
+        m.atomic(delivery.path, state)
+        replay = delivery.pending({'current': [], 'complete': False})
+        self.assertEqual((replay['wake_id'], replay['tier'], replay['authority']), (wake['wake_id'], 'confirmed', 'hook-row'))
+        self.assertIn('no longer current', replay['classification']['observation']['evidence']['screen']['reason'])
+
+    def test_a_hook_park_receipt_keeps_its_delivered_tier_and_reports_the_reevaluation(self):
+        self.append(self.screen('resumed', 'working', 0), self.hook('Stop', 'idle', 1))
+        wake = self.watch('--durable', '--since', '0')
+        self.assertEqual(wake['tier'], 'confirmed')
+        unchanged = m.wake_receipt(self.kdir, wake['wake_id'])['payload']
+        self.assertEqual((unchanged['tier'], unchanged['reevaluation']['tier']), ('confirmed', 'confirmed'))
+        self.append(self.hook('UserPromptSubmit', 'working', 2))
+        receipt = m.wake_receipt(self.kdir, wake['wake_id'], acknowledge=True)
+        payload = receipt['payload']
+        self.assertEqual((payload['tier'], payload['authority'], payload['classification']['label']), ('confirmed', 'hook-row', 'hook-Stop'))
+        self.assertEqual((payload['reevaluation']['tier'], payload['reevaluation']['classification']['label']), ('advisory', 'hook-Stop-not-current'))
+        compact = m.compact_receipt(receipt)['payload']
+        self.assertEqual((compact['tier'], compact['reevaluation']['tier'], compact['reevaluation']['label']),
+                         ('confirmed', 'advisory', 'hook-Stop-not-current'))
+
     def test_sweeps_through_the_real_merge_add_no_pending_delta_for_a_reported_park(self):
         self.append(self.screen('resumed', 'working', 0))
         hook, = self.append(self.hook('PreToolUse', 'blocked', 1, tool_name='AskUserQuestion'))
@@ -608,6 +789,57 @@ class WatchCommands(unittest.TestCase):
         m.wake_receipt(self.kdir, first['wake_id'], acknowledge=True)
         _, second = self.watch('--durable')
         self.assertEqual(second['outcome'], 'timeout')
+
+    def append(self, row, delay=0):
+        time.sleep(delay)
+        with (self.kdir / '_sessions/events.jsonl').open('a') as stream:
+            stream.write(json.dumps(dict(row, event_id=row['event'] + '-late', ts=m.timestamp())) + '\n')
+
+    def test_a_teardowns_worktree_outcome_and_closed_row_wake_once_together(self):
+        # The live run's wake-dd2b6b9d and wake-a3196b41: one teardown, two confirmed wakes a second apart.
+        self.journal([{'event': 'close_requested', 'slug': 'task--w1', 'request_id': 'c1'},
+                      {'event': 'worktree_quarantined', 'slug': 'task--w1', 'reason': 'integration_pending'}])
+        closing = threading.Thread(target=self.append, args=({'event': 'closed', 'slug': 'task--w1', 'request_id': 'c1'}, 2))
+        closing.start()
+        _, wake = self.watch('--durable', '--compact', '--since', '0')
+        closing.join()
+        self.assertEqual((wake['outcome'], wake['tier']), ('matched', 'confirmed'))
+        self.assertEqual(wake['matched']['event'], 'closed')
+        self.assertEqual([row['event'] for row in wake['journal_batch']], ['worktree_quarantined', 'closed'])
+        receipt = m.wake_receipt(self.kdir, wake['wake_id'], acknowledge=True)
+        self.assertEqual([row['event'] for row in receipt['payload']['journal_batch']], ['worktree_quarantined', 'closed'])
+        _, after = self.watch('--durable')
+        self.assertEqual(after['outcome'], 'timeout')
+
+    def test_a_worktree_outcome_no_close_follows_wakes_alone_once_the_settle_bound_passes(self):
+        self.journal([{'event': 'worktree_quarantined', 'slug': 'task--w1', 'reason': 'interrupted before harness launch'}])
+        started = time.monotonic()
+        _, wake = self.watch('--durable', '--since', '0', timeout=30)
+        self.assertGreaterEqual(time.monotonic() - started, 7)
+        self.assertEqual(wake['matched']['event'], 'worktree_quarantined')
+        self.assertNotIn('journal_batch', wake)
+        # Without --durable the single-event contract holds and nothing waits.
+        started = time.monotonic()
+        _, raw = self.watch('--since', '0')
+        self.assertLess(time.monotonic() - started, 7)
+        self.assertEqual(raw['matched']['event'], 'worktree_quarantined')
+
+    def test_status_reads_a_delivered_confirmed_wake_as_confirmed_after_acknowledgement(self):
+        path = self.kdir / '_coordination/watch-delivery-cli.json'
+        captured = peek()
+        row = {'slug': 'task--w1', 'peek': captured, 'observation': captured['observation']}
+        identity = dict(owner_kind='pid', owner_value=str(os.getpid()), key='cli', scope='board')
+        wake = m.Delivery(path).publish(dict(outcome='current_delta', tier='confirmed', authority='observation', next_cursor=0,
+                                             current_delta=[row], current_observations={'current': [row], 'delta': [row], 'complete': True}),
+                                        identity, 0)
+        argv = ['bash', str(ROOT / 'scripts/coordinate-status.sh'), '--kdir', str(self.kdir), '--wake-id', wake['wake_id'],
+                '--full-evidence', '--receipt-only', '--json']
+        for _ in range(2):
+            result = subprocess.run(argv, env=self.env, text=True, capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            receipt = json.loads(result.stdout)['wake_receipt']
+            self.assertEqual(receipt['payload']['tier'], 'confirmed')
+        self.assertTrue(receipt['acknowledged_at'])
 
     def test_shell_lost_output_and_explicit_status_receipt(self):
         self.journal([{'event': 'closed', 'slug': 'task--w1', 'request_id': 'r1'}])
