@@ -106,7 +106,7 @@ describe('which arc a session is bound to', () => {
     await seen.clock.settle()
     expect(seen.opened.map(open => open.id)).toEqual(['lore-arcs'])
     const window = await $.ui.mount({ plugin: 'lore', surface: 'terminal', ...pane('lore-arcs', 30) })
-    expect(await window.find({ type: 'Text', text: 'Pin an arc to this session:' })).toBeDefined()
+    expect(await window.find({ type: 'Text', text: 'No arc is bound to this session. Pin one:' })).toBeDefined()
     expect(await window.find({ key: 'pin:alpha' })).toBeDefined()
     expect(await window.find({ key: 'pin:gamma' })).toBeUndefined()
     await window.press({ key: 'pin:beta' })

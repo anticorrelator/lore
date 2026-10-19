@@ -40,7 +40,8 @@ describe('the lore-loaded gate', () => {
     expect(seen.commands).toEqual(['arcs'])
     await seen.clock.advance(30_000)
     expect(seen.commands).toEqual(['arcs'])
-    expect(seen.runs).toEqual(['active --harness claude-code --json'])
+    // The project's reviews are listed once, to say whether to offer /reviews.
+    expect(seen.runs).toEqual(['active --harness claude-code --json', 'followup list --json'])
   })
 
   test('an active store with an active arc registers /arcs and polls the snapshot file', async ($, on) => {
@@ -48,7 +49,7 @@ describe('the lore-loaded gate', () => {
     await start($, seen.clock)
     expect(seen.commands).toEqual(['arcs'])
     const opened = await $.command.run({ command: 'arcs', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } } as never)
-    expect(opened.text).toBe('Opened the lore window.')
+    expect(opened.text).toBe('Opened the arc window.')
     await seen.clock.settle()
     expect(seen.reads).toContain('/store/_coordination/display.json')
     expect(seen.runs).not.toContain('coordinate read --refresh --json')

@@ -1,7 +1,9 @@
 {
   "name": "lore",
   "version": "0.1.0",
-  "description": "Lore's arc window inside Claude Code: a chip for this session's arc that opens into its streams, Brief, decisions and documents",
-  "author": { "name": "lore" },
+  "description": "Lore inside Claude Code: an arc window (a chip for this session's arc that opens into its streams, Brief, decisions and documents) and a review panel for selecting, editing and posting /pr-review comments",
+  "author": {
+    "name": "lore"
+  },
   "types": "./types/index.d.ts"
 }
