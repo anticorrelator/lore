@@ -131,14 +131,16 @@ non-`none` cell points at an id that exists here.
 - **URL / path:** https://code.claude.com/docs/en/hooks;
   `~/.local/share/claude/versions/2.1.299`; probe record
   `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/claude-code-2.1.299-settings-hooks/probe.md`
-- **Retrieved:** 2026-10-18
+- **Retrieved:** 2026-10-19 (probe 2026-10-18; live run 2026-10-19)
 - **Product / version:** Claude Code 2.1.299 (the docs page names releases
   up to 2.1.299; the binary and the probed launch are that release)
 - **Method:** live probe — two launches of the installed binary on a private
   tmux socket in an empty scratch folder, each with
   `--dangerously-skip-permissions --model opus --settings <payload>
   --session-id <uuid>` and no prompt, so no model turn was requested; the
-  docs and binary-string reading above came first.
+  docs and binary-string reading above came first. Then a live run: three
+  hosted worker sessions started by `lore session start` on the store host,
+  each with this payload and real model turns.
 - **Transcript:** `_work/sessions-report-their-own-lifecycle-harness-hooks/probes/claude-code-2.1.299-settings-hooks/`
   (`1-startup.txt`, `2-after-trust.txt`, `3-hooks.txt`, `4-probe2.txt`,
   `payload.json`, `payload2.json`, and the scripts that produced them)
@@ -181,10 +183,24 @@ non-`none` cell points at an id that exists here.
   synchronous and an `async: true` command handler, each touching a marker
   file) created both markers, so hooks from `--settings` load and run beside
   the person's own, async included. `~/.claude/settings.json` was unchanged
-  by both launches. Not yet established: that a real turn journals a row
-  from this payload's own events (none fires without a turn), which `full`
-  needs.
-- **Consumed by:** `claude-code.session_lifecycle_hooks` (`support: partial`).
+  by both launches.
+  Live run, 2026-10-19. Three hosted worker sessions on the store host
+  (Claude Code 2.1.299, started by `lore session start` with this payload,
+  no TUI open) journaled hook rows from real model turns. UserPromptSubmit
+  wrote `resumed` for each brief and again for each coordinator reply (6
+  rows). Stop wrote `needs_input` idle at each worker's planned pause (3
+  rows). Every row carried that launch's generation, and a screen-signature
+  row agreed within about a second. The board watcher woke the coordinator
+  from these rows, and `lore session peek` reported `authority=hook-row`
+  with the screen agreeing. StopFailure, PermissionRequest and the
+  AskUserQuestion/ExitPlanMode entries did not fire: no turn ended on an API
+  error, the launches pass `--dangerously-skip-permissions`, and no worker
+  asked a question. Their mapping rests on the reference and the binary
+  above. Journal: the store's `_sessions/events.jsonl` rows for work item
+  `live-shakedown-hook-reported-lifecycle-on-real-cla`, 2026-10-19T15:28Z to
+  15:57Z. `~/.claude/settings.json` was unchanged (sha256 prefix
+  505bd5ac814218a7 before and after).
+- **Consumed by:** `claude-code.session_lifecycle_hooks` (`support: full`).
 
 ### claude-code-pre-compact-hook
 
