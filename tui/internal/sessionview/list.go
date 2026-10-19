@@ -236,8 +236,6 @@ func activityBadge(r SessionRow) (string, lipgloss.Style) {
 		return "needs input", needsInputStyle
 	case r.ClosePending:
 		return "close pending", reviewHeldStyle
-	case !r.Local:
-		return "◆ active", style.Dim
 	case r.Quiescent:
 		return "idle", style.Dim
 	default:

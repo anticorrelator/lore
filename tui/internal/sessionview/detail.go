@@ -9,11 +9,11 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
-// DetailModel is the read-only card shown for a session with no local panel to
-// attach: a cross-instance session or an in-flight spawn. It renders registry
-// fields plus the journal activity overlay — a local session shows its live
-// SessionPanelModel instead, routed by the host. The View is body-only; the host
-// wraps panel chrome.
+// DetailModel is the card shown for a session row with no viewer panel in front:
+// an in-flight spawn, a session without a tmux pane to view, or one toggled to
+// detail. It renders registry fields plus the journal activity overlay — a
+// session with an open viewer shows that panel instead, routed by the host. The
+// View is body-only; the host wraps panel chrome.
 type DetailModel struct {
 	row    SessionRow
 	has    bool
@@ -69,18 +69,8 @@ func (m DetailModel) View() string {
 		b.WriteString("\n")
 	}
 
-	// Lead with the standing condition: what this card is and why it is read-only.
-	switch {
-	case r.InFlight:
+	if r.InFlight {
 		b.WriteString(style.StatusWarn.Render("spawning — queued, not yet live"))
-	case !r.Local:
-		b.WriteString(style.Dim.Render("read-only — runs on another instance"))
-		b.WriteString("\n")
-		if r.Tmux != "" {
-			b.WriteString(style.Dim.Render("live drill-in available — Enter opens the remote tmux pane"))
-		} else {
-			b.WriteString(style.Dim.Render("live screen unavailable — tmux identity unknown"))
-		}
 	}
 	b.WriteString("\n\n")
 
