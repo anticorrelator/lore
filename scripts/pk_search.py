@@ -11,6 +11,7 @@ Other extracted modules:
 
 import fcntl
 import hashlib
+import io
 import json
 import math
 import os
@@ -527,11 +528,19 @@ class Indexer:
             PRIMARY KEY (file_path, heading, similar_entry_path, similar_entry_heading, result_type)
         )
         """,
+        """
+        CREATE TABLE IF NOT EXISTS file_backlinks (
+            file_path TEXT PRIMARY KEY,
+            content_hash TEXT,
+            backlinks TEXT
+        )
+        """,
     )
 
     _REBUILD_DROP_ORDER = (
         "entry_terms_instance",
         "entry_terms",
+        "file_backlinks",
         "concordance_results",
         "tfidf_terms",
         "tfidf_vectors",
@@ -1289,6 +1298,89 @@ class Indexer:
         except IndexLockBusy:
             return {"error": INDEX_BUSY_ERROR}
 
+    _RENORMALIZE_COMMENT_RE = re.compile(r"<!--\s*source:\s*renormalize-backlinks\s*-->")
+    _CONCORDANCE_COMMENT_RE = re.compile(r"<!--\s*source:\s*concordance-backlinks\s*-->")
+
+    @classmethod
+    def _extract_knowledge_backlinks(cls, text: str) -> list[list[str]]:
+        """[target, provenance] for each [[knowledge:...]] link outside code, in text order.
+
+        provenance names the importance counter the link credits: "explicit",
+        "llm" (beside a renormalize-backlinks comment) or "concordance_backlinks".
+        """
+        # Strip code blocks to avoid template backlinks
+        stripped = _FENCED_CODE_RE.sub("", text)
+        stripped = _INLINE_CODE_RE.sub("", stripped)
+
+        links = []
+        for match in _BACKLINK_RE.finditer(stripped):
+            if match.group("type") != "knowledge":
+                continue
+            target = match.group("target").strip()
+            if target in _PLACEHOLDER_TARGETS:
+                continue
+
+            # Check for provenance comments in surrounding context
+            start = max(0, match.start() - 100)
+            end = min(len(stripped), match.end() + 100)
+            context = stripped[start:end]
+            if cls._CONCORDANCE_COMMENT_RE.search(context):
+                provenance = "concordance_backlinks"
+            elif cls._RENORMALIZE_COMMENT_RE.search(context):
+                provenance = "llm"
+            else:
+                provenance = "explicit"
+            links.append([target, provenance])
+        return links
+
+    def _file_backlinks(self, conn: sqlite3.Connection, file_paths: list[str]) -> dict[str, list[list[str]]]:
+        """Each existing file's knowledge backlinks, read from disk only when its content changed.
+
+        file_backlinks keeps one row per file, keyed by the hash of the text
+        the links came from. Links depend on nothing but that text, so a row
+        whose hash matches file_meta's stands in for reading the file. Entry
+        content cannot: work files lose their preamble and headings to the
+        section split, and inline code can pair backticks across sections.
+        """
+        indexed_hashes = dict(conn.execute("SELECT file_path, content_hash FROM file_meta"))
+        stored = {
+            fp: (content_hash, backlinks)
+            for fp, content_hash, backlinks in conn.execute(
+                "SELECT file_path, content_hash, backlinks FROM file_backlinks"
+            )
+        }
+
+        result: dict[str, list[list[str]]] = {}
+        for file_path in file_paths:
+            if not os.path.isfile(file_path):
+                continue
+            row = stored.get(file_path)
+            if row is not None and row[0] == indexed_hashes.get(file_path):
+                result[file_path] = json.loads(row[1])
+                continue
+            try:
+                data = Path(file_path).read_bytes()
+            except OSError:
+                continue
+            try:
+                # The newline handling Path.read_text applies.
+                text = io.TextIOWrapper(io.BytesIO(data), encoding="utf-8").read()
+                links = self._extract_knowledge_backlinks(text)
+            except UnicodeDecodeError:
+                links = []
+            conn.execute(
+                "INSERT OR REPLACE INTO file_backlinks (file_path, content_hash, backlinks) VALUES (?, ?, ?)",
+                (file_path, hashlib.sha256(data).hexdigest(), json.dumps(links)),
+            )
+            result[file_path] = links
+
+        indexed = set(file_paths)
+        conn.executemany(
+            "DELETE FROM file_backlinks WHERE file_path = ?",
+            [(fp,) for fp in stored if fp not in indexed],
+        )
+        return result
+
     def _compute_structural_importance(self, conn: sqlite3.Connection) -> dict[tuple[str, str], dict]:
         """Compute structural importance for all entries from three sources.
 
@@ -1310,8 +1402,6 @@ class Indexer:
                 concordance: float (sum of concordance similarity scores),
             }
         """
-        from pk_resolve import BACKLINK_RE
-
         # Build entry lookup: map file_path -> list of headings
         entry_rows = conn.execute(
             "SELECT file_path, heading FROM entries WHERE source_type = 'knowledge'"
@@ -1320,12 +1410,10 @@ class Indexer:
 
         # Initialize importance tracking
         importance: dict[tuple[str, str], dict] = {}
+        keys_by_file: dict[str, list[tuple[str, str]]] = {}
         for key in entry_keys:
             importance[key] = {"importance": 0.0, "explicit": 0, "llm": 0, "concordance_backlinks": 0, "concordance": 0.0}
-
-        # Regex to detect backlink provenance comments
-        renormalize_comment_re = re.compile(r"<!--\s*source:\s*renormalize-backlinks\s*-->")
-        concordance_comment_re = re.compile(r"<!--\s*source:\s*concordance-backlinks\s*-->")
+            keys_by_file.setdefault(key[0], []).append(key)
 
         # Build concordance similarity lookup for concordance-backlinks weighting
         concordance_scores: dict[tuple[str, str], float] = {}
@@ -1340,61 +1428,32 @@ class Indexer:
         except sqlite3.OperationalError:
             pass
 
-        # (a) Scan all indexed files for [[knowledge:...]] backlinks
+        # (a) Credit the targets of every indexed file's [[knowledge:...]] backlinks
         resolver = Resolver(self.knowledge_dir)
-        file_rows = conn.execute("SELECT DISTINCT file_path FROM entries").fetchall()
+        resolved_targets: dict[str, str | None] = {}
+        file_paths = [fp for (fp,) in conn.execute("SELECT DISTINCT file_path FROM entries")]
+        backlinks_by_file = self._file_backlinks(conn, file_paths)
 
-        for (file_path,) in file_rows:
-            if not os.path.isfile(file_path):
-                continue
-            try:
-                text = Path(file_path).read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-
-            # Strip code blocks to avoid template backlinks
-            stripped = _FENCED_CODE_RE.sub("", text)
-            stripped = _INLINE_CODE_RE.sub("", stripped)
-
-            for match in BACKLINK_RE.finditer(stripped):
-                source_type = match.group("type")
-                if source_type != "knowledge":
-                    continue
-
-                target = match.group("target").strip()
-                if target in _PLACEHOLDER_TARGETS:
-                    continue
-
-                # Resolve the backlink target to a file path
-                resolved_path, _ = resolver._resolve_path("knowledge", target)
+        for file_path in file_paths:
+            for target, provenance in backlinks_by_file.get(file_path, ()):
+                if target not in resolved_targets:
+                    resolved_targets[target], _ = resolver._resolve_path("knowledge", target)
+                resolved_path = resolved_targets[target]
                 if not resolved_path:
                     continue
 
-                # Check for provenance comments in surrounding context
-                start = max(0, match.start() - 100)
-                end = min(len(stripped), match.end() + 100)
-                context = stripped[start:end]
-                is_concordance = bool(concordance_comment_re.search(context))
-                is_llm = bool(renormalize_comment_re.search(context))
-
-                if is_concordance:
+                if provenance == "concordance_backlinks":
                     # Weight at concordance similarity score, fallback to 0.5
                     weight = concordance_scores.get((file_path, resolved_path), 0.5)
-                elif is_llm:
+                elif provenance == "llm":
                     weight = 0.8
                 else:
                     weight = 1.0
 
                 # Credit all entries in the target file
-                for key in entry_keys:
-                    if key[0] == resolved_path:
-                        if is_concordance:
-                            importance[key]["concordance_backlinks"] += 1
-                        elif is_llm:
-                            importance[key]["llm"] += 1
-                        else:
-                            importance[key]["explicit"] += 1
-                        importance[key]["importance"] += weight
+                for key in keys_by_file.get(resolved_path, ()):
+                    importance[key][provenance] += 1
+                    importance[key]["importance"] += weight
 
         # (b) Concordance see_also edges with similarity >= 0.15
         try:
