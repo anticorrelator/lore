@@ -10,9 +10,13 @@ The form that lands first time:
 lore capture --insight "<claim>" --title "<the claim as a headline>" --context "<why it holds / how you checked>" \
   --scale <abstract|architecture|subsystem|implementation> --category <gotchas|conventions|principles|preferences|…> \
   --related-files <paths> --producer-role <your position> --protocol-slot <slot> --work-item <slug>
+# a preference also names the activity it governs:
+lore capture --category preferences --activity <name> --insight "<claim>" --title "<headline>" --scale <…> …
 ```
 
 `--scale` is required (one label, or two adjacent labels comma-delimited). In a bare interactive session with no skill running, the position is `--producer-role interactive --protocol-slot Reflection` — that is the established pairing, not a placeholder. Entries show who left them and during what work; an entry captured without those shows no byline, and a byline is how the next reader finds the context behind the claim.
+
+`--activity` is required for `--category preferences` and applies to no other category: a preference is filed under the activity it governs (`pr-bodies`, `model-routing`, …), or `general` when it applies to any task. Capture refuses a missing or unknown name and lists the names in use, so choose from that list before minting one with `--new-activity`; a near-duplicate name splits one activity in two. After filing, capture prints the preferences for `preference-writing`, so the new entry can be read beside how preferences are written here.
 
 `--title` is the line every search result and packet leads with. Without it, the title is the claim's first eight words, usually cut off mid-sentence, so write one that states the claim.
 

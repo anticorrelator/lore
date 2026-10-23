@@ -157,6 +157,12 @@ The decision shape is normative:
 - `application` is present only when the effective resolution is apply; then it is `{outcome,target,pre_version,post_version}` with outcome exactly `applied | failed | deferred`.
 - A lead decision being accepted does not imply the edit landed. Keep verdict, human resolution, and application outcome as separate facts.
 
+Before authoring the first edit, print how protocol prose is written here and hold each edit against it:
+
+```bash
+lore search --preferences --activity protocol-prose
+```
+
 For an effective apply, snapshot the target's pre-edit version, read the current file, author the change directly, verify it, and compute the post-edit version:
 
 ```bash

@@ -42,7 +42,7 @@ printf 'KNOWLEDGE_DIR=%s\nWORK_DIR=%s\nSCRIPTS_DIR=%s\nSKILL_FILE=%s\nLEAD_TEMPL
   "$KNOWLEDGE_DIR" "$WORK_DIR" "$SCRIPTS_DIR" "$SKILL_FILE" "$LEAD_TEMPLATE_VERSION"
 ```
 
-The standing defaults bind this run — role routes, preference directives by title:
+The standing defaults bind this run — role routes, preferences by activity:
 
 **Recipe inputs:** none.
 <!-- spec-recipe: lore-defaults -->
