@@ -13,8 +13,13 @@
 # Output contract (consumed as prompt content, keep it boring):
 #   - a header naming the render time and settings source
 #   - the effective settings document flattened to `key.path: value` lines
-#   - the preference directives currently in force, cited by entry title only
-#     (full text is retrieved via `lore search` when a directive binds a step)
+#   - the preferences in force, grouped by the activity each is filed under:
+#     the project's working style, accumulated from many hands. Titles only,
+#     one `<activity> (<count>):` group per activity in name order, an entry
+#     filed under two activities listed under both, live entries without an
+#     activity under `untagged`. The full text of one activity is
+#     `lore search --preferences --activity <name>`, and the commands that
+#     start an activity print it themselves.
 #   - with --with-routing, the effective route per role as resolved from THIS
 #     process's harness. Off by default because the dispatch-guidance digest
 #     hashes this script's output and a worker is validated by whichever host
@@ -91,42 +96,31 @@ fi
 fi
 
 echo ""
-echo "-- Preference directives in force (titles; retrieve full text via lore search) --"
+echo "-- Preferences in force, by activity (titles; full text: lore search --preferences --activity <name>) --"
 
 KNOWLEDGE_DIR="$(resolve_knowledge_dir 2>/dev/null || true)"
 PREF_DIR="$KNOWLEDGE_DIR/preferences"
 if [[ -n "$KNOWLEDGE_DIR" && -d "$PREF_DIR" ]]; then
-  # Only entries default search would return are in force. A retired or
-  # superseded directive stays on disk for its history, but listing it here
-  # presents it as binding: on 2026-09-24 a retired split-provider routing
-  # posture was still rendered in this section. The rule is the store's own
-  # (pk_search.DEFAULT_STATUS_FILTER read through pk_markdown's footer reader),
-  # imported rather than restated.
-  if ! directives="$(python3 - "$SCRIPT_DIR" "$PREF_DIR" <<'PY'
-import os
+  # The dispatch-guidance digest hashes this output and is re-rendered at
+  # admission, so the order must depend on nothing but the entries: groups by
+  # name, entries by path, both as pk_activities.index returns them.
+  if ! grouped="$(python3 - "$SCRIPT_DIR" "$KNOWLEDGE_DIR" <<'PY'
 import sys
 
 sys.path.insert(0, sys.argv[1])
-from pk_markdown import MarkdownParser  # noqa: E402
-from pk_search import DEFAULT_STATUS_FILTER  # noqa: E402
+from pk_activities import index  # noqa: E402
 
-pref_dir = sys.argv[2]
-paths = []
-for root, _dirs, files in os.walk(pref_dir):
-    paths.extend(os.path.join(root, f) for f in files if f.endswith(".md") and f != "README.md")
-for path in sorted(paths):
-    with open(path, encoding="utf-8", errors="replace") as f:
-        text = f.read()
-    status = MarkdownParser._extract_metadata(text)["entry_status"]
-    if status and status not in DEFAULT_STATUS_FILTER:
+for name, group in index(sys.argv[2]).items():
+    if not group:
         continue
-    title = next((line[2:].strip() for line in text.splitlines() if line.startswith("# ")), "")
-    print("- " + (title or os.path.splitext(os.path.basename(path))[0]))
+    print(f"{name} ({len(group)}):")
+    for entry in group:
+        print(f"- {entry['title']}")
 PY
 )"; then
-    echo "(preference directives not renderable: could not read $PREF_DIR)"
-  elif [[ -n "$directives" ]]; then
-    printf '%s\n' "$directives"
+    echo "(preferences not renderable: could not read $PREF_DIR)"
+  elif [[ -n "$grouped" ]]; then
+    printf '%s\n' "$grouped"
   else
     echo "(none)"
   fi
