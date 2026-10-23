@@ -27,6 +27,10 @@
 #     is a snapshot of what compiles at start; dispatch compiles its selected
 #     target again against invocation-fresh guidance and binds that.
 #
+# After the start struct it prints, in full, the preferences filed under
+# model-routing through render-preferences.sh: on stdout, or on stderr under
+# --json so stdout stays one JSON object.
+#
 # --branch affects fuzzy resolution (tier 5) only; the cache write always
 # uses the actual current branch.
 #
@@ -89,6 +93,10 @@ Writes the branch cache. With --compiled-positions it also retains each
 compiled position under the store's _templates/positions tree and registers
 its version in the template registry, both idempotent for identical bytes.
 Makes no judgments.
+
+Ends by printing, in full, the project's preferences for model-routing: the
+working style this project has accumulated for choosing models. They go to
+stdout, or to stderr under --json.
 
 Exit codes:
   0  start struct printed
@@ -347,8 +355,18 @@ print(json.dumps({
 PYEOF
 )
 
+show_preferences() {
+  local fd=1 text
+  [[ $JSON_MODE -eq 1 ]] && fd=2
+  if text="$("$SCRIPT_DIR/render-preferences.sh" --kdir "$KNOWLEDGE_DIR" --command "impl start")"; then
+    printf '\n%s\n' "$text" >&"$fd"
+  fi
+}
+
 if [[ $JSON_MODE -eq 1 ]]; then
-  json_output "$PAYLOAD"
+  printf '%s\n' "$PAYLOAD"
+  show_preferences
+  exit 0
 fi
 
 python3 - "$PAYLOAD" <<'PYEOF'
@@ -393,3 +411,5 @@ if anchor:
 else:
     print("Intent anchor: none")
 PYEOF
+
+show_preferences
