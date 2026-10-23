@@ -21,14 +21,10 @@ if [[ ! -d "$KNOWLEDGE_DIR" ]]; then
   exit 0
 fi
 
-# Auto-discover repo root for source file indexing
-REPO_ROOT_ARGS=()
-if REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
-  REPO_ROOT_ARGS=(--repo-root "$REPO_ROOT")
-fi
-
-# Run incremental index, suppress stdout on success, show stderr on error
-if ! python3 "${SCRIPT_DIR}/pk_cli.py" incremental-index "$KNOWLEDGE_DIR" "${REPO_ROOT_ARGS[@]}" >/dev/null 2>&1; then
+# No --repo-root: a search indexes without one and drops source rows, so
+# passing it here re-added them every session start only for the first search
+# to delete them again.
+if ! python3 "${SCRIPT_DIR}/pk_cli.py" incremental-index "$KNOWLEDGE_DIR" >/dev/null 2>&1; then
   echo "[auto-reindex] Failed to reindex: $KNOWLEDGE_DIR" >&2
   # Non-fatal: exit 0 so the hook chain continues
   exit 0
