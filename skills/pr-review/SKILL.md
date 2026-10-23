@@ -84,9 +84,10 @@ Then diff your expectation against reality. Surfaces you expected touched but th
 
 ```bash
 lore prefetch "pr-review" --scale-set=<bucket>
+lore search --preferences --activity review-comments
 ```
 
-Read the `## Prior Knowledge` block this produces. Incorporate any surfaced preferences or conventions into the review — especially scope-matched preference entries whose `related_files` include this skill.
+Read the `## Prior Knowledge` block the prefetch produces and the review-comments preferences the listing prints in full: how comments land here. Incorporate both into the review and into the comments it proposes.
 
 ## Step 2: Triage
 

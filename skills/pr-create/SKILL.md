@@ -130,13 +130,20 @@ Extract:
 CI on a pull request tests the merge of the branch into the *current* base, installed the way the project's CI installs it. It does not test the branch as it sits in your checkout. A targeted test run plus the project's lint target is not that check: lint targets often leave out the formatters CI diffs against, and targeted tests miss the suite a change breaks elsewhere.
 
 1. **Current base.** Run `git fetch origin <base>`. If `origin/<base>` has moved past the merge-base, rebase onto it (ask first when the branch is already pushed and shared). Base-side changes, such as a removed path, a bumped tool pin, or a new test, fail the PR's merge ref while the branch still looks green locally.
-2. **The gate.** `lore search --preferences "pre-push gate"` returns the project's gate: the commands that reproduce its CI checks the way CI runs them, each with the paths that trigger it. Run every command whose trigger matches `git diff origin/<base>...HEAD --name-only`. Fix any failure and re-run the gate before pushing.
-   - **No gate entry yet:** derive one from the workflows that run on pull requests. Include each check's command as CI invokes it (formatters too), every regenerate-then-`git diff --exit-code` step, the type checker at its configured scope, and the tests the diff affects. Run it, then record it with `lore capture --category preferences --title "Pre-push gate: <project>" --scale implementation --related-files <workflow files> …` so the next PR starts from it.
+2. **The gate.** `lore search --preferences --activity shipping` prints the project's shipping preferences in full; among them is the gate: the commands that reproduce its CI checks the way CI runs them, each with the paths that trigger it. Run every command whose trigger matches `git diff origin/<base>...HEAD --name-only`. Fix any failure and re-run the gate before pushing.
+   - **No gate entry yet:** derive one from the workflows that run on pull requests. Include each check's command as CI invokes it (formatters too), every regenerate-then-`git diff --exit-code` step, the type checker at its configured scope, and the tests the diff affects. Run it, then record it with `lore capture --category preferences --activity shipping --title "Pre-push gate: <project>" --scale implementation --related-files <workflow files> …` so the next PR starts from it.
 3. **Push.** Run `git push -u origin HEAD`. Use `--force-with-lease` after rebasing a branch that was already pushed. Ask before force-pushing if the branch tracks a remote with diverged history.
 
 ### 6. Draft the PR
 
-Write a clean, reviewer-facing PR description. No internal process details — no mentions of agents, workers, skills, knowledge stores, work items, or lore tooling.
+Before drafting, print how PR bodies and prose for people are written here, one activity per call:
+
+```bash
+lore search --preferences --activity pr-bodies
+lore search --preferences --activity human-writing
+```
+
+Hold the title and body against what they print. Write a clean, reviewer-facing PR description. No internal process details — no mentions of agents, workers, skills, knowledge stores, work items, or lore tooling.
 
 **Write for a competent colleague who has never seen this project's internals.** The title and body use shared professional vocabulary — standard terms of art and plain language. The risky words are not the unusual ones; they are ordinary words that acquired a precise project-internal meaning during the work. A cold reader doesn't stumble on those — they glide over them with a confident wrong reading. Any term whose meaning lives only inside this project either gets renamed to shared vocabulary or is defined inline where it first appears, with a line on why existing vocabulary doesn't serve. The same standard applies to commit messages: they are read outside this project's process (git log, release tooling, other teams), so if uncommitted changes are committed in Step 2, write those messages to the same standard.
 
