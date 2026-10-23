@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # auto-reindex.sh — Incrementally reindex knowledge store before session load
 # Called as first SessionStart hook. Silent on success, prints on error.
-# Must complete within 5 seconds (hook timeout).
+# A harness kills it at its SessionStart hook timeout (Claude Code's is set in
+# adapters/hooks/claude-code.sh), leaving the reindex to the next search.
 
 set -euo pipefail
 
