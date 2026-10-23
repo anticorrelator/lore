@@ -601,3 +601,72 @@ assert records[1]['binding']['state'] == 'current'
 assert all(record['receipt']=='unknown' for record in records)
 PY
 }
+
+@test "a task that declares **Activities:** gets a packet led by those preferences in full; an undeclared task does not" {
+  ITEM="$WORK_DIR/activity-pipeline"
+  mkdir -p "$ITEM" "$TEST_KDIR/preferences" "$TEST_KDIR/conventions"
+  printf '%s\n' '# Announce the wake' 'Say what woke you and what you did.' '<!-- learned: 2026-09-01 | confidence: high | scale: subsystem | activity: coordination | status: current -->' > "$TEST_KDIR/preferences/announce.md"
+  printf '%s\n' '# Name the model' 'Every spawn names its model.' '<!-- learned: 2026-09-01 | confidence: high | scale: subsystem | activity: model-routing | status: current -->' > "$TEST_KDIR/preferences/model.md"
+  printf '%s\n' '# Widget boundary' 'The widget boundary preserves identity.' '<!-- learned: 2026-09-01 | confidence: high | scale: subsystem | status: current -->' > "$TEST_KDIR/conventions/widget.md"
+  printf '%s\n' '{"title":"Activity pipeline","status":"active","intent_anchor":"Carry working style to workers."}' > "$ITEM/_meta.json"
+  cat > "$ITEM/plan.md" <<'PLAN'
+# Activity pipeline
+
+## Intent Anchor
+Carry working style to workers.
+
+**Scope delta:** none
+
+## Tasks
+
+**Merge rationale:** One task declares activities and one does not.
+
+### Task 1: Coordinate widgets
+**Deliverable:** Widget coordination.
+**Files:** `src/widget.py`
+**Activities:** coordination, model-routing  <!-- optional -->
+**Retrieval directive:**
+```yaml
+retrieval_directive:
+  version: 2
+  topics:
+    - role: focal
+      topic: "widget boundary"
+      seeds:
+        - "widget"
+      scale_set: [subsystem]
+      limit: 4
+```
+- [ ] Coordinate widgets [class: standard]
+
+### Task 2: Record gadgets
+**Deliverable:** Gadget record.
+**Files:** `src/gadget.py`
+- [ ] Record gadgets [class: mechanical]
+PLAN
+  printf '%s\n' '{"anchor_coverage":{"disposition":"covered","by":"designer","note":"Fixture."},"review_requirement":{"disposition":"not-required","by":"designer","note":"Fixture scope."},"dispatch_decision":{"disposition":"proceed","by":"coordinator","note":"Exercise packet delivery.","task_ids":["task-1","task-2"],"prior_review_refs":[]}}' > "$ITEM/decisions.json"
+  bash "$REPO_DIR/scripts/plan-revise.sh" activity-pipeline --decisions "$ITEM/decisions.json" >/dev/null
+  run bash "$OPEN_SH" activity-pipeline --all --json
+  [ "$status" -eq 0 ]
+  payload > "$BATS_TEST_TMPDIR/payload.json"
+  python3 - "$ITEM/tasks.json" "$TEST_KDIR/_packets/packets.jsonl" "$BATS_TEST_TMPDIR/payload.json" <<'PYEOF'
+import json, sys
+tasks = {t["id"]: t for t in json.load(open(sys.argv[1]))["tasks"]}
+assert tasks["task-1"]["activities"] == ["coordination", "model-routing"]
+assert "activities" not in tasks["task-2"]
+rows = {r["task_id"]: r for r in (json.loads(l) for l in open(sys.argv[2]) if l.strip())}
+first, second = rows["task-1"], rows["task-2"]
+content = first["content"]
+assert content.startswith("## Preferences\n"), content[:120]
+assert "Preferences for coordination (1):\n- Announce the wake\n  Say what woke you and what you did." in content
+assert "Preferences for model-routing (1):\n- Name the model\n  Every spawn names its model." in content
+# The section precedes the assembled body, which still delivers the directive's entry.
+assert content.index("Every spawn names its model.") < content.index("## Prior Knowledge") < content.index("Widget boundary")
+assert first["activities"] == ["coordination", "model-routing"]
+assert [e["path"] for e in first["delivered_entries"]] == ["conventions/widget.md"]
+assert "## Preferences" not in (second.get("content") or "") and "activities" not in second
+payload = json.load(open(sys.argv[3]))
+creates = {op["local_id"]: op for op in payload["manifest"] if op["op"] == "TaskCreate"}
+assert creates["task-1"]["packet_id"] == first["packet_id"]
+PYEOF
+}

@@ -57,7 +57,9 @@
 # task-scope packet row per eligible task appended via the sole-writer
 # packet-append.sh (delivery_stage "assembled"; per-entry trust snapshots from
 # resolve-manifest's --delivery-json sidecar). A legacy append failure warns;
-# a bound append failure stops dispatch.
+# a bound append failure stops dispatch. A task whose tasks.json record lists
+# `activities` gets a `## Preferences` section at the head of its packet
+# content with the full text of the preferences filed under each one.
 # Each TaskCreate manifest entry carries its packet_id so the lead can thread
 # it into the worker Task prompt for dispatch confirmation. With
 # --compiled-positions, compiling the active framework's positions also
@@ -723,7 +725,8 @@ for tid in eligible_ids:
         build_packet(knowledge_dir, row,
                      directive=directive_by_unit.get(unit_key),
                      assembly=(pk_status_by_unit.get(unit_key, {}).get("content") or "", snapshot or {}),
-                     caller="implement-lead")
+                     caller="implement-lead",
+                     activities=task_by_id[tid].get("activities"))
         identity = {key: row.get(key) for key in
                     ("packet_id", "dispatch_attempt_id", "revision_id")}
         taskcreate_by_id[tid].update(identity)
