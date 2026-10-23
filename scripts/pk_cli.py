@@ -201,7 +201,13 @@ def _search_kind_sections(
     )
 
 
-def cmd_search(args: argparse.Namespace) -> None:
+def cmd_search(args: argparse.Namespace, searcher: Searcher | None = None) -> None:
+    searcher = searcher or Searcher(args.knowledge_dir)
+    with searcher.single_index_check():
+        _search(args, searcher)
+
+
+def _search(args: argparse.Namespace, searcher: Searcher) -> None:
     mode = "bm25"
     if getattr(args, "composite", False):
         mode = "composite"
@@ -210,7 +216,6 @@ def cmd_search(args: argparse.Namespace) -> None:
     elif getattr(args, "hybrid", False):
         mode = "hybrid"
 
-    searcher = Searcher(args.knowledge_dir)
     source_type = getattr(args, "type", None)
     category = getattr(args, "category", None)
     exclude_category = getattr(args, "exclude_category", None)
@@ -1098,7 +1103,7 @@ def cmd_resolve_manifest(args: argparse.Namespace) -> None:
 # Argument parsing
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pk-search",
         description="SQLite FTS5 search for lore knowledge stores",
@@ -1241,8 +1246,11 @@ def main() -> None:
     p_stats.add_argument("knowledge_dir", help="Path to knowledge directory")
     p_stats.add_argument("--json", action="store_true", help="Output as JSON")
     p_stats.set_defaults(func=cmd_stats)
+    return parser
 
-    args = parser.parse_args()
+
+def main() -> None:
+    args = build_parser().parse_args()
     args.func(args)
 
 

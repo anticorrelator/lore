@@ -1,5 +1,7 @@
 """Tests for pk_concordance.py — TF-IDF concordance from FTS5 index."""
 
+import builtins
+import io
 import math
 import os
 import sqlite3
@@ -603,6 +605,101 @@ class TestIncrementalReindexWritesOnlyChanges:
 
         assert "full_rebuild" in result["concordance"]
         assert result["concordance"]["vectors_built"] == len(TOPICS)
+
+    def test_reindex_deletes_entry_rows_by_rowid(self, larger_store, traced_statements):
+        _append(larger_store / "conventions" / "entry-05.md", "Also covers eviction.\n")
+        (larger_store / "conventions" / "entry-06.md").unlink()
+        Indexer(str(larger_store)).incremental_index()
+        Indexer(str(larger_store)).index_all()
+
+        deletes = [s for s in traced_statements if s.startswith("DELETE FROM entries ")]
+        assert deletes
+        assert all(s.startswith("DELETE FROM entries WHERE rowid = ") for s in deletes)
+
+
+@pytest.fixture
+def opened_md(monkeypatch):
+    """Paths of every .md file opened through Python's file API."""
+    opened: list[str] = []
+    real_open = io.open
+
+    def recording_open(file, *args, **kwargs):
+        if isinstance(file, (str, os.PathLike)) and os.fspath(file).endswith(".md"):
+            opened.append(os.fspath(file))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(io, "open", recording_open)
+    monkeypatch.setattr(builtins, "open", recording_open)
+    return opened
+
+
+class TestStructuralImportanceReadsOnlyChangedFiles:
+
+    def test_unchanged_store_reads_no_files(self, larger_store, opened_md):
+        idx = Indexer(str(larger_store))
+        conn = idx._connect()
+        importance = idx._compute_structural_importance(conn)
+        conn.close()
+
+        assert opened_md == []
+        assert importance[(str(larger_store / "conventions" / "entry-00.md"), "Entry 00")]["explicit"] == 9
+
+    def test_content_edit_reads_only_the_edited_file(self, larger_store, opened_md):
+        edited = larger_store / "conventions" / "entry-05.md"
+        _append(edited, "Also covers eviction.\n")
+        Indexer(str(larger_store)).incremental_index()
+
+        assert set(opened_md) == {str(edited)}
+
+    def test_stored_links_for_other_content_are_not_used(self, larger_store, opened_md):
+        linking = larger_store / "conventions" / "entry-03.md"
+        idx = Indexer(str(larger_store))
+        conn = idx._connect()
+        conn.execute(
+            "UPDATE file_backlinks SET content_hash = 'other', backlinks = '[]' WHERE file_path = ?",
+            (str(linking),),
+        )
+        importance = idx._compute_structural_importance(conn)
+        conn.close()
+
+        assert opened_md == [str(linking)]
+        assert importance[(str(larger_store / "conventions" / "entry-00.md"), "Entry 00")]["explicit"] == 9
+
+    def test_work_file_links_count_as_the_whole_file_reads(self, tmp_path):
+        """Entry content loses a (the preamble) and b (a heading line), and would
+        count d, which sits inside an inline code span that crosses a heading."""
+        kd = tmp_path / "knowledge"
+        conv = kd / "conventions"
+        conv.mkdir(parents=True)
+        for name in "abcd":
+            (conv / f"entry-{name}.md").write_text(f"# Entry {name.upper()}\nAbout {name}.\n", encoding="utf-8")
+        work = kd / "_work" / "item"
+        work.mkdir(parents=True)
+        (work / "plan.md").write_text(
+            "# Plan\nPreamble cites [[knowledge:conventions/entry-a]].\n\n"
+            "### See [[knowledge:conventions/entry-b]]\n"
+            "Body with `one backtick span\n"
+            "### Next\n"
+            "continued` and [[knowledge:conventions/entry-c]].\n"
+            "### Code\n"
+            "text `code start\n"
+            "### Inside\n"
+            "[[knowledge:conventions/entry-d]] end` more\n",
+            encoding="utf-8",
+        )
+        idx = Indexer(str(kd))
+        idx.index_all()
+
+        conn = idx._connect()
+        stored = idx._compute_structural_importance(conn)
+        conn.execute("DELETE FROM file_backlinks")
+        from_disk = idx._compute_structural_importance(conn)
+        conn.close()
+
+        assert stored == from_disk
+        assert {key[1]: info["importance"] for key, info in stored.items()} == {
+            "Entry A": 1.0, "Entry B": 1.0, "Entry C": 1.0, "Entry D": 0.0,
+        }
 
 
 # ---------------------------------------------------------------------------

@@ -1081,6 +1081,73 @@ class TestAutoReindex:
         assert results[0]["heading"] == "Quantum Computing"
 
 
+class TestOneIndexCheckPerCommand:
+    """A command checks the index once however many searches it runs: the
+    check stats every indexed file, and the kind sections alone run four."""
+
+    @pytest.fixture
+    def store(self, knowledge_dir):
+        (knowledge_dir / "architecture" / "retry-routing.md").write_text(
+            "# Retry Routing\nHow retries travel between the sidecars of the mesh.\n"
+            "<!-- learned: 2025-01-01 | confidence: high | scale: architecture | kind: theory | subsystem: mesh -->\n",
+            encoding="utf-8",
+        )
+        # Outranks the theory entry, so the theory reaches its section rather
+        # than the one ranked result these searches ask for.
+        (knowledge_dir / "architecture" / "mesh-sidecars.md").write_text(
+            "# Mesh Sidecars\nEvery service in the service mesh runs an Envoy sidecar; the mesh owns retries.\n"
+            "<!-- learned: 2025-01-01 | confidence: high | scale: architecture -->\n",
+            encoding="utf-8",
+        )
+        Indexer(str(knowledge_dir)).index_all()
+        return knowledge_dir
+
+    @pytest.fixture
+    def stale_checks(self, monkeypatch):
+        calls = []
+        original = Indexer.get_stale_files
+
+        def counted(self):
+            calls.append(self.knowledge_dir)
+            return original(self)
+
+        monkeypatch.setattr(Indexer, "get_stale_files", counted)
+        return calls
+
+    def test_search_with_kind_sections_checks_once(self, store, stale_checks, capsys):
+        import pk_cli
+
+        args = pk_cli.build_parser().parse_args(
+            ["search", str(store), "service mesh", "--scale-set", "architecture", "--limit", "1"]
+        )
+        pk_cli.cmd_search(args)
+
+        assert "### Theory" in capsys.readouterr().out
+        assert len(stale_checks) == 1
+
+    def test_all_types_search_checks_once(self, store, stale_checks, capsys):
+        import pk_work_search
+
+        status = pk_work_search.search_all(
+            "auth", ["search", str(store), "mesh", "--scale-set", "architecture", "--limit", "1"]
+        )
+
+        out = capsys.readouterr().out
+        assert status == 0
+        assert "### Theory" in out and "=== End Work Search ===" in out
+        assert len(stale_checks) == 1
+
+    def test_each_search_checks_outside_a_block(self, store, stale_checks):
+        searcher = Searcher(str(store))
+        with searcher.single_index_check():
+            searcher.search("mesh")
+            searcher.search("retries")
+        searcher.search("mesh")
+        searcher.search("retries")
+
+        assert len(stale_checks) == 3
+
+
 # ---------------------------------------------------------------------------
 # Resolver Tests
 # ---------------------------------------------------------------------------
