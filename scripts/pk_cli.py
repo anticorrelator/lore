@@ -424,10 +424,12 @@ def _search(args: argparse.Namespace, searcher: Searcher) -> None:
 
 
 def cmd_list_preferences(args: argparse.Namespace) -> None:
-    """List preferences by activity: every live entry under one, or the index.
+    """List preferences by activity: every live entry under each named, or the index.
 
     Not a search: nothing is ranked or cut, so an activity with no entry
     answers "none filed". Its own shape, apart from search_preferences().
+    Every name is checked before anything prints, so an unknown one among
+    several leaves stdout empty.
     """
     import pk_activities
 
@@ -439,19 +441,23 @@ def cmd_list_preferences(args: argparse.Namespace) -> None:
             sys.stdout.write(pk_activities.render_index(groups))
         return
 
+    listings = {}
     try:
-        group = pk_activities.entries(args.knowledge_dir, args.activity)
+        for value in args.activity:
+            for raw in pk_activities.split_value(value) or [value]:
+                group = pk_activities.entries(args.knowledge_dir, raw)
+                listings.setdefault(pk_activities.canonical(raw), group)
     except pk_activities.UnknownActivity as exc:
         if args.json:
             print(json.dumps({"error": str(exc), "known": exc.known}), file=sys.stderr)
         else:
             print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
-    name = pk_activities.canonical(args.activity)
     if args.json:
-        print(json.dumps({"activity": name, "count": len(group), "entries": group}, indent=2))
+        objects = [{"activity": name, "count": len(group), "entries": group} for name, group in listings.items()]
+        print(json.dumps(objects[0] if len(objects) == 1 else objects, indent=2))
     else:
-        sys.stdout.write(pk_activities.render_listing(name, group))
+        sys.stdout.write("\n".join(pk_activities.render_listing(name, group) for name, group in listings.items()))
 
 
 def cmd_search_preferences(args: argparse.Namespace) -> None:
@@ -1206,7 +1212,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_pref.add_argument("knowledge_dir", help="Path to knowledge directory")
     p_pref.add_argument("query", nargs="?", default=None, help="Search query (omit with --activity or --activities)")
     p_pref_list = p_pref.add_mutually_exclusive_group()
-    p_pref_list.add_argument("--activity", default=None, metavar="NAME", help="List every live preference filed under this activity, in full")
+    p_pref_list.add_argument(
+        "--activity", action="append", default=None, metavar="NAME",
+        help="List every live preference filed under this activity, in full. Repeat the flag, or separate "
+             "names with commas, to list several in turn; --json then prints a list of the per-activity objects",
+    )
     p_pref_list.add_argument("--activities", action="store_true", help="List each activity with its count of live preferences")
     p_pref.add_argument("--json", action="store_true", help="Output as JSON (flat list, same shape as `search --json`)")
     p_pref.add_argument("--caller", default=None, help="Caller identifier logged to retrieval log")

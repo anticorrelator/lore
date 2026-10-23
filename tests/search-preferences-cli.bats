@@ -6,6 +6,7 @@
 #   - --activity lists every live entry under the name in full (title line,
 #     body, store-relative path), in filename order, ending with the count;
 #     no query positional is needed, and both spellings of the flag parse.
+#   - a repeated --activity, or a comma list, lists each name in turn.
 #   - --activities prints `<name> (<count>)` per line, untagged included.
 #   - --json parses for both, and a query search keeps its flat list.
 #   - an unknown name exits non-zero with the known names on stderr.
@@ -78,6 +79,45 @@ Preferences for coordination: 2 entries."
   run_search --preferences --activity general
   [ "$status" -eq 0 ]
   [ "$output" = "Preferences for general: none filed." ]
+}
+
+@test "a repeated --activity lists each named activity in turn, the same as a comma list" {
+  run_search --preferences --activity model-routing --activity general
+  [ "$status" -eq 0 ]
+  expected="# Arcs price themselves before they run
+Coordinators surface projected spend at arc open.
+path: preferences/a-cost.md
+
+# Every role routes to one model
+Routing is uniform for now.
+path: preferences/c-routing.md
+
+Preferences for model-routing: 2 entries.
+
+Preferences for general: none filed."
+  [ "$output" = "$expected" ]
+  run_search --preferences --activity "model-routing, general"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$expected" ]
+  run_search --preferences --activity model-routing --activity general --activity Model-Routing
+  [ "$status" -eq 0 ]
+  [ "$output" = "$expected" ]
+}
+
+@test "an unknown name among several prints nothing on stdout and exits non-zero" {
+  run env LORE_KNOWLEDGE_DIR="$TEST_STORE" bash -c '"$0" search --preferences --activity coordination --activity nope 2>/dev/null' "$LORE"
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+}
+
+@test "several activities under --json parse as a list of the per-activity objects" {
+  run env LORE_KNOWLEDGE_DIR="$TEST_STORE" bash "$LORE" search --preferences --activity coordination --activity model-routing --json
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | python3 -c '
+import json, sys
+d = json.loads(sys.stdin.read())
+assert [(o["activity"], o["count"]) for o in d] == [("coordination", 2), ("model-routing", 2)], d
+'
 }
 
 @test "--activities prints the index, untagged included and retired excluded" {
