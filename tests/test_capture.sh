@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_capture.sh — Tests for capture.sh (direct-to-category knowledge capture)
+# test_capture.sh — Tests for capture.sh (one entry file per capture, filed under its category)
 # Creates a temporary knowledge store and tests capture.sh against it.
 
 set -euo pipefail
@@ -83,15 +83,16 @@ assert_file_not_contains() {
 }
 
 # --- Setup test knowledge store ---
+# capture.sh treats a directory with _manifest.json as an initialized store.
 setup_knowledge_store() {
   rm -rf "$KNOWLEDGE_DIR"
   mkdir -p "$KNOWLEDGE_DIR"
+  echo '{}' > "$KNOWLEDGE_DIR/_manifest.json"
+}
 
-  cat > "$KNOWLEDGE_DIR/_index.md" << 'EOF'
-# Project Knowledge Index
-
-- conventions.md — Coding conventions
-EOF
+# Every capture declares its scale; the provenance pair keeps the warning off stderr.
+capture() {
+  bash "$SCRIPT_DIR/capture.sh" --producer-role worker --protocol-slot test "$@"
 }
 
 # --- Override resolve-repo.sh to point at test directory ---
@@ -101,55 +102,59 @@ echo "=== Capture Tests ==="
 echo ""
 
 # =============================================
-# Test 1: Basic happy path — insight written to correct category file
+# Test 1: Basic happy path — insight written to its own file under the category
 # =============================================
-echo "Test 1: Basic happy path — writes to conventions.md"
+echo "Test 1: Basic happy path — writes conventions/<slug>.md"
 setup_knowledge_store
 
-OUTPUT=$(bash "$SCRIPT_DIR/capture.sh" --insight "Use snake_case for database column names" --category "conventions" 2>&1)
-assert_contains "output confirms filing" "$OUTPUT" '[capture] Filed to conventions:'
-assert_file_exists "conventions.md created" "$KNOWLEDGE_DIR/conventions.md"
-assert_file_contains "insight text in file" "$KNOWLEDGE_DIR/conventions.md" "Use snake_case for database column names"
-assert_file_contains "entry has ### heading" "$KNOWLEDGE_DIR/conventions.md" "### "
-assert_file_contains "entry has HTML comment" "$KNOWLEDGE_DIR/conventions.md" "<!-- learned:"
-assert_file_contains "HTML comment has confidence" "$KNOWLEDGE_DIR/conventions.md" "confidence: high"
-assert_file_contains "HTML comment has source" "$KNOWLEDGE_DIR/conventions.md" "source: capture"
+OUTPUT=$(capture --insight "Use snake_case for database column names" --category "conventions" --scale implementation 2>&1)
+ENTRY="$KNOWLEDGE_DIR/conventions/use-snake-case-database-column-names.md"
+assert_contains "output confirms filing" "$OUTPUT" '[capture] Filed to conventions/use-snake-case-database-column-names.md'
+assert_file_exists "entry file created" "$ENTRY"
+assert_file_contains "insight text in file" "$ENTRY" "Use snake_case for database column names"
+assert_file_contains "entry has an H1 title" "$ENTRY" "# Use Snake_case For Database Column Names"
+assert_file_contains "entry has metadata comment" "$ENTRY" "<!-- learned:"
+assert_file_contains "metadata has confidence" "$ENTRY" "confidence: high"
+assert_file_contains "metadata has source" "$ENTRY" "source: manual"
+assert_file_contains "metadata has scale" "$ENTRY" "scale: implementation"
+assert_file_contains "metadata has kind" "$ENTRY" "kind: fact"
+assert_file_contains "metadata has status" "$ENTRY" "status: current -->"
+assert_file_not_contains "no activity field outside preferences" "$ENTRY" "activity:"
+assert_not_contains "no preference block outside preferences" "$OUTPUT" "Preferences for"
 
 # =============================================
-# Test 2: Title generation — first ~8 words, title-cased
+# Test 2: Title generation — first eight words, title-cased
 # =============================================
 echo ""
-echo "Test 2: Title generation — first ~8 words, title-cased"
+echo "Test 2: Title generation — first eight words, title-cased"
 setup_knowledge_store
 
-bash "$SCRIPT_DIR/capture.sh" --insight "the api rate limiter uses a sliding window algorithm for throttling" --category "conventions" > /dev/null 2>&1
-CONTENT=$(cat "$KNOWLEDGE_DIR/conventions.md")
-# First ~8 words: "the api rate limiter uses a sliding window"
-# Title-cased: "The Api Rate Limiter Uses A Sliding Window"
-assert_contains "title has title-cased words" "$CONTENT" "### The"
-assert_contains "title contains early words" "$CONTENT" "Rate Limiter"
-# The 9th word "algorithm" should not be in the title (only ~8 words)
-# But the full insight should appear in the body
+capture --insight "the api rate limiter uses a sliding window algorithm for throttling" --category "conventions" --scale implementation > /dev/null 2>&1
+ENTRY=$(ls "$KNOWLEDGE_DIR/conventions/"*.md | head -1)
+CONTENT=$(cat "$ENTRY")
+assert_contains "title is the first eight words, title-cased" "$CONTENT" "# The Api Rate Limiter Uses A Sliding Window"
+assert_not_contains "the ninth word is not in the title" "$(head -1 "$ENTRY")" "Algorithm"
 assert_contains "body has full insight text" "$CONTENT" "the api rate limiter uses a sliding window algorithm for throttling"
 
 # =============================================
-# Test 3: Entry format — ### Title + body + HTML comment
+# Test 3: --title, --confidence and a different category
 # =============================================
 echo ""
-echo "Test 3: Entry format — ### Title + body + HTML comment"
+echo "Test 3: --title, --confidence and the gotchas category"
 setup_knowledge_store
 
-bash "$SCRIPT_DIR/capture.sh" \
+capture \
   --insight "Redis cache entries expire after 1 hour by default" \
+  --title "Redis cache entries expire after an hour" \
   --category "gotchas" \
-  --confidence "medium" > /dev/null 2>&1
+  --confidence "medium" \
+  --scale subsystem > /dev/null 2>&1
 
-assert_file_exists "gotchas.md created" "$KNOWLEDGE_DIR/gotchas.md"
-CONTENT=$(cat "$KNOWLEDGE_DIR/gotchas.md")
-assert_contains "has ### heading" "$CONTENT" "### "
-assert_contains "has insight body" "$CONTENT" "Redis cache entries expire after 1 hour by default"
-assert_contains "has HTML comment with date" "$CONTENT" "<!-- learned:"
-assert_contains "has confidence in comment" "$CONTENT" "confidence: medium"
+ENTRY="$KNOWLEDGE_DIR/gotchas/redis-cache-entries-expire-hour.md"
+assert_file_exists "gotchas entry created" "$ENTRY"
+assert_file_contains "H1 is the given title" "$ENTRY" "# Redis cache entries expire after an hour"
+assert_file_contains "has insight body" "$ENTRY" "Redis cache entries expire after 1 hour by default"
+assert_file_contains "has confidence in comment" "$ENTRY" "confidence: medium"
 
 # =============================================
 # Test 4: Default category — missing --category defaults to conventions
@@ -158,166 +163,104 @@ echo ""
 echo "Test 4: Default category — omitting --category → conventions"
 setup_knowledge_store
 
-OUTPUT=$(bash "$SCRIPT_DIR/capture.sh" --insight "Always validate user input at the boundary" 2>&1)
-assert_contains "output shows conventions" "$OUTPUT" "Filed to conventions"
-assert_file_exists "conventions.md exists" "$KNOWLEDGE_DIR/conventions.md"
-assert_file_contains "insight in conventions file" "$KNOWLEDGE_DIR/conventions.md" "Always validate user input at the boundary"
+OUTPUT=$(capture --insight "Always validate user input at the boundary" --scale implementation 2>&1)
+assert_contains "output shows conventions" "$OUTPUT" "Filed to conventions/"
+assert_file_contains "insight in a conventions entry" "$KNOWLEDGE_DIR/conventions/always-validate-user-input-at-boundary.md" \
+  "Always validate user input at the boundary"
 
 # =============================================
-# Test 5: New category file creation — non-existent category creates file with heading
-# =============================================
-echo ""
-echo "Test 5: New category file — creates with # Heading"
-setup_knowledge_store
-
-bash "$SCRIPT_DIR/capture.sh" --insight "Deploy requires a VPN connection" --category "workflows" > /dev/null 2>&1
-assert_file_exists "workflows.md created" "$KNOWLEDGE_DIR/workflows.md"
-assert_file_contains "file starts with # heading" "$KNOWLEDGE_DIR/workflows.md" "# Workflows"
-assert_file_contains "insight appended" "$KNOWLEDGE_DIR/workflows.md" "Deploy requires a VPN connection"
-
-# =============================================
-# Test 6: Hyphenated category name — heading has spaces and title case
+# Test 5: Nested category — domains/<topic> creates the directory
 # =============================================
 echo ""
-echo "Test 6: Hyphenated category name → heading with spaces"
+echo "Test 5: Nested category — domains/evaluators"
 setup_knowledge_store
 
-bash "$SCRIPT_DIR/capture.sh" --insight "Use structured logging everywhere" --category "error-handling" > /dev/null 2>&1
-assert_file_exists "error-handling.md created" "$KNOWLEDGE_DIR/error-handling.md"
-assert_file_contains "heading is title-cased with spaces" "$KNOWLEDGE_DIR/error-handling.md" "# Error Handling"
+capture --insight "Evaluators use template-method pattern" --category "domains/evaluators" --scale subsystem > /dev/null 2>&1
+ENTRY="$KNOWLEDGE_DIR/domains/evaluators/evaluators-use-template-method-pattern.md"
+assert_file_exists "entry created under domains/evaluators/" "$ENTRY"
+assert_file_contains "insight written" "$ENTRY" "Evaluators use template-method pattern"
 
 # =============================================
-# Test 7: domains/ path — --category "domains/my-topic" creates under domains/
+# Test 6: Two-label scale is written in top-to-bottom order
 # =============================================
 echo ""
-echo "Test 7: domains/ path — creates file under domains/"
+echo "Test 6: Two adjacent scale labels are normalized"
 setup_knowledge_store
 
-bash "$SCRIPT_DIR/capture.sh" --insight "Evaluators use template-method pattern" --category "domains/evaluators" > /dev/null 2>&1
-assert_file_exists "domains dir created" "$KNOWLEDGE_DIR/domains/evaluators.md"
-assert_file_contains "heading is topic name" "$KNOWLEDGE_DIR/domains/evaluators.md" "# Evaluators"
-assert_file_contains "insight appended" "$KNOWLEDGE_DIR/domains/evaluators.md" "Evaluators use template-method pattern"
+capture --insight "Scale pairs are ordered" --category conventions --scale "implementation,subsystem" > /dev/null 2>&1
+assert_file_contains "pair written top-to-bottom" "$KNOWLEDGE_DIR/conventions/scale-pairs-are-ordered.md" "scale: subsystem,implementation"
 
 # =============================================
-# Test 8: --no-file flag — writes to _inbox/ instead
+# Test 7: Missing --insight and missing --scale produce errors
 # =============================================
 echo ""
-echo "Test 8: --no-file flag — writes to _inbox/"
+echo "Test 7: Missing --insight or --scale → error"
 setup_knowledge_store
 
-OUTPUT=$(bash "$SCRIPT_DIR/capture.sh" --insight "Something uncertain that needs review" --no-file 2>&1)
-assert_contains "output mentions inbox" "$OUTPUT" "Inbox entry created"
-
-# Check that an inbox file was created
-INBOX_FILES=$(ls "$KNOWLEDGE_DIR/_inbox/"*.md 2>/dev/null | wc -l | tr -d ' ')
-if [[ "$INBOX_FILES" -ge 1 ]]; then
-  echo "  PASS: inbox file created"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL: no inbox file found"
-  FAIL=$((FAIL + 1))
-fi
-
-# Check inbox file content
-INBOX_FILE=$(ls "$KNOWLEDGE_DIR/_inbox/"*.md 2>/dev/null | head -1)
-if [[ -n "$INBOX_FILE" ]]; then
-  assert_file_contains "inbox has insight" "$INBOX_FILE" "Something uncertain that needs review"
-  assert_file_contains "inbox has suggested category" "$INBOX_FILE" "Suggested category:"
-  assert_file_contains "inbox has confidence" "$INBOX_FILE" "Confidence:"
-fi
-
-# Verify it did NOT write to a category file
-assert_file_not_contains "conventions.md untouched" "$KNOWLEDGE_DIR/conventions.md" "Something uncertain" 2>/dev/null || true
-
-# =============================================
-# Test 9: --no-file uses default category in inbox entry
-# =============================================
-echo ""
-echo "Test 9: --no-file with --category sets suggested category in inbox"
-setup_knowledge_store
-
-bash "$SCRIPT_DIR/capture.sh" --insight "Consider using connection pooling" --no-file --category "architecture" > /dev/null 2>&1
-INBOX_FILE=$(ls -t "$KNOWLEDGE_DIR/_inbox/"*.md 2>/dev/null | head -1)
-if [[ -n "$INBOX_FILE" ]]; then
-  assert_file_contains "inbox has architecture category" "$INBOX_FILE" "architecture"
-else
-  echo "  FAIL: no inbox file found"
-  FAIL=$((FAIL + 1))
-fi
-
-# =============================================
-# Test 10: Missing --insight flag produces error
-# =============================================
-echo ""
-echo "Test 10: Missing --insight flag → error"
-setup_knowledge_store
-
-OUTPUT=$(bash "$SCRIPT_DIR/capture.sh" --category "conventions" 2>&1 || true)
+OUTPUT=$(capture --category "conventions" --scale implementation 2>&1 || true)
 assert_contains "error about missing insight" "$OUTPUT" "--insight is required"
+OUTPUT=$(capture --insight "No scale given" --category "conventions" 2>&1 || true)
+assert_contains "error about missing scale" "$OUTPUT" "--scale is required"
+if [[ -d "$KNOWLEDGE_DIR/conventions" ]]; then
+  echo "  FAIL: nothing should be filed without --insight or --scale"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS: nothing filed without --insight or --scale"
+  PASS=$((PASS + 1))
+fi
 
 # =============================================
-# Test 11: Appending to existing category file
+# Test 8: Unknown flags are refused with the usage line
 # =============================================
 echo ""
-echo "Test 11: Appending to existing category file"
+echo "Test 8: Unknown flag → usage"
 setup_knowledge_store
 
-# Create an existing conventions.md with content
-cat > "$KNOWLEDGE_DIR/conventions.md" << 'EOF'
-# Conventions
-
-### Existing Entry
-Some existing content.
-EOF
-
-bash "$SCRIPT_DIR/capture.sh" --insight "New naming convention for tests" --category "conventions" > /dev/null 2>&1
-assert_file_contains "original content preserved" "$KNOWLEDGE_DIR/conventions.md" "Existing Entry"
-assert_file_contains "new insight appended" "$KNOWLEDGE_DIR/conventions.md" "New naming convention for tests"
+OUTPUT=$(capture --insight "x" --scale implementation --no-file 2>&1 || true)
+assert_contains "unknown argument named" "$OUTPUT" "Unknown argument: --no-file"
+assert_contains "usage line printed" "$OUTPUT" "Usage: capture.sh --insight"
 
 # =============================================
-# Test 12: No knowledge store → error
+# Test 9: No knowledge store → error
 # =============================================
 echo ""
-echo "Test 12: No knowledge store → error"
+echo "Test 9: No knowledge store → error"
 rm -rf "$KNOWLEDGE_DIR"
 mkdir -p "$KNOWLEDGE_DIR"
-# Don't create _index.md
+# No _manifest.json
 
-OUTPUT=$(bash "$SCRIPT_DIR/capture.sh" --insight "This should fail" 2>&1 || true)
+OUTPUT=$(capture --insight "This should fail" --scale implementation 2>&1 || true)
 assert_contains "error about missing knowledge store" "$OUTPUT" "No knowledge store found"
 
 # =============================================
-# Test 13: Slug length cap — dedup collision keeps stems ≤ 60 chars
+# Test 10: Slug length cap — dedup collision keeps stems within MAX_SLUG_LENGTH
 # =============================================
 echo ""
-echo "Test 13: Slug length cap — dedup keeps stems ≤ 60 chars"
+echo "Test 10: Slug length cap — dedup keeps stems ≤ 50 chars"
 setup_knowledge_store
-
-# Create _manifest.json so capture.sh passes its existence check
-echo '{}' > "$KNOWLEDGE_DIR/_manifest.json"
 
 LONG_INSIGHT="authentication authorization infrastructure configuration implementation deployment environment management"
 
 # First capture — creates the base slug file
-bash "$SCRIPT_DIR/capture.sh" --insight "$LONG_INSIGHT" --category "conventions" > /dev/null 2>&1
+capture --insight "$LONG_INSIGHT" --category "conventions" --scale implementation > /dev/null 2>&1
 
 # Second capture — triggers dedup, should trim slug before appending suffix
-bash "$SCRIPT_DIR/capture.sh" --insight "$LONG_INSIGHT" --category "conventions" > /dev/null 2>&1
+capture --insight "$LONG_INSIGHT" --category "conventions" --scale implementation > /dev/null 2>&1
 
-# Assert all file stems in the conventions dir are ≤ 60 chars
+# Assert all file stems in the conventions dir are ≤ 50 chars
 ALL_WITHIN_LIMIT=1
 for f in "$KNOWLEDGE_DIR/conventions/"*.md; do
   [[ -f "$f" ]] || continue
   stem=$(basename "$f" .md)
-  if [[ ${#stem} -gt 60 ]]; then
-    echo "  FAIL: stem exceeds 60 chars: '$stem' (${#stem} chars)"
+  if [[ ${#stem} -gt 50 ]]; then
+    echo "  FAIL: stem exceeds 50 chars: '$stem' (${#stem} chars)"
     ALL_WITHIN_LIMIT=0
     FAIL=$((FAIL + 1))
   fi
 done
 
 if [[ $ALL_WITHIN_LIMIT -eq 1 ]]; then
-  echo "  PASS: all file stems ≤ 60 chars"
+  echo "  PASS: all file stems ≤ 50 chars"
   PASS=$((PASS + 1))
 fi
 
@@ -330,6 +273,17 @@ else
   echo "  FAIL: expected ≥ 2 files, got $FILE_COUNT"
   FAIL=$((FAIL + 1))
 fi
+
+# =============================================
+# Test 11: --json prints one object naming the filed entry
+# =============================================
+echo ""
+echo "Test 11: --json output"
+setup_knowledge_store
+
+OUTPUT=$(capture --insight "JSON output names the entry" --category conventions --scale implementation --json 2>/dev/null)
+PARSED=$(printf '%s' "$OUTPUT" | python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); print(d["path"], d["category"])')
+assert_contains "JSON names path and category" "$PARSED" "conventions/json-output-names-entry.md conventions"
 
 # =============================================
 # Summary
