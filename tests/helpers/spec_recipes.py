@@ -582,8 +582,9 @@ def exercise_entry(f):
     norm_paths = []
     for category, insight in norm_inputs:
         before = knowledge_entries(f)
+        activity = ("--activity", "general") if category == "preferences" else ()
         f.lore("capture", "--insight", insight, "--category", category, "--scale", "implementation",
-               "--producer-role", "spec-lead", "--work-item", "recipes")
+               *activity, "--producer-role", "spec-lead", "--work-item", "recipes")
         added = knowledge_entries(f) - before
         assert len(added) == 1
         norm_paths.append(added.pop())
