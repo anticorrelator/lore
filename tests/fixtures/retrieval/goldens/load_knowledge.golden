@@ -7,7 +7,9 @@ Scale declaration required for `lore search` and `lore prefetch` — use `--scal
 **principles/** (1 entries)
 **workflows/** (1 entries)
 **conventions/** (2 entries)
-**preferences/** (1 entries)
+**preferences/** (1 entries), by activity:
+  general (0) — titles only; lore search --preferences --activity general
+  untagged (1) — titles only; lore search --preferences --activity untagged
 **architecture/** (1 entries)
 **gotchas/** (1 entries)
 **domains/** (1 files, lazy-loaded)

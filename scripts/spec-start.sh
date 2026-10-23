@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # spec-start.sh — Read-only /spec startup assembly.
+#
+# After the start struct it prints, in full, the preferences filed under
+# work-scoping through render-preferences.sh: on stdout, or on stderr under
+# --json so stdout stays one JSON value.
 
 set -euo pipefail
 
@@ -18,6 +22,10 @@ Usage: lore spec start <input> [--branch <name>] [--model <name>] [--short] [--j
 
 Assemble the read-only state needed to choose the next /spec branch. A
 previously unseen input returns resolved=false; an ambiguous input exits 2.
+
+It ends by printing, in full, the project's preferences for work-scoping: the
+working style this project has accumulated for scoping work. They go to
+stdout, or to stderr under --json.
 EOF
 }
 
@@ -234,4 +242,10 @@ else:
     print(f"Framework: {d['active_framework']}  Lead model: {d['effective_lead_model']}")
     print(f"Strategy present: {str(d['strategy_present']).lower()}")
 PY
+fi
+
+PREFS_FD=1
+[[ $JSON_MODE -eq 1 ]] && PREFS_FD=2
+if PREFS_TEXT="$("$SCRIPT_DIR/render-preferences.sh" --kdir "$KDIR" --command "spec start")"; then
+  printf '\n%s\n' "$PREFS_TEXT" >&"$PREFS_FD"
 fi

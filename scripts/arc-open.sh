@@ -26,6 +26,10 @@
 # asked for; watcher hygiene does not get a veto over it. Every outcome the
 # block reports goes to stderr, clear of the --json contract on stdout, and
 # every path that does not arm prints the command that would.
+#
+# Last, it prints the preferences filed under the activities opening an arc
+# starts (coordination and model-routing), in full, through
+# render-preferences.sh: on stdout, or on stderr under --json.
 
 set -euo pipefail
 
@@ -45,6 +49,10 @@ new arc, into the repository's project-local harness settings file
 (`.claude/settings.local.json` on Claude Code). `lore arc close` records that
 exact path and switches only this watcher identity off again. Other watcher
 identities in the same file remain intact.
+
+It ends by printing, in full, the project's preferences for coordination and
+model-routing: the working style this project has accumulated for those
+activities. They go to stdout, or to stderr under --json.
 
 Options:
   --title <title>    What the arc is about. The slug is derived from it.
@@ -335,12 +343,20 @@ record = envelope["record"]
 record["path"] = sys.argv[1]
 print(json.dumps(record, indent=2))
 ' "$RELATIVE_PATH"
-  exit 0
+else
+  echo "[arc] Opened: $SLUG ($TITLE)"
+  echo "  path:   $RELATIVE_PATH"
+  echo "  ledger: $RELATIVE_PATH/coordination.md"
+  if [[ $HAS_PROJECT -eq 1 ]]; then
+    echo "  project: $PROJECT"
+  fi
 fi
 
-echo "[arc] Opened: $SLUG ($TITLE)"
-echo "  path:   $RELATIVE_PATH"
-echo "  ledger: $RELATIVE_PATH/coordination.md"
-if [[ $HAS_PROJECT -eq 1 ]]; then
-  echo "  project: $PROJECT"
+# The preferences for what opening an arc starts. Under --json they go to
+# stderr so stdout stays one JSON value; a failure to render them is reported
+# by the renderer and does not fail the open.
+PREFS_FD=1
+[[ $JSON_MODE -eq 1 ]] && PREFS_FD=2
+if PREFS_TEXT="$("$SCRIPT_DIR/render-preferences.sh" --kdir "$KNOWLEDGE_DIR" --command "arc open")"; then
+  printf '\n%s\n' "$PREFS_TEXT" >&"$PREFS_FD"
 fi

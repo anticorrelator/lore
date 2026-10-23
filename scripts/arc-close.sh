@@ -6,6 +6,9 @@
 # Closure is the coordinator's decision, so it is recorded rather than inferred
 # from what is on disk. A missing report.md is called out loudly and does not
 # stop the close.
+#
+# Last, it prints the preferences filed under human-writing, in full, through
+# render-preferences.sh: on stdout, or on stderr under --json.
 
 set -euo pipefail
 
@@ -19,6 +22,10 @@ Usage:
 
 Records the arc as closed and stamps its closure time. Closing an already-closed
 arc leaves the recorded closure time alone.
+
+It ends by printing, in full, the project's preferences for human-writing: the
+working style this project has accumulated for prose people read, such as the
+arc's report. They go to stdout, or to stderr under --json.
 
 Options:
   --json             Emit the updated record as JSON.
@@ -252,12 +259,21 @@ if [[ $JSON_MODE -eq 1 ]]; then
 import json, sys
 print(json.dumps(json.load(sys.stdin)["record"], indent=2))
 '
-  exit 0
-fi
-
-printf '%s' "$ENVELOPE" | python3 -c '
+else
+  printf '%s' "$ENVELOPE" | python3 -c '
 import json, sys
 record = json.load(sys.stdin)["record"]
 print("[arc] Closed: %s (%s)" % (record["slug"], record.get("title") or "untitled"))
 print("  closed_at: %s" % (record.get("closed_at") or "unrecorded"))
 '
+fi
+
+# The preferences for what closing an arc starts: the report is written for
+# people. Under --json they go to stderr so stdout stays one JSON value; a
+# failure to render them is reported by the renderer and does not fail the
+# close.
+PREFS_FD=1
+[[ $JSON_MODE -eq 1 ]] && PREFS_FD=2
+if PREFS_TEXT="$("$SCRIPT_DIR/render-preferences.sh" --kdir "$KNOWLEDGE_DIR" --command "arc close")"; then
+  printf '\n%s\n' "$PREFS_TEXT" >&"$PREFS_FD"
+fi

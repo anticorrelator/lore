@@ -48,11 +48,19 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$REF" ]] || { usage; fail "missing required argument: <ref>"; }
 
+# spec start prints its preferences block on stderr under --json, so only its
+# stdout is the JSON; stderr is relayed when it fails.
+START_ERR=$(mktemp)
 set +e
-START_STATE=$(bash "$SCRIPT_DIR/spec-start.sh" "$REF" --json 2>&1)
+START_STATE=$(bash "$SCRIPT_DIR/spec-start.sh" "$REF" --json 2>"$START_ERR")
 RESOLVE_RC=$?
 set -e
-if [[ $RESOLVE_RC -ne 0 ]]; then printf '%s\n' "$START_STATE" >&2; exit "$RESOLVE_RC"; fi
+if [[ $RESOLVE_RC -ne 0 ]]; then
+  { printf '%s\n' "$START_STATE"; cat "$START_ERR"; } >&2
+  rm -f "$START_ERR"
+  exit "$RESOLVE_RC"
+fi
+rm -f "$START_ERR"
 if [[ "$(jq -r '.resolved' <<<"$START_STATE")" != "true" ]]; then
   fail "no work item matches reference '$REF'"
 fi
