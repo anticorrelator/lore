@@ -31,7 +31,9 @@
 # explanatory status (all-blocked | all-complete), not an error.
 #
 # Packet rows describe the returned context; the execution log retains one
-# attribution row (source: impl-verb).
+# attribution row (source: impl-verb). A task whose tasks.json record lists
+# `activities` gets a `## Preferences` section at the head of its packet
+# content, as it would from impl open.
 #
 # Exit codes:
 #   0  batch emitted (possibly empty with explanatory status)
@@ -340,7 +342,8 @@ for task in batch:
         owner, _ = task_owner(knowledge_dir, slug, task["local_id"])
         directive = owner.get("retrieval_directive")
         build_packet(knowledge_dir, row, directive=directive,
-                     assembly=None if directive else ("", {}), caller="implement-lead")
+                     assembly=None if directive else ("", {}), caller="implement-lead",
+                     activities=task_by_id[task["local_id"]].get("activities"))
         identity = {key: row.get(key) for key in ("packet_id", "dispatch_attempt_id", "revision_id")}
         task.update(identity)
         packets.append({"task_id": task["local_id"], "phase": task["phase"], **identity})

@@ -161,6 +161,7 @@ Read this template when writing `plan.md`: the design sections in `/spec` § 3, 
 ]
 ```
 **Task format:** prescriptive  <!-- optional — omit for default intent+constraints format -->
+**Activities:** coordination, model-routing  <!-- optional — activities the worker will be doing, named from `lore search --preferences --activities`; the task packet then opens with the full text of the preferences filed under each. Omit it and the worker sees preferences only as the packet's by-activity Norms listing -->
 **Knowledge delivery:** full  <!-- optional — omit for default annotation-only delivery -->
 **Retrieval directive:**
 <!-- Optional — omit when the task has no Knowledge context backlinks and no Files entries, and leave

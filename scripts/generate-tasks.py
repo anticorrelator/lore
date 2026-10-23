@@ -919,6 +919,38 @@ def _parse_consultations_required(block: str) -> list[str]:
     return domains
 
 
+def _parse_activities(block: str, unit_label: str) -> list[str]:
+    """Parse a task's ``**Activities:** <a>, <b>`` line into canonical names.
+
+    The names select which preferences' full text the task packet carries.
+    Names follow the activity footer's alphabet; a name outside it is refused
+    here rather than when the packet is built at dispatch. Whether any entry
+    is filed under a name is not checked: the packet says "none filed" for
+    one that has none. Template placeholders (``<a>``) are skipped.
+    """
+    match = re.search(r"^\*\*Activities:\*\*[ \t]*(.*)$", block, re.MULTILINE)
+    if not match:
+        return []
+    value = match.group(1).split("<!--", 1)[0]
+    scripts = os.path.dirname(os.path.abspath(__file__))
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    from pk_activities import ActivityError, canonical, split_value
+
+    names: list[str] = []
+    for piece in split_value(value):
+        piece = piece.strip("`").strip()
+        if not piece or (piece.startswith("<") and piece.endswith(">")):
+            continue
+        try:
+            name = canonical(piece)
+        except ActivityError as exc:
+            raise ValueError(f"[generate-tasks] {unit_label}: **Activities:** {exc}") from None
+        if name not in names:
+            names.append(name)
+    return names
+
+
 def _parse_knowledge_context(block: str) -> list[tuple[str, str]]:
     """Parse a ``**Knowledge context:**`` block into (backlink, annotation) pairs."""
     kc_match = re.search(
@@ -2293,6 +2325,7 @@ def _tasks_from_plan(
         knowledge_context = _parse_knowledge_context(body)
         scope_lines = _parse_scope_lines(body)
         consultations_required = _parse_consultations_required(body)
+        activities = _parse_activities(body, f"task {number}")
         has_advisory = _has_persistent_advisor(body)
         retrieval_directive = _parse_retrieval_directive(body, f"task {number}")
 
@@ -2394,6 +2427,8 @@ def _tasks_from_plan(
         }
         if criteria is not None:
             task_payload["close_criteria"] = criteria
+        if activities:
+            task_payload["activities"] = activities
         route = extract_route(item_text)
         if route is not None:
             task_payload["route"] = route

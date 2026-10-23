@@ -3132,6 +3132,45 @@ class TestFlatPerTaskDirectives:
         assert plain["tasks"][0]["context_cost_estimate"]["advisory_chars"] == 0
 
 
+class TestFlatTaskActivities:
+    @staticmethod
+    def _with_activities(line):
+        return MINIMAL_FLAT_PLAN.replace(
+            "**Files:** `src/only.py`", f"**Files:** `src/only.py`\n{line}"
+        )
+
+    def test_declared_activities_are_written_in_canonical_order(self, tmp_path):
+        plan = self._with_activities("**Activities:** coordination, Model Routing, coordination")
+        result = generate_tasks_from_plan(plan, str(tmp_path))
+        assert result["tasks"][0]["activities"] == ["coordination", "model-routing"]
+
+    def test_an_undeclared_task_has_no_activities_key(self, tmp_path):
+        result = generate_tasks_from_plan(MINIMAL_FLAT_PLAN, str(tmp_path))
+        assert "activities" not in result["tasks"][0]
+
+    def test_activities_are_read_per_task(self, tmp_path):
+        plan = FLAT_PLAN.replace(
+            "**Consultations required:**", "**Activities:** `review-comments`\n**Consultations required:**"
+        )
+        result = generate_tasks_from_plan(plan, str(tmp_path))
+        assert "activities" not in _flat_task(result, "task-1")
+        assert _flat_task(result, "task-2")["activities"] == ["review-comments"]
+
+    def test_the_template_comment_and_placeholders_are_not_names(self, tmp_path):
+        plan = self._with_activities(
+            "**Activities:** coordination, <b>  <!-- optional — activities, comma, separated -->"
+        )
+        result = generate_tasks_from_plan(plan, str(tmp_path))
+        assert result["tasks"][0]["activities"] == ["coordination"]
+        placeholder = self._with_activities("**Activities:** <a>, <b>")
+        assert "activities" not in generate_tasks_from_plan(placeholder, str(tmp_path))["tasks"][0]
+
+    def test_a_name_outside_the_footer_alphabet_is_refused_naming_the_task(self, tmp_path):
+        plan = self._with_activities("**Activities:** coordination, pr_bodies")
+        with pytest.raises(ValueError, match=r"task 1: \*\*Activities:\*\* .*pr_bodies.*not a valid activity name"):
+            generate_tasks_from_plan(plan, str(tmp_path))
+
+
 class TestFlatSizingDiagnostics:
     def test_diagnostics_render_for_a_flat_plan(self, tmp_path, capsys):
         result = generate_tasks_from_plan(FLAT_PLAN, str(tmp_path))

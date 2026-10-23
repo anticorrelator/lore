@@ -100,13 +100,43 @@ def consultations(kdir, slug, task_id, phase, directive):
     return list(dict.fromkeys(found))
 
 
+def activity_names(activities):
+    """Canonical, de-duplicated activity names; flag values may also carry comma-separated names."""
+    if not activities:
+        return []
+    import pk_activities
+    names = []
+    for value in activities or []:
+        for piece in pk_activities.split_value(value):
+            name = pk_activities.canonical(piece)
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def preferences_section(kdir, names):
+    """The full text of the preferences filed under each named activity, as a packet section."""
+    import pk_activities
+    return ("## Preferences\n\n"
+            f"The project's accumulated working style for {', '.join(names)}, in full:\n\n"
+            + pk_activities.block(str(kdir), names))
+
+
 def build_packet(kdir, row, *, directive=None, assembly=None, role="worker", caller="worker",
-                 scales=None, flags=None, thin_floor=None):
+                 scales=None, flags=None, thin_floor=None, activities=None):
     directive = directive or {}
+    names = activity_names(activities)
     if assembly is None:
         assembly = assemble(kdir, row["work_item"], directive, row.get("task_id"), row.get("phase"))
     body, snapshot = assembly
+    if names:
+        # Synthesis edits only delivered-entry spans and appends its sections at the end, so the
+        # section must lead the content for those appended sections to still close it.
+        section = preferences_section(kdir, names)
+        body = section + ("\n" + body if body else "")
     row = dict(row)
+    if names:
+        row["activities"] = names
     entries = snapshot.get("entries", row.get("delivered_entries", []))
     row.update(recipient_role=role, caller=caller, delivery_stage="assembled",
                delivered_entries=entries, content=body, norms=population(kdir), flags=flags or [],
@@ -142,7 +172,40 @@ def build_packet(kdir, row, *, directive=None, assembly=None, role="worker", cal
               "location": str(Path(kdir).resolve() / "_packets/packets.jsonl"), "flags": row["flags"]}
     if thin_floor is not None:
         status["below_floor"] = [s for s, count in counts.items() if count < thin_floor]
+    if names:
+        status["activities"] = names
     return status
+
+
+def render_norms(kdir, norms):
+    """The Norms section: preference rows grouped by the activity their entry is filed under, then conventions.
+
+    The stored rows carry no activity, so the grouping is read from the store's entries at show time.
+    A live entry filed under two activities is listed under both; a preference row whose entry is not
+    live now (retired, removed, or not an entry at all) is listed last so no stored row is dropped.
+    """
+    import pk_activities
+    preference_rows = [n for n in norms if n.get("source_id") == "preferences-tree"]
+    other_rows = [n for n in norms if n.get("source_id") != "preferences-tree"]
+    lines = ["## Norms"]
+    line = lambda norm: f"- `{norm['label']}` — {norm['path']}"
+    if preference_rows:
+        groups = pk_activities.index(str(kdir))
+        filed = {}
+        for name, entries in groups.items():
+            for entry in entries:
+                filed.setdefault(entry["path"], []).append(name)
+        for name in groups:
+            rows = [n for n in preference_rows if name in filed.get(n["path"], ())]
+            if rows:
+                lines += [f"### {name}"] + [line(n) for n in rows]
+        unfiled = [n for n in preference_rows if n["path"] not in filed]
+        if unfiled:
+            lines += ["### not a live entry"] + [line(n) for n in unfiled]
+        if other_rows:
+            lines.append("### conventions")
+    lines += [line(n) for n in other_rows]
+    return "\n".join(lines)
 
 
 def _canonical(path):
@@ -361,6 +424,9 @@ def main():
     build.add_argument("--scale-set", required=True)
     build.add_argument("--thin-floor", type=int)
     build.add_argument("--flag", nargs=2, action="append", default=[], metavar=("TRIGGER", "REASON"))
+    build.add_argument("--activity", action="append", default=[], metavar="NAME",
+                       help="put the full text of the preferences filed under this activity, the project's "
+                            "accumulated working style for it, at the head of the packet content (repeatable)")
     for verb in ("show", "pointer"):
         command = commands.add_parser(verb)
         command.add_argument("packet_id")
@@ -409,9 +475,7 @@ def main():
             if not row.get("content"):
                 for entry in row.get("delivered_entries", []):
                     print(f"- {entry['path']} ({entry['render_mode']})")
-            print("\n## Norms")
-            for norm in row.get("norms", []):
-                print(f"- `{norm['label']}` — {norm['path']}")
+            print("\n" + render_norms(kdir, row.get("norms", [])))
         return
     if not args.work_item or Path(args.work_item).name != args.work_item or args.work_item in (".", ".."):
         parser.error("--work-item must be a slug")
@@ -429,6 +493,10 @@ def main():
         if flag not in FLAGS or not reason.strip():
             parser.error("--flag requires a named trigger and a non-empty reason")
         flags.append({"flag": flag, "reason": reason})
+    try:
+        activities = activity_names(args.activity)
+    except ValueError as exc:
+        parser.error(f"--activity {exc}")
     owner, phase = task_owner(kdir, args.work_item, args.task)
     seeds = [seed for group in args.seeds for seed in group.split(",") if seed]
     directive = owner.get("retrieval_directive")
@@ -445,8 +513,16 @@ def main():
            "session_id": None, "work_item": args.work_item, "task_id": args.task, "phase": phase,
            "arm": os.environ.get("LORE_PACKET_ARM") or None, "task_scale_set": ",".join(scales),
            **binding(kdir, args.work_item, args.task)}
+    if activities:
+        import pk_activities
+        known = pk_activities.vocabulary(str(kdir))
+        for name in activities:
+            if name not in known:
+                print(f'packet: no live preference is filed under "{name}", so its section says none filed '
+                      f"(known: {', '.join(known)})", file=sys.stderr)
     print(json.dumps(build_packet(kdir, row, directive=directive, role=args.role, caller=args.caller,
-                                 scales=scales, flags=flags, thin_floor=args.thin_floor), ensure_ascii=False))
+                                 scales=scales, flags=flags, thin_floor=args.thin_floor,
+                                 activities=activities), ensure_ascii=False))
 
 
 if __name__ == "__main__":

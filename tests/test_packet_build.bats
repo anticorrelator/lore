@@ -166,6 +166,51 @@ PY
   [[ "$output" == *'Binding:'* && "$output" == *'## Norms'* && "$output" == *'Widget boundary'* ]]
 }
 
+@test "build --activity leads the content with full-text preferences and show groups preference norms by activity" {
+  mkdir -p "$TEST_KDIR/preferences"
+  printf '%s\n' '# Announce the wake' 'Say what woke you.' '<!-- learned: 2026-09-01 | confidence: high | scale: subsystem | activity: coordination | status: current -->' > "$TEST_KDIR/preferences/announce.md"
+  printf '%s\n' '# Loose rule' 'Filed before activities.' '<!-- learned: 2026-09-01 | confidence: high | scale: subsystem | status: current -->' > "$TEST_KDIR/preferences/loose.md"
+  run bash "$PACKET" build --work-item packet-fixture --role worker --caller coordinator --topic widget --scale-set subsystem --activity coordination --activity coordination
+  [ "$status" -eq 0 ]
+  STATUS_JSON="$output" python3 - <<'PY'
+import json, os
+from pathlib import Path
+s = json.loads(os.environ['STATUS_JSON'])
+assert s['activities'] == ['coordination'], s
+row = json.loads(Path(s['location']).read_text().splitlines()[-1])
+assert row['content'].startswith('## Preferences\n'), row['content'][:80]
+assert row['content'].index('Say what woke you.') < row['content'].index('Widget boundary')
+assert 'Filed before activities.' not in row['content']
+assert row['norms'] == [
+    {'label': 'announce', 'path': 'preferences/announce.md', 'source_id': 'preferences-tree'},
+    {'label': 'loose', 'path': 'preferences/loose.md', 'source_id': 'preferences-tree'},
+    {'label': 'widget', 'path': 'conventions/widget.md', 'source_id': 'conventions-tree'},
+]
+PY
+  id=$(printf '%s\n' "$output" | tail -1 | jq -r .packet_id)
+  run bash "$PACKET" show "$id"
+  [ "$status" -eq 0 ]
+  norms="${output#*## Norms}"
+  [ "$norms" = "
+### coordination
+- \`announce\` — preferences/announce.md
+### untagged
+- \`loose\` — preferences/loose.md
+### conventions
+- \`widget\` — conventions/widget.md" ]
+}
+
+@test "build --activity refuses a malformed name and notes a name no live entry carries" {
+  run bash "$PACKET" build --work-item packet-fixture --role worker --caller coordinator --topic widget --scale-set subsystem --activity 'PR Bodies!'
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a valid activity name"* ]]
+  [ ! -f "$TEST_KDIR/_packets/packets.jsonl" ]
+  run bash "$PACKET" build --work-item packet-fixture --role worker --caller coordinator --topic widget --scale-set subsystem --activity review-comments
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'no live preference is filed under "review-comments"'*'known: general'* ]]
+  [ "$(tail -1 "$TEST_KDIR/_packets/packets.jsonl" | jq -r .content | head -5 | tail -1)" = 'Preferences for review-comments: none filed.' ]
+}
+
 load helpers/packet_legacy
 
 @test "impl-open legacy fixture preserves its contract with optional compiled descriptors" {

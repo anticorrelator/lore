@@ -459,3 +459,79 @@ assert records[1]['binding']['state'] == 'current'
 assert all(record['receipt']=='unknown' for record in records)
 PY
 }
+
+@test "a later-batch task that declares **Activities:** gets a packet led by those preferences; an undeclared one does not" {
+  ITEM="$WORK_DIR/later-batch"
+  mkdir -p "$ITEM" "$TEST_KDIR/preferences" "$TEST_KDIR/conventions"
+  printf '%s\n' '# Announce the wake' 'Say what woke you and what you did.' '<!-- learned: 2026-09-01 | confidence: high | scale: subsystem | activity: coordination | status: current -->' > "$TEST_KDIR/preferences/announce.md"
+  printf '%s\n' '# Widget boundary' 'The widget boundary preserves identity.' '<!-- learned: 2026-09-01 | confidence: high | scale: subsystem | status: current -->' > "$TEST_KDIR/conventions/widget.md"
+  printf '%s\n' '{"title":"Later batch","status":"active","intent_anchor":"Carry working style to later workers."}' > "$ITEM/_meta.json"
+  cat > "$ITEM/plan.md" <<'PLAN'
+# Later batch
+
+## Intent Anchor
+Carry working style to later workers.
+
+**Scope delta:** none
+
+## Tasks
+
+**Merge rationale:** A first task gates two later ones; one declares activities.
+
+### Task 1: Lay foundations
+**Deliverable:** Foundations.
+**Files:** `src/base.py`
+- [ ] Lay foundations [class: mechanical]
+
+### Task 2: Coordinate widgets
+**Deliverable:** Widget coordination.
+**Files:** `src/widget.py`
+**Activities:** coordination
+**Retrieval directive:**
+```yaml
+retrieval_directive:
+  version: 2
+  topics:
+    - role: focal
+      topic: "widget boundary"
+      seeds:
+        - "widget"
+      scale_set: [subsystem]
+      limit: 4
+```
+- [ ] Coordinate widgets [class: standard] [depends-on: task-1]
+
+### Task 3: Record gadgets
+**Deliverable:** Gadget record.
+**Files:** `src/gadget.py`
+- [ ] Record gadgets [class: mechanical] [depends-on: task-1]
+PLAN
+  printf '%s\n' '{"anchor_coverage":{"disposition":"covered","by":"designer","note":"Fixture."},"review_requirement":{"disposition":"not-required","by":"designer","note":"Fixture scope."},"dispatch_decision":{"disposition":"proceed","by":"coordinator","note":"Exercise later-batch packet delivery.","task_ids":["task-1","task-2","task-3"],"prior_review_refs":[]}}' > "$ITEM/decisions.json"
+  bash "$REPO_DIR/scripts/plan-revise.sh" later-batch --decisions "$ITEM/decisions.json" >/dev/null
+  # Task 1 is done, so tasks 2 and 3 are the next batch.
+  sed -i.bak 's/- \[ \] Lay foundations/- [x] Lay foundations/' "$ITEM/plan.md" && rm -f "$ITEM/plan.md.bak"
+  run bash "$NEXT_SH" later-batch --json
+  [ "$status" -eq 0 ]
+  payload > "$BATS_TEST_TMPDIR/payload.json"
+  python3 - "$ITEM/tasks.json" "$TEST_KDIR/_packets/packets.jsonl" "$BATS_TEST_TMPDIR/payload.json" <<'PYEOF'
+import json, sys
+tasks = {t["id"]: t for t in json.load(open(sys.argv[1]))["tasks"]}
+assert tasks["task-2"]["activities"] == ["coordination"]
+assert "activities" not in tasks["task-3"]
+payload = json.load(open(sys.argv[3]))
+assert payload["status"] == "batch-ready"
+assert [t["local_id"] for t in payload["batch"]] == ["task-2", "task-3"], payload["batch"]
+rows = {r["task_id"]: r for r in (json.loads(l) for l in open(sys.argv[2]) if l.strip())}
+declared, undeclared = rows["task-2"], rows["task-3"]
+content = declared["content"]
+assert content.startswith("## Preferences\n"), content[:120]
+assert "Preferences for coordination (1):\n- Announce the wake\n  Say what woke you and what you did." in content
+assert content.index("Say what woke you") < content.index("## Prior Knowledge") < content.index("Widget boundary")
+assert declared["activities"] == ["coordination"]
+assert [e["path"] for e in declared["delivered_entries"]] == ["conventions/widget.md"]
+assert "## Preferences" not in (undeclared.get("content") or "") and "activities" not in undeclared
+batch = {t["local_id"]: t for t in payload["batch"]}
+assert batch["task-2"]["packet_id"] == declared["packet_id"]
+assert batch["task-3"]["packet_id"] == undeclared["packet_id"]
+PYEOF
+}
