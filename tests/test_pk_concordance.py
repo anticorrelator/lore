@@ -604,6 +604,16 @@ class TestIncrementalReindexWritesOnlyChanges:
         assert "full_rebuild" in result["concordance"]
         assert result["concordance"]["vectors_built"] == len(TOPICS)
 
+    def test_reindex_deletes_entry_rows_by_rowid(self, larger_store, traced_statements):
+        _append(larger_store / "conventions" / "entry-05.md", "Also covers eviction.\n")
+        (larger_store / "conventions" / "entry-06.md").unlink()
+        Indexer(str(larger_store)).incremental_index()
+        Indexer(str(larger_store)).index_all()
+
+        deletes = [s for s in traced_statements if s.startswith("DELETE FROM entries ")]
+        assert deletes
+        assert all(s.startswith("DELETE FROM entries WHERE rowid = ") for s in deletes)
+
 
 # ---------------------------------------------------------------------------
 # Phase 2: composite_search TF-IDF rankings

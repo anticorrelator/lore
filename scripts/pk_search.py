@@ -872,10 +872,28 @@ class Indexer:
             return parts[0]
         return None
 
-    def _index_file(self, conn: sqlite3.Connection, file_path: str, source_type: str = "knowledge") -> int:
-        """Index a single file. Returns number of entries added."""
-        # Remove old entries for this file
-        conn.execute("DELETE FROM entries WHERE file_path = ?", (file_path,))
+    @staticmethod
+    def _entry_rowids_by_file(conn: sqlite3.Connection) -> dict[str, list[int]]:
+        """Each indexed file's rows in entries, read in one pass.
+
+        Rows are deleted by rowid: FTS5 cannot index file_path, so a DELETE
+        matching on it scans the whole table once per file.
+        """
+        rowids: dict[str, list[int]] = {}
+        for rowid, file_path in conn.execute("SELECT rowid, file_path FROM entries"):
+            rowids.setdefault(file_path, []).append(rowid)
+        return rowids
+
+    def _index_file(
+        self,
+        conn: sqlite3.Connection,
+        file_path: str,
+        source_type: str = "knowledge",
+        *,
+        rowids: list[int],
+    ) -> int:
+        """Index a single file, replacing its rows `rowids`. Returns number of entries added."""
+        conn.executemany("DELETE FROM entries WHERE rowid = ?", [(r,) for r in rowids])
 
         # Source files: index whole file as a single entry
         if source_type == "source":
@@ -990,9 +1008,10 @@ class Indexer:
         # loop below at worst causes one redundant refresh, never a stale rank.
         trust_marker_state = self._trust_marker_state()
         self._trust_fold = None
+        rowids_by_file = self._entry_rowids_by_file(conn)
 
         for fpath, source_type in all_files:
-            count = self._index_file(conn, fpath, source_type)
+            count = self._index_file(conn, fpath, source_type, rowids=rowids_by_file.pop(fpath, []))
             total_entries += count
             files_indexed += 1
 
@@ -1002,7 +1021,10 @@ class Indexer:
         for (fp,) in rows:
             if fp not in existing_paths:
                 conn.execute("DELETE FROM file_meta WHERE file_path = ?", (fp,))
-                conn.execute("DELETE FROM entries WHERE file_path = ?", (fp,))
+                conn.executemany(
+                    "DELETE FROM entries WHERE rowid = ?",
+                    [(r,) for r in rowids_by_file.pop(fp, [])],
+                )
 
         # Record index timestamp
         conn.execute(
@@ -1172,6 +1194,7 @@ class Indexer:
         files_removed = 0
         total_entries_added = 0
         changed_paths: set[str] = set()
+        rowids_by_file = self._entry_rowids_by_file(conn)
 
         # Re-index new or changed files
         for fpath, source_type in all_files:
@@ -1190,7 +1213,7 @@ class Indexer:
                         needs_index = True
 
             if needs_index:
-                count = self._index_file(conn, fpath, source_type)
+                count = self._index_file(conn, fpath, source_type, rowids=rowids_by_file.pop(fpath, []))
                 total_entries_added += count
                 files_reindexed += 1
                 changed_paths.add(fpath)
@@ -1198,7 +1221,10 @@ class Indexer:
         # Remove deleted files
         for fp in meta_rows:
             if fp not in existing_paths:
-                conn.execute("DELETE FROM entries WHERE file_path = ?", (fp,))
+                conn.executemany(
+                    "DELETE FROM entries WHERE rowid = ?",
+                    [(r,) for r in rowids_by_file.pop(fp, [])],
+                )
                 conn.execute("DELETE FROM file_meta WHERE file_path = ?", (fp,))
                 files_removed += 1
                 changed_paths.add(fp)
