@@ -8,6 +8,8 @@
 # parse as one JSON value. The block comes from the store the verb resolved
 # (--kdir for the arc verbs, LORE_KNOWLEDGE_DIR for the start verbs), never
 # from another one in the environment, and a verb that fails prints none.
+# spec discover, which reads spec start's --json output, still gets one JSON
+# value from it.
 
 set -euo pipefail
 
@@ -166,6 +168,15 @@ check "spec start --json: stdout is the start struct" \
   'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d[\"schema_version\"]==1 and d[\"slug\"]==\"start-item\"" "$OUT"'
 run_verb "spec start (unseen input)" env LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPTS/spec-start.sh" a-brand-new-capability --json
 check "spec start on an unseen input still delivers work-scoping" 'grep -qx "Preferences for work-scoping (1):" "$ERR"'
+
+echo "spec discover"
+# spec discover reads spec start's --json output; the block on spec start's
+# stderr must not reach the JSON it parses.
+run_verb "spec discover" env LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPTS/spec-discover.sh" start-item --json
+check "spec discover exits 0 over a store with work-scoping preferences" '[[ $RC -eq 0 ]]'
+check "spec discover --json: stdout parses as one JSON value" \
+  'python3 -c "import json,sys; json.loads(open(sys.argv[1]).read())" "$OUT"'
+check "spec discover prints no block of its own" '! grep -q "Preferences for " "$OUT" "$ERR"'
 
 echo "impl start"
 run_verb "impl start" env LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPTS/impl-start.sh" widget-pipeline

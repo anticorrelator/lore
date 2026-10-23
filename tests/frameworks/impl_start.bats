@@ -247,7 +247,9 @@ PYEOF
   run bash "$LORE_CLI" impl start retired-widget --json
   [ "$status" -eq 0 ]
   [ ! -f "$TEST_KDIR/_branch_cache.json" ]
-  echo "$output" | python3 -c '
+  # `run` merges stderr, where --json prints the preferences block, into
+  # $output; parse the JSON object line only.
+  echo "$output" | grep '"slug"' | python3 -c '
 import json, sys
 d = json.loads(sys.stdin.read())
 assert d["archived"] is True
