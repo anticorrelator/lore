@@ -29,6 +29,7 @@ from pathlib import Path
 
 DB_FILENAME = ".pk_search.db"
 INDEX_LOCK_FILENAME = ".pk_search.lock"
+BACKLINK_EXTRACTOR_KEY = "backlink_extractor_fingerprint"
 DEFAULT_INDEX_LOCK_WAIT_SECS = 5.0
 INDEX_LOCK_POLL_SECS = 0.05
 # Returned in the "error" slot by index-mutating methods when the write lock
@@ -1334,15 +1335,41 @@ class Indexer:
             links.append([target, provenance])
         return links
 
+    @classmethod
+    def _backlink_extractor_fingerprint(cls) -> str:
+        """Hash of _extract_knowledge_backlinks' source and every pattern it reads."""
+        import inspect
+        parts = [
+            inspect.getsource(cls._extract_knowledge_backlinks),
+            _BACKLINK_RE.pattern,
+            _FENCED_CODE_RE.pattern,
+            _INLINE_CODE_RE.pattern,
+            cls._RENORMALIZE_COMMENT_RE.pattern,
+            cls._CONCORDANCE_COMMENT_RE.pattern,
+            repr(sorted(_PLACEHOLDER_TARGETS)),
+        ]
+        return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
+
     def _file_backlinks(self, conn: sqlite3.Connection, file_paths: list[str]) -> dict[str, list[list[str]]]:
         """Each existing file's knowledge backlinks, read from disk only when its content changed.
 
         file_backlinks keeps one row per file, keyed by the hash of the text
-        the links came from. Links depend on nothing but that text, so a row
-        whose hash matches file_meta's stands in for reading the file. Entry
+        the links came from. Links depend on that text and on the extractor,
+        so a row whose hash matches file_meta's stands in for reading the file
+        until the extractor's fingerprint changes, which drops every row. Entry
         content cannot: work files lose their preamble and headings to the
         section split, and inline code can pair backticks across sections.
         """
+        fingerprint = self._backlink_extractor_fingerprint()
+        stored_fingerprint = conn.execute(
+            "SELECT value FROM index_meta WHERE key = ?", (BACKLINK_EXTRACTOR_KEY,)
+        ).fetchone()
+        if stored_fingerprint is None or stored_fingerprint[0] != fingerprint:
+            conn.execute("DELETE FROM file_backlinks")
+            conn.execute(
+                "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+                (BACKLINK_EXTRACTOR_KEY, fingerprint),
+            )
         indexed_hashes = dict(conn.execute("SELECT file_path, content_hash FROM file_meta"))
         stored = {
             fp: (content_hash, backlinks)

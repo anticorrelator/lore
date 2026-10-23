@@ -665,6 +665,16 @@ class TestStructuralImportanceReadsOnlyChangedFiles:
         assert opened_md == [str(linking)]
         assert importance[(str(larger_store / "conventions" / "entry-00.md"), "Entry 00")]["explicit"] == 9
 
+    def test_changed_extractor_rereads_every_file(self, larger_store, opened_md, monkeypatch):
+        idx = Indexer(str(larger_store))
+        monkeypatch.setattr(Indexer, "_backlink_extractor_fingerprint", classmethod(lambda cls: "changed"))
+        conn = idx._connect()
+        importance = idx._compute_structural_importance(conn)
+        conn.close()
+
+        assert sorted(opened_md) == sorted(str(p) for p in larger_store.rglob("*.md"))
+        assert importance[(str(larger_store / "conventions" / "entry-00.md"), "Entry 00")]["explicit"] == 9
+
     def test_work_file_links_count_as_the_whole_file_reads(self, tmp_path):
         """Entry content loses a (the preamble) and b (a heading line), and would
         count d, which sits inside an inline code span that crosses a heading."""
