@@ -136,11 +136,10 @@ CI on a pull request tests the merge of the branch into the *current* base, inst
 
 ### 6. Draft the PR
 
-Before drafting, print how PR bodies and prose for people are written here, one activity per call:
+Before drafting, print how PR bodies and prose for people are written here:
 
 ```bash
-lore search --preferences --activity pr-bodies
-lore search --preferences --activity human-writing
+lore search --preferences --activity pr-bodies,human-writing
 ```
 
 Hold the title and body against what they print. Write a clean, reviewer-facing PR description. No internal process details — no mentions of agents, workers, skills, knowledge stores, work items, or lore tooling.
