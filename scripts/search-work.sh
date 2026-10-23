@@ -57,117 +57,6 @@ if [[ ! -d "$WORK_DIR" ]]; then
   exit 1
 fi
 
-# Arc records sit at _work/_arcs/, which every work-item walk below prunes along
-# with the other underscore-prefixed substrates. They get their own scan so arc
-# titles, anchors, ledgers, and reports stay reachable from this search. Hits
-# carry kind "arc" and work-item hits carry kind "work-item": an arc very often
-# shares a slug with the work item it grew out of, so results are deduplicated
-# on the pair and never on the slug alone.
-arc_hits_json() {
-  ARC_SEARCH_DIR="$WORK_DIR/_arcs" ARC_SEARCH_QUERY="$QUERY" python3 - <<'PYEOF'
-import json
-import os
-
-arcs_dir = os.environ["ARC_SEARCH_DIR"]
-query = os.environ["ARC_SEARCH_QUERY"].lower()
-
-results = []
-if query and os.path.isdir(arcs_dir):
-    for name in sorted(os.listdir(arcs_dir)):
-        arc_dir = os.path.join(arcs_dir, name)
-        if name.startswith("_") or name.startswith(".") or not os.path.isdir(arc_dir):
-            continue
-
-        record = {}
-        meta_path = os.path.join(arc_dir, "_meta.json")
-        if os.path.isfile(meta_path):
-            try:
-                with open(meta_path) as handle:
-                    loaded = json.load(handle)
-                if isinstance(loaded, dict):
-                    record = loaded
-            except ValueError:
-                pass
-
-        excerpt = ""
-        hit_path = os.path.join("_work", "_arcs", name)
-        for field in ("title", "anchor", "project"):
-            value = record.get(field)
-            if isinstance(value, str) and query in value.lower():
-                excerpt = "%s: %s" % (field, value.strip())
-                break
-
-        if not excerpt:
-            for doc in sorted(os.listdir(arc_dir)):
-                if not doc.endswith(".md"):
-                    continue
-                doc_path = os.path.join(arc_dir, doc)
-                if not os.path.isfile(doc_path):
-                    continue
-                try:
-                    with open(doc_path, errors="replace") as handle:
-                        for line in handle:
-                            if query in line.lower():
-                                excerpt = line.strip()
-                                hit_path = os.path.join("_work", "_arcs", name, doc)
-                                break
-                except OSError:
-                    continue
-                if excerpt:
-                    break
-
-        if excerpt:
-            results.append({
-                "kind": "arc",
-                "slug": record.get("slug") or name,
-                "title": record.get("title") or name,
-                "excerpt": excerpt,
-                "status": record.get("status") or "unrecorded",
-                "path": hit_path,
-            })
-
-print(json.dumps(results))
-PYEOF
-}
-
-print_arc_section() {
-  local hits="$1"
-  printf '%s' "$hits" | python3 -c '
-import json, sys
-rows = json.load(sys.stdin)
-print("--- Arc matches ---")
-if not rows:
-    print("  (no matches in arcs)")
-else:
-    for row in rows:
-        print("")
-        print("  [arc] %s (%s) — %s" % (row["slug"], row["status"], row["title"]))
-        print("    %s" % row["path"])
-        print("    %s" % row["excerpt"])
-print("")
-'
-}
-
-if [[ $JSON_MODE -eq 0 ]]; then
-  echo "=== Work Search: \"$QUERY\" ==="
-  echo ""
-
-  # Index metadata matches (title/tags/slug/project). Runs ahead of the FTS
-  # backend because FTS indexes prose documents only — _meta.json fields like
-  # project are findable solely through the index.
-  INDEX="$WORK_DIR/_index.json"
-  if [[ -f "$INDEX" ]]; then
-    echo "--- Index matches ---"
-    MATCHES=$(grep -i "$QUERY" "$INDEX" 2>/dev/null | grep -E '"(title|tags|slug|project)"' || true)
-    if [[ -n "$MATCHES" ]]; then
-      echo "$MATCHES" | sed 's/^/  /'
-    else
-      echo "  (no title/tag matches)"
-    fi
-    echo ""
-  fi
-fi
-
 # ---------------------------------------------------------------------------
 # Try pk_cli.py (FTS5 backend) first
 # ---------------------------------------------------------------------------
@@ -178,113 +67,14 @@ if [[ -f "$LORE_SEARCH" ]]; then
 fi
 
 if [[ $USE_FTS -eq 1 ]]; then
+  WORK_SEARCH=(python3 "$SCRIPT_DIR/pk_work_search.py" search)
   if [[ $JSON_MODE -eq 1 ]]; then
-    # Always fetch both active and archived results for JSON output
-    ACTIVE_JSON=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$QUERY" --limit 10 --type work --json 2>/dev/null || true)
-    ARCHIVED_JSON=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$QUERY" --limit 10 --type work --include-archived --json 2>/dev/null || true)
-    # Merge: add "status" field — active results get "active", archived get "archived"
-    ARC_JSON=$(arc_hits_json)
-    MERGED=$(python3 -c "
-import json, sys
-active_raw = sys.argv[1]
-archived_raw = sys.argv[2]
-arc_raw = sys.argv[3]
-
-active = json.loads(active_raw) if active_raw else []
-archived_all = json.loads(archived_raw) if archived_raw else []
-arcs = json.loads(arc_raw) if arc_raw else []
-
-# Mark active
-active_slugs = set()
-results = []
-for r in active:
-    r['status'] = 'active'
-    # Derive slug from file_path: first component of _work/<slug>/...
-    fp = r.get('file_path', '')
-    parts = fp.replace('_work/', '').split('/')
-    slug = parts[0] if parts else ''
-    r['kind'] = 'work-item'
-    r['slug'] = slug
-    active_slugs.add(slug)
-    results.append(r)
-
-# Add archived results not already in active
-for r in archived_all:
-    fp = r.get('file_path', '')
-    parts = fp.replace('_work/_archive/', '').replace('_work/', '').split('/')
-    slug = parts[0] if parts else ''
-    if slug not in active_slugs:
-        r['status'] = 'archived'
-        r['kind'] = 'work-item'
-        r['slug'] = slug
-        results.append(r)
-
-results.extend(arcs)
-
-print(json.dumps(results))
-" "$ACTIVE_JSON" "$ARCHIVED_JSON" "$ARC_JSON")
-    json_output "$MERGED"
-    exit 0
+    WORK_SEARCH+=(--json)
   fi
-
-  echo "--- Ranked results (FTS5) ---"
-  FTS_OUTPUT=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$QUERY" --limit 10 --type work 2>/dev/null || true)
-  if [[ -n "$FTS_OUTPUT" ]]; then
-    echo "$FTS_OUTPUT"
-  else
-    echo "(no active matches)"
+  if [[ $SHOW_ALL -eq 1 ]]; then
+    WORK_SEARCH+=(--all)
   fi
-  echo ""
-
-  # Check for archived matches and show hint or full results
-  ARCHIVED_OUTPUT=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$QUERY" --limit 10 --type work --include-archived 2>/dev/null || true)
-  # Count archived-only results (those in _archive path) by comparing with active
-  ARCHIVED_COUNT=$(python3 -c "
-import sys
-active = sys.argv[1]
-archived_all = sys.argv[2]
-# Count lines in archived_all not in active (rough heuristic: line count difference)
-a_lines = [l for l in active.strip().splitlines() if l.strip() and not l.startswith('Score')]
-b_lines = [l for l in archived_all.strip().splitlines() if l.strip() and not l.startswith('Score')]
-print(max(0, len(b_lines) - len(a_lines)))
-" "$FTS_OUTPUT" "$ARCHIVED_OUTPUT" 2>/dev/null || echo 0)
-
-  if [[ "$SHOW_ALL" -eq 1 ]]; then
-    if [[ -n "$ARCHIVED_OUTPUT" && "$ARCHIVED_OUTPUT" != "$FTS_OUTPUT" ]]; then
-      echo "--- Archived results (FTS5) ---"
-      echo "$ARCHIVED_OUTPUT"
-      echo ""
-    else
-      echo "(no additional archived matches)"
-      echo ""
-    fi
-  else
-    # Show hint if there are archived matches beyond active
-    HINT_COUNT=$(python3 -c "
-import sys
-active = sys.argv[1]
-archived_all = sys.argv[2]
-a_slugs = set()
-b_slugs = set()
-import re
-for line in active.splitlines():
-    m = re.search(r'_work/([^/]+)/', line)
-    if m: a_slugs.add(m.group(1))
-for line in archived_all.splitlines():
-    m = re.search(r'_work/_archive/([^/]+)/', line)
-    if m: b_slugs.add(m.group(1))
-print(len(b_slugs - a_slugs))
-" "$FTS_OUTPUT" "$ARCHIVED_OUTPUT" 2>/dev/null || echo 0)
-    if [[ "$HINT_COUNT" -gt 0 ]]; then
-      echo "Also found: $HINT_COUNT archived match(es) — use --all to show"
-      echo ""
-    fi
-  fi
-
-  print_arc_section "$(arc_hits_json)"
-
-  echo "=== End Work Search ==="
-  exit 0
+  exec "${WORK_SEARCH[@]}" -- "$KNOWLEDGE_DIR" "$QUERY"
 fi
 
 # ---------------------------------------------------------------------------
@@ -334,7 +124,7 @@ if [[ $JSON_MODE -eq 1 ]]; then
   fi
 
   # Deduplicate on (kind, slug) and emit JSON array via inline python3
-  ARC_JSON=$(arc_hits_json)
+  ARC_JSON=$(python3 "$SCRIPT_DIR/pk_work_search.py" arcs --json -- "$KNOWLEDGE_DIR" "$QUERY")
   JSON_OUT=$(printf '%s' "$GREP_RESULTS" | python3 -c '
 import json, sys
 arcs = json.loads(sys.argv[1]) if sys.argv[1] else []
@@ -366,6 +156,8 @@ print(json.dumps(results, indent=2))
   json_output "$JSON_OUT"
   exit 0
 fi
+
+python3 "$SCRIPT_DIR/pk_work_search.py" header -- "$KNOWLEDGE_DIR" "$QUERY"
 
 # Full-text search across active work item files
 echo "--- Active work matches ---"
@@ -427,6 +219,6 @@ if [[ -d "$ARCHIVE_DIR" ]]; then
   fi
 fi
 
-print_arc_section "$(arc_hits_json)"
+python3 "$SCRIPT_DIR/pk_work_search.py" arcs -- "$KNOWLEDGE_DIR" "$QUERY"
 
 echo "=== End Work Search ==="

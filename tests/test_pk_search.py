@@ -1125,6 +1125,18 @@ class TestOneIndexCheckPerCommand:
         assert "### Theory" in capsys.readouterr().out
         assert len(stale_checks) == 1
 
+    def test_all_types_search_checks_once(self, store, stale_checks, capsys):
+        import pk_work_search
+
+        status = pk_work_search.search_all(
+            "auth", ["search", str(store), "mesh", "--scale-set", "architecture", "--limit", "1"]
+        )
+
+        out = capsys.readouterr().out
+        assert status == 0
+        assert "### Theory" in out and "=== End Work Search ===" in out
+        assert len(stale_checks) == 1
+
     def test_each_search_checks_outside_a_block(self, store, stale_checks):
         searcher = Searcher(str(store))
         with searcher.single_index_check():

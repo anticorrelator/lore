@@ -1855,12 +1855,13 @@ cmd_search() {
         exec python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" ${kind_sections_args[@]+"${kind_sections_args[@]}"} "${args[@]:1}"
         ;;
       work)
-        exec "$SCRIPTS_DIR/search-work.sh" "$query"
+        # search-work.sh resolves the store again, a few git calls, unless handed this one.
+        LORE_KNOWLEDGE_DIR="$kdir" exec "$SCRIPTS_DIR/search-work.sh" "$query"
         ;;
       all)
-        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" ${kind_sections_args[@]+"${kind_sections_args[@]}"} "${args[@]:1}"
-        echo ""
-        exec "$SCRIPTS_DIR/search-work.sh" "$query"
+        # The knowledge search, a blank line, then `search-work.sh "$query"`,
+        # in one process. The first "$query" is the work search's.
+        exec python3 "$SCRIPTS_DIR/pk_work_search.py" all -- "$query" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" ${kind_sections_args[@]+"${kind_sections_args[@]}"} "${args[@]:1}"
         ;;
       *)
         echo "Error: --type must be knowledge, work, or all" >&2
