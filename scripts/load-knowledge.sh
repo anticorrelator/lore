@@ -110,6 +110,91 @@ echo ""
   # scale with the store — the rendered size stays flat at a handful of lines.
   INDEX_COMPACT=""
 
+  # --- Preferences: the activity index and the general block ---
+  # A count of preferences/ tells an agent nothing about what to search for, so
+  # that category's line heads an index instead: each activity, how many live
+  # entries it holds, and the commands that print it in full (pk_activities'
+  # STARTS table, read in reverse). The entries filed under `general` apply to
+  # any task, so their titles follow the index inside a reserve taken from
+  # BUDGET before anything else spends it; whatever the block leaves unspent
+  # stays with the entries below. One python process reads every footer once.
+  GENERAL_RESERVE=2500
+  if [[ $GENERAL_RESERVE -gt $BUDGET ]]; then
+    GENERAL_RESERVE=$BUDGET
+  fi
+  PREF_INDEX=""
+  GENERAL_TEXT=""
+  GENERAL_CHARS=0
+  GENERAL_PATHS=()
+  if [[ -d "$KNOWLEDGE_DIR/preferences" ]]; then
+    PREF_PAYLOAD=$(python3 - "$SCRIPT_DIR" "$KNOWLEDGE_DIR" "$GENERAL_RESERVE" 2>/dev/null <<'PYTHON_SCRIPT'
+import sys
+
+script_dir, kdir, reserve = sys.argv[1], sys.argv[2], int(sys.argv[3])
+sys.path.insert(0, script_dir)
+from pk_activities import GENERAL, STARTS, index
+
+groups = index(kdir)
+printed_by = {}
+for command, names in STARTS.items():
+    shown = command if command.startswith("/") else "lore " + command
+    for name in names:
+        printed_by.setdefault(name, []).append(shown)
+
+listing = "lore search --preferences --activity "
+lines = []
+for name, group in groups.items():
+    via = printed_by.get(name)
+    where = "printed in full by " + ", ".join(via) if via else "titles only"
+    lines.append("index\t  %s (%d) — %s; %s%s" % (name, len(group), where, listing, name))
+
+general = groups.get(GENERAL, [])
+block = ["--- Preferences for general ---"]
+used = len(block[0]) + 1
+shown = []
+
+
+def more(count):
+    return "(+%d more: %s%s)" % (count, listing, GENERAL)
+
+
+for position, entry in enumerate(general):
+    line = "- " + entry["title"]
+    left = len(general) - position - 1
+    need = used + len(line) + 1 + (len(more(left)) + 1 if left else 0)
+    if need > reserve:
+        break
+    block.append(line)
+    used += len(line) + 1
+    shown.append(entry["path"])
+hidden = len(general) - len(shown)
+if hidden:
+    block.append(more(hidden))
+    used += len(block[-1]) + 1
+if not general or used > reserve:
+    block, used, shown = [], 0, []
+
+lines.append("chars\t%d" % used)
+lines.extend("general\t" + path for path in shown)
+lines.append("---GENERAL_TEXT---")
+sys.stdout.write("\n".join(lines) + "\n")
+if block:
+    sys.stdout.write("\n".join(block) + "\n")
+PYTHON_SCRIPT
+    ) || PREF_PAYLOAD=""
+
+    if [[ -n "$PREF_PAYLOAD" ]]; then
+      while IFS=$'\t' read -r record value; do
+        case "$record" in
+          index) PREF_INDEX+="$value"$'\n' ;;
+          chars) GENERAL_CHARS="${value:-0}" ;;
+          general) [[ -n "$value" ]] && GENERAL_PATHS+=("$value") ;;
+        esac
+      done < <(printf '%s\n' "$PREF_PAYLOAD" | sed -n '/^---GENERAL_TEXT---$/q;p')
+      GENERAL_TEXT=$(printf '%s\n' "$PREF_PAYLOAD" | sed '1,/^---GENERAL_TEXT---$/d')
+    fi
+  fi
+
   for category in "${ACTIVE_CATEGORIES[@]}"; do
     CAT_DIR="$KNOWLEDGE_DIR/$category"
     [[ -d "$CAT_DIR" ]] || continue
@@ -117,7 +202,11 @@ echo ""
     ENTRY_COUNT=$(find "$CAT_DIR" -type f -name '*.md' 2>/dev/null | wc -l | tr -d '[:space:]')
     [[ "${ENTRY_COUNT:-0}" -gt 0 ]] || continue
 
-    INDEX_COMPACT+="**${category}/** (${ENTRY_COUNT} entries)"$'\n'
+    if [[ "$category" == "preferences" && -n "$PREF_INDEX" ]]; then
+      INDEX_COMPACT+="**${category}/** (${ENTRY_COUNT} entries), by activity:"$'\n'"$PREF_INDEX"
+    else
+      INDEX_COMPACT+="**${category}/** (${ENTRY_COUNT} entries)"$'\n'
+    fi
   done
 
   # Include domains if present
@@ -134,6 +223,16 @@ echo ""
   if [[ $INDEX_COMPACT_SIZE -gt 0 ]]; then
     echo "--- Index (compact) ---"
     echo "$INDEX_COMPACT"
+  fi
+
+  if [[ -n "$GENERAL_TEXT" ]]; then
+    echo "$GENERAL_TEXT"
+    echo ""
+    CHARS_USED=$((CHARS_USED + GENERAL_CHARS))
+    for general_path in ${GENERAL_PATHS[@]+"${GENERAL_PATHS[@]}"}; do
+      FILES_SUMMARY=$((FILES_SUMMARY + 1))
+      PACKET_ENTRIES+=("summary"$'\t'"$general_path")
+    done
   fi
 
   # --- Step 1: Direct-resolve knowledge backlinks ---

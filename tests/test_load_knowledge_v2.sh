@@ -296,13 +296,13 @@ setup_work_items
 # Build FTS5 index so relevance search works
 build_index
 
-# Override git branch to main
-export LORE_GIT_BRANCH="main"
-OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
+# The signal comes from the branch of the checkout the hook runs in, so run it
+# from a repo on main rather than from wherever the suite was started.
+setup_main_branch_repo
+OUTPUT=$(cd "$MAIN_REPO" && bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
 # The context signal should use "Relevant entries" header with signal text
 assert_contains "relevance signal present" "$OUTPUT" "Relevant entries"
 assert_contains "relevance signal has signal text" "$OUTPUT" "signal:"
-unset LORE_GIT_BRANCH
 
 # =============================================
 # Test 5: Compact index frees budget for actual content
@@ -328,11 +328,10 @@ setup_work_items
 # Build FTS5 index so relevance search works
 build_index
 # Need a context signal to trigger content loading (relevance-ranked search)
-export LORE_GIT_BRANCH="main"
-OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
+setup_main_branch_repo
+OUTPUT=$(cd "$MAIN_REPO" && bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
 # Should load actual entry content when context signal triggers relevance search
 assert_contains "loads entry content" "$OUTPUT" "camelCase"
-unset LORE_GIT_BRANCH
 
 # =============================================
 # Test 7: Budget report breaks down full/summary/skipped counts
@@ -630,6 +629,163 @@ else
   echo "  FAIL: threads hook wrote to the index (mtime $INDEX_MTIME_BEFORE -> $INDEX_MTIME_AFTER)"
   FAIL=$((FAIL + 1))
 fi
+
+# --- Preferences filed under activities ---
+pref_entry() {
+  local rel="$1" title="$2" footer="$3"
+  mkdir -p "$(dirname "$KNOWLEDGE_DIR/preferences/$rel")"
+  printf '# %s\nBody of %s.\n<!-- %s -->\n' "$title" "$title" "$footer" > "$KNOWLEDGE_DIR/preferences/$rel"
+}
+
+setup_preferences_store() {
+  setup_v2_knowledge_store
+  mkdir -p "$KNOWLEDGE_DIR/preferences/nested"
+  pref_entry a-cost.md "Arcs price themselves before running" "learned: 2026-10-01 | activity: coordination | status: current"
+  pref_entry b-routing.md "Every role routes to one model" "learned: 2026-10-01 | activity: model-routing, coordination | status: current"
+  pref_entry c-runtime.md "The runtime needs nothing launched by hand" "learned: 2026-10-01 | activity: runtime-design | status: current"
+  pref_entry d-untagged.md "Filed before activities existed" "learned: 2026-10-01 | status: current"
+  pref_entry g1.md "Propose a shape when a concern comes without one" "learned: 2026-10-01 | activity: general | status: current"
+  pref_entry nested/g2.md "Explain the mechanism before the fix" "learned: 2026-10-01 | activity: general"
+  pref_entry g3.md "Answer at the level of what a choice does" "learned: 2026-10-01 | activity: general, human-writing | status: current"
+  pref_entry g4-retired.md "A retired general rule" "learned: 2026-07-01 | activity: general | status: retired"
+  printf '# preferences/\nWhat this directory holds.\n' > "$KNOWLEDGE_DIR/preferences/README.md"
+}
+
+# Length of the general block as printed: its lines, each with its newline.
+general_block_chars() {
+  python3 -c '
+import sys
+text = sys.stdin.read()
+start = text.find("--- Preferences for general ---\n")
+if start < 0:
+    print(-1)
+else:
+    end = text.index("\n\n", start)
+    print(len(text[start:end + 1]))
+'
+}
+
+# =============================================
+# Test 20: The activity index replaces the preferences count line
+# =============================================
+echo ""
+echo "Test 20: preferences/ renders as an activity index"
+rm -rf "$KNOWLEDGE_DIR"
+setup_preferences_store
+setup_main_branch_repo
+OUTPUT=$(cd "$MAIN_REPO" && bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
+INDEX_BLOCK=$(echo "$OUTPUT" | sed -n '/--- Index (compact) ---/,/^$/p')
+# 9 files: the 8 entries, retired one included, and the README, as the count always was.
+assert_contains "index heads with the recursive count" "$INDEX_BLOCK" "**preferences/** (9 entries), by activity:"
+if echo "$INDEX_BLOCK" | grep -qx '\*\*preferences/\*\* ([0-9]* entries)'; then
+  echo "  FAIL: the bare preferences count line is still rendered"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS: the bare preferences count line is gone"
+  PASS=$((PASS + 1))
+fi
+assert_contains "a commanded activity names its command" "$INDEX_BLOCK" \
+  "  coordination (2) — printed in full by lore arc open; lore search --preferences --activity coordination"
+assert_contains "an activity two commands start names both" "$INDEX_BLOCK" \
+  "  model-routing (1) — printed in full by lore arc open, lore impl start; lore search --preferences --activity model-routing"
+assert_contains "a skill-started activity names the skill" "$INDEX_BLOCK" \
+  "  human-writing (1) — printed in full by lore arc close, /pr-create; lore search --preferences --activity human-writing"
+assert_contains "an activity no command starts reads titles only" "$INDEX_BLOCK" \
+  "  runtime-design (1) — titles only; lore search --preferences --activity runtime-design"
+assert_contains "general counts live entries only" "$INDEX_BLOCK" \
+  "  general (3) — titles only; lore search --preferences --activity general"
+assert_contains "untagged live entries keep a line" "$INDEX_BLOCK" \
+  "  untagged (1) — titles only; lore search --preferences --activity untagged"
+ACTIVITY_ORDER=$(echo "$INDEX_BLOCK" | sed -n 's/^  \([a-z0-9-]*\) (.*/\1/p' | tr '\n' ' ')
+if [[ "$ACTIVITY_ORDER" == "coordination general human-writing model-routing runtime-design untagged " ]]; then
+  echo "  PASS: activities listed in name order"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: activity order was '$ACTIVITY_ORDER'"
+  FAIL=$((FAIL + 1))
+fi
+INDEX_SUM=$(echo "$INDEX_BLOCK" | sed -n 's/^\*\*.*\*\* (\([0-9][0-9]*\) .*/\1/p' | awk '{s += $1} END {print s + 0}')
+FOOTER_TOTAL=$(echo "$OUTPUT" | sed -n 's/^\[knowledge\] \([0-9][0-9]*\) entries across.*/\1/p' | head -1)
+assert_eq_num "footer total still equals the index sum" "${FOOTER_TOTAL:-missing}" "$INDEX_SUM"
+
+# =============================================
+# Test 21: General titles follow the index, inside the budget
+# =============================================
+echo ""
+echo "Test 21: general block lists every live general title"
+assert_contains "general block header" "$OUTPUT" "--- Preferences for general ---"
+GENERAL_BLOCK=$(echo "$OUTPUT" | sed -n '/^--- Preferences for general ---$/,/^$/p')
+assert_contains "first general title" "$GENERAL_BLOCK" "- Propose a shape when a concern comes without one"
+assert_contains "nested general title" "$GENERAL_BLOCK" "- Explain the mechanism before the fix"
+assert_contains "two-activity general title" "$GENERAL_BLOCK" "- Answer at the level of what a choice does"
+assert_not_contains "retired general entry omitted" "$GENERAL_BLOCK" "A retired general rule"
+assert_not_contains "non-general entry omitted" "$GENERAL_BLOCK" "Arcs price themselves"
+assert_not_contains "titles only, no bodies" "$GENERAL_BLOCK" "Body of"
+assert_not_contains "nothing overflowed" "$GENERAL_BLOCK" "more: lore search"
+GENERAL_CHARS=$(echo "$OUTPUT" | general_block_chars)
+assert_contains "budget is charged the block's chars and counts its titles" "$OUTPUT" \
+  "[Budget] ${GENERAL_CHARS}/8000 chars | 0 full, 3 summary, 0 skipped"
+assert_not_contains "titles delivered, so no zero-entry line" "$OUTPUT" "0 entries delivered"
+
+# With a context signal, the block still precedes the entries resolved for it.
+setup_work_items
+build_index
+OUTPUT=$(cd "$MAIN_REPO" && bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
+GENERAL_LINE=$(echo "$OUTPUT" | grep -n -F -- "--- Preferences for general ---" | head -1 | cut -d: -f1)
+RELEVANT_LINE=$(echo "$OUTPUT" | grep -n -F -- "--- Relevant entries" | head -1 | cut -d: -f1)
+INDEX_LINE=$(echo "$OUTPUT" | grep -n -F -- "--- Index (compact) ---" | head -1 | cut -d: -f1)
+if [[ -n "$GENERAL_LINE" && -n "$RELEVANT_LINE" && $INDEX_LINE -lt $GENERAL_LINE && $GENERAL_LINE -lt $RELEVANT_LINE ]]; then
+  echo "  PASS: general block sits between the index and the relevant entries"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: general block at line ${GENERAL_LINE:-missing}, index ${INDEX_LINE:-missing}, relevant ${RELEVANT_LINE:-missing}"
+  FAIL=$((FAIL + 1))
+fi
+
+# =============================================
+# Test 22: General titles past the reserve are counted, not printed
+# =============================================
+echo ""
+echo "Test 22: general block overflow stays inside its 2,500-char reserve"
+rm -rf "$KNOWLEDGE_DIR"
+setup_v2_knowledge_store
+for i in $(seq -w 1 60); do
+  pref_entry "general-$i.md" "General preference number $i with a title long enough to need the reserve" \
+    "learned: 2026-10-01 | activity: general | status: current"
+done
+OUTPUT=$(cd "$MAIN_REPO" && bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
+GENERAL_BLOCK=$(echo "$OUTPUT" | sed -n '/^--- Preferences for general ---$/,/^$/p')
+GENERAL_CHARS=$(echo "$OUTPUT" | general_block_chars)
+SHOWN=$(echo "$GENERAL_BLOCK" | grep -c '^- General preference number' || true)
+HIDDEN=$(echo "$GENERAL_BLOCK" | sed -n 's/^(+\([0-9][0-9]*\) more: lore search --preferences --activity general)$/\1/p')
+if [[ "$GENERAL_CHARS" -gt 0 && "$GENERAL_CHARS" -le 2500 ]]; then
+  echo "  PASS: block is $GENERAL_CHARS chars, inside the reserve"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: block is $GENERAL_CHARS chars against a 2500 reserve"
+  FAIL=$((FAIL + 1))
+fi
+if [[ -n "$HIDDEN" && "$SHOWN" -gt 0 && $((SHOWN + HIDDEN)) -eq 60 ]]; then
+  echo "  PASS: $SHOWN titles shown, overflow line counts the other $HIDDEN"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: shown=$SHOWN hidden=${HIDDEN:-none} (expected them to sum to 60)"
+  FAIL=$((FAIL + 1))
+fi
+assert_contains "first titles in filename order" "$GENERAL_BLOCK" "- General preference number 01 with"
+assert_contains "budget line counts the shown titles" "$OUTPUT" "[Budget] ${GENERAL_CHARS}/8000 chars | 0 full, ${SHOWN} summary"
+
+# =============================================
+# Test 23: No preferences/, no index lines and no general block
+# =============================================
+echo ""
+echo "Test 23: a store without preferences/ is unchanged"
+rm -rf "$KNOWLEDGE_DIR"
+setup_v2_knowledge_store
+OUTPUT=$(cd "$MAIN_REPO" && bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
+assert_not_contains "no activity index" "$OUTPUT" "by activity:"
+assert_not_contains "no general block" "$OUTPUT" "--- Preferences for general ---"
+assert_contains "zero-entry line still explains itself" "$OUTPUT" "[knowledge] 0 entries delivered —"
 
 # =============================================
 # Summary
