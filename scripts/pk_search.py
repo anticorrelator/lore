@@ -9,6 +9,7 @@ Other extracted modules:
     pk_resolve.py  — Resolver, resolve_read_path, BACKLINK_RE
 """
 
+import contextlib
 import fcntl
 import hashlib
 import io
@@ -1519,6 +1520,25 @@ class Searcher:
         # Reported rather than returned: search() returns a list of dicts that
         # composite_search, budget_search, and prefetch all consume as-is.
         self.last_status_excluded: dict[str, int] = {}
+        self._in_single_check = False
+        self._index_checked = False
+
+    @contextlib.contextmanager
+    def single_index_check(self):
+        """Check the index once for all the searches one command runs inside this block.
+
+        Outside a block every search checks, so a Searcher kept across a
+        change to the store still sees it.
+        """
+        if self._in_single_check:
+            yield
+            return
+        self._in_single_check = True
+        try:
+            yield
+        finally:
+            self._in_single_check = False
+            self._index_checked = False
 
     def _index_queryable(self) -> bool:
         """True when the index on disk can answer a search right now."""
@@ -1542,6 +1562,12 @@ class Searcher:
         never waits out a rebuild it could not join: it serves whatever index
         is already on disk and names the reason.
         """
+        if not self._index_checked:
+            self._check_index()
+            self._index_checked = self._in_single_check
+        return self.degraded
+
+    def _check_index(self) -> str | None:
         self.degraded = None
         if not os.path.exists(self.db_path):
             result = self.indexer.index_all()
