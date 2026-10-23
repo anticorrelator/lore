@@ -511,6 +511,12 @@ class Indexer:
         )
         """,
         """
+        CREATE TABLE IF NOT EXISTS tfidf_terms (
+            term TEXT PRIMARY KEY,
+            idx INTEGER NOT NULL
+        )
+        """,
+        """
         CREATE TABLE IF NOT EXISTS concordance_results (
             file_path TEXT,
             heading TEXT,
@@ -527,6 +533,7 @@ class Indexer:
         "entry_terms_instance",
         "entry_terms",
         "concordance_results",
+        "tfidf_terms",
         "tfidf_vectors",
         "embeddings",
         "index_meta",
@@ -597,7 +604,7 @@ class Indexer:
         """Recompute the ledger fold and rewrite the cached trust_score column.
 
         The cheap arm of marker-triggered staleness: no file re-parse, just an
-        UPDATE per indexed knowledge file with the fresh fold's scores.
+        UPDATE per knowledge row whose score the fresh fold changed.
         """
         try:
             with IndexWriteLock(self.knowledge_dir):
@@ -615,18 +622,21 @@ class Indexer:
         if not self._validate_db(conn):
             conn.close()
             return {"error": "index schema invalid; run a full index"}
-        rows = conn.execute(
-            "SELECT DISTINCT file_path FROM entries WHERE source_type = 'knowledge'"
-        ).fetchall()
-        for (fp,) in rows:
-            conn.execute(
-                "UPDATE entries SET trust_score = ? WHERE file_path = ?",
-                (self._trust_score_for(fp), fp),
-            )
+        scores: dict[str, float] = {}
+        changed = []
+        # Keyed by rowid for the reason _store_structural_importance gives.
+        for rowid, fp, stored in conn.execute(
+            "SELECT rowid, file_path, trust_score FROM entries WHERE source_type = 'knowledge'"
+        ).fetchall():
+            if fp not in scores:
+                scores[fp] = self._trust_score_for(fp)
+            if scores[fp] != stored:
+                changed.append((scores[fp], rowid))
+        conn.executemany("UPDATE entries SET trust_score = ? WHERE rowid = ?", changed)
         self._record_trust_marker_state(conn, marker_state)
         conn.commit()
         conn.close()
-        return {"trust_entries_updated": len(rows)}
+        return {"trust_entries_updated": len(changed)}
 
     def _rebuild_db(self) -> sqlite3.Connection:
         """Reset the index to an empty current-schema state, in place.
@@ -1034,23 +1044,37 @@ class Indexer:
     def _update_structural_importance_locked(self) -> dict:
         conn = self._connect()
         importance_map = self._compute_structural_importance(conn)
-
-        updated = 0
-        for (file_path, heading), info in importance_map.items():
-            importance = info.get("importance", 0.0)
-            if importance > 0:
-                conn.execute(
-                    "UPDATE entries SET structural_importance = ? WHERE file_path = ? AND heading = ?",
-                    (importance, file_path, heading),
-                )
-                updated += 1
-
+        self._store_structural_importance(conn, importance_map)
         conn.commit()
         conn.close()
         return {
-            "entries_with_importance": updated,
+            "entries_with_importance": sum(
+                1 for info in importance_map.values() if info["importance"] > 0
+            ),
             "total_computed": len(importance_map),
         }
+
+    @staticmethod
+    def _store_structural_importance(
+        conn: sqlite3.Connection, importance_map: dict[tuple[str, str], dict]
+    ) -> int:
+        """Write each recomputed score that differs from the stored one. Returns rows written.
+
+        Keyed by rowid: FTS5 cannot index file_path or heading, so an UPDATE
+        matching on them scans the whole table once per entry.
+        """
+        changed = []
+        for rowid, file_path, heading, stored in conn.execute(
+            "SELECT rowid, file_path, heading, structural_importance "
+            "FROM entries WHERE source_type = 'knowledge'"
+        ):
+            info = importance_map.get((file_path, heading))
+            if info is not None and info["importance"] != stored:
+                changed.append((info["importance"], rowid))
+        conn.executemany(
+            "UPDATE entries SET structural_importance = ? WHERE rowid = ?", changed
+        )
+        return len(changed)
 
     def _collect_all_files(self) -> list[tuple[str, str]]:
         """Collect all indexable files: knowledge + source."""
@@ -1125,6 +1149,9 @@ class Indexer:
         if not self._validate_db(conn):
             conn.close()
             return self.index_all(force=True)
+        # An index built before tfidf_terms existed gains it here, without a
+        # schema bump that would force every store through a full rebuild.
+        self._init_schema(conn)
 
         start_time = time.time()
 
@@ -1144,6 +1171,7 @@ class Indexer:
         files_reindexed = 0
         files_removed = 0
         total_entries_added = 0
+        changed_paths: set[str] = set()
 
         # Re-index new or changed files
         for fpath, source_type in all_files:
@@ -1165,6 +1193,7 @@ class Indexer:
                 count = self._index_file(conn, fpath, source_type)
                 total_entries_added += count
                 files_reindexed += 1
+                changed_paths.add(fpath)
 
         # Remove deleted files
         for fp in meta_rows:
@@ -1172,6 +1201,7 @@ class Indexer:
                 conn.execute("DELETE FROM entries WHERE file_path = ?", (fp,))
                 conn.execute("DELETE FROM file_meta WHERE file_path = ?", (fp,))
                 files_removed += 1
+                changed_paths.add(fp)
 
         conn.execute(
             "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
@@ -1180,23 +1210,17 @@ class Indexer:
         conn.commit()
         conn.close()
 
-        # Rebuild concordance vectors if entries changed
         concordance_stats = {}
-        if files_reindexed > 0 or files_removed > 0:
-            concordance_stats = self.build_concordance()
+        if changed_paths:
+            concordance_stats = self.update_concordance(changed_paths)
 
         # Recompute structural importance (link structure is global —
         # any file change can affect importance scores)
         importance_updated = 0
-        if files_reindexed > 0 or files_removed > 0:
+        if changed_paths:
             imp_conn = self._connect()
             importance_map = self._compute_structural_importance(imp_conn)
-            for (fp, heading), scores in importance_map.items():
-                imp_conn.execute(
-                    "UPDATE entries SET structural_importance = ? WHERE file_path = ? AND heading = ?",
-                    (scores["importance"], fp, heading),
-                )
-                importance_updated += 1
+            importance_updated = self._store_structural_importance(imp_conn, importance_map)
             imp_conn.commit()
             imp_conn.close()
 
@@ -1223,6 +1247,19 @@ class Indexer:
                 # holding the lock across the call is what keeps that
                 # connection from racing another process's rebuild.
                 return Concordance(self.db_path).build_vectors()
+        except IndexLockBusy:
+            return {"error": INDEX_BUSY_ERROR}
+
+    def update_concordance(self, file_paths: set[str]) -> dict:
+        """Recompute TF-IDF vectors for the entries of file_paths only.
+
+        Returns stats dict from Concordance.update_vectors(), which falls back
+        to a full build_vectors() when the corpus has drifted too far.
+        """
+        from pk_concordance import Concordance
+        try:
+            with IndexWriteLock(self.knowledge_dir):
+                return Concordance(self.db_path).update_vectors(file_paths)
         except IndexLockBusy:
             return {"error": INDEX_BUSY_ERROR}
 

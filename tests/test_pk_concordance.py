@@ -448,6 +448,164 @@ class TestIndexerConcordance:
 
 
 # ---------------------------------------------------------------------------
+# An incremental reindex rewrites only what changed
+# ---------------------------------------------------------------------------
+
+TOPICS = [
+    "caching", "logging", "retries", "locking", "parsing", "paging", "hashing", "sorting",
+    "batching", "tracing", "routing", "pooling", "queueing", "sharding", "indexing", "merging",
+    "diffing", "linting", "packing", "signing", "polling", "mapping", "folding", "scanning",
+    "binding", "seeding", "pruning", "framing", "tagging", "timing",
+]
+
+
+@pytest.fixture
+def larger_store(tmp_path):
+    """Thirty entries, so one changed entry stays under REBUILD_DRIFT. Every third
+    entry after the first links to entry-00; nothing links to entry-05."""
+    kd = tmp_path / "knowledge"
+    conv = kd / "conventions"
+    conv.mkdir(parents=True)
+    for n, topic in enumerate(TOPICS):
+        link = "See [[knowledge:conventions/entry-00]].\n" if n and n % 3 == 0 else ""
+        (conv / f"entry-{n:02d}.md").write_text(
+            f"# Entry {n:02d}\nNotes on {topic} for the shared store.\n{link}",
+            encoding="utf-8",
+        )
+    Indexer(str(kd)).index_all()
+    return kd
+
+
+@pytest.fixture
+def traced_statements(monkeypatch):
+    """Every SQL statement Indexer and Concordance connections run, as executed."""
+    statements: list[str] = []
+
+    def tracing(connect):
+        def traced_connect(self):
+            conn = connect(self)
+            conn.set_trace_callback(statements.append)
+            return conn
+        return traced_connect
+
+    monkeypatch.setattr(Indexer, "_connect", tracing(Indexer._connect))
+    monkeypatch.setattr(Concordance, "_connect", tracing(Concordance._connect))
+    return statements
+
+
+def _append(path, text):
+    """Append text, moving mtime past the indexer's tolerance for a same-instant write."""
+    mtime = path.stat().st_mtime
+    path.write_text(path.read_text(encoding="utf-8") + text, encoding="utf-8")
+    os.utime(path, (mtime + 1, mtime + 1))
+
+
+def _importance_writes(statements):
+    return [s for s in statements if s.startswith("UPDATE entries SET structural_importance")]
+
+
+def _vector_writes(statements):
+    return [s for s in statements if s.startswith("INSERT OR REPLACE INTO tfidf_vectors")]
+
+
+class TestIncrementalReindexWritesOnlyChanges:
+
+    def test_content_edit_writes_one_vector_and_no_importance(self, larger_store, traced_statements):
+        _append(larger_store / "conventions" / "entry-05.md", "Also covers eviction.\n")
+        result = Indexer(str(larger_store)).incremental_index()
+
+        assert _importance_writes(traced_statements) == []
+        writes = _vector_writes(traced_statements)
+        assert len(writes) == 1 and "entry-05.md" in writes[0]
+        assert result["concordance"]["vectors_built"] == 1
+        assert "full_rebuild" not in result["concordance"]
+        assert result["importance_updated"] == 0
+
+    def test_new_backlink_writes_only_the_target_score(self, larger_store, traced_statements):
+        db = os.path.join(str(larger_store), ".pk_search.db")
+        conn = sqlite3.connect(db)
+        target_rowid = conn.execute(
+            "SELECT rowid FROM entries WHERE heading = 'Entry 01'"
+        ).fetchone()[0]
+        conn.close()
+
+        _append(larger_store / "conventions" / "entry-05.md", "See [[knowledge:conventions/entry-01]].\n")
+        result = Indexer(str(larger_store)).incremental_index()
+
+        writes = _importance_writes(traced_statements)
+        assert writes == [f"UPDATE entries SET structural_importance = 1.0 WHERE rowid = {target_rowid}"]
+        assert result["importance_updated"] == 1
+
+    def test_reindexed_entry_gets_back_its_own_score(self, larger_store, traced_statements):
+        db = os.path.join(str(larger_store), ".pk_search.db")
+
+        def score():
+            conn = sqlite3.connect(db)
+            try:
+                return conn.execute(
+                    "SELECT structural_importance FROM entries WHERE heading = 'Entry 00'"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+
+        before = score()
+        assert before > 0
+        _append(larger_store / "conventions" / "entry-00.md", "Also covers eviction.\n")
+        result = Indexer(str(larger_store)).incremental_index()
+
+        assert score() == before
+        assert len(_importance_writes(traced_statements)) == 1
+        assert result["importance_updated"] == 1
+
+    def test_removed_entry_loses_its_vector_without_a_rebuild(self, larger_store, traced_statements):
+        (larger_store / "conventions" / "entry-05.md").unlink()
+        result = Indexer(str(larger_store)).incremental_index()
+
+        assert _vector_writes(traced_statements) == []
+        assert "full_rebuild" not in result["concordance"]
+        conc = Concordance(os.path.join(str(larger_store), ".pk_search.db"))
+        paths = {os.path.basename(e["file_path"]) for e in conc.get_all_vectors()}
+        assert "entry-05.md" not in paths and len(paths) == 29
+
+    def test_new_terms_append_without_moving_stored_indices(self, larger_store):
+        conc = Concordance(os.path.join(str(larger_store), ".pk_search.db"))
+        before = conc.get_term_index()
+        _append(larger_store / "conventions" / "entry-05.md", "Aardvark.\n")
+        Indexer(str(larger_store)).incremental_index()
+
+        after = conc.get_term_index()
+        assert all(after[term] == idx for term, idx in before.items())
+        assert after["aardvark"] == len(before)
+        entry = conc.get_vector(str(larger_store / "conventions" / "entry-05.md"), "Entry 05")
+        assert sparse_cosine_similarity(conc.build_query_vector("aardvark"), entry) > 0
+
+    def test_latest_vectors_include_rows_an_update_wrote(self, larger_store):
+        _append(larger_store / "conventions" / "entry-05.md", "Also covers eviction.\n")
+        Indexer(str(larger_store)).incremental_index()
+
+        latest = Concordance(os.path.join(str(larger_store), ".pk_search.db")).latest_vectors()
+        assert len(latest) == 30
+
+    def test_editing_one_entry_again_does_not_add_drift(self, larger_store):
+        idx = Indexer(str(larger_store))
+        for word in ("eviction", "expiry", "warming", "invalidation"):
+            _append(larger_store / "conventions" / "entry-05.md", f"Also covers {word}.\n")
+            result = idx.incremental_index()
+            assert "full_rebuild" not in result["concordance"]
+
+    def test_drift_past_threshold_rebuilds_every_vector(self, larger_store):
+        from pk_concordance import REBUILD_DRIFT
+        # Each edited row counts twice: its new vector and its full-build one.
+        edits = int(REBUILD_DRIFT * len(TOPICS) / 2) + 1
+        for n in range(1, edits + 1):
+            _append(larger_store / "conventions" / f"entry-{n:02d}.md", "Also covers eviction.\n")
+        result = Indexer(str(larger_store)).incremental_index()
+
+        assert "full_rebuild" in result["concordance"]
+        assert result["concordance"]["vectors_built"] == len(TOPICS)
+
+
+# ---------------------------------------------------------------------------
 # Phase 2: composite_search TF-IDF rankings
 # ---------------------------------------------------------------------------
 

@@ -34,6 +34,22 @@ _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 VECTOR_TEXT_KEY = "tfidf_vector_text"
 VECTOR_TEXT_WITHOUT_COMMENTS = "html-comments-removed"
 
+# index_meta rows a whole build_vectors() run writes: when it ran (every row it
+# writes carries that timestamp) and how many vectors it wrote.
+FULL_BUILD_AT_KEY = "tfidf_full_build_at"
+FULL_BUILD_VECTORS_KEY = "tfidf_full_build_vectors"
+
+# update_vectors() leaves every vector it does not rewrite at the IDF it was
+# written with. Once the rows written or removed since the last full build
+# exceed this share of that build's vectors, it rebuilds them all instead.
+# Calibrated 2026-10-23 on a 7,818-row store by adding its newest rows back
+# incrementally and comparing with a full rebuild: knowledge similarities moved
+# at most 0.013 at 1% of rows and 0.027-0.036 from 5% through 20%, keeping 97.7%
+# or more of each entry's top-10 see-also. The error stops growing, so the value
+# is set by rebuild cost: organic churn was 3.6% of rows a week, and the source
+# rows a search drops and the next session start re-adds count 10.8% on their own.
+REBUILD_DRIFT = 0.15
+
 # One cutoff for "similar entry" everywhere: the capture-time notice and
 # curate's duplicate candidates. Calibrated 2026-09-23 on footer-free vectors:
 # held out of the index, 11 of 14 hand-labelled duplicate pairs scored 0.5 or
@@ -150,8 +166,73 @@ class Concordance:
         return {term: doc_count for term, doc_count in rows}
 
     def _build_term_index(self, doc_freqs: dict[str, int]) -> dict[str, int]:
-        """Build a stable term -> integer index mapping, sorted alphabetically."""
+        """Build a term -> integer index mapping, sorted alphabetically."""
         return {term: idx for idx, term in enumerate(sorted(doc_freqs.keys()))}
+
+    def _stored_term_index(self, conn: sqlite3.Connection) -> dict[str, int] | None:
+        """The term index the stored vectors were written in, or None for vectors
+        written before the index was stored, which used _build_term_index().
+
+        A full build stores the alphabetical index; an update appends new terms
+        after it, so an index already in a stored vector never moves.
+        """
+        try:
+            rows = conn.execute("SELECT term, idx FROM tfidf_terms").fetchall()
+        except sqlite3.OperationalError:
+            return None
+        return {term: idx for term, idx in rows} or None
+
+    def _term_index(self, conn: sqlite3.Connection, doc_freqs: dict[str, int]) -> dict[str, int]:
+        stored = self._stored_term_index(conn)
+        return stored if stored is not None else self._build_term_index(doc_freqs)
+
+    def _extend_term_index(self, conn: sqlite3.Connection, doc_freqs: dict[str, int]) -> dict[str, int]:
+        """The term index with doc_freqs' unseen terms appended, stored in conn's transaction."""
+        term_index = self._stored_term_index(conn)
+        if term_index is None:
+            added = list(self._build_term_index(doc_freqs).items())
+            term_index = {}
+        else:
+            new_terms = sorted(term for term in doc_freqs if term not in term_index)
+            added = [(term, len(term_index) + i) for i, term in enumerate(new_terms)]
+        conn.executemany("INSERT INTO tfidf_terms (term, idx) VALUES (?, ?)", added)
+        term_index.update(added)
+        return term_index
+
+    def _full_build_baseline(self, conn: sqlite3.Connection) -> tuple[float, int] | None:
+        """(timestamp, vector count) of the last full build_vectors(), or None if none is recorded."""
+        try:
+            rows = dict(conn.execute(
+                "SELECT key, value FROM index_meta WHERE key IN (?, ?)",
+                (FULL_BUILD_AT_KEY, FULL_BUILD_VECTORS_KEY),
+            ).fetchall())
+        except sqlite3.OperationalError:
+            return None
+        if FULL_BUILD_AT_KEY not in rows or FULL_BUILD_VECTORS_KEY not in rows:
+            return None
+        return float(rows[FULL_BUILD_AT_KEY]), int(rows[FULL_BUILD_VECTORS_KEY])
+
+    @staticmethod
+    def _rows_changed_since(conn: sqlite3.Connection, built_at: float, built_vectors: int) -> int:
+        """Vectors written since the full build at built_at, plus that build's vectors
+        since rewritten or removed. A rewritten row counts twice, which errs early."""
+        present, written_since = conn.execute(
+            "SELECT count(*), coalesce(sum(updated_at > ?), 0) FROM tfidf_vectors",
+            (built_at,),
+        ).fetchone()
+        return written_since + (built_vectors - (present - written_since))
+
+    @staticmethod
+    def _tfidf_vector(tf_counts: Counter, term_index: dict[str, int], idf: dict[str, float]) -> dict[int, float]:
+        """TF-IDF = (1 + log(tf)) * idf for each indexed term with tf > 0."""
+        vec: dict[int, float] = {}
+        for term, count in tf_counts.items():
+            if term in term_index and term in idf:
+                tf_weight = 1.0 + math.log(count) if count > 0 else 0.0
+                tfidf = tf_weight * idf[term]
+                if tfidf > 0:
+                    vec[term_index[term]] = tfidf
+        return vec
 
     def _get_instance_term_frequencies(self, conn: sqlite3.Connection) -> dict[int, Counter]:
         """Get per-document term frequencies from fts5vocab instance table.
@@ -217,8 +298,12 @@ class Concordance:
         The rows being rebuilt are cleared first, in the same transaction, so an
         entry removed from the index since the last build leaves no vector behind.
 
+        A whole build also replaces the stored term index with the alphabetical
+        one and records itself as the baseline update_vectors() measures drift from.
+
         Args:
-            source_type_filter: If set, only build (and clear) vectors for entries of this source_type.
+            source_type_filter: If set, only build (and clear) vectors for entries
+                of this source_type, in the stored term index.
 
         Returns:
             Stats dict with vectors_built, elapsed_seconds.
@@ -232,24 +317,36 @@ class Concordance:
             else:
                 conn.execute("DELETE FROM tfidf_vectors")
 
-        # Get corpus stats from fts5vocab
-        def record_vector_text() -> None:
-            if not source_type_filter:
-                conn.execute(
-                    "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+        def record_whole_build(term_index: dict[str, int], built_at: float) -> None:
+            if source_type_filter:
+                return
+            conn.execute("DELETE FROM tfidf_terms")
+            conn.executemany(
+                "INSERT INTO tfidf_terms (term, idx) VALUES (?, ?)", term_index.items()
+            )
+            vectors = conn.execute("SELECT count(*) FROM tfidf_vectors").fetchone()[0]
+            conn.executemany(
+                "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+                [
                     (VECTOR_TEXT_KEY, VECTOR_TEXT_WITHOUT_COMMENTS),
-                )
+                    (FULL_BUILD_AT_KEY, repr(built_at)),
+                    (FULL_BUILD_VECTORS_KEY, str(vectors)),
+                ],
+            )
 
         total_docs = self._get_doc_count(conn)
         if total_docs == 0:
             clear_rebuilt_rows()
-            record_vector_text()
+            record_whole_build({}, time.time())
             conn.commit()
             conn.close()
             return {"vectors_built": 0, "elapsed_seconds": 0.0}
 
         doc_freqs = self._get_doc_frequencies(conn)
-        term_index = self._build_term_index(doc_freqs)
+        if source_type_filter:
+            term_index = self._extend_term_index(conn, doc_freqs)
+        else:
+            term_index = self._build_term_index(doc_freqs)
 
         # Precompute IDF: log(N / df) for each term
         idf: dict[str, float] = {}
@@ -264,37 +361,10 @@ class Concordance:
         entry_map = self._get_entry_rowids(conn, source_type_filter)
 
         clear_rebuilt_rows()
-        vectors_built = 0
         now = time.time()
+        vectors_built = self._write_vectors(conn, entry_map, doc_tfs, term_index, idf, now)
 
-        for rowid, (file_path, heading, source_type) in entry_map.items():
-            tf_counts = doc_tfs.get(rowid)
-            if not tf_counts:
-                continue
-
-            # Build sparse TF-IDF vector using porter-stemmed terms
-            # TF-IDF = (1 + log(tf)) * idf for tf > 0
-            vec: dict[int, float] = {}
-            for term, count in tf_counts.items():
-                if term in term_index and term in idf:
-                    tf_weight = 1.0 + math.log(count) if count > 0 else 0.0
-                    tfidf = tf_weight * idf[term]
-                    if tfidf > 0:
-                        vec[term_index[term]] = tfidf
-
-            if not vec:
-                continue
-
-            # Store vector
-            blob = serialize_sparse_vector(vec)
-            conn.execute(
-                "INSERT OR REPLACE INTO tfidf_vectors (file_path, heading, vector, source_type, updated_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (file_path, heading, blob, source_type, now),
-            )
-            vectors_built += 1
-
-        record_vector_text()
+        record_whole_build(term_index, now)
         conn.commit()
         conn.close()
 
@@ -302,6 +372,99 @@ class Concordance:
         return {
             "vectors_built": vectors_built,
             "elapsed_seconds": round(elapsed, 3),
+        }
+
+    def _write_vectors(
+        self,
+        conn: sqlite3.Connection,
+        entry_map: dict[int, tuple[str, str, str]],
+        doc_tfs: dict[int, Counter],
+        term_index: dict[str, int],
+        idf: dict[str, float],
+        written_at: float,
+    ) -> int:
+        """Store a vector for each entry in entry_map that has one. Returns how many."""
+        vectors_written = 0
+        for rowid, (file_path, heading, source_type) in entry_map.items():
+            tf_counts = doc_tfs.get(rowid)
+            if not tf_counts:
+                continue
+            vec = self._tfidf_vector(tf_counts, term_index, idf)
+            if not vec:
+                continue
+            conn.execute(
+                "INSERT OR REPLACE INTO tfidf_vectors (file_path, heading, vector, source_type, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (file_path, heading, serialize_sparse_vector(vec), source_type, written_at),
+            )
+            vectors_written += 1
+        return vectors_written
+
+    def update_vectors(self, file_paths: set[str]) -> dict:
+        """Recompute the vectors of the entries in file_paths, dropping those no longer indexed.
+
+        The entries are weighed with this moment's document frequencies, in the
+        stored term index extended by any new terms; every other vector keeps
+        the IDF it was written with. A whole build_vectors() runs instead when
+        there is no full build to extend, or when this update would take the
+        rows changed since it past REBUILD_DRIFT of its vectors.
+
+        Returns:
+            Stats dict with vectors_built, elapsed_seconds, and full_rebuild
+            (the reason) when a whole build ran instead.
+        """
+        start_time = time.time()
+        conn = self._connect()
+
+        def rebuild(reason: str) -> dict:
+            conn.rollback()
+            conn.close()
+            return {**self.build_vectors(), "full_rebuild": reason}
+
+        baseline = self._full_build_baseline(conn)
+        if baseline is None:
+            return rebuild("no full build recorded to extend")
+        built_at, built_vectors = baseline
+
+        total_docs = self._get_doc_count(conn)
+        doc_freqs = self._content_doc_frequencies(conn)
+        term_index = self._extend_term_index(conn, doc_freqs)
+
+        paths = sorted(file_paths)
+        conn.executemany("DELETE FROM tfidf_vectors WHERE file_path = ?", [(p,) for p in paths])
+
+        entry_map: dict[int, tuple[str, str, str]] = {}
+        texts: dict[int, str] = {}
+        for start in range(0, len(paths), 500):
+            chunk = paths[start:start + 500]
+            for rowid, file_path, heading, source_type, content in conn.execute(
+                "SELECT rowid, file_path, heading, source_type, content FROM entries "
+                f"WHERE file_path IN ({','.join('?' * len(chunk))}) ORDER BY rowid",
+                chunk,
+            ):
+                entry_map[rowid] = (file_path, heading, source_type)
+                texts[rowid] = strip_html_comments(content)
+        doc_tfs = self._stem_and_count_many(texts)
+
+        idf = {
+            term: math.log(total_docs / doc_freqs[term])
+            for counts in doc_tfs.values() for term in counts
+            if doc_freqs.get(term)
+        }
+        # Rows stamped after the full build are how drift and latest_vectors()
+        # tell them from its own, even if the clock has stepped back since.
+        written_at = max(time.time(), math.nextafter(built_at, math.inf))
+        vectors_built = self._write_vectors(conn, entry_map, doc_tfs, term_index, idf, written_at)
+
+        changed = self._rows_changed_since(conn, built_at, built_vectors)
+        if changed > REBUILD_DRIFT * built_vectors:
+            return rebuild(f"{changed} rows changed since the last full build of {built_vectors}")
+
+        conn.commit()
+        conn.close()
+        return {
+            "vectors_built": vectors_built,
+            "elapsed_seconds": round(time.time() - start_time, 3),
         }
 
     def get_vector(self, file_path: str, heading: str) -> dict[int, float] | None:
@@ -563,7 +726,7 @@ class Concordance:
             return {}
 
         doc_freqs = self._get_doc_frequencies(conn)
-        term_index = self._build_term_index(doc_freqs)
+        term_index = self._term_index(conn, doc_freqs)
         conn.close()
 
         # Stem query tokens using FTS5's porter tokenizer
@@ -604,7 +767,8 @@ class Concordance:
 
         Same porter tokenizer, same comment stripping, same content-column IDF,
         same term index — so the vector of an indexed entry's content equals its
-        stored vector, and the vector of any other text can be compared with
+        stored vector up to the document frequencies that moved since that vector
+        was written, and the vector of any other text can be compared with
         stored vectors directly.
 
         A term the index has never seen is weighted as if one document held it,
@@ -614,23 +778,24 @@ class Concordance:
         vector. Dropping it instead would score two texts on an unindexed topic
         by the few common words they happen to share.
 
-        The term index and IDF are read once, now. They match the stored vectors
-        only while the index is unchanged since the last build_vectors(); a caller
-        that needs that guarantee holds IndexWriteLock across this call and
-        latest_vectors().
+        The term index and IDF are read once, now. Entries indexed after the
+        vectors were last written can carry terms the stored index does not
+        have yet, which are weighed as unseen; a caller that needs entries and
+        vectors from the same index write holds IndexWriteLock across this call
+        and latest_vectors().
         """
         conn = self._connect()
         total_docs = self._get_doc_count(conn)
         doc_freqs = self._content_doc_frequencies(conn)
+        term_index = self._term_index(conn, doc_freqs)
         conn.close()
-        term_index = self._build_term_index(doc_freqs)
         unseen_index: dict[str, int] = {}
 
         def vectorize(text: str) -> dict[int, float]:
             vec: dict[int, float] = {}
             for term, count in self._stem_and_count(strip_html_comments(text)).items():
                 df = doc_freqs.get(term)
-                if df:
+                if df and term in term_index:
                     idx = term_index[term]
                 else:
                     df = 1
@@ -661,26 +826,33 @@ class Concordance:
         return row is not None and row[0] == VECTOR_TEXT_WITHOUT_COMMENTS
 
     def latest_vectors(self, source_type: str = "knowledge") -> dict[tuple[str, str], dict[int, float]]:
-        """Stored vectors written by the most recent build_vectors(), keyed by (file_path, heading).
+        """Stored vectors written since the last whole build_vectors(), keyed by (file_path, heading).
 
-        Every row one build writes shares that build's timestamp. An index last
-        built before build_vectors() cleared the rows it rebuilds can still hold
-        rows from earlier builds, for entries removed since and in an older
-        vocabulary's term indices; the timestamp is what leaves them out.
+        Every row a whole build writes carries the build's timestamp, and
+        update_vectors() stamps the rows it writes later. An index last built
+        before build_vectors() cleared the rows it rebuilds can still hold rows
+        from earlier builds, for entries removed since and in an older
+        vocabulary's term indices; the timestamp is what leaves them out. Such
+        an index records no build time, and every row of its last build shares
+        the newest timestamp.
         """
         conn = self._connect()
         rows = conn.execute(
             "SELECT file_path, heading, vector, updated_at FROM tfidf_vectors WHERE source_type = ?",
             (source_type,),
         ).fetchall()
+        baseline = self._full_build_baseline(conn)
         conn.close()
         if not rows:
             return {}
-        latest = max(updated_at for *_, updated_at in rows)
+        if baseline is not None:
+            built_at = baseline[0]
+        else:
+            built_at = max(updated_at for *_, updated_at in rows)
         return {
             (file_path, heading): deserialize_sparse_vector(blob)
             for file_path, heading, blob, updated_at in rows
-            if updated_at == latest and blob
+            if updated_at >= built_at and blob
         }
 
     def run_full_analysis(
@@ -822,14 +994,13 @@ class Concordance:
         return candidates
 
     def get_term_index(self) -> dict[str, int]:
-        """Build and return the current term -> integer index mapping.
-
-        Reads from fts5vocab to get the current vocabulary.
-        """
+        """The term -> integer index mapping the stored vectors are written in."""
         conn = self._connect()
-        doc_freqs = self._get_doc_frequencies(conn)
+        term_index = self._stored_term_index(conn)
+        if term_index is None:
+            term_index = self._build_term_index(self._get_doc_frequencies(conn))
         conn.close()
-        return self._build_term_index(doc_freqs)
+        return term_index
 
     def get_reverse_term_index(self) -> dict[int, str]:
         """Build and return the current integer index -> term mapping.
