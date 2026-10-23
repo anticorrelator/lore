@@ -4,4 +4,4 @@ prefetch: caller,event,loaded_paths,scale_declared,timestamp
 search: caller,elapsed_ms,event,miss,query,query_kind,result_count,scale_declared,source_type,timestamp,top_score
 search: caller,elapsed_ms,event,miss,query,query_kind,result_count,source_type,timestamp,top_score
 search: elapsed_ms,event,miss,query,query_kind,result_count,source_type,timestamp,top_score
-unknown: budget_total,budget_used,context_sections,context_signal,direct_resolved,files_full,files_skipped,files_summary,format_version,git_branch,loaded_paths,relevance_search,scale_declared,signal_sources,timestamp
+unknown: budget_total,budget_used,context_sections,context_signal,direct_resolved,elapsed_ms,files_full,files_skipped,files_summary,format_version,git_branch,loaded_paths,relevance_search,scale_declared,signal_sources,timestamp

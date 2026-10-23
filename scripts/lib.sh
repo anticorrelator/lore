@@ -443,6 +443,20 @@ timestamp_iso() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
+# --- epoch_ms ---
+# Wall-clock time in Unix epoch milliseconds. macOS /bin/bash 3.2 has no
+# EPOCHREALTIME and its date has no %N, so there it costs one python3 call.
+# Usage: ms=$(epoch_ms)
+epoch_ms() {
+  if [[ ${BASH_VERSINFO[0]} -ge 5 ]]; then
+    local us="${EPOCHREALTIME/[.,]/}"
+    echo $(( us / 1000 ))
+  else
+    python3 -S -c 'import time; print(int(time.time() * 1000))' 2>/dev/null \
+      || echo $(( $(date +%s) * 1000 ))
+  fi
+}
+
 # --- get_mtime ---
 # Get the modification time of a file as Unix epoch seconds.
 # Cross-platform: works on both Darwin (macOS) and Linux.
@@ -2848,6 +2862,46 @@ _extract_work_item_signal() {
   fi
 }
 
+# --- _newest_active_work_item ---
+# Of the given _meta.json paths, print the work item directory (trailing slash
+# included) whose _meta.json was modified most recently and whose status is
+# neither completed nor archived. Prints nothing when none qualifies; a tie
+# goes to the earlier argument.
+# Usage: dir=$(_newest_active_work_item "$work_dir"/a/_meta.json "$work_dir"/b/_meta.json)
+_newest_active_work_item() {
+  python3 - "$@" <<'PYEOF'
+import os, re, sys
+
+# Status is read the way json_field reads it: the first line naming the key,
+# and that line verbatim when the substitution does not match.
+STATUS = re.compile(rb'.*"status"[ \t\n\v\f\r]*:[ \t\n\v\f\r]*"(.*)".*')
+
+newest_mtime, newest = 0, None
+for meta in sys.argv[1:]:
+    status = b""
+    try:
+        with open(meta, "rb") as f:
+            for line in f.read().split(b"\n"):
+                if b'"status"' in line:
+                    match = STATUS.match(line)
+                    status = match.group(1) if match else line
+                    break
+    except OSError:
+        pass
+    if status in (b"completed", b"archived"):
+        continue
+    try:
+        mtime = os.lstat(meta).st_mtime_ns // 1_000_000_000
+    except OSError:
+        mtime = 0
+    if mtime > newest_mtime:
+        newest_mtime, newest = mtime, meta
+
+if newest is not None:
+    sys.stdout.buffer.write(os.fsencode(newest[:-len("_meta.json")]) + b"\n")
+PYEOF
+}
+
 # --- extract_context_signal ---
 # Extract context signal from git branch + matched work item for FTS5 ranking.
 # Combines branch name, work item title, plan headings, tags, and notes into a text signal.
@@ -2889,58 +2943,56 @@ extract_context_signal() {
     # Try to match branch to a work item for a stronger signal
     local work_dir="$knowledge_dir/_work"
     if [[ -d "$work_dir" ]]; then
-      local work_item_dir meta_file
+      local work_item_dir meta_files=() matched_meta=""
       for work_item_dir in "$work_dir"/*/; do
-        [[ -d "$work_item_dir" ]] || continue
-        meta_file="${work_item_dir}_meta.json"
-        [[ -f "$meta_file" ]] || continue
-
-        if grep -q "\"$branch\"" "$meta_file" 2>/dev/null; then
-          local item_output
-          item_output=$(_extract_work_item_signal "$work_item_dir")
-          _parse_item_signal "$item_output"
-          if [[ -n "$_PARSED_SIGNAL" ]]; then
-            signal="${signal} ${_PARSED_SIGNAL}"
-          fi
-          # Collect item sources
-          if [[ -n "$_PARSED_SOURCES" ]]; then
-            while IFS= read -r src; do
-              [[ -n "$src" ]] && signal_sources+=("$src")
-            done <<< "$_PARSED_SOURCES"
-          fi
-
-          # Extract backlinks from notes.md and plan.md
-          backlinks=$(_extract_work_item_backlinks "$work_item_dir")
-          if [[ -n "$backlinks" ]]; then
-            signal_sources+=("backlinks")
-          fi
-          break
-        fi
+        [[ -d "$work_item_dir" && -f "${work_item_dir}_meta.json" ]] || continue
+        meta_files+=("${work_item_dir}_meta.json")
       done
+
+      # The first item in glob order wins; grep -l lists matches in argument order.
+      if [[ ${#meta_files[@]} -gt 0 ]]; then
+        IFS= read -r matched_meta < <(grep -l "\"$branch\"" "${meta_files[@]}" 2>/dev/null) || true
+      fi
+
+      if [[ -n "$matched_meta" ]]; then
+        work_item_dir="${matched_meta%_meta.json}"
+        local item_output
+        item_output=$(_extract_work_item_signal "$work_item_dir")
+        _parse_item_signal "$item_output"
+        if [[ -n "$_PARSED_SIGNAL" ]]; then
+          signal="${signal} ${_PARSED_SIGNAL}"
+        fi
+        # Collect item sources
+        if [[ -n "$_PARSED_SOURCES" ]]; then
+          while IFS= read -r src; do
+            [[ -n "$src" ]] && signal_sources+=("$src")
+          done <<< "$_PARSED_SOURCES"
+        fi
+
+        # Extract backlinks from notes.md and plan.md
+        backlinks=$(_extract_work_item_backlinks "$work_item_dir")
+        if [[ -n "$backlinks" ]]; then
+          signal_sources+=("backlinks")
+        fi
+      fi
     fi
   else
     # On main/master: use most recently updated active work item
     local work_dir="$knowledge_dir/_work"
     if [[ -d "$work_dir" ]]; then
-      local newest_mtime=0 newest_dir="" work_item_dir dirname meta_file item_status item_mtime
+      local newest_dir="" work_item_dir dirname meta_files=()
       for work_item_dir in "$work_dir"/*/; do
         [[ -d "$work_item_dir" ]] || continue
-        dirname=$(basename "$work_item_dir")
+        dirname="${work_item_dir%/}"
+        dirname="${dirname##*/}"
         [[ "$dirname" == _* ]] && continue
-        meta_file="${work_item_dir}_meta.json"
-        [[ -f "$meta_file" ]] || continue
-
-        item_status=$(json_field "status" "$meta_file")
-        if [[ "$item_status" == "completed" || "$item_status" == "archived" ]]; then
-          continue
-        fi
-
-        item_mtime=$(get_mtime "$meta_file")
-        if [[ "$item_mtime" -gt "$newest_mtime" ]]; then
-          newest_mtime="$item_mtime"
-          newest_dir="$work_item_dir"
-        fi
+        [[ -f "${work_item_dir}_meta.json" ]] || continue
+        meta_files+=("${work_item_dir}_meta.json")
       done
+
+      if [[ ${#meta_files[@]} -gt 0 ]]; then
+        newest_dir=$(_newest_active_work_item "${meta_files[@]}")
+      fi
 
       if [[ -n "$newest_dir" ]]; then
         local item_output

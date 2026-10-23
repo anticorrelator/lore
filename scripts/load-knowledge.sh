@@ -18,6 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # resolving the knowledge dir. The gate now lives at the hook entrypoints
 # where it actually belongs.
 source "$SCRIPT_DIR/lib.sh"
+LOAD_STARTED_MS=$(epoch_ms)
 lore_agent_enabled || exit 0
 
 KNOWLEDGE_DIR=$("$SCRIPT_DIR/resolve-repo.sh" 2>/dev/null) || exit 0
@@ -485,92 +486,68 @@ for e in data.get('titles_only', []):
   fi
 
   # --- Staleness check (v2): check entry files in category directories ---
-  STALE_ENTRIES=()
-  STALE_COUNT=0
-  NOW=$(date +%s)
-  NINETY_DAYS=$((90 * 86400))
-
-  # Collect all entry files once, then batch the per-file checks into single
-  # invocations: one stat for all mtimes, one grep for all low-confidence
-  # markers. The previous per-file get_mtime + grep -c forks were the hook's
-  # dominant cost at store scale (~3s for ~600 entries).
-  #
   # The walk is recursive for the same reason the index count is: entries live
   # in category subdirectories, and a depth-1 scan silently declared ~93% of the
-  # store non-stale. Batching already made the cost per-invocation rather than
-  # per-file, so the wider walk is two forks either way.
-  ALL_ENTRY_FILES=()
-  for category in "${ACTIVE_CATEGORIES[@]}"; do
-    CAT_DIR="$KNOWLEDGE_DIR/$category"
-    [[ -d "$CAT_DIR" ]] || continue
-    while IFS= read -r -d '' file; do
-      ALL_ENTRY_FILES+=("$file")
-    done < <(find "$CAT_DIR" -type f -name '*.md' -print0 2>/dev/null)
-  done
+  # store non-stale.
+  #
+  # find supplies the file list because its traversal order is the order the
+  # list is rendered in. The checks are python because a per-file shell loop
+  # (bash 3.2 has no associative arrays) costs seconds at store scale.
+  #
+  # A retired entry has already had the review this list is asking for, so it
+  # stays off the list; leaving it on trains everyone to ignore the list.
+  STALE_ENTRIES=()
+  while IFS= read -r -d '' stale_label; do
+    STALE_ENTRIES+=("$stale_label")
+  done < <(
+    for category in "${ACTIVE_CATEGORIES[@]}"; do
+      CAT_DIR="$KNOWLEDGE_DIR/$category"
+      [[ -d "$CAT_DIR" ]] || continue
+      find "$CAT_DIR" -type f -name '*.md' -print0 2>/dev/null
+    done | python3 -c '
+import bisect, os, sys, time
 
-  RETIRED_FILES=()
+prefix = os.fsencode(sys.argv[1]) + b"/"
+now = int(time.time())
+entries = []
+for path in sys.stdin.buffer.read().split(b"\0"):
+    if not path:
+        continue
+    try:
+        with open(path, "rb") as f:
+            text = f.read()
+    except OSError:
+        text = b""
+    if b"status: retired" in text:
+        continue
+    rel = path[len(prefix):] if path.startswith(prefix) else path
+    entries.append((path, rel, b"confidence: low" in text))
 
-  if [[ ${#ALL_ENTRY_FILES[@]} -gt 0 ]]; then
-    # A retired entry has already had the review this list is asking for, so it
-    # stays off the list; leaving it on trains everyone to ignore the list.
-    # Same batched grep shape as the low-confidence pass below — one more grep
-    # over the array already collected.
-    while IFS= read -r file; do
-      [[ -n "$file" ]] || continue
-      RETIRED_FILES+=("$file")
-    done < <(grep -l 'status: retired' "${ALL_ENTRY_FILES[@]}" 2>/dev/null || true)
+labels = []
+for path, rel, _ in entries:
+    try:
+        mtime = os.lstat(path).st_mtime_ns // 1_000_000_000
+    except OSError:
+        continue
+    age = now - (mtime or now)
+    if age > 90 * 86400:
+        labels.append(rel + b" (%dd)" % (age // 86400))
 
-    # Batched mtime check (>90 days)
-    while IFS=' ' read -r FILE_MTIME file; do
-      [[ -n "$FILE_MTIME" && -n "$file" ]] || continue
-      RETIRED=0
-      for retired_file in ${RETIRED_FILES[@]+"${RETIRED_FILES[@]}"}; do
-        if [[ "$retired_file" == "$file" ]]; then
-          RETIRED=1
-          break
-        fi
-      done
-      [[ $RETIRED -eq 1 ]] && continue
-      [[ "$FILE_MTIME" -eq 0 ]] && FILE_MTIME="$NOW"
-      AGE=$((NOW - FILE_MTIME))
-      if [[ $AGE -gt $NINETY_DAYS ]]; then
-        DAYS_OLD=$((AGE / 86400))
-        STALE_ENTRIES+=("${file#"$KNOWLEDGE_DIR/"} (${DAYS_OLD}d)")
-        STALE_COUNT=$((STALE_COUNT + 1))
-      fi
-    done < <(
-      if [[ "$(uname)" == "Darwin" ]]; then
-        stat -f '%m %N' "${ALL_ENTRY_FILES[@]}" 2>/dev/null
-      else
-        stat -c '%Y %n' "${ALL_ENTRY_FILES[@]}" 2>/dev/null
-      fi
-    )
+# A low-confidence entry is skipped when its path prefixes any label already listed.
+listed = sorted(labels)
+for _, rel, low_confidence in entries:
+    if not low_confidence:
+        continue
+    i = bisect.bisect_left(listed, rel)
+    if i < len(listed) and listed[i].startswith(rel):
+        continue
+    labels.append(rel + b" (low-confidence)")
+    bisect.insort(listed, labels[-1])
 
-    # Batched low-confidence check
-    while IFS= read -r file; do
-      [[ -n "$file" ]] || continue
-      RETIRED=0
-      for retired_file in ${RETIRED_FILES[@]+"${RETIRED_FILES[@]}"}; do
-        if [[ "$retired_file" == "$file" ]]; then
-          RETIRED=1
-          break
-        fi
-      done
-      [[ $RETIRED -eq 1 ]] && continue
-      REL_PATH="${file#"$KNOWLEDGE_DIR/"}"
-      ALREADY=0
-      for entry in ${STALE_ENTRIES[@]+"${STALE_ENTRIES[@]}"}; do
-        if [[ "$entry" == "${REL_PATH}"* ]]; then
-          ALREADY=1
-          break
-        fi
-      done
-      if [[ $ALREADY -eq 0 ]]; then
-        STALE_ENTRIES+=("${REL_PATH} (low-confidence)")
-        STALE_COUNT=$((STALE_COUNT + 1))
-      fi
-    done < <(grep -l 'confidence: low' "${ALL_ENTRY_FILES[@]}" 2>/dev/null || true)
-  fi
+sys.stdout.buffer.write(b"".join(label + b"\0" for label in labels))
+' "$KNOWLEDGE_DIR" 2>/dev/null
+  )
+  STALE_COUNT=${#STALE_ENTRIES[@]}
 
   # The COUNT is truthful; the LISTING is bounded. Now that the scan is
   # recursive it draws from the whole store, and an unbounded inline list would
@@ -684,7 +661,12 @@ if [[ -n "$CONTEXT_SIGNAL" ]]; then
   SCALE_DECLARED="true"
 fi
 
-printf '{"timestamp":"%s","format_version":%d,"budget_used":%d,"budget_total":%d,"files_full":%d,"files_summary":%d,"files_skipped":%d,"context_signal":"%s","context_sections":%d,"direct_resolved":%d,"relevance_search":%d,"signal_sources":%s,"git_branch":"%s","loaded_paths":%s,"scale_declared":%s}\n' \
+# elapsed_ms runs from just after lib.sh is sourced to here, once the payload is
+# printed; the packet emission below is not in it. Not gated on a time budget:
+# the slow loads are the ones this field is for.
+ELAPSED_MS=$(( $(epoch_ms) - LOAD_STARTED_MS ))
+
+printf '{"timestamp":"%s","format_version":%d,"budget_used":%d,"budget_total":%d,"files_full":%d,"files_summary":%d,"files_skipped":%d,"context_signal":"%s","context_sections":%d,"direct_resolved":%d,"relevance_search":%d,"signal_sources":%s,"git_branch":"%s","loaded_paths":%s,"scale_declared":%s,"elapsed_ms":%d}\n' \
   "$LOG_TIMESTAMP" \
   4 \
   "$CHARS_USED" \
@@ -700,6 +682,7 @@ printf '{"timestamp":"%s","format_version":%d,"budget_used":%d,"budget_total":%d
   "$(echo "$CURRENT_BRANCH" | tr '"\\' '__')" \
   "$LOADED_PATHS_JSON" \
   "$SCALE_DECLARED" \
+  "$ELAPSED_MS" \
   >> "$META_DIR/retrieval-log.jsonl" 2>/dev/null || true
 
 # --- Session-scope packet emission (sole writer: packet-append.sh) ---
