@@ -4,7 +4,7 @@
 #        [--producer-role "..."] [--protocol-slot "..."] [--template-version "..."] [--capturer-role "..."] [--source-artifact-ids "..."]
 #        [--captured-at-branch "..."] [--captured-at-sha "..."] [--captured-at-merge-base-sha "..."] [--work-item "..."]
 #        [--kind "<kind>"] [--kind-status "<value>"] [--where-looked "..."] [--answered-by "..."] [--subsystem "..."]
-#        [--executable-falsifier '<json>'] [--kdir "<path>"]
+#        [--executable-falsifier '<json>'] [--activity "<name>[,<name>]"] [--new-activity] [--kdir "<path>"]
 #
 # Writes an individual entry file to the category directory (e.g., conventions/<slug>.md).
 #
@@ -69,6 +69,20 @@
 #   Values bound for the footer are sanitized (see lib.sh sanitize_footer_value) —
 #   long-form context belongs in the entry body under a heading, not here.
 #
+# Activity (preferences only):
+#   --activity <name>[,<name>]  Required for --category preferences and refused for any other
+#     category. The activity a preference governs (pr-bodies, model-routing, ...), one name or
+#     two comma-separated; names are folded to lowercase with spaces as hyphens and must match
+#     [a-z0-9-]+. Written to the footer as `activity: <a>` or `activity: <a>, <b>`.
+#     The known names are the ones live preferences/ entries already carry, plus `general` for
+#     preferences that apply everywhere (scripts/pk_activities.py reads them). A missing or
+#     unknown name is refused with the existing names listed, so a near-duplicate of an
+#     existing activity is not minted by accident.
+#   --new-activity  Admit names that no live entry carries yet.
+#   After filing a preference, capture prints the preferences filed under preference-writing
+#   in full (on stderr under --json), so the new entry can be read beside how the project's
+#   other preferences are written.
+#
 # Executable falsifier (optional):
 #   --executable-falsifier '<json>'  Optional object {command, expected_output_shape[, root]}.
 #     Shape-validated fail-closed here, then surfaced in the --json output for the
@@ -113,6 +127,8 @@ ANSWERED_BY=""
 SUBSYSTEM=""
 EXECUTABLE_FALSIFIER=""
 TITLE_ARG=""
+ACTIVITY=""
+NEW_ACTIVITY=0
 JSON_MODE=0
 SKIP_MANIFEST=0
 KDIR_OVERRIDE=""
@@ -243,6 +259,18 @@ while [[ $# -gt 0 ]]; do
       EXECUTABLE_FALSIFIER="$2"
       shift 2
       ;;
+    --activity)
+      ACTIVITY="$2"
+      shift 2
+      ;;
+    --activity=*)
+      ACTIVITY="${1#--activity=}"
+      shift
+      ;;
+    --new-activity)
+      NEW_ACTIVITY=1
+      shift
+      ;;
     --kdir)
       KDIR_OVERRIDE="$2"
       shift 2
@@ -257,7 +285,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: capture.sh --insight \"...\" [--title \"...\"] [--context \"...\"] [--category \"...\"] [--confidence \"...\"] [--related-files \"...\"] [--source \"...\"] [--example \"...\"] [--producer-role \"...\"] [--protocol-slot \"...\"] [--template-version \"...\"] [--capturer-role \"...\"] [--source-artifact-ids \"...\"] [--captured-at-branch \"...\"] [--captured-at-sha \"...\"] [--captured-at-merge-base-sha \"...\"] [--work-item \"...\"] [--kind \"...\"] [--kind-status \"...\"] [--where-looked \"...\"] [--answered-by \"...\"] [--subsystem \"...\"] [--executable-falsifier '<json>'] [--kdir <path>] [--json] [--skip-manifest]" >&2
+      echo "Usage: capture.sh --insight \"...\" [--title \"...\"] [--context \"...\"] [--category \"...\"] [--confidence \"...\"] [--related-files \"...\"] [--source \"...\"] [--example \"...\"] [--producer-role \"...\"] [--protocol-slot \"...\"] [--template-version \"...\"] [--capturer-role \"...\"] [--source-artifact-ids \"...\"] [--captured-at-branch \"...\"] [--captured-at-sha \"...\"] [--captured-at-merge-base-sha \"...\"] [--work-item \"...\"] [--kind \"...\"] [--kind-status \"...\"] [--where-looked \"...\"] [--answered-by \"...\"] [--subsystem \"...\"] [--executable-falsifier '<json>'] [--activity \"<name>[,<name>]\"] [--new-activity] [--kdir <path>] [--json] [--skip-manifest]" >&2
       exit 1
       ;;
   esac
@@ -554,6 +582,36 @@ if [[ -z "$CATEGORY" ]]; then
   CATEGORY="conventions"
 fi
 
+# --- Activity ---
+# Checked against the resolved store: the vocabulary is the set of names its
+# live preferences/ entries carry, which scripts/pk_activities.py reads.
+IS_PREFERENCE=0
+case "$CATEGORY" in
+  preferences|preferences/*) IS_PREFERENCE=1 ;;
+esac
+ACTIVITY_FOOTER=""
+if [[ $IS_PREFERENCE -eq 1 ]]; then
+  _activity_check_args=(--kdir "$KNOWLEDGE_DIR" check "$ACTIVITY")
+  if [[ $NEW_ACTIVITY -eq 1 ]]; then
+    _activity_check_args+=(--new-activity)
+  fi
+  _activity_status=0
+  _activity_err=$(mktemp)
+  ACTIVITY_FOOTER=$(python3 "$SCRIPT_DIR/pk_activities.py" "${_activity_check_args[@]}" 2>"$_activity_err") || _activity_status=$?
+  _activity_msg=$(tail -n 1 "$_activity_err")
+  rm -f "$_activity_err"
+  if [[ $_activity_status -ne 0 ]]; then
+    refuse_kind "${_activity_msg:-cannot read the activities of $KNOWLEDGE_DIR/preferences (pk_activities.py exited $_activity_status)}"
+  fi
+else
+  if [[ -n "$ACTIVITY" ]]; then
+    refuse_kind "--activity does not apply to --category \"$CATEGORY\"; it belongs to preferences entries"
+  fi
+  if [[ $NEW_ACTIVITY -eq 1 ]]; then
+    refuse_kind "--new-activity does not apply to --category \"$CATEGORY\"; it belongs to preferences entries"
+  fi
+fi
+
 # --- Title: --title verbatim, otherwise generated from the insight ---
 # For lifecycle kinds, a leading kind marker in the prose ("Hypothesis
 # (untested):", "Believed:", "Open question —", "PROSPECTIVE TRIGGER —")
@@ -661,6 +719,9 @@ fi
 if [[ -n "$SUBSYSTEM" ]]; then
   append_meta subsystem "$SUBSYSTEM"
 fi
+if [[ -n "$ACTIVITY_FOOTER" ]]; then
+  append_meta activity "$ACTIVITY_FOOTER"
+fi
 
 # Branch-provenance trio (always emitted). Fill from git when the caller did
 # not pass an explicit value; fall back to "null" on any git failure so capture
@@ -739,8 +800,18 @@ if [[ $SIMILAR_STATUS -ne 0 ]]; then
   fi
 fi
 
+# --- Preference-writing block ---
+# Never delays or refuses the filing: an unreadable store prints nothing.
+PREFERENCE_BLOCK=""
+if [[ $IS_PREFERENCE -eq 1 ]]; then
+  PREFERENCE_BLOCK=$(python3 "$SCRIPT_DIR/pk_activities.py" --kdir "$KNOWLEDGE_DIR" block preference-writing 2>/dev/null) || PREFERENCE_BLOCK=""
+fi
+
 # --- Output ---
 if [[ $JSON_MODE -eq 1 ]]; then
+  if [[ -n "$PREFERENCE_BLOCK" ]]; then
+    printf '%s\n' "$PREFERENCE_BLOCK" >&2
+  fi
   JSON_RESULT=$(python3 -c "
 import json, sys
 d = {'path': sys.argv[1], 'category': sys.argv[2], 'title': sys.argv[3], 'confidence': sys.argv[4]}
@@ -764,4 +835,8 @@ fi
 echo "[capture] Filed to $RELPATH"
 if [[ -n "$SIMILAR_OUT" ]]; then
   printf '%s\n' "$SIMILAR_OUT"
+fi
+if [[ -n "$PREFERENCE_BLOCK" ]]; then
+  echo ""
+  printf '%s\n' "$PREFERENCE_BLOCK"
 fi

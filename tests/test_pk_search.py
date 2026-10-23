@@ -3170,6 +3170,98 @@ class TestSearchPreferences:
 
 
 # ---------------------------------------------------------------------------
+# Preference listing by activity — a separate shape from search_preferences()
+# ---------------------------------------------------------------------------
+
+PK_CLI = os.path.join(os.path.dirname(__file__), "..", "scripts", "pk_cli.py")
+
+
+@pytest.fixture
+def activity_preferences_dir(preferences_dir):
+    """preferences_dir with an activity on the strong-match entry."""
+    entry = preferences_dir / "preferences" / "in-pr-review-lead-with-impact.md"
+    entry.write_text(
+        entry.read_text(encoding="utf-8").replace(
+            "| scale: subsystem -->", "| scale: subsystem | activity: review-comments -->"
+        ),
+        encoding="utf-8",
+    )
+    return preferences_dir
+
+
+def _pref_cli(kdir, *args):
+    return subprocess.run(
+        [sys.executable, PK_CLI, "search-preferences", str(kdir), *args],
+        capture_output=True, text=True, timeout=120,
+    )
+
+
+class TestPreferenceListingByActivity:
+    def test_search_shapes_stay_equal_with_an_activity_footer(self, activity_preferences_dir):
+        """The activity field is read from footers, not indexed, so neither
+        search shape gains a key and the two stay equal."""
+        searcher = Searcher(str(activity_preferences_dir))
+        side_channel = searcher.search_preferences("pr review impact")
+        main_pool = searcher.search("pr review impact")
+        assert side_channel and main_pool
+        assert set(side_channel[0]) == set(main_pool[0])
+        assert "activity" not in side_channel[0]
+
+    def test_index_schema_has_no_activity_column(self, activity_preferences_dir):
+        searcher = Searcher(str(activity_preferences_dir))
+        searcher.search_preferences("pr review impact")
+        assert Indexer.SCHEMA_VERSION == 13
+        conn = sqlite3.connect(searcher.db_path)
+        try:
+            cols = [row[1] for row in conn.execute("PRAGMA table_info(entries)")]
+        finally:
+            conn.close()
+        assert "activity" not in cols
+
+    def test_activity_lists_every_live_entry_in_its_own_shape(self, activity_preferences_dir):
+        r = _pref_cli(activity_preferences_dir, "--activity", "review-comments", "--json")
+        assert r.returncode == 0, r.stderr
+        payload = json.loads(r.stdout)
+        assert set(payload) == {"activity", "count", "entries"}
+        assert payload["activity"] == "review-comments"
+        assert payload["count"] == 1
+        (entry,) = payload["entries"]
+        assert set(entry) == {"path", "title", "body", "activities", "learned", "status"}
+        assert entry["path"] == "preferences/in-pr-review-lead-with-impact.md"
+
+    def test_activities_index_counts_general_and_tagged(self, activity_preferences_dir):
+        r = _pref_cli(activity_preferences_dir, "--activities")
+        assert r.returncode == 0, r.stderr
+        assert r.stdout == "general (0)\nreview-comments (1)\n"
+        r = _pref_cli(activity_preferences_dir, "--activities", "--json")
+        names = [row["name"] for row in json.loads(r.stdout)["activities"]]
+        assert names == ["general", "review-comments"]
+
+    def test_unknown_activity_exits_1_naming_known(self, activity_preferences_dir):
+        r = _pref_cli(activity_preferences_dir, "--activity", "commit-messages")
+        assert r.returncode == 1
+        assert r.stdout == ""
+        assert "general, review-comments" in r.stderr
+
+    def test_listing_takes_no_query(self, activity_preferences_dir):
+        r = _pref_cli(activity_preferences_dir, "pr review", "--activity", "review-comments")
+        assert r.returncode == 2
+        assert "take no query" in r.stderr
+
+    def test_search_without_query_or_listing_flag_is_refused(self, activity_preferences_dir):
+        r = _pref_cli(activity_preferences_dir)
+        assert r.returncode == 2
+        assert "query is required" in r.stderr
+
+    def test_query_search_keeps_its_flat_list_shape(self, activity_preferences_dir):
+        r = _pref_cli(activity_preferences_dir, "pr review impact", "--json")
+        assert r.returncode == 0, r.stderr
+        results = json.loads(r.stdout)
+        assert isinstance(results, list) and results
+        assert "file_path" in results[0] and "activity" not in results[0]
+
+
+# ---------------------------------------------------------------------------
 # Index Write Lock Tests
 # ---------------------------------------------------------------------------
 

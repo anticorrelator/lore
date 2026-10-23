@@ -9,10 +9,14 @@
 #
 # Required fields per entry: insight, scale
 # Optional fields: title, context, category, confidence, related_files, source, example,
-#   kind, kind_status, where_looked, answered_by, subsystem
+#   kind, kind_status, where_looked, answered_by, subsystem, activity, new_activity
 #   scale must be one of: abstract, architecture, subsystem, implementation
 #   kind must be one of: fact, hypothesis, question, theory (default: fact); each kind's
 #   own fields are validated by capture.sh against scripts/kind-registry.json
+#   activity is required when category is preferences: a name, "a,b", or a list of at most
+#   two; new_activity (true) admits names no live preference carries yet
+#
+# An entry capture.sh refuses is reported with capture's own refusal text.
 #
 # Calls capture.sh --skip-manifest for each entry, then runs update-manifest.sh once.
 
@@ -50,9 +54,12 @@ Input JSON format:
 
 Required per entry: insight, scale
 Optional per entry: title, context, category, confidence, related_files, source, example,
-                    kind, kind_status, where_looked, answered_by, subsystem
+                    kind, kind_status, where_looked, answered_by, subsystem,
+                    activity, new_activity
 scale must be one of: abstract, architecture, subsystem, implementation
 kind must be one of: fact, hypothesis, question, theory (default: fact)
+activity is required when category is preferences: a name, "a,b", or a list of at
+most two; new_activity (true) admits names no live preference carries yet
 EOF
       exit 0
       ;;
@@ -110,6 +117,7 @@ SUCCEEDED=0
 FAILED=0
 FAILED_INDICES=()
 TMP_ERR=$(mktemp)
+TMP_CAPTURE_ERR=$(mktemp)
 
 for ((i = 0; i < ENTRY_COUNT; i++)); do
   # Extract each field and build NUL-delimited arg list
@@ -148,9 +156,23 @@ for field, flag in PASSTHROUGH:
     if entry.get(field):
         args += [flag, entry[field]]
 
+activity = entry.get('activity')
+if isinstance(activity, list):
+    activity = ','.join(str(a) for a in activity)
+if activity:
+    args += ['--activity', str(activity)]
+if entry.get('new_activity') in (True, 'true', 'True', 1, '1'):
+    args += ['--new-activity']
+
 os.write(1, b'\x00'.join(a.encode() for a in args))
-" "$FILE" "$i" 2>"$TMP_ERR" | xargs -0 "$SCRIPT_DIR/capture.sh" --skip-manifest > /dev/null 2>&1; then
+" "$FILE" "$i" 2>"$TMP_ERR" | xargs -0 "$SCRIPT_DIR/capture.sh" --skip-manifest > /dev/null 2>"$TMP_CAPTURE_ERR"; then
     ERR=$(cat "$TMP_ERR" 2>/dev/null)
+    if [[ -z "$ERR" ]]; then
+      ERR=$(grep 'Error:' "$TMP_CAPTURE_ERR" 2>/dev/null | tail -n 1 || true)
+    fi
+    if [[ -z "$ERR" ]]; then
+      ERR=$(grep -v '^[[:space:]]*$' "$TMP_CAPTURE_ERR" 2>/dev/null | tail -n 1 || true)
+    fi
     echo "[batch-capture] Entry $((i+1))/$ENTRY_COUNT: failed${ERR:+ — $ERR}" >&2
     FAILED=$((FAILED + 1))
     FAILED_INDICES+=("$i")
@@ -159,7 +181,7 @@ os.write(1, b'\x00'.join(a.encode() for a in args))
   fi
 done
 
-rm -f "$TMP_ERR"
+rm -f "$TMP_ERR" "$TMP_CAPTURE_ERR"
 
 # --- Run manifest update once ---
 "$SCRIPT_DIR/update-manifest.sh" > /dev/null 2>&1 || true

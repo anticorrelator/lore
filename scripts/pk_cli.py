@@ -6,6 +6,7 @@ pk_search.py is now a pure library (Indexer, Searcher, Stats, LinkChecker).
 Usage:
     python pk_cli.py index <knowledge_dir> [--force]
     python pk_cli.py search <knowledge_dir> <query> [--limit N] [--threshold F] [--json] [--kind-sections] [--budget N]
+    python pk_cli.py search-preferences <knowledge_dir> [<query>] [--activity NAME | --activities] [--json]
     python pk_cli.py prefetch <knowledge_dir> <query> --scale-set <csv> [--format prompt|summary]
     python pk_cli.py query <knowledge_dir> <seeds> --scale-set <csv> [--format json|prompt]
     python pk_cli.py resolve-manifest <knowledge_dir> --directive <json> --slug <slug> [--phase <n>]
@@ -422,13 +423,62 @@ def _search(args: argparse.Namespace, searcher: Searcher) -> None:
         _report_withheld_retired(withheld_retired, sys.stdout)
 
 
+def cmd_list_preferences(args: argparse.Namespace) -> None:
+    """List preferences by activity: every live entry under one, or the index.
+
+    Not a search: nothing is ranked or cut, so an activity with no entry
+    answers "none filed". Its own shape, apart from search_preferences().
+    """
+    import pk_activities
+
+    if args.activities:
+        groups = pk_activities.index(args.knowledge_dir)
+        if args.json:
+            print(json.dumps({"activities": pk_activities.index_rows(groups)}, indent=2))
+        else:
+            sys.stdout.write(pk_activities.render_index(groups))
+        return
+
+    try:
+        group = pk_activities.entries(args.knowledge_dir, args.activity)
+    except pk_activities.UnknownActivity as exc:
+        if args.json:
+            print(json.dumps({"error": str(exc), "known": exc.known}), file=sys.stderr)
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    name = pk_activities.canonical(args.activity)
+    if args.json:
+        print(json.dumps({"activity": name, "count": len(group), "entries": group}, indent=2))
+    else:
+        sys.stdout.write(pk_activities.render_listing(name, group))
+
+
 def cmd_search_preferences(args: argparse.Namespace) -> None:
     """Side-channel BM25 search restricted to category=preferences.
 
     Returns a flat JSON list (same shape as `lore search --json`) when --json
     is set; otherwise renders human-readable result blocks. Composes with the
     main search pool at the wrapper layer.
+
+    With --activity or --activities it lists instead of searching
+    (cmd_list_preferences), and takes no query.
     """
+    listing = args.activity is not None or args.activities
+    if listing and args.query:
+        print(
+            "Error: --activity and --activities list preferences by activity and take no query; "
+            "drop the query, or search without them",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if listing:
+        cmd_list_preferences(args)
+        return
+    if not args.query:
+        print("Error: a query is required unless --activity or --activities is given", file=sys.stderr)
+        sys.exit(2)
+
     searcher = Searcher(args.knowledge_dir)
     caller = getattr(args, "caller", None)
     include_status = getattr(args, "include_status", None)
@@ -1154,7 +1204,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Side-channel BM25 search restricted to category=preferences (always-on forward guidance).",
     )
     p_pref.add_argument("knowledge_dir", help="Path to knowledge directory")
-    p_pref.add_argument("query", help="Search query")
+    p_pref.add_argument("query", nargs="?", default=None, help="Search query (omit with --activity or --activities)")
+    p_pref_list = p_pref.add_mutually_exclusive_group()
+    p_pref_list.add_argument("--activity", default=None, metavar="NAME", help="List every live preference filed under this activity, in full")
+    p_pref_list.add_argument("--activities", action="store_true", help="List each activity with its count of live preferences")
     p_pref.add_argument("--json", action="store_true", help="Output as JSON (flat list, same shape as `search --json`)")
     p_pref.add_argument("--caller", default=None, help="Caller identifier logged to retrieval log")
     p_pref.add_argument("--include-status", nargs="+", default=None, metavar="STATUS", help="Status values to include. Default: current only.")

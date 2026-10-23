@@ -1747,6 +1747,9 @@ cmd_search() {
   local caller="cli"
   local preferences_only=0
   local args=()
+  # Value flags only the preference channel reads. Parsed here so they never
+  # land in args, whose first element is passed on as the query.
+  local activity_args=()
   # Recognized here rather than passed through with the rest, because --type all
   # must route it to the knowledge half only.
   local kind_sections_args=()
@@ -1755,7 +1758,9 @@ cmd_search() {
     case "$1" in
       --help|-h)
         echo "Usage: lore search <query> [--scale-set <bucket>] [--caller <id>] [--type knowledge|work|all] [--json] [--kind-sections]
-       lore search --preferences <query> [--caller <id>] [--json]" >&2
+       lore search --preferences <query> [--caller <id>] [--json]
+       lore search --preferences --activity <name> [--json]   every live preference filed under <name>, in full
+       lore search --preferences --activities [--json]        each activity with its count" >&2
         return 0
         ;;
       --type)
@@ -1772,6 +1777,22 @@ cmd_search() {
         ;;
       --preferences)
         preferences_only=1
+        shift
+        ;;
+      --activity)
+        if [[ $# -lt 2 ]]; then
+          echo "Error: --activity needs an activity name (list them with: lore search --preferences --activities)" >&2
+          return 1
+        fi
+        activity_args=(--activity "$2")
+        shift 2
+        ;;
+      --activity=*)
+        activity_args=(--activity "${1#--activity=}")
+        shift
+        ;;
+      --activities)
+        activity_args=(--activities)
         shift
         ;;
       --scale-set)
@@ -1797,9 +1818,16 @@ cmd_search() {
     esac
   done
 
-  if [[ ${#args[@]} -eq 0 ]]; then
+  if [[ ${#activity_args[@]} -gt 0 && $preferences_only -eq 0 ]]; then
+    echo "Error: --activity and --activities list preferences; use them with lore search --preferences" >&2
+    return 1
+  fi
+
+  if [[ ${#args[@]} -eq 0 && ${#activity_args[@]} -eq 0 ]]; then
     echo "Usage: lore search <query> [--scale-set <bucket>] [--caller <id>] [--type knowledge|work|all] [--json] [--kind-sections]
-       lore search --preferences <query> [--caller <id>] [--json]" >&2
+       lore search --preferences <query> [--caller <id>] [--json]
+       lore search --preferences --activity <name> [--json]
+       lore search --preferences --activities [--json]" >&2
     return 1
   fi
 
@@ -1808,7 +1836,7 @@ cmd_search() {
   if [[ $preferences_only -eq 1 ]]; then
     local pref_kdir
     pref_kdir="$(resolve_kdir)"
-    exec python3 "$SCRIPTS_DIR/pk_cli.py" search-preferences "$pref_kdir" "${args[0]}" --caller "$caller" ${json_flag:+--json} "${args[@]:1}"
+    exec python3 "$SCRIPTS_DIR/pk_cli.py" search-preferences "$pref_kdir" ${args[0]+"${args[0]}"} --caller "$caller" ${json_flag:+--json} ${activity_args[@]+"${activity_args[@]}"} ${args[1]+"${args[@]:1}"}
   fi
 
   if [[ -z "$scale_set" ]]; then

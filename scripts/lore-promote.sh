@@ -26,6 +26,8 @@
 #   --source-artifact-ids <s>  Override source_artifact_ids from row (comma-separated)
 #   --template-version <v>     Template version hash (passthrough to capture.sh)
 #   --category <cat>           Knowledge category (default: conventions)
+#   --activity <name>[,<name>] Activity for a preferences promotion (passthrough to capture.sh,
+#                              which requires it for --category preferences)
 #
 # Exit codes:
 #   0  success (or --dry-run success)
@@ -45,6 +47,7 @@ PROTOCOL_SLOT_OVERRIDE=""
 SOURCE_ARTIFACT_IDS_OVERRIDE=""
 TEMPLATE_VERSION=""
 CATEGORY=""
+ACTIVITY=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -80,8 +83,12 @@ while [[ $# -gt 0 ]]; do
       CATEGORY="$2"
       shift 2
       ;;
+    --activity)
+      ACTIVITY="$2"
+      shift 2
+      ;;
     -h|--help)
-      sed -n '2,30p' "$0"
+      sed -n '2,36p' "$0"
       exit 0
       ;;
     *)
@@ -222,6 +229,7 @@ CAPTURE_ARGS=(
 [[ -n "$WHERE_LOOKED" ]]    && CAPTURE_ARGS+=(--where-looked "$WHERE_LOOKED")
 [[ -n "$ANSWERED_BY" ]]     && CAPTURE_ARGS+=(--answered-by "$ANSWERED_BY")
 [[ -n "$SUBSYSTEM" ]]       && CAPTURE_ARGS+=(--subsystem "$SUBSYSTEM")
+[[ -n "$ACTIVITY" ]]        && CAPTURE_ARGS+=(--activity "$ACTIVITY")
 
 # --- Dry-run: print planned invocation and exit ---
 if [[ $DRY_RUN -eq 1 ]]; then
