@@ -414,6 +414,27 @@ def test_append_marker_refreshes_rank_without_manual_reindex(store):
 
 
 @pytest.mark.skipif(not _writer_available(), reason="jq or writer script unavailable")
+def test_marker_refresh_writes_only_scores_the_fold_changed(store, monkeypatch):
+    Indexer(store).index_all()
+    _append_held(store, "conventions/alpha.md", "e")
+
+    statements: list[str] = []
+    connect = Indexer._connect
+
+    def traced_connect(self):
+        conn = connect(self)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(Indexer, "_connect", traced_connect)
+    result = Indexer(store).refresh_trust_scores()
+
+    writes = [s for s in statements if s.startswith("UPDATE entries SET trust_score")]
+    assert len(writes) == 1 and writes[0].split("WHERE")[1].strip().startswith("rowid =")
+    assert result == {"trust_entries_updated": 1}
+
+
+@pytest.mark.skipif(not _writer_available(), reason="jq or writer script unavailable")
 def test_stamp_shows_live_ledger_component(store):
     searcher = Searcher(store)
     results = searcher.search("widget retry policy", source_type="knowledge")

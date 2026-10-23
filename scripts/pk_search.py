@@ -604,7 +604,7 @@ class Indexer:
         """Recompute the ledger fold and rewrite the cached trust_score column.
 
         The cheap arm of marker-triggered staleness: no file re-parse, just an
-        UPDATE per indexed knowledge file with the fresh fold's scores.
+        UPDATE per knowledge row whose score the fresh fold changed.
         """
         try:
             with IndexWriteLock(self.knowledge_dir):
@@ -622,18 +622,21 @@ class Indexer:
         if not self._validate_db(conn):
             conn.close()
             return {"error": "index schema invalid; run a full index"}
-        rows = conn.execute(
-            "SELECT DISTINCT file_path FROM entries WHERE source_type = 'knowledge'"
-        ).fetchall()
-        for (fp,) in rows:
-            conn.execute(
-                "UPDATE entries SET trust_score = ? WHERE file_path = ?",
-                (self._trust_score_for(fp), fp),
-            )
+        scores: dict[str, float] = {}
+        changed = []
+        # Keyed by rowid for the reason _store_structural_importance gives.
+        for rowid, fp, stored in conn.execute(
+            "SELECT rowid, file_path, trust_score FROM entries WHERE source_type = 'knowledge'"
+        ).fetchall():
+            if fp not in scores:
+                scores[fp] = self._trust_score_for(fp)
+            if scores[fp] != stored:
+                changed.append((scores[fp], rowid))
+        conn.executemany("UPDATE entries SET trust_score = ? WHERE rowid = ?", changed)
         self._record_trust_marker_state(conn, marker_state)
         conn.commit()
         conn.close()
-        return {"trust_entries_updated": len(rows)}
+        return {"trust_entries_updated": len(changed)}
 
     def _rebuild_db(self) -> sqlite3.Connection:
         """Reset the index to an empty current-schema state, in place.
