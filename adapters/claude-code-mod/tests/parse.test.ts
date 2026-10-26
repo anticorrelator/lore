@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { mentions, pages } from '../hooks/parse'
+import { latestArc, mentions, pages, sessionArcOf } from '../hooks/parse'
 
 describe('paging long text', () => {
   test('a short body is one block', () => {
@@ -45,5 +45,30 @@ describe('arc mentions', () => {
     const listing = JSON.stringify([{ slug: 'alpha', path: '_work/_arcs/alpha' }, { slug: 'beta', path: '_work/_arcs/beta' }])
     expect(mentions('lore arc list --json', listing)).toEqual([])
     expect(mentions('cat notes.md', 'see lore arc show alpha')).toEqual([])
+  })
+})
+
+describe('the arc lore names for a session', () => {
+  test("lore active's arc field names it; a missing or empty one names none", () => {
+    const answer = (arc: unknown) => ({ exitCode: 0, stdout: JSON.stringify({ active: true, store: '/store', reason: 'ok', arc }), isStdoutTruncated: false })
+    expect(sessionArcOf(answer('alpha'))).toBe('alpha')
+    expect(sessionArcOf(answer(null))).toBeNull()
+    expect(sessionArcOf(answer(''))).toBeNull()
+    expect(sessionArcOf({ exitCode: 1, stdout: 'not json', isStdoutTruncated: false })).toBeNull()
+    expect(sessionArcOf(null)).toBeNull()
+  })
+})
+
+describe('the fallback arc', () => {
+  const arcs = ['alpha', 'beta', 'delta'].map(slug => ({ slug, streams: [] }))
+
+  test('is the arc whose ledger changed last', () => {
+    expect(latestArc(arcs, new Map([['alpha', 5], ['beta', 9], ['delta', 7]]))?.slug).toBe('beta')
+  })
+
+  test('an arc with no ledger yet comes after every arc with one; ties keep board order', () => {
+    expect(latestArc(arcs, new Map([['delta', 1]]))?.slug).toBe('delta')
+    expect(latestArc(arcs, new Map())?.slug).toBe('alpha')
+    expect(latestArc([], new Map())).toBeNull()
   })
 })

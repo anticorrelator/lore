@@ -49,6 +49,12 @@ export function activeStoreOf(ran: Ran): string | null {
     : null
 }
 
+export function sessionArcOf(ran: Ran): string | null {
+  if (!ran) return null
+  const answer = record(parse(ran.stdout))
+  return typeof answer.arc === 'string' && answer.arc !== '' ? answer.arc : null
+}
+
 export type Snapshot = Record<string, unknown>
 
 export function snapshotOf(raw: string | null): Snapshot | null {
@@ -249,4 +255,13 @@ export function boundArc(arcs: LoreArc[], seen: string[], pin: string | null): L
     if (chosen) return chosen
   }
   return null
+}
+
+// An arc with no ledger written yet sorts after every arc with one.
+export function latestArc(arcs: LoreArc[], changedAt: ReadonlyMap<string, number>): LoreArc | null {
+  let latest: LoreArc | null = null
+  for (const arc of arcs) {
+    if (!latest || (changedAt.get(arc.slug) ?? -1) > (changedAt.get(latest.slug) ?? -1)) latest = arc
+  }
+  return latest
 }

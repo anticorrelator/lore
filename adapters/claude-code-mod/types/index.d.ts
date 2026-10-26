@@ -80,6 +80,7 @@ declare module 'claude-code' {
       titles: LoreTitle[]
       candidates: string[]
       pinned: string | null
+      hadArc: boolean
       isOpen: boolean
       rails: LoreRails | null
       detail: LoreDetail | null
