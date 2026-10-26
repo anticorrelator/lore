@@ -129,7 +129,7 @@ Most calls are yours; four forks are the human's — **(a)** intent-anchor or us
 
 **Two questions.** *Did this arc leave the system harder to state as one idea?* — the accumulated answers trigger coherence-recovery work. *What does this arc leave you believing that no phase verified?* — a first-person belief nobody else can capture: `lore capture --kind hypothesis --kind-status untested --producer-role coordinator --work-item <slug> --insight "<belief, the test that would settle it, where it came from>" --scale "<bucket>"`. A subsystem the arc touched with no theory page is a gap — commission one or write it; update any theory a review found out of step with the code — the theory describes the code, not the reverse.
 
-**The report**, for an arc a reader spanning many arcs must absorb: `report.md`, perfect tense — what the arc made permanently true — in the register `templates/report.md` gives. A fresh-context reader flags every term it cannot ground; re-ground or remove each.
+**The report**, for an arc a reader spanning many arcs must absorb: `report.md`, perfect tense — what the arc made permanently true — in the register `templates/report.md` gives. Before drafting, print how prose for people is written here — `lore search --preferences --activity human-writing` — and hold the draft against it. A fresh-context reader flags every term it cannot ground; re-ground or remove each.
 
 ## The ledger
 
