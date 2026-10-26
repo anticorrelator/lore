@@ -26,7 +26,7 @@ Every entry in the knowledge store carries provenance and a falsifier you can ch
 
 `preferences/` holds the project's working style: how PR bodies are written, how review comments land, how work is scoped, how models are routed, how protocol prose reads. Each entry is filed under the activity it governs, or `general` for any task. These are taste, not claims about the code.
 
-The commands that start an activity print its preferences, so they arrive when they apply; session start shows which command prints each. Before anything another person will read, or a judgment call already settled, `lore search --preferences --activity <name>` prints an activity in full; plain `lore search` buries them.
+The commands that start an activity print its preferences, so they arrive when they apply; session start shows which command prints each. Before anything another person will read, or a judgment call that may already be settled, `lore search --preferences --activity <name>` prints an activity in full; plain `lore search` buries them.
 
 ### Beyond Facts: Theory, Questions, Hypotheses
 Retrieval may hand you three sections beside plain facts, and each carries its own invitation. A `### Theory` entry describes how a subsystem works — it orients you, it never outranks the code, and updating it is part of changing the subsystem it describes. An `### Open questions` entry your session can actually answer is in-scope work, not a detour — answer it and settle the entry. And if your work walks past the settling test a `### Hypotheses` entry names, record what you saw as one corroborating observation via `lore claim corroborate`.
