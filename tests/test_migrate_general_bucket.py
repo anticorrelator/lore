@@ -410,6 +410,7 @@ def test_apply_files_writes_back_empties_and_is_idempotent(store):
     check = run(store, "--check")
     assert check.returncode == 0, check.stderr
     assert "how-we-work: already migrated on" in check.stdout
+    assert "Nothing left to do: every entry is filed and every thread is migrated." in check.stdout
 
 
 def test_apply_skips_an_entry_that_already_carries_a_filed_path(store):

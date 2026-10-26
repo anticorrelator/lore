@@ -484,7 +484,10 @@ def run_check(kdir: Path, bucket: BucketList) -> int:
         return 1
     for line in summary(bucket, rv):
         print(line)
-    print("The list is ready to file.")
+    if rv.pending or any(not e.filed for e in bucket.entries):
+        print("The list is ready to file.")
+    else:
+        print("Nothing left to do: every entry is filed and every thread is migrated.")
     return 0
 
 
