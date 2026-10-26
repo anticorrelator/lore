@@ -29,9 +29,11 @@ Exits 0 when active and 1 when not, so `lore active && ...` works in a shell.
 
 Options:
   --harness <fw>  Harness to check (default: claude-code).
-  --json          Emit {active, harness, store, reason}. reason is one of ok,
-                  disabled-env, harness-disabled, store-uninitialized,
+  --json          Emit {active, harness, store, reason, arc}. reason is one of
+                  ok, disabled-env, harness-disabled, store-uninitialized,
                   lore-unresolved; store is null when no store was resolved.
+                  arc is the active arc whose members include the work item of
+                  the lore session this runs in (LORE_SESSION_SLUG), else null.
   --help, -h      Show this help.
 EOF
 }
@@ -79,10 +81,44 @@ elif [[ ! -f "$STORE/_manifest.json" || ! -f "$STORE/_work/_index.json" ]]; then
   REASON="store-uninitialized"
 fi
 
+# A managed session's manifest names its work item. Other sessions carry it in
+# the slug: a worker's is `<item>--w<n>`, the shape the session journal stamps
+# links.work_item from, and a spec or implement session's is the item itself.
+session_work_item() {
+  local slug="${LORE_SESSION_SLUG:-}"
+  [[ "$slug" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || return 0
+  local manifest="$STORE/_sessions/managed/$slug.json"
+  if [[ -f "$manifest" ]]; then
+    jq -r '.work_item // empty' "$manifest" 2>/dev/null || true
+  elif [[ "$slug" =~ ^(.+)--w[0-9]+$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  else
+    printf '%s\n' "$slug"
+  fi
+}
+
+# grep narrows the arc records to those naming the item, so jq reads one or two
+# of them, and a record that will not parse costs only its own answer.
+session_arc() {
+  local item meta
+  item="$(session_work_item)"
+  [[ -n "$item" ]] || return 0
+  { grep -lF -- "\"$item\"" "$STORE"/_work/_arcs/*/_meta.json 2>/dev/null || true; } \
+    | while IFS= read -r meta; do
+        jq -c --arg item "$item" \
+          'select(.status == "active" and any(.members[]?; . == $item)) | {slug, opened}' \
+          "$meta" 2>/dev/null || true
+      done \
+    | jq -rs 'sort_by(.opened // "") | last | .slug // empty'
+}
+
 if [[ $JSON_MODE -eq 1 ]]; then
-  jq -n --arg harness "$HARNESS" --arg store "$STORE" --arg reason "$REASON" \
+  ARC=""
+  [[ "$REASON" != "ok" ]] || ARC="$(session_arc)"
+  jq -n --arg harness "$HARNESS" --arg store "$STORE" --arg reason "$REASON" --arg arc "$ARC" \
     '{active: ($reason == "ok"), harness: $harness,
-      store: (if $store == "" then null else $store end), reason: $reason}'
+      store: (if $store == "" then null else $store end), reason: $reason,
+      arc: (if $arc == "" then null else $arc end)}'
 elif [[ "$REASON" == "ok" ]]; then
   echo "active ($HARNESS): $STORE"
 else
