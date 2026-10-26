@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, PaneOpenArgs, Register, UiPane } from 'claude-code'
 
 import type { LoreArc, LoreFile, LorePopout, LoreReview, LoreReviewConfirm, LoreReviewList } from '../types'
 import type { Actions } from './draw'
@@ -256,7 +256,7 @@ async function sync($: EngineInterface): Promise<void> {
 
 async function openWindow($: EngineInterface): Promise<void> {
   await update($, isOpen, () => true)
-  await $.ui.open(isSized ? { id: WINDOW, title: 'Arc' } : { id: WINDOW, title: 'Arc', columns: WINDOW_COLUMNS })
+  await openInFront($, isSized ? { id: WINDOW, title: 'Arc' } : { id: WINDOW, title: 'Arc', columns: WINDOW_COLUMNS })
   isSized = true
   detach(poll($))
 }
@@ -269,8 +269,34 @@ async function closeWindow($: EngineInterface): Promise<void> {
 
 // The pane, not a saved flag, says whether the window is up: a flag outlives a
 // reload or a close the engine made, and a toggle trusting it closes nothing.
+// The dock shows one pane and keeps the rest as tabs behind it, so open and
+// shown differ: an open pane is kept fresh for when its tab is chosen, and only
+// a shown one is what a toggle closes.
+async function paneOf($: EngineInterface, id: string): Promise<UiPane | undefined> {
+  return (await $.ui.panes()).find(pane => pane.id === id)
+}
+
+async function isPaneOpen($: EngineInterface, id: string): Promise<boolean> {
+  return (await paneOf($, id)) !== undefined
+}
+
 async function isPaneShown($: EngineInterface, id: string): Promise<boolean> {
-  return (await $.ui.panes()).some(pane => pane.id === id && pane.isShown)
+  return (await paneOf($, id))?.isShown === true
+}
+
+// Opening an open pane only retitles it; asking for the keyboard is what
+// raises it over the tab holding the dock, such as the diff panel the engine
+// opens once a session edits. Asked only when the plain open left it behind,
+// so an ordinary open leaves the keys at the prompt.
+async function openInFront($: EngineInterface, pane: PaneOpenArgs): Promise<void> {
+  await $.ui.open(pane)
+  if (!(await isPaneShown($, pane.id))) await $.ui.open({ ...pane, focus: true })
+}
+
+async function paneReply($: EngineInterface, id: string, name: string): Promise<string> {
+  const pane = await paneOf($, id)
+  if (!pane) return `Closed the ${name}.`
+  return pane.isShown ? `Opened the ${name}.` : `The ${name} is open in a tab behind another pane.`
 }
 
 async function isWindowShown($: EngineInterface): Promise<boolean> {
@@ -389,7 +415,7 @@ async function pollReviews($: EngineInterface): Promise<void> {
 
 async function openReviews($: EngineInterface): Promise<void> {
   await update($, isReviewsOpen, () => true)
-  await $.ui.open(isSized ? { id: REVIEWS, title: 'Reviews' } : { id: REVIEWS, title: 'Reviews', columns: WINDOW_COLUMNS })
+  await openInFront($, isSized ? { id: REVIEWS, title: 'Reviews' } : { id: REVIEWS, title: 'Reviews', columns: WINDOW_COLUMNS })
   isSized = true
   detach(pollReviews($))
 }
@@ -630,27 +656,29 @@ export const register: Register = on => {
     const kept = await $.store.get(await pinKey($))
     if (typeof kept === 'string') await update($, pinned, () => kept)
 
-    const shown = await isWindowShown($)
-    await update($, isOpen, () => shown)
-    const isReviewsShown = await isPaneShown($, REVIEWS)
-    await update($, isReviewsOpen, () => isReviewsShown)
+    // Open, not shown: a pane in a tab behind another is still drawn the
+    // moment its tab is chosen, so it is kept as fresh as one in front.
+    const isWindowUp = await isPaneOpen($, WINDOW)
+    await update($, isOpen, () => isWindowUp)
+    const isReviewsUp = await isPaneOpen($, REVIEWS)
+    await update($, isReviewsOpen, () => isReviewsUp)
     $.clock.every(POLL_MS, () => {
       detach(poll($))
       detach(pollReviews($))
     })
     detach(poll($))
-    detach(isReviewsShown ? pollReviews($) : loadReviews($).then(() => undefined))
+    detach(isReviewsUp ? pollReviews($) : loadReviews($).then(() => undefined))
     return next(e)
   })
 
   on('command.run', { command: 'arcs' }, async $ => {
     await toggleWindow($)
-    return { text: (await isWindowShown($)) ? 'Opened the arc window.' : 'Closed the arc window.' }
+    return { text: await paneReply($, WINDOW, 'arc window') }
   })
 
   on('command.run', { command: 'reviews' }, async $ => {
     await toggleReviews($)
-    return { text: (await isPaneShown($, REVIEWS)) ? 'Opened the review panel.' : 'Closed the review panel.' }
+    return { text: await paneReply($, REVIEWS, 'review panel') }
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {

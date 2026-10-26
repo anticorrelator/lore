@@ -118,6 +118,10 @@ export type Fixture = {
   nextUpdate?: number
   history?: SessionMessage[]
   store?: Record<string, unknown>
+  // This plugin's panes already open at session start, and the dock's shown
+  // pane, which may be another's (the engine's diff panel, say).
+  panes?: string[]
+  front?: string
 }
 
 export type World = {
@@ -132,6 +136,7 @@ export type World = {
   commands: string[]
   opened: PaneOpenArgs[]
   closed: string[]
+  dock: { panes: string[]; front: string | null }
   store: Map<string, unknown>
   files: Record<string, string>
 }
@@ -186,6 +191,7 @@ export function world(on: On, fixture: Fixture = {}): World {
     commands: [],
     opened: [],
     closed: [],
+    dock: { panes: [...(fixture.panes ?? [])], front: fixture.front ?? fixture.panes?.at(-1) ?? null },
     store: new Map(Object.entries(fixture.store ?? {})),
     files: {},
   }
@@ -196,7 +202,10 @@ export function world(on: On, fixture: Fixture = {}): World {
   }
 
   seen.files = files
-  const shown = new Set<string>()
+  // The dock as the engine keeps it: one pane shown, the rest tabs behind it.
+  // A new pane comes to the front; opening an open one only retitles it unless
+  // it asks for the keyboard, which raises it.
+  const dock = seen.dock
 
   on('store.get', (_$, e) => ({ value: seen.store.get(e.key) }))
   on('store.set', (_$, e) => {
@@ -220,16 +229,22 @@ export function world(on: On, fixture: Fixture = {}): World {
   })
   on('ui.open', (_$, e) => {
     seen.opened.push(e)
-    shown.add(e.id)
+    if (!dock.panes.includes(e.id)) {
+      dock.panes.push(e.id)
+      dock.front = e.id
+    } else if (e.focus) {
+      dock.front = e.id
+    }
     return { value: { isPlaced: true } }
   })
   on('ui.close', (_$, e) => {
     seen.closed.push(e.id)
-    shown.delete(e.id)
+    dock.panes = dock.panes.filter(id => id !== e.id)
+    if (dock.front === e.id) dock.front = dock.panes.at(-1) ?? null
     return { value: undefined }
   })
   on('ui.panes', () => ({
-    value: [...shown].map(id => ({ id, title: 'lore', isShown: true, isFocused: false, isPlaced: true })),
+    value: dock.panes.map(id => ({ id, title: 'lore', isShown: dock.front === id, isFocused: false, isPlaced: true })),
   }))
   on('ui.render', ($, e) => {
     const { Box } = $.ui.resolve(e)
