@@ -42,7 +42,7 @@ When `_pending_captures/` directory exists in the knowledge store at session sta
 1. Glob `_pending_captures/*.md` — each file contains one candidate queued by the SessionStart miners: `mine-retrieval-misses.py` is the sole writer of `_pending_captures/`, and `packet-assess.py` routes its needed-but-missing packet verdicts through that writer
 2. For each file, read it and evaluate the candidate against **the 4-condition gate (reusable, non-obvious, stable, high-confidence) OR the orientation gate** (see Step 2 canonical body for both gates' full criteria; a candidate qualifies if either gate passes) and assess synthesis level for tier placement. **Trigger-type guidance:**
    - **`retrieval-miss` and `packet-gap` candidates** — the trigger types the live miners emit. Both record demand the store failed to meet: a `retrieval-miss` is a `lore search` whose pooled rows all missed, followed by manual source derivation; a `packet-gap` is a packet assessed needed-but-missing. The **Query** and **Context** fields carry the demand evidence — evaluate whether a durable entry would have answered that demand.
-   - **Legacy trigger types** (`debug-root-cause`, `debug-narrative`, `structural-*`, `preference-signal`, `design-decision`, `gotcha`, `self-correction`) — emitted by the retired stop-hook extractor; older queues may still hold them. Debug candidates: apply the debugging narrative lens — most valuable when they capture expected → found → meaning. `structural-*` candidates: evaluate as architectural observations (module roles, integration points, change constraints). `preference-signal` candidates: if `related_files` names a skill, file, or directory (non-`none`), route to `lore capture --category preferences --related-files <paths>` via Step 3 branch; if `related_files: none`, route to thread `accumulated_preferences` instead — not to a knowledge entry. The rest evaluate normally against the capture gate.
+   - **Legacy trigger types** (`debug-root-cause`, `debug-narrative`, `structural-*`, `preference-signal`, `design-decision`, `gotcha`, `self-correction`) — emitted by the retired stop-hook extractor; older queues may still hold them. Debug candidates: apply the debugging narrative lens — most valuable when they capture expected → found → meaning. `structural-*` candidates: evaluate as architectural observations (module roles, integration points, change constraints). `preference-signal` candidates: file each one as a `preferences/` entry through Step 3's preference filing — list the activities, choose the one the preference governs (`general` when it applies to any task), and run `lore capture --category preferences --activity <name>`, passing `related_files` as `--related-files` when it is not `none`. The rest evaluate normally against the capture gate.
 
    **Low-context candidates:** If the candidate excerpt is too sparse to evaluate the gate confidently, read the **Related files:** field and skim those files before deciding. Do not reject a candidate solely because the excerpt is thin — the miner's pre-filter has already established baseline relevance. Rejection requires a positive reason (fails Reusable, Non-obvious, Stable, or High confidence), not an absence of evidence.
 
@@ -69,9 +69,7 @@ When `_threads/_pending_digest.md` exists at session start:
 1. Read the pending digest (previous session's extracted highlights).
 2. Decide which existing thread(s) to update — or if a new thread is needed.
 3. Write thread entries: `## YYYY-MM-DD` + Summary, Key points, Shifts (optional), Preferences (optional), Related.
-4. Extract preference signals from the digest and step-3 entries. For each clear, reusable preference, update the thread's `_meta.json` `accumulated_preferences`:
-   - **Existing:** update `last_reinforced`; append new entry filename to `source_entries`
-   - **New:** add `{preference, first_seen, last_reinforced (both today), source_entries}`
+4. For each clear, reusable preference the digest or the new entries show, file a `preferences/` entry through Step 3's preference filing: list the activities, then `lore capture --category preferences --activity <name>`, with `general` for a preference that applies to any task.
 5. Delete the `_pending_digest.md` file.
 6. Brief feedback: `[thread: topic-name] Updated with previous session discussion` (or `[thread: new] Created "..."` if new).
 
@@ -226,11 +224,18 @@ Review the conversation for thread-worthy content:
 
    **Not preferences:** One-off requests, task-specific instructions, or transient choices that won't apply next session.
 
-   **Scoped vs. global routing:** For each detected preference signal, classify before acting:
-   - **Scoped** — names a skill (`/pr-review`, `/implement`), a specific file or directory, or only applies under a particular workflow or tool → route to `lore capture --category preferences --related-files <paths> --producer-role interactive --protocol-slot Reflection`. Use the skill's SKILL.md path or the relevant source file(s) as `related_files`. Do NOT also write it to thread `accumulated_preferences`.
-   - **Global** — no detectable scope; applies regardless of context ("be terse", "use active voice") → skip `lore capture` and continue to Step 5 thread accumulation as usual.
+   **Filing a preference:** `preferences/` is the project's working style, accumulated from many hands, and a preference signal from this session joins it as an entry filed under the activity it governs. List the activities in use, print how preferences are written here, then capture:
 
-   When scope is ambiguous, ask: "would this preference be irrelevant or wrong in a different skill or file context?" If yes → scoped. If it applies equally everywhere → global.
+   ```bash
+   lore search --preferences --activities
+   lore search --preferences --activity preference-writing
+   lore capture --category preferences --activity <name> --insight "..." --title "<the preference as a sentence a diff can be held against>" --scale <bucket> --producer-role interactive --protocol-slot Reflection
+   ```
+
+   - A preference about one activity — how PR bodies are written, how models are routed, how a skill's prose reads — takes that activity's name; one that fits two takes both.
+   - A preference that applies to any task ("be terse", "use active voice") takes `general`.
+   - A preference no listed name fits takes a new name (`--new-activity`); read the list first, since a near-duplicate name splits one activity in two.
+   - `--related-files` names the skill or file the preference is about when there is one. It is the design-history anchor `lore why` reads, not the scope; the activity is the scope.
 
 4. If the thread was discussed, write a new entry file at `$THREADS_DIR/<slug>/<date>.md` (e.g., `how-we-work/2026-02-08.md`). If a file for today already exists, disambiguate with session suffix: `2026-02-08-s2.md`. Entry files do NOT contain the `## ` heading — it is reconstructed from the filename at load time. Entry content starts with `**Summary:**`:
    ```markdown
@@ -238,7 +243,7 @@ Review the conversation for thread-worthy content:
    **Key points:**
    - Specific decisions, shifts, or ideas
    **Shifts:** Change from previous entries (optional)
-   **Preferences:** User preferences or working-style signals observed this session (optional — **include only global preferences here**; scoped preferences were already routed to `lore capture` in step 3 above)
+   **Preferences:** Working-style signals observed this session (optional; each was filed as a `preferences/` entry in step 3, which is the durable record)
    **Related:** [[work:name]], [[knowledge:file#heading]]
    ```
 5. Check for new topics that don't match existing threads and had >2 substantive exchanges — these become new thread candidates. Create the directory `$THREADS_DIR/<slug>/` with a `_meta.json` file:
@@ -248,18 +253,9 @@ Review the conversation for thread-worthy content:
      "tier": "pinned | active | dormant",
      "created": "ISO-8601 timestamp",
      "updated": "ISO-8601 timestamp",
-     "sessions": 0,
-     "accumulated_preferences": [
-       {
-         "preference": "Short description of the preference",
-         "first_seen": "YYYY-MM-DD",
-         "last_reinforced": "YYYY-MM-DD",
-         "source_entries": ["2026-02-06.md", "2026-02-07-s18.md"]
-       }
-     ]
+     "sessions": 0
    }
    ```
-   The `accumulated_preferences` array distills user preferences from thread entries — each entry records `first_seen`, `last_reinforced`, and `source_entries` evidence. Added during `/remember` and pending digest evaluation. May be empty but must be present for new threads.
 
    Then write the first entry file as in step 4. Update `$THREADS_DIR/_index.json` to include the new thread.
 
@@ -306,7 +302,7 @@ echo '<tier3-json-row>' | lore promote --work-item "$RESOLVED_SLUG" \
   --template-version <hash>
 ```
 
-**Use `lore capture` (Tier 1 path)** for everything else — interactive sessions, work-scoped insights, scoped preference captures, and any candidate that fails any of the four Tier 3 predicates:
+**Use `lore capture` (Tier 1 path)** for everything else — interactive sessions, work-scoped insights, preference captures, and any candidate that fails any of the four Tier 3 predicates:
 
 ```bash
 lore capture --insight "..." --title "..." --context "..." --category "..." --confidence "..." --related-files "..." \
@@ -349,31 +345,13 @@ printf 'Captures: %s\nThreads updated: %s\nSummary: %s\n' \
 
 If no captures were made and no threads updated, omit the write.
 
-#### Thread updates and preference accumulation
+#### Thread updates
 
 - Write all thread updates (new entry files to `_threads/<slug>/<date>.md`, update `_meta.json`)
 - Create new threads if warranted (create directory, `_meta.json`, first entry file, update `_index.json`)
 - Update plans as needed
 
-**Scope gate:** Only accumulate preferences that were NOT routed to `lore capture` in Step 3. Scoped preferences are stored in the knowledge store (`preferences/` category) and must not also be written to `accumulated_preferences` — that is the double-capture scenario to avoid.
-
-After writing thread entries that contain a `**Preferences:**` field, update the thread's `_meta.json` `accumulated_preferences` array:
-
-1. **Read** the thread's current `_meta.json` and its `accumulated_preferences` array
-2. **For each preference** in the new entry's `**Preferences:**` field:
-   - **Match check:** Does it match an existing accumulated preference? (semantic match — same intent, possibly different wording)
-   - **If match found:** Update `last_reinforced` to today's date and append the entry filename to `source_entries`
-   - **If no match:** Add a new entry:
-     ```json
-     {
-       "preference": "Short description of the preference",
-       "first_seen": "YYYY-MM-DD",
-       "last_reinforced": "YYYY-MM-DD",
-       "source_entries": ["<entry-filename>.md"]
-     }
-     ```
-3. **Contradiction check:** If a new preference directly contradicts an existing accumulated preference, remove the old preference and add the new one. Note: `[thread: <slug>] Preference updated: "<old>" → "<new>"`
-4. **Write** the updated `_meta.json`
+Preferences were filed in Step 3. A thread entry's `**Preferences:**` field records what was observed; `_meta.json` carries none.
 
 #### Post-capture conflict check
 
