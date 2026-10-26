@@ -42,7 +42,7 @@ When `_pending_captures/` directory exists in the knowledge store at session sta
 1. Glob `_pending_captures/*.md` — each file contains one candidate queued by the SessionStart miners: `mine-retrieval-misses.py` is the sole writer of `_pending_captures/`, and `packet-assess.py` routes its needed-but-missing packet verdicts through that writer
 2. For each file, read it and evaluate the candidate against **the 4-condition gate (reusable, non-obvious, stable, high-confidence) OR the orientation gate** (see Step 2 canonical body for both gates' full criteria; a candidate qualifies if either gate passes) and assess synthesis level for tier placement. **Trigger-type guidance:**
    - **`retrieval-miss` and `packet-gap` candidates** — the trigger types the live miners emit. Both record demand the store failed to meet: a `retrieval-miss` is a `lore search` whose pooled rows all missed, followed by manual source derivation; a `packet-gap` is a packet assessed needed-but-missing. The **Query** and **Context** fields carry the demand evidence — evaluate whether a durable entry would have answered that demand.
-   - **Legacy trigger types** (`debug-root-cause`, `debug-narrative`, `structural-*`, `preference-signal`, `design-decision`, `gotcha`, `self-correction`) — emitted by the retired stop-hook extractor; older queues may still hold them. Debug candidates: apply the debugging narrative lens — most valuable when they capture expected → found → meaning. `structural-*` candidates: evaluate as architectural observations (module roles, integration points, change constraints). `preference-signal` candidates: file each one as a `preferences/` entry through Step 3's preference filing — list the activities, choose the one the preference governs (`general` when it applies to any task), and run `lore capture --category preferences --activity <name>`, passing `related_files` as `--related-files` when it is not `none`. The rest evaluate normally against the capture gate.
+   - **Legacy trigger types** (`debug-root-cause`, `debug-narrative`, `structural-*`, `preference-signal`, `design-decision`, `gotcha`, `self-correction`) — emitted by the retired stop-hook extractor; older queues may still hold them. Debug candidates: apply the debugging narrative lens — most valuable when they capture expected → found → meaning. `structural-*` candidates: evaluate as architectural observations (module roles, integration points, change constraints). `preference-signal` candidates: a `preferences/` entry under the activity the preference governs, as in Step 3; `related_files` carries over as `--related-files` when it is not `none`. The rest evaluate normally against the capture gate.
 
    **Low-context candidates:** If the candidate excerpt is too sparse to evaluate the gate confidently, read the **Related files:** field and skim those files before deciding. Do not reject a candidate solely because the excerpt is thin — the miner's pre-filter has already established baseline relevance. Rejection requires a positive reason (fails Reusable, Non-obvious, Stable, or High confidence), not an absence of evidence.
 
@@ -69,7 +69,7 @@ When `_threads/_pending_digest.md` exists at session start:
 1. Read the pending digest (previous session's extracted highlights).
 2. Decide which existing thread(s) to update — or if a new thread is needed.
 3. Write thread entries: `## YYYY-MM-DD` + Summary, Key points, Shifts (optional), Preferences (optional), Related.
-4. For each clear, reusable preference the digest or the new entries show, file a `preferences/` entry through Step 3's preference filing: list the activities, then `lore capture --category preferences --activity <name>`, with `general` for a preference that applies to any task.
+4. A clear, reusable preference the digest or the new entries show becomes a `preferences/` entry, as in Step 3.
 5. Delete the `_pending_digest.md` file.
 6. Brief feedback: `[thread: topic-name] Updated with previous session discussion` (or `[thread: new] Created "..."` if new).
 
@@ -224,18 +224,11 @@ Review the conversation for thread-worthy content:
 
    **Not preferences:** One-off requests, task-specific instructions, or transient choices that won't apply next session.
 
-   **Filing a preference:** `preferences/` is the project's working style, accumulated from many hands, and a preference signal from this session joins it as an entry filed under the activity it governs. List the activities in use, print how preferences are written here, then capture:
+   **Filing a preference:** a preference signal from this session becomes a `preferences/` entry under the activity it governs, or `general` when it applies to any task ("be terse", "use active voice"). The activities in use: `lore search --preferences --activities`. How preferences are written here: `lore search --preferences --activity preference-writing`. `--related-files` names the skill or file the preference is about, when there is one; it anchors design history, and the activity is the scope.
 
    ```bash
-   lore search --preferences --activities
-   lore search --preferences --activity preference-writing
    lore capture --category preferences --activity <name> --insight "..." --title "<the preference as a sentence a diff can be held against>" --scale <bucket> --producer-role interactive --protocol-slot Reflection
    ```
-
-   - A preference about one activity — how PR bodies are written, how models are routed, how a skill's prose reads — takes that activity's name; one that fits two takes both.
-   - A preference that applies to any task ("be terse", "use active voice") takes `general`.
-   - A preference no listed name fits takes a new name (`--new-activity`); read the list first, since a near-duplicate name splits one activity in two.
-   - `--related-files` names the skill or file the preference is about when there is one. It is the design-history anchor `lore why` reads, not the scope; the activity is the scope.
 
 4. If the thread was discussed, write a new entry file at `$THREADS_DIR/<slug>/<date>.md` (e.g., `how-we-work/2026-02-08.md`). If a file for today already exists, disambiguate with session suffix: `2026-02-08-s2.md`. Entry files do NOT contain the `## ` heading — it is reconstructed from the filename at load time. Entry content starts with `**Summary:**`:
    ```markdown
@@ -243,7 +236,7 @@ Review the conversation for thread-worthy content:
    **Key points:**
    - Specific decisions, shifts, or ideas
    **Shifts:** Change from previous entries (optional)
-   **Preferences:** Working-style signals observed this session (optional; each was filed as a `preferences/` entry in step 3, which is the durable record)
+   **Preferences:** Working-style signals observed this session (optional; the durable record is the `preferences/` entry)
    **Related:** [[work:name]], [[knowledge:file#heading]]
    ```
 5. Check for new topics that don't match existing threads and had >2 substantive exchanges — these become new thread candidates. Create the directory `$THREADS_DIR/<slug>/` with a `_meta.json` file:
@@ -351,7 +344,7 @@ If no captures were made and no threads updated, omit the write.
 - Create new threads if warranted (create directory, `_meta.json`, first entry file, update `_index.json`)
 - Update plans as needed
 
-Preferences were filed in Step 3. A thread entry's `**Preferences:**` field records what was observed; `_meta.json` carries none.
+A thread entry's `**Preferences:**` field records what was observed; the durable record is the `preferences/` entry, and `_meta.json` carries none.
 
 #### Post-capture conflict check
 

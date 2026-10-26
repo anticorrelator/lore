@@ -87,7 +87,7 @@ lore prefetch "pr-review" --scale-set=<bucket>
 lore search --preferences --activity review-comments
 ```
 
-Read the `## Prior Knowledge` block the prefetch produces and the review-comments preferences the listing prints in full: how comments land here. Incorporate both into the review and into the comments it proposes.
+The prefetch's `## Prior Knowledge` block and the review-comments preferences, how comments land here, inform the review and its comments.
 
 ## Step 2: Triage
 
