@@ -16,7 +16,7 @@ lore capture --category preferences --activity <name> --insight "<claim>" --titl
 
 `--scale` is required (one label, or two adjacent labels comma-delimited). In a bare interactive session with no skill running, the position is `--producer-role interactive --protocol-slot Reflection` — that is the established pairing, not a placeholder. Entries show who left them and during what work; an entry captured without those shows no byline, and a byline is how the next reader finds the context behind the claim.
 
-`--activity` is required for `--category preferences` and applies to no other category: a preference is filed under the activity it governs (`pr-bodies`, `model-routing`, …), or `general` when it applies to any task. Capture refuses a missing or unknown name and lists the names in use, so choose from that list before minting one with `--new-activity`; a near-duplicate name splits one activity in two. After filing, capture prints the preferences for `preference-writing`, so the new entry can be read beside how preferences are written here.
+`--activity` is the scope of a preference: what an agent is doing when it applies, or `general` for any task. A new name is minted only when none in use fits, since a near-duplicate name splits one activity in two.
 
 `--title` is the line every search result and packet leads with. Without it, the title is the claim's first eight words, usually cut off mid-sentence, so write one that states the claim.
 
