@@ -108,6 +108,8 @@ export function boardJson(width: number) {
 
 export type Fixture = {
   active?: boolean
+  arc?: string
+  mtimes?: Record<string, number>
   reviews?: Record<string, unknown>[]
   review?: Record<string, ReviewFixture>
   postExit?: number
@@ -233,6 +235,11 @@ export function world(on: On, fixture: Fixture = {}): World {
     const { Box } = $.ui.resolve(e)
     return <Box key="engine" />
   })
+  on('fs.stat', (_$, e) => {
+    const mtimeMs = fixture.mtimes?.[e.path]
+    if (mtimeMs === undefined) throw new Error(`ENOENT: ${e.path}`)
+    return { value: { kind: 'file', size: 0, mtimeMs, isLink: false } }
+  })
   on('fs.read', (_$, e) => {
     seen.reads.push(e.path)
     const body = files[e.path]
@@ -247,7 +254,7 @@ export function world(on: On, fixture: Fixture = {}): World {
     if (args.startsWith('active ')) {
       const isActive = fixture.active ?? true
       const reason = isActive ? 'ok' : 'harness-disabled'
-      return ran(JSON.stringify({ active: isActive, harness: 'claude-code', store: STORE, reason }), isActive ? 0 : 1)
+      return ran(JSON.stringify({ active: isActive, harness: 'claude-code', store: STORE, reason, arc: fixture.arc ?? null }), isActive ? 0 : 1)
     }
     if (args === 'arc list --json') return ran(JSON.stringify(ARC_LIST))
     if (args === 'followup list --json') return ran(JSON.stringify(seen.listed))

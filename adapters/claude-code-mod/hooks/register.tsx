@@ -12,10 +12,12 @@ import {
   detailOf,
   documentOf,
   isDue,
+  latestArc,
   mentions,
   pages,
   railsOf,
   refreshedSnapshotOf,
+  sessionArcOf,
   snapshotOf,
   titlesOf,
   workItemOf,
@@ -38,6 +40,7 @@ const board = atom({ plugin: 'lore', key: 'board' } as const, null)
 const titles = atom({ plugin: 'lore', key: 'titles' } as const, [])
 const candidates = atom({ plugin: 'lore', key: 'candidates' } as const, [])
 const pinned = atom({ plugin: 'lore', key: 'pinned' } as const, null)
+const hadArc = atom({ plugin: 'lore', key: 'hadArc' } as const, false)
 const isOpen = atom({ plugin: 'lore', key: 'isOpen' } as const, false)
 const rails = atom({ plugin: 'lore', key: 'rails' } as const, null)
 const detail = atom({ plugin: 'lore', key: 'detail' } as const, null)
@@ -108,7 +111,13 @@ async function poll($: EngineInterface): Promise<void> {
     }
     const fresh = boardOf(snapshot)
     await offerArcs($, fresh.arcs)
-    const mine = boundArc(fresh.arcs, await read($, candidates), await read($, pinned))
+    let mine = boundArc(fresh.arcs, await read($, candidates), await read($, pinned))
+    if (!mine && (await read($, hadArc))) {
+      // Remembered, so the window stays on it while other ledgers move.
+      mine = latestArc(fresh.arcs, await ledgerTimes($, dir, fresh.arcs))
+      if (mine) await remember($, [mine.slug])
+    }
+    if (mine && !(await read($, hadArc))) await update($, hadArc, () => true)
     const key = JSON.stringify({ slugs: fresh.arcs.map(arc => arc.slug), mine, error: fresh.error })
     if (key !== lastBoardKey || (await read($, board)) === null) {
       lastBoardKey = key
@@ -156,16 +165,22 @@ let lastBoardKey = ''
 let lastLedgerStamp = ''
 let isDetailDirty = false
 
+const LEDGER = ['coordination.md', 'digest.md']
+
+async function mtimeOf($: EngineInterface, path: string): Promise<number | null> {
+  try {
+    return (await $.fs.stat(path)).mtimeMs
+  } catch {
+    return null
+  }
+}
+
 // The Brief, decisions and file list change when the coordinator writes the
 // ledger or digest, which moves no stream row; their mtimes say when to refetch.
 async function ledgerStamp($: EngineInterface, dir: string, slug: string): Promise<string> {
   const parts: string[] = []
-  for (const name of ['coordination.md', 'digest.md']) {
-    try {
-      parts.push(String((await $.fs.stat(`${dir}/_work/_arcs/${slug}/${name}`)).mtimeMs))
-    } catch {
-      parts.push('-')
-    }
+  for (const name of LEDGER) {
+    parts.push(String((await mtimeOf($, `${dir}/_work/_arcs/${slug}/${name}`)) ?? '-'))
   }
   try {
     parts.push(String((await $.fs.list(`${dir}/_work/_arcs/${slug}`)).length))
@@ -173,6 +188,17 @@ async function ledgerStamp($: EngineInterface, dir: string, slug: string): Promi
     parts.push('-')
   }
   return parts.join(':')
+}
+
+async function ledgerTimes($: EngineInterface, dir: string, arcs: readonly LoreArc[]): Promise<Map<string, number>> {
+  const times = new Map<string, number>()
+  for (const arc of arcs) {
+    for (const name of LEDGER) {
+      const at = await mtimeOf($, `${dir}/_work/_arcs/${arc.slug}/${name}`)
+      if (at !== null) times.set(arc.slug, Math.max(at, times.get(arc.slug) ?? at))
+    }
+  }
+  return times
 }
 
 async function once(key: string, work: () => Promise<void>): Promise<void> {
@@ -584,11 +610,15 @@ function reviewActionsFor($: EngineInterface): ReviewActions {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    const dir = activeStoreOf(await lore($, ['active', '--harness', 'claude-code', '--json'], 10_000))
+    const active = await lore($, ['active', '--harness', 'claude-code', '--json'], 10_000)
+    const dir = activeStoreOf(active)
     await update($, store, () => dir)
     if (!dir) return next(e)
 
-    const seen: string[] = []
+    // A dispatched session never names its arc, so lore names it, as the oldest
+    // candidate: an arc the session names, or a pin, still wins.
+    const seeded = sessionArcOf(active)
+    const seen: string[] = seeded ? [seeded] : []
     for (const message of await $.session.messages()) {
       for (const use of message.toolUses) {
         if (use.tool !== 'Bash') continue

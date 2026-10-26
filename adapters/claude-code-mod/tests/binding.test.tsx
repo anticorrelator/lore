@@ -1,11 +1,19 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { ARC_LIST, BAND, SESSION, SURFACES, bash, pane, start, world } from './world'
+import { ARC_LIST, BAND, SESSION, STORE, SURFACES, bash, pane, snapshot, start, world } from './world'
 
 const ARCS = { command: 'arcs', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } } as never
 
 async function chipText(ui: { find: (q: { key: string }) => Promise<{ text: string } | undefined> }) {
   return (await ui.find({ key: 'chip' }))?.text
+}
+
+const BOARD = `${STORE}/_coordination/display.json`
+const LEDGERS = `${STORE}/_work/_arcs`
+
+// The board with these arcs in this order, each in its status.
+function boardWith(arcs: Record<string, string>): string {
+  return JSON.stringify({ ...snapshot(), coordination_arcs: Object.entries(arcs).map(([arc, status]) => ({ arc, status })) })
 }
 
 describe('which arc a session is bound to', () => {
@@ -114,5 +122,74 @@ describe('which arc a session is bound to', () => {
     const band = await $.ui.mount({ plugin: 'lore', surface: 'terminal', ...BAND })
     expect(await chipText(band)).toContain('Beta arc')
     expect(await window.find({ type: 'Text', text: 'Beta arc' })).toBeDefined()
+  })
+})
+
+describe('the arc lore names for a dispatched session', () => {
+  test('a session whose work item an active arc lists is bound to that arc', async ($, on) => {
+    const seen = world(on, { arc: 'alpha' })
+    await start($, seen.clock)
+    const ui = await $.ui.mount({ plugin: 'lore', surface: 'terminal', ...BAND })
+    expect(await chipText(ui)).toContain('Alpha arc')
+  })
+
+  test('an arc the session names wins over the arc lore names', async ($, on) => {
+    const seen = world(on, { arc: 'alpha', history: [bash('lore arc show beta')] })
+    await start($, seen.clock)
+    const ui = await $.ui.mount({ plugin: 'lore', surface: 'terminal', ...BAND })
+    expect(await chipText(ui)).toContain('Beta arc')
+  })
+
+  test('a pin wins over the arc lore names', async ($, on) => {
+    const seen = world(on, { arc: 'alpha', store: { ['pin:' + SESSION]: 'beta' } })
+    await start($, seen.clock)
+    const ui = await $.ui.mount({ plugin: 'lore', surface: 'terminal', ...BAND })
+    expect(await chipText(ui)).toContain('Beta arc')
+  })
+})
+
+describe('when the arcs a session had close', () => {
+  test('the window moves to the active arc whose ledger changed last, until the session names another', async ($, on) => {
+    const seen = world(on, {
+      arc: 'alpha',
+      mtimes: {
+        [`${LEDGERS}/delta/coordination.md`]: 1_000,
+        [`${LEDGERS}/beta/coordination.md`]: 500,
+        [`${LEDGERS}/beta/digest.md`]: 2_000,
+      },
+    })
+    seen.files[BOARD] = boardWith({ alpha: 'active', delta: 'active', beta: 'active' })
+    on('tool.call', () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
+    await start($, seen.clock)
+    const ui = await $.ui.mount({ plugin: 'lore', surface: 'terminal', ...BAND })
+    expect(await chipText(ui)).toContain('Alpha arc')
+    seen.files[BOARD] = boardWith({ alpha: 'closed', delta: 'active', beta: 'active' })
+    await seen.clock.advance(30_000)
+    expect(await chipText(ui)).toContain('Beta arc')
+    await $.tool.call({ tool: 'Bash', command: 'lore arc show delta' })
+    await seen.clock.settle()
+    expect(await chipText(ui)).toContain('delta')
+  })
+
+  test('a pinned arc that closes falls back the same way', async ($, on) => {
+    const seen = world(on, { store: { ['pin:' + SESSION]: 'beta' }, mtimes: { [`${LEDGERS}/alpha/coordination.md`]: 1_000 } })
+    await start($, seen.clock)
+    const ui = await $.ui.mount({ plugin: 'lore', surface: 'terminal', ...BAND })
+    expect(await chipText(ui)).toContain('Beta arc')
+    seen.files[BOARD] = boardWith({ alpha: 'active', beta: 'closed' })
+    await seen.clock.advance(30_000)
+    expect(await chipText(ui)).toContain('Alpha arc')
+  })
+
+  test('a session that never had an arc keeps the picker', async ($, on) => {
+    const seen = world(on, { history: [bash('lore arc show gamma')], mtimes: { [`${LEDGERS}/alpha/coordination.md`]: 1_000 } })
+    await start($, seen.clock)
+    await seen.clock.advance(30_000)
+    const band = await $.ui.mount({ plugin: 'lore', surface: 'terminal', ...BAND })
+    expect(await chipText(band)).toBeUndefined()
+    await $.command.run(ARCS)
+    await seen.clock.settle()
+    const window = await $.ui.mount({ plugin: 'lore', surface: 'terminal', ...pane('lore-arcs', 30) })
+    expect(await window.find({ type: 'Text', text: 'No arc is bound to this session. Pin one:' })).toBeDefined()
   })
 })
