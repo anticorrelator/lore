@@ -26,9 +26,8 @@
 # are returned as conditions: those tasks must not be parallel-dispatched
 # across workers; serialize-within-one-worker vs merge is the lead's call.
 #
-# The four lead-inline gate conditions are returned as SEPARATE fields,
-# never an aggregate boolean. An empty unblocked set is success with an
-# explanatory status (all-blocked | all-complete), not an error.
+# An empty unblocked set is success with an explanatory status
+# (all-blocked | all-complete), not an error.
 #
 # Packet rows describe the returned context; the execution log retains one
 # attribution row (source: impl-verb). A task whose tasks.json record lists
@@ -55,7 +54,7 @@ usage() {
 Usage: lore impl next-batch <ref> [--active <task-id>]... [--template-version <hash>] [--json]
 
 Return the unblocked pending task set (per plan.md checkboxes) with refreshed
-Tier 2 extracts, collision groups, and the four lead-inline condition fields.
+Tier 2 extracts and collision groups.
 --active marks tasks currently dispatched; they are excluded and count as
 incomplete blockers. Empty batch is success with status all-blocked or
 all-complete.
@@ -385,92 +384,6 @@ elif pending_blocked or active:
 else:
     status = "all-complete"
 
-# --- Lead-inline gate conditions: four separate fields, never an aggregate -----
-# Units are keyed by the label they are addressed by downstream: the task id on
-# a flat plan, the phase number as a string on a phase-shaped one.
-_heading = r"^### Phase (\d+):[^\n]*\n" if phases else r"^### Task (\d+):[^\n]*\n"
-plan_blocks = {}
-matches = list(re.finditer(_heading, plan, re.MULTILINE))
-for i, m in enumerate(matches):
-    end = matches[i + 1].start() if i + 1 < len(matches) else len(plan)
-    number = int(m.group(1))
-    plan_blocks[str(number) if phases else f"task-{number}"] = plan[m.start():end]
-
-persistent_advisors = []
-consultations_by_unit = {}
-task_format_by_unit = {}
-for unit_key, content in sorted(plan_blocks.items()):
-    am = re.search(r"^\*\*Advisors:\*\*\s*\n((?:(?!^\*\*|\n##).*\n?)*)",
-                   content, re.MULTILINE)
-    if am:
-        for line in am.group(1).splitlines():
-            line = line.strip()
-            if line.startswith("- ") and re.search(r"\bmode\s*:\s*persistent\b", line):
-                body = line[2:].strip()
-                m = re.match(r"(\S+)\s*(?:—|--)?\s*(.*?)\.?\s*mode\s*:\s*persistent\b", body)
-                advisor = {
-                    "name": (m.group(1) if m else body.split()[0]).strip(),
-                    "domain": (m.group(2).strip() if m else ""),
-                    "mode": "persistent",
-                    "unit": unit_key,
-                }
-                if phases:
-                    advisor["phase"] = int(unit_key)
-                persistent_advisors.append(advisor)
-    cm = re.search(r"^\*\*Consultations required:\*\*\s*\n((?:(?!^\*\*|\n##)- .*\n?)*)",
-                   content, re.MULTILINE)
-    if cm:
-        domains = []
-        for line in cm.group(1).splitlines():
-            text = line.strip()
-            if not text.startswith("- ") or text.startswith("- [ ]") or text.startswith("- [x]"):
-                continue
-            text = text[2:].strip()
-            if not text or (text.startswith("<") and text.endswith(">")):
-                continue
-            domains.append(text)
-        if domains:
-            consultations_by_unit[unit_key] = domains
-    fm = re.search(r"\*\*Task format:\*\*\s*(.*)", content)
-    task_format_by_unit[unit_key] = (fm.group(1).strip().lower() if fm else None)
-
-related_skills = []
-rm = re.search(r"^\*\*Related skills:\*\*\s*\n((?:- .*\n?)*)", plan, re.MULTILINE)
-if rm:
-    for line in rm.group(1).splitlines():
-        text = line.strip()
-        if not text.startswith("- "):
-            continue
-        sm = re.match(r"/([A-Za-z0-9_-]+)", text[2:].strip())
-        if sm:
-            related_skills.append(sm.group(1))
-
-task_count = len(all_tasks)
-single_task = task_count == 1
-if single_task:
-    only_id = all_tasks[0]["id"]
-    single_unit = str(phase_of[only_id]) if phases else only_id
-else:
-    single_unit = None
-prescriptive = bool(
-    single_task and task_format_by_unit.get(single_unit) == "prescriptive")
-
-lead_inline_conditions = {
-    "single_task": single_task,
-    "prescriptive": prescriptive,
-    "no_persistent_advisor": not persistent_advisors,
-    "no_required_consultation": not consultations_by_unit and not related_skills,
-    "detail": {
-        "task_count": task_count,
-        "task_format_by_unit": task_format_by_unit,
-        "persistent_advisors": persistent_advisors,
-        "consultations_required_by_unit": consultations_by_unit,
-        "related_skills": related_skills,
-        "file_count_diagnostic": (
-            len(all_tasks[0].get("file_targets", [])) if single_task else None),
-    },
-}
-
 print(json.dumps({
     "slug": slug,
     "status": status,
@@ -481,7 +394,6 @@ print(json.dumps({
     "pending_blocked": pending_blocked,
     "unmatched": unmatched,
     "collision_groups": collision_groups,
-    "lead_inline_conditions": lead_inline_conditions,
     "warnings": warnings,
 }, ensure_ascii=False))
 PYEOF
@@ -543,11 +455,4 @@ if d["collision_groups"]:
     print("Same-file collision groups (serialize within one worker, or merge — your call):")
     for g in d["collision_groups"]:
         print(f"  {g['file']}: {', '.join(g['tasks'])}  [chain class: {g['chain_class']}]")
-print()
-c = d["lead_inline_conditions"]
-print("Lead-inline conditions (read each; the route decision is yours):")
-print(f"  single_task: {c['single_task']}")
-print(f"  prescriptive: {c['prescriptive']}")
-print(f"  no_persistent_advisor: {c['no_persistent_advisor']}")
-print(f"  no_required_consultation: {c['no_required_consultation']}")
 PYEOF

@@ -14,7 +14,8 @@
 #     domains block; required domains without --transcript exit 1
 #   - convention-handling completeness is non-blocking: findings surfaced,
 #     mechanical_pass unaffected; no --woven-norm -> loud skipped status
-#   - fabrication guard: handler: agent entries need --provider-status;
+#   - advisor attribution: handler: agent entries use the transcript provider
+#     status, read by the verb unless --provider-status declares it;
 #     verified entries roll up to scorecard rows; unverified entries are
 #     stripped and logged `fabrication-guard: skipped <id>`; provider
 #     unavailable withholds the rollup; handler: lead entries bypass
@@ -580,12 +581,18 @@ c1
 EOF
 }
 
-@test "agent consultations without --provider-status exit 1" {
+@test "agent consultations without --provider-status read the transcript provider" {
   write_agent_report
-  run bash "$CHECK_SH" report-item --task 5 \
-    --report "$REPORT"
-  [ "$status" -eq 1 ]
-  echo "$output" | grep -q -- "--provider-status"
+  LORE_FRAMEWORK=codex run bash "$CHECK_SH" report-item --task 5 \
+    --report "$REPORT" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c '
+import json, sys
+d = json.loads(sys.stdin.read())
+assert d["provider_status"] == {"status": "partial", "source": "computed"}, d["provider_status"]
+assert d["findings"]["fabrication_guard"]["status"] == "provider-partial-degraded"
+'
+  grep -q "fabrication-guard: provider-partial; rollup skipped" "$(log_file)"
 }
 
 @test "provider full requires --spawned-advisors" {
