@@ -1218,7 +1218,7 @@ PY
     recipe_root="$POSITION_DISPATCH_FIXTURES/implement-recipes"
   fi
   run python3 "$REPO/tests/helpers/implement_recipes.py" --run --root "$recipe_root" \
-    --source "${IMPLEMENT_RECIPE_SOURCE:-$REPO/skills/implement/SKILL.md}"
+    --source "$REPO/skills/implement/SKILL.md" "$REPO/skills/implement/dispatching.md"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
 
