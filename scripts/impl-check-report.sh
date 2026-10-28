@@ -25,13 +25,13 @@
 #      unrecognized labels and `none in scope` conflicts are surfaced.
 #      Divergence rationales are listed verbatim; assessing them is the
 #      caller's judgment, not this script's.
-#   4. Advisor attribution (non-blocking, metadata-only) — `handler: agent`
-#      consultations are intersected with --spawned-advisors under the
+#   4. Advisor join (non-blocking, metadata-only) — `handler: agent`
+#      consultations are joined to --spawned-advisors under the
 #      transcript provider status, read here unless --provider-status
 #      declares it. Entries no spawned advisor matches are left out of the
 #      rollup payload and logged; provider unavailable (or partial without a
 #      spawn list) withholds the rollup, since nothing can join the entries.
-#   5. Advisor-impact rollup — the verified `handler: agent` subset is
+#   5. Advisor-impact rollup — the joined `handler: agent` subset is
 #      forwarded to advisor-impact-rollup.sh (the scorecard sole writer).
 #   6. One execution-log entry (source: impl-verb) filing the findings.
 #
@@ -80,7 +80,7 @@ Usage: lore impl check-report <ref> --task <id> --report <file>
 
 Mechanically verify a worker completion report: Tier 2 claim_id
 cross-reference (blocking), required-consultation acknowledgement (blocking),
-convention-handling completeness (non-blocking), fabrication guard +
+convention-handling completeness (non-blocking), advisor join +
 advisor-impact rollup (metadata-only), one execution-log entry.
 
 --transcript is required when the task declares required consultation domains.
@@ -632,7 +632,7 @@ else:
     else:
         convention["status"] = "skipped-no-woven-list"
 
-# --- 4. Fabrication guard (metadata-only) ------------------------------------
+# --- 4. Advisor join (metadata-only) -----------------------------------------
 agent_entries = []
 invalid_entries = 0
 for e in entries:
@@ -647,7 +647,7 @@ for e in entries:
 
 rollup_payload = []
 if not agent_entries:
-    guard = {"status": "no-agent-consultations", "verified": [], "stripped": []}
+    join = {"status": "no-agent-consultations", "joined": [], "unmatched": []}
 else:
     if os.environ["CR_PROVIDER_SET"] != "1":
         validation_error(
@@ -658,35 +658,35 @@ else:
     spawned = {clean(t) for t in os.environ.get("CR_SPAWNED", "").split(",")
                if clean(t)}
     if provider == "unavailable":
-        guard = {"status": "provider-unavailable", "verified": [], "stripped": []}
+        join = {"status": "provider-unavailable", "joined": [], "unmatched": []}
     elif provider == "partial" and not spawned_set:
-        guard = {"status": "provider-partial-degraded", "verified": [],
-                 "stripped": []}
+        join = {"status": "provider-partial-degraded", "joined": [],
+                "unmatched": []}
     else:
         if provider == "full" and not spawned_set:
             validation_error(
                 "--provider-status full requires --spawned-advisors "
                 "(pass an empty value when none were spawned)")
-        verified_ids = []
-        stripped_ids = []
+        joined_ids = []
+        unmatched_ids = []
         for e in agent_entries:
             ident = e.get("advisor_template_version") or e.get("advisor") or ""
             attribution = e.get("producer_attribution")
             attributed = attribution is None or (attribution["status"] == "resolved" and attribution["template_version"] == ident)
             if ident and ident in spawned and attributed:
-                verified_ids.append(ident)
+                joined_ids.append(ident)
                 rollup_payload.append(e)
             else:
-                stripped_ids.append(ident or "<no-identifier>")
-        if not stripped_ids:
-            status = "verified"
-        elif not verified_ids:
-            status = "all-stripped"
+                unmatched_ids.append(ident or "<no-identifier>")
+        if not unmatched_ids:
+            status = "all-joined"
+        elif not joined_ids:
+            status = "none-joined"
         else:
-            status = "partial-strip"
-        guard = {"status": status, "verified": verified_ids,
-                 "stripped": stripped_ids}
-guard["invalid_entries"] = invalid_entries
+            status = "some-joined"
+        join = {"status": status, "joined": joined_ids,
+                "unmatched": unmatched_ids}
+join["invalid_entries"] = invalid_entries
 
 print(json.dumps({
     "producer_attribution": producer_attribution,
@@ -694,7 +694,7 @@ print(json.dumps({
     "tier2": tier2,
     "required_consultations": required_check,
     "convention_handling": convention,
-    "fabrication_guard": guard,
+    "advisor_join": join,
     "rollup_payload": rollup_payload,
     "fail_reasons": fail_reasons,
     "mechanical_pass": not fail_reasons,
@@ -711,19 +711,19 @@ fi
 
 MECHANICAL_PASS=$(printf '%s' "$RESULT" \
   | python3 -c 'import json,sys; print("true" if json.load(sys.stdin)["mechanical_pass"] else "false")')
-GUARD_STATUS=$(printf '%s' "$RESULT" \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["fabrication_guard"]["status"])')
+JOIN_STATUS=$(printf '%s' "$RESULT" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["advisor_join"]["status"])')
 ROLLUP_PAYLOAD=$(printf '%s' "$RESULT" \
   | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["rollup_payload"]))')
 
-# --- 5. Advisor-impact rollup on the verified subset -------------------------
+# --- 5. Advisor-impact rollup on the joined subset ---------------------------
 ROLLUP_STATUS="skipped"
 ROLLUP_REASON=""
-case "$GUARD_STATUS" in
+case "$JOIN_STATUS" in
   no-agent-consultations) ROLLUP_REASON="no-agent-consultations" ;;
   provider-unavailable)   ROLLUP_REASON="provider-unavailable" ;;
   provider-partial-degraded) ROLLUP_REASON="provider-partial-degraded" ;;
-  all-stripped)           ROLLUP_REASON="all-entries-stripped" ;;
+  none-joined)            ROLLUP_REASON="no-entries-joined" ;;
   *)
     set +e
     ROLLUP_OUTPUT=$(printf '%s' "$ROLLUP_PAYLOAD" \
@@ -764,7 +764,7 @@ task_id, rollup_status, rollup_reason = sys.argv[2:5]
 t2 = result["tier2"]
 rc = result["required_consultations"]
 ch = result["convention_handling"]
-fg = result["fabrication_guard"]
+aj = result["advisor_join"]
 
 lines = [
     f"Check-report task: {task_id}",
@@ -778,14 +778,14 @@ lines = [
     f"duplicated={json.dumps(ch['duplicated'])}; "
     f"unrecognized={json.dumps(ch['unrecognized'])}; "
     f"diverged={json.dumps(ch['diverged'], ensure_ascii=False)}",
-    f"Fabrication guard: {fg['status']}; verified={json.dumps(fg['verified'])}",
+    f"Advisor join: {aj['status']}; joined={json.dumps(aj['joined'])}",
 ]
-for ident in fg["stripped"]:
-    lines.append(f"fabrication-guard: skipped {ident}")
-if fg["status"] == "provider-unavailable":
-    lines.append("fabrication-guard: provider-unavailable; rollup skipped")
-elif fg["status"] == "provider-partial-degraded":
-    lines.append("fabrication-guard: provider-partial; rollup skipped")
+for ident in aj["unmatched"]:
+    lines.append(f"advisor-join: unmatched {ident}")
+if aj["status"] == "provider-unavailable":
+    lines.append("advisor-join: provider-unavailable; rollup skipped")
+elif aj["status"] == "provider-partial-degraded":
+    lines.append("advisor-join: provider-partial; rollup skipped")
 rollup = f"Advisor rollup: {rollup_status}"
 if rollup_reason:
     rollup += f" ({rollup_reason})"
@@ -813,7 +813,7 @@ slug, task_id, rollup_status, rollup_reason, log_path, json_mode, provider_statu
 t2 = result["tier2"]
 rc = result["required_consultations"]
 ch = result["convention_handling"]
-fg = result["fabrication_guard"]
+aj = result["advisor_join"]
 
 if json_mode == "1":
     print(json.dumps({
@@ -827,7 +827,7 @@ if json_mode == "1":
             "tier2": t2,
             "required_consultations": rc,
             "convention_handling": ch,
-            "fabrication_guard": fg,
+            "advisor_join": aj,
         },
         "provider_status": {"status": provider_status, "source": provider_source},
         "advisor_rollup": {"status": rollup_status,
@@ -867,8 +867,8 @@ for d in ch["diverged"]:
     print(f"  diverged: {d['label']} — {d['rationale']} (assess the rationale; "
           f"this verb does not)")
 print(f"Provider status: {provider_status} ({provider_source})")
-print(f"Fabrication guard: {fg['status']}"
-      + (f"; stripped: {', '.join(fg['stripped'])}" if fg["stripped"] else ""))
+print(f"Advisor join: {aj['status']}"
+      + (f"; unmatched: {', '.join(aj['unmatched'])}" if aj["unmatched"] else ""))
 print(f"Advisor rollup: {rollup_status}"
       + (f" ({rollup_reason})" if rollup_reason else ""))
 print(f"Execution log: appended ({log_path})")

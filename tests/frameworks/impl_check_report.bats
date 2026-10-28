@@ -16,9 +16,9 @@
 #     mechanical_pass unaffected; no --woven-norm -> loud skipped status
 #   - advisor attribution: handler: agent entries use the transcript provider
 #     status, read by the verb unless --provider-status declares it;
-#     verified entries roll up to scorecard rows; unverified entries are
-#     stripped and logged `fabrication-guard: skipped <id>`; provider
-#     unavailable withholds the rollup; handler: lead entries bypass
+#     joined entries roll up to scorecard rows; entries that match no
+#     advisor that ran are left out and logged `advisor-join: unmatched <id>`;
+#     provider unavailable withholds the rollup; handler: lead entries bypass
 #   - one execution-log entry with source impl-verb on pass AND on mechanical
 #     fail; --json output shape with explicit exit 0/3
 #
@@ -563,7 +563,7 @@ EOF
     "$ITEM_DIR/execution-log.md"
 }
 
-# --- Fabrication guard + advisor rollup ---------------------------------------
+# --- Advisor join + advisor rollup --------------------------------------------
 
 write_agent_report() {
   cat > "$REPORT" <<'EOF'
@@ -590,9 +590,9 @@ EOF
 import json, sys
 d = json.loads(sys.stdin.read())
 assert d["provider_status"] == {"status": "partial", "source": "computed"}, d["provider_status"]
-assert d["findings"]["fabrication_guard"]["status"] == "provider-partial-degraded"
+assert d["findings"]["advisor_join"]["status"] == "provider-partial-degraded"
 '
-  grep -q "fabrication-guard: provider-partial; rollup skipped" "$(log_file)"
+  grep -q "advisor-join: provider-partial; rollup skipped" "$(log_file)"
 }
 
 @test "provider full requires --spawned-advisors" {
@@ -603,7 +603,7 @@ assert d["findings"]["fabrication_guard"]["status"] == "provider-partial-degrade
   echo "$output" | grep -q -- "requires --spawned-advisors"
 }
 
-@test "verified agent consultation rolls up scorecard rows" {
+@test "joined agent consultation rolls up scorecard rows" {
   write_agent_report
   run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --provider-status full \
@@ -615,13 +615,13 @@ assert d["findings"]["fabrication_guard"]["status"] == "provider-partial-degrade
   grep -q "abcdef123456" "$(rows_file)"
 }
 
-@test "unverified advisor is stripped and logged; rollup withheld" {
+@test "unmatched advisor is left out and logged; rollup withheld" {
   write_agent_report
   run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --provider-status full --spawned-advisors ""
   [ "$status" -eq 0 ]
-  echo "$output" | grep -q "Advisor rollup: skipped (all-entries-stripped)"
-  grep -q "fabrication-guard: skipped abcdef123456" "$(log_file)"
+  echo "$output" | grep -q "Advisor rollup: skipped (no-entries-joined)"
+  grep -q "advisor-join: unmatched abcdef123456" "$(log_file)"
   [ ! -f "$(rows_file)" ]
 }
 
@@ -631,18 +631,18 @@ assert d["findings"]["fabrication_guard"]["status"] == "provider-partial-degrade
     --report "$REPORT" --provider-status unavailable
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Advisor rollup: skipped (provider-unavailable)"
-  grep -q "fabrication-guard: provider-unavailable; rollup skipped" "$(log_file)"
+  grep -q "advisor-join: provider-unavailable; rollup skipped" "$(log_file)"
   [ ! -f "$(rows_file)" ]
 }
 
-@test "handler lead consultations bypass the guard and emit no rows" {
+@test "handler lead consultations bypass the join and emit no rows" {
   write_consulted_report
   printf '{"consultation_id":"c-100","worker":"worker-5","domain":"security","handler":"lead","replied_at":"2026-06-10T00:00:00Z"}\n' \
     > "$TRANSCRIPT"
   run bash "$CHECK_SH" report-item --task 5 \
     --report "$REPORT" --transcript "$TRANSCRIPT"
   [ "$status" -eq 0 ]
-  echo "$output" | grep -q "Fabrication guard: no-agent-consultations"
+  echo "$output" | grep -q "Advisor join: no-agent-consultations"
   [ ! -f "$(rows_file)" ]
 }
 

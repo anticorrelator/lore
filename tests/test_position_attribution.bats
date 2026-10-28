@@ -229,12 +229,12 @@ consult_check_args = ['fixture','--task','task-1','--report',str(consult_report)
                      '--provider-status','full','--spawned-advisors',ad['template_version'],'--json']
 check = script('impl-check-report.sh',*consult_check_args)
 result = next(json.loads(line) for line in check.stdout.decode().splitlines() if line.startswith('{'))
-assert result['findings']['fabrication_guard']['status']=='verified', result
+assert result['findings']['advisor_join']['status']=='all-joined', result
 assert result['consultation_attribution'][0]['producer_attribution']['status']=='resolved', result
 consult_report.write_text(consult_report.read_text().replace(ar['manifest_sha256'],'0'*64))
 check = script('impl-check-report.sh',*consult_check_args)
 result = next(json.loads(line) for line in check.stdout.decode().splitlines() if line.startswith('{'))
-assert result['findings']['fabrication_guard']['status']=='all-stripped', result
+assert result['findings']['advisor_join']['status']=='none-joined', result
 assert result['consultation_attribution'][0]['producer_attribution']['status']=='unknown', result
 script('impl-check-report.sh','fixture','--task','missing-task','--revision',revision,'--report',b['report_path'],ok=False)
 

@@ -1,25 +1,25 @@
 #!/usr/bin/env bats
-# implement-fabrication-guard.bats — advisor attribution behavior from the
+# implement-advisor-join.bats — advisor join behavior from the
 # `lore impl check-report` contract (scripts/impl-check-report.sh).
 #
-# The guard sits between worker-report acceptance (§1-2) and the existing
+# The join sits between worker-report acceptance (§1-2) and the existing
 # advisor-impact-rollup invocation (§4 after renumbering). It consumes the
 # transcript provider per the canonical consumer pattern
 # (`get_provider()` -> catch UnsupportedFrameworkError -> `provider_status()`
 # gate -> operation calls) and routes to one of three branches:
 #
-#   (a) Provider OK + every claimed advisor verified in the transcript ->
+#   (a) Provider OK + every reported advisor present in the transcript ->
 #       invoke advisor-impact-rollup unchanged with all consultations.
-#   (b) Provider OK + at least one claimed advisor not seen in the transcript
-#       spawn events -> log `fabrication-guard: skipped <name>` per unverified
-#       entry and forward only the verified subset to the rollup. Verified
+#   (b) Provider OK + at least one reported advisor not seen in the transcript
+#       spawn events -> log `advisor-join: unmatched <name>` per unmatched
+#       entry and forward only the joined subset to the rollup. Joined
 #       entries still flow.
 #   (c) Provider returns `unavailable` or `partial` (with the spawn surface
-#       degraded) -> log `fabrication-guard: provider-<status>; rollup skipped`
-#       and do NOT invoke the rollup at all. Verify-or-skip default; do NOT
-#       fall through to today's verbatim-trust behavior.
+#       degraded) -> log `advisor-join: provider-<status>; rollup skipped`
+#       and do NOT invoke the rollup at all: with no spawn record there is
+#       nothing to join the entries to, so the rollup has nothing to attribute.
 #
-# The guard is metadata-only — worker task acceptance is unaffected; only
+# The join is metadata-only — worker task acceptance is unaffected; only
 # the advisor scorecard attribution changes. This bats file mirrors the
 # check-report algorithm in test-side bash helpers (same pattern as
 # scorecard-rollup-snapshots.bats's `select_prior_snapshot`) so each branch
@@ -44,7 +44,7 @@ setup() {
   # Hermetic knowledge dir — write-execution-log.sh + advisor-impact-rollup.sh
   # both resolve via resolve_knowledge_dir(), which short-circuits on
   # $LORE_KNOWLEDGE_DIR (resolve-repo.sh:23-26).
-  WORK_SLUG="fabrication-guard-fixture"
+  WORK_SLUG="advisor-join-fixture"
   KDIR="$(mktemp -d)"
   mkdir -p "$KDIR/_scorecards" "$KDIR/_work/$WORK_SLUG"
   printf '%s' '{"format_version": 2}' > "$KDIR/_manifest.json"
@@ -52,7 +52,7 @@ setup() {
   export LORE_KNOWLEDGE_DIR="$KDIR"
   export KDIR
 
-  TRANSCRIPT_FIXTURE="$(mktemp -t fabguard-fixture.XXXXXX.jsonl)"
+  TRANSCRIPT_FIXTURE="$(mktemp -t advisor-join-fixture.XXXXXX.jsonl)"
 }
 
 teardown() {
@@ -75,13 +75,13 @@ import json, sys
 fixture_path = sys.argv[1]
 advisor_names = sys.argv[2:]
 entries = [
-    {"sessionId": "fab-sess-1", "timestamp": "2026-05-08T08:00:00Z",
+    {"sessionId": "join-sess-1", "timestamp": "2026-05-08T08:00:00Z",
      "type": "human",
      "message": {"role": "user", "content": "/implement audit-scorecard-plumbing-follow-ups-w03-settlement"}},
 ]
 for i, name in enumerate(advisor_names):
     entries.append({
-        "sessionId": "fab-sess-1",
+        "sessionId": "join-sess-1",
         "timestamp": f"2026-05-08T08:00:{i+1:02d}Z",
         "type": "assistant",
         "message": {"role": "assistant",
@@ -96,9 +96,9 @@ with open(fixture_path, "w") as f:
 PYEOF
 }
 
-# Test-side mirror of the check-report fabrication guard. Returns a JSON object
-# on stdout: {"branch": "a"|"b"|"c", "verified": [...], "rollup_payload": [...]}
-# and emits the canonical fabrication-guard log lines to execution-log.md
+# Test-side mirror of the check-report advisor join. Returns a JSON object
+# on stdout: {"branch": "a"|"b"|"c", "joined": [...], "rollup_payload": [...]}
+# and emits the canonical advisor-join log lines to execution-log.md
 # via write-execution-log.sh.
 #
 # Inputs:
@@ -107,7 +107,7 @@ PYEOF
 #   $2 — path to transcript fixture
 #   $3 — `claude-code` (full) | `unavailable` (force degraded) | `partial`
 #   $4 — slug
-fabrication_guard() {
+advisor_join() {
   local cons_path="$1"
   local transcript_path="$2"
   local force_status="$3"
@@ -132,8 +132,8 @@ with open(cons_path) as f:
 # Branch (c) short-circuit when caller wants to simulate a degraded provider.
 if force_status in ("unavailable", "partial"):
     out = {"branch": "c", "status": force_status,
-           "verified": [], "rollup_payload": [],
-           "log_lines": [f"fabrication-guard: provider-{force_status}; rollup skipped"]}
+           "joined": [], "rollup_payload": [],
+           "log_lines": [f"advisor-join: provider-{force_status}; rollup skipped"]}
     print(json.dumps(out))
     sys.exit(0)
 
@@ -142,16 +142,16 @@ try:
     provider = get_provider('claude-code')
 except UnsupportedFrameworkError:
     out = {"branch": "c", "status": "unavailable",
-           "verified": [], "rollup_payload": [],
-           "log_lines": ["fabrication-guard: provider-unavailable; rollup skipped"]}
+           "joined": [], "rollup_payload": [],
+           "log_lines": ["advisor-join: provider-unavailable; rollup skipped"]}
     print(json.dumps(out))
     sys.exit(0)
 
 status, reason = provider.provider_status()
 if status == 'unavailable':
     out = {"branch": "c", "status": "unavailable",
-           "verified": [], "rollup_payload": [],
-           "log_lines": ["fabrication-guard: provider-unavailable; rollup skipped"]}
+           "joined": [], "rollup_payload": [],
+           "log_lines": ["advisor-join: provider-unavailable; rollup skipped"]}
     print(json.dumps(out))
     sys.exit(0)
 
@@ -177,33 +177,33 @@ for m in msgs:
             if nm:
                 spawned_names.add(nm)
 
-verified = []
+joined = []
 log_lines = []
 for c in consultations:
     name = c.get('spawned_as_name')
     if name and name in spawned_names:
-        verified.append(c)
+        joined.append(c)
     else:
         # Identifier emitted in the log: prefer name, fall back to template version.
         ident = name or c.get('advisor_template_version') or '<unknown>'
-        log_lines.append(f"fabrication-guard: skipped {ident}")
+        log_lines.append(f"advisor-join: unmatched {ident}")
 
-branch = "a" if len(verified) == len(consultations) else "b"
+branch = "a" if len(joined) == len(consultations) else "b"
 out = {
     "branch": branch,
     "status": status,
-    "verified": verified,
-    "rollup_payload": verified,
+    "joined": joined,
+    "rollup_payload": joined,
     "log_lines": log_lines,
 }
 print(json.dumps(out))
 PYEOF
 }
 
-# Helper: write the fabrication-guard log lines to execution-log.md the
+# Helper: write the advisor-join log lines to execution-log.md the
 # same way the report-check contract prescribes (one write-execution-log.sh invocation per
 # line, source=implement-lead).
-write_guard_log_lines() {
+write_join_log_lines() {
   local lines_json="$1"
   local slug="$2"
   echo "$lines_json" | python3 -c '
@@ -221,7 +221,7 @@ for line in lines:
 ' "$slug" "$WRITE_LOG_SH"
 }
 
-# Helper: invoke the real advisor-impact-rollup against a verified-payload
+# Helper: invoke the real advisor-impact-rollup against a joined-payload
 # JSON array, attribute everything to KDIR. Returns rollup script status.
 run_rollup() {
   local payload_json="$1"
@@ -242,10 +242,10 @@ rollup_rows_for() {
 }
 
 # ============================================================
-# Branch (a) — provider OK, all entries verified, rollup runs unchanged.
+# Branch (a) — provider OK, all entries joined, rollup runs unchanged.
 # ============================================================
 
-@test "branch (a): provider full + all advisors verified -> rollup invoked, no fabrication-guard log line" {
+@test "branch (a): provider full + all advisors joined -> rollup invoked, no advisor-join log line" {
   ADVISOR_TV="aaaaaaaaaaaa"
   ADVISOR_NAME="supply-chain-risk-auditor-advisor"
 
@@ -256,7 +256,7 @@ rollup_rows_for() {
 [{"advisor_template_version":"$ADVISOR_TV","spawned_as_name":"$ADVISOR_NAME","query_summary":"q","advice_summary":"a","was_followed":true}]
 EOF
 
-  result=$(fabrication_guard "$CONS" "$TRANSCRIPT_FIXTURE" "claude-code" "$WORK_SLUG")
+  result=$(advisor_join "$CONS" "$TRANSCRIPT_FIXTURE" "claude-code" "$WORK_SLUG")
   rm -f "$CONS"
 
   branch=$(echo "$result" | jq -r '.branch')
@@ -266,7 +266,7 @@ EOF
   log_count=$(echo "$result" | jq -r '.log_lines | length')
   [ "$log_count" = "0" ]
 
-  # Forward verified payload to the real rollup.
+  # Forward joined payload to the real rollup.
   payload=$(echo "$result" | jq -c '.rollup_payload')
   run_rollup "$payload" "$WORK_SLUG"
 
@@ -275,21 +275,21 @@ EOF
   rows=$(rollup_rows_for "$ADVISOR_TV")
   [ "$rows" = "2" ]
 
-  # execution-log.md does NOT contain a fabrication-guard line for branch (a).
-  ! grep -q '^fabrication-guard:' "$KDIR/_work/$WORK_SLUG/execution-log.md" || \
-    { echo "unexpected fabrication-guard log line in branch (a)"; cat "$KDIR/_work/$WORK_SLUG/execution-log.md"; return 1; }
+  # execution-log.md does NOT contain an advisor-join line for branch (a).
+  ! grep -q '^advisor-join:' "$KDIR/_work/$WORK_SLUG/execution-log.md" || \
+    { echo "unexpected advisor-join log line in branch (a)"; cat "$KDIR/_work/$WORK_SLUG/execution-log.md"; return 1; }
 }
 
 # ============================================================
-# Branch (b) — provider OK, mismatch on one advisor: rollup runs WITHOUT the
-# fabricated entry, log emits `fabrication-guard: skipped <name>`.
+# Branch (b) — provider OK, one advisor absent from the transcript: rollup
+# runs WITHOUT that entry, log emits `advisor-join: unmatched <name>`.
 # ============================================================
 
-@test "branch (b): one fabricated advisor -> rollup invoked without fabricated entry, log records skip" {
+@test "branch (b): one advisor absent from the transcript -> rollup invoked without its entry, log records the unmatched id" {
   REAL_TV="bbbbbbbbbbbb"
   REAL_NAME="real-advisor"
-  FAKE_TV="ffffffffffff"
-  FAKE_NAME="ghost-advisor"
+  ABSENT_TV="ffffffffffff"
+  ABSENT_NAME="unspawned-advisor"
 
   # Only the real advisor is spawned in the transcript.
   write_transcript_fixture "$REAL_NAME"
@@ -298,48 +298,48 @@ EOF
   cat > "$CONS" <<EOF
 [
   {"advisor_template_version":"$REAL_TV","spawned_as_name":"$REAL_NAME","query_summary":"q","advice_summary":"a","was_followed":true},
-  {"advisor_template_version":"$FAKE_TV","spawned_as_name":"$FAKE_NAME","query_summary":"q2","advice_summary":"a2","was_followed":false,"rationale_if_not_followed":"disagreed"}
+  {"advisor_template_version":"$ABSENT_TV","spawned_as_name":"$ABSENT_NAME","query_summary":"q2","advice_summary":"a2","was_followed":false,"rationale_if_not_followed":"disagreed"}
 ]
 EOF
 
-  result=$(fabrication_guard "$CONS" "$TRANSCRIPT_FIXTURE" "claude-code" "$WORK_SLUG")
+  result=$(advisor_join "$CONS" "$TRANSCRIPT_FIXTURE" "claude-code" "$WORK_SLUG")
   rm -f "$CONS"
 
   branch=$(echo "$result" | jq -r '.branch')
   [ "$branch" = "b" ]
 
-  # Exactly one log line, naming the fabricated advisor.
+  # Exactly one log line, naming the unmatched advisor.
   log_count=$(echo "$result" | jq -r '.log_lines | length')
   [ "$log_count" = "1" ]
   log_line=$(echo "$result" | jq -r '.log_lines[0]')
-  [ "$log_line" = "fabrication-guard: skipped $FAKE_NAME" ]
+  [ "$log_line" = "advisor-join: unmatched $ABSENT_NAME" ]
 
-  # Verified payload contains only the real advisor.
-  verified_count=$(echo "$result" | jq -r '.verified | length')
-  [ "$verified_count" = "1" ]
-  verified_tv=$(echo "$result" | jq -r '.verified[0].advisor_template_version')
-  [ "$verified_tv" = "$REAL_TV" ]
+  # Joined payload contains only the real advisor.
+  joined_count=$(echo "$result" | jq -r '.joined | length')
+  [ "$joined_count" = "1" ]
+  joined_tv=$(echo "$result" | jq -r '.joined[0].advisor_template_version')
+  [ "$joined_tv" = "$REAL_TV" ]
 
   # Persist the log line via the canonical writer, then run the rollup.
   log_lines=$(echo "$result" | jq -c '.log_lines')
-  write_guard_log_lines "$log_lines" "$WORK_SLUG"
+  write_join_log_lines "$log_lines" "$WORK_SLUG"
 
   payload=$(echo "$result" | jq -c '.rollup_payload')
   run_rollup "$payload" "$WORK_SLUG"
 
-  # Real advisor got two rows; fake advisor got zero.
+  # Real advisor got two rows; the absent advisor got zero.
   real_rows=$(rollup_rows_for "$REAL_TV")
-  fake_rows=$(rollup_rows_for "$FAKE_TV")
+  absent_rows=$(rollup_rows_for "$ABSENT_TV")
   [ "$real_rows" = "2" ]
-  [ "$fake_rows" = "0" ]
+  [ "$absent_rows" = "0" ]
 
-  # execution-log.md contains the fabrication-guard line.
-  grep -q "fabrication-guard: skipped $FAKE_NAME" "$KDIR/_work/$WORK_SLUG/execution-log.md"
+  # execution-log.md contains the advisor-join line.
+  grep -q "advisor-join: unmatched $ABSENT_NAME" "$KDIR/_work/$WORK_SLUG/execution-log.md"
 }
 
 # ============================================================
 # Branch (c) — provider unavailable: rollup NOT invoked, log line records
-# the provider status. Verify-or-skip default, NOT fall-through.
+# the provider status. Nothing to join to, so nothing is attributed.
 # ============================================================
 
 @test "branch (c): provider unavailable -> rollup NOT invoked, log records provider status" {
@@ -353,7 +353,7 @@ EOF
 [{"advisor_template_version":"$ADVISOR_TV","spawned_as_name":"$ADVISOR_NAME","query_summary":"q","advice_summary":"a","was_followed":true}]
 EOF
 
-  result=$(fabrication_guard "$CONS" "$TRANSCRIPT_FIXTURE" "unavailable" "$WORK_SLUG")
+  result=$(advisor_join "$CONS" "$TRANSCRIPT_FIXTURE" "unavailable" "$WORK_SLUG")
   rm -f "$CONS"
 
   branch=$(echo "$result" | jq -r '.branch')
@@ -363,24 +363,24 @@ EOF
   log_count=$(echo "$result" | jq -r '.log_lines | length')
   [ "$log_count" = "1" ]
   log_line=$(echo "$result" | jq -r '.log_lines[0]')
-  [ "$log_line" = "fabrication-guard: provider-unavailable; rollup skipped" ]
+  [ "$log_line" = "advisor-join: provider-unavailable; rollup skipped" ]
 
-  # Verified payload is empty — branch (c) does NOT fall through.
-  verified_count=$(echo "$result" | jq -r '.verified | length')
-  [ "$verified_count" = "0" ]
+  # Joined payload is empty — branch (c) does NOT fall through.
+  joined_count=$(echo "$result" | jq -r '.joined | length')
+  [ "$joined_count" = "0" ]
   payload_count=$(echo "$result" | jq -r '.rollup_payload | length')
   [ "$payload_count" = "0" ]
 
   # Persist the log line. Do NOT invoke the rollup.
   log_lines=$(echo "$result" | jq -c '.log_lines')
-  write_guard_log_lines "$log_lines" "$WORK_SLUG"
+  write_join_log_lines "$log_lines" "$WORK_SLUG"
 
   # No rows for this advisor (rollup was skipped).
   rows=$(rollup_rows_for "$ADVISOR_TV")
   [ "$rows" = "0" ]
 
   # execution-log.md contains the provider-unavailable line.
-  grep -q "fabrication-guard: provider-unavailable; rollup skipped" \
+  grep -q "advisor-join: provider-unavailable; rollup skipped" \
     "$KDIR/_work/$WORK_SLUG/execution-log.md"
 
   # Sanity: rows.jsonl must not exist (or, if it does, must be empty for
@@ -394,7 +394,7 @@ EOF
 
 # ============================================================
 # Default-route exclusion: when no consultation has handler: agent, the
-# downstream observable of the fabrication guard's filtering is that
+# downstream observable of the advisor join's filtering is that
 # advisor-impact-rollup.sh emits zero rows. Exercise the downstream rollup
 # with the same default-route payload
 # (handler: lead + handler: skill, no handler: agent) and assert no
@@ -415,7 +415,7 @@ EOF
 EOF
 
   # Drive the rollup directly with this payload — the rollup is the
-  # observable end of the fabrication-guard branch. The rollup itself filters
+  # observable end of the advisor-join branch. The rollup itself filters
   # to handler: agent (advisor-impact-rollup.sh:240-241), so the script
   # produces no rows.jsonl when no entry carries handler: agent.
   bash "$ROLLUP_SH" \
@@ -435,7 +435,7 @@ EOF
 # ============================================================
 # Opt-in path preservation: mixed handler payload with at least one
 # handler: agent entry still produces rollup rows for that agent entry.
-# Mirrors branch (a) of the guard: verified agent entries flow through;
+# Mirrors branch (a) of the join: joined agent entries flow through;
 # this case just adds non-agent siblings to confirm they don't disrupt
 # the agent's row emission.
 # ============================================================
@@ -455,20 +455,20 @@ EOF
 ]
 EOF
 
-  # Run the test-side guard mirror first — it filters by spawned_as_name
-  # for the existing branch (a) verification. We pass only the handler: agent
-  # entry through to the guard (lead/skill are pre-filtered before the
-  # guard by the documented metadata-only contract).
+  # Run the test-side join mirror first — it filters by spawned_as_name
+  # for the existing branch (a) join. We pass only the handler: agent
+  # entry through to the join (lead/skill are pre-filtered before the
+  # join by the documented metadata-only contract).
   AGENT_CONS=$(mktemp)
   jq '[.[] | select(.handler == "agent")]' "$CONS" > "$AGENT_CONS"
 
-  result=$(fabrication_guard "$AGENT_CONS" "$TRANSCRIPT_FIXTURE" "claude-code" "$WORK_SLUG")
+  result=$(advisor_join "$AGENT_CONS" "$TRANSCRIPT_FIXTURE" "claude-code" "$WORK_SLUG")
   rm -f "$AGENT_CONS"
 
   branch=$(echo "$result" | jq -r '.branch')
   [ "$branch" = "a" ]
 
-  # Forward verified payload to the real rollup.
+  # Forward joined payload to the real rollup.
   payload=$(echo "$result" | jq -c '.rollup_payload')
   run_rollup "$payload" "$WORK_SLUG"
 
