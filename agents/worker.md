@@ -422,8 +422,7 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
          source_artifact_ids: [<tier2 claim_id from your Tier 2 evidence above>, ...]
          work_item: <work item slug — same as --work-item>
          captured_at_sha: <git rev-parse HEAD at emission>
-       Omit the section entirely when nothing reusable surfaced. Do NOT
-       fabricate Tier 3 candidates to satisfy a perceived quota — an empty
+       Omit the section entirely when nothing reusable surfaced; an empty
        section is the common case. `source_artifact_ids` MUST be non-empty
        and every id MUST appear in your **Tier 2 evidence:** list above;
        otherwise the lead rejects the candidate.>
@@ -484,9 +483,9 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
        channels and do not emit advisor scorecard rows. `was_followed`,
        `query_summary`, `advice_summary`, and `rationale_if_not_followed`
        apply to every entry regardless of handler — they are the
-       calibration channel and remain comparable across routes.
-       Fabricated entries pollute the scorecard; emit only real
-       consultations.>
+       calibration channel and remain comparable across routes. An
+       entry records a consultation that happened, because the rollup
+       attributes the advice to the template that gave it.>
      **Blockers:** <none, or description of what's blocking>
    ```
 10. **Update task description** with your full completion report:
@@ -574,8 +573,8 @@ the recipe elsewhere.
 `line_range`, `exact_snippet`, `normalized_snippet_hash`, `falsifier`,
 `why_this_work_needs_it`, `captured_at_sha`, `change_context`.
 Add `phase_id` only when your task metadata carries an actual phase value —
-it is type-checked when present and never required, so omit it rather than
-invent one.
+it is type-checked when present and never required, so omit it when there
+is none.
 `tier` MUST be the literal string `"task-evidence"`; `producer_role` MUST
 be `"worker"` when you are the emitter; `line_range` MUST match `N-M` with
 `N ≤ M`; `change_context.changed_files` MUST include `file`;
@@ -697,7 +696,7 @@ For tasks with subjects starting with "Update stale knowledge entry":
   - `domain` — REQUIRED. One-word or short-phrase domain the consultation targeted (e.g. `auth-middleware`, `serialization`). Used by the lead's required-consultation matcher and by the rollup grouping.
   - `advisor_template_version` — REQUIRED when `handler: agent`, OMITTED otherwise. 12-char hash identifying the advisor's template at the time of consultation. Without it the agent-handled consultation cannot be attributed to a scorecard row.
   - `skill_template_version` — REQUIRED when `handler: skill`, OMITTED otherwise. 12-char content hash of the invoked skill's SKILL.md at the time the lead invoked it.
-  - `query_summary` — REQUIRED. One-sentence description of what you asked. Keep it concrete and evidence-anchored; vague summaries inflate consultation_rate without informing advice_followed_rate.
+  - `query_summary` — REQUIRED. One-sentence description of what you asked. Keep it concrete and evidence-anchored, so a later reader of `advice_followed_rate` can see what the advice was for.
   - `advice_summary` — REQUIRED. One-sentence description of what was answered. Paraphrase — don't copy-paste the full reply.
   - `was_followed` — REQUIRED. Boolean. `true` = you implemented the advice as-given or with minor adaptation. `false` = you deliberately did not follow the advice.
   - `rationale_if_not_followed` — REQUIRED when `was_followed=false`, omitted otherwise. One sentence explaining why. This field is the *teaching signal* for the answering template: `/evolve` reads these rationales alongside `advice_followed_rate` to tune templates that systematically produce advice workers reject.
@@ -708,11 +707,11 @@ For tasks with subjects starting with "Update stale knowledge entry":
 
   Both metrics land as scorecard rows with `template_id = <advisor_template_version>` and `kind=scored`, attributing to the advisor (not the worker's or producer's template). The rollup filters input entries to `handler: agent` only before grouping by `advisor_template_version`; `handler: lead` and `handler: skill` entries bypass the advisor scorecard path.
 
-  **Do not fabricate** consultation entries. Workers who synthesize consultations to inflate consultation_rate corrupt the advisor scorecard with noise; the advisor template receives tuning pressure from work that didn't happen.
+  Each entry is a consultation that happened: these rows attribute its advice to the template that gave it, and `/evolve` tunes that template from them.
 
 - **Consultations required** is a task-level declaration (it lives in your task description, not in your report). The description may include a `**Consultations required:**` block listing the consultation domains you MUST request before starting implementation; the lead's blocking acknowledgement check reads that block keyed by your task id. For each required domain:
   1. Send a `## Consultation` request (see the next section) and end your turn without producing implementation work. The protocol contract is: the worker requests, the worker ends its turn, the lead (or skill, or agent) replies on the next turn boundary, the worker resumes on receipt. Workers that proceed to implementation in the same turn as the request never receive replies (the request never reaches a turn boundary the system can deliver across).
-  2. Your `**Consultations:**` report must contain a matching entry for each required domain — same `consultation_id` you sent, same `domain`, plus the `handler` value the answering side reported back. During worker-progress collection the lead cross-checks each required domain against (a) a `**Consultations:**` entry in your report and (b) a matching acknowledged reply in its transcript (lead replies carry `lead-acknowledged: true`; advisor replies carry `advisor-acknowledged: true`; skill-handled replies are recorded by the lead at invocation time). Required-domain entries without a matching acknowledged reply cause your task acceptance to be withheld — the gate's teeth are no weaker than today's must-consult failure surface.
+  2. Your `**Consultations:**` report must contain a matching entry for each required domain — same `consultation_id` you sent, same `domain`, plus the `handler` value the answering side reported back. During worker-progress collection the lead cross-checks each required domain against (a) a `**Consultations:**` entry in your report and (b) a matching acknowledged reply in its transcript (lead replies carry `lead-acknowledged: true`; advisor replies carry `advisor-acknowledged: true`; skill-handled replies are recorded by the lead at invocation time). A required domain without a matching acknowledged reply holds the task's acceptance until the reply lands.
   
   If your task description carries no `**Consultations required:**` block, no consultations are pre-required for your task and the **Consultations** report field is optional (emit only what you actually sent).
 
