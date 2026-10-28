@@ -8,7 +8,6 @@
 #   - empty unblocked set is success (status all-blocked / all-complete)
 #   - unmatched subjects warned and treated as incomplete
 #   - same-file collision groups within the batch returned as conditions
-#   - the four lead-inline conditions as separate fields, no aggregate boolean
 #   - batch preparation writes only attribution and packet evidence
 #   - resolver tri-state propagation, archived refusal, missing tasks.json
 #
@@ -257,23 +256,6 @@ assert grp["chain_class"] == "judgment-dense"   # max(mechanical, judgment-dense
 '
 }
 
-# --- Lead-inline conditions --------------------------------------------------------
-
-@test "the four lead-inline conditions are separate fields with no aggregate boolean" {
-  run bash "$NEXT_SH" batch-item --json
-  [ "$status" -eq 0 ]
-  payload | python3 -c '
-import json, sys
-c = json.loads(sys.stdin.read())["lead_inline_conditions"]
-assert set(c.keys()) == {"single_task", "prescriptive", "no_persistent_advisor",
-                         "no_required_consultation", "detail"}
-assert c["single_task"] is False
-assert c["no_persistent_advisor"] is True
-assert c["no_required_consultation"] is True
-assert "eligible" not in json.dumps(c).lower()
-'
-}
-
 # --- Write discipline ----------------------------------------------------------------
 
 @test "batch preparation writes only attribution and packet evidence" {
@@ -401,14 +383,14 @@ assert sorted(d["candidates"]) == ["alpha-shared", "beta-shared"]
   echo "$output" | grep -q "Unknown flag"
 }
 
-@test "text mode renders the batch, blockers, and conditions" {
+@test "text mode renders the batch and blockers" {
   run bash "$NEXT_SH" batch-item
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "\[impl next-batch\] batch-item"
   echo "$output" | grep -q "Status: batch-ready"
   echo "$output" | grep -q "task-2 (phase 1): build beta module"
   echo "$output" | grep -q "blocked: task-3 <- task-2"
-  echo "$output" | grep -q "single_task: False"
+  ! echo "$output" | grep -q "Lead-inline conditions"
 }
 
 @test "lore impl usage mentions the next-batch verb" {

@@ -6,37 +6,9 @@ from lib import read_skill, extract_section, find_invocation
 
 SKILL = "implement"
 
-# Canonical section headings produced by the implement-rewrite (D10). Tests
-# below assert load-bearing content under each heading. If worker-3 renames a
-# heading, update the constant here in one place.
-STEP_1_HEADING = "Step 1: Load work item and validate"
-STEP_3_HEADING = "Step 3: Spawn agents"
-STEP_4_HEADING = "Step 4: Collect progress"
-STEP_5_HEADING = "Step 5: Promote accepted Tier 3 candidates"
-
-
 @pytest.fixture(scope="module")
 def impl() -> str:
     return read_skill(SKILL)
-
-
-# ---------------------------------------------------------------------------
-# Stage presence (Steps 1–7)
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("step_label", [
-    "Step 1",
-    "Step 2",
-    "Step 3",
-    "Step 4",
-    "Step 5",
-    "Step 6",
-])
-def test_step_present(step_label: str) -> None:
-    """Each of Steps 1–7 must appear as a heading in implement/SKILL.md."""
-    impl = read_skill(SKILL)
-    hits = find_invocation(impl, f"### {step_label}:")
-    assert len(hits) >= 1, f"'{step_label}' heading not found in implement/SKILL.md"
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +62,7 @@ def test_tier2_tier3_emission_documented(impl: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Anchor-coverage gate (Step 1.5b) and lead-inline gate (Step 3.0)
+# Closure verdict
 # ---------------------------------------------------------------------------
 
 
@@ -100,16 +72,12 @@ def test_tier2_tier3_emission_documented(impl: str) -> None:
 
 
 def test_step_6_capability_anchor_reconciliation(impl: str) -> None:
-    """Step 6 must declare the trichotomous full|partial|none verdict shape.
+    """The closure verdict keeps its three-way shape and its summary field.
 
-    Sentinel #10 — implement/SKILL.md Step 6 (line 724) names the
-    capability-anchor reconciliation gate with the trichotomous verdict
-    `full | partial | none`, and Step 6.2 requires `capability_loop_summary`
-    on full and partial. Both anchors are load-bearing for closure-laundering
-    prevention.
+    `full | partial | none` is the vocabulary `lore impl close` validates, and
+    `capability_loop_summary` is the one-line summary a full or partial verdict
+    carries; both are load-bearing for the closure record.
     """
-    assert "### Step 6:" in impl, "Step 6 heading missing from implement/SKILL.md"
-
     # The trichotomous verdict pipe-string is the canonical shape signal
     trichotomous_hits = find_invocation(impl, "full | partial | none")
     assert len(trichotomous_hits) >= 1, (

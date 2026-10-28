@@ -25,18 +25,19 @@
 #      unrecognized labels and `none in scope` conflicts are surfaced.
 #      Divergence rationales are listed verbatim; assessing them is the
 #      caller's judgment, not this script's.
-#   4. Fabrication guard (non-blocking, metadata-only) — `handler: agent`
+#   4. Advisor attribution (non-blocking, metadata-only) — `handler: agent`
 #      consultations are intersected with --spawned-advisors under the
-#      declared --provider-status. Unverified entries are stripped from the
+#      transcript provider status, read here unless --provider-status
+#      declares it. Entries no spawned advisor matches are left out of the
 #      rollup payload and logged; provider unavailable (or partial without a
-#      spawn list) withholds the rollup entirely rather than trusting the
-#      report verbatim.
+#      spawn list) withholds the rollup, since nothing can join the entries.
 #   5. Advisor-impact rollup — the verified `handler: agent` subset is
 #      forwarded to advisor-impact-rollup.sh (the scorecard sole writer).
 #   6. One execution-log entry (source: impl-verb) filing the findings.
 #
-# Harness facts (transcript, spawned advisors, provider status) are flag- or
-# file-passed: a CLI verb cannot read harness tool surfaces. This verb never
+# Harness facts (transcript, spawned advisors) are flag- or file-passed: a CLI
+# verb cannot read harness tool surfaces. The transcript provider status is
+# read here, with --provider-status as an override. This verb never
 # accepts or rejects the report. mechanical_pass=false obliges the caller to
 # reject; mechanical_pass=true leaves acceptance entirely with the caller.
 # Every check reports a status — skips are loud, never swallowed.
@@ -83,9 +84,9 @@ convention-handling completeness (non-blocking), fabrication guard +
 advisor-impact rollup (metadata-only), one execution-log entry.
 
 --transcript is required when the task declares required consultation domains.
---provider-status is required when the report carries handler: agent
-consultations; full additionally requires --spawned-advisors (pass an empty
-value when none were spawned).
+--provider-status overrides the transcript provider status the verb reads
+itself; a full status requires --spawned-advisors (pass an empty value when
+none were spawned) so handler: agent entries join only to advisors that ran.
 
 Exit codes: 0 mechanical_pass=true, 1 error/no match, 2 ambiguous reference,
             3 mechanical_pass=false (caller must reject)
@@ -221,6 +222,22 @@ if [[ $PROVIDER_SET -eq 1 ]]; then
   fi
 elif [[ $SPAWNED_SET -eq 1 ]]; then
   fail "--spawned-advisors requires --provider-status"
+fi
+
+# Without a declared status the verb asks the transcript provider itself, so
+# the seat only passes the harness facts a verb cannot read (the spawn list).
+PROVIDER_SOURCE="declared"
+if [[ $PROVIDER_SET -eq 0 ]]; then
+  PROVIDER_STATUS=$(PYTHONPATH="$SCRIPT_DIR/..${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PYEOF'
+from adapters.transcripts import get_provider, UnsupportedFrameworkError
+try:
+    print(get_provider().provider_status()[0])
+except UnsupportedFrameworkError:
+    print("unavailable")
+PYEOF
+  ) || fail "transcript provider status could not be read"
+  PROVIDER_SET=1
+  PROVIDER_SOURCE="computed"
 fi
 
 if [[ $TRANSCRIPT_SET -eq 1 && ! -f "$TRANSCRIPT_FILE" ]]; then
@@ -787,12 +804,12 @@ fi
 # Printed manually (not via json_output) so mechanical_pass=false can carry
 # exit 3: this verb surfaces findings; accept/reject stays with the caller.
 python3 - "$RESULT" "$SLUG" "$TASK_ID" "$ROLLUP_STATUS" "$ROLLUP_REASON" \
-  "$ITEM_DIR/execution-log.md" "$JSON_MODE" <<'PYEOF'
+  "$ITEM_DIR/execution-log.md" "$JSON_MODE" "$PROVIDER_STATUS" "$PROVIDER_SOURCE" <<'PYEOF'
 import json
 import sys
 
 result = json.loads(sys.argv[1])
-slug, task_id, rollup_status, rollup_reason, log_path, json_mode = sys.argv[2:8]
+slug, task_id, rollup_status, rollup_reason, log_path, json_mode, provider_status, provider_source = sys.argv[2:10]
 t2 = result["tier2"]
 rc = result["required_consultations"]
 ch = result["convention_handling"]
@@ -812,6 +829,7 @@ if json_mode == "1":
             "convention_handling": ch,
             "fabrication_guard": fg,
         },
+        "provider_status": {"status": provider_status, "source": provider_source},
         "advisor_rollup": {"status": rollup_status,
                            "reason": rollup_reason or None},
         "execution_log": "appended",
@@ -848,6 +866,7 @@ if ch["status"] == "findings":
 for d in ch["diverged"]:
     print(f"  diverged: {d['label']} — {d['rationale']} (assess the rationale; "
           f"this verb does not)")
+print(f"Provider status: {provider_status} ({provider_source})")
 print(f"Fabrication guard: {fg['status']}"
       + (f"; stripped: {', '.join(fg['stripped'])}" if fg["stripped"] else ""))
 print(f"Advisor rollup: {rollup_status}"

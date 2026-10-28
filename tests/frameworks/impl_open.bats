@@ -4,7 +4,6 @@
 # Asserts the prepare-and-return dispatch manifest emitter:
 #   - TeamCreate-first ordered manifest with complete blockedBy wiring
 #   - same-file collision serialization (path-connected pairs exempt)
-#   - the four lead-inline conditions as separate fields, no aggregate boolean
 #   - 3-branch prior-knowledge gate routing with per-phase error containment
 #   - per-task Tier 2 extracts (task_id and file-target overlap)
 #   - skill-invocation map (plan Related skills)
@@ -175,56 +174,7 @@ assert "collision_serialized" not in updates["task-3"]
 '
 }
 
-@test "the four lead-inline conditions are separate fields with no aggregate boolean" {
-  run bash "$OPEN_SH" widget-pipeline --all --json
-  [ "$status" -eq 0 ]
-  payload | python3 -c '
-import json, sys
-d = json.loads(sys.stdin.read())
-c = d["lead_inline_conditions"]
-assert set(c.keys()) == {"single_task", "prescriptive", "no_persistent_advisor",
-                         "no_required_consultation", "detail"}
-assert c["single_task"] is False
-assert c["no_persistent_advisor"] is True
-assert c["no_required_consultation"] is False  # plan declares /semgrep
-assert "eligible" not in json.dumps(c).lower()
-'
-}
-
-@test "single prescriptive task with no orchestration reports all four conditions true" {
-  ITEM2="$WORK_DIR/tiny-fix"
-  mkdir -p "$ITEM2"
-  printf '{"title": "Tiny Fix", "status": "active", "intent_anchor": "a"}\n' > "$ITEM2/_meta.json"
-  cat > "$ITEM2/plan.md" <<'EOF'
-# Tiny Fix
-
-## Phases
-
-### Phase 1: Fix
-**Task format:** prescriptive
-- [ ] fix the typo
-EOF
-  build_tasks_json "$ITEM2/plan.md" "$ITEM2/tasks.json" '{
-   "generated_at": "x", "recommended_workers": 1,
-   "phases": [{"phase_number": 1, "phase_name": "Fix", "objective": "Fix",
-    "files": ["/src/a.sh"], "retrieval_directive": null,
-    "tasks": [{"id": "task-1", "subject": "fix the typo", "activeForm": "Fixing the typo",
-     "blockedBy": [], "file_targets": ["/src/a.sh"],
-     "description": "**Phase:** 1\n\n## Prior Knowledge\n- embedded"}]}]}'
-  run bash "$OPEN_SH" tiny-fix --all --json
-  [ "$status" -eq 0 ]
-  payload | python3 -c '
-import json, sys
-c = json.loads(sys.stdin.read())["lead_inline_conditions"]
-assert c["single_task"] is True
-assert c["prescriptive"] is True
-assert c["no_persistent_advisor"] is True
-assert c["no_required_consultation"] is True
-assert c["detail"]["file_count_diagnostic"] == 1
-'
-}
-
-@test "a mode: persistent advisor declaration flips no_persistent_advisor and is returned parsed" {
+@test "a mode: persistent advisor declaration is returned parsed" {
   cat >> "$ITEM_DIR/plan.md" <<'EOF'
 
 **Advisors:**
@@ -236,7 +186,6 @@ EOF
   payload | python3 -c '
 import json, sys
 d = json.loads(sys.stdin.read())
-assert d["lead_inline_conditions"]["no_persistent_advisor"] is False
 adv = d["advisors"][0]
 assert adv["name"] == "security-advisor"
 assert adv["mode"] == "persistent"
@@ -543,13 +492,13 @@ assert sorted(d["candidates"]) == ["alpha-shared", "beta-shared"]
   echo "$output" | grep -q "Unknown flag"
 }
 
-@test "text mode renders the manifest, conditions, and checksum line" {
+@test "text mode renders the manifest and checksum line" {
   run bash "$OPEN_SH" widget-pipeline --all
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "\[impl open\] Widget Pipeline"
   echo "$output" | grep -q "1. TeamCreate impl-widget-pipeline"
   echo "$output" | grep -q "TaskUpdate task-4 addBlockedBy=\[task-2\]"
-  echo "$output" | grep -q "single_task: False"
+  ! echo "$output" | grep -q "Lead-inline conditions"
   echo "$output" | grep -q "checksum: .* MATCH"
 }
 

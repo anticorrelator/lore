@@ -12,6 +12,7 @@ import re
 import shutil
 import sys
 import tempfile
+import uuid
 
 from position_compile import POSITIONS, digest, encoded, read, run, validate_descriptor
 from packet_builder import pointer, show
@@ -671,6 +672,149 @@ def launch_session(context, *, framework, slug, execution_root, kdir):
     return {'reference': ref, 'payload': payload, 'activation': activation, 'producer': m['producer']}
 
 
+# --- /implement dispatch plumbing ------------------------------------------------
+# The seat composes a worker or designer attempt from an `impl open` or
+# `impl next-batch` envelope. These verbs turn that envelope into the bindings,
+# wrapper and session context the binder consumes, and read a landed report or
+# reply against the reference the seat holds.
+
+IMPLEMENT_ROUTES = {'native': 'harness-subagent', 'chaperone': 'codex-chaperone',
+                    'session': 'worker-session', 'designer': 'designer-consultation'}
+CONSULTATION_BODY = ('a ## Consultation body (first line exactly ## Consultation, then '
+                     'consultation-id, domain, reason, question, task)')
+
+
+def worker_bindings(dispatch, *, task_id, slug, kdir, report_id, execution_root):
+    """Bindings for one task from an open or next-batch envelope."""
+    entries = [e for e in dispatch.get('manifest', []) if e.get('op') == 'TaskCreate'] + list(dispatch.get('batch', []))
+    task = next((e for e in entries if e.get('local_id') == task_id), None)
+    if task is None:
+        raise ValueError(f'task {task_id} is not in this dispatch output; it is complete, blocked, excluded or active')
+    inputs = task.get('position_binding_inputs') or {
+        'work_item': slug, 'task_id': task_id, 'revision_id': task.get('revision_id'),
+        'packet_id': task.get('packet_id'), 'dispatch_attempt_id': task.get('dispatch_attempt_id'),
+        'assignment': task['description'],
+        'packet_pointer': pointer(kdir, task['packet_id']) if task.get('packet_id') else None}
+    missing = [k for k in TASK_BINDINGS[:3] + ('dispatch_attempt_id',) if not inputs.get(k)]
+    if missing:
+        raise ValueError('legacy-unbound task; adopt the item with lore plan revise --reconcile before compiled dispatch: ' + ', '.join(missing))
+    b = dict.fromkeys(FIELDS)
+    b.update(inputs)
+    b.update(report_id=report_id, report_path=str(kdir / '_work' / slug / 'worker-reports' / (report_id + '.md')),
+             execution_root=execution_root or None)
+    reasons = {k: 'designer consultation fields do not apply to a worker' for k in ('mode', 'consultation_id', 'domain', 'reply_destination')}
+    if b['execution_root'] is None:
+        reasons['execution_root'] = 'the ordinary session host supplies its physical worktree'
+    b['absence_reasons'] = reasons
+    return b
+
+
+def consultation_bindings(request, *, slug, kdir, packet_id, advisor, worker, task_id, revision_id, execution_root):
+    """Bindings for a designer consultation attempt from a worker's request body."""
+    lines = request.strip().splitlines()
+    fields = {m.group(1): m.group(2).strip() for m in (re.match(r'^([a-z-]+):\s*(.*)$', l) for l in lines[1:]) if m}
+    missing = [k for k in ('consultation-id', 'domain', 'question') if not fields.get(k)]
+    if not lines or lines[0].strip() != '## Consultation' or missing:
+        raise ValueError('consultation request refused: not a ## Consultation body with ' + ', '.join(missing or ['the required headers']))
+    cid, domain = fields['consultation-id'], fields['domain']
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', cid):
+        raise ValueError('consultation request refused: consultation-id is not a path-safe token')
+    item = kdir / '_work' / slug
+    report_id = re.sub(r'[^A-Za-z0-9_.-]', '-', f'{advisor}-{cid}')
+    assignment = {'request': request, 'worker': worker, 'task_id': task_id, 'revision_id': revision_id}
+    return {'work_item': slug, 'task_id': None, 'revision_id': None, 'packet_id': packet_id, 'packet_pointer': pointer(kdir, packet_id),
+            'dispatch_attempt_id': 'consult-' + uuid.uuid4().hex, 'assignment': json.dumps(assignment), 'report_id': report_id,
+            'report_path': str(item / 'worker-reports' / (report_id + '.md')), 'execution_root': execution_root or None, 'mode': 'consultation',
+            'consultation_id': cid, 'domain': domain, 'reply_destination': str(item / 'consultation-replies' / (cid + '.md')),
+            'absence_reasons': {k: 'consultation packet is session-scoped; the worker task and revision are in the assignment' for k in ('task_id', 'revision_id')}}
+
+
+def implement_wrapper(bindings, route, *, work_title, framework, team_name='', lead_name='', placement_note='', tier2_extract=''):
+    """The wrapper identity, identity prefix and dispatching note around a compiled brief.
+
+    The wrapper is versioned by this file, the verb that composes it, so the
+    recorded identity names the text that actually wrapped the brief."""
+    if route not in IMPLEMENT_ROUTES:
+        raise ValueError('route must be one of ' + ', '.join(IMPLEMENT_ROUTES))
+    source = Path(__file__).resolve()
+    sha = digest(read(source))
+    wrapper = {'template_id': 'implement/wrapper', 'template_version': sha[:12], 'path': str(source), 'sha256': sha}
+    ids = [('Packet-id', bindings['packet_id']), ('Report-id', bindings['report_id']),
+           ('Revision-id', bindings['revision_id']), ('Dispatch-attempt-id', bindings['dispatch_attempt_id'])]
+    prefix = ''.join(f'{k}: {v}\n' for k, v in ids if v)
+    slug, task = bindings['work_item'], bindings['task_id'] or '(consultation)'
+    team = f', on team {team_name} led by {lead_name}' if team_name else ''
+    note = [f'## From the dispatching seat\n\nThe seat holding {work_title} handed you task {task} of work item {slug} on the {route} route{team}. '
+            'The identity envelope above is the binder\'s record of this attempt. Your assignment is position_dispatch.bindings.assignment, the complete task description. '
+            'The Packet-id line names a packet built for this move: lore packet show renders it, and its entries are candidates to check against the code. '
+            'It was synthesized before binding; the Left out by synthesis list at its end names what was set aside and why, and when a reason does not hold for what you find in the code, '
+            're-pull the entry with lore search. Revision-id and Dispatch-attempt-id name the plan revision and this attempt. '
+            f'Work in position_dispatch.bindings.execution_root and allocate no other tree. {placement_note}'.rstrip()]
+    if route == 'designer':
+        note.append('You are the persistent advisor for the domain in position_dispatch.bindings.domain, answering the worker\'s question carried verbatim in the assignment. '
+                    'Read current code in the execution root before answering about current behavior; the baseline in the assignment is older than the file the worker asks about. '
+                    'Write the reply to position_dispatch.bindings.reply_destination and return the same text as your result. Its first four lines are the headers the ledger joins on: '
+                    'consultation-id (from the assignment), handler: agent, advisor_template_version (position_dispatch.producer.template_version), advisor-acknowledged: true; then '
+                    '**Domain:**, **Guidance:**, **Key files:**, **Cautions:**. You stay available: a later question arrives with its own envelope and destination. '
+                    'Tier 2 rows you append carry producer_role advisor. You implement no source and complete no task.')
+    else:
+        sha_source = ('the two environment variables LORE_POSITION_DISPATCH_MANIFEST and LORE_POSITION_DISPATCH_SHA256' if route == 'session'
+                      else 'the sha256 you compute over the manifest file the envelope names')
+        note.append(f'Write the schema 1 report with these header lines first, plain, one per line: Report-schema: 1, Report-id and Work-item from the envelope, Task: <the task subject>, '
+                    f'Producer-role: worker, Dispatch-path: {IMPLEMENT_ROUTES[route]}, Harness: {framework}, Status:, Template-version: position_dispatch.producer.template_version, '
+                    f'Position-dispatch-manifest: the envelope\'s manifest_path, Position-dispatch-sha256: {sha_source}, then Packet-id:, Revision-id:, Dispatch-attempt-id:. '
+                    f'Tier 2 rows go through evidence-append.sh --work-item {slug} with task_id {task} as each claim forms; the report lists claim IDs. '
+                    f'Close criteria run through lore criteria run {slug} {task} <criterion-id> --execution-worktree "$PWD" --packet-id {bindings["packet_id"]}; cite result IDs.')
+        if route == 'session':
+            note.append('You run as a hosted session, so land the report yourself with '
+                        f'printf \'%s\' "$REPORT" | lore coordinate report {slug} --report-id {bindings["report_id"]}. Exit 4 means a file already exists at that path because the id was used before; '
+                        'record that under Blockers as written. Exit 1 names what was wrong with the arguments, environment or body; correct the call. '
+                        'Once the report has landed and the rows are appended, stop and wait without closing this session or removing anything from its execution root: '
+                        'report validation reads every source artifact against that root, and the seat closes the session after integration, so a correction can still reach you here. '
+                        f'A required consultation goes in this session\'s output as {CONSULTATION_BODY}; the seat reaches this session with lore session send. '
+                        'If no reply arrives, record the domain and how long you waited under Blockers rather than implementing past the requirement.')
+        elif route == 'chaperone':
+            note.append('The chaperone that launched you relays your final message verbatim and lands it at the bound report path; do not land it yourself. '
+                        f'A required consultation is {CONSULTATION_BODY} in your output; wait for the reply before implementing past the requirement.')
+        else:
+            note.append('Return the finished report as your final message; the seat lands it at the bound report path and checks it against its own copy of this attempt\'s reference. '
+                        f'A required consultation travels the same way: return {CONSULTATION_BODY} as your message and stop; the reply sent to your name resumes you.')
+    if tier2_extract.strip():
+        note.append('Prior Tier 2 evidence for this task, from task-claims.jsonl:\n\n' + tier2_extract.rstrip() + '\n')
+    return wrapper, prefix.encode(), ('\n\n'.join(note) + '\n').encode()
+
+
+def report_headers(path, limit=16):
+    return dict(l.split(': ', 1) for l in read(Path(path)).decode().splitlines()[:limit] if ': ' in l)
+
+
+def check_report_identity(report_path, reference):
+    """Read a landed report against the held reference, never against the report's own claims."""
+    ref = reference.get('reference', reference)
+    manifest = Path(ref['manifest_path'])
+    raw = read(manifest)
+    if digest(raw) != ref['manifest_sha256']:
+        raise ValueError('held reference does not match the manifest bytes; do not read this report against it')
+    producer = json.loads(raw)['producer']['template_version']
+    headers = report_headers(report_path)
+    want = {'Template-version': producer, 'Position-dispatch-manifest': str(manifest), 'Position-dispatch-sha256': ref['manifest_sha256']}
+    bad = [k for k, v in want.items() if headers.get(k) != v]
+    if bad:
+        raise ValueError('report answers another input; re-dispatch under fresh ids. mismatched: ' + ', '.join(bad))
+    return {'status': 'matches', 'report_path': str(report_path), 'manifest_path': str(manifest), 'producer_template_version': producer}
+
+
+def check_reply(reply_path, *, consultation_id, template_version):
+    """A designer reply joins the ledger only through its first four header lines."""
+    head = read(Path(reply_path)).decode().splitlines()[:4]
+    want = [f'consultation-id: {consultation_id}', 'handler: agent',
+            f'advisor_template_version: {template_version}', 'advisor-acknowledged: true']
+    bad = [w for h, w in zip(head + [''] * 4, want) if h.strip() != w]
+    if bad:
+        raise ValueError('designer reply refused; headers missing or wrong: ' + '; '.join(bad))
+    return {'status': 'acknowledged', 'reply_path': str(reply_path), 'consultation_id': consultation_id}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     verbs = parser.add_subparsers(dest='verb', required=True)
@@ -708,8 +852,77 @@ def main():
     for name in ('position', 'framework', 'slug', 'execution-root', 'packet-id'):
         session.add_argument('--' + name, required=True)
     session.add_argument('--kdir', required=True, type=Path)
+    prepare = verbs.add_parser('prepare-session', help='pending session context from the same files bind takes')
+    for name in ('descriptor', 'bindings', 'kdir', 'guidance-file'):
+        prepare.add_argument('--' + name, required=True, type=Path)
+    prepare.add_argument('--slug', required=True)
+    prepare.add_argument('--wrapper', type=Path)
+    prepare.add_argument('--prefix-file', type=Path)
+    prepare.add_argument('--suffix-file', type=Path)
+    worker = verbs.add_parser('worker-bindings', help='bindings for one task of an impl open or next-batch envelope')
+    worker.add_argument('--dispatch', required=True, type=Path)
+    worker.add_argument('--task', required=True)
+    worker.add_argument('--work-item', required=True)
+    worker.add_argument('--report-id', required=True)
+    worker.add_argument('--execution-root', default='')
+    worker.add_argument('--kdir', required=True, type=Path)
+    worker.add_argument('--out', required=True, type=Path)
+    consult = verbs.add_parser('consultation-bindings', help='bindings for a designer consultation from a ## Consultation request')
+    consult.add_argument('--request', required=True, type=Path)
+    for name in ('work-item', 'packet-id', 'advisor', 'worker', 'task', 'revision'):
+        consult.add_argument('--' + name, required=True)
+    consult.add_argument('--execution-root', default='')
+    consult.add_argument('--kdir', required=True, type=Path)
+    consult.add_argument('--out', required=True, type=Path)
+    wrapper = verbs.add_parser('wrapper', help='the implement wrapper identity, identity prefix and dispatching note')
+    wrapper.add_argument('--bindings', required=True, type=Path)
+    wrapper.add_argument('--route', required=True, choices=sorted(IMPLEMENT_ROUTES))
+    wrapper.add_argument('--work-title', required=True)
+    wrapper.add_argument('--framework', required=True)
+    for name in ('team-name', 'lead-name', 'placement-note'):
+        wrapper.add_argument('--' + name, default='')
+    wrapper.add_argument('--tier2-extract-file', type=Path)
+    for name in ('wrapper', 'prefix-file', 'suffix-file'):
+        wrapper.add_argument('--' + name, required=True, type=Path)
+    identity = verbs.add_parser('check-report-identity', help='read a landed report against the held reference')
+    identity.add_argument('--report', required=True, type=Path)
+    identity.add_argument('--reference', required=True, type=Path)
+    reply = verbs.add_parser('check-reply', help='check the four header lines of a designer reply')
+    reply.add_argument('--reply', required=True, type=Path)
+    reply.add_argument('--consultation-id', required=True)
+    reply.add_argument('--template-version', required=True)
     args = parser.parse_args()
-    if args.verb == 'register-native':
+    if args.verb == 'prepare-session':
+        result = prepare_session_input(json.loads(read(args.descriptor)), json.loads(read(args.bindings)), args.kdir,
+                                       read(args.guidance_file), slug=args.slug,
+                                       wrapper=json.loads(read(args.wrapper)) if args.wrapper else None,
+                                       prefix=read(args.prefix_file) if args.prefix_file else b'',
+                                       suffix=read(args.suffix_file) if args.suffix_file else b'')
+    elif args.verb == 'worker-bindings':
+        b = worker_bindings(json.loads(read(args.dispatch)), task_id=args.task, slug=args.work_item, kdir=args.kdir.resolve(),
+                            report_id=args.report_id, execution_root=args.execution_root)
+        args.out.write_text(json.dumps(b, indent=2) + '\n')
+        result = {k: b[k] for k in ('task_id', 'revision_id', 'packet_id', 'dispatch_attempt_id', 'report_id', 'execution_root')}
+    elif args.verb == 'consultation-bindings':
+        b = consultation_bindings(read(args.request).decode(), slug=args.work_item, kdir=args.kdir.resolve(), packet_id=args.packet_id,
+                                  advisor=args.advisor, worker=args.worker, task_id=args.task, revision_id=args.revision,
+                                  execution_root=args.execution_root)
+        args.out.write_text(json.dumps(b, indent=2) + '\n')
+        result = {k: b[k] for k in ('dispatch_attempt_id', 'report_id', 'consultation_id', 'domain', 'reply_destination')}
+    elif args.verb == 'wrapper':
+        extract = read(args.tier2_extract_file).decode() if args.tier2_extract_file else ''
+        identity_record, prefix, suffix = implement_wrapper(
+            json.loads(read(args.bindings)), args.route, work_title=args.work_title, framework=args.framework,
+            team_name=args.team_name, lead_name=args.lead_name, placement_note=args.placement_note, tier2_extract=extract)
+        args.wrapper.write_text(json.dumps(identity_record))
+        args.prefix_file.write_bytes(prefix)
+        args.suffix_file.write_bytes(suffix)
+        result = identity_record
+    elif args.verb == 'check-report-identity':
+        result = check_report_identity(args.report, json.loads(read(args.reference)))
+    elif args.verb == 'check-reply':
+        result = check_reply(args.reply, consultation_id=args.consultation_id, template_version=args.template_version)
+    elif args.verb == 'register-native':
         result = register_native(args.manifest, args.sha256, args.scope)
     elif args.verb == 'native-input':
         result = native_input(args.manifest, args.sha256, args.scope)

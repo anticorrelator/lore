@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute the implement skill's published recipes in an isolated store."""
+"""Execute the implement skill's published recipes, across SKILL.md and dispatching.md, in an isolated store."""
 
 import argparse
 import copy
@@ -155,19 +155,21 @@ def capture_prepared_launch(prepared, destination, *, offered_fields=(), offered
     destination.write_text(json.dumps({"proof": "prepared-input only; no live model consumption", "tool": prepared["tool"], "arguments": args}, indent=2) + "\n")
 
 
-def validate_declarative_examples(document, source):
-    lines = source.read_text().splitlines(keepends=True)
+def validate_declarative_examples(document, sources):
+    sources = [Path(p) for p in (sources if isinstance(sources, (list, tuple)) else [sources])]
+    lines_by_source = {str(p.resolve()): p.read_text().splitlines(keepends=True) for p in sources}
     for row in document["declarative_examples"]:
         if row["language"] != "text":
             continue
+        lines = lines_by_source[row.get("source_path", str(sources[0].resolve()))]
         body = "".join(lines[row["line_start"]:row["line_end"] - 1])
         labels = [line.strip().split(":", 1)[0] for line in body.splitlines() if ":" in line]
-        if "Test result" in labels:
-            # These labels feed the execution-log reduction readers.
-            required = {"Task", "Changes", "Skills", "Tier2-claims", "Observations", "Convention", "Investigation",
-                        "Blockers", "Consultations", "Surfaced concerns", "Test result", "Spend"}
-            assert set(labels) == required and len(labels) == len(required), labels
-            row["validation"] = "validated-reduction-labels"
+        if "Route" in labels:
+            # These labels are the per-task execution-log entry; close reads Task and Spend.
+            required = ["Task", "Route", "Changes", "Results", "Tier2-claims", "Captures",
+                        "Surfaced concerns", "Blockers", "Spend"]
+            assert labels == required, labels
+            row["validation"] = "validated-task-entry-labels"
         elif "consultation-id" in labels:
             assert labels[:4] == ["consultation-id", "handler", "lead-acknowledged", "skill_template_version"], labels
             row["validation"] = "validated-consultation-reply-labels"
@@ -207,6 +209,7 @@ class Fixture:
         self.document, self.bodies = inventory(source, namespace)
         if namespace == "implement":
             validate_declarative_examples(self.document, source)
+        self.sources = [Path(p) for p in (source if isinstance(source, (list, tuple)) else [source])]
         self.rows = {r["id"]: r for r in self.document["recipes"]}
         self.home, self.store, self.code = [self.root / n for n in ("home", "knowledge", "code")]
         for path in (self.home, self.store, self.code, self.root / "outputs"):
@@ -471,14 +474,16 @@ def extraction_controls(root):
     source.write_bytes(original)
 
 
-def exercise_recipes(repo, root, source):
-    repo, root, source = repo.resolve(), root.resolve(), source.resolve()
-    f = Fixture(repo, root, source)
+def exercise_recipes(repo, root, sources):
+    repo, root = repo.resolve(), root.resolve()
+    sources = [Path(p).resolve() for p in sources]
+    skill = sources[0]
+    f = Fixture(repo, root, sources)
     item = f.create_item()
     decisions = f.write_plan(item, consultation=True)
     v = dict(SLUG="recipes", INPUT="recipes", KNOWLEDGE_DIR=f.store,
-             SCRIPTS_DIR=repo / "scripts", SKILL_FILE=source,
-             LEAD_TEMPLATE_VERSION=digest(source.read_bytes())[:12],
+             SCRIPTS_DIR=repo / "scripts", SKILL_FILE=skill,
+             LEAD_TEMPLATE_VERSION=digest(skill.read_bytes())[:12],
              WORK_TITLE="Recipe behavior", TASK_IDS="", FALLBACK_SCALE_SET="implementation",
              ACTIVE_TASK_IDS="", TASK_ID="task-1", ROLE="worker", TARGET_FRAMEWORK="codex",
              POSITION="worker", EXECUTION_ROOT=f.code, REPORT_ID="native-first",
@@ -509,9 +514,9 @@ def exercise_recipes(repo, root, source):
 
     def prepare(prefix, route="native", framework="codex", root_path=None):
         paths(prefix)
-        run("normalize-bindings", prefix, REPORT_ID=prefix, EXECUTION_ROOT=root_path if root_path is not None else f.code)
+        run("worker-bindings", prefix, REPORT_ID=prefix, EXECUTION_ROOT=root_path if root_path is not None else f.code)
         b = json.loads(v["BINDINGS_FILE"].read_text())
-        # The lead's judgment over the candidate set travels with the packet; an empty pair of lists is a recorded judgment too.
+        # The seat's judgment over the candidate set travels with the packet; an empty pair of lists is a recorded judgment too.
         synthesized = obj(run("synthesize-packet", prefix + " packet synthesized before binding", PACKET_ID=b["packet_id"],
                               SYNTHESIS_FILE=f.data(prefix + "-synthesis.json", {"dropped": [], "added": []})))
         assert synthesized["delivery_stage"] == "synthesized" and synthesized["packet_id"] == b["packet_id"]
@@ -525,6 +530,7 @@ def exercise_recipes(repo, root, source):
         v.update(MANIFEST_PATH=ref["manifest_path"], MANIFEST_SHA256=ref["manifest_sha256"])
         return ref
 
+    # --- Orient ---------------------------------------------------------------
     resolved = dict(line.split("=", 1) for line in run("resolve-paths").stdout.decode().splitlines())
     assert Path(resolved["SCRIPTS_DIR"]).resolve() == repo / "scripts"
     assert Path(resolved["KNOWLEDGE_DIR"]).resolve() == f.store
@@ -533,9 +539,6 @@ def exercise_recipes(repo, root, source):
     run("plan-publish", "initial plan publication", REASON="Publish the authored fixture plan.")
     assert (item / "tasks.json").is_file(), "initial publication must persist task identity"
     run("plan-reconcile", "legacy revision adoption")
-    v["REVISION_ID"] = json.loads((item / "tasks.json").read_text())["revision_id"]
-    run("set-intent-anchor", INTENT_ANCHOR="Preserve execution and dispatch history.")
-    run("plan-publish", REASON="Publish existing intent before review.")
     v["REVISION_ID"] = json.loads((item / "tasks.json").read_text())["revision_id"]
     run("plan-decision", DECISION_ID="initial-coverage", DECISIONS_FILE=decisions)
     started = obj(run("impl-start"))
@@ -561,14 +564,18 @@ def exercise_recipes(repo, root, source):
     v["ADVISOR_TEMPLATE_VERSION"] = started["template_versions"]["advisor"]
     assert obj(run("work-show"))["slug"] == "recipes"
     run("gate-anchor", VERDICT="aligned", FIT="Both tasks preserve recorded history.", GAP="", SCOPE_DELTA="")
+
+    # --- Open, then hand task 1 to another agent -------------------------------
     assert b"framework=codex" in run("probe-operations").stdout
     worker_model = run("resolve-role-model").stdout.decode().strip()
     assert "gpt-6-astra" in worker_model
-    # A session request carries the resolved route as framework/model shorthand.
     v["SESSION_ROUTE"] = v["TARGET_FRAMEWORK"] + "/" + worker_model
     first = opened("initial task normalization")
+    assert "lead_inline_conditions" not in first
     b = prepare("native-first")
     assert b["assignment"] == next(e for e in first["manifest"] if e.get("local_id") == "task-1")["description"]
+    suffix = v["SUFFIX_FILE"].read_text()
+    assert suffix.startswith("## From the dispatching seat") and "Dispatch-path: harness-subagent" in suffix
     first_ref = bind("native Codex preparation")
     native = obj(run("native-input", "prepared-input proof only"))
     payload = Path(first_ref["payload_path"]).read_bytes()
@@ -593,10 +600,13 @@ def exercise_recipes(repo, root, source):
     assert Path(first_ref["manifest_path"]).read_bytes() == original_manifest
     v["BINDINGS_FILE"].write_bytes(original_binding)
     first_bindings, first_reference_file = b, v["REFERENCE_FILE"]
+    run("worker-bindings", "task outside the envelope refused", REPORT_ID="absent", TASK_ID="task-9", expected=1)
+    v["TASK_ID"] = "task-1"
 
     opened("fresh retry packet")
     retry = prepare("session-retry", route="session", root_path="")
     assert all(retry[k] != b[k] for k in ("report_id", "dispatch_attempt_id", "packet_id"))
+    assert "lore coordinate report recipes --report-id session-retry" in v["SUFFIX_FILE"].read_text()
     v["SESSION_SLUG"] = "recipes--w1"
     run("prepare-session", "ordinary host-owned placement")
     context = json.loads(v["CONTEXT_FILE"].read_text())
@@ -615,12 +625,17 @@ def exercise_recipes(repo, root, source):
     f.data("ordinary-session-reference.json", session_ref)
 
     # This mutation is executed at admission, rather than inferred from prose.
-    mutation = root / "missing-placement.md"
+    mutation_dir = root / "placement-mutation"
+    mutation_dir.mkdir()
     body = f.bodies["request-session"]
     stance = b"args+=(--anywhere)\n"
     assert stance in body
-    mutation.write_bytes(source.read_bytes().replace(body, body.replace(stance, b"")))
-    negative = Fixture(repo, root / "placement-negative", mutation)
+    mutated_sources = []
+    for source in sources:
+        target = mutation_dir / source.name
+        target.write_bytes(source.read_bytes().replace(body, body.replace(stance, b"")))
+        mutated_sources.append(target)
+    negative = Fixture(repo, root / "placement-negative", mutated_sources)
     # Use the original valid preparation and isolated context so only placement changes.
     negative.env = f.env.copy()
     negative.code = f.code
@@ -662,6 +677,7 @@ def exercise_recipes(repo, root, source):
     refusal = run("bind-attempt", "OpenCode native preparation refused", NATIVE_MODEL="anthropic/opus", expected=1)
     assert b"native" in refusal.stderr.lower()
 
+    # --- A consultation crosses the dispatch boundary ---------------------------
     run("designer-packet", "required storage consultation", DOMAIN="storage", QUESTION="Where is the execution root?", SCALE_SET="implementation")
     packets = [json.loads(line) for line in (f.store / "_packets/packets.jsonl").read_text().splitlines()]
     v["PACKET_ID"] = packets[-1]["packet_id"]
@@ -675,6 +691,7 @@ def exercise_recipes(repo, root, source):
     run("designer-bindings", "missing consultation identity refused", expected=1)
     run("compile-position", "designer consultation compilation", POSITION="designer", TARGET_FRAMEWORK="codex")
     run("author-wrapper", "designer consultation wrapper", ROUTE="designer")
+    assert "reply_destination" in v["SUFFIX_FILE"].read_text()
     run("synthesize-packet", "designer packet synthesized before binding",
         SYNTHESIS_FILE=f.data("designer-synthesis.json", {"dropped": [], "added": []}))
     designer_ref = bind("designer bound to its own packet", REQUIRED_BINDINGS="packet_id packet_pointer", NATIVE_MODEL="gpt-6-astra-high")
@@ -698,6 +715,7 @@ def exercise_recipes(repo, root, source):
         run("consult-log", handler + " acknowledged consultation", HANDLER=handler,
             CONSULTATION_ID="optional-" + handler, DOMAIN="optional", SKILL_TEMPLATE_VERSION=v["LEAD_TEMPLATE_VERSION"])
 
+    # --- Collect the dispatched task's report ----------------------------------
     snippet_hash = run("snippet-hash", SNIPPET="observable source").stdout.decode().strip()
     worker_claim = {"claim_id": "observed-source", "tier": "task-evidence", "claim": "The assigned root contains observable source.",
         "producer_role": "worker", "protocol_slot": "Implementation", "task_id": "task-1", "scale": "implementation",
@@ -716,12 +734,15 @@ def exercise_recipes(repo, root, source):
     run("land-report", "report id cannot overwrite prior attempt", expected=4)
     assert Path(v["REPORT_PATH"]).read_bytes() == landed
     run("check-identity", "independent reference read")
+    run("check-identity", "report from another attempt refused", REFERENCE_FILE=f.data("other-reference.json", fixed_ref), expected=1)
+    v["REFERENCE_FILE"] = first_reference_file
     run("typed-completion", "compiled report completion")
     run("check-report", "required consultation transcript absent", TRANSCRIPT_FILE="", PROVIDER_STATUS="full",
         SPAWNED_ADVISORS="storage", expected=1)
     checks = obj(run("check-report", "required consultation acknowledged", TRANSCRIPT_FILE=transcript))
     assert checks["mechanical_pass"] is True
-    assert run("provider-status").stdout.decode().strip() in {"full", "partial", "unavailable"}
+    computed = obj(run("check-report", "provider status read by the verb", PROVIDER_STATUS="", SPAWNED_ADVISORS=""))
+    assert computed["provider_status"] == {"status": "partial", "source": "computed"}
 
     result = obj(run("criteria-run", "actual bound execution", CRITERION_ID="observe", EXECUTION_ROOT=f.code,
                      PACKET_ID=first_bindings["packet_id"], UNBOUND_REASON=""))
@@ -742,10 +763,14 @@ def exercise_recipes(repo, root, source):
     citations = json.loads((item / "reviews/integration-1/sealed/cited-results.json").read_text())
     assert citations["results"][0]["row"] == executed
 
-    reduction = root / "worker-reduction.md"
-    reduction.write_text("Task: Observe history 1 [class: mechanical]\nChanges: tracked: inspected source\nSkills: None\nTier2-claims: observed-source\nObservations: None\nConvention: none in scope\nInvestigation: None\nBlockers: none\nConsultations: none\nSurfaced concerns: None\nTest result: passed\n")
+    def entry_text(task_id, subject, route, claim_id, result_id):
+        return (f"Task: {task_id} — {subject}\nRoute: {route}\nChanges: tracked: inspected source\nResults: {result_id}\n"
+                f"Tier2-claims: {claim_id}\nCaptures: none\nSurfaced concerns: None\nBlockers: none\n")
+
+    entry = root / "worker-entry.md"
+    entry.write_text(entry_text("task-1", "Observe history 1", "native — the fixture exercises a dispatched attempt", "observed-source", executed["result_id"]))
     worker_version = json.loads(Path(first_ref["manifest_path"]).read_text())["producer"]["template_version"]
-    run("log-reduction", "compiled producer and filer remain distinct", REDUCTION_FILE=reduction, PRODUCER_TEMPLATE_VERSION=worker_version,
+    run("log-entry", "dispatched task: producer and filer remain distinct", ENTRY_FILE=entry, PRODUCER_TEMPLATE_VERSION=worker_version,
         MANIFEST_PATH=first_ref["manifest_path"], MANIFEST_SHA256=first_ref["manifest_sha256"], PRODUCER_ROLE="worker")
     attribution = [json.loads(line.split(": ", 1)[1]) for line in (item / "execution-log.md").read_text().splitlines()
                    if line.startswith("Producer-attribution: ")][-1]
@@ -760,9 +785,10 @@ def exercise_recipes(repo, root, source):
     resumed = obj(run("impl-start", "resume with prior claims"))
     assert resumed["prior_claims"]
     next_batch = obj(run("impl-next-batch", "subsequent ready task"))
+    assert "lead_inline_conditions" not in next_batch
     v.update(DISPATCH_JSON=f.data("next-batch.json", next_batch), TASK_ID="task-2", REVISION_ID=current_revision)
     paths("next-native")
-    run("normalize-bindings", "subsequent normalization", REPORT_ID="next-native", EXECUTION_ROOT=f.code)
+    run("worker-bindings", "subsequent normalization", REPORT_ID="next-native", EXECUTION_ROOT=f.code)
     next_binding = json.loads(v["BINDINGS_FILE"].read_text())
     assert next_binding["task_id"] == "task-2" and next_binding["revision_id"] == current_revision
     assert next_binding["packet_id"] != first_bindings["packet_id"]
@@ -770,41 +796,23 @@ def exercise_recipes(repo, root, source):
     assert active["status"] == "all-blocked" and not active["batch"]
     opened("resume selected remainder", TASK_IDS="task-2")
 
-    inline_claim = dict(worker_claim, claim_id="inline-source", producer_role="implement-lead", task_id="task-2")
-    inline_claim.pop("position_dispatch")
-    run("append-tier2", "truthful lead-inline evidence", ROW_FILE=f.data("inline-claim.json", inline_claim))
-    inline_id = "inline-second"
-    inline_report = root / "inline-report.md"
-    inline_report.write_text(report_input.read_text().replace("Report-id: native-first", "Report-id: " + inline_id)
-                             .replace("Producer-role: worker", "Producer-role: implement-lead")
-                             .replace("Dispatch-path: harness-subagent", "Dispatch-path: lead-inline")
-                             .replace(worker_version, v["LEAD_TEMPLATE_VERSION"])
-                             .replace("Observe history 1", "Observe history 2")
-                             .replace("- observed-source", "- inline-source"))
-    # A local contribution has no worker dispatch reference to borrow.
-    inline_report.write_text("\n".join(line for line in inline_report.read_text().splitlines()
-                                      if not line.startswith(("Position-dispatch-", "Packet-id:", "Revision-id:", "Dispatch-attempt-id:"))) + "\n")
-    run("land-report", "lead-inline report persistence", REPORT_ID=inline_id, REPORT_BODY_FILE=inline_report)
-    inline_path = item / "worker-reports" / (inline_id + ".md")
-    assert "Producer-role: implement-lead" in inline_path.read_text() and "Position-dispatch-manifest:" not in inline_path.read_text()
-    run("check-report", "inline task uses current canonical task id", REPORT_PATH=inline_path, REVISION_ID=current_revision,
-        TRANSCRIPT_FILE="", PROVIDER_STATUS="unavailable", SPAWNED_ADVISORS="")
-    second_result = obj(run("criteria-run", "lead-inline execution with declared unbound reason", PACKET_ID="",
-                            UNBOUND_REASON="The implement lead performs this task inline.", EXECUTION_ROOT=f.code))
+    # --- The seat does task 2 itself: same records, no report -------------------
+    seat_claim = dict(worker_claim, claim_id="seat-source", producer_role="implement-lead", task_id="task-2")
+    seat_claim.pop("position_dispatch")
+    run("append-tier2", "the seat's own evidence", ROW_FILE=f.data("seat-claim.json", seat_claim))
+    second_result = obj(run("criteria-run", "the seat's own execution with a declared unbound reason", PACKET_ID="",
+                            UNBOUND_REASON="The seat performs this task itself.", EXECUTION_ROOT=f.code))
     assert (f.code / "execution-count").read_text() == "2"
-    inline_key = v["RUN_STARTED_AT"] + "/task-2"
-    inline_reduction = root / "inline-reduction.md"
-    inline_reduction.write_text("Report-key: " + inline_key + "\n" + reduction.read_text().replace("history 1", "history 2").replace("observed-source", "inline-source"))
-    run("log-reduction", "inline producer is the lead", REDUCTION_FILE=inline_reduction, PRODUCER_TEMPLATE_VERSION=v["LEAD_TEMPLATE_VERSION"],
-        MANIFEST_PATH="", MANIFEST_SHA256="", PRODUCER_ROLE="implement-lead")
-    run("readback-report", "durable inline report and unique reduction", REPORT_KEY=inline_key)
-    run("inline-commit", "selected task count refuses false completion", TASK_COUNT="2", expected=1)
-    run("inline-commit", "all selected inline reports read back", TASK_COUNT="1")
-    entry = root / "lead-entry.md"
-    entry.write_text("Lead-invoked skill: fixture validation\nDomain: recipe behavior\nSkill template-version: " + v["LEAD_TEMPLATE_VERSION"] + "\n")
-    run("lead-log", ENTRY_FILE=entry, TEMPLATE_VERSION=v["LEAD_TEMPLATE_VERSION"])
-    note.write_text("Accept task-2 after reading its durable inline report and actual command result.\n")
-    run("work-note", "inline acceptance before progress", NOTE_FILE=note)
+    entry.write_text(entry_text("task-2", "Observe history 2", "seat — one context holds both observations", "seat-source", second_result["result"]["result_id"]))
+    run("log-entry", "the seat's own task carries its own version and no dispatch pair", ENTRY_FILE=entry,
+        PRODUCER_TEMPLATE_VERSION=v["LEAD_TEMPLATE_VERSION"], MANIFEST_PATH="", MANIFEST_SHA256="", PRODUCER_ROLE="implement-lead")
+    assert not (item / "worker-reports" / "task-2.md").exists()
+    advisor_entry = root / "advisor-entry.md"
+    advisor_entry.write_text("Advisor spawned: storage-advisor\nDomain: storage\nMode: persistent\n")
+    run("log-entry", "advisor activation under the designer's version", ENTRY_FILE=advisor_entry,
+        PRODUCER_TEMPLATE_VERSION=designer_version, PRODUCER_ROLE="")
+    note.write_text("Accept task-2 after reading the seat's own commit and command result.\n")
+    run("work-note", "seat acceptance before progress", NOTE_FILE=note)
     subject2 = json.loads((item / "tasks.json").read_text())["tasks"][1]["subject"]
     run("check-task", TASK_SUBJECT=subject2)
     complete = obj(run("impl-next-batch", "all complete", ACTIVE_TASK_IDS=""))
@@ -814,6 +822,7 @@ def exercise_recipes(repo, root, source):
     run("review-seal", "historical citation sealed without rewriting results")
     assert (item / "results.jsonl").read_text().count(executed["result_id"]) >= 1
 
+    # --- Close ------------------------------------------------------------------
     run("promote-batch", "empty accepted set is still recorded", CANDIDATES_FILE=f.data("empty-candidates.json", []),
         ADVISOR_TEMPLATE_VERSION=started["template_versions"]["advisor"])
     assert "0 accepted, 0 rejected" in (item / "execution-log.md").read_text()
@@ -848,6 +857,10 @@ def exercise_recipes(repo, root, source):
     assert archived.is_dir() and not item.exists()
     bundle = json.loads((archived / "retro-bundle.json").read_text())
     assert len(bundle) == 10 and "task_attribution" in bundle
+    # Close attributes a dispatched task to its attempt and records the seat's own task with none, refusing neither.
+    attempts = {row["task_id"]: row["producer_attempts"] for row in bundle["task_attribution"]}
+    assert len(attempts["task-1"]) == 1 and attempts["task-1"][0]["status"] == "resolved"
+    assert attempts["task-2"] == []
     assert (archived / "reviews/integration-final/sealed/cited-results.json").is_file()
 
     recovery_item = f.create_item("recovery")
@@ -880,7 +893,8 @@ def exercise_recipes(repo, root, source):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", type=Path, default=Path(__file__).resolve().parents[2] / "skills/implement/SKILL.md")
+    parser.add_argument("--source", type=Path, nargs="+",
+                        default=[Path(__file__).resolve().parents[2] / "skills/implement" / name for name in ("SKILL.md", "dispatching.md")])
     parser.add_argument("--inventory", type=Path)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--run", action="store_true")
@@ -897,7 +911,7 @@ def main():
         extraction_controls(args.root)
         print("Recipe extraction and coverage negative controls passed")
         return
-    document, _ = inventory(args.source.resolve())
+    document, _ = inventory([p.resolve() for p in args.source] if len(args.source) > 1 else args.source[0].resolve())
     rendered = json.dumps(document, indent=2) + "\n"
     if args.inventory:
         args.inventory.write_text(rendered)

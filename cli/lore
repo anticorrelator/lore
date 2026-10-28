@@ -505,7 +505,7 @@ Verbs:
   gate-anchor    File the anchor-coverage gate outcome and return the route
   start          Assemble the /implement startup manifest for a work item
   close          Reconcile closure, write the closure block, archive, emit telemetry
-  open           Return work-item open conditions for lead-inline eligibility
+  open           Prepare the dispatch envelope for a selection of tasks
   next-batch     Compute the next executable task batch from tasks.json
   check-report   Mechanically verify a worker completion report
   consult-log    File a consultation record

@@ -29,9 +29,6 @@
 #   - same-file collision intersection: concurrent selected tasks sharing a
 #     file target with no dependency path between them get a serialization
 #     edge, so the manifest's blockedBy wiring is already collision-safe
-#   - the four lead-inline gate conditions as SEPARATE fields (single_task,
-#     prescriptive, no_persistent_advisor, no_required_consultation) — never
-#     an aggregate eligibility boolean; the lead reads conditions and decides
 #   - with --compiled-positions: the worker and designer compiler descriptors
 #     for the active framework under position_descriptors, plus on every
 #     TaskCreate entry `position: worker`, `position_binding_inputs` (work
@@ -776,29 +773,6 @@ for key, content in sorted(plan_blocks.items()):
                 advisor["phase"] = int(key)
             persistent_advisors.append(advisor)
 
-consultations_by_unit = {}
-for key, content in sorted(plan_blocks.items()):
-    m = re.search(r"^\*\*Consultations required:\*\*\s*\n((?:(?!^\*\*|\n##)- .*\n?)*)",
-                  content, re.MULTILINE)
-    if not m:
-        continue
-    domains = []
-    for line in m.group(1).splitlines():
-        text = line.strip()
-        if not text.startswith("- ") or text.startswith("- [ ]") or text.startswith("- [x]"):
-            continue
-        text = text[2:].strip()
-        if not text or (text.startswith("<") and text.endswith(">")):
-            continue
-        domains.append(text)
-    if domains:
-        consultations_by_unit[key] = domains
-
-task_format_by_unit = {}
-for key, content in sorted(plan_blocks.items()):
-    m = re.search(r"\*\*Task format:\*\*\s*(.*)", content)
-    task_format_by_unit[key] = (m.group(1).strip().lower() if m else None)
-
 # --- Skill-invocation map: plan Related skills -------------------------------
 related_skills = []
 m = re.search(r"^\*\*Related skills:\*\*\s*\n((?:- .*\n?)*)", plan, re.MULTILINE)
@@ -840,35 +814,6 @@ for entry in related_skills:
         "source": "plan",
         "annotation": entry["annotation"],
     }
-
-# --- Lead-inline gate conditions: four separate fields, never an aggregate -----
-task_count = len(all_tasks)
-single_task = task_count == 1
-if single_task:
-    only_id = all_tasks[0]["id"]
-    single_unit = str(phase_of[only_id]) if phases else only_id
-else:
-    single_unit = None
-prescriptive = bool(
-    single_task and task_format_by_unit.get(single_unit) == "prescriptive")
-no_persistent_advisor = not persistent_advisors
-no_required_consultation = not consultations_by_unit and not related_skills
-
-lead_inline_conditions = {
-    "single_task": single_task,
-    "prescriptive": prescriptive,
-    "no_persistent_advisor": no_persistent_advisor,
-    "no_required_consultation": no_required_consultation,
-    "detail": {
-        "task_count": task_count,
-        "task_format_by_unit": task_format_by_unit,
-        "persistent_advisors": persistent_advisors,
-        "consultations_required_by_unit": consultations_by_unit,
-        "related_skills": [e["skill"] for e in related_skills],
-        "file_count_diagnostic": (
-            len(all_tasks[0].get("file_targets", [])) if single_task else None),
-    },
-}
 
 for entry in prior_knowledge:
     entry.pop("unit_key", None)
@@ -923,7 +868,6 @@ print(json.dumps({
     "skill_invocation_map": skill_invocation_map,
     "advisors": persistent_advisors,
     "position_descriptors": position_descriptors,
-    "lead_inline_conditions": lead_inline_conditions,
     "warnings": warnings,
 }, ensure_ascii=False))
 PYEOF
@@ -1009,13 +953,6 @@ if d.get("packets"):
     for p in d["packets"]:
         where = f" (phase {p['phase']})" if p.get("phase") is not None else ""
         print(f"  {p['task_id']}{where}: {p['packet_id']}")
-print()
-c = d["lead_inline_conditions"]
-print("Lead-inline conditions (read each; the route decision is yours):")
-print(f"  single_task: {c['single_task']}")
-print(f"  prescriptive: {c['prescriptive']}")
-print(f"  no_persistent_advisor: {c['no_persistent_advisor']}")
-print(f"  no_required_consultation: {c['no_required_consultation']}")
 if d["skill_invocation_map"]:
     print()
     print("Skill-invocation map:")

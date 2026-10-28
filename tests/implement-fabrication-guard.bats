@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
-# implement-fabrication-guard.bats — fabrication-guard behavior from the
-# `lore impl check-report` contract in skills/implement/SKILL.md.
+# implement-fabrication-guard.bats — advisor attribution behavior from the
+# `lore impl check-report` contract (scripts/impl-check-report.sh).
 #
 # The guard sits between worker-report acceptance (§1-2) and the existing
 # advisor-impact-rollup invocation (§4 after renumbering). It consumes the
@@ -22,13 +22,12 @@
 # The guard is metadata-only — worker task acceptance is unaffected; only
 # the advisor scorecard attribution changes. This bats file mirrors the
 # check-report algorithm in test-side bash helpers (same pattern as
-# scorecard-rollup-snapshots.bats's `select_prior_snapshot`) because the
-# guard lives in skill prose, not in a standalone script.
+# scorecard-rollup-snapshots.bats's `select_prior_snapshot`) so each branch
+# can be driven with a fixture transcript.
 #
 # Style: pure bats. Skips cleanly when prerequisites are missing.
 
 REPO_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME:-$0}")/.." && pwd)"
-SKILL_FILE="$REPO_DIR/skills/implement/SKILL.md"
 ROLLUP_SH="$REPO_DIR/scripts/advisor-impact-rollup.sh"
 APPEND_SH="$REPO_DIR/scripts/scorecard-append.sh"
 WRITE_LOG_SH="$REPO_DIR/scripts/write-execution-log.sh"
@@ -37,7 +36,6 @@ PROVIDER_PKG="$REPO_DIR/adapters/transcripts"
 setup() {
   command -v python3 >/dev/null 2>&1 || skip "python3 required"
   command -v jq >/dev/null 2>&1 || skip "jq required"
-  [ -f "$SKILL_FILE" ] || skip "skills/implement/SKILL.md missing"
   [ -f "$ROLLUP_SH" ] || skip "scripts/advisor-impact-rollup.sh missing"
   [ -f "$APPEND_SH" ] || skip "scripts/scorecard-append.sh missing"
   [ -f "$WRITE_LOG_SH" ] || skip "scripts/write-execution-log.sh missing"
@@ -67,8 +65,8 @@ teardown() {
 }
 
 # Build a Claude-Code-shaped transcript fixture that records advisor spawn
-# events. The advisor-spawn shape mirrors what `/implement` Step 3.5b
-# produces: a TaskCreate tool_use entry whose `input.name` is the advisor
+# events. The advisor-spawn shape mirrors what a persistent-advisor
+# activation produces: a TaskCreate tool_use entry whose `input.name` is the advisor
 # name (e.g. "supply-chain-risk-auditor-advisor").
 write_transcript_fixture() {
   local advisor_names="$1"  # space-separated
@@ -395,12 +393,6 @@ EOF
 }
 
 # ============================================================
-# Step 4 report-check prose anchors — guard against the SKILL.md text drifting
-# away from the three documented branches. These are doc-anchored regression
-# guards (same shape as the README-anchored asserts in transcripts.bats).
-# ============================================================
-
-# ============================================================
 # Default-route exclusion: when no consultation has handler: agent, the
 # downstream observable of the fabrication guard's filtering is that
 # advisor-impact-rollup.sh emits zero rows. Exercise the downstream rollup
@@ -486,87 +478,4 @@ EOF
   [ "$rows" = "2" ]
 
   rm -f "$CONS"
-}
-
-# ============================================================
-# D1/A3 — Step 4.0 lead consultation handler documentation conformance.
-# This is a doc-anchored regression guard for the new Step 4.0 surface
-# (the runtime path is judgment-heavy SKILL.md prose, not a standalone
-# script — same pattern as the existing "SKILL.md report check names the
-# three branches" assert below).
-# ============================================================
-
-@test "SKILL.md Step 4.0 documents the lead consultation handler flow (parse → route → reply → log)" {
-  # The four documented sub-steps are present in prose (semantic tokens, not
-  # exact voice register — the filing now routes through `lore impl consult-log`,
-  # which appends the durable consultation-transcript.jsonl record).
-  grep -q "Parse the request body" "$SKILL_FILE"
-  grep -q "Route by domain" "$SKILL_FILE"
-  grep -q "SKILL_INVOCATION_MAP" "$SKILL_FILE"
-  grep -q "Reply via SendMessage" "$SKILL_FILE"
-  grep -qi "transcript record" "$SKILL_FILE"
-  grep -q "consultation-transcript.jsonl" "$SKILL_FILE"
-  grep -q "lore impl consult-log" "$SKILL_FILE"
-
-  # The reply shape names consultation-id, handler, lead-acknowledged, and
-  # the conditional skill_template_version field (per D6 / D6a).
-  grep -q "consultation-id: <verbatim from request>" "$SKILL_FILE"
-  grep -q "handler: <skill|lead>" "$SKILL_FILE"
-  grep -q "lead-acknowledged: true" "$SKILL_FILE"
-  grep -q "skill_template_version:" "$SKILL_FILE"
-
-  # Skill-tool inline invocation path is named: lookup, Skill tool, capture
-  # output, set handler="skill".
-  grep -q 'Invoke the named skill via the `Skill` tool' "$SKILL_FILE"
-  grep -q 'handler="skill"' "$SKILL_FILE"
-
-}
-
-# ============================================================
-# D4 — Required-consultation rejection (Step 4.1.d) documentation conformance.
-# The acceptance check is inline lead logic in SKILL.md prose; we anchor a
-# regression guard that the documented rejection mode survives subsequent
-# edits.
-# ============================================================
-
-@test "SKILL.md documents required-consultation rejection on missing acknowledged reply" {
-  # The blocking check is named (now part of the `lore impl check-report`
-  # contract; the durable transcript is consultation-transcript.jsonl).
-  grep -q "Required-consultation acknowledgement check" "$SKILL_FILE"
-
-  # The cross-check names the canonical durable transcript artifact and the
-  # lead-acknowledged: true reply field per D6a.
-  grep -q 'consultation-transcript.jsonl' "$SKILL_FILE"
-  grep -q 'lead-acknowledged: true' "$SKILL_FILE"
-
-  # Rejection branch: if a required domain has no matching entry OR the
-  # consultation_id does not match an acknowledged reply, the task is
-  # rejected (semantic token — exact bolding is a register, not a contract).
-  grep -q 'the task is rejected' "$SKILL_FILE"
-
-  # The mechanism's teeth are documented as the new lead-side lever the
-  # previous pipeline lacked.
-  grep -qi 'lead-side tracking adds' "$SKILL_FILE"
-}
-
-@test "SKILL.md names the fabrication guard's three branches and the verify-or-skip default" {
-  # Branch labels appear in prose (semantic tokens — the guard mechanics now
-  # live in scripts/impl-check-report.sh; the SKILL.md call-site contract
-  # still names all three branches).
-  grep -qi "every claimed advisor is verified" "$SKILL_FILE"
-  grep -q "Mismatch" "$SKILL_FILE"
-  grep -qi "provider \`unavailable\`" "$SKILL_FILE"
-
-  # Verify-or-skip default is explicit.
-  grep -qi "fall through to verbatim-trust" "$SKILL_FILE"
-
-  # Canonical log line shapes are documented verbatim so consumers (this
-  # bats file, /retro, future audit tooling) can match them.
-  grep -q "fabrication-guard: skipped" "$SKILL_FILE"
-  grep -q "fabrication-guard: provider-" "$SKILL_FILE"
-
-  # Canonical consumer pattern is named.
-  grep -q "get_provider()" "$SKILL_FILE"
-  grep -q "provider_status()" "$SKILL_FILE"
-  grep -q "UnsupportedFrameworkError" "$SKILL_FILE"
 }

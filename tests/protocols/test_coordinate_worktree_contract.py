@@ -68,7 +68,3 @@ def test_reconciliation_and_cleanup_are_terminal_preconditions():
         "branch/ref disposition",
     ):
         assert token.lower() in combined.lower()
-
-    closure = prose(IMPLEMENT[IMPLEMENT.index("### Step 6: Closure verdict") :])
-    assert "Unproven removal" in closure
-    assert "failed close" in closure

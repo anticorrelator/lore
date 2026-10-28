@@ -15,7 +15,7 @@
 #      /implement Step 0 surfaces).
 #   2. Capability-gate verification: opencode (team_messaging=none) refuses
 #      send_message with the literal `unsupported` so /implement Step 2.0
-#      collapses to lead-inline (no TeamCreate/spawn surface); codex
+#      leaves the seat doing the work (no TeamCreate/spawn surface); codex
 #      (task_completed_hook=fallback + subagents=partial) resolves
 #      completion_enforcement to `lead_validator` so /implement Step 4.1
 #      branches into the post-hoc validator path.
@@ -294,7 +294,7 @@ PYEOF
   [ -f "$OC_AGENT_ADAPTER" ] || skip "adapters/agents/opencode.sh missing"
   setup_framework opencode
 
-  # /implement Step 2.0: TEAM_MESSAGING=none collapses skill to lead-inline.
+  # With TEAM_MESSAGING=none a task cannot be steered mid-flight on this route.
   TEAM_MESSAGING=$(python3 -c "
 import json
 d = json.load(open('$CAPS'))
