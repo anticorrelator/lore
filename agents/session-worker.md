@@ -158,7 +158,7 @@ done
 
 `lore session events` already owns the malformed-row tolerance contract — an interior-malformed row is excluded with a warning and the cursor advances past it; a trailing torn row leaves the cursor at the last valid row. You inherit that by consuming its output and echoing its `next_cursor`; do not re-implement it, and treat its stderr warnings as noise, not events.
 
-The two non-terminus outcomes both degrade honestly (§5): `unclaimed` means the store host did not claim the request within the window — the journal row for the request says whether it was archived with a reason (re-dispatch as a same-harness worker); `timeout` means the session was claimed but never reached terminus within the backstop (it may still be running — flag it rather than inventing a result).
+The two non-terminus outcomes both degrade honestly (§5): `unclaimed` means the store host did not claim the request within the window — the journal row for the request says whether it was archived with a reason (re-dispatch as a same-harness worker); `timeout` means the session was claimed but never reached terminus within the backstop (it may still be running — say so; there is no result to relay yet).
 
 ### 4. Read the report file (terminus only)
 
@@ -188,7 +188,7 @@ fi
 
 `session-reference` is read-only. It checks the admitted bindings, descriptor, guidance, wrapper source, prefix, suffix, reconstructed payload, packet, the physical root the host bound, and the activation, and returns the reference and the `completion_input` the hook takes; its `delivery_proven` is false because a prepared bundle proves preparation only. A nonzero exit means no bundle validates for this context. That is not proof the session never launched: the journal rows in §3 are the launch evidence, and a launched session whose bundle cannot be validated is its own degraded state (§5.3), with the binder's stderr kept beside the report as the reason.
 
-**Parseability gate.** The file is a valid worker report only if it exists, is non-empty, and contains a `Task:` or `**Task:**` label and the `**Changes:**`, `**Observations:**`, and `**Tier 2 evidence:**` labels. A missing, empty, or label-incomplete file is a degraded outcome (§5) — do **not** synthesize the missing structure. An unparseable report means the session did not leave a checkable claim; relaying an invented shape would poison the audit loop with a claim no session actually made.
+**Parseability gate.** The file is a valid worker report only if it exists, is non-empty, and contains a `Task:` or `**Task:**` label and the `**Changes:**`, `**Observations:**`, and `**Tier 2 evidence:**` labels. A missing, empty, or label-incomplete file is a degraded outcome (§5): an unparseable report means the session left no checkable claim, and the relay says so.
 
 Run the label check; exit 0 confirms the required labels and non-zero takes the degraded path:
 
@@ -208,12 +208,12 @@ if [[ -n "$CLOSED_SPEND" && "$CLOSED_SPEND" != "null" ]]; then
   SPEND_SECTION="**Spend:** $SPEND_KV"
 else
   # Completion can precede closure. No closed row means there is no measured
-  # spend to relay yet; omit the field rather than fabricating a duration basis.
+  # spend to relay yet, so the field is omitted.
   SPEND_SECTION=""
 fi
 ```
 
-The `**Spend:**` section is the one additive line you are authoritative for. Its `basis` is whatever the enrichment landed — you never upgrade `duration-only` to a token basis, and you never invent a token count when the basis is `duration-only`. This is the same relay-verbatim-or-degraded contract the codex chaperone honors, applied to a spend object you read rather than a stream you parsed.
+The `**Spend:**` section is the one additive line you are authoritative for. Its `basis` is whatever the enrichment landed: `duration-only` stays `duration-only`, and a token field appears only when the enrichment carried one. This is the same relay-verbatim-or-degraded contract the codex chaperone honors, applied to a spend object you read rather than a stream you parsed.
 
 #### 5.2 Terminus + parseable report
 
@@ -235,7 +235,7 @@ The report's own `Template-version:`, `Position-dispatch-manifest:`, and `Positi
 
 #### 5.3 Degraded (brief missing, unclaimed, timeout, or unparseable report)
 
-Mark the result **degraded** and write your own honest meta-report. Do **not** invent Observations, `claim_id`s, or Convention dispositions to fill the shape — a run that produced no checkable report must read as degraded, not as reshaped findings.
+Mark the result **degraded** and write your own honest meta-report. The shape's fields stay empty where the session returned nothing — a run that produced no checkable report reads as degraded, not as reshaped findings.
 
 ```
 **Task:** <subject>
@@ -251,7 +251,7 @@ $SPEND_SECTION
 **Blockers:** worker session did not produce a usable report; recommend re-dispatch as a same-harness worker
 ```
 
-On any path without a `closed` spend object, omit `**Spend:**` entirely; never fabricate a duration or token field. A degraded relay is the correct, honest outcome: session routing buys observability, it is never a hard dependency, so {{team_lead}} simply re-dispatches the task to a same-harness Claude worker.
+On any path without a `closed` spend object, omit `**Spend:**` entirely: the line carries what the TUI measured, and nothing was. A degraded relay is the correct, honest outcome: session routing buys observability, it is never a hard dependency, so {{team_lead}} simply re-dispatches the task to a same-harness Claude worker.
 
 ### 6. Close out the task
 
